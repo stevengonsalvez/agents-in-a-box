@@ -9,6 +9,10 @@
 //! `right_edge` it is dropped entirely rather than overlapping the tabs
 //! (`project_ainb_tui_width_aware_panels`). Returns the start column actually
 //! used, or `None` when it was dropped, so the caller can reserve the space.
+//!
+//! Crisp B2 (Q11): the avatars are followed by the count in words
+//! (`⬡⬡ 2 working`), and the count comes from the tasks snapshot's running
+//! agents rather than the hard-coded `0` the chip used to be handed.
 
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
@@ -39,12 +43,10 @@ pub fn render_working_chip(
         return None;
     }
     let avatars = working_count.min(MAX_AVATARS);
-    let overflow = working_count.saturating_sub(MAX_AVATARS);
-    let badge = if overflow > 0 {
-        format!(" +{overflow}")
-    } else {
-        String::new()
-    };
+    // Crisp B2 (Q11): the count is SPOKEN (`⬡⬡ 2 working`), not implied by
+    // counting glyphs — bare rings said nothing about what they were, and past
+    // three the old `+N` badge made the reader add two numbers together.
+    let badge = format!(" {working_count} working");
 
     let width = u16::try_from(avatars).unwrap_or(u16::MAX)
         + u16::try_from(badge.chars().count()).unwrap_or(0);
@@ -90,24 +92,25 @@ mod tests {
         assert!(buf.cells.is_empty());
     }
 
-    /// Two working agents render two glyphs and no overflow badge.
+    /// Two working agents render two glyphs and SAY the count (Q11).
     #[test]
-    fn two_agents_render_two_glyphs_no_badge() {
+    fn two_agents_render_two_glyphs_and_the_count() {
         let mut buf = WireBuffer::new(80, 1);
         render_working_chip(&mut buf, 0, 80, 2);
         let text = row_text(&buf, 0, 80);
         assert_eq!(text.matches(AGENT_GLYPH).count(), 2);
-        assert!(!text.contains('+'), "unexpected overflow badge: {text:?}");
+        assert!(text.contains("2 working"), "count in words: {text:?}");
     }
 
-    /// Five working agents cap at three glyphs plus a `+2` overflow badge.
+    /// Past three agents the avatars cap but the count stays exact — the reader
+    /// never has to add three glyphs to an overflow badge.
     #[test]
-    fn overflow_caps_avatars_and_shows_badge() {
+    fn overflow_caps_avatars_but_not_the_count() {
         let mut buf = WireBuffer::new(80, 1);
         let start = render_working_chip(&mut buf, 0, 80, 5).unwrap();
         let text = row_text(&buf, 0, 80);
         assert_eq!(text.matches(AGENT_GLYPH).count(), MAX_AVATARS);
-        assert!(text.contains("+2"), "missing overflow badge: {text:?}");
+        assert!(text.contains("5 working"), "exact count: {text:?}");
         // Right-aligned: the chip ends at the right edge.
         assert!(start < 80);
     }
@@ -116,7 +119,8 @@ mod tests {
     #[test]
     fn chip_dropped_when_no_room() {
         let mut buf = WireBuffer::new(2, 1);
-        // 5 agents → 3 glyphs + " +2" = 6 cols, but right_edge is 2.
+        // 5 agents → 3 glyphs + " 5 working" = 13 cols, but right_edge is 2.
         assert_eq!(render_working_chip(&mut buf, 0, 2, 5), None);
+        assert!(buf.cells.is_empty(), "a dropped chip paints nothing");
     }
 }

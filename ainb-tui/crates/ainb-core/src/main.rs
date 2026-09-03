@@ -110,6 +110,42 @@ fn is_skill_manager_cli_invocation() -> bool {
 }
 
 fn main() -> Result<()> {
+    // BEFORE the `ainb-cli` short-circuit and before any runtime exists.
+    //
+    // Two reasons, both bugs when this lived in `tokio_main`:
+    //
+    // 1. `skill` / `source` / `search` return through `ainb_cli::run()` above
+    //    without ever entering `tokio_main`, and `ainb-cli` does not depend on
+    //    this crate. So `general.skill_install_real_homes` never reached
+    //    `ainb skill install`, the one command it exists to govern.
+    // 2. `export_env_bridge` calls `std::env::set_var`. Inside `#[tokio::main]`
+    //    the worker threads and the tracing subscriber already exist, and a
+    //    `setenv` racing another thread's `getenv` is a data race (which is why
+    //    Rust 2024 made it `unsafe`). Here, `main` is still the only thread.
+    //
+    // `migrate_legacy_paths` moves with it rather than staying behind: it folds
+    // a stray older config.toml into the canonical one, and the bridge has to
+    // read the merged result, not the pre-migration file.
+    // Skipped for the pure-informational invocations. Otherwise `ainb --help`
+    // and `ainb --version` would each do a four-path config load and could
+    // WRITE config.toml through the legacy-path migration — surprising for a
+    // command that is meant to print and exit, and any warning raised during
+    // that load is discarded because the tracing subscriber does not exist yet.
+    //
+    // `!args.is_empty()` matters: `all()` on an EMPTY iterator is `true`, so
+    // bare `ainb` — the normal way to open the TUI — would classify itself as
+    // informational and skip both the migration and the bridge, leaving every
+    // promoted key inert in the one invocation that most needs them.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let informational_only = !args.is_empty()
+        && args
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version" | "help"));
+    if !informational_only {
+        config::AppConfig::migrate_legacy_paths();
+        config::tunables::export_env_bridge(&config::tunables::snapshot());
+    }
+
     if is_skill_manager_cli_invocation() {
         return ainb_cli::run();
     }
@@ -173,7 +209,8 @@ async fn tokio_main() -> Result<()> {
                 // a fresh home shows a runtime + a seeded agent (the boot seed runs in
                 // the daemon) instead of an offline panel. Idempotent + non-fatal — a
                 // spawn failure is logged and the TUI still launches.
-                cli::hangar::ensure_hangar_daemon();
+                // Persistent: the TUI is the daemon's consumer and outlives it.
+                cli::hangar::ensure_hangar_daemon(cli::hangar::LauncherLifetime::Persistent);
                 // Same contract for the rest: clear heartbeats left by daemons
                 // that are already gone, and hand a drifted notifyd to this
                 // binary. Without it an upgraded ainb kept talking to the
@@ -389,7 +426,11 @@ async fn run_tui_loop(
     // screens via `App::tick_plugin_renders` and its `take_render_dirty`
     // gate. Set to ~30 fps so a keystroke lands in the next iter
     // (< 33 ms) rather than the next 250 ms window.
-    let tick_rate = Duration::from_millis(33);
+    // `.max(1)`: the registry's `min` only gates the settings screen and
+    // `ainb config set`. A hand-edited `tick_rate_ms = 0` gives a zero poll
+    // timeout, so the loop never blocks and repaints continuously at 100% CPU.
+    let tick_rate =
+        Duration::from_millis(crate::config::tunables::snapshot().ui.tick_rate_ms.max(1));
     // App-tick cadence: how often we run the heavy host-side periodic
     // work (mascot animation, OAuth refresh check, tmux preview
     // capture, async action dispatch, log streaming refresh,
@@ -398,8 +439,11 @@ async fn run_tui_loop(
     // loop, stall key processing, and burn CPU. 250 ms is the
     // pre-perf-PR cadence; keeping it isolates the tick-rate cut
     // to only the event-poll path that actually affects perceived
-    // latency. See `last_app_tick` below.
-    let app_tick_rate = Duration::from_millis(250);
+    // latency. See `last_app_tick` below. Both cadences are
+    // `[ui]` keys now: a slow terminal wants a coarser poll.
+    let app_tick_rate =
+        Duration::from_millis(crate::config::tunables::snapshot().ui.app_tick_ms.max(1))
+            .max(tick_rate);
     let mut last_tick = Instant::now();
     let mut last_app_tick = Instant::now();
 
@@ -1240,8 +1284,11 @@ async fn run_tui_loop(
 
                         info!("Killing other tmux session '{}'", session_name);
 
+                        // `=name` is an exact target. A bare `-t` resolves
+                        // exact, then prefix, so killing "feat-auth" could take
+                        // out a live "feat-auth-2".
                         let output = Command::new("tmux")
-                            .args(["kill-session", "-t", &session_name])
+                            .args(["kill-session", "-t", &format!("={session_name}")])
                             .output()
                             .await;
 
@@ -1295,8 +1342,9 @@ async fn run_tui_loop(
                         for session_name in &session_names {
                             info!("Killing other tmux session '{}'", session_name);
 
+                            // Exact target, see the single-session kill above.
                             let output = Command::new("tmux")
-                                .args(["kill-session", "-t", session_name])
+                                .args(["kill-session", "-t", &format!("={session_name}")])
                                 .output()
                                 .await;
 
@@ -1574,7 +1622,7 @@ async fn run_tui_loop(
 
                         // Check if session already exists
                         let has_session = Command::new("tmux")
-                            .args(["has-session", "-t", &tmux_name])
+                            .args(["has-session", "-t", &format!("={tmux_name}")])
                             .output()
                             .await
                             .map(|o| o.status.success())
@@ -1672,8 +1720,9 @@ async fn run_tui_loop(
 
                         if let Some((tmux_name, workspace_name)) = shell_info {
                             // Kill the tmux session
+                            // Exact target: a bare `-t` prefix-matches.
                             let _ = Command::new("tmux")
-                                .args(["kill-session", "-t", &tmux_name])
+                                .args(["kill-session", "-t", &format!("={tmux_name}")])
                                 .output()
                                 .await;
 
@@ -2122,4 +2171,37 @@ fn command_exists(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod informational_only_tests {
+    /// The predicate `main` uses to decide whether to skip the config load.
+    fn informational_only(args: &[&str]) -> bool {
+        !args.is_empty()
+            && args
+                .iter()
+                .all(|arg| matches!(*arg, "-h" | "--help" | "-V" | "--version" | "help"))
+    }
+
+    /// Bare `ainb` is the normal TUI launch and must NOT be treated as
+    /// informational. `all()` on an empty iterator is `true`, so the obvious
+    /// spelling skipped the config load and env bridge for the one invocation
+    /// that most needs them.
+    #[test]
+    fn bare_ainb_is_not_informational() {
+        assert!(!informational_only(&[]), "bare `ainb` must load config");
+        assert!(!informational_only(&["tui"]));
+        assert!(!informational_only(&["config", "show"]));
+        assert!(!informational_only(&["--help", "config"]));
+    }
+
+    #[test]
+    fn help_and_version_are_informational() {
+        for args in [&["--help"][..], &["-h"], &["--version"], &["-V"], &["help"]] {
+            assert!(
+                informational_only(args),
+                "{args:?} should skip the config load"
+            );
+        }
+    }
 }

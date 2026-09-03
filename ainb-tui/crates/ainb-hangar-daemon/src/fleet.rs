@@ -1264,6 +1264,7 @@ fn session_wire(
             "claude" => wire::FleetProvider::Claude,
             "codex" => wire::FleetProvider::Codex,
             "copilot" => wire::FleetProvider::Copilot,
+            "antigravity" | "agy" => wire::FleetProvider::Antigravity,
             "acp" => wire::FleetProvider::Acp,
             _ => wire::FleetProvider::Unknown,
         },

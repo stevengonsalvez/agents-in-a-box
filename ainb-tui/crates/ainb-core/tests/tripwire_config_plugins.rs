@@ -6,7 +6,7 @@
 //! TUI-only — no CLI parity leg). It drives the real `ainb` binary in a
 //! detached tmux session and exercises the full loop end-to-end:
 //!
-//!   tmux `C` → host GoToConfig → Configuration screen
+//!   tmux `o` → host GoToConfig → Configuration screen
 //!     → `j`×5 to the Plugins category (Categories pane)
 //!     → the learnings `[[config]]` rows paint (built from the loaded
 //!       manifest by `ConfigScreenState::apply_plugin_manifests`, seeded
@@ -26,9 +26,10 @@
 //! - ALSO seeds `config.toml` with `[plugins.learnings].learnings_dir` so the
 //!   pre-edit render is deterministic AND the file already has the section the
 //!   final grep checks.
-//! - Re-presses `C` each poll on the open step (the resend pattern) — the
-//!   first `C` can land before the host's first paint and be dropped; `C` is
-//!   idempotent once on the Config screen.
+//! - Re-presses `o` each poll on the open step (the resend pattern) — the
+//!   first `o` can land before the host's first paint and be dropped; `o` is
+//!   idempotent once on the Config screen. (It was `C` until 7f402237 made the
+//!   home-screen shortcuts all-lowercase, which this test did not follow.)
 //! - Asserts EXACT unique tokens, never a substring-OR.
 
 use std::fs;
@@ -179,9 +180,9 @@ fn send_key(session: &str, key: &str) {
 /// category and assert the learnings `[[config]]` row renders. Returns the
 /// capture once the Plugins category shows the field label.
 fn open_plugins_category(session: &str) -> Option<String> {
-    // Open Settings — resend `C` until the Configuration title paints.
+    // Open Settings — resend `o` until the Configuration title paints.
     let open_deadline = Instant::now() + Duration::from_secs(30);
-    poll_capture_resending(session, "C", open_deadline, |c| c.contains(CONFIG_TITLE))?;
+    poll_capture_resending(session, "o", open_deadline, |c| c.contains(CONFIG_TITLE))?;
 
     // Focus starts on the Categories pane. Step down to Plugins (index 5 of
     // ConfigCategory::all(): Authentication, Workspace, Docker, AgentDefaults,
@@ -199,17 +200,51 @@ fn open_plugins_category(session: &str) -> Option<String> {
     })
 }
 
+/// Press `j` in the Settings pane until the SELECTED row (the one carrying the
+/// `▶` marker) contains `needle`.
+///
+/// The Plugins category now leads with one enable/disable toggle per loaded
+/// plugin, so the old "one Down past the placeholder" hop lands on a different
+/// row depending on how many plugins are staged. Stepping until the selection
+/// matches is index-free and cannot drift.
+fn step_to_selected_row(session: &str, needle: &str) -> bool {
+    for _ in 0..40 {
+        if selected_settings_row(&capture_pane(session)).is_some_and(|row| row.contains(needle)) {
+            return true;
+        }
+        send_key(session, "j");
+        thread::sleep(Duration::from_millis(120));
+    }
+    false
+}
+
+/// The selected row of the RIGHT-hand settings pane.
+///
+/// Both panes share every terminal line, so `line.contains("▶") &&
+/// line.contains(label)` is a false match whenever the left pane's selection
+/// happens to sit on the same row as the label — which depends on plugin
+/// discovery order and so flaked about one run in three. Split at the pane
+/// divider and only look right of it.
+fn selected_settings_row(capture: &str) -> Option<&str> {
+    capture
+        .lines()
+        .filter_map(|line| line.split("││").nth(1))
+        .find(|segment| segment.trim_start().starts_with('▶'))
+}
+
 /// Edit the learnings_dir row from the Plugins category: focus the Settings
-/// pane, move to the first plugin row (one Down past the `installed_plugins`
-/// placeholder — learnings_dir is the first manifest field), open the text
-/// popup, clear the seeded value, type [`EDITED_VALUE`], and confirm. The
-/// confirm triggers the host's apply→`AppConfig::save()` hook (cf7fe1e), so
-/// the value persists to config.toml without an explicit save-all.
+/// pane, step to the learnings_dir row, open the text popup, clear the seeded
+/// value, type [`EDITED_VALUE`], and confirm. The confirm triggers the host's
+/// apply→`AppConfig::save()` hook (cf7fe1e), so the value persists to
+/// config.toml without an explicit save-all.
 fn edit_learnings_dir_value(session: &str) {
     send_key(session, "l"); // focus Settings pane
     thread::sleep(Duration::from_millis(200));
-    send_key(session, "j"); // installed_plugins -> learnings_dir
-    thread::sleep(Duration::from_millis(200));
+    if !step_to_selected_row(session, FIELD_LABEL) {
+        let last = capture_pane(session);
+        let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
+        panic!("could not select the {FIELD_LABEL:?} row; last:\n---\n{last}\n---");
+    }
     send_key(session, "Enter"); // open the text-input popup
 
     // Wait for the popup to mount (it pre-fills with the seeded value).

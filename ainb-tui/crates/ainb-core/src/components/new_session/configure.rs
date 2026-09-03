@@ -654,7 +654,10 @@ impl ConfigureState {
             rows.push(ConfigureRow::Agent);
             // Model row is shown for both Claude and Codex (2026-05 refresh).
             // Shell / SSH agents have no model concept — keep the row hidden.
-            if preset.agent_provider == "claude" || preset.agent_provider == "codex" {
+            if preset.agent_provider == "claude"
+                || preset.agent_provider == "codex"
+                || preset.agent_provider == "antigravity"
+            {
                 rows.push(ConfigureRow::Model);
             }
             // Shell agent: no Mode/Yolo/Prompt.
@@ -1041,16 +1044,24 @@ fn render_agent_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
     let preset = state.effective_preset();
     let current = agent_label(preset.agent_provider.as_str()).to_string();
     // Gemini is shown but greyed-out / non-selectable for now (kept out of the
-    // `AGENTS` cycle ring) — `build_pills_line` renders it muted with a
-    // `[soon]` tag. Copilot is a real, selectable option. `DISABLED_AGENTS` is
+    // `AGENTS` cycle ring) - `build_pills_line` renders it muted with a
+    // `[soon]` tag. Copilot and Antigravity are real, selectable options. `DISABLED_AGENTS` is
     // the single source of truth shared with the launch guard.
-    let options: Vec<String> = ["Claude", "Codex", "Gemini", "Copilot", "Shell", "SSH"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect();
+    let options: Vec<String> = [
+        "Claude",
+        "Codex",
+        "Antigravity",
+        "Gemini",
+        "Copilot",
+        "Shell",
+        "SSH",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
     let disabled: Vec<&str> = DISABLED_AGENTS.iter().map(|p| agent_label(p)).collect();
 
-    // Width-fit gate (mirrors render_model_row): the row grew to six pills, so
+    // Width-fit gate (mirrors render_model_row): the row grew to pills, so
     // on narrow terminals fall back to the single `◀ value ▶` cycle display
     // rather than overflowing and truncating pills off the right edge.
     let pill_width = estimate_pill_width("Agent:   ", &options, &disabled, focused);
@@ -1081,7 +1092,7 @@ fn render_agent_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
 }
 
 fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
-    use crate::models::{ClaudeModel, CodexModel};
+    use crate::models::{AntigravityModel, ClaudeModel, CodexModel};
     let preset = state.effective_preset();
     // Resolve raw `agent_model` (a free-form String for TOML stability) into
     // the appropriate enum's `display_label()` for the active provider.
@@ -1098,6 +1109,16 @@ fn render_model_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: 
             (
                 cur.display_label().to_string(),
                 CodexModel::all().into_iter().map(|m| m.display_label().to_string()).collect(),
+            )
+        }
+        "antigravity" => {
+            let cur = AntigravityModel::parse(&preset.agent_model);
+            (
+                cur.display_label().to_string(),
+                AntigravityModel::all()
+                    .into_iter()
+                    .map(|m| m.display_label().to_string())
+                    .collect(),
             )
         }
         _ => (preset.agent_model.clone(), vec![preset.agent_model.clone()]),
@@ -2360,7 +2381,7 @@ fn ensure_overrides_seed(state: &mut ConfigureState) -> &mut CustomOverrides {
     state.custom_overrides.as_mut().expect("just seeded")
 }
 
-const AGENTS: &[&str] = &["claude", "codex", "copilot", "shell", "ssh"];
+const AGENTS: &[&str] = &["claude", "codex", "antigravity", "copilot", "shell", "ssh"];
 
 /// Agent providers shown in the Agent row but greyed-out / non-selectable:
 /// kept OUT of the `AGENTS` cycle ring AND refused at launch. Single source of
@@ -2372,6 +2393,7 @@ fn agent_label(provider: &str) -> &str {
     match provider {
         "claude" => "Claude",
         "codex" => "Codex",
+        "antigravity" => "Antigravity",
         "gemini" => "Gemini",
         "copilot" => "Copilot",
         "shell" => "Shell",
@@ -2380,8 +2402,8 @@ fn agent_label(provider: &str) -> &str {
     }
 }
 
-/// Cycle agent for Custom selection: rotates through claude → codex → copilot → shell → ssh.
-/// Gemini is intentionally excluded — it renders greyed-out (non-selectable) in the Agent row.
+/// Cycle agent for Custom selection: rotates through claude -> codex -> antigravity -> copilot -> shell -> ssh.
+/// Gemini is intentionally excluded: it renders greyed-out (non-selectable) in the Agent row.
 fn cycle_agent(state: &mut ConfigureState, delta: i32) {
     let prev_provider = {
         let overrides = ensure_overrides_seed(state);
@@ -2392,23 +2414,27 @@ fn cycle_agent(state: &mut ConfigureState, delta: i32) {
         overrides.agent_provider = AGENTS[next].to_string();
         prev
     };
-    // Crossing the Claude/Codex boundary directly: reset the model field to
-    // `"default"` so a Claude-flavoured id doesn't linger on a Codex agent (or
-    // vice versa). Non-adjacent paths (e.g. codex → copilot → … → claude) skip
-    // this, but `ClaudeModel::parse` / `CodexModel::parse` map any stale/unknown
-    // id to SystemDefault and omit `--model`, so it stays safe either way.
+    // Crossing the model-supporting provider boundary directly: reset the model field to
+    // `"default"` so a Claude/Codex/Antigravity-flavoured id doesn't linger on another agent.
+    // Non-adjacent paths skip this, but model parsers map any stale/unknown id to SystemDefault
+    // and omit `--model`, so it stays safe either way.
     {
         let overrides = state.custom_overrides.as_mut().expect("just seeded");
         let crossed = matches!(
             (prev_provider.as_str(), overrides.agent_provider.as_str()),
-            ("claude", "codex") | ("codex", "claude")
+            ("claude", "codex")
+                | ("codex", "claude")
+                | ("claude", "antigravity")
+                | ("antigravity", "claude")
+                | ("codex", "antigravity")
+                | ("antigravity", "codex")
         );
         if crossed {
             overrides.agent_model = "default".to_string();
         }
     }
     // Swapping agents may strand focus on a Model row that's no longer visible
-    // (Model exists only for Claude / Codex). Re-anchor.
+    // (Model exists only for Claude / Codex / Antigravity). Re-anchor.
     let rows = state.visible_rows();
     if !rows.contains(&state.focused_row) {
         state.focused_row = ConfigureRow::Agent;
@@ -2416,12 +2442,12 @@ fn cycle_agent(state: &mut ConfigureState, delta: i32) {
 }
 
 /// Cycle the Model row's value. Provider-aware: walks the `ClaudeModel::all()`
-/// ring for Claude, the `CodexModel::all()` ring for Codex. The cycled-to
-/// variant's full canonical id (or `"default"` for `SystemDefault`) is written
+/// ring for Claude, `CodexModel::all()` for Codex, `AntigravityModel::all()` for Antigravity.
+/// The cycled-to variant's full canonical id (or `"default"` for `SystemDefault`) is written
 /// back into `overrides.agent_model` so TOML serialization stays the same
 /// String shape it always was.
 fn cycle_model(state: &mut ConfigureState, delta: i32) {
-    use crate::models::{ClaudeModel, CodexModel};
+    use crate::models::{AntigravityModel, ClaudeModel, CodexModel};
     let provider = state.effective_preset().agent_provider.clone();
     let overrides = ensure_overrides_seed(state);
     overrides.agent_model = match provider.as_str() {
@@ -2431,7 +2457,7 @@ fn cycle_model(state: &mut ConfigureState, delta: i32) {
             let cur_idx = ring.iter().position(|m| *m == current).unwrap_or(0);
             let len = ring.len() as i32;
             let next = ((cur_idx as i32) + delta).rem_euclid(len) as usize;
-            // SystemDefault → "default"; real variants → canonical CLI id.
+            // SystemDefault -> "default"; real variants -> canonical CLI id.
             ring[next].cli_value().unwrap_or("default").to_string()
         }
         "codex" => {
@@ -2442,8 +2468,16 @@ fn cycle_model(state: &mut ConfigureState, delta: i32) {
             let next = ((cur_idx as i32) + delta).rem_euclid(len) as usize;
             ring[next].cli_value().unwrap_or("default").to_string()
         }
+        "antigravity" => {
+            let ring = AntigravityModel::all();
+            let current = AntigravityModel::parse(&overrides.agent_model);
+            let cur_idx = ring.iter().position(|m| *m == current).unwrap_or(0);
+            let len = ring.len() as i32;
+            let next = ((cur_idx as i32) + delta).rem_euclid(len) as usize;
+            ring[next].cli_value().unwrap_or("default").to_string()
+        }
         // Shell / SSH never reach this code path (Model row hidden), but
-        // belt-and-braces — leave the field unchanged.
+        // belt-and-braces: leave the field unchanged.
         _ => overrides.agent_model.clone(),
     };
 }
@@ -2864,10 +2898,14 @@ mod tests {
 
     #[test]
     fn agent_cycle_ring_excludes_gemini_includes_copilot() {
-        // Copilot is selectable (in the cycle ring); Gemini is not.
+        // Copilot and Antigravity are selectable (in the cycle ring); Gemini is not.
         assert!(
             AGENTS.contains(&"copilot"),
             "copilot must be a selectable agent"
+        );
+        assert!(
+            AGENTS.contains(&"antigravity"),
+            "antigravity must be a selectable agent"
         );
         assert!(
             !AGENTS.contains(&"gemini"),
@@ -3536,7 +3574,7 @@ mod tests {
 
     #[test]
     fn agent_switch_claude_to_codex_resets_model_to_default() {
-        // Crossing the Claude↔Codex provider boundary must reset agent_model
+        // Crossing the Claude/Codex provider boundary must reset agent_model
         // so a Claude id doesn't linger on a Codex agent (and vice versa).
         let mut s = mk_state();
         s.preset_selection = PresetSelection::Custom;
@@ -3546,10 +3584,84 @@ mod tests {
         s.custom_overrides = Some(overrides);
 
         s.focused_row = ConfigureRow::Agent;
-        // Forward from claude → codex (AGENTS = [claude, codex, shell, ssh]).
+        // Forward from claude -> codex (AGENTS = [claude, codex, antigravity, copilot, shell, ssh]).
         cycle_agent(&mut s, 1);
         let o = s.custom_overrides.as_ref().unwrap();
         assert_eq!(o.agent_provider, "codex");
         assert_eq!(o.agent_model, "default");
+    }
+
+    #[test]
+    fn agent_switch_to_and_from_antigravity_resets_model_to_default() {
+        let mut s = mk_state();
+        s.preset_selection = PresetSelection::Custom;
+        let mut overrides = CustomOverrides::seed_from(&s.current_preset);
+        overrides.agent_provider = "codex".to_string();
+        overrides.agent_model = "gpt-5.5".to_string();
+        s.custom_overrides = Some(overrides);
+
+        s.focused_row = ConfigureRow::Agent;
+        // Forward from codex -> antigravity
+        cycle_agent(&mut s, 1);
+        let o = s.custom_overrides.as_ref().unwrap();
+        assert_eq!(o.agent_provider, "antigravity");
+        assert_eq!(o.agent_model, "default");
+
+        // Set an antigravity model, then cycle backward from antigravity -> codex
+        s.custom_overrides.as_mut().unwrap().agent_model = "gemini-3.7-flash".to_string();
+        cycle_agent(&mut s, -1);
+        let o = s.custom_overrides.as_ref().unwrap();
+        assert_eq!(o.agent_provider, "codex");
+        assert_eq!(o.agent_model, "default");
+    }
+
+    #[test]
+    fn cycle_model_antigravity() {
+        let mut s = mk_state();
+        s.preset_selection = PresetSelection::Custom;
+        let mut overrides = CustomOverrides::seed_from(&s.current_preset);
+        overrides.agent_provider = "antigravity".to_string();
+        overrides.agent_model = "default".to_string();
+        s.custom_overrides = Some(overrides);
+
+        s.focused_row = ConfigureRow::Model;
+        cycle_model(&mut s, 1);
+        assert_eq!(
+            s.custom_overrides.as_ref().unwrap().agent_model,
+            "gemini-3.7-flash"
+        );
+
+        cycle_model(&mut s, 1);
+        assert_eq!(
+            s.custom_overrides.as_ref().unwrap().agent_model,
+            "gemini-2.5-pro"
+        );
+
+        cycle_model(&mut s, 1);
+        assert_eq!(
+            s.custom_overrides.as_ref().unwrap().agent_model,
+            "gemini-2.5-flash"
+        );
+
+        cycle_model(&mut s, 1);
+        assert_eq!(s.custom_overrides.as_ref().unwrap().agent_model, "default");
+    }
+
+    #[test]
+    fn visible_rows_includes_model_for_antigravity() {
+        let mut s = mk_state();
+        s.preset_selection = PresetSelection::Custom;
+        let mut overrides = CustomOverrides::seed_from(&s.current_preset);
+        overrides.agent_provider = "antigravity".to_string();
+        s.custom_overrides = Some(overrides);
+
+        let rows = s.visible_rows();
+        assert!(rows.contains(&ConfigureRow::Agent));
+        assert!(rows.contains(&ConfigureRow::Model));
+        assert!(rows.contains(&ConfigureRow::Mode));
+        assert!(rows.contains(&ConfigureRow::Yolo));
+        assert!(rows.contains(&ConfigureRow::Prefix));
+        assert!(rows.contains(&ConfigureRow::Branch));
+        assert!(rows.contains(&ConfigureRow::Launch));
     }
 }

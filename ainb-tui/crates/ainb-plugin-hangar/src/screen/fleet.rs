@@ -274,6 +274,7 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
                 FleetProvider::Claude => "claude",
                 FleetProvider::Codex => "codex",
                 FleetProvider::Copilot => "copilot",
+                FleetProvider::Antigravity => "antigravity",
                 FleetProvider::Acp => "acp",
                 FleetProvider::Unknown => "unknown",
             }
@@ -370,17 +371,31 @@ impl FleetFilter {
         }
     }
 
-    const fn label(self) -> &'static str {
+    /// The lens word, from the ONE status vocabulary (crisp B2 §2.1).
+    ///
+    /// `Completed` reads `done` and `Running` reads `running` — the same words
+    /// the run vocabulary uses, so a run named on one screen is named the same on
+    /// this one. Lowercase, like every word that is not an attention code.
+    ///
+    /// Public because `ainb-core` renders this pane through
+    /// [`render_fleet`] and asserts on the lens row: its tests compose the
+    /// expected text from here rather than repeating the words, so the two
+    /// crates cannot drift apart the way they did when the vocabulary changed.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
-            Self::NeedsInput => "Needs input",
-            Self::Idle => "Idle",
-            Self::Completed => "Completed",
-            Self::Running => "Running",
-            Self::All => "All",
+            Self::NeedsInput => crate::vocab::FLEET_NEEDS_INPUT,
+            Self::Idle => crate::vocab::FLEET_IDLE,
+            Self::Completed => crate::vocab::RunState::Done.word(),
+            Self::Running => crate::vocab::RunState::Running.word(),
+            Self::All => "all",
         }
     }
 
-    const fn key(self) -> char {
+    /// The digit that selects this lens, painted before its label. Public for
+    /// the same reason as [`Self::label`].
+    #[must_use]
+    pub const fn key(self) -> char {
         match self {
             Self::NeedsInput => '1',
             Self::Idle => '2',
@@ -2575,9 +2590,12 @@ pub fn render_fleet(
         area_width
     };
     render_lenses(buffer, 1, top, list_width, state);
-    render_focus_summary(buffer, 1, top.saturating_add(1), list_width, state);
+    // Crisp B2 (Q15): the roster header used to stack THREE count rows saying the
+    // same thing — the lens row, an abbreviated `0 INPUT 0 RUN …` strip, and the
+    // ACTION QUEUE header's own session count. The middle one is gone and the
+    // list moves up into the row it occupied.
     let visible = state.visible_sessions();
-    let header_y = top.saturating_add(2);
+    let header_y = top.saturating_add(1);
     let rows_top = header_y.saturating_add(1);
     const CARD_HEIGHT: u16 = 4;
     let capacity = usize::from(bottom.saturating_sub(rows_top) / CARD_HEIGHT);
@@ -2680,41 +2698,40 @@ fn render_empty_lens(
     right: u16,
     state: &FleetPaneState,
 ) {
+    // All three branches are one voice (crisp B2 §2.1, lowercase): they are three
+    // states of ONE line, and casing that changes with which lens is empty reads
+    // as two different screens.
     if state.roster.is_empty() {
-        put_str(buffer, left, row, "No Fleet sessions yet", FG, right);
+        put_str(buffer, left, row, "no fleet sessions yet", FG, right);
         put_str(
             buffer,
             left,
             row.saturating_add(2),
-            "Press t to start a managed Codex session.",
+            "press t to start a managed codex session",
             MUTED,
             right,
         );
     } else if state.filter == FleetFilter::NeedsInput {
-        put_str(buffer, left, row, "✓ Nothing needs you", GREEN, right);
+        put_str(buffer, left, row, "✓ nothing needs you", GREEN, right);
         put_str(
             buffer,
             left,
             row.saturating_add(2),
-            "Sessions are running, idle, or complete. Press 5 for All.",
+            "sessions are running, idle, or complete · press 5 for all",
             MUTED,
             right,
         );
     } else {
+        // Q15: this used to interpolate the lens label into `No {label} sessions`,
+        // which read `No all sessions` on the All lens and `No needs input
+        // sessions` on the others. The lens is already named one row up,
+        // highlighted; the empty state only has to say it is empty.
         put_str(
             buffer,
             left,
             row,
-            &format!("No {} sessions", state.filter.label().to_lowercase()),
+            "no sessions yet · press 5 for all",
             FG,
-            right,
-        );
-        put_str(
-            buffer,
-            left,
-            row.saturating_add(2),
-            "Press 5 for All.",
-            MUTED,
             right,
         );
     }
@@ -2886,6 +2903,8 @@ fn provider_label(provider: &str) -> &'static str {
         "CODEX"
     } else if provider.eq_ignore_ascii_case("copilot") {
         "COPILOT"
+    } else if provider.eq_ignore_ascii_case("antigravity") || provider.eq_ignore_ascii_case("agy") {
+        "ANTIGRAVITY"
     } else if provider.eq_ignore_ascii_case("acp") {
         "ACP"
     } else {
@@ -5315,18 +5334,27 @@ mod tests {
         let state = apply(&state_with_roster(), FleetEvent::Tick(10_000)).state;
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
-        assert!(row_text(&buffer, 0, 120).contains("1 Needs input 2"));
-        assert!(row_text(&buffer, 0, 120).contains("5 All 3"));
-        let header = row_text(&buffer, 2, 90);
-        let card_status = row_text(&buffer, 3, 90);
-        assert!(row_text(&buffer, 1, 90).contains("2 INPUT"));
+        // Crisp B2 §2.1: the lens row speaks the shared vocabulary, lowercase, and
+        // it is now the ONLY count row in the roster header — the abbreviated
+        // `2 INPUT …` strip that used to sit under it is gone (Q15), so every row
+        // below moved up one.
+        assert!(row_text(&buffer, 0, 120).contains("1 needs input 2"));
+        assert!(row_text(&buffer, 0, 120).contains("5 all 3"));
+        // Clipped to the ROSTER pane (the detail pane to its right paints its own
+        // `NEEDS INPUT` heading on these rows).
+        assert!(
+            !row_text(&buffer, 1, 80).contains("INPUT"),
+            "the duplicate count row is gone"
+        );
+        let header = row_text(&buffer, 1, 90);
+        let card_status = row_text(&buffer, 2, 90);
         assert!(header.contains("ACTION QUEUE"));
         assert!(card_status.contains("INPUT"));
         assert!(card_status.contains("Enter Answer"));
-        assert!(row_text(&buffer, 4, 90).contains("agents-in-a-box"));
-        assert!(row_text(&buffer, 5, 90).contains("claude/ask"));
-        assert!(row_text(&buffer, 5, 90).contains("CLAUDE"));
-        assert!(row_text(&buffer, 5, 90).contains("TMUX"));
+        assert!(row_text(&buffer, 3, 90).contains("agents-in-a-box"));
+        assert!(row_text(&buffer, 4, 90).contains("claude/ask"));
+        assert!(row_text(&buffer, 4, 90).contains("CLAUDE"));
+        assert!(row_text(&buffer, 4, 90).contains("TMUX"));
         let rendered: String =
             (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("NOW"));
@@ -5425,7 +5453,8 @@ mod tests {
 
         let rendered =
             (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
-        assert!(row_text(&buffer, 3, 90).contains("ASK · 2 Q"));
+        // Row 2, not 3: the duplicate count row under the lenses is gone (Q15).
+        assert!(row_text(&buffer, 2, 90).contains("ASK · 2 Q"));
         assert!(rendered.contains("ASK · 2 QUESTIONS"));
         assert!(rendered.contains("STRUCTURED INTERVIEW · 2 QUESTIONS"));
     }
@@ -5457,16 +5486,17 @@ mod tests {
         let mut buffer = WireBuffer::new(120, 30);
         render_fleet(&mut buffer, 120, 0, 29, &state);
 
+        // Every card row moved up one when the duplicate count row went (Q15).
         assert_eq!(
-            final_cell(&buffer, 0, 3).and_then(|cell| cell.fg),
+            final_cell(&buffer, 0, 2).and_then(|cell| cell.fg),
             Some(SELECTION_GREEN)
         );
         assert_eq!(
-            final_cell(&buffer, 2, 4).and_then(|cell| cell.bg),
+            final_cell(&buffer, 2, 3).and_then(|cell| cell.bg),
             Some(SURFACE),
             "text inherits Fleet surface instead of terminal-default background"
         );
-        for (row, color) in [(3, GOLD), (7, BLUE), (11, VIOLET), (15, GREEN), (19, ALERT)] {
+        for (row, color) in [(2, GOLD), (6, BLUE), (10, VIOLET), (14, GREEN), (18, ALERT)] {
             assert_eq!(
                 final_cell(&buffer, 2, row).and_then(|cell| cell.fg),
                 Some(color),
@@ -5512,9 +5542,9 @@ mod tests {
         render_fleet(&mut buffer, 100, 0, 15, &state);
         let rendered =
             (0..15).map(|row| row_text(&buffer, row, 100)).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("1 Needs input 0"));
-        assert!(rendered.contains("✓ Nothing needs you"));
-        assert!(rendered.contains("Press 5 for All."));
+        assert!(rendered.contains("1 needs input 0"));
+        assert!(rendered.contains("✓ nothing needs you"));
+        assert!(rendered.contains("press 5 for all"));
     }
 
     #[test]
@@ -6036,6 +6066,7 @@ mod tests {
                 FleetProvider::Claude
                 | FleetProvider::Codex
                 | FleetProvider::Copilot
+                | FleetProvider::Antigravity
                 | FleetProvider::Acp => true,
                 FleetProvider::Unknown => false,
             }
@@ -6045,6 +6076,7 @@ mod tests {
             FleetProvider::Claude,
             FleetProvider::Codex,
             FleetProvider::Copilot,
+            FleetProvider::Antigravity,
             FleetProvider::Acp,
             FleetProvider::Unknown,
         ] {

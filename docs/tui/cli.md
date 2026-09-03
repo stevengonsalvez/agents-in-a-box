@@ -87,7 +87,7 @@ Options:
       --repo <REPO>                    Local repository path
       --create-branch <CREATE_BRANCH>  Create a new branch with this name
       --worktree                       Use git worktree for isolation
-      --tool <TOOL>                    AI tool to use [default: claude] [possible values: claude, codex, gemini, copilot]
+      --tool <TOOL>                    AI tool to use [default: claude] [possible values: claude, codex, gemini, copilot, antigravity]
       --model <MODEL>                  Provider model ID to pass through unchanged
   -p, --prompt <PROMPT>                Initial prompt to send
   -a, --attach                         Attach to session after creation
@@ -936,7 +936,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -969,7 +969,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1002,7 +1002,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1035,7 +1035,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1068,7 +1068,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1124,7 +1124,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1154,7 +1154,7 @@ Arguments:
 Options:
       --format <format>            Output format [default: text] [possible values: text, json, csv, markdown]
       --monthly-usd <MONTHLY_USD>  
-      --provider <PROVIDER>        [default: all] [possible values: all, claude, codex, cursor]
+      --provider <PROVIDER>        [default: all] [possible values: all, claude, codex, cursor, antigravity]
       --reset-day <RESET_DAY>      [default: 1]
   -h, --help                       Print help
 ```
@@ -1249,7 +1249,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1282,7 +1282,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1315,7 +1315,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1348,7 +1348,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1431,7 +1431,7 @@ Options:
       --quarter <QUARTER>    Pin to a specific calendar quarter, e.g. `2026-Q2`. Mutually exclusive with --month, --last-n-days, --ytd, --from, --to
       --last-n-days <N>      Last N days (rolling window ending today). Mutually exclusive with --month, --quarter, --ytd, --from, --to
       --ytd                  Jan 1 of the current year through today. Mutually exclusive with --month, --quarter, --last-n-days, --from, --to
-      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini]
+      --provider <PROVIDER>  Provider: all, claude, codex [default: all] [possible values: all, claude, codex, cursor, copilot, gemini, antigravity]
       --include <INCLUDE>    Include projects matching substring (repeatable; OR-combined). Note: previously aliased as `--project`; the alias has been removed because `--project` is now a distinct exact-match cross-filter flag (see below). Use `--include <substring>` for the substring/glob behaviour
       --exclude <EXCLUDE>    Exclude projects matching substring (repeatable; OR-combined)
       --no-cache             Bypass the persistent usage cache and force a full re-parse
@@ -1715,12 +1715,14 @@ Serve an SSE-live web dashboard (live terminal + web-push) for the fleet
 Usage: ainb web [OPTIONS]
 
 Options:
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-      --listen <ADDR>    Address to bind (default loopback; non-loopback needs --token) [default: 127.0.0.1:8420]
-      --token <SECRET>   Bearer token required on every /api/* route (enables non-loopback bind)
-      --insecure-bind    Allow a non-loopback bind with no token. DANGEROUS: an unauthenticated bind exposes a control surface — the live WS terminal is interactive shell access to every fleet session. Only honored with --read-only (terminal disabled); otherwise refused. Use --token instead to expose the write surface safely
-      --read-only        Viewer-only: disable the live terminal write surface (the WS terminal is refused with 403)
-  -h, --help             Print help
+      --format <format>   Output format [default: text] [possible values: text, json, csv, markdown]
+      --listen <ADDR>     Address to bind (default: web.listen, or 127.0.0.1:8420; non-loopback needs --token)
+      --token <SECRET>    Bearer token required on every /api/* route (enables non-loopback bind)
+      --insecure-bind     Allow a non-loopback bind with no token. DANGEROUS: an unauthenticated bind exposes a control surface — the live WS terminal is interactive shell access to every fleet session. Only honored with --read-only (terminal disabled); otherwise refused. Use --token instead to expose the write surface safely
+      --read-only         Viewer-only: disable the live terminal write surface (the WS terminal is refused with 403)
+      --no-read-only      Serve the write surface for this run, overriding web.read_only
+      --no-insecure-bind  Refuse an unauthenticated non-loopback bind for this run, overriding web.insecure_bind
+  -h, --help              Print help
 
 EXAMPLES:
   ainb web                                       Serve on 127.0.0.1:8420 (loopback)
@@ -2798,6 +2800,7 @@ Commands:
   teardown  Remove an ATC instance's heartbeat timer + session
   status    Report one ATC instance (meta + timer + session liveness)
   repair    Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
+  mode      Report or switch the supervisor mode (lite | full) — exactly one owner per fleet
   list      List all provisioned ATC instances
   inbox     Inspect / drain / commit a parent's durable completion inbox
   help      Print this message or the help of the given subcommand(s)
@@ -2827,6 +2830,8 @@ Options:
       --no-heartbeat             Provision without installing the OS heartbeat timer
       --no-spawn                 Provision files + timer but do not spawn the ainb session
       --no-hooks                 Skip installing the event-driven lifecycle hooks into ~/.claude/settings.json (poll-mode only)
+      --mode <mode>              Supervisor mode (default: keep an existing instance's mode, else full). lite runs no LLM; full schedules a heartbeat into a brain session [possible values: lite, full]
+      --provider <provider>      Full-mode brain (claude | codex; default claude)
   -h, --help                     Print help
 ```
 
@@ -2902,6 +2907,48 @@ Options:
           
           [default: text]
           [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb fleet atc mode`
+
+One ATC supervisor owns a fleet, in exactly one mode.
+
+```console
+$ ainb fleet atc mode --help
+One ATC supervisor owns a fleet, in exactly one mode.
+
+lite — no LLM. A deterministic scan of the same LLM-free `fleet needs` read, auto-continuing only known transient errors, inside the same per-session retry cap. It never answers an ASK and never resolves an ambiguous session: those are reported, not decided.
+
+full — the scheduled heartbeat wakes an LLM session that triages the ambiguous work and coordinates the fleet. It spends tokens every beat and needs a provider ainb can actually drive.
+
+Both modes share ONE safety ledger, so switching never hands a permanently-broken session a fresh set of retries. Without --set this verb only reports; switching a fleet's controller is not something to do by accident while looking.
+
+Usage: ainb fleet atc mode [OPTIONS] <name>
+
+Arguments:
+  <name>
+          Instance name
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --set <set>
+          Switch the mode. Stops the outgoing controller before starting the incoming one
+          
+          [possible values: lite, full]
+
+      --provider <provider>
+          Full-mode brain (claude | codex). Remembered across a switch to lite, which runs no brain. A provider ainb cannot drive is refused, not faked
+
+      --no-reconcile
+          Persist the mode without starting or stopping either controller. The old one still stands down on its next action
 
   -h, --help
           Print help (see a summary with '-h')
@@ -3390,10 +3437,14 @@ ATC
 Usage: ainb daemon atc [OPTIONS] <COMMAND>
 
 Commands:
-  start    Bring it up
-  restart  Take it down and bring it back up
-  stop     Take it down
-  help     Print this message or the help of the given subcommand(s)
+  start          Bring it up
+  restart        Take it down and bring it back up
+  stop           Take it down
+  provision      Provision the instance and bring it up, creating it if absent
+  remove-orphan  Remove a heartbeat timer whose instance does not exist
+  mode-lite      Switch the supervisor to lite mode (no LLM, deterministic scan)
+  mode-full      Switch the supervisor to full mode (scheduled LLM heartbeat)
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3439,6 +3490,66 @@ $ ainb daemon atc stop --help
 Take it down
 
 Usage: ainb daemon atc stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc provision`
+
+Provision the instance and bring it up, creating it if absent
+
+```console
+$ ainb daemon atc provision --help
+Provision the instance and bring it up, creating it if absent
+
+Usage: ainb daemon atc provision [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc remove-orphan`
+
+Remove a heartbeat timer whose instance does not exist
+
+```console
+$ ainb daemon atc remove-orphan --help
+Remove a heartbeat timer whose instance does not exist
+
+Usage: ainb daemon atc remove-orphan [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc mode-lite`
+
+Switch the supervisor to lite mode (no LLM, deterministic scan)
+
+```console
+$ ainb daemon atc mode-lite --help
+Switch the supervisor to lite mode (no LLM, deterministic scan)
+
+Usage: ainb daemon atc mode-lite [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb daemon atc mode-full`
+
+Switch the supervisor to full mode (scheduled LLM heartbeat)
+
+```console
+$ ainb daemon atc mode-full --help
+Switch the supervisor to full mode (scheduled LLM heartbeat)
+
+Usage: ainb daemon atc mode-full [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -4043,6 +4154,7 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --codex            Target Codex CLI
       --copilot          Target GitHub Copilot CLI
+      --antigravity      Target Google Antigravity CLI
       --all              Target every known agent
   -h, --help             Print help
 ```
@@ -4062,6 +4174,7 @@ Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
       --codex            Target Codex CLI
       --copilot          Target GitHub Copilot CLI
+      --antigravity      Target Google Antigravity CLI
       --all              Target every known agent
   -h, --help             Print help
 ```
@@ -4094,7 +4207,7 @@ Usage: ainb notifyd list [OPTIONS]
 Options:
       --dismissed          Include dismissed notifications
       --format <format>    Output format [default: text] [possible values: text, json, csv, markdown]
-      --agent <agent>      Filter by agent (claude|codex|copilot)
+      --agent <agent>      Filter by agent (claude|codex|copilot|antigravity)
       --project <project>  Filter by project (basename of cwd)
       --limit <limit>      Max rows to show [default: 50]
   -h, --help               Print help
@@ -4765,6 +4878,7 @@ Commands:
   stop                        Stop the running daemon: signal the exact recorded PID, then remove the PID file
   restart                     Restart the daemon: `stop` (if running) then `start`
   setup                       One-command bring-up: ensure the store + socket-auth token, then `start`
+  prune                       Report hangar homes left behind under the system temp dir, and with `--yes` delete the ones no live process still owns
   reproject-claude-interview  Rebuild one stale Claude structured interview from durable hook history
   config                      View + edit the daemon's user-config knobs (`list`/`get`/`set`)
   cred                        Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
@@ -4879,6 +4993,37 @@ Usage: ainb hangar daemon setup [OPTIONS]
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb hangar daemon prune`
+
+Report hangar homes left behind under the system temp dir, and with `--yes` delete the ones no live process still owns
+
+```console
+$ ainb hangar daemon prune --help
+Report hangar homes left behind under the system temp dir, and with `--yes` delete the ones no live process still owns
+
+Usage: ainb hangar daemon prune [OPTIONS]
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --yes
+          Actually delete the homes that no live process owns. Without it, nothing on disk is touched. Homes with a live owner are always left alone
+
+      --older-than <DAYS>
+          Only consider homes untouched for at least this many days (default 1).
+          
+          A live run's home looks exactly like a leaked one: no daemon is ever spawned into an ephemeral home, so nothing records an owner there. Age is what separates "a run that finished yesterday" from "a run that is still going". `0` removes that gate.
+          
+          [default: 1]
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb hangar daemon reproject-claude-interview`

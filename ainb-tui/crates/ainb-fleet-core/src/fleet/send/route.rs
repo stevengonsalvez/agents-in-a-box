@@ -41,6 +41,20 @@ fn transport() -> Transport {
     parse_transport(std::env::var(TRANSPORT_ENV).ok().as_deref())
 }
 
+/// Whether the configured transport delivers over tmux first (`tmux-first`, the
+/// default, or `tmux-only`). Under `peers-first` a caller that would otherwise
+/// drive keys into a pane should hand the answer to [`send`] so the broker
+/// keeps owning structured delivery.
+#[must_use]
+pub fn tmux_delivery_preferred() -> bool {
+    // Positive on the tmux variants: a transport added later is NOT assumed to
+    // drive keys into a pane until it says so here.
+    match transport() {
+        Transport::TmuxFirst | Transport::TmuxOnly => true,
+        Transport::PeersFirst => false,
+    }
+}
+
 fn from_peer_id() -> String {
     std::env::var(PEER_ID_ENV).unwrap_or_else(|_| PEER_ID_DEFAULT.to_string())
 }

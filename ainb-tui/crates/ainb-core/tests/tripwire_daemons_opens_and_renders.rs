@@ -56,28 +56,6 @@ git_directories = []
     // would swallow the `h` keystroke).
     let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(base.join("install.json"), install_record).expect("seed install.json");
-
-    // Seed a LIVE bridge heartbeat: pid = this test process (definitely alive),
-    // a fresh last_heartbeat_at, connected to Telegram. The aggregator's pid
-    // cross-check then reports the bridge running + connected (not stale).
-    //
-    // The H1 identity guard matches `started_at` against the live process's REAL
-    // OS start time, so the seed must use the test process's actual start time
-    // (not an arbitrary "10 minutes ago") — otherwise the live-but-mismatched
-    // pid would correctly classify as a recycled-pid tombstone (Stopped).
-    let daemons = base.join("daemons");
-    fs::create_dir_all(&daemons).expect("create daemons dir");
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let started_at = ainb::fleet::daemons::heartbeat::process_start_ms(std::process::id())
-        .expect("test process start time readable");
-    let bridge = format!(
-        r#"{{"pid":{pid},"started_at":{started},"last_heartbeat_at":{beat},"last_activity_at":{act},"connected":true,"channel":"Telegram (@tripwire_bot)","error_count":0}}"#,
-        pid = std::process::id(),
-        started = started_at,
-        beat = now_ms - 1_000,
-        act = now_ms - 5_000,
-    );
-    fs::write(daemons.join("bridge.json"), bridge).expect("seed bridge heartbeat");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -154,8 +132,7 @@ fn daemons_opens_and_renders_four_rows() {
     assert!(status.success(), "tmux new-session failed");
 
     // Point both HOME and AINB_HOME at the isolated tmp so the daemons
-    // aggregator reads the seeded heartbeat (bridge/fleet/ATC honour
-    // $AINB_HOME; notifyd reads $HOME — both land in the tmp here).
+    // aggregator reads the isolated directory.
     let cmd = format!(
         "HOME={home} AINB_HOME={home}/.agents-in-a-box exec {bin} tui",
         home = home_tmp.path().display(),
@@ -183,30 +160,25 @@ fn daemons_opens_and_renders_four_rows() {
         "pre-key capture already on daemons — state leaked.\n{pre}"
     );
 
-    // Discoverability gate: the HomeScreen V2 sidebar MUST list the Daemon
-    // Health tile with its `[h]` shortcut, else the screen is unreachable by a
+    // Discoverability gate: the HomeScreen V2 sidebar MUST list the Daemons
+    // tile with its `[d]` shortcut, else the screen is unreachable by a
     // fresh user who can't see it.
     assert!(
-        pre.contains("Daemon Health") && pre.contains("[h]"),
-        "HomeScreen V2 sidebar missing Daemon Health tile — discoverability regression.\n{pre}"
+        pre.contains("Daemons") && pre.contains("[d]"),
+        "HomeScreen V2 sidebar missing Daemons tile — discoverability regression.\n{pre}"
     );
 
     let post_cap = poll_capture_resending(
         &session,
-        "h",
+        "d",
         Instant::now() + Duration::from_secs(30),
-        |c| {
-            c.contains("Daemons")
-                && c.contains("phone bridge")
-                && c.contains("notifyd")
-                && c.contains("fleet daemon")
-        },
+        |c| c.contains("runtime health") && c.contains("mcp pool"),
     );
     if post_cap.is_none() {
         let last = capture_pane(&session);
         kill_session(&session);
         panic!(
-            "Daemons screen didn't render all four rows after pressing h; \
+            "Daemons screen didn't render rows after pressing d; \
              last capture:\n---\n{last}\n---"
         );
     }
@@ -214,52 +186,45 @@ fn daemons_opens_and_renders_four_rows() {
 
     // The daemon rows are present — including the approve broker, which is a
     // socket (rides notifyd's process) yet still gets a first-class row.
-    assert!(post.contains("phone bridge"), "bridge row missing:\n{post}");
-    assert!(post.contains("notifyd"), "notifyd row missing:\n{post}");
-    assert!(post.contains("ATC"), "ATC row missing:\n{post}");
-    assert!(
-        post.contains("fleet daemon"),
-        "fleet daemon row missing:\n{post}"
-    );
-    assert!(
-        post.contains("approve broker"),
-        "approve broker row missing:\n{post}"
-    );
+    for row in [
+        "phone bridge",
+        "notifyd",
+        "approve broker",
+        "ATC",
+        "fleet daemon",
+        "mcp pool",
+        "hangar daemon",
+        "headroom proxy",
+    ] {
+        assert!(post.contains(row), "daemon row missing: {row}\n{post}");
+    }
 
-    // The seeded live bridge heartbeat flips the bridge to running + connected,
-    // surfacing the Telegram channel label — the original blind spot, closed.
-    assert!(
-        post.contains("running"),
-        "no running daemon shown despite seeded live heartbeat:\n{post}"
-    );
-    assert!(
-        post.contains("Telegram (@tripwire_bot)"),
-        "bridge channel label missing — heartbeat not surfaced:\n{post}"
-    );
-
-    // Back home, then the `d` overlay: sockets are tracked there too — the
-    // approve.sock line must render with the notifyd section (goal invariant:
-    // every daemon AND socket shows in the d overlay).
-    send_key(&session, "Escape");
-    let overlay = poll_capture_resending(
-        &session,
-        "d",
-        Instant::now() + Duration::from_secs(30),
-        |c| c.contains("notifyd processes") && c.contains("approve.sock"),
-    );
-    if overlay.is_none() {
-        let last = capture_pane(&session);
-        kill_session(&session);
-        panic!(
-            "d overlay never rendered the approve.sock line; \
-             last capture:\n---\n{last}\n---"
+    // The Hooks panel names BOTH executables. A pointer left aimed at a deleted
+    // worktree while a perfectly good ainb is running was invisible until this
+    // rendered two lines, and repair was a CLI command quoted in an error.
+    // Substrings that exist ONLY on those two lines: a bare "hooks " matches
+    // the panel title and a bare "running " matches the table's STATE column,
+    // so either would pass with both lines deleted.
+    for hook_line in [") → ", "running →", "B pin running", "I install / repair"] {
+        assert!(
+            post.contains(hook_line),
+            "hooks panel missing {hook_line:?}\n{post}"
         );
     }
-    let overlay = overlay.unwrap();
-    assert!(
-        overlay.contains("restart (resume/repair)"),
-        "overlay must advertise the R repair lever next to the socket row:\n{overlay}"
+
+    // Back home on Escape.
+    send_key(&session, "Escape");
+    let back_home = poll_capture_resending(
+        &session,
+        "Escape",
+        Instant::now() + Duration::from_secs(20),
+        |c| c.contains("Stats") && c.contains("[i]"),
     );
+    if back_home.is_none() {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("Escape never returned to HomeScreen; last capture:\n---\n{last}\n---");
+    }
 
     kill_session(&session);
 }

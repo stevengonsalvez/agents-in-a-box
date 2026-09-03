@@ -733,6 +733,16 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
             &config.socket_path,
         ));
         server_command.env("CODEX_HOME", &codex_home);
+        // Pin the cwd to a directory that outlives every session. Inheriting
+        // ours means inheriting whatever tree the daemon was started from,
+        // which for a daemon cold-started by a `codex` run inside a worktree is
+        // that worktree -- and Ainb deletes worktrees. `thread/start` resolves
+        // config relative to the server's own cwd, so once that directory is
+        // gone EVERY new thread fails with "failed to load configuration: No
+        // such file or directory" until the server is restarted by hand. The
+        // scoped home is created just above and lives under the hangar home,
+        // so it is always present and never a worktree.
+        server_command.current_dir(&codex_home);
         server_command.kill_on_drop(true);
         let mut child = server_command
             .stdin(Stdio::null())

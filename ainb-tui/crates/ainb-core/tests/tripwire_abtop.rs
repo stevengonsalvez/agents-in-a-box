@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 /// tmux session ainb spawns for the embedded abtop monitor. Must match
 /// `ABTOP_SESSION` in `crates/ainb-core/src/main.rs`'s `AttachAbtop` arm.
 const ABTOP_SESSION: &str = "ainb-abtop";
+static ABTOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -131,6 +132,7 @@ fn kill_session(session: &str) {
 
 #[test]
 fn pressing_t_offers_setup_then_embeds_abtop() {
+    let _guard = ABTOP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
         return;
@@ -253,6 +255,7 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
 /// doesn't intercept `t` (that leg is covered by the test above).
 #[test]
 fn abtop_opened_from_session_list_resumes_on_session_list() {
+    let _guard = ABTOP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !tmux_available() {
         eprintln!("SKIP: tmux not available");
         return;

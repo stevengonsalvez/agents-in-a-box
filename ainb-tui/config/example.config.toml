@@ -2,19 +2,46 @@
 # ==============================
 # Copy this file to: ~/.agents-in-a-box/config/config.toml
 #
-# Configuration is loaded from (in order of precedence):
-#   1. ./.agents-box/config.toml  (project-level)
-#   2. ~/.agents-in-a-box/config/config.toml  (user-level)
-#   3. /etc/agents-in-a-box/config.toml  (system-level)
+# Configuration is read from these four locations, HIGHEST precedence first.
+# The most specific file wins, key by key — a file only overrides the keys it
+# actually writes, so a small project config cannot disturb your other
+# settings:
+#   1. ./.ainb/config.toml                    (project-level)
+#   2. ./.agents-box/config.toml              (project-level, legacy name)
+#   3. ~/.agents-in-a-box/config/config.toml  (user-level)
+#   4. /etc/agents-in-a-box/config.toml       (system-level)
+#
+# `ainb config path` prints the same list with a mark against the ones that
+# exist.
 
 version = "0.1.0"
+
+# =============================================================================
+# General
+# =============================================================================
+# --8<-- parse
+# [general]
+# ## Colourise fenced code blocks in agent output. NO_COLOR still wins over
+# ## this and over AGENTS_BOX_SYNTAX_HIGHLIGHT.
+# syntax_highlight = true
+#
+# ## Install skills into each tool's real config dir (~/.claude, ~/.codex, ...)
+# ## rather than ainb's managed sandbox. True is the shipped behaviour: an
+# ## installed skill has to be where the tool actually looks.
+# skill_install_real_homes = true
+# -->8--
+#
+# The AINB_HOME env var still relocates ainb's state directory and is unchanged.
+# It has deliberately NOT been promoted to a config key: its readers disagree
+# about whether it names the state directory itself or its parent, so a key here
+# would have to pick one and silently scatter the other's files.
 
 # =============================================================================
 # Authentication
 # =============================================================================
 [authentication]
 # Active CLI provider for agent sessions
-# Options: "claude" | "codex" | "gemini"
+# Options: "claude" | "codex" | "gemini" | "copilot" | "antigravity"
 cli_provider = "claude"
 
 # Claude-specific authentication provider
@@ -85,6 +112,15 @@ max_repositories = 500
 # Options: "auto_rename" | "error"
 worktree_collision_behavior = "auto_rename"
 
+# How many directory levels below each scan path the scanner descends.
+# Raise it for deeply nested checkouts; every extra level multiplies the walk.
+scan_max_depth = 3
+
+# Seconds a cached repository scan stays fresh before the scanner walks the
+# disk again. The cache is also invalidated when a scan path's mtime changes,
+# so this is the ceiling on staleness rather than the only guard.
+scan_cache_ttl_secs = 3600
+
 # =============================================================================
 # UI Preferences
 # =============================================================================
@@ -105,35 +141,88 @@ show_container_status = true
 # Show git changes in session list (+added, -removed, ~modified)
 show_git_status = true
 
+# Show the session menu bar (also toggled live with Shift+M)
+show_session_menu_bar = true
+
+# Which sessions the list shows by default
+# Options: "all" | "active_only" | "stopped_only"
+session_filter = "all"
+
+# Sidebar geometry. Normally written by the TUI as you drag/collapse a pane
+# rather than set by hand; listed here so the keys are discoverable.
+# home_sidebar_width = 40
+# sessions_sidebar_width = 40
+# sessions_sidebar_collapsed = false
+# skill_manager_sources_width = 32
+
+# First-run wizard decisions. "unset" means "ask again next launch"; the TUI
+# writes "declined" or "installed" once you answer, so hand-editing these back
+# to "unset" is how you make the wizard offer them again.
+# Options: "unset" | "declined" | "installed"
+# statusline_decision = "unset"
+# tmux_decision = "unset"
+
 # =============================================================================
 # Container Templates (Advanced)
 # =============================================================================
 # Define custom container templates for different development environments.
 # These override or extend the built-in templates: claude-dev, node, python, rust
 #
+# `image_source` is a tagged enum. `type` is one of:
+#   { type = "Image",        name = "node:20-slim" }
+#   { type = "Dockerfile",   path = "./Dockerfile", build_args = {} }
+#   { type = "ClaudeDocker", base_image = "…", build_args = {} }
+# The tag values are case-sensitive.
+#
 # Example: Custom Node.js template with additional packages
+# --8<-- parse
 # [container_templates.my-node]
-# image_source = { type = "prebuilt", image = "node:20-slim" }
-# working_directory = "/workspace"
+# name = "my-node"
+# description = "Node 20 with extra tooling"
+# required_env = []
+# default_mcp_servers = []
+#
+# [container_templates.my-node.config]
+# image_source = { type = "Image", name = "node:20-slim" }
+# working_dir = "/workspace"
 # system_packages = ["git", "curl", "vim"]
+# npm_packages = []
+# python_packages = []
 # environment = { NODE_ENV = "development" }
-# memory_limit = "4g"
+# ports = [3000]
+# memory_limit = 4096   # megabytes, an integer — NOT a Docker-style "4g" string
 # cpu_limit = 2.0
+# mount_ssh = true
+# mount_git_config = true
+# -->8--
 
 # =============================================================================
 # MCP Servers (Advanced)
 # =============================================================================
 # Configure Model Context Protocol (MCP) servers for enhanced AI capabilities.
 #
+# Both `installation` and `definition` are tagged enums; `type` is
+# case-sensitive.
+#   installation: { type = "Npm", package = "…", version = "…" }
+#                 { type = "Python", package = "…", version = "…" }
+#                 { type = "Git", url = "…", branch = "…", install_command = "…" }
+#                 { type = "PreInstalled" }
+#                 { type = "Custom", script = "…" }
+#   definition:   { type = "Command", command = "…", args = [], env = {} }
+#                 { type = "Json", config = { … } }
+#
 # Example: Context7 documentation server
+# --8<-- parse
 # [mcp_servers.context7]
 # name = "context7"
-# command = "npx"
-# args = ["-y", "@context7/mcp-server"]
-# environment = {}
-# init_strategy = "lazy"  # Options: "lazy", "eager", "none"
+# description = "Up-to-date library documentation"
+# required_env = []
+# enabled_by_default = true
 # shared = true           # Pool this server across sessions (default: true).
 #                         # Set false for stateful servers (browser/db bridges).
+# installation = { type = "Npm", package = "@context7/mcp-server", version = "latest" }
+# definition = { type = "Command", command = "npx", args = ["-y", "@context7/mcp-server"], env = {} }
+# -->8--
 
 # =============================================================================
 # MCP Pool (shared MCP server processes for host/tmux sessions)
@@ -259,3 +348,249 @@ show_git_status = true
 # Optional: channel to reply in when the inbound message carries none.
 # channel_id = "123456789012345678"
 # default_target = "conductor"
+
+# =============================================================================
+# Usage analytics (the Analytics/burndown screen)
+# =============================================================================
+# Written by the burndown plugin (`ainb burndown plan set …`) as well as read
+# by it — hand-edit if you prefer, but note both this file and that command
+# target the same path.
+#
+# --8<-- parse
+# [usage.plan]
+# id = "claude-max"        # "claude-pro" | "claude-max" | "claude-max5x"
+#                          # | "cursor-pro" | "custom" | "none"
+# monthly_usd = 200.0
+# provider = "claude"      # "all" | "claude" | "codex" | "cursor"
+# reset_day = 1            # day of month the allowance resets
+# set_at = "2026-01-01T00:00:00Z"
+#
+# [usage.currency]
+# code = "GBP"
+# symbol = "£"
+# usd_rate = 0.79          # multiply USD figures by this for display
+#
+# # Map a model id reported by an agent onto one ainb knows the rate for.
+# [usage.model_aliases]
+# cursor-auto = "claude-sonnet-4-5"
+# -->8--
+
+# =============================================================================
+# Fleet
+# =============================================================================
+# --8<-- parse
+# [fleet]
+# # Terminal the macOS Fleet app opens when you jump to a session.
+# # Options: "warp" | "iterm" | "ghostty" | "terminal" (default: "warp")
+# terminal = "warp"
+#
+# ## Minutes of quiet before a session reads IDLE. One knob for both producers
+# ## (the tmux classifier and notifyd's hook fold), so they cannot disagree.
+# ## Env: AINB_FLEET_IDLE_MIN
+# idle_min = 5
+#
+# ## How `ainb fleet send` delivers.
+# ## "tmux" send-keys first with a broker fallback (default), "tmux-only" never
+# ## touches the broker, "broker" tries the broker first.
+# ## Env: AINB_FLEET_TRANSPORT
+# transport = "tmux"
+#
+# ## Attach cost/hint enrichment to fleet rows. False still serves free cached
+# ## suggestions but runs no producer, so it spends no tokens.
+# ## Env: AINB_FLEET_ENRICH
+# enrich = true
+#
+# ## Milliseconds before a STICKY hook row (ASK/ERR/WAIT/IDLE) stops being
+# ## trusted and the reader falls back to a live scan. 0 disables the check:
+# ## those states only change on a new event, so age is a poor signal for them.
+# ## Env: AINB_FLEET_STATE_STALE_MS
+# state_stale_ms = 0
+#
+# ## Milliseconds before a HEALTHY hook row (RUNNING/DONE) stops suppressing
+# ## the live scan. Its own knob, because a daemon that stopped materializing
+# ## would otherwise mask a real need forever. Before this key existed both
+# ## windows read AINB_FLEET_STATE_STALE_MS with different hardcoded fallbacks.
+# ## Env: AINB_FLEET_HEALTHY_STATE_STALE_MS (AINB_FLEET_STATE_STALE_MS still
+# ## works as a legacy fallback).
+# healthy_state_stale_ms = 300000
+#
+# ## Seconds of pane silence before tmux discovery calls a live session
+# ## "between turns" rather than working.
+# ## Env: AINB_FLEET_TMUX_IDLE_AFTER_SECS
+# tmux_idle_after_secs = 120
+#
+# # Budget caps for `ainb fleet cost`, in USD. Unset means no cap.
+# [fleet.cost]
+# session_usd = 5.0
+# group_usd = 25.0
+#
+# # Per-session and per-group overrides of the caps above.
+# [fleet.cost.session_overrides]
+# "my-long-running-session" = 20.0
+#
+# [fleet.cost.group_overrides]
+# "release-swarm" = 100.0
+#
+# # Which surface answers Claude interviews.
+# # Options: "native" | "fleet" (default: "native")
+# [fleet.interview]
+# surface = "native"
+# -->8--
+
+# =============================================================================
+# Presets
+# =============================================================================
+# Where the single presets.toml lives. Relative paths resolve against this
+# file's directory, so the default lands on ~/.agents-in-a-box/presets.toml.
+# `~` is NOT expanded — use an absolute path or a relative one.
+#
+# --8<-- parse
+# [presets]
+# file = "../presets.toml"
+# -->8--
+
+# =============================================================================
+# UI tunables
+# =============================================================================
+# Cadences and query bounds, as opposed to [ui_preferences] above, which is
+# what the interface looks like and which the TUI writes back itself.
+#
+# --8<-- parse
+# [ui]
+# ## Milliseconds between input polls. Lower feels snappier and costs CPU;
+# ## ~30fps by default.
+# tick_rate_ms = 33
+#
+# ## Milliseconds between the heavy periodic passes (tmux previews, mascot
+# ## animation, OAuth refresh checks). Deliberately much coarser than the poll:
+# ## running these per poll starves the event loop.
+# app_tick_ms = 250
+#
+# ## Rows the attention-marker query reads per refresh, and how far back an
+# ## event may still raise a session's [?] / [!] marker.
+# session_query_limit = 500
+# session_lookback_hours = 6
+#
+# ## Rows the Inbox lists. The query runs every render, so keep it modest.
+# inbox_list_limit = 200
+#
+# ## Milliseconds in which two clicks count as one double-click.
+# double_click_ms = 300
+# -->8--
+
+# =============================================================================
+# Usage client
+# =============================================================================
+# How ainb FETCHES and caches usage data. Deliberately not [usage] above: that
+# section belongs to the burndown plugin, which writes it itself, so ainb-core
+# treats it as read-only. These four knobs are core's own.
+#
+# --8<-- parse
+# [usage_client]
+# ## Port the ainb-managed Headroom compression proxy listens on.
+# ## Env: AINB_HEADROOM_PORT
+# headroom_port = 8787
+#
+# ## Seconds `ainb usage` waits for data before giving up. The first scan of a
+# ## large ~/.claude/projects is slow; raise this against a huge archive.
+# ## Env: AINB_USAGE_TIMEOUT_SECS
+# fetch_timeout_secs = 120
+#
+# ## Seconds between Codex statusline usage refreshes.
+# ## Env: AINB_CODEX_USAGE_TTL_SECS
+# codex_ttl_secs = 60
+#
+# ## Override the usage cache database. Unset derives
+# ## <home>/.agents-in-a-box/cache/usage.db.
+# ## Env: AINB_USAGE_CACHE_DB
+# cache_db = "/tmp/usage.db"
+# -->8--
+
+# =============================================================================
+# Daemons
+# =============================================================================
+# --8<-- parse
+# [daemons]
+# ## Milliseconds without a heartbeat before a daemon whose pid is STILL alive
+# ## (a wedged daemon that stopped ticking) reads stale. A dead pid is caught
+# ## immediately regardless of this window.
+# stale_after_ms = 90000
+#
+# ## Milliseconds the bridge may go without a SUCCESSFUL attention poll before
+# ## its proactive-push half counts as broken. A different clock from the one
+# ## above: that asks "is the process alive", this asks "can it do the job".
+# attention_stale_after_ms = 45000
+#
+# [notifyd]
+# ## Seconds one (session, event) pair waits before it may raise another OS
+# ## notification. Keeps a noisy session out of Notification Center.
+# os_debounce_secs = 60
+#
+# ## Seconds an unanswered permission request waits before it is auto-DENIED.
+# ## The bottom of a timeout ladder (broker < client re-dial < Claude's hook
+# ## timeout), so values above 630 are clamped rather than trusted.
+# approval_timeout_secs = 600
+# -->8--
+
+# =============================================================================
+# Web dashboard
+# =============================================================================
+# Defaults for `ainb web`. Its CLI flags still win, because a flag is a
+# decision about one invocation and this file is a standing preference.
+#
+# The bearer token is NOT settable here. Pass `--token <secret>`; it goes to
+# the OS keychain and never into this file.
+#
+# --8<-- parse
+# [web]
+# ## host:port to bind. A non-loopback address still has to clear the bind
+# ## security check, so setting it here cannot expose anything a flag could not.
+# listen = "127.0.0.1:8420"
+#
+# ## Serve viewer-only: the live WS terminal and POST /api/answer are refused.
+# read_only = false
+#
+# ## Allow a non-loopback bind with no token. Honoured ONLY together with
+# ## read_only; the security check refuses it otherwise.
+# insecure_bind = false
+# -->8--
+
+# =============================================================================
+# ACP adapters
+# =============================================================================
+# The adapter registry the Hangar daemon spawns ACP sessions from. Naming an
+# adapter overrides the built-in entry; naming a new one adds it. Omitting the
+# section keeps the built-in `claude-agent-acp` and `codex-acp` entries.
+#
+# --8<-- parse
+# [acp.adapters.claude-agent-acp]
+# ## Executable to spawn. Unset resolves the adapter's own name on PATH.
+# command = "/opt/homebrew/bin/claude-agent-acp"
+#
+# ## The permission mode PINNED at session/new and re-asserted after every
+# ## session/load. Never leave an adapter to inherit ambient state: one was
+# ## observed picking up "bypassPermissions", which disables the whole
+# ## permission surface silently.
+# ## Options: "default" | "acceptEdits" | "bypassPermissions" | "plan"
+# permission_mode = "default"
+# -->8--
+
+# =============================================================================
+# Hangar daemon
+# =============================================================================
+# NOT part of this file. These knobs live in the Hangar daemon's `daemon_config`
+# SQLite table (~/.agents-in-a-box/hangar.db), because the daemon reads them on
+# its own tick without restarting. They are listed in the settings screen under
+# "Hangar Daemon" and are settable from either surface:
+#
+#   ainb config set hangar_daemon.autostandup.enabled true
+#   ainb hangar daemon config set autostandup.stagnant_min 30
+#
+# Writing `[hangar_daemon]` into this file does nothing at all.
+#
+#   hangar_daemon.autostandup.enabled          bool         (default false)
+#   hangar_daemon.autostandup.stagnant_min     int 1..1440  (default 15)
+#   hangar_daemon.autostandup.cooldown_min     int 1..1440  (default 60)
+#   hangar_daemon.autostandup.max_concurrent   int 1..64    (default 1)
+#   hangar_daemon.card_agent.default           claude|codex|copilot (default claude)
+#   hangar_daemon.workspace.creation_disabled  bool         (default false)

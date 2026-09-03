@@ -22,15 +22,18 @@ use ainb_fleet_core::fleet::read::needs::idle_threshold_from_env;
 /// Staleness window (ms) for a hook-sourced `current_state` row before the
 /// reader falls back to a live `classify()` scan. `0` (the default) disables
 /// the age check: ASK/ERR/WAIT/IDLE are sticky states the materializer only
-/// changes on a new event, so an old row is normally still the truth. Override
-/// via `AINB_FLEET_STATE_STALE_MS` only when there is an independent reason to
-/// distrust an aged row (e.g. a known-flaky daemon).
+/// changes on a new event, so an old row is normally still the truth. Raise
+/// `fleet.state_stale_ms` (or `AINB_FLEET_STATE_STALE_MS`) only when there is
+/// an independent reason to distrust an aged row (e.g. a known-flaky daemon).
+///
+/// This is the STICKY-kind window. The RUNNING/DONE floor is a separate knob
+/// with its own default; see `fleet::read::current_state`.
 fn stale_window_ms() -> i64 {
-    std::env::var("AINB_FLEET_STATE_STALE_MS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|n| *n >= 0)
-        .unwrap_or(0)
+    crate::config::tunables::resolved(
+        "AINB_FLEET_STATE_STALE_MS",
+        crate::config::tunables::snapshot().fleet.state_stale_ms,
+    )
+    .max(0)
 }
 
 pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
@@ -81,8 +84,8 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     Ok(())
 }
 
-/// Enrichment is on by default. `--no-enrich` or `AINB_FLEET_ENRICH=0` turns it
-/// off — the reader still attaches free cached suggestions, but no card is
+/// Enrichment is on by default. `--no-enrich`, `fleet.enrich = false`, or
+/// `AINB_FLEET_ENRICH=0` turns it off. The reader still attaches free cached suggestions, but no card is
 /// flagged `need_enrich`, so no producer (inline or agent) runs → 0 tokens.
 pub fn enrich_enabled(matches: &clap::ArgMatches) -> bool {
     if matches
@@ -94,7 +97,10 @@ pub fn enrich_enabled(matches: &clap::ArgMatches) -> bool {
     {
         return false;
     }
-    std::env::var("AINB_FLEET_ENRICH").map(|v| v != "0").unwrap_or(true)
+    crate::config::tunables::resolved_bool(
+        "AINB_FLEET_ENRICH",
+        crate::config::tunables::snapshot().fleet.enrich,
+    )
 }
 
 /// Classify every session, reading the event-sourced `current_state` table as

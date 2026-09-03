@@ -69,6 +69,7 @@ pub enum UsageProviderFilter {
     All,
     Claude,
     Codex,
+    Antigravity,
 }
 
 impl UsageProviderFilter {
@@ -77,6 +78,7 @@ impl UsageProviderFilter {
             Self::All => true,
             Self::Claude => provider == "claude",
             Self::Codex => provider == "codex",
+            Self::Antigravity => provider == "antigravity",
         }
     }
 }
@@ -2120,6 +2122,7 @@ fn plan_provider_includes(provider: crate::config::UsagePlanProvider, call_provi
         crate::config::UsagePlanProvider::Claude => call_provider == "claude",
         crate::config::UsagePlanProvider::Codex => call_provider == "codex",
         crate::config::UsagePlanProvider::Cursor => call_provider == "cursor",
+        crate::config::UsagePlanProvider::Antigravity => call_provider == "antigravity",
     }
 }
 

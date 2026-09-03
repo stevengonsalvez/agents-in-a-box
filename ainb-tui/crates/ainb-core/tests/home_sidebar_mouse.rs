@@ -54,11 +54,11 @@ fn home_sidebar_resize_release_persists_width_to_isolated_home() {
     assert!(state.home_screen_v2_state.sidebar_resize_active);
 
     let drag =
-        EventHandler::handle_mouse_event(AppEvent::MouseDragging { x: 44, y: 10 }, &mut state);
+        EventHandler::handle_mouse_event(AppEvent::MouseDragging { x: 29, y: 10 }, &mut state);
     assert!(drag.is_none());
     assert_eq!(state.home_screen_v2_state.sidebar.preferred_width, 30);
 
-    let up = EventHandler::handle_mouse_event(AppEvent::MouseDragEnd { x: 44, y: 10 }, &mut state);
+    let up = EventHandler::handle_mouse_event(AppEvent::MouseDragEnd { x: 29, y: 10 }, &mut state);
     assert!(up.is_none());
     assert!(!state.home_screen_v2_state.sidebar_resize_active);
 

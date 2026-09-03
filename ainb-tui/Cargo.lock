@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "ainb"
-version = "1.22.13"
+version = "1.23.2"
 dependencies = [
  "ainb-cli",
  "ainb-fleet-core",
@@ -199,6 +199,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-term",
  "two-face",
+ "unicode-width 0.2.2",
  "url",
  "uuid",
  "vt100",
@@ -363,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-hangar-daemon"
-version = "1.22.13"
+version = "1.23.2"
 dependencies = [
  "agent-client-protocol",
  "ainb-acp",
@@ -511,13 +512,14 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "ainb-plugin-cts-v2"
-version = "1.22.13"
+version = "1.23.2"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-secrets",
@@ -537,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-plugin-hangar"
-version = "1.22.13"
+version = "1.23.2"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",
@@ -581,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-plugin-notifyd"
-version = "1.22.13"
+version = "1.23.2"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",
@@ -596,6 +598,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -750,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-web"
-version = "1.22.13"
+version = "1.23.2"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",

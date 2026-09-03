@@ -59,6 +59,7 @@ const ALL_TOOL_ENV_VARS: &[&str] = &[
     "AINB_TOOL_HOME_CLAUDE",
     "AINB_TOOL_HOME_CODEX",
     "AINB_TOOL_HOME_COPILOT",
+    "AINB_TOOL_HOME_ANTIGRAVITY",
     "AINB_TOOL_HOME_GEMINI",
     "AINB_TOOL_HOME_CURSOR",
     "AINB_TOOL_HOME_AMAZONQ",
@@ -125,6 +126,7 @@ fn stable_tool_name(env_lowercase: &str) -> &'static str {
         "claude" => "claude",
         "codex" => "codex",
         "copilot" => "copilot",
+        "antigravity" => "antigravity",
         "gemini" => "gemini",
         "cursor" => "cursor",
         "amazonq" => "amazonq",
@@ -157,7 +159,7 @@ fn install_to_all_v1_tools() {
         );
         res.expect("install ok");
         assert!(
-            out.contains("installed") && out.contains("8 tool(s)"),
+            out.contains("installed") && out.contains("9 tool(s)"),
             "got: {out}"
         );
         assert!(out.contains("1 skipped"), "got: {out}");
@@ -175,10 +177,10 @@ fn install_to_all_v1_tools() {
             }
         }
 
-        // Lockfile has one unit; 8 deployed + 1 skipped entries.
+        // Lockfile has one unit; 9 deployed + 1 skipped entries.
         let lock = Lockfile::load_from(&lockfile_path_in(home.path())).unwrap();
         assert_eq!(lock.units.len(), 1);
-        assert_eq!(lock.units[0].deployed.len(), 9);
+        assert_eq!(lock.units[0].deployed.len(), 10);
         assert!(matches!(
             lock.units[0].deployed.get("claude-desktop").unwrap(),
             ainb_skill_core::DeployedRef::Skipped { .. }

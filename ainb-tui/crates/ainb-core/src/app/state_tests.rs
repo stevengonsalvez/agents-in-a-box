@@ -470,7 +470,9 @@ mod tests {
         struct ExactTmuxSession(String);
         impl Drop for ExactTmuxSession {
             fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", &format!("={}", self.0)])
+                    .output();
             }
         }
 
@@ -998,108 +1000,360 @@ mod tests {
     use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
     use crate::config::AppConfig;
 
-    fn set_default_workspace(screen: &mut ConfigScreenState, value: &str) {
-        let settings = screen
-            .settings
-            .get_mut(&ConfigCategory::Workspace)
-            .expect("Workspace category present");
-        let setting = settings
-            .iter_mut()
-            .find(|s| s.key == "default_workspace")
-            .expect("default_workspace setting present");
-        setting.value = ConfigValue::Text(value.to_string());
+    // ========================================================================
+    // Config screen category list
+    // ========================================================================
+
+    /// The screen renders only the categories that have rows. `ConfigCategory`
+    /// now covers the whole TOML schema (registry.rs), so without this filter
+    /// opening Settings would show eight empty sections.
+    #[test]
+    fn config_screen_lists_only_categories_that_have_rows() {
+        let screen = ConfigScreenState::default();
+        for category in &screen.categories {
+            let rows = screen
+                .settings
+                .get(category)
+                .unwrap_or_else(|| panic!("category {category:?} is listed but has no settings"));
+            assert!(
+                !rows.is_empty(),
+                "category {category:?} is listed but has no rows"
+            );
+        }
     }
 
-    fn displayed_default_workspace(screen: &ConfigScreenState) -> String {
+    /// The tmux tripwire (`tripwire_config_plugins`) steps down exactly five
+    /// times to reach Plugins. Renumbering the category list silently breaks a
+    /// test that lives in another file, so pin the order here where it is cheap
+    /// to see.
+    #[test]
+    fn plugins_is_the_sixth_category() {
+        let screen = ConfigScreenState::default();
+        assert_eq!(
+            screen.categories.get(5),
+            Some(&ConfigCategory::Plugins),
+            "categories: {:?}",
+            screen.categories
+        );
+    }
+
+    /// Edit a row by its dotted key, exactly as the popup confirm does.
+    fn edit(screen: &mut ConfigScreenState, key: &str, value: ConfigValue) {
+        assert!(
+            screen.settings.values().flatten().any(|s| s.key == key),
+            "no row for '{key}'; the registry and the screen have drifted"
+        );
+        screen.set_row_value(key, value);
+    }
+
+    fn row_display(screen: &ConfigScreenState, key: &str) -> String {
         screen
             .settings
-            .get(&ConfigCategory::Workspace)
-            .unwrap()
-            .iter()
-            .find(|s| s.key == "default_workspace")
-            .unwrap()
+            .values()
+            .flatten()
+            .find(|s| s.key == key)
+            .unwrap_or_else(|| panic!("no row for '{key}'"))
             .value
             .display()
     }
 
+    // ========================================================================
+    // Registry-driven rows: an edit reaches AppConfig and survives a reopen
+    // ========================================================================
+    //
+    // These replace the old hand-written `default_workspace` / `branch_prefix`
+    // round-trip tests. Those covered four of the ~24 rows and were the only
+    // rows with a persist branch worth testing; the point now is that ONE path
+    // (serialize → set_validated → deserialize) covers every row, so the tests
+    // pick one row per widget kind rather than one row per hand-written arm.
+
     #[test]
-    fn default_workspace_edit_replaces_primary_and_round_trips() {
+    fn a_text_edit_round_trips_through_the_registry() {
         let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths = vec![PathBuf::from("/a/git")];
-
         let mut screen = ConfigScreenState::from_app_config(&config);
-        set_default_workspace(&mut screen, "/a/projects");
-        screen.apply_to_app_config(&mut config);
 
-        // Primary scan path is the edited value, not appended to the tail.
-        assert_eq!(
-            config.workspace_defaults.workspace_scan_paths.first(),
-            Some(&PathBuf::from("/a/projects"))
+        edit(
+            &mut screen,
+            "workspace_defaults.branch_prefix",
+            ConfigValue::Text("squad/".to_string()),
         );
-        // Reopening the screen now shows the saved value.
+        screen.apply_to_app_config(&mut config).expect("edit applies");
+
+        assert_eq!(config.workspace_defaults.branch_prefix, "squad/");
         let reopened = ConfigScreenState::from_app_config(&config);
-        assert_eq!(displayed_default_workspace(&reopened), "/a/projects");
+        assert_eq!(
+            row_display(&reopened, "workspace_defaults.branch_prefix"),
+            "squad/"
+        );
     }
 
     #[test]
-    fn default_workspace_edit_preserves_other_scan_dirs() {
+    fn a_list_edit_round_trips_as_a_comma_separated_list() {
         let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths =
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
-
         let mut screen = ConfigScreenState::from_app_config(&config);
-        set_default_workspace(&mut screen, "/a/projects");
-        screen.apply_to_app_config(&mut config);
 
-        // Old primary replaced; the secondary scan dir is kept.
+        edit(
+            &mut screen,
+            "workspace_defaults.workspace_scan_paths",
+            ConfigValue::Text("/a/projects, /a/work".to_string()),
+        );
+        screen.apply_to_app_config(&mut config).expect("edit applies");
+
         assert_eq!(
             config.workspace_defaults.workspace_scan_paths,
             vec![PathBuf::from("/a/projects"), PathBuf::from("/a/work")]
         );
-    }
-
-    #[test]
-    fn default_workspace_noop_confirm_keeps_secondary_dirs() {
-        // Opening the popup and confirming without changing the value must NOT
-        // drop other configured scan dirs (regression: a de-dup that stripped
-        // the unchanged primary then overwrote slot 0 lost the secondary).
-        let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths =
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
-
-        let mut screen = ConfigScreenState::from_app_config(&config);
-        // first() is /a/git — re-confirm it unchanged.
-        set_default_workspace(&mut screen, "/a/git");
-        screen.apply_to_app_config(&mut config);
-
+        let reopened = ConfigScreenState::from_app_config(&config);
         assert_eq!(
-            config.workspace_defaults.workspace_scan_paths,
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")]
+            row_display(&reopened, "workspace_defaults.workspace_scan_paths"),
+            "/a/projects, /a/work"
         );
     }
 
     #[test]
-    fn default_workspace_edit_does_not_duplicate_existing_path() {
+    fn a_number_edit_round_trips_and_is_range_checked() {
         let mut config = AppConfig::default();
-        config.workspace_defaults.workspace_scan_paths =
-            vec![PathBuf::from("/a/git"), PathBuf::from("/a/work")];
-
         let mut screen = ConfigScreenState::from_app_config(&config);
-        // Promote an already-present path to primary.
-        set_default_workspace(&mut screen, "/a/work");
-        screen.apply_to_app_config(&mut config);
+
+        edit(&mut screen, "docker.timeout", ConfigValue::Number(120));
+        screen.apply_to_app_config(&mut config).expect("edit applies");
+        assert_eq!(config.docker.timeout, 120);
+
+        // Out of the registry's declared range: the row is REPORTED and
+        // skipped rather than written, and the pass still succeeds so one bad
+        // value cannot block every other row (see
+        // `a_rejected_edit_does_not_block_the_others`).
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        edit(&mut screen, "docker.timeout", ConfigValue::Number(0));
+        let applied = screen.apply_to_app_config(&mut config).expect("the pass succeeds");
+        assert_eq!(applied.rejected.len(), 1, "{:?}", applied.rejected);
+        assert!(
+            applied.rejected[0].1.contains("between 1 and 3600"),
+            "{:?}",
+            applied.rejected
+        );
+        assert_eq!(
+            config.docker.timeout, 120,
+            "a rejected edit changes nothing"
+        );
+    }
+
+    #[test]
+    fn an_untouched_row_is_never_written() {
+        // The screen seeds ~150 rows, most of them from serde defaults. Only
+        // the rows the user actually edited may reach config.toml — otherwise
+        // opening Settings and pressing S would materialise every default.
+        let config = AppConfig::default();
+        let screen = ConfigScreenState::from_app_config(&config);
+        assert!(
+            screen.pending_edits().is_empty(),
+            "a freshly-opened screen has pending edits: {:?}",
+            screen.pending_edits()
+        );
+    }
+
+    #[test]
+    fn a_read_only_usage_row_is_shown_but_never_written() {
+        // `[usage]` belongs to the burndown plugin (READ_ONLY_SECTIONS). The
+        // row exists so the value is visible, and is refused at both the
+        // keypress and the save.
+        let config = AppConfig::default();
+        let mut screen = ConfigScreenState::from_app_config(&config);
+        assert!(
+            screen.settings.values().flatten().any(|s| s.key == "usage.currency.code"),
+            "usage rows must still be visible"
+        );
+        // Even a forced edit (the keypress path refuses first) is filtered out.
+        screen.set_row_value("usage.currency.code", ConfigValue::Text("EUR".to_string()));
+        assert!(
+            !screen.pending_edits().iter().any(|(key, _)| key.starts_with("usage.")),
+            "a usage row must never reach a save: {:?}",
+            screen.pending_edits()
+        );
+    }
+
+    /// #11. `EXTERNAL_PREFIXES` holds DOTTED PATHS, so grafting them into the
+    /// seed has to walk the path. The old code trimmed `"fleet.bridge."` to
+    /// `"fleet.bridge"` and looked it up as a flat top-level key, which TOML can
+    /// never contain — the section was silently never carried across.
+    #[test]
+    fn external_sections_graft_at_their_dotted_path() {
+        let mut seed: toml::Value = toml::from_str("[docker]\ntimeout = 60\n").unwrap();
+        let on_disk: toml::Value = toml::from_str(
+            "[skills]\napi_key = \"sk-secret\"\n\n[fleet.bridge.telegram]\ntoken = \"keychain:t\"\n",
+        )
+        .unwrap();
+
+        crate::app::state::merge_external_sections(&mut seed, &on_disk);
 
         assert_eq!(
-            config.workspace_defaults.workspace_scan_paths.first(),
-            Some(&PathBuf::from("/a/work"))
+            crate::config::registry::navigate_toml(&seed, "skills.api_key").ok(),
+            Some(&toml::Value::String("sk-secret".to_string())),
+            "single-segment external section was dropped: {seed}"
         );
-        let dupes = config
-            .workspace_defaults
-            .workspace_scan_paths
+        assert_eq!(
+            crate::config::registry::navigate_toml(&seed, "fleet.bridge.telegram.token").ok(),
+            Some(&toml::Value::String("keychain:t".to_string())),
+            "a dotted external prefix was looked up as a flat key: {seed}"
+        );
+    }
+
+    /// The seed must not overwrite a section it already carries — the loaded
+    /// config wins over whatever is on disk.
+    #[test]
+    fn an_external_section_already_in_the_seed_is_not_overwritten() {
+        let mut seed: toml::Value =
+            toml::from_str("[skills]\napi_key = \"from-config\"\n").unwrap();
+        let on_disk: toml::Value = toml::from_str("[skills]\napi_key = \"from-disk\"\n").unwrap();
+        crate::app::state::merge_external_sections(&mut seed, &on_disk);
+        assert_eq!(
+            crate::config::registry::navigate_toml(&seed, "skills.api_key").ok(),
+            Some(&toml::Value::String("from-config".to_string()))
+        );
+    }
+
+    /// #2b. Expanding a node must not write anything until the screen is left,
+    /// and a screen the user only browsed must leave the file alone entirely.
+    #[test]
+    fn expansion_is_flushed_once_on_exit_and_never_when_untouched() {
+        let mut screen = ConfigScreenState::from_app_config(&AppConfig::default());
+        assert!(
+            screen.take_expansion_to_persist().is_none(),
+            "a freshly opened screen wants to write the config"
+        );
+
+        let root = screen
+            .tree
             .iter()
-            .filter(|p| *p == &PathBuf::from("/a/work"))
-            .count();
-        assert_eq!(dupes, 1, "edited path must not be duplicated");
+            .position(|node| node.category == ConfigCategory::ContainerTemplates && node.depth == 0)
+            .expect("container templates root");
+        screen.selected_node = screen
+            .visible_nodes
+            .iter()
+            .position(|index| *index == root)
+            .expect("root visible");
+
+        assert!(screen.toggle_expanded());
+        assert!(screen.toggle_expanded(), "collapse it again");
+
+        let flushed = screen
+            .take_expansion_to_persist()
+            .expect("a toggled tree must be persisted on exit");
+        assert!(flushed.is_empty(), "expanded then collapsed: {flushed:?}");
+        assert!(
+            screen.take_expansion_to_persist().is_none(),
+            "the flush must happen once, not on every exit"
+        );
+    }
+
+    /// #4. A Ctrl+K prompt that is escaped must disarm the row.
+    ///
+    /// Left armed, the NEXT ordinary edit of that same row is routed into the
+    /// keychain: typing `$TELEGRAM_BOT_TOKEN` stores that literal string as a
+    /// secret and rewrites the row to a `keychain:` ref, discarding the env
+    /// reference the user asked for. Drives the real event so the fix cannot be
+    /// "the state has a method nobody calls".
+    #[test]
+    fn cancelling_a_keychain_prompt_disarms_the_row() {
+        let mut state = crate::app::state::AppState::new();
+        state.config_screen_state.keychain_target = Some("fleet.bridge.telegram.token".to_string());
+
+        crate::app::EventHandler::process_event(
+            crate::app::events::AppEvent::ConfigPopupCancel,
+            &mut state,
+        );
+
+        assert_eq!(
+            state.config_screen_state.keychain_target, None,
+            "an escaped Ctrl+K prompt left the row armed; the next edit of it \
+             would be stored in the keychain"
+        );
+    }
+
+    /// #8. One unwritable row must not wedge every later save. The registry
+    /// refuses an out-of-range number; the other edit in the same pass has to
+    /// land anyway, and the bad key must not stay pending.
+    #[test]
+    fn a_rejected_edit_does_not_block_the_others() {
+        let mut config = AppConfig::default();
+        let mut screen = ConfigScreenState::from_app_config(&config);
+
+        edit(&mut screen, "docker.timeout", ConfigValue::Number(0)); // below the range
+        edit(
+            &mut screen,
+            "workspace_defaults.branch_prefix",
+            ConfigValue::Text("squad/".to_string()),
+        );
+
+        let applied = screen.apply_to_app_config(&mut config).expect("the pass itself succeeds");
+        assert_eq!(applied.rejected.len(), 1, "{:?}", applied.rejected);
+        assert!(
+            applied.rejected[0].0 == "docker.timeout",
+            "{:?}",
+            applied.rejected
+        );
+        assert_eq!(
+            config.workspace_defaults.branch_prefix, "squad/",
+            "the good edit was blocked by the bad one"
+        );
+
+        // And once saved, the bad key is gone from `dirty` rather than
+        // re-failing on every subsequent auto-persist.
+        screen.mark_saved();
+        assert!(
+            screen.pending_edits().is_empty(),
+            "a rejected edit stayed pending: {:?}",
+            screen.pending_edits()
+        );
+    }
+
+    #[test]
+    fn the_search_filter_finds_a_row_by_its_dotted_key() {
+        // The whole reason the tree got a `/` filter: a leaf is reachable
+        // without knowing which section it lives in.
+        let mut screen = ConfigScreenState::from_app_config(&AppConfig::default());
+        screen.start_search();
+        for c in "idle_grace".chars() {
+            screen.push_search_char(c);
+        }
+        let hits: Vec<String> =
+            screen.current_settings().iter().map(|row| row.key.clone()).collect();
+        assert!(
+            hits.contains(&"mcp_pool.idle_grace_secs".to_string()),
+            "search missed the row: {hits:?}"
+        );
+
+        screen.clear_search();
+        assert!(!screen.is_searching());
+    }
+
+    #[test]
+    fn expanding_a_node_reveals_its_children() {
+        let mut screen = ConfigScreenState::from_app_config(&AppConfig::default());
+        // Select the Container Templates root, which nests per template.
+        let root = screen
+            .tree
+            .iter()
+            .position(|node| node.category == ConfigCategory::ContainerTemplates && node.depth == 0)
+            .expect("container templates root");
+        screen.selected_node = screen
+            .visible_nodes
+            .iter()
+            .position(|index| *index == root)
+            .expect("root visible");
+
+        let before = screen.visible_nodes.len();
+        assert!(screen.current_node().unwrap().has_children);
+        assert!(screen.toggle_expanded(), "root expands");
+        assert!(
+            screen.visible_nodes.len() > before,
+            "expanding revealed nothing: {} -> {}",
+            before,
+            screen.visible_nodes.len()
+        );
+
+        assert!(screen.toggle_expanded(), "root collapses");
+        assert_eq!(screen.visible_nodes.len(), before);
     }
 
     // ========================================================================
@@ -1192,10 +1446,12 @@ mod tests {
 
         let rows = screen.settings.get(&ConfigCategory::Plugins).expect("Plugins category present");
 
-        // The original enable/disable placeholder row is preserved.
+        // The static "Installed Plugins: None installed" placeholder is gone,
+        // replaced by a real per-plugin enable toggle.
         assert!(
-            rows.iter().any(|s| s.key == "installed_plugins"),
-            "existing enable/disable placeholder row must be kept"
+            rows.iter().any(|s| s.key == "plugin-enabled:learnings"),
+            "expected a real enable toggle for the loaded plugin, got: {:?}",
+            rows.iter().map(|s| &s.key).collect::<Vec<_>>()
         );
 
         // learnings_dir: path → Text, value from plugins.values (override wins).
@@ -1241,6 +1497,178 @@ mod tests {
         assert!(matches!(limit.value, ConfigValue::Number(20)));
     }
 
+    /// The same race for a per-plugin `[[config]]` row, which is what
+    /// `tripwire_config_plugins` flaked on: discovery landing between the edit
+    /// and its save rebuilt the row from the saved config and threw the typed
+    /// value away.
+    #[test]
+    fn discovery_does_not_drop_an_edited_plugin_field() {
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![field(
+                "learnings_dir",
+                ConfigKind::Path,
+                "~/.learnings",
+                &[],
+            )],
+        );
+        let cfg = plugins_values("learnings", &[("learnings_dir", "/tmp/seed")]);
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        let row_key = plugin_row_key("learnings", "learnings_dir");
+        screen.set_row_value(&row_key, ConfigValue::Text("/tmp/edited".to_string()));
+
+        // Discovery re-runs (a second plugin finished loading).
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        let row = screen
+            .settings
+            .get(&ConfigCategory::Plugins)
+            .and_then(|rows| rows.iter().find(|row| row.key == row_key))
+            .expect("row rebuilt");
+        assert!(
+            matches!(row.value, ConfigValue::Text(ref t) if t == "/tmp/edited"),
+            "discovery reverted an in-flight edit to {:?}",
+            row.value
+        );
+    }
+
+    /// Plugin discovery finishes after the screen is built, so it can land
+    /// between an edit of `plugins.disabled` and that edit's save. Replacing
+    /// the list rows with toggles at that moment used to take the pending value
+    /// with them.
+    #[test]
+    fn discovery_does_not_drop_an_edited_plugin_list_row() {
+        let mut screen = ConfigScreenState::default();
+        screen.set_row_value(
+            "plugins.disabled",
+            ConfigValue::Text("burndown, witr".to_string()),
+        );
+
+        let manifest = manifest_with_config("learnings", vec![]);
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &PluginsConfig::default());
+
+        assert!(
+            screen
+                .pending_edits()
+                .iter()
+                .any(|(key, raw)| key == "plugins.disabled" && raw == "burndown, witr"),
+            "discovery discarded a pending edit: {:?}",
+            screen.pending_edits()
+        );
+    }
+
+    #[test]
+    fn a_plugin_toggle_writes_the_denylist() {
+        // The "real plugin list" that replaced the static "Installed Plugins:
+        // None installed" placeholder. Turning a plugin off must land in
+        // `plugins.disabled`; turning it back on must remove it, which a
+        // diff-free rebuild gets right and an append would not.
+        let manifest = manifest_with_config("learnings", vec![]);
+        let cfg = PluginsConfig::default();
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+        screen.set_row_value("plugin-enabled:learnings", ConfigValue::Bool(false));
+
+        let mut app = AppConfig::default();
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+        assert_eq!(app.plugins.disabled, vec!["learnings".to_string()]);
+
+        // Re-enable: the name comes back out of the denylist.
+        screen.set_row_value("plugin-enabled:learnings", ConfigValue::Bool(true));
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+        assert!(
+            app.plugins.disabled.is_empty(),
+            "re-enabling left the plugin disabled: {:?}",
+            app.plugins.disabled
+        );
+    }
+
+    #[test]
+    fn a_plugin_disabled_elsewhere_is_not_dropped_by_a_toggle_save() {
+        // A shared config can disable a plugin this machine never discovered.
+        // Rebuilding `plugins.disabled` from the visible toggles alone would
+        // silently re-enable it on the next save.
+        let manifest = manifest_with_config("learnings", vec![]);
+        let cfg = PluginsConfig::default();
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+        screen.set_row_value("plugin-enabled:learnings", ConfigValue::Bool(false));
+
+        let mut app = AppConfig::default();
+        app.plugins.disabled = vec!["not-installed-here".to_string()];
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+        assert_eq!(
+            app.plugins.disabled,
+            vec!["learnings".to_string(), "not-installed-here".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_save_with_no_edits_applies_nothing() {
+        // Pressing `S` with nothing edited must not write. `save()` renders the
+        // whole AppConfig from the snapshot taken at startup, so a no-op save
+        // would revert anything `ainb config set` or another process wrote
+        // since — while reporting "No changes to save".
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![field(
+                "learnings_dir",
+                ConfigKind::Path,
+                "~/.learnings",
+                &[],
+            )],
+        );
+        let cfg = PluginsConfig::default();
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        assert!(screen.pending_edits().is_empty(), "nothing was edited");
+
+        let mut app = AppConfig::default();
+        let applied = screen.apply_to_app_config(&mut app).expect("applies");
+        assert!(
+            applied.external.is_empty(),
+            "a clean screen produced external writes: {:?}",
+            applied.external
+        );
+    }
+
+    #[test]
+    fn untouched_plugin_rows_are_not_written_into_config() {
+        // Saving an unrelated setting must not materialise every discovered
+        // plugin's schema defaults into config.toml. Doing so pins today's
+        // defaults, so a later change in the plugin's manifest can never take
+        // effect for anyone who ever opened the settings screen.
+        let manifest = manifest_with_config(
+            "learnings",
+            vec![field(
+                "learnings_dir",
+                ConfigKind::Path,
+                "~/.learnings",
+                &[],
+            )],
+        );
+        let cfg = PluginsConfig::default();
+
+        let mut screen = ConfigScreenState::default();
+        screen.apply_plugin_manifests(std::slice::from_ref(&manifest), &cfg);
+
+        // Nothing edited: the row exists and shows its default, but is clean.
+        let mut app = AppConfig::default();
+        screen.apply_to_app_config(&mut app).expect("edits apply");
+
+        assert!(
+            app.plugins.values.get("learnings").is_none(),
+            "an untouched plugin row was written into config.toml: {:?}",
+            app.plugins.values
+        );
+    }
+
     #[test]
     fn test_apply_routes_plugin_edit_to_values() {
         // Editing a Plugins-category row then apply_to_app_config writes into
@@ -1263,14 +1691,15 @@ mod tests {
         // Simulate the popup-confirm edit: mutate the row value in place,
         // exactly as ConfigPopupConfirm does (matched by key).
         let row_key = plugin_row_key("learnings", "learnings_dir");
-        {
-            let rows = screen.settings.get_mut(&ConfigCategory::Plugins).unwrap();
-            let row = rows.iter_mut().find(|s| s.key == row_key).expect("row present");
-            row.value = ConfigValue::Text("/tmp/edited-kb".to_string());
-        }
+        // Through `set_row_value`, exactly as ConfigPopupConfirm does. Mutating
+        // the row in place instead would leave it out of `dirty`, and only
+        // dirty rows are written — an untouched plugin row must NOT be
+        // materialised into config.toml just because some other setting was
+        // saved.
+        screen.set_row_value(&row_key, ConfigValue::Text("/tmp/edited-kb".to_string()));
 
         let mut app = AppConfig::default();
-        screen.apply_to_app_config(&mut app);
+        screen.apply_to_app_config(&mut app).expect("edits apply");
 
         // The edit landed under plugins.values[learnings][learnings_dir],
         // not at any top-level config field.
@@ -1669,6 +2098,835 @@ mod tests {
             "use_case selection must survive the State -> Config -> disk mapping"
         );
     }
+
+    // ========================================================================
+    // Bulk delete confirmation
+    //
+    // Pressing `d` (or Shift+D) with rows checked used to queue
+    // BulkDeleteSessions immediately: no dialog, no Stop option, no
+    // uncommitted-work warning, and every selected worktree was removed. These
+    // tests pin the confirmation step in place.
+    // ========================================================================
+
+    struct RestoreAinbHome {
+        previous: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for RestoreAinbHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var("AINB_HOME", v),
+                None => std::env::remove_var("AINB_HOME"),
+            }
+        }
+    }
+
+    /// Take the crate-wide env lock and point `AINB_HOME` at a fresh tempdir
+    /// until the returned guard drops.
+    fn pin_ainb_home() -> RestoreAinbHome {
+        let dir = tempfile::tempdir().expect("tempdir");
+        RestoreAinbHome {
+            _guard: crate::headroom::HEADROOM_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            previous: {
+                let previous = std::env::var("AINB_HOME").ok();
+                std::env::set_var("AINB_HOME", dir.path());
+                previous
+            },
+            _dir: dir,
+        }
+    }
+
+    /// Point `AINB_HOME` at a tempdir for the duration of `body`.
+    ///
+    /// Opening the bulk dialog probes worktrees, which builds a
+    /// `WorktreeManager` and so reads `AINB_HOME` and creates directories under
+    /// it. Without this these tests would touch the developer's real
+    /// `~/.agents-in-a-box`. The lock is the crate-wide env lock, not a private
+    /// one, so this serialises against EVERY `AINB_HOME`-mutating test in the
+    /// binary rather than just other callers here. The restore runs from `Drop`,
+    /// so a failing assertion inside `body` cannot leave a deleted tempdir path
+    /// in the env for every later test in the binary.
+    fn with_ainb_home<R>(body: impl FnOnce() -> R) -> R {
+        let _restore = pin_ainb_home();
+        body()
+    }
+
+    /// `with_ainb_home` for an async body. `stop_interactive_session` falls back
+    /// to `SessionStore::load()`, which reads `AINB_HOME`, so the bulk-stop tests
+    /// need the same isolation the synchronous ones get.
+    // The env guard is deliberately held across the await: that is what makes the
+    // isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::future_not_send)]
+    async fn with_ainb_home_async<F, Fut, R>(body: F) -> R
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let _restore = pin_ainb_home();
+        body().await
+    }
+
+    /// Two checked, running interactive sessions, plus their ids in list order.
+    fn state_with_checked_sessions(names: &[&str]) -> (AppState, Vec<uuid::Uuid>) {
+        use crate::models::SessionStatus;
+
+        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+        let mut ids = Vec::new();
+        for name in names {
+            let session = resumable_session(
+                name,
+                SessionMode::Interactive,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            ids.push(session.id);
+            ws.add_session(session);
+        }
+
+        let mut state = AppState::new();
+        state.workspaces.push(ws);
+        for id in &ids {
+            state.selected_sessions.insert(*id);
+        }
+        (state, ids)
+    }
+
+    /// The regression guard: `d` with rows checked must ask first. If the
+    /// confirmation is removed this goes red on `pending_async_action`.
+    #[test]
+    fn bulk_delete_asks_before_destroying_anything() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            assert!(
+                state.pending_async_action.is_none(),
+                "bulk delete must not queue any action before the user confirms"
+            );
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert_eq!(opts.len(), 3, "Stop all / Delete all / Cancel");
+            assert_eq!(opts[0].label, "Stop all");
+            assert_eq!(opts[1].label, "Delete all");
+            assert_eq!(opts[2].label, "Cancel");
+            assert_eq!(dialog.selected_index, 0, "Default = Stop all (safe option)");
+            assert!(matches!(
+                &opts[0].action,
+                ConfirmAction::BulkStopSessions(got) if got == &ids
+            ));
+            assert!(matches!(
+                &opts[1].action,
+                ConfirmAction::BulkDeleteSessions(got) if got == &ids
+            ));
+            assert!(matches!(opts[2].action, ConfirmAction::Cancel));
+            assert_eq!(
+                state.selected_sessions.len(),
+                2,
+                "selection survives until the user picks an outcome"
+            );
+        });
+    }
+
+    /// Shift+D (the explicit bulk key) takes the same confirmed path as `d`.
+    #[test]
+    fn bulk_delete_selected_sessions_asks_before_destroying_anything() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+
+            EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
+
+            assert!(state.pending_async_action.is_none());
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert!(matches!(
+                &dialog.options.as_ref().expect("tri-option dialog")[0].action,
+                ConfirmAction::BulkStopSessions(got) if got == &ids
+            ));
+        });
+    }
+
+    /// The dialog names the sessions and says how many are affected.
+    #[test]
+    fn bulk_delete_dialog_names_the_affected_sessions() {
+        with_ainb_home(|| {
+            let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert_eq!(dialog.title, "Stop or Delete 2 Session(s)");
+            assert!(
+                dialog.message.contains("2 session(s): alpha, beta"),
+                "{}",
+                dialog.message
+            );
+            assert!(
+                dialog.message.contains("Stop keeps every worktree"),
+                "{}",
+                dialog.message
+            );
+        });
+    }
+
+    /// Accepting the default (Stop all) must queue a stop, never a delete.
+    #[test]
+    fn bulk_dialog_default_option_queues_stop_not_delete() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
+            ));
+            assert!(state.selected_sessions.is_empty(), "selection consumed");
+            assert!(state.confirmation_dialog.is_none());
+        });
+    }
+
+    /// Explicitly choosing Delete all still deletes, so the fix does not remove
+    /// the capability, only the surprise.
+    #[test]
+    fn bulk_dialog_delete_option_queues_bulk_delete() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationToggle, &mut state);
+
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkDeleteSessions(ref got)) if got == &ids
+            ));
+        });
+    }
+
+    /// Cancel (either the option or Esc) leaves the selection and every session
+    /// exactly as it was.
+    #[test]
+    fn bulk_dialog_cancel_does_nothing() {
+        with_ainb_home(|| {
+            let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationPrev, &mut state); // wrap to Cancel
+
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(
+                state.pending_async_action.is_none(),
+                "Cancel queues nothing"
+            );
+            assert_eq!(state.selected_sessions.len(), 2, "selection untouched");
+
+            // Esc on a freshly-opened dialog is equally inert.
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationCancel, &mut state);
+            assert!(state.confirmation_dialog.is_none());
+            assert!(state.pending_async_action.is_none());
+            assert_eq!(state.selected_sessions.len(), 2);
+        });
+    }
+
+    /// Long selections stay readable: three names, then a count.
+    #[test]
+    fn bulk_session_summary_truncates_long_selections() {
+        let names: Vec<(uuid::Uuid, String)> =
+            (1..=12).map(|i| (uuid::Uuid::new_v4(), format!("s{i}"))).collect();
+        assert_eq!(
+            AppState::format_bulk_session_summary(&names),
+            "12 session(s): s1, s2, s3, and 9 more"
+        );
+        assert_eq!(
+            AppState::format_bulk_session_summary(&[(uuid::Uuid::new_v4(), "only".to_string())]),
+            "1 session(s): only"
+        );
+    }
+
+    /// The uncommitted-work warning is the whole point of the dialog: it names
+    /// the sessions whose work "Delete all" would destroy.
+    #[test]
+    fn bulk_uncommitted_warning_names_the_dirty_sessions() {
+        assert_eq!(AppState::format_bulk_uncommitted_warning(&[], 0, 2), None);
+
+        let dirty = vec![("alpha".to_string(), 3), ("beta".to_string(), 1)];
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&dirty, 0, 2).expect("dirty sessions warn");
+        assert!(warning.contains("4 uncommitted file(s)"), "{}", warning);
+        assert!(warning.contains("2 session(s)"), "{}", warning);
+        assert!(warning.contains("alpha (3)"), "{}", warning);
+        assert!(warning.contains("beta (1)"), "{}", warning);
+
+        let many: Vec<(String, usize)> = (1usize..=5).map(|i| (format!("s{i}"), i)).collect();
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&many, 0, 5).expect("dirty sessions warn");
+        assert!(warning.contains("and 2 more"), "{}", warning);
+    }
+
+    /// A worktree whose status cannot be read must never read as clean: the
+    /// dialog says it could not be checked, so "no warning" keeps meaning
+    /// "nothing to lose".
+    #[test]
+    fn bulk_uncommitted_warning_reports_what_could_not_be_checked() {
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&[], 3, 3).expect("unchecked sessions warn");
+        assert!(
+            warning.contains("could not check 3 session(s)"),
+            "{}",
+            warning
+        );
+
+        let dirty = vec![("alpha".to_string(), 2)];
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&dirty, 2, 3).expect("dirty sessions warn");
+        assert!(warning.contains("alpha (2)"), "{}", warning);
+        assert!(
+            warning.contains("2 more could not be checked"),
+            "{}",
+            warning
+        );
+    }
+
+    /// Stop is meaningless for a Boss (Docker) session: killing tmux leaves the
+    /// container running. A selection of only such sessions must fall back to
+    /// the binary delete confirmation, defaulting to No, rather than offering a
+    /// Stop button that would lie about what happened.
+    #[test]
+    fn bulk_dialog_without_any_stop_path_falls_back_to_delete_confirmation() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            for name in ["boss-a", "boss-b"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Boss,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                state.selected_sessions.insert(session.id);
+                ws.add_session(session);
+            }
+            state.workspaces.push(ws);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            assert!(state.pending_async_action.is_none(), "still asks first");
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.options.is_none(), "no Stop option for Boss sessions");
+            assert!(!dialog.selected_option, "Default = No");
+            assert!(matches!(
+                dialog.confirm_action,
+                ConfirmAction::BulkDeleteSessions(_)
+            ));
+        });
+    }
+
+    /// One Boss row in the selection must not strip the safe option from the
+    /// rows that can use it: Stop covers the stoppable subset, Delete still
+    /// covers everything, and Stop stays the default.
+    #[test]
+    fn bulk_dialog_offers_stop_for_the_stoppable_subset_of_a_mixed_selection() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            let boss = resumable_session(
+                "boss",
+                SessionMode::Boss,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            let boss_id = boss.id;
+            state.workspaces[0].add_session(boss);
+            state.selected_sessions.insert(boss_id);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert_eq!(dialog.selected_index, 0, "Stop is still the default");
+            assert_eq!(opts[0].label, "Stop 2", "names how many Stop covers");
+            assert!(
+                matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
+                "Stop covers only the two interactive sessions"
+            );
+            let ConfirmAction::BulkDeleteSessions(delete_ids) = &opts[1].action else {
+                panic!("second option must delete");
+            };
+            assert_eq!(delete_ids.len(), 3, "Delete still covers everything");
+            assert!(delete_ids.contains(&boss_id));
+            assert!(
+                dialog.message.contains("the other one cannot be stopped"),
+                "a Boss row is excluded because it has no stop path, not because it \
+                 is already stopped: {}",
+                dialog.message
+            );
+        });
+    }
+
+    /// When the excluded rows are merely already stopped, the message must say
+    /// so rather than claiming they cannot be stopped at all.
+    #[test]
+    fn bulk_dialog_names_already_stopped_rows_as_the_reason_they_are_excluded() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["running"]);
+            let stopped = resumable_session(
+                "stopped",
+                SessionMode::Interactive,
+                SessionAgentType::Claude,
+                SessionStatus::Stopped,
+            );
+            state.selected_sessions.insert(stopped.id);
+            state.workspaces[0].add_session(stopped);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert!(
+                matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
+                "Stop covers only the running session"
+            );
+            assert!(
+                dialog.message.contains("the other one is already stopped"),
+                "{}",
+                dialog.message
+            );
+        });
+    }
+
+    /// A checked id that no longer resolves to a session still takes part in the
+    /// bulk delete (nothing silently drops out), but the dialog shows a short
+    /// label rather than a full 36-character uuid.
+    #[test]
+    fn bulk_dialog_labels_unresolvable_ids_without_dumping_a_uuid() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha"]);
+            let stale = uuid::Uuid::new_v4();
+            state.selected_sessions.insert(stale);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.message.contains("unknown ("), "{}", dialog.message);
+            assert!(
+                !dialog.message.contains(&stale.to_string()),
+                "the full uuid would eat three rows of the dialog: {}",
+                dialog.message
+            );
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            let ConfirmAction::BulkDeleteSessions(delete_ids) = &opts[1].action else {
+                panic!("second option must delete");
+            };
+            assert!(delete_ids.contains(&stale), "stale ids stay in the delete");
+            assert!(delete_ids.contains(&ids[0]));
+        });
+    }
+
+    /// A bulk stop must not claim to have stopped sessions that were already
+    /// stopped: the count is what the user reads to know the operation worked.
+    #[tokio::test]
+    async fn bulk_stop_reports_already_stopped_sessions_separately() {
+        with_ainb_home_async(|| async {
+            use crate::models::SessionStatus;
+
+            // No tmux name on these, so the stop never shells out and the test
+            // does not need a tmux binary.
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            let mut ids = Vec::new();
+            for (name, status) in [
+                ("running", SessionStatus::Running),
+                ("already", SessionStatus::Stopped),
+            ] {
+                let mut session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    status,
+                );
+                session.tmux_session_name = None;
+                ids.push(session.id);
+                ws.add_session(session);
+            }
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            state.bulk_stop_sessions(ids).await;
+
+            let message = state
+                .notifications
+                .iter()
+                .map(|n| n.message.clone())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(message.contains("Stopped 1 session(s)"), "{message}");
+            assert!(message.contains("1 already stopped"), "{message}");
+        })
+        .await;
+    }
+
+    /// A selection that is already entirely stopped has nothing to stop, so
+    /// offering "Stop all" as the default would make Enter a no-op that also
+    /// throws the selection away.
+    #[test]
+    fn bulk_dialog_offers_no_stop_when_everything_is_already_stopped() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            for name in ["a", "b"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Stopped,
+                );
+                state.selected_sessions.insert(session.id);
+                ws.add_session(session);
+            }
+            state.workspaces.push(ws);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.options.is_none(), "nothing left to stop");
+            assert!(!dialog.selected_option, "Default = No");
+            assert!(
+                dialog.message.contains("already stopped"),
+                "the message must say why Stop is absent, and these sessions are \
+                 resumable, so claiming they cannot be stopped and resumed would be \
+                 the opposite of the truth: {}",
+                dialog.message
+            );
+            assert!(
+                !dialog.message.contains("None of these sessions can be stopped"),
+                "{}",
+                dialog.message
+            );
+        });
+    }
+
+    /// Stopping the stoppable subset must leave the rows it did not touch
+    /// checked, or the user has to find and re-select them.
+    #[test]
+    fn bulk_stop_of_a_subset_keeps_the_untouched_rows_selected() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            let boss = resumable_session(
+                "boss",
+                SessionMode::Boss,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            let boss_id = boss.id;
+            state.workspaces[0].add_session(boss);
+            state.selected_sessions.insert(boss_id);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
+            ));
+            assert_eq!(
+                state.selected_sessions.iter().copied().collect::<Vec<_>>(),
+                vec![boss_id],
+                "the row Stop did not touch stays checked"
+            );
+        });
+    }
+
+    /// An empty selection has nothing to confirm, so it must not open a
+    /// "Stop or Delete 0 Session(s)" dialog whose Delete deletes nothing.
+    #[test]
+    fn bulk_dialog_refuses_an_empty_selection() {
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            state.show_bulk_delete_or_stop_confirmation(Vec::new());
+            assert!(state.confirmation_dialog.is_none());
+            assert!(state.pending_async_action.is_none());
+        });
+    }
+
+    /// Two sessions pointing at the same tree must be probed once: reporting
+    /// its four modified files twice would tell the user eight are at risk, and
+    /// "Delete removes N worktree(s)" would count the tree twice too.
+    #[test]
+    fn bulk_worktree_status_counts_a_shared_tree_once() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            if std::process::Command::new("git").arg("--version").status().is_err() {
+                eprintln!("SKIP: git unavailable");
+                return;
+            }
+
+            // One real repo with an uncommitted file, two sessions symlinked to it.
+            let home = std::env::var("AINB_HOME").expect("pinned by with_ainb_home");
+            let by_session = std::path::PathBuf::from(&home)
+                .join(".agents-in-a-box")
+                .join("worktrees")
+                .join("by-session");
+            std::fs::create_dir_all(&by_session).expect("by-session");
+            let tree = std::path::PathBuf::from(&home).join("shared-tree");
+            std::fs::create_dir_all(&tree).expect("tree");
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .current_dir(&tree)
+                    .status()
+                    .expect("git init")
+                    .success()
+            );
+            std::fs::write(tree.join("dirty.txt"), b"work").expect("write");
+
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tree.clone());
+            let mut ids = Vec::new();
+            for name in ["alpha", "beta"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                std::os::unix::fs::symlink(&tree, by_session.join(session.id.to_string()))
+                    .expect("symlink");
+                ids.push(session.id);
+                ws.add_session(session);
+            }
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            let id_names: Vec<(uuid::Uuid, String)> = ids
+                .iter()
+                .zip(["alpha", "beta"])
+                .map(|(id, name)| (*id, name.to_string()))
+                .collect();
+            let status = AppState::bulk_uncommitted_counts(&id_names);
+
+            assert_eq!(status.with_worktree, 1, "one tree, not two");
+            assert_eq!(status.dirty.len(), 1, "probed once");
+            assert_eq!(status.dirty[0].1, 1, "one dirty file, not two");
+            assert_eq!(
+                status.dirty[0].0, "alpha, beta",
+                "both sessions map to the dirty tree, so both are named"
+            );
+            assert_eq!(status.unchecked, 0);
+        });
+    }
+
+    /// A Shell session's row is deletable like any other, and delete removes
+    /// whatever its `by-session` symlink points at, so it must be counted and
+    /// probed rather than assumed to own nothing.
+    #[test]
+    fn bulk_worktree_status_counts_a_shell_session_with_a_tree() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let home = std::env::var("AINB_HOME").expect("pinned by with_ainb_home");
+            let by_session = std::path::PathBuf::from(&home)
+                .join(".agents-in-a-box")
+                .join("worktrees")
+                .join("by-session");
+            std::fs::create_dir_all(&by_session).expect("by-session");
+            let tree = std::path::PathBuf::from(&home).join("shell-tree");
+            std::fs::create_dir_all(&tree).expect("tree");
+
+            let session = resumable_session(
+                "shell",
+                SessionMode::Interactive,
+                SessionAgentType::Shell,
+                SessionStatus::Running,
+            );
+            std::os::unix::fs::symlink(&tree, by_session.join(session.id.to_string()))
+                .expect("symlink");
+            let id = session.id;
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tree);
+            ws.add_session(session);
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            let status = AppState::bulk_uncommitted_counts(&[(id, "shell".to_string())]);
+
+            assert_eq!(
+                status.with_worktree, 1,
+                "delete would remove this directory"
+            );
+            assert_eq!(
+                status.unchecked, 1,
+                "not a git tree, so its contents are unknown, whether or not the \
+                 temp directory happens to sit inside some other repository"
+            );
+            assert!(status.dirty.is_empty(), "no ancestor repository's files");
+        });
+    }
+
+    /// A session directory that is not a checkout must never be answered for by
+    /// an ancestor repository: `git status` walks up, so probing a plain folder
+    /// nested inside a repo would report hundreds of files the session does not
+    /// own, on the dialog whose entire job is to state what is at risk.
+    #[test]
+    fn a_plain_directory_inside_a_repo_is_unknown_not_dirty() {
+        if std::process::Command::new("git").arg("--version").status().is_err() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let outer = tempfile::tempdir().expect("tempdir");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(outer.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        std::fs::write(outer.path().join("dirty.txt"), b"work").expect("write");
+        let nested = outer.path().join("not-a-checkout");
+        std::fs::create_dir_all(&nested).expect("nested");
+
+        let err = crate::git::WorktreeManager::uncommitted_file_count_at(&nested)
+            .expect_err("a plain directory is not a checkout");
+        assert!(format!("{err}").contains("no .git"), "{err}");
+    }
+
+    /// In a bulk selection the name is the point of the warning, even when only
+    /// one of the selected sessions turns out to be dirty. Only a one-row dialog
+    /// drops it, because there the name is the row the user is looking at.
+    #[test]
+    fn bulk_warning_names_the_dirty_session_even_when_only_one_is_dirty() {
+        let dirty = vec![("beta".to_string(), 3)];
+
+        let bulk = AppState::format_bulk_uncommitted_warning(&dirty, 0, 12)
+            .expect("one dirty session in a bulk selection still warns");
+        assert!(bulk.contains("beta (3)"), "{bulk}");
+
+        let single = AppState::format_bulk_uncommitted_warning(&dirty, 0, 1)
+            .expect("a single-row dialog still warns");
+        assert_eq!(single, "⚠️ 3 uncommitted file(s) in worktree");
+    }
+
+    /// A single-row dialog must not hedge in the plural about "1 session(s)"
+    /// when its own worktree could not be read.
+    #[test]
+    fn single_row_unchecked_warning_reads_singly() {
+        let single = AppState::format_bulk_uncommitted_warning(&[], 1, 1)
+            .expect("an unreadable worktree warns");
+        assert_eq!(
+            single,
+            "⚠️ could not check this worktree for uncommitted work"
+        );
+
+        let bulk = AppState::format_bulk_uncommitted_warning(&[], 2, 6)
+            .expect("unreadable worktrees warn");
+        assert!(bulk.contains("could not check 2 session(s)"), "{bulk}");
+    }
+
+    /// Multi-select ids come out in list order, once each.
+    #[test]
+    fn selected_session_ids_in_order_dedups_and_follows_the_list() {
+        let (state, ids) = state_with_checked_sessions(&["alpha", "beta", "gamma"]);
+        assert_eq!(state.selected_session_ids_in_order(), ids);
+    }
+
+    /// End to end for the safe path: check the rows, press `d`, accept the
+    /// default, and every worktree is still on disk afterwards.
+    ///
+    /// The keypress and the confirmation are driven through the real event
+    /// handler, so re-introducing the original bug (queuing a bulk delete from
+    /// `d`) fails this test at the action assertion before any directory is
+    /// touched. Only the stop is executed; the delete action is never run,
+    /// because running it in a test would remove real directories.
+    #[tokio::test]
+    async fn bulk_stop_preserves_every_worktree() {
+        with_ainb_home_async(|| async {
+            use crate::models::SessionStatus;
+
+            // The stop path shells out to tmux; without the binary every stop
+            // reports failure and the status assertions below are meaningless.
+            if std::process::Command::new("tmux").arg("-V").status().is_err() {
+                eprintln!("SKIP: tmux unavailable");
+                return;
+            }
+
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tmp.path().to_path_buf());
+            let mut ids = Vec::new();
+            let mut worktrees = Vec::new();
+
+            for name in ["alpha", "beta", "gamma"] {
+                let worktree = tmp.path().join(name);
+                std::fs::create_dir_all(&worktree).expect("create worktree");
+                std::fs::write(worktree.join("uncommitted.txt"), b"work").expect("write file");
+
+                let mut session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                session.workspace_path = worktree.to_string_lossy().to_string();
+                // A name that exists nowhere, so the real kill path runs and
+                // reports "can't find session". Safe only because the kill
+                // targets `=name`: a bare `-t` would prefix-match and could
+                // reach a developer's live session.
+                session.tmux_session_name = Some(format!("ainb-test-{}", session.id));
+                ids.push(session.id);
+                worktrees.push(worktree);
+                ws.add_session(session);
+            }
+
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+            for id in &ids {
+                state.selected_sessions.insert(*id);
+            }
+
+            // `d` with rows checked, then Enter on the default option.
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            assert!(
+                state.pending_async_action.is_none(),
+                "the keypress must not queue anything before the user confirms"
+            );
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            let queued = state.pending_async_action.take();
+            let stop_ids = match queued {
+                Some(AsyncAction::BulkStopSessions(stop_ids)) => stop_ids,
+                other => panic!("the default must be a stop, not {other:?}"),
+            };
+            assert_eq!(stop_ids, ids, "every checked session is stopped");
+
+            state.bulk_stop_sessions(stop_ids).await;
+
+            for worktree in &worktrees {
+                assert!(worktree.is_dir(), "Stop must keep {}", worktree.display());
+                assert!(
+                    worktree.join("uncommitted.txt").exists(),
+                    "Stop must keep the uncommitted work in {}",
+                    worktree.display()
+                );
+            }
+            for id in &ids {
+                let session = state.find_session(*id).expect("session still registered");
+                assert!(matches!(session.status, SessionStatus::Stopped));
+            }
+        })
+        .await;
+    }
 }
 
 #[cfg(test)]
@@ -1676,15 +2934,15 @@ mod mcp_pool_config_screen_tests {
     use crate::app::state::{ConfigCategory, ConfigScreenState, ConfigValue};
     use crate::config::AppConfig;
 
+    /// Edit a row by its dotted key, as the popup confirm does. The per-server
+    /// `shared` rows now file under McpServers rather than McpPool, so the
+    /// lookup has to span categories.
     fn set_bool(screen: &mut ConfigScreenState, key: &str, value: bool) {
-        let setting = screen
-            .settings
-            .get_mut(&ConfigCategory::McpPool)
-            .unwrap()
-            .iter_mut()
-            .find(|s| s.key == key)
-            .unwrap_or_else(|| panic!("missing setting {key}"));
-        setting.value = ConfigValue::Bool(value);
+        assert!(
+            screen.settings.values().flatten().any(|s| s.key == key),
+            "missing setting {key}"
+        );
+        screen.set_row_value(key, ConfigValue::Bool(value));
     }
 
     #[test]
@@ -1697,19 +2955,19 @@ mod mcp_pool_config_screen_tests {
 
         // Loaded values reflect config.
         let settings = screen.settings.get(&ConfigCategory::McpPool).unwrap();
-        let grace = settings.iter().find(|s| s.key == "idle_grace_secs").unwrap();
+        let grace = settings.iter().find(|s| s.key == "mcp_pool.idle_grace_secs").unwrap();
         assert_eq!(grace.value.display(), "120");
         // Per-server toggles exist for the built-in defaults.
         assert!(
-            settings.iter().any(|s| s.key == "shared.context7"),
+            settings.iter().any(|s| s.key == "mcp_servers.context7.shared"),
             "expected per-server toggle, got: {:?}",
             settings.iter().map(|s| &s.key).collect::<Vec<_>>()
         );
 
         // Edit: disable pool + opt context7 out of sharing.
-        set_bool(&mut screen, "pool_enabled", false);
-        set_bool(&mut screen, "shared.context7", false);
-        screen.apply_to_app_config(&mut config);
+        set_bool(&mut screen, "mcp_pool.enabled", false);
+        set_bool(&mut screen, "mcp_servers.context7.shared", false);
+        screen.apply_to_app_config(&mut config).expect("edits apply");
 
         assert!(!config.mcp_pool.enabled);
         assert!(!config.mcp_servers["context7"].shared);
@@ -1721,9 +2979,9 @@ mod mcp_pool_config_screen_tests {
         // Reopen → edited values shown.
         let reopened = ConfigScreenState::from_app_config(&config);
         let settings = reopened.settings.get(&ConfigCategory::McpPool).unwrap();
-        let enabled = settings.iter().find(|s| s.key == "pool_enabled").unwrap();
+        let enabled = settings.iter().find(|s| s.key == "mcp_pool.enabled").unwrap();
         assert_eq!(enabled.value.display(), "✗ Disabled");
-        let ctx = settings.iter().find(|s| s.key == "shared.context7").unwrap();
+        let ctx = settings.iter().find(|s| s.key == "mcp_servers.context7.shared").unwrap();
         assert_eq!(ctx.value.display(), "✗ Disabled");
     }
 }

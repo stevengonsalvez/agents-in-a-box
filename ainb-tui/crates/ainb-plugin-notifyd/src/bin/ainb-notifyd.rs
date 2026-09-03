@@ -65,6 +65,9 @@ struct AgentArgs {
     /// Target GitHub Copilot CLI.
     #[arg(long)]
     copilot: bool,
+    /// Target Google Antigravity CLI.
+    #[arg(long)]
+    antigravity: bool,
     /// Target every known agent (mutually exclusive with per-agent flags).
     #[arg(long)]
     all: bool,
@@ -86,12 +89,20 @@ async fn main() -> ExitCode {
         Cmd::Stop => cli::cmd_stop(),
         Cmd::Reap => cli::cmd_reap(json),
         Cmd::Restart => cli::cmd_restart(json),
-        Cmd::Install(a) => {
-            cli::cmd_install(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
-        }
-        Cmd::Uninstall(a) => {
-            cli::cmd_uninstall(&cli::agents_from_flags(a.claude, a.codex, a.copilot, a.all))
-        }
+        Cmd::Install(a) => cli::cmd_install(&cli::agents_from_flags(
+            a.claude,
+            a.codex,
+            a.copilot,
+            a.antigravity,
+            a.all,
+        )),
+        Cmd::Uninstall(a) => cli::cmd_uninstall(&cli::agents_from_flags(
+            a.claude,
+            a.codex,
+            a.copilot,
+            a.antigravity,
+            a.all,
+        )),
         Cmd::Status => cli::cmd_status(json),
     };
     match result {

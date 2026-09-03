@@ -39,12 +39,27 @@ shows `stopped` with a stale-heartbeat reason here.
 |---|---|---|
 | **phone bridge** | `bridge` | heartbeat file (`~/.agents-in-a-box/daemons/bridge.json`) + pid-identity cross-check |
 | **notifyd** | `notifyd` | PID-file liveness + bound Unix socket + sqlite DB file present |
-| **ATC** | `atc` | most-recently-beating provisioned instance's `heartbeat-state.json` (timer-driven; no resident pid) |
-| **fleet daemon** | `fleet-daemon` | heartbeat file + pid-identity cross-check |
+| **ATC** | `atc` | mode-dependent: in `full`, the most-recently-beating instance's `heartbeat-state.json` (timer-driven; no resident pid); in `lite`, the scan loop's own heartbeat + pid |
+| **fleet daemon** | `fleet-daemon` | heartbeat file + pid-identity cross-check — **conditional row**, see below |
 
-Rows are always emitted in this exact order (bridge, notifyd, ATC, fleet
-daemon), even when every daemon is stopped — so "everything stopped" is a
-legible four-row table, never an empty one.
+Rows are emitted in this exact order (bridge, notifyd, ATC, then the fleet
+daemon when it has a row), even when every daemon is stopped — so "everything
+stopped" is a legible table, never an empty one.
+
+**The fleet daemon is a conditional row.** ATC is the fleet's supervisor and the
+standalone daemon is what it replaced, so a permanently-stopped row for it
+presented the two as a choice — the competing control path the supervisor exists
+to remove, still on the screen you read to see who is running. It is therefore
+listed only when it is NOT stopped.
+
+That is deliberately not "always hidden". A daemon that is up got there through
+`--force-race`, which means two controllers really are auto-continuing the same
+panes and ATC's per-session retry cap cannot hold. That row appears, reports
+`degraded`, and its reason opens with `RACING ATC`. Hiding it would make the one
+state you most need to see the only one the screen does not show.
+
+The row is only a display decision: `ainb daemon fleet-daemon start|stop|restart`
+keeps working whether or not a row is drawn.
 
 ## Run
 
@@ -137,3 +152,12 @@ ainb --format json fleet daemons | jq -r '.[] | select(.reason | test("crash|sta
 - **ATC surfaces as one row.** v1 reports the most-recently-beating provisioned
   instance; the instance name is in the `channel` label. Heartbeat-disabled
   instances are never counted as running, even with a recent leftover beat.
+- **The ATC row's `channel` names the supervisor mode** — `tower · FULL(claude)
+  · every 15m` or `tower · LITE · no LLM`. A lite instance has no scheduler and
+  no brain session, so it is probed by its scan loop instead; one provisioned in
+  lite with no scanner running reads `degraded` (the fleet has a designated
+  owner and that owner is absent), not `stopped`.
+- **The mode is switchable from the row.** Enter on the ATC row offers the mode
+  it is not in, and the screen prints what each mode does inline. It is the same
+  transition `ainb fleet atc mode <name> --set <mode>` performs — the screen
+  shells that verb rather than reimplementing the stop-then-start ordering.

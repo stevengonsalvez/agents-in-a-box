@@ -17,6 +17,9 @@ pub mod plugin;
 pub mod screen;
 pub mod shell;
 pub mod stream;
+#[cfg(test)]
+mod test_support;
+pub mod vocab;
 pub mod widgets;
 
 pub use board_mouse::{BoardMouseIntent, fold_board_mouse};

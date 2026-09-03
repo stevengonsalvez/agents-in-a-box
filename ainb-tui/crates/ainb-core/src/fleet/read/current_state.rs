@@ -281,23 +281,46 @@ impl CurrentStateIndex {
     }
 }
 
-/// Default staleness window (ms) applied ONLY to the HEALTHY-suppressing kinds
-/// (RUNNING/DONE) so a stale "healthy" row from a stopped daemon eventually
-/// falls back to a live tmux scan instead of masking a real need forever. A few
-/// minutes is long enough to outlast normal materializer latency but short
-/// enough that a dead daemon surfaces quickly. Overridable via
-/// `AINB_FLEET_STATE_STALE_MS` (a non-negative integer; 0 disables it).
-const DEFAULT_HEALTHY_STALE_WINDOW_MS: i64 = 5 * 60_000;
-
-/// The effective healthy-kind staleness window, honouring the
-/// `AINB_FLEET_STATE_STALE_MS` override (clamped to ≥ 0; unset/invalid → the
-/// default).
+/// The effective staleness window (ms) for the HEALTHY-suppressing kinds
+/// (RUNNING/DONE), so a stale "healthy" row from a stopped daemon eventually
+/// falls back to a live tmux scan instead of masking a real need forever.
+///
+/// Its own knob (`fleet.healthy_state_stale_ms`, default 5 minutes), because it
+/// is a different clock from the sticky-kind window in `cli::fleet::needs`. The
+/// two used to share the ONE env var `AINB_FLEET_STATE_STALE_MS` while
+/// hardcoding different fallbacks (300000 here, 0 there): setting it moved both
+/// clocks at once, and neither knob had a default you could name. They are now
+/// separate keys with one default each.
+///
+/// `AINB_FLEET_STATE_STALE_MS` stays as the LAST rung so an existing override
+/// keeps doing what it did. Someone who set it to 0 to disable this floor must
+/// not silently get the 5-minute default back.
+///
+/// That rung is only reachable because `tunables::resolved` ignores a variable
+/// this process planted itself: `export_env_bridge` fills
+/// `AINB_FLEET_HEALTHY_STATE_STALE_MS` from config whenever it is unset, so
+/// without that guard the outer call would ALWAYS find a value and the legacy
+/// rung would be dead code. See `tunables::BRIDGED`.
 fn effective_stale_window_ms() -> i64 {
-    std::env::var("AINB_FLEET_STATE_STALE_MS")
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .map(|v| v.max(0))
-        .unwrap_or(DEFAULT_HEALTHY_STALE_WINDOW_MS)
+    let config = crate::config::tunables::snapshot();
+    // Order matters. The legacy variable is only a fallback for someone who
+    // has NOT set the new key: consulting it first made
+    // `fleet.healthy_state_stale_ms` unreachable for anyone with the old
+    // variable exported, so the settings row reported saved and the window
+    // never moved. One env var driving both clocks is the coupling the split
+    // exists to break.
+    let from_new = crate::config::tunables::resolved(
+        "AINB_FLEET_HEALTHY_STATE_STALE_MS",
+        config.fleet.healthy_state_stale_ms,
+    );
+    let explicit_new = crate::config::tunables::env_override("AINB_FLEET_HEALTHY_STATE_STALE_MS")
+        .is_some()
+        || config.fleet.healthy_state_stale_ms
+            != crate::config::default_fleet_healthy_state_stale_ms();
+    if explicit_new {
+        return from_new.max(0);
+    }
+    crate::config::tunables::resolved("AINB_FLEET_STATE_STALE_MS", from_new).max(0)
 }
 
 /// Outcome of resolving one session against `current_state`.
@@ -403,6 +426,65 @@ fn context_from_state(kind: &str, context_json: Option<&str>) -> Option<NeedsCon
 
 #[cfg(test)]
 mod tests {
+    /// Env-mutating tests here serialize against each other.
+    /// [reference: ENV_LOCK for parallel tests]
+    use crate::config::tunables::TEST_ENV_LOCK as STALE_ENV_LOCK;
+
+    /// The legacy `AINB_FLEET_STATE_STALE_MS` override must still disable the
+    /// healthy-kind floor.
+    ///
+    /// The regression this guards: `export_env_bridge` fills
+    /// `AINB_FLEET_HEALTHY_STATE_STALE_MS` from config whenever it is unset, so
+    /// an operator with `export AINB_FLEET_STATE_STALE_MS=0` in their profile
+    /// silently got the 5-minute floor back that they had turned off on `main`.
+    /// Without the self-planted guard in `tunables` this fails with
+    /// `assertion `left == right` failed: left: 300000, right: 0`.
+    #[test]
+    fn the_legacy_stale_env_var_still_disables_the_healthy_floor() {
+        let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_legacy = std::env::var_os("AINB_FLEET_STATE_STALE_MS");
+        let prior_new = std::env::var_os("AINB_FLEET_HEALTHY_STATE_STALE_MS");
+        std::env::set_var("AINB_FLEET_STATE_STALE_MS", "0");
+        std::env::remove_var("AINB_FLEET_HEALTHY_STATE_STALE_MS");
+
+        // Startup: the bridge publishes the config default for the NEW variable
+        // (300000) because nothing had set it, and leaves the legacy one alone.
+        let config = crate::config::AppConfig::default();
+        // Restored below: the snapshot is process-global, so leaving this
+        // installed makes every later test in the binary read it instead of
+        // its own config.
+        let previous = crate::config::tunables::snapshot();
+        crate::config::tunables::install_snapshot(config.clone());
+        crate::config::tunables::export_env_bridge(&config);
+
+        assert_eq!(
+            effective_stale_window_ms(),
+            0,
+            "the legacy override must still win over a value the bridge planted"
+        );
+
+        crate::config::tunables::clear_bridged_for_test();
+        std::env::remove_var("AINB_FLEET_HEALTHY_STATE_STALE_MS");
+        match prior_legacy {
+            Some(v) => std::env::set_var("AINB_FLEET_STATE_STALE_MS", v),
+            None => std::env::remove_var("AINB_FLEET_STATE_STALE_MS"),
+        }
+        if let Some(v) = prior_new {
+            std::env::set_var("AINB_FLEET_HEALTHY_STATE_STALE_MS", v);
+        }
+        crate::config::tunables::install_snapshot((*previous).clone());
+    }
+
+    /// The two windows are separate knobs with separate defaults, which is the
+    /// bug they were split to fix: one env var used to drive both, with a
+    /// hardcoded 0 at one call site and 300000 at the other.
+    #[test]
+    fn the_sticky_and_healthy_windows_have_their_own_defaults() {
+        let bare: crate::config::AppConfig = toml::from_str("").expect("parses");
+        assert_eq!(bare.fleet.state_stale_ms, 0);
+        assert_eq!(bare.fleet.healthy_state_stale_ms, 300_000);
+    }
+
     use super::*;
     use crate::fleet::types::SessionSource;
 

@@ -33,7 +33,7 @@ pub enum StoreError {
 }
 
 /// Retention policy applied on every insert. Mirrors the runtime
-/// config in `~/.agents-in-a-box/config.toml [notifyd]`.
+/// config in `~/.agents-in-a-box/config/config.toml [notifyd]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetentionPolicy {
     /// Delete rows whose `ts` is older than this many days. `0` =

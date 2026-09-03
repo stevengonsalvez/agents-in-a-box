@@ -16,6 +16,21 @@ on:
   # is how an operator asks for it without labelling a PR.
   workflow_dispatch:
 
+# Superseded pushes used to run to completion: four pushes to one branch in
+# half an hour queued four full runs, and the last one spent 190 minutes
+# waiting for a runner rather than working. Group per ref and cancel only on
+# pull_request, a push to main must still get its own complete run.
+#
+# The gates below say `!cancelled()`, never `always()`. `always()` runs a job
+# or step even when the run has been CANCELLED, so with `always()` in place
+# this concurrency group would cancel a superseded run and then watch it keep
+# building anyway. `!cancelled()` keeps the same fail-open behaviour when the
+# `changes` job errors, which is the only reason the gates reach for a status
+# function at all.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   WORKING_DIR: ainb-tui
@@ -34,9 +49,33 @@ jobs:
   #
   # `on.push` keeps its own `paths:` — push runs are not required checks, so
   # main-branch CI cost is unchanged.
+  #
+  # WHAT HAPPENS WHEN THIS JOB ITSELF FAILS. The four matrix jobs below
+  # (`test`, `ainb-hooks`, `fleet-send-tmux`, `hangar-e2e`) gate their STEPS
+  # on `needs.changes.outputs.relevant != 'false'`. If a failed `changes`
+  # made that comparison false, all four would conclude GREEN having
+  # executed nothing: the required checks would be satisfied by four jobs
+  # that ran no tests, and a PR could merge untested. That is NOT what
+  # happens, and it is measured rather than assumed:
+  #
+  # Run 33393560903 forced this job to fail before dorny/paths-filter could
+  # set `relevant` (the filter step reports `skipped`, so the output is
+  # genuinely absent, not stale). All sixteen jobs dispatched, the four
+  # matrix jobs reported under their EXPANDED names, and the step-level
+  # guards RAN: `ainb-hooks (ubuntu-latest)` (job 99492659192) concluded
+  # success with all seven of its real steps executed, and both
+  # `fleet send integrity` legs did the same. A missing output resolves to
+  # the empty string, and `'' != 'false'` is true.
+  #
+  # Worth re-measuring if GitHub ever changes that resolution, because the
+  # failure would be SILENT: a job green-with-every-step-skipped is
+  # indistinguishable from a real pass in `gh pr checks` or in any job-level
+  # summary. Only the `steps[]` conclusions from
+  # `/actions/runs/<id>/jobs` tell the two apart.
   # ────────────────────────────────────────────────────────────────────────────
   changes:
     name: Detect relevant changes
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     outputs:
       relevant: ${{ steps.filter.outputs.relevant }}
@@ -77,8 +116,9 @@ jobs:
     name: Rustfmt
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,8 +149,9 @@ jobs:
     name: CLI reference freshness
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -160,6 +201,22 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
+    if: '!cancelled()'
+    # 40 against a 28.7min p95. A macOS leg once sat here for 97 minutes with
+    # the nextest step never recording a completion, and with no budget set
+    # nothing would have killed it before GitHub's 360min default.
+    timeout-minutes: 40
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -168,7 +225,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       # Linux only: these paths and `df --output` are GNU/Linux, and the macOS
       # leg of this matrix has never hit the wall.
@@ -191,7 +248,7 @@ jobs:
       # the margin from ~1G to ~21G.
       - name: Reclaim runner disk
         if: >-
-          runner.os == 'Linux' && always() &&
+          runner.os == 'Linux' && !cancelled() &&
           (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
@@ -202,7 +259,7 @@ jobs:
       # 20 minutes later as a linker crash nobody can attribute.
       - name: Assert disk headroom for the --all-features build
         if: >-
-          runner.os == 'Linux' && always() &&
+          runner.os == 'Linux' && !cancelled() &&
           (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
@@ -215,11 +272,11 @@ jobs:
           echo "$((avail/1048576))G free, need ~85G"
       - uses: dtolnay/rust-toolchain@stable
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
@@ -236,7 +293,7 @@ jobs:
           save-if: false
       - uses: taiki-e/install-action@nextest
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       # `--lib` alone builds ONLY in-source `#[cfg(test)]` modules, so every
       # integration target under `crates/*/tests/` was invisible here: whole test
@@ -268,7 +325,7 @@ jobs:
       # widens WHICH crates they are built from.
       - run: "cargo nextest run --workspace --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         working-directory: ${{ env.WORKING_DIR }}
 
@@ -309,8 +366,9 @@ jobs:
     name: Contracts
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -352,6 +410,19 @@ jobs:
   ainb-hooks:
     name: ainb-hooks (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
+    if: '!cancelled()'
+    timeout-minutes: 20
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -360,15 +431,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: Swatinem/rust-cache@v2
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
@@ -377,35 +448,38 @@ jobs:
       # nothing is ever proven and reaping silently becomes a no-op, which fails
       # `reap_signals_a_notifyd_serving_this_home` on Linux while macOS passes.
       - name: Install tmux and lsof (Linux only; macOS runner ships them)
-        if: matrix.os == 'ubuntu-latest'
+        if: >-
+          matrix.os == 'ubuntu-latest' && !cancelled() &&
+          (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
         run: sudo apt-get update && sudo apt-get install -y tmux jq lsof
       - name: Verify hook script parses on the runner
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: bash -n plugins/ainb-hooks/hooks/notify.sh
       - name: Stall guard compiles + self-check passes
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
           python3 -m py_compile plugins/ainb-hooks/hooks/stall_guard.py
           python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test
       - name: Build + lib tests (ainb-plugin-notifyd)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb-plugin-notifyd --lib --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: End-to-end hook → socket → SQLite
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb-plugin-notifyd --test end_to_end --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: Tripwire — Inbox screen open + render
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
@@ -415,13 +489,13 @@ jobs:
         # to `unknown` in silence. Without this, that line has no coverage on
         # the screen an operator actually looks at.
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_fleet_panel_shows_acp_session --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: Sandbox script safety guards (rm -rf belts)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test sandbox_script_safety_guards --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
@@ -447,6 +521,82 @@ jobs:
   fleet-send-tmux:
     name: fleet send integrity (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
+    if: '!cancelled()'
+    timeout-minutes: 15
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: Swatinem/rust-cache@v2
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        with:
+          workspaces: "ainb-tui -> target"
+      # macOS runner images do NOT ship tmux (actions/runner-images macos-15
+      # README), the same reason `hangar-e2e` brew-installs it.
+      - name: Install tmux (apt-get on Linux, brew on macOS)
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y tmux
+          else
+            brew install tmux
+          fi
+      - name: Send-path integrity against a real tmux pane
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          set -o pipefail
+          cargo test -p ainb-fleet-core --features tmux-tests \
+            --test tmux_send_integrity --no-fail-fast -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/tmux-send-integrity.log"
+          if grep -q '^SKIP:' "$RUNNER_TEMP/tmux-send-integrity.log"; then
+            echo "::error::tmux send-integrity suite SKIPped, so the send path was never exercised on this runner"
+            exit 1
+          fi
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Codex launch-pane behaviour against a REAL tmux server
+  #
+  # Same trap as `fleet-send-tmux` above, same remedy. `Test` compiles and
+  # selects these tests, but neither runner image ships tmux, so `require_tmux!`
+  # self-skips and they pass vacuously. That is not hypothetical here: three
+  # separate defects shipped in this area behind 24-of-24 green CI, including
+  # one that would have failed every Codex launch outright, because nothing in
+  # CI ever started a tmux session.
+  #
+  # The trailing grep is the point: a suite that degrades to SKIP must fail the
+  # job, or the guard is theatre.
+  # ────────────────────────────────────────────────────────────────────────────
+  codex-launch-tmux:
+    name: codex launch pane (${{ matrix.os }})
+    needs: changes
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -467,8 +617,7 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
-      # macOS runner images do NOT ship tmux (actions/runner-images macos-15
-      # README), the same reason `hangar-e2e` brew-installs it.
+      # macOS runner images do NOT ship tmux, same as fleet-send-tmux above.
       - name: Install tmux (apt-get on Linux, brew on macOS)
         if: >-
           always() && (github.event_name != 'pull_request' ||
@@ -479,17 +628,24 @@ jobs:
           else
             brew install tmux
           fi
-      - name: Send-path integrity against a real tmux pane
+      - name: Launch-pane behaviour against a real tmux pane
         if: >-
           always() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
           set -o pipefail
-          cargo test -p ainb-fleet-core --features tmux-tests \
-            --test tmux_send_integrity --no-fail-fast -- --nocapture \
-            2>&1 | tee "$RUNNER_TEMP/tmux-send-integrity.log"
-          if grep -q '^SKIP:' "$RUNNER_TEMP/tmux-send-integrity.log"; then
-            echo "::error::tmux send-integrity suite SKIPped, so the send path was never exercised on this runner"
+          cargo test -p ainb --test behavioral keeping_dead_pane \
+            --no-fail-fast -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/codex-launch-tmux.log"
+          cargo test -p ainb --lib capture_failed_launch_pane_reads_a_dead_pane \
+            --no-fail-fast -- --nocapture \
+            2>&1 | tee -a "$RUNNER_TEMP/codex-launch-tmux.log"
+          if grep -q '^SKIP:' "$RUNNER_TEMP/codex-launch-tmux.log"; then
+            echo "::error::codex launch-pane suite SKIPped, so the launch path was never exercised on this runner"
+            exit 1
+          fi
+          if ! grep -q 'test result: ok. 2 passed' "$RUNNER_TEMP/codex-launch-tmux.log"; then
+            echo "::error::expected both keeping_dead_pane tests to run; filter may have stopped matching"
             exit 1
           fi
         working-directory: ${{ env.WORKING_DIR }}
@@ -506,6 +662,19 @@ jobs:
   hangar-e2e:
     name: hangar-e2e (${{ matrix.os }})
     needs: changes
+    # Bare `!cancelled()`, with NO relevance clause: it exists so this job is
+    # never SKIPPED. `needs: changes` carries an implicit `success()`, so one
+    # failure in `changes` would skip this job, and GitHub does not expand
+    # `strategy.matrix` for a job it never dispatches: it reports a single
+    # check under the literal unexpanded name. Ruleset 11610771 requires the
+    # EXPANDED names, so that one skip strands every open PR on "Expected".
+    # The relevance clause stays on the steps, where a gated-out PR still
+    # costs no compute and the check still reports under its real name.
+    # MEASURED (run 33393560903): when `changes` FAILS, `relevant` is left
+    # unset, an unset output resolves to '', and `'' != 'false'` is TRUE, so
+    # those step guards RUN rather than skip. See the `changes` job above.
+    if: '!cancelled()'
+    timeout-minutes: 45
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -514,11 +683,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
       - uses: dtolnay/rust-toolchain@stable
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           # This action installs with rustup's MINIMAL profile, which omits
@@ -527,16 +696,24 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         with:
           workspaces: "ainb-tui -> target"
+      # Both hangar suites below drive nextest (one run per package instead of
+      # one `cargo test` per test file). Unlike the `test` job this one has no
+      # other nextest step, so without this install they fail with
+      # `no such command: nextest`.
+      - uses: taiki-e/install-action@nextest
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
       # macOS runner images do NOT ship tmux (actions/runner-images macos-15
       # README) — without installing it here the macOS leg is vacuously green:
       # `can_run_tripwire()` is false and every TUI tripwire SKIPs.
       - name: Install tmux (apt-get on Linux, brew on macOS)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -546,25 +723,25 @@ jobs:
           fi
       - name: Build hangar daemon binary
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo build -p ainb-hangar-daemon --bin ainb-hangar-daemon
         working-directory: ${{ env.WORKING_DIR }}
       - name: Build ainb binary
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo build -p ainb --bin ainb
         working-directory: ${{ env.WORKING_DIR }}
       - name: Stage bundled plugins (incl. hangar-tui)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: bash scripts/build-plugins.sh
         working-directory: ${{ env.WORKING_DIR }}
       - name: CI-lint — assert ci.yml hangar-e2e contract
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo xtask ci-lint
         working-directory: ${{ env.WORKING_DIR }}
@@ -586,7 +763,7 @@ jobs:
       # thousands of lines away from the cause.
       - name: No tracing span guard held across an await
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: >
           cargo clippy -p ainb-hangar-daemon -p ainb-acp --lib
@@ -594,7 +771,7 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
       - name: Run all hangar tripwires
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         # Hosted runners render the TUI much slower than a dev box, so the
         # dev-tuned tmux poll budgets time out under the full serial suite (a
@@ -602,9 +779,9 @@ jobs:
         # routes through `budget_scale()` here; single-run rigor is kept (a real
         # regression still fails at the scaled deadline).
         #
-        # The Linux leg runs the FULL 34-tripwire matrix (authoritative — the
+        # The Linux leg runs the FULL 68-tripwire matrix (authoritative — the
         # tmux tripwires exercise OS-agnostic render/protocol/daemon logic). The
-        # macOS hosted runner is too small to finish all 34 heavy serial tmux
+        # macOS hosted runner is too small to finish all 68 heavy serial tmux
         # tripwires even at 3x budget (~4 random timeouts — runner capacity, not
         # a code fault), so the macOS leg runs a launch-smoke SUBSET that proves
         # the macOS-staged binaries actually launch + the basic stack works
@@ -621,7 +798,7 @@ jobs:
       # nor the tripwire suite runs them, so they were CI-ungated. Gate them here.
       - name: Run hangar acceptance tests (framed-socket + CLI)
         if: >-
-          always() && (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: bash ../scripts/hangar/run_acceptance_tests.sh
         working-directory: ${{ env.WORKING_DIR }}
@@ -647,8 +824,9 @@ jobs:
     name: ainb-acp
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.acp != 'false')
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -669,6 +847,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   recordings:
     name: Recording artifacts are not empty
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -708,6 +887,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       vars.AINB_CHAT_BUS_SMOKE == '1' ||
       contains(github.event.pull_request.labels.*.name, 'chat-bus-smoke')
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -734,8 +914,9 @@ jobs:
     name: Cargo Machete
     needs: changes
     if: >-
-      always() && (github.event_name != 'pull_request' ||
+      !cancelled() && (github.event_name != 'pull_request' ||
       needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

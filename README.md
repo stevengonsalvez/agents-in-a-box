@@ -321,7 +321,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went — then cut it with [The Token Optimisation Playbook](https://stevengonsalvez.com/blog/token-optimisation-playbook)
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
-- **Scriptable CLI** — 40 commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …), with `--format json` on session state, config, git, usage, fleet, and most daemons. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
+- **Scriptable CLI** — 41 commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …), with `--format json` on session state, config, git, usage, fleet, and most daemons. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
 
 ### CLI — Scriptable Equivalent of Every TUI Feature
 
@@ -337,7 +337,7 @@ ainb config set authentication.default_model opus
 ainb completion zsh > ~/.zsh/completions/_ainb
 ```
 
-**40 top-level commands** — `tui`, `run`, `list`, `label`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `doctor`, `reflect`, `presets`, `usage`, `statusline`, `claudecode`, `codex`, `tmux`, `otel`, `completion`, `abtop`, `web`, `witr`, `learnings`, `plugin`, `fleet`, `headroom`, `daemon`, `mcp`, `notifyd`, `hangar`, `rtk`, `diff-review`, `skill`, `source`, `search` — with nested subcommands for recover / config / git / favorites / presets / plugin / fleet / hangar / mcp / daemon / usage / skill / source.
+**41 top-level commands** — `tui`, `run`, `list`, `label`, `logs`, `attach`, `status`, `kill`, `auth`, `recover`, `config`, `git`, `favorites`, `init`, `doctor`, `reflect`, `presets`, `usage`, `statusline`, `claudecode`, `codex`, `tmux`, `otel`, `completion`, `abtop`, `web`, `witr`, `learnings`, `plugin`, `fleet`, `headroom`, `daemon`, `mcp`, `notifyd`, `hangar`, `rtk`, `update`, `diff-review`, `skill`, `source`, `search` — with nested subcommands for recover / config / git / favorites / presets / plugin / fleet / hangar / mcp / daemon / usage / skill / source.
 
 **[📘 Full CLI reference → docs/tui/cli.md](docs/tui/cli.md)**
 
@@ -427,7 +427,7 @@ brew install ainb   # or brew upgrade ainb
 `ainb` boots a plugin host at startup. Some screens — notably **Analytics / Usage (the burndown dashboard)** — are provided by subprocess plugins that the host discovers and loads automatically. **All plugins are enabled by default**; you only need the controls below to turn them off or scope which ones load.
 
 <p align="center">
-  <img src="docs/assets/diagrams/plugin-architecture.svg" alt="ainb v2 plugin architecture — host, JSON-RPC stdio, plugin subprocesses, capability gate, event bus" width="860">
+  <img src="docs/assets/diagrams/plugin-architecture.svg" alt="ainb v2 plugin architecture: the host and its runtime, the JSON-RPC method sets on each side of the wire, the six in-tree plugins, and the two ways a plugin can draw" width="860">
 </p>
 
 **How it works (in brief):** a v2 plugin is a **native subprocess** that speaks **JSON-RPC 2.0 over Content-Length-framed stdio** — no wasm, no in-process linking. The host (`ainb-core`) discovers each plugin from `dist/plugins/<id>/`, spawns it, and exchanges messages: `plugin/render` (the plugin returns a `WireBuffer` of cells the host blits), `plugin/handle_key`, `plugin/cli_dispatch` (routes `ainb <namespace> …`), plus reverse `host/snapshot/publish` calls over an **event bus**. Each plugin declares its `[capabilities]` in `manifest.toml`; the runtime denies any ungranted host call with JSON-RPC `-32001`. A plugin screen can render **two ways**: in-process via a `WireBuffer` (host owns the terminal — e.g. **burndown**), or as a **host-embedded foreign TTY** where ainb suspends and hands the terminal to an external interactive program (e.g. **witr**'s `witr -i` browser). Full walkthrough: [`docs/plugins/`](docs/plugins/overview.md).
@@ -608,7 +608,7 @@ The `/reflect` skill captures learnings. The `/research` and `/prime` skills ret
 ## Architecture
 
 <p align="center">
-  <img src="docs/assets/diagrams/ecosystem-architecture.svg" alt="agents-in-a-box ecosystem architecture — ainb TUI Rust workspace, JSON-RPC plugin host, fleet orchestration, portable toolkit deploying to 9+ tool homes, reflect GraphRAG memory, and the on-disk state that ties them together" width="900">
+  <img src="docs/assets/diagrams/ecosystem-architecture.svg" alt="agents-in-a-box ecosystem architecture: the ainb TUI host, the v2 plugin host and its six in-tree plugins, the nine daemons the TUI supervises, the separate toolkit and reflect-memory repos, and how it is distributed" width="900">
 </p>
 
 ```

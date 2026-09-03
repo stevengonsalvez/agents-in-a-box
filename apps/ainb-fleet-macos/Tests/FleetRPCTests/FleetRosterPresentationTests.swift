@@ -166,8 +166,8 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(event.deepLink.absoluteString, "ainbfleet://session/codex%2Fa%3Fb%23c")
     }
 
-    private func session(key: String, lifecycle: LifecycleState, cwd: String = "/workspace", attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1, model: String? = nil, reasoningEffort: String? = nil, modelUpdatedAt: Int64? = nil) -> FleetSession {
-        FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: cwd, displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision, model: model, reasoningEffort: reasoningEffort, modelUpdatedAt: modelUpdatedAt)
+    private func session(key: String, provider: FleetProvider = .codex, lifecycle: LifecycleState, cwd: String = "/workspace", attention: AttentionState = .none, activeWorkCount: Int64? = nil, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1, model: String? = nil, reasoningEffort: String? = nil, modelUpdatedAt: Int64? = nil) -> FleetSession {
+        FleetSession(sessionKey: key, provider: provider, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: cwd, displayName: key, lifecycle: lifecycle, activeWorkCount: activeWorkCount, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision, model: model, reasoningEffort: reasoningEffort, modelUpdatedAt: modelUpdatedAt)
     }
 
     func testModelLabelRendersPair() {
@@ -275,5 +275,21 @@ final class FleetRosterPresentationTests: XCTestCase {
 
         // Nothing structural set: a search term is the only thing left.
         XCTAssertEqual(FleetRosterEmptyState.activeFilterNames(.all), ["a search term"])
+    }
+
+    func testAntigravityProviderFilterAndEmptyState() {
+        let agy = session(key: "antigravity:1", provider: .antigravity, lifecycle: .running)
+        let codex = session(key: "codex:1", provider: .codex, lifecycle: .running)
+
+        XCTAssertTrue(FleetRosterPresentation.matches(agy, search: "", filters: FleetRosterFilters(provider: .antigravity)))
+        XCTAssertFalse(FleetRosterPresentation.matches(codex, search: "", filters: FleetRosterFilters(provider: .antigravity)))
+        XCTAssertTrue(FleetRosterPresentation.matches(agy, search: "antigravity", filters: .all))
+
+        var filters = FleetRosterFilters.all
+        filters.provider = .antigravity
+        XCTAssertEqual(
+            FleetRosterEmptyState.activeFilterNames(filters),
+            ["provider antigravity"]
+        )
     }
 }

@@ -829,11 +829,7 @@ fn put_char(buf: &mut WireBuffer, x: u16, row: u16, ch: char, color: Color) {
 mod tests {
     use super::*;
 
-    /// Collect the full painted text of the buffer (symbols concatenated) so a
-    /// test can assert a label appears somewhere without pinning a cell.
-    fn painted_text(buf: &WireBuffer) -> String {
-        buf.cells.iter().map(|(_, c)| c.symbol.as_str()).collect()
-    }
+    use crate::test_support::painted_text;
 
     fn actors() -> Vec<MenuActor> {
         vec![

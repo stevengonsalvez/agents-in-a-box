@@ -5,7 +5,7 @@
 use crate::app::{
     AppState,
     screens::ids as screen_ids,
-    state::{AsyncAction, AuthMethod, ConfigPane},
+    state::{AsyncAction, AuthMethod, ConfigPane, ConfigScreenState},
 };
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
@@ -52,18 +52,13 @@ pub enum AppEvent {
     McpOverlayStopServer,
     McpOverlayStopDaemon,
     McpOverlayImport, // Import cwd .mcp.json + Claude user-scope into the global user config
-    // Daemons runtime snapshot (MCP pool + Headroom + repair actions)
-    DaemonsOverlayOpen,
-    DaemonsOverlayClose,
-    DaemonsOverlayRefresh,
-    /// Move the overlay's row selection by a signed step (saturating).
-    DaemonsOverlaySelect(isize),
-    /// Restart whichever daemon row is selected in the overlay.
-    DaemonsOverlayRestartSelected,
+    // Daemons screen
+    /// Re-collect the daemon table now instead of waiting out the interval.
+    DaemonsRefresh,
+    /// Install or repair the hooks, pointing them at the installed ainb.
     DaemonsRepairHooks,
-    DaemonsOverlayStartHangar,
-    DaemonsStartMcp,
-    DaemonsStartHeadroom,
+    /// Point the hooks at the binary running right now, for dev testing.
+    DaemonsPinHookBinary,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -456,22 +451,28 @@ pub enum AppEvent {
     InboxRefresh,               // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
-    ConfigBack,            // Return to home screen (Esc)
-    ConfigNextCategory,    // Navigate to next category
-    ConfigPrevCategory,    // Navigate to previous category
-    ConfigNextSetting,     // Navigate to next setting
-    ConfigPrevSetting,     // Navigate to previous setting
-    ConfigSwitchPane,      // Toggle focus between category and settings pane (Tab)
-    ConfigNavigateUp,      // Navigate up within current focused pane
-    ConfigNavigateDown,    // Navigate down within current focused pane
-    ConfigFocusCategories, // Switch focus to categories pane (Left)
-    ConfigFocusSettings,   // Switch focus to settings pane (Right)
-    ConfigEditSetting,     // Start editing current setting (Enter)
-    ConfigSaveEdit,        // Save current edit (Enter while editing)
-    ConfigCancelEdit,      // Cancel current edit (Esc while editing)
-    ConfigEditChar(char),  // Input character while editing
-    ConfigEditBackspace,   // Backspace while editing
-    ConfigSaveAll,         // Save all settings (S)
+    ConfigBack,             // Return to home screen (Esc)
+    ConfigNextCategory,     // Navigate to next category
+    ConfigPrevCategory,     // Navigate to previous category
+    ConfigNextSetting,      // Navigate to next setting
+    ConfigPrevSetting,      // Navigate to previous setting
+    ConfigSwitchPane,       // Toggle focus between category and settings pane (Tab)
+    ConfigNavigateUp,       // Navigate up within current focused pane
+    ConfigNavigateDown,     // Navigate down within current focused pane
+    ConfigFocusCategories,  // Switch focus to categories pane (Left)
+    ConfigFocusSettings,    // Switch focus to settings pane (Right)
+    ConfigEditSetting,      // Start editing current setting (Enter)
+    ConfigSaveEdit,         // Save current edit (Enter while editing)
+    ConfigCancelEdit,       // Cancel current edit (Esc while editing)
+    ConfigEditChar(char),   // Input character while editing
+    ConfigEditBackspace,    // Backspace while editing
+    ConfigSaveAll,          // Save all settings (S)
+    ConfigToggleExpand,     // Open/close the selected section in the tree (Enter/Space)
+    ConfigSearchStart,      // Open the `/` filter over every row
+    ConfigSearchChar(char), // Type into the `/` filter
+    ConfigSearchBackspace,  // Backspace in the `/` filter
+    ConfigSearchCancel,     // Close the `/` filter (Esc)
+    ConfigSecretToKeychain, // Store a credential literal in the OS keychain (Ctrl+K)
     // API Key configuration
     ConfigApiKeyStart,  // Start API key input mode (when on API Key Status)
     ConfigApiKeySave,   // Save the entered API key to keychain
@@ -772,6 +773,53 @@ fn worth_persisting_repo_defaults(
     repo_label: &str,
 ) -> bool {
     !prompt_text.is_empty() || defaults.per_repo.contains_key(repo_label)
+}
+
+/// Whether a secret row should render as configured.
+///
+/// A `keychain:` reference counts on the strength of being set. Whether the
+/// secret actually retrieves is a question for whoever needs its value, not for
+/// a status dot drawn on the event loop.
+fn secret_reference_is_set(reference: &str) -> bool {
+    let trimmed = reference.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with("keychain:") {
+        return true;
+    }
+    !crate::fleet::bridge::secrets::resolve_secret(reference).trim().is_empty()
+}
+
+/// What one pass of `persist_config_screen` did.
+///
+/// Two counts, not one, because the two backends succeed at different moments:
+/// `written` is already in config.toml when this returns, while
+/// `queued_for_daemon` has not been attempted yet: it goes to the Hangar
+/// daemon's SQLite table on the next app tick, and can still fail there with
+/// its own error toast. Reporting "Setting saved to config.toml" for a daemon
+/// row was wrong twice over: wrong file, and wrong tense.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PersistOutcome {
+    /// Rows written to config.toml.
+    pub written: usize,
+    /// Rows handed to the Hangar daemon queue, not yet written.
+    pub queued_for_daemon: usize,
+}
+
+impl PersistOutcome {
+    /// The success line to show, or `None` when nothing happened at all.
+    #[must_use]
+    pub fn message(self) -> Option<String> {
+        match (self.written, self.queued_for_daemon) {
+            (0, 0) => None,
+            (0, queued) => Some(format!("Sending {queued} setting(s) to the Hangar daemon")),
+            (written, 0) => Some(format!("Saved {written} setting(s) to config.toml")),
+            (written, queued) => Some(format!(
+                "Saved {written} setting(s) to config.toml, sending {queued} to the Hangar daemon"
+            )),
+        }
+    }
 }
 
 impl EventHandler {
@@ -1465,23 +1513,6 @@ impl EventHandler {
             };
         }
 
-        // Legacy popup captures keys only outside the unified Daemons screen.
-        // The screen itself owns r/R/S so controls remain visible beside data.
-        if state.daemons_overlay.is_some() && state.current_screen != screen_ids::DAEMONS {
-            return match key_event.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
-                    Some(AppEvent::DaemonsOverlayClose)
-                }
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::DaemonsOverlaySelect(-1)),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::DaemonsOverlaySelect(1)),
-                KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
-                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartSelected),
-                KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
-                KeyCode::Char('S') => Some(AppEvent::DaemonsOverlayStartHangar),
-                _ => None,
-            };
-        }
-
         // Handle "Other tmux" rename mode (high priority)
         if state.other_tmux_rename_mode {
             match key_event.code {
@@ -1551,18 +1582,30 @@ impl EventHandler {
         // pasted text containing `H` to be partially swallowed because
         // `H` toggled the help overlay mid-paste (e.g. `SHOTClubhouse/SHOTid`
         // → `SOTid`). The single `in_text_input` predicate replaces all
-        // those lists. It now gates *three* places: (a) the explicit
-        // `?`/`H` and `W` globals immediately below, (b) the help-visible
-        // swallow guard (so the field still consumes keys if help is
-        // somehow open inside a text input), and (c) the SessionList
-        // fallthrough match later in this function (defense-in-depth
-        // for future text-input views that forget an early-return
-        // handler).
+        // those lists. It gates the SessionList fallthrough match later in
+        // this function (defense-in-depth for future text-input views that
+        // forget an early-return handler); `host_globals_suppressed` below
+        // extends it for (a) the explicit `?`/`H` and `W` globals and (b) the
+        // help-visible swallow guard (so the field still consumes keys if
+        // help is somehow open inside a text input).
         let in_text_input = Self::is_text_input_context(state);
+        // The printable host globals (`?`/`H` help, `W` statusline) are also
+        // off on a plugin screen whose plugin renders its OWN help, whatever the
+        // per-frame `captures_text` flag says: that flag is refreshed from the
+        // previous render, so the first ~70ms after such a plugin opens a text
+        // field report `false`, and a typed `H`/`?`/`W` was hijacked by the
+        // host. Worse, once `H` opened help the swallow branch below dropped
+        // every later key until Esc, which read as "the wizard lost my input".
+        // This is deliberately NOT folded into `in_text_input`: that predicate
+        // also short-circuits the fallthrough at the end of this function,
+        // and folding it in turned an unavailable plugin's placeholder into a
+        // screen where Ctrl+C, Esc and q all died (the PR #249 trap).
+        let host_globals_suppressed =
+            in_text_input || crate::app::screens::builtin::plugin_owns_help_keys(state);
 
         if state.help_visible {
             tracing::debug!("Help is visible, handling key: {:?}", key_event.code);
-            if !in_text_input {
+            if !host_globals_suppressed {
                 match key_event.code {
                     KeyCode::Char('?' | 'H') | KeyCode::Esc => {
                         tracing::info!("Toggling help off via {:?}", key_event.code);
@@ -1587,7 +1630,7 @@ impl EventHandler {
             }
         }
 
-        if !in_text_input {
+        if !host_globals_suppressed {
             // Session-list-specific intercept for `H`: downgrade Headroom
             // routing on the selected running session. Must be checked before
             // the global `H` → ToggleHelp handler below because the global
@@ -2138,21 +2181,14 @@ impl EventHandler {
                 // Enter on a Stopped interactive session = resume it.
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
-                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                use crate::models::SessionStatus;
                 // Checked rows win over cursor: with a multi-select active,
                 // Enter starts every selected resumable session, not just the
                 // highlighted one.
                 if !state.selected_sessions.is_empty() {
                     Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
                 } else if let Some(session) = state.selected_session() {
-                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("Enter".to_string()))
                     } else {
@@ -2168,20 +2204,13 @@ impl EventHandler {
                 // moved to 'A' so the menu bar's `r resume` hint matches what
                 // the key actually does (one key, one meaning). Pressing 'r'
                 // on a non-resumable selection is a no-op.
-                use crate::models::{SessionAgentType, SessionMode, SessionStatus};
+                use crate::models::SessionStatus;
                 // Checked rows win over cursor: with a multi-select active,
                 // 'r' resumes every selected resumable session.
                 if !state.selected_sessions.is_empty() {
                     Some(AppEvent::ResumeSelectedSessions("r".to_string()))
                 } else if let Some(session) = state.selected_session() {
-                    let is_interactive = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
                     if is_interactive && matches!(session.status, SessionStatus::Stopped) {
                         Some(AppEvent::ResumeSession("r".to_string()))
                     } else {
@@ -3062,6 +3091,13 @@ impl EventHandler {
             KeyCode::Char('q') if daemons.has_overlay() => daemons.close_all_overlays(),
             KeyCode::Enter if daemons.has_overlay() => {
                 daemons.confirm_menu();
+                // The component cannot reach into AppState, so an entry that
+                // needs to leave the TUI (attaching to the ATC session) parks
+                // the request and the handler, which owns the slot, drains it.
+                if let Some(session) = daemons.take_attach_request() {
+                    state.pending_async_action =
+                        Some(crate::app::state::AsyncAction::AttachToOtherTmux(session));
+                }
                 return None;
             }
             KeyCode::Enter => {
@@ -3088,8 +3124,12 @@ impl EventHandler {
         }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+            KeyCode::Char('r') => Some(AppEvent::DaemonsRefresh),
+            // Routed as events rather than applied inline: this dispatcher is
+            // pure by contract (its tests call it just to read the routing) and
+            // both of these really do write into the user's home.
             KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
+            KeyCode::Char('B') => Some(AppEvent::DaemonsPinHookBinary),
             // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
             // (headroom) and `S` (hangar) wrote status fields whose only
             // renderer was the System services panel, so after that panel was
@@ -3330,28 +3370,54 @@ impl EventHandler {
                 KeyCode::Char(c) => Some(AppEvent::ConfigEditChar(c)),
                 _ => None,
             }
+        } else if config_state.is_searching() {
+            // `/` filter box: every printable key narrows the match list, so
+            // the vim nav letters have to come from the arrow keys here.
+            match key_event.code {
+                KeyCode::Esc => Some(AppEvent::ConfigSearchCancel),
+                KeyCode::Up => Some(AppEvent::ConfigPrevSetting),
+                KeyCode::Down => Some(AppEvent::ConfigNextSetting),
+                KeyCode::Enter => Some(AppEvent::ConfigEditSetting),
+                KeyCode::Backspace => Some(AppEvent::ConfigSearchBackspace),
+                KeyCode::Char('k') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(AppEvent::ConfigSecretToKeychain)
+                }
+                KeyCode::Char(c) => Some(AppEvent::ConfigSearchChar(c)),
+                _ => None,
+            }
         } else {
-            // Navigation mode - check if we're on auth settings
-            let is_auth_category = config_state.selected_category == 0; // Authentication category
-            let on_claude_auth = is_auth_category && config_state.selected_setting == 0; // Claude Authentication
+            // Navigation mode. The Claude-auth row opens its own popup rather
+            // than the generic choice widget, because picking "API key" there
+            // also prompts for the key and stores it in the OS keychain.
+            // Matched by KEY: the old `selected_category == 0 &&
+            // selected_setting == 0` index match pointed at whatever row
+            // happened to sort first.
+            let on_claude_auth = config_state
+                .current_setting()
+                .is_some_and(|row| row.key == ConfigScreenState::CLAUDE_PROVIDER_KEY);
+            let on_categories = config_state.focused_pane == ConfigPane::Categories;
 
             match key_event.code {
                 KeyCode::Esc => Some(AppEvent::ConfigBack),
                 KeyCode::Tab => Some(AppEvent::ConfigSwitchPane),
+                KeyCode::Char('/') => Some(AppEvent::ConfigSearchStart),
+                // Ctrl+K before the bare `k` nav arm, which would otherwise
+                // swallow it.
+                KeyCode::Char('k') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(AppEvent::ConfigSecretToKeychain)
+                }
                 // Up/Down navigate within the current focused pane
                 KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::ConfigNavigateUp),
                 KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::ConfigNavigateDown),
                 // Left/Right switch focus between panes
                 KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::ConfigFocusCategories),
                 KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::ConfigFocusSettings),
-                KeyCode::Enter => {
-                    if on_claude_auth {
-                        // Open the auth provider popup
-                        Some(AppEvent::AuthProviderPopupOpen)
-                    } else {
-                        Some(AppEvent::ConfigEditSetting)
-                    }
-                }
+                // Space opens/closes a section from either pane, so the tree is
+                // reachable without giving up Enter-to-edit.
+                KeyCode::Char(' ') => Some(AppEvent::ConfigToggleExpand),
+                KeyCode::Enter if on_categories => Some(AppEvent::ConfigToggleExpand),
+                KeyCode::Enter if on_claude_auth => Some(AppEvent::AuthProviderPopupOpen),
+                KeyCode::Enter => Some(AppEvent::ConfigEditSetting),
                 KeyCode::Char('s' | 'S') => Some(AppEvent::ConfigSaveAll),
                 _ => None,
             }
@@ -3713,6 +3779,141 @@ impl EventHandler {
         Ok(session_name.to_string())
     }
 
+    /// Write every pending settings-screen edit, returning how many landed.
+    ///
+    /// One path for both the auto-persist on a popup confirm and the explicit
+    /// `S` save-all, so they cannot drift. The order matters: `apply_to_app_config`
+    /// folds the edits into the live config and hands back the ones whose section
+    /// `AppConfig` does not model, `save()` writes the modelled part (overlaying
+    /// the file so unknown sections survive), then `save_external_keys` writes the
+    /// rest. On success the edits are cleared, so a later save cannot rewrite a
+    /// value another process has since changed.
+    fn persist_config_screen(state: &mut AppState) -> anyhow::Result<PersistOutcome> {
+        let pending = state.config_screen_state.pending_edits().len();
+        // Daemon rows are excluded: they go to SQLite, and
+        // `apply_to_app_config` deliberately skips them, so a save that touched
+        // only daemon rows changed nothing in `app_config`. Counting them here
+        // let it fall through and rewrite config.toml from the startup
+        // snapshot — the exact revert this guard exists to prevent.
+        let dirty_before = state
+            .config_screen_state
+            .dirty
+            .iter()
+            .any(|key| !key.starts_with("hangar_daemon."));
+        let plugin_written = state
+            .config_screen_state
+            .dirty
+            .iter()
+            .filter(|key| key.starts_with("plugin:") || key.starts_with("plugin-enabled:"))
+            .count();
+        let mut applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
+        // Nothing to write: return before touching the file. `save()` renders
+        // the whole AppConfig from the snapshot loaded at startup, so pressing
+        // `S` with no edits would revert anything `ainb config set` or another
+        // process wrote since — and then report "No changes to save". Exactly
+        // the hazard `save_tree_expansion` exists to avoid.
+        // Keyed off `dirty`, not `pending`: `pending_edits()` deliberately
+        // excludes plugin rows and read-only rows, so a plugin-only edit has
+        // `pending == 0` while still having work to do. `dirty` is the honest
+        // "did the user change anything" signal.
+        // The Hangar daemon rows land in a SQLite table, not this file, and
+        // that store is async while this pass is not. APPENDED to a queue, not
+        // assigned to `pending_async_action`: that slot holds one action and is
+        // drained once per app tick, so two popup confirms inside the same
+        // 250 ms tick silently threw the first edit away and toasted "saved"
+        // for both. Queue them before the early return, so a save that touched
+        // only daemon rows still writes.
+        let queued_for_daemon = applied.daemon.len();
+        state.pending_daemon_config_edits.append(&mut applied.daemon);
+        if !dirty_before && applied.external.is_empty() {
+            state.config_screen_state.mark_saved();
+            return Ok(PersistOutcome {
+                written: 0,
+                queued_for_daemon,
+            });
+        }
+        state.app_config.save()?;
+        // Collected, not propagated — the same rule the modelled rows already
+        // follow. An external value the registry rejects (a `0` in a
+        // `min: 1` row, say) used to fail the whole save with `?`, so
+        // `mark_saved()` never ran, the row stayed dirty, and every later save
+        // in that session re-hit the same error. One bad row must not wedge
+        // the screen.
+        let mut rejected = applied.rejected.clone();
+        if let Err(err) = crate::config::AppConfig::save_external_keys(&applied.external) {
+            let keys = applied
+                .external
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            rejected.push((keys, err.to_string()));
+        }
+        state.config_screen_state.mark_saved();
+        for (key, why) in &rejected {
+            tracing::warn!(key, error = %why, "settings edit rejected");
+            state.add_error_notification(format!("{key}: {why}"));
+        }
+        Ok(PersistOutcome {
+            // The daemon rows are counted separately: they are not in
+            // config.toml, and their write has not been attempted yet.
+            // `pending_edits()` deliberately skips plugin rows, but
+            // `apply_plugin_rows` DOES write them — counting only pending
+            // meant editing any plugin setting completed in total silence.
+            written: pending.saturating_sub(rejected.len() + queued_for_daemon) + plugin_written,
+            queued_for_daemon,
+        })
+    }
+
+    /// Store a credential literal in the OS keychain and point the row at it.
+    ///
+    /// The literal is written under a service name derived from the row's key
+    /// and NEVER written to `config.toml`: the row is left holding
+    /// `keychain:<service>`, which the existing bridge secret resolver already
+    /// understands. An empty literal is treated as "clear this row" rather than
+    /// storing an empty secret.
+    fn store_secret_in_keychain(state: &mut AppState, row_key: &str, literal: &str) {
+        let literal = literal.trim();
+        let Some(row) = crate::config::registry::row(row_key).cloned() else {
+            return;
+        };
+        if literal.is_empty() {
+            state.config_screen_state.set_row_value(
+                row_key,
+                crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue::default()),
+            );
+        } else {
+            let service = crate::config::screen_model::keychain_service(row_key);
+            match crate::credentials::store_keychain_secret(&service, literal) {
+                Ok(()) => {
+                    state.config_screen_state.set_row_value(
+                        row_key,
+                        crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue {
+                            reference: format!("keychain:{service}"),
+                            resolved: true,
+                        }),
+                    );
+                    state.add_success_notification(format!(
+                        "{} stored in the keychain as '{service}'",
+                        row.label
+                    ));
+                }
+                Err(e) => {
+                    // Loud on both channels: the notification can scroll away,
+                    // and "the secret silently did not get stored" is the worst
+                    // possible outcome for this flow.
+                    tracing::error!(service, error = %e, "keychain write failed");
+                    state.add_error_notification(format!("Keychain write failed: {e}"));
+                    return;
+                }
+            }
+        }
+        match Self::persist_config_screen(state) {
+            Ok(_) => {}
+            Err(e) => state.add_error_notification(format!("Failed to save setting: {e}")),
+        }
+    }
+
     pub fn process_event(event: AppEvent, state: &mut AppState) {
         match event {
             AppEvent::Quit => state.quit(),
@@ -3725,16 +3926,10 @@ impl EventHandler {
                 // either the home menu or the session list; closing one
                 // returns to wherever it was opened from rather than
                 // hardcoding HOME. Mirrors GitViewBack's pop semantics.
-                let leaving_daemons = state.current_screen == screen_ids::DAEMONS;
                 let target =
                     state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
                 tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
                 state.current_screen = target;
-                // The unified screen owns this runtime snapshot. Drop it on
-                // exit so no obsolete popup appears over the destination.
-                if leaving_daemons {
-                    state.close_daemons_overlay();
-                }
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
@@ -3785,30 +3980,14 @@ impl EventHandler {
             // from anywhere. cwd's .mcp.json is still pulled in as a source.
             // Additive (never overwrites), so it fires without a confirmation.
             AppEvent::McpOverlayImport => state.mcp_import(true),
-            AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
-            AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
-            AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
-            AppEvent::DaemonsOverlaySelect(delta) => {
-                if let Some(o) = state.daemons_overlay.as_mut() {
-                    o.selected = o.selected.step(delta);
-                }
-            }
-            // `DaemonsSelect` / `DaemonsRestartSelected` are gone. They moved the
-            // cursor and restarted ONLY notifyd, refusing every other daemon
-            // with "has no TUI restart; use its own CLI verb" — including ATC,
-            // the row this work exists to make restartable. Selection and the
-            // per-row start/restart/stop menu are handled inline in
-            // `handle_daemons_keys` now, against `ainb daemon <kind> <verb>`,
-            // which every daemon actually implements.
-            AppEvent::DaemonsOverlayRestartSelected => {
-                if let Some(kind) = state.daemons_overlay.as_ref().map(|o| o.selected) {
-                    state.spawn_daemon_restart(kind);
-                }
-            }
-            AppEvent::DaemonsRepairHooks => state.spawn_hooks_repair(),
-            AppEvent::DaemonsOverlayStartHangar => state.spawn_hangar_start(),
-            AppEvent::DaemonsStartMcp => state.spawn_mcp_start(),
-            AppEvent::DaemonsStartHeadroom => state.spawn_headroom_start(),
+            AppEvent::DaemonsRefresh => state.daemons_state.force_collect(),
+            // Kept next to the two hook events it belongs with.
+            AppEvent::DaemonsRepairHooks => state
+                .daemons_state
+                .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install),
+            AppEvent::DaemonsPinHookBinary => state
+                .daemons_state
+                .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::PinRunning),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
@@ -3942,10 +4121,10 @@ impl EventHandler {
                 // detached `std::thread` it is not torn down mid-write at
                 // shutdown.
                 let scan_paths = state.app_config.workspace_defaults.workspace_scan_paths.clone();
-                let exclude_paths = state.app_config.workspace_defaults.exclude_paths.clone();
+                let defaults = state.app_config.workspace_defaults.clone();
                 tokio::task::spawn_blocking(move || {
                     let scanner = WorkspaceScanner::with_additional_paths(scan_paths)
-                        .with_exclude_paths(exclude_paths);
+                        .with_workspace_defaults(&defaults);
                     if let Err(err) = scanner.scan() {
                         tracing::warn!(error = %err, "pick_repo: background repo rescan failed");
                     }
@@ -4244,13 +4423,12 @@ impl EventHandler {
                 } else if other_count > 0 {
                     state.show_kill_other_tmux_sessions_confirmation(other_names);
                 } else if managed_count > 0 {
-                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
-                    state.add_success_notification(format!(
-                        "Deleting {} selected session(s)...",
-                        managed_count
-                    ));
-                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
-                    state.selected_sessions.clear();
+                    // Checked rows get the SAME tri-option dialog as a single
+                    // row: bulk delete used to fire immediately here, which
+                    // destroyed every selected worktree (and any uncommitted
+                    // work in it) with no way back.
+                    let ids = state.selected_session_ids_in_order();
+                    state.show_bulk_delete_or_stop_confirmation(ids);
                 // Check if we're in the SSH Sessions section
                 } else if state.is_ssh_session_selected() {
                     if let Some(ssh_session) = state.selected_ssh_session() {
@@ -4304,15 +4482,7 @@ impl EventHandler {
                     // tri-option Stop / Delete / Cancel dialog so the user can
                     // soft-stop without losing the worktree. Boss/Docker, SSH,
                     // and Shell sessions stick with the binary delete flow.
-                    use crate::models::{SessionAgentType, SessionMode};
-                    let is_interactive_agent = matches!(session.mode, SessionMode::Interactive)
-                        && matches!(
-                            session.agent_type,
-                            SessionAgentType::Claude
-                                | SessionAgentType::Codex
-                                | SessionAgentType::Gemini
-                                | SessionAgentType::Copilot
-                        );
+                    let is_interactive_agent = crate::app::state::is_stoppable_interactive(session);
                     let session_id = session.id;
                     if is_interactive_agent {
                         state.show_delete_or_stop_confirmation(session_id);
@@ -4347,7 +4517,7 @@ impl EventHandler {
                 let other_count = other_names.len();
                 if managed_count == 0 && other_count == 0 {
                     state.add_warning_notification(
-                        "No sessions selected. Use Space to select sessions first.".to_string(),
+                        crate::app::state::NOTHING_SELECTED_WARNING.to_string(),
                     );
                 } else if managed_count > 0 && other_count > 0 {
                     state.add_warning_notification(
@@ -4356,13 +4526,8 @@ impl EventHandler {
                 } else if other_count > 0 {
                     state.show_kill_other_tmux_sessions_confirmation(other_names);
                 } else {
-                    let ids: Vec<uuid::Uuid> = state.selected_sessions.iter().copied().collect();
-                    state.add_success_notification(format!(
-                        "Deleting {} selected session(s)...",
-                        managed_count
-                    ));
-                    state.pending_async_action = Some(AsyncAction::BulkDeleteSessions(ids));
-                    state.selected_sessions.clear();
+                    let ids = state.selected_session_ids_in_order();
+                    state.show_bulk_delete_or_stop_confirmation(ids);
                 }
             }
             AppEvent::ResumeSession(trigger) => {
@@ -4517,6 +4682,32 @@ impl EventHandler {
                             crate::app::state::ConfirmAction::StopSession(session_id) => {
                                 state.pending_async_action =
                                     Some(AsyncAction::StopSession(session_id));
+                            }
+                            crate::app::state::ConfirmAction::BulkDeleteSessions(session_ids) => {
+                                state.add_success_notification(format!(
+                                    "Deleting {} selected session(s)...",
+                                    session_ids.len()
+                                ));
+                                // Only the rows being acted on lose their check.
+                                // A mixed selection's Stop covers a subset, and
+                                // silently dropping the rest would make the user
+                                // re-select them.
+                                for id in &session_ids {
+                                    state.selected_sessions.remove(id);
+                                }
+                                state.pending_async_action =
+                                    Some(AsyncAction::BulkDeleteSessions(session_ids));
+                            }
+                            crate::app::state::ConfirmAction::BulkStopSessions(session_ids) => {
+                                state.add_success_notification(format!(
+                                    "Stopping {} selected session(s)...",
+                                    session_ids.len()
+                                ));
+                                for id in &session_ids {
+                                    state.selected_sessions.remove(id);
+                                }
+                                state.pending_async_action =
+                                    Some(AsyncAction::BulkStopSessions(session_ids));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmux(session_name) => {
                                 state.pending_async_action =
@@ -6398,17 +6589,9 @@ impl EventHandler {
                 // Arm the background collector on entry (H-D2): collection runs
                 // off the UI thread, never on render, so this only spawns/keeps
                 // the collector — it does no disk I/O on the event loop.
+                // MCP, Headroom, Hangar and notifyd are rows in that same
+                // collect, so there is nothing else to arm.
                 state.daemons_state.arm();
-                // MCP, Headroom, Hangar, and notifyd are collected by the
-                // existing non-blocking runtime probe and rendered on this
-                // screen as one system-services table.
-                if tokio::runtime::Handle::try_current().is_ok() {
-                    if state.daemons_overlay.is_none() {
-                        state.toggle_daemons_overlay();
-                    } else {
-                        state.spawn_daemons_fetch();
-                    }
-                }
             }
             AppEvent::GoToFleetPanel => {
                 tracing::info!("Navigating to Fleet panel");
@@ -6596,49 +6779,27 @@ impl EventHandler {
             } // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
+                // One write on the way out, and only when a node actually
+                // toggled — a user who just looked around leaves the file alone.
+                if let Some(ids) = state.config_screen_state.take_expansion_to_persist() {
+                    state.app_config.ui_preferences.config_tree_expanded = ids.clone();
+                    if let Err(e) = crate::config::AppConfig::save_tree_expansion(&ids) {
+                        tracing::warn!(error = %e, "could not persist config tree expansion");
+                    }
+                }
                 state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ConfigNextCategory => {
-                let num_categories = state.config_screen_state.categories.len();
-                if num_categories > 0 {
-                    state.config_screen_state.selected_category =
-                        (state.config_screen_state.selected_category + 1) % num_categories;
-                    state.config_screen_state.selected_setting = 0;
-                }
+                state.config_screen_state.select_next_category();
             }
             AppEvent::ConfigPrevCategory => {
-                let num_categories = state.config_screen_state.categories.len();
-                if num_categories > 0 {
-                    state.config_screen_state.selected_category = state
-                        .config_screen_state
-                        .selected_category
-                        .checked_sub(1)
-                        .unwrap_or(num_categories - 1);
-                    state.config_screen_state.selected_setting = 0;
-                }
+                state.config_screen_state.select_prev_category();
             }
             AppEvent::ConfigNextSetting => {
-                let current_category = &state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) = state.config_screen_state.settings.get(current_category) {
-                    if !settings.is_empty() {
-                        state.config_screen_state.selected_setting =
-                            (state.config_screen_state.selected_setting + 1) % settings.len();
-                    }
-                }
+                state.config_screen_state.select_next_setting();
             }
             AppEvent::ConfigPrevSetting => {
-                let current_category = &state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) = state.config_screen_state.settings.get(current_category) {
-                    if !settings.is_empty() {
-                        state.config_screen_state.selected_setting = state
-                            .config_screen_state
-                            .selected_setting
-                            .checked_sub(1)
-                            .unwrap_or(settings.len() - 1);
-                    }
-                }
+                state.config_screen_state.select_prev_setting();
             }
             AppEvent::ConfigSwitchPane => {
                 // Toggle focus between categories and settings panes
@@ -6652,67 +6813,14 @@ impl EventHandler {
                     state.config_screen_state.focused_pane
                 );
             }
-            AppEvent::ConfigNavigateUp => {
-                // Navigate up within the currently focused pane
-                match state.config_screen_state.focused_pane {
-                    ConfigPane::Categories => {
-                        // Navigate to previous category
-                        let num_categories = state.config_screen_state.categories.len();
-                        if num_categories > 0 {
-                            state.config_screen_state.selected_category = state
-                                .config_screen_state
-                                .selected_category
-                                .checked_sub(1)
-                                .unwrap_or(num_categories - 1);
-                            state.config_screen_state.selected_setting = 0;
-                        }
-                    }
-                    ConfigPane::Settings => {
-                        // Navigate to previous setting
-                        let current_category = &state.config_screen_state.categories
-                            [state.config_screen_state.selected_category];
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get(current_category)
-                        {
-                            if !settings.is_empty() {
-                                state.config_screen_state.selected_setting = state
-                                    .config_screen_state
-                                    .selected_setting
-                                    .checked_sub(1)
-                                    .unwrap_or(settings.len() - 1);
-                            }
-                        }
-                    }
-                }
-            }
-            AppEvent::ConfigNavigateDown => {
-                // Navigate down within the currently focused pane
-                match state.config_screen_state.focused_pane {
-                    ConfigPane::Categories => {
-                        // Navigate to next category
-                        let num_categories = state.config_screen_state.categories.len();
-                        if num_categories > 0 {
-                            state.config_screen_state.selected_category =
-                                (state.config_screen_state.selected_category + 1) % num_categories;
-                            state.config_screen_state.selected_setting = 0;
-                        }
-                    }
-                    ConfigPane::Settings => {
-                        // Navigate to next setting
-                        let current_category = &state.config_screen_state.categories
-                            [state.config_screen_state.selected_category];
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get(current_category)
-                        {
-                            if !settings.is_empty() {
-                                state.config_screen_state.selected_setting =
-                                    (state.config_screen_state.selected_setting + 1)
-                                        % settings.len();
-                            }
-                        }
-                    }
-                }
-            }
+            AppEvent::ConfigNavigateUp => match state.config_screen_state.focused_pane {
+                ConfigPane::Categories => state.config_screen_state.select_prev_category(),
+                ConfigPane::Settings => state.config_screen_state.select_prev_setting(),
+            },
+            AppEvent::ConfigNavigateDown => match state.config_screen_state.focused_pane {
+                ConfigPane::Categories => state.config_screen_state.select_next_category(),
+                ConfigPane::Settings => state.config_screen_state.select_next_setting(),
+            },
             AppEvent::ConfigFocusCategories => {
                 state.config_screen_state.focused_pane = ConfigPane::Categories;
                 tracing::debug!("Config focus switched to Categories pane");
@@ -6721,13 +6829,34 @@ impl EventHandler {
                 state.config_screen_state.focused_pane = ConfigPane::Settings;
                 tracing::debug!("Config focus switched to Settings pane");
             }
+            AppEvent::ConfigToggleExpand => {
+                // In-memory only. Persisting here meant a read-parse-write of
+                // config.toml inside the event loop on every keypress; the flush
+                // happens once, on ConfigBack.
+                state.config_screen_state.toggle_expanded();
+            }
+            AppEvent::ConfigSearchStart => {
+                state.config_screen_state.start_search();
+            }
+            AppEvent::ConfigSearchChar(c) => {
+                state.config_screen_state.push_search_char(c);
+            }
+            AppEvent::ConfigSearchBackspace => {
+                state.config_screen_state.pop_search_char();
+            }
+            AppEvent::ConfigSearchCancel => {
+                state.config_screen_state.clear_search();
+            }
             AppEvent::ConfigEditSetting => {
-                let current_category = state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) = state.config_screen_state.settings.get(&current_category) {
-                    if let Some(setting) = settings.get(state.config_screen_state.selected_setting)
+                let selected = state.config_screen_state.current_setting().cloned();
+                if let Some(setting) = selected {
+                    // A row core cannot persist says so instead of opening an
+                    // editor that would throw the value away.
+                    if let Some(reason) =
+                        crate::config::screen_model::read_only_reason(&setting.key)
                     {
-                        // Open popup based on setting type
+                        state.add_info_notification(format!("{}: {reason}", setting.label));
+                    } else {
                         let title = setting.label.clone();
                         let description = setting.description.clone();
                         let key = setting.key.clone();
@@ -6750,9 +6879,19 @@ impl EventHandler {
                                     text,
                                 );
                             }
-                            crate::app::state::ConfigValue::Secret(_) => {
-                                // For secrets, show empty input (don't reveal existing value)
-                                state.config_popup_state.open_text(&title, &description, &key, "");
+                            crate::app::state::ConfigValue::Secret(secret) => {
+                                // Editing a secret edits the REFERENCE
+                                // ($ENV_VAR or keychain:<service>), never a
+                                // plaintext value: a literal typed here would
+                                // land in config.toml. Ctrl+K is the path that
+                                // takes a literal, and it writes it to the
+                                // keychain instead.
+                                state.config_popup_state.open_text(
+                                    &title,
+                                    "reference: $ENV_VAR or keychain:<service> — Ctrl+K stores a literal in the keychain",
+                                    &key,
+                                    &secret.reference,
+                                );
                             }
                             crate::app::state::ConfigValue::Bool(value) => {
                                 state.config_popup_state.open_boolean(
@@ -6775,46 +6914,63 @@ impl EventHandler {
                     }
                 }
             }
-            AppEvent::ConfigSaveEdit => {
-                let current_category = state.config_screen_state.categories
-                    [state.config_screen_state.selected_category];
-                if let Some(settings) =
-                    state.config_screen_state.settings.get_mut(&current_category)
-                {
-                    if let Some(setting) =
-                        settings.get_mut(state.config_screen_state.selected_setting)
-                    {
-                        let new_value = state.config_screen_state.edit_buffer.clone();
-                        // Update the value based on the type
-                        setting.value = match &setting.value {
-                            crate::app::state::ConfigValue::Text(_) => {
-                                crate::app::state::ConfigValue::Text(new_value)
-                            }
-                            crate::app::state::ConfigValue::Secret(_) => {
-                                crate::app::state::ConfigValue::Secret(new_value)
-                            }
-                            crate::app::state::ConfigValue::Bool(_) => {
-                                crate::app::state::ConfigValue::Bool(
-                                    new_value.to_lowercase() == "true",
-                                )
-                            }
-                            crate::app::state::ConfigValue::Number(_) => {
-                                crate::app::state::ConfigValue::Number(
-                                    new_value.parse().unwrap_or(0),
-                                )
-                            }
-                            crate::app::state::ConfigValue::Choice(options, _) => {
-                                // Try to find the index of the entered value
-                                let idx = options.iter().position(|o| o == &new_value).unwrap_or(0);
-                                crate::app::state::ConfigValue::Choice(options.clone(), idx)
-                            }
+            AppEvent::ConfigSecretToKeychain => {
+                let selected = state.config_screen_state.current_setting().cloned();
+                match selected.as_ref().map(|setting| (&setting.value, setting)) {
+                    Some((crate::app::state::ConfigValue::Secret(secret), setting)) => {
+                        // Pre-fill with an existing literal so migrating one out
+                        // of config.toml is a confirm away — and so the user is
+                        // shown what is about to move, never a silent rewrite.
+                        let prefill = if secret.is_reference() {
+                            ""
+                        } else {
+                            secret.reference.as_str()
                         };
-                        tracing::info!(
-                            "Saved setting: {} = {}",
-                            setting.label,
-                            setting.value.display()
+                        let service = crate::config::screen_model::keychain_service(&setting.key);
+                        state.config_screen_state.keychain_target = Some(setting.key.clone());
+                        state.config_popup_state.open_text(
+                            &format!("{} → keychain", setting.label),
+                            &format!(
+                                "stored under '{service}'; config.toml keeps only the reference"
+                            ),
+                            &setting.key,
+                            prefill,
                         );
                     }
+                    _ => state.add_info_notification(
+                        "Ctrl+K stores a credential in the keychain; this row is not one"
+                            .to_string(),
+                    ),
+                }
+            }
+            AppEvent::ConfigSaveEdit => {
+                let new_value = state.config_screen_state.edit_buffer.clone();
+                if let Some(setting) = state.config_screen_state.current_setting().cloned() {
+                    let updated = match &setting.value {
+                        crate::app::state::ConfigValue::Text(_) => {
+                            crate::app::state::ConfigValue::Text(new_value)
+                        }
+                        crate::app::state::ConfigValue::Secret(secret) => {
+                            crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue {
+                                reference: new_value,
+                                resolved: secret.resolved,
+                            })
+                        }
+                        crate::app::state::ConfigValue::Bool(_) => {
+                            crate::app::state::ConfigValue::Bool(
+                                new_value.eq_ignore_ascii_case("true"),
+                            )
+                        }
+                        crate::app::state::ConfigValue::Number(_) => {
+                            crate::app::state::ConfigValue::Number(new_value.parse().unwrap_or(0))
+                        }
+                        crate::app::state::ConfigValue::Choice(options, _) => {
+                            let idx = options.iter().position(|o| o == &new_value).unwrap_or(0);
+                            crate::app::state::ConfigValue::Choice(options.clone(), idx)
+                        }
+                    };
+                    tracing::info!("Saved setting: {} = {}", setting.label, updated.display());
+                    state.config_screen_state.set_row_value(&setting.key, updated);
                 }
                 state.config_screen_state.editing = false;
                 state.config_screen_state.edit_buffer.clear();
@@ -6832,16 +6988,11 @@ impl EventHandler {
             }
             AppEvent::ConfigSaveAll => {
                 tracing::info!("Saving all settings to config file");
-
-                // Apply ConfigScreenState settings to AppConfig
-                state.config_screen_state.apply_to_app_config(&mut state.app_config);
-
-                // Save to disk
-                match state.app_config.save() {
-                    Ok(()) => {
-                        state.add_success_notification("Settings saved to config.toml".to_string());
-                        tracing::info!("Settings saved to ~/.agents-in-a-box/config/config.toml");
-                    }
+                match Self::persist_config_screen(state) {
+                    Ok(outcome) => match outcome.message() {
+                        Some(message) => state.add_success_notification(message),
+                        None => state.add_info_notification("No changes to save".to_string()),
+                    },
                     Err(e) => {
                         state.add_error_notification(format!("Failed to save settings: {}", e));
                         tracing::error!("Failed to save config: {}", e);
@@ -6871,16 +7022,12 @@ impl EventHandler {
                         // Update auth status to show API key configured
                         let masked = credentials::get_anthropic_api_key_masked();
                         let status = format!("API Key ({})", masked);
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(status);
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
                     }
                     Err(e) => {
                         state.add_error_notification(format!("Failed to save API key: {}", e));
@@ -6902,18 +7049,12 @@ impl EventHandler {
                         tracing::info!("API key successfully deleted from keychain");
 
                         // Update auth status to show system auth
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string(),
-                                );
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
                     }
                     Err(e) => {
                         state.add_error_notification(format!("Failed to delete API key: {}", e));
@@ -6956,17 +7097,12 @@ impl EventHandler {
                             // Update config screen status
                             let masked = credentials::get_anthropic_api_key_masked();
                             let status = format!("API Key ({})", masked);
-                            let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) =
-                                state.config_screen_state.settings.get_mut(&auth_category)
-                            {
-                                if let Some(status_setting) =
-                                    settings.iter_mut().find(|s| s.key == "claude_auth")
-                                {
-                                    status_setting.value =
-                                        crate::app::state::ConfigValue::Text(status);
-                                }
-                            }
+                            // Reseed from the live config: this row is a registry Choice,
+                            // keyed by its dotted path, not the deleted `claude_auth` key.
+                            state.config_screen_state.reseed_row(
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                &state.app_config,
+                            );
 
                             // Persist auth provider to config.toml
                             state.app_config.authentication.claude_provider =
@@ -7004,18 +7140,12 @@ impl EventHandler {
                             let _ = credentials::delete_anthropic_api_key();
 
                             // Update config screen status
-                            let auth_category = crate::app::state::ConfigCategory::Authentication;
-                            if let Some(settings) =
-                                state.config_screen_state.settings.get_mut(&auth_category)
-                            {
-                                if let Some(status_setting) =
-                                    settings.iter_mut().find(|s| s.key == "claude_auth")
-                                {
-                                    status_setting.value = crate::app::state::ConfigValue::Text(
-                                        "System Auth (Pro/Max Plan)".to_string(),
-                                    );
-                                }
-                            }
+                            // Reseed from the live config: this row is a registry Choice,
+                            // keyed by its dotted path, not the deleted `claude_auth` key.
+                            state.config_screen_state.reseed_row(
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                &state.app_config,
+                            );
 
                             // Persist auth provider to config.toml
                             state.app_config.authentication.claude_provider =
@@ -7049,18 +7179,12 @@ impl EventHandler {
                         state.auth_provider_popup_state.refresh_providers();
 
                         // Update config screen
-                        let auth_category = crate::app::state::ConfigCategory::Authentication;
-                        if let Some(settings) =
-                            state.config_screen_state.settings.get_mut(&auth_category)
-                        {
-                            if let Some(status_setting) =
-                                settings.iter_mut().find(|s| s.key == "claude_auth")
-                            {
-                                status_setting.value = crate::app::state::ConfigValue::Text(
-                                    "System Auth (Pro/Max Plan)".to_string(),
-                                );
-                            }
-                        }
+                        // Reseed from the live config: this row is a registry Choice,
+                        // keyed by its dotted path, not the deleted `claude_auth` key.
+                        state.config_screen_state.reseed_row(
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            &state.app_config,
+                        );
 
                         // Persist switch to system auth in config.toml
                         state.app_config.authentication.claude_provider =
@@ -7086,74 +7210,93 @@ impl EventHandler {
 
                 if let Some(value) = state.config_popup_state.get_value() {
                     let setting_key = state.config_popup_state.setting_key.clone();
-                    let current_category = state.config_screen_state.categories
-                        [state.config_screen_state.selected_category];
 
-                    // Update the setting value
-                    if let Some(settings) =
-                        state.config_screen_state.settings.get_mut(&current_category)
-                    {
-                        if let Some(setting) = settings.iter_mut().find(|s| s.key == setting_key) {
-                            match value {
-                                ConfigPopupValue::Choice(text, idx) => {
-                                    if let crate::app::state::ConfigValue::Choice(opts, _) =
-                                        &setting.value
-                                    {
-                                        setting.value = crate::app::state::ConfigValue::Choice(
-                                            opts.clone(),
-                                            idx,
-                                        );
+                    // Ctrl+K flow: the popup collected a plaintext credential.
+                    // It goes to the OS keychain and the row keeps only the
+                    // reference, so the literal never reaches config.toml.
+                    let keychain_row = state
+                        .config_screen_state
+                        .keychain_target
+                        .take()
+                        .filter(|k| *k == setting_key);
+                    if let Some(row_key) = keychain_row {
+                        if let ConfigPopupValue::Text(literal) = &value {
+                            Self::store_secret_in_keychain(state, &row_key, literal);
+                        }
+                        state.config_popup_state.close();
+                    } else {
+                        let updated = match &value {
+                            ConfigPopupValue::Choice(_, idx) => state
+                                .config_screen_state
+                                .current_setting()
+                                .and_then(|row| match &row.value {
+                                    crate::app::state::ConfigValue::Choice(options, _) => {
+                                        Some(crate::app::state::ConfigValue::Choice(
+                                            options.clone(),
+                                            *idx,
+                                        ))
                                     }
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        text
-                                    );
-                                }
-                                ConfigPopupValue::Text(text) => {
-                                    setting.value =
-                                        crate::app::state::ConfigValue::Text(text.clone());
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        text
-                                    );
-                                }
-                                ConfigPopupValue::Boolean(b) => {
-                                    setting.value = crate::app::state::ConfigValue::Bool(b);
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        b
-                                    );
-                                }
-                                ConfigPopupValue::Number(n) => {
-                                    setting.value = crate::app::state::ConfigValue::Number(n);
-                                    tracing::info!(
-                                        "Config setting {} changed to: {}",
-                                        setting_key,
-                                        n
-                                    );
+                                    _ => None,
+                                }),
+                            ConfigPopupValue::Text(text) => {
+                                // A secret row edits its reference, so the text has
+                                // to go back as a reference, not as a plain value.
+                                match state.config_screen_state.current_setting().map(|r| &r.value)
+                                {
+                                    Some(crate::app::state::ConfigValue::Secret(_)) => {
+                                        Some(crate::app::state::ConfigValue::Secret(
+                                            crate::app::state::SecretValue {
+                                                reference: text.clone(),
+                                                // A `keychain:` reference is
+                                                // taken at face value, exactly
+                                                // as `ConfigRow::to_value`
+                                                // does. Resolving it here means
+                                                // a keyring read plus a
+                                                // `security` shell-out, each
+                                                // bounded at 5s, on the event
+                                                // loop — up to ~10s of frozen
+                                                // TUI against a locked
+                                                // keychain, just for a status
+                                                // dot.
+                                                resolved: secret_reference_is_set(text),
+                                            },
+                                        ))
+                                    }
+                                    _ => Some(crate::app::state::ConfigValue::Text(text.clone())),
                                 }
                             }
-                        }
-                    }
+                            ConfigPopupValue::Boolean(b) => {
+                                Some(crate::app::state::ConfigValue::Bool(*b))
+                            }
+                            ConfigPopupValue::Number(n) => {
+                                Some(crate::app::state::ConfigValue::Number(*n))
+                            }
+                        };
 
-                    // Auto-persist: apply the edited settings to the live
-                    // config and write config.toml immediately, so the change
-                    // *becomes* the config (and survives a reopen/restart)
-                    // without the user having to remember `S` save-all. `S`
-                    // remains as an explicit save-all; `Esc` still cancels the
-                    // single edit before it reaches here.
-                    state.config_screen_state.apply_to_app_config(&mut state.app_config);
-                    match state.app_config.save() {
-                        Ok(()) => {
-                            state.add_success_notification(
-                                "Setting saved to config.toml".to_string(),
+                        if let Some(updated) = updated {
+                            tracing::info!(
+                                "Config setting {} changed to: {}",
+                                setting_key,
+                                updated.display()
                             );
+                            state.config_screen_state.set_row_value(&setting_key, updated);
                         }
-                        Err(e) => {
-                            state.add_error_notification(format!("Failed to save setting: {}", e));
+
+                        // Auto-persist: write config.toml immediately, so the change
+                        // *becomes* the config (and survives a reopen/restart)
+                        // without the user having to remember `S` save-all. `S`
+                        // remains as an explicit save-all; `Esc` still cancels the
+                        // single edit before it reaches here.
+                        match Self::persist_config_screen(state) {
+                            Ok(outcome) => {
+                                if let Some(message) = outcome.message() {
+                                    state.add_success_notification(message);
+                                }
+                            }
+                            Err(e) => {
+                                state
+                                    .add_error_notification(format!("Failed to save setting: {e}"));
+                            }
                         }
                     }
                 }
@@ -7161,6 +7304,12 @@ impl EventHandler {
             }
             AppEvent::ConfigPopupCancel => {
                 tracing::debug!("Config popup cancelled");
+                // A Ctrl+K prompt that is escaped must not leave the row armed:
+                // the next ordinary edit of that same row would be routed into
+                // the keychain, storing the typed "$MY_TOKEN" as a secret and
+                // rewriting the row to a `keychain:` ref — silently discarding
+                // the env reference the user actually asked for.
+                state.config_screen_state.keychain_target = None;
                 state.config_popup_state.close();
             }
             AppEvent::ConfigPopupInputChar(c) => {
@@ -8940,10 +9089,6 @@ mod panel_back_tests {
             ids::SESSION_LIST,
             "Daemons must pop back to the screen it was opened from"
         );
-        assert!(
-            state.daemons_overlay.is_none(),
-            "leaving Daemons must not leave the old popup behind"
-        );
     }
 
     /// `q` on the Daemons screen behaves identically to Esc.
@@ -8957,80 +9102,6 @@ mod panel_back_tests {
 
         let event = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Char('q')), &mut state);
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
-    }
-
-    /// `R` restarts the SELECTED daemon, and the selection is movable.
-    ///
-    /// The overlay previously hardcoded `R` to notifyd and had no cursor, so an
-    /// already-running daemon on a stale binary — the state a `brew upgrade`
-    /// leaves behind — could not be cycled from the TUI at all. Selection
-    /// saturates rather than wraps, so holding a direction parks at an end
-    /// instead of silently cycling past it.
-    #[test]
-    fn daemons_overlay_restarts_the_selected_row() {
-        use crate::app::state::DaemonRow;
-
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-
-        let mut state = AppState::default();
-        EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
-
-        let selected = |s: &AppState| s.daemons_overlay.as_ref().map(|o| o.selected);
-        assert_eq!(
-            selected(&state),
-            Some(DaemonRow::ORDER[0]),
-            "selection starts on the first row"
-        );
-
-        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
-        assert_eq!(selected(&state), Some(DaemonRow::Headroom));
-
-        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
-        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
-
-        // Saturates at the top rather than wrapping to the bottom.
-        EventHandler::process_event(AppEvent::DaemonsOverlaySelect(-1), &mut state);
-        assert_eq!(selected(&state), Some(DaemonRow::Mcp));
-
-        // ...and at the bottom.
-        for _ in 0..10 {
-            EventHandler::process_event(AppEvent::DaemonsOverlaySelect(1), &mut state);
-        }
-        assert_eq!(selected(&state), Some(DaemonRow::Notifyd));
-
-        // Key routing is NOT asserted here: `GoToDaemons` opens the Daemons
-        // SCREEN, whose arrows drive that screen's cursor, not this overlay's.
-        // `daemons_screen_keys_drive_the_screen_cursor_not_the_overlay` owns
-        // that contract — conflating the two is what shipped a cursor nobody
-        // could reach.
-    }
-
-    /// Every row is labelled, and the labels are distinct.
-    ///
-    /// Deliberately does NOT call `spawn_daemon_restart`: each arm performs
-    /// REAL daemon lifecycle work (SIGTERM the running owner, respawn, poll a
-    /// socket). Driving that from a unit test kills the daemons on whatever
-    /// machine runs the suite and hangs CI — which is exactly what it did, so
-    /// the dispatch itself is covered by the compiler instead. The match in
-    /// `spawn_daemon_restart` is exhaustive over `DaemonRow`, so a new row
-    /// cannot be added without giving it an arm.
-    #[test]
-    fn every_daemon_row_is_labelled_distinctly() {
-        use crate::app::state::DaemonRow;
-        use std::collections::HashSet;
-
-        let mut seen = HashSet::new();
-        for row in DaemonRow::ORDER {
-            let label = row.label();
-            assert!(!label.is_empty(), "{row:?} needs a label");
-            assert!(
-                seen.insert(label),
-                "{row:?} reuses the label {label:?}; the restart status line \
-                 would then name the wrong daemon"
-            );
-        }
-        assert_eq!(seen.len(), DaemonRow::ORDER.len());
     }
 
     /// `d` reaches the Daemons SCREEN, and its keys drive that screen's cursor.
@@ -9076,17 +9147,8 @@ mod panel_back_tests {
     fn daemons_repair_key_routing() {
         use crossterm::event::{KeyCode, KeyEvent};
 
-        // Opening the unified screen fires the first lazy fetch, so this test
-        // needs a live reactor.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let _guard = rt.enter();
-
         let mut state = AppState::default();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
-        assert!(
-            state.daemons_overlay.is_some(),
-            "runtime probe must be armed"
-        );
 
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
@@ -9095,8 +9157,12 @@ mod panel_back_tests {
             Some(AppEvent::DaemonsRepairHooks)
         ));
         assert!(matches!(
+            route(&mut state, KeyCode::Char('B')),
+            Some(AppEvent::DaemonsPinHookBinary)
+        ));
+        assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
-            Some(AppEvent::DaemonsOverlayRefresh)
+            Some(AppEvent::DaemonsRefresh)
         ));
         // The one-key-per-daemon actions are gone. `M` (mcp), `P` (headroom)
         // and `S` (hangar) wrote status fields whose only renderer was the
@@ -9409,7 +9475,7 @@ mod panel_back_tests {
         impl Drop for SessionGuard {
             fn drop(&mut self) {
                 let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &self.0])
+                    .args(["kill-session", "-t", &format!("={}", self.0)])
                     .status();
             }
         }
@@ -10033,22 +10099,49 @@ mod text_input_guard_tests {
     /// boards-specific special case.
     #[test]
     fn plugin_text_capture_flag_flips_text_input_context() {
-        // Baseline: a focused plugin screen with NO capture flag is navigable —
-        // `H`/`?` still toggle help (this is the pre-fix behaviour that swallowed
-        // characters typed into a plugin overlay).
+        // A focused plugin screen with NO capture flag is NOT text-input (the
+        // fallthrough short-circuit must stay off so Ctrl+C / Esc / q keep
+        // working when the plugin is unavailable)...
         let mut state = AppState::default();
         state.current_screen = screen_ids::HANGAR.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "plugin screen without the capture flag must NOT be text-input"
         );
-        // The host would eat `H` as the help toggle here — the 8hx bug.
+        // ...but `H` is still not a host help toggle there: hangar renders its
+        // own help, and the capture flag lags a frame, so the host owning `H`
+        // stole the first keystrokes into every hangar text field.
         assert!(
-            matches!(
+            !matches!(
                 EventHandler::handle_key_event(char_key('H'), &mut state),
                 Some(AppEvent::ToggleHelp)
             ),
-            "precondition: without capture, H toggles help on a plugin screen"
+            "H never toggles host help on a plugin screen that owns its help"
+        );
+        // Esc / q / Ctrl+C still reach the host fallthrough on that screen
+        // (the plugin runtime is absent in this test, exactly the unavailable-
+        // plugin placeholder case).
+        assert!(
+            EventHandler::handle_key_event(
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut state
+            )
+            .is_some(),
+            "Esc must not be swallowed on a plugin screen"
+        );
+        assert!(
+            matches!(
+                EventHandler::handle_key_event(
+                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    &mut state
+                ),
+                Some(AppEvent::Quit)
+            ),
+            "Ctrl+C must still quit from a plugin screen"
+        );
+        assert!(
+            EventHandler::handle_key_event(char_key('q'), &mut state).is_some(),
+            "q must still reach the host fallthrough on a plugin screen"
         );
 
         // Declare text-capture (as the plugin's frame would via
@@ -10361,5 +10454,112 @@ mod configure_back_persist_tests {
         let mut defaults = SessionDefaults::default();
         defaults.per_repo.insert("owner/repo".to_string(), Default::default());
         assert!(worth_persisting_repo_defaults("", &defaults, "owner/repo"));
+    }
+}
+
+#[cfg(test)]
+mod hangar_daemon_persist_tests {
+    use super::*;
+    use crate::app::state::{AppState, ConfigValue};
+
+    /// Point HOME at a tempdir for the duration of the test.
+    ///
+    /// `AppState::default()` calls the real `AppConfig::load()`, and
+    /// `persist_config_screen` can reach `save()` — so without this these tests
+    /// wrote the developer's own `~/.agents-in-a-box/config/config.toml`,
+    /// appended real audit entries, and mutated the process-wide tunables
+    /// snapshot that other tests in this binary read. Serialised, because the
+    /// environment is process-global and cargo runs tests in parallel.
+    fn with_isolated_home<T>(body: impl FnOnce() -> T) -> T {
+        // The crate-wide lock, not a private one: sibling tests call
+        // `AppConfig::load()` and `snapshot()`, which read this same HOME.
+        let _guard =
+            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+        let out = body();
+        match previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    /// Two Hangar-daemon edits confirmed inside one app tick must BOTH be
+    /// written.
+    ///
+    /// `persist_config_screen` used to assign `pending_async_action`, a slot
+    /// that holds exactly one action and is drained once per 250 ms tick, while
+    /// persist runs on every popup confirm. So the first edit was silently
+    /// dropped and both got a success toast. Before the queue this fails with
+    /// `assertion `left == right` failed: left: 1, right: 2`.
+    #[test]
+    fn two_daemon_edits_in_one_tick_are_both_queued() {
+        with_isolated_home(|| {
+            let mut state = AppState::default();
+
+            state
+                .config_screen_state
+                .set_row_value("hangar_daemon.autostandup.enabled", ConfigValue::Bool(true));
+            EventHandler::persist_config_screen(&mut state).expect("first persist");
+
+            state.config_screen_state.set_row_value(
+                "hangar_daemon.autostandup.stagnant_min",
+                ConfigValue::Number(30),
+            );
+            EventHandler::persist_config_screen(&mut state).expect("second persist");
+
+            let queued: Vec<&str> =
+                state.pending_daemon_config_edits.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(
+                queued.len(),
+                2,
+                "both edits must survive until the tick drains them, got {queued:?}"
+            );
+            assert!(queued.contains(&"autostandup.enabled"), "{queued:?}");
+            assert!(queued.contains(&"autostandup.stagnant_min"), "{queued:?}");
+        });
+    }
+
+    /// A daemon row is NOT reported as saved to config.toml: it has not been
+    /// written anywhere yet, and its SQLite write can still fail with its own
+    /// error toast on the next tick.
+    #[test]
+    fn a_daemon_row_is_not_reported_as_saved_to_config_toml() {
+        with_isolated_home(|| {
+            let mut state = AppState::default();
+            state
+                .config_screen_state
+                .set_row_value("hangar_daemon.autostandup.enabled", ConfigValue::Bool(true));
+
+            let outcome = EventHandler::persist_config_screen(&mut state).expect("persist");
+            assert_eq!(outcome.written, 0, "nothing reached config.toml");
+            assert_eq!(outcome.queued_for_daemon, 1);
+            let message = outcome.message().expect("a daemon edit is still a change");
+            assert!(
+                !message.contains("config.toml"),
+                "a daemon row must not claim config.toml: {message}"
+            );
+            assert!(message.contains("Hangar daemon"), "{message}");
+        });
+    }
+
+    /// A config.toml row keeps its own wording, so the split does not make the
+    /// ordinary case vaguer.
+    #[test]
+    fn a_config_toml_row_still_reports_config_toml() {
+        with_isolated_home(|| {
+            let outcome = PersistOutcome {
+                written: 2,
+                queued_for_daemon: 0,
+            };
+            assert_eq!(
+                outcome.message().unwrap(),
+                "Saved 2 setting(s) to config.toml"
+            );
+            assert!(PersistOutcome::default().message().is_none());
+        });
     }
 }

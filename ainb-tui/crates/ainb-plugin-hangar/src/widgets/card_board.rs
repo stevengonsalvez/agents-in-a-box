@@ -30,13 +30,14 @@
 //! │ HGR-9            │      ┃ HGR-12           ┃    heavy clay border)
 //! │ Refactor the API │      ┃ Wire the mouse   ┃
 //! │ layer end to end │      ┃ hit-test into …  ┃  ← title, 2 lines, ellipsis
-//! │ ◆ Urgent      ◔a │      ┃ ◆ High        ◔c ┃  ← priority chip + assignee
+//! │ ◆ Urgent ◔ impl-1│      ┃ ◔ rev-1 · run 2m ┃  ← footer, swaps by state
 //! ╰──────────────────╯      ╰──────────────────╯
 //! ```
 //!
 //! The id line is muted; the title wraps to two lines with an ellipsis on
-//! overflow; the footer carries a colour-coded priority chip
-//! ([`PriorityChip`]) and an assignee glyph. A selected card swaps the rounded
+//! overflow; the footer swaps by state (crisp B2 §2.2) — the attention code when
+//! something is asking, else the run chip, else the colour-coded priority chip
+//! ([`PriorityChip`]) with an assignee glyph. A selected card swaps the rounded
 //! border for a heavy "clay" border so the eye lands on it immediately.
 //!
 //! ## Empty columns
@@ -51,6 +52,8 @@
 //! 80×24 floor (`project_ainb_tui_width_aware_panels`).
 
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
+
+use crate::vocab::{AttentionKind, RunState};
 
 /// A laid-out card: a column item drawn at `rect`, tagged with the issue id it
 /// renders. P0.2 hit-tests a click against `rect` to resolve the clicked card.
@@ -172,9 +175,11 @@ pub struct BoardCard {
     pub title: String,
     /// The priority chip rendered in the footer.
     pub priority: PriorityChip,
-    /// The assignee's initial glyph in the footer (the first char of the
-    /// `type:id` assignee), or `None` when unassigned.
-    pub assignee_initial: Option<char>,
+    /// The assignee's display name painted flush-right in the footer as
+    /// `◔ <name>` (crisp B1, defect 8: the roster name, never the first char of
+    /// a ULID), or `None` when unassigned. Clipped to the room the priority
+    /// chip leaves, so a long name loses its tail rather than the chip.
+    pub assignee: Option<String>,
     /// Whether the issue links an upstream GitHub/Jira issue (`issue.external_ref`,
     /// 0043): drives a subtle `⧉` glyph flush-right on the id line for traceability.
     pub linked: bool,
@@ -188,6 +193,78 @@ pub struct BoardCard {
     /// so "this is not running, and there is a reason" is discoverable from the
     /// board without opening the card. The reason itself is on the detail card.
     pub not_dispatched: bool,
+    /// This card's latest run (crisp B2 §2.2), or `None` when it never ran.
+    ///
+    /// A card with a run wears `◔ impl-1 · running 2m` in its footer INSTEAD of
+    /// the priority chip — a running card and an untouched backlog card used to
+    /// render identically, which is the whole defect.
+    pub run: Option<RunChip>,
+    /// The PR the card's run opened, or `None` when it opened none. Rides the run
+    /// footer as a trailing `· PR ✓`; a card with no run never paints it (there is
+    /// no row to put it on).
+    pub pr: Option<PrChip>,
+    /// The attention this card is waiting on (crisp B2 §2.2), or `None` when
+    /// nothing is asking. Outranks the run in the footer: "this asked you" is the
+    /// only card state an operator must act on.
+    ///
+    /// No caller sets this yet — the attention feed carries a session id and no
+    /// issue, so projecting it onto a card is B3's job (`crisp-ui-track.md` §2.4),
+    /// which makes the Inbox the one attention surface. The footer branch lands
+    /// here so B3 wires a feed, not a widget.
+    pub attention: Option<AttentionKind>,
+}
+
+/// A card's latest run, rendered as the footer `◔ <agent> · <state> <elapsed>`.
+///
+/// Carries only what the footer paints: the roster NAME (never a raw ULID — crisp
+/// B1, defect 8), the state as one of the five vocabulary words, and the age.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunChip {
+    /// The agent doing the work, resolved to its display name, or `None` when the
+    /// surface has no agent to name (a Boards wire card carries none).
+    pub agent: Option<String>,
+    /// The run's state in the shared vocabulary ([`crate::vocab`]).
+    pub state: RunState,
+    /// Milliseconds since the run was CREATED, or `None` when the surface has no
+    /// stamp (the age is then simply omitted, never faked as `0s`).
+    ///
+    /// Creation, not start: the issue list fills this from `last_run_at`, which
+    /// is when the task row was written, so a task that sat queued for five
+    /// minutes and has been running for thirty seconds reads `running 5m`. That
+    /// is the same age the Kanban tile has always shown, and the daemon sends no
+    /// separate start stamp to do better with.
+    pub elapsed_ms: Option<i64>,
+}
+
+/// The CI rollup of the PR a card's run opened, painted as `PR ✓` / `PR ✗` /
+/// `PR …` after the run state.
+///
+/// [`Self::Unknown`] paints a bare `PR` for a surface that knows a PR exists but
+/// has no rollup for it (the issue list: `IssueRow` carries `pr_url` and no CI).
+/// Printing `…` there would claim "checks pending" for something nothing measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrChip {
+    /// Every check passed.
+    Pass,
+    /// At least one check failed.
+    Fail,
+    /// Checks are still in flight.
+    Pending,
+    /// A PR exists; this surface has no rollup for it.
+    Unknown,
+}
+
+impl PrChip {
+    /// The chip text, glyph included (`PR ✓`, or a bare `PR` when unknown).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "PR ✓",
+            Self::Fail => "PR ✗",
+            Self::Pending => "PR …",
+            Self::Unknown => "PR",
+        }
+    }
 }
 
 /// One status column's input to the board.
@@ -316,6 +393,13 @@ const CARD_BORDER: Color = Color::rgb(70, 80, 110);
 /// Amber warning accent — the same band `unstable` presence uses. Marks a card
 /// whose newest dispatch attempt was declined (multica parity #12).
 const WARN_AMBER: Color = Color::rgb(230, 190, 90);
+/// Failure red, shared by the `✗ failed` run glyph and the Failed column accent.
+const FAIL_RED: Color = Color::rgb(220, 90, 90);
+/// Success green, shared by the `● done` run glyph and the Done column accent.
+const DONE_GREEN: Color = Color::rgb(110, 200, 130);
+/// In-flight amber, shared by the `◔ running` run glyph and the In Progress
+/// column accent — a running card reads the same colour wherever it is painted.
+const RUNNING_AMBER: Color = Color::rgb(235, 185, 80);
 const CARD_BG: Color = Color::rgb(30, 30, 40);
 /// Selected-card fill (the palette list-highlight background).
 const CARD_BG_SELECTED: Color = Color::rgb(40, 40, 60);
@@ -571,7 +655,11 @@ fn render_header_affordances(buf: &mut WireBuffer, x0: u16, y: u16, col_w: u16) 
 /// - row 0: top border
 /// - row 1: the muted id line (`HGR-9`)
 /// - rows 2..=3: the title, wrapped to two lines with an ellipsis
-/// - row 4: the footer — priority chip (left) + assignee initial (right)
+/// - row 4: the footer, which SWAPS by state (crisp B2 §2.2):
+///   `● impl-1 · ASK 40s` when something is asking, else
+///   `◔ impl-1 · running 2m · PR ✓` when it has a run, else the priority chip
+///   (left, dropped entirely when the priority is the default) + `◔ <assignee>`
+///   (right) + the `⊟ done/total` sub-issue badge
 /// - row 5: bottom border
 fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: bool) {
     let border_color = if selected { CLAY } else { CARD_BORDER };
@@ -647,33 +735,83 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
         inner_right,
     );
 
-    // Footer: priority chip on the left, assignee initial flushed right.
-    let footer_y = rect.y.saturating_add(4);
-    let chip = format!("{} {}", card.priority.glyph(), card.priority.label());
-    put_str_bg(
+    render_footer(
         buf,
-        inner_x,
-        footer_y,
-        &clip(&chip, inner_w),
-        card.priority.color(),
+        (inner_x, rect.y.saturating_add(4), inner_right),
         fill,
-        inner_right,
+        card,
     );
-    if let Some(initial) = card.assignee_initial {
-        // `◔<initial>` flushed to the right edge of the content area.
-        let glyph_x = inner_right.saturating_sub(2);
-        let init_x = inner_right.saturating_sub(1);
-        if glyph_x >= inner_x {
+}
+
+/// Paint the card's footer row, which SWAPS by state (crisp B2 §2.2) rather than
+/// growing a row — `CARD_ROWS` is untouched, so no column loses capacity.
+///
+/// Priority: attention (`● impl-1 · ASK 40s`) > run (`◔ impl-1 · running 2m`) >
+/// the resting priority chip + assignee + sub-issue badge.
+///
+/// `pos` is `(inner_x, row, inner_right)` — the footer's writable span.
+fn render_footer(buf: &mut WireBuffer, pos: (u16, u16, u16), fill: Color, card: &BoardCard) {
+    let (inner_x, footer_y, inner_right) = pos;
+    let inner_w = inner_right.saturating_sub(inner_x);
+    if let Some(kind) = card.attention {
+        return render_state_footer(
+            buf,
+            pos,
+            fill,
+            (AttentionKind::GLYPH, attention_color(kind)),
+            &attention_footer_text(kind, card.run.as_ref()),
+        );
+    }
+    if let Some(run) = card.run.as_ref() {
+        return render_state_footer(
+            buf,
+            pos,
+            fill,
+            (run.state.glyph(), run_color(run.state)),
+            &run_footer_text(run, card.pr, inner_w),
+        );
+    }
+
+    // Resting footer: priority chip on the left, `◔ <assignee>` flushed right.
+    // `◇ None` is the DEFAULT priority, so it carried zero information on 100% of
+    // untriaged cards — the chip is dropped entirely rather than painted (§2.2).
+    let chip = (card.priority != PriorityChip::None)
+        .then(|| format!("{} {}", card.priority.glyph(), card.priority.label()));
+    let chip_w = chip
+        .as_ref()
+        .map_or(0, |c| u16::try_from(c.chars().count()).unwrap_or(u16::MAX));
+    if let Some(chip) = &chip {
+        put_str_bg(
+            buf,
+            inner_x,
+            footer_y,
+            &clip(chip, inner_w),
+            card.priority.color(),
+            fill,
+            inner_right,
+        );
+    }
+    // The name takes whatever the chip leaves (minus a one-cell gap), clipped by
+    // chars; the roll-up badge below keeps clear of it. A card too narrow for
+    // even `◔ x` drops the assignee rather than painting a stray glyph.
+    let mut badge_right = inner_right;
+    if let Some(name) = card.assignee.as_deref() {
+        let room = inner_w.saturating_sub(chip_w).saturating_sub(1);
+        let name = clip(name, room.saturating_sub(2));
+        if !name.is_empty() {
+            let name_w = u16::try_from(name.chars().count()).unwrap_or(0);
+            let glyph_x = inner_right.saturating_sub(name_w).saturating_sub(2);
             put_char_bg(buf, glyph_x, footer_y, '◔', ID_ACCENT, fill, inner_right);
-            put_char_bg(
+            put_str_bg(
                 buf,
-                init_x,
+                glyph_x.saturating_add(2),
                 footer_y,
-                initial,
+                &name,
                 SOFT_WHITE,
                 fill,
                 inner_right,
             );
+            badge_right = glyph_x.saturating_sub(1);
         }
     }
 
@@ -684,11 +822,13 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
     if let Some((done, total)) = card.subtasks {
         if total > 0 {
             let badge = format!("⊟ {done}/{total}");
-            let badge_x =
-                inner_x.saturating_add(u16::try_from(chip.chars().count() + 1).unwrap_or(0));
+            // Flush left when the priority chip was dropped, else one cell past it.
+            let badge_x = if chip_w == 0 {
+                inner_x
+            } else {
+                inner_x.saturating_add(chip_w).saturating_add(1)
+            };
             let color = if done >= total { GOLD } else { MUTED_GRAY };
-            // Keep clear of the flush-right assignee glyph (2 cells wide).
-            let badge_right = inner_right.saturating_sub(3);
             // Render the badge ONLY when the WHOLE thing fits before `badge_right`
             // (CodeRabbit): a clipped `⊟ 1/` fragment misreads the roll-up, so a
             // narrow card omits the badge entirely rather than truncating it.
@@ -697,6 +837,130 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
                 put_str_bg(buf, badge_x, footer_y, &badge, color, fill, badge_right);
             }
         }
+    }
+}
+
+/// Paint a state footer: the state glyph in its own colour, then the rest of the
+/// line in the card's text colour, clipped at the card's inner right edge.
+///
+/// `pos` is `(inner_x, row, inner_right)` — the footer's writable span.
+fn render_state_footer(
+    buf: &mut WireBuffer,
+    pos: (u16, u16, u16),
+    fill: Color,
+    glyph: (char, Color),
+    text: &str,
+) {
+    let (x, row, right) = pos;
+    let after = put_char_bg(buf, x, row, glyph.0, glyph.1, fill, right);
+    put_str_bg(
+        buf,
+        after.saturating_add(1),
+        row,
+        text,
+        SOFT_WHITE,
+        fill,
+        right,
+    );
+}
+
+/// The run footer's text after the glyph: `<agent> · <state> <elapsed> · PR ✓`,
+/// shortened to the widest form that FITS rather than clipped.
+///
+/// A card is 21 cells on a seven-column board and 11 at the 80×24 floor, so this
+/// line runs out of room routinely. Clipping it from the tail loses the state
+/// first (`◔ impl-1 · `), which is the one thing the footer exists to say, so the
+/// parts are shed in reverse order of worth instead: the PR chip, then the agent,
+/// then the age, leaving `◔ running`. The PR chip in particular is never cut — a
+/// clipped `· PR` reads as "a PR with no checks", a different and wrong claim.
+fn run_footer_text(run: &RunChip, pr: Option<PrChip>, inner_w: u16) -> String {
+    // The caller paints the glyph and its trailing space before this text.
+    let room = usize::from(inner_w).saturating_sub(2);
+    let state = run.elapsed_ms.map_or_else(
+        || run.state.word().to_string(),
+        |elapsed| format!("{} {}", run.state.word(), elapsed_label(elapsed)),
+    );
+    let named = run
+        .agent
+        .as_deref()
+        .map_or_else(|| state.clone(), |agent| format!("{agent} · {state}"));
+    // Each form is a strict subsequence of the one above it, so a WIDER card can
+    // never show less than a narrower one. The last is the floor (the state word
+    // alone), clipped by the painter only on a sliver of a card.
+    let forms = [
+        pr.map(|pr| format!("{named} · {}", pr.label())),
+        Some(named),
+        Some(state),
+        Some(run.state.word().to_string()),
+    ];
+    let mut floor = String::new();
+    for form in forms.into_iter().flatten() {
+        if form.chars().count() <= room {
+            return form;
+        }
+        floor = form;
+    }
+    floor
+}
+
+/// The attention footer's text after the dot: `<agent> · ASK 40s`.
+///
+/// The agent and the age ride the card's run when it has one; an attention row
+/// with no run is still worth painting (`ASK` alone) — a human is waiting either
+/// way.
+fn attention_footer_text(kind: AttentionKind, run: Option<&RunChip>) -> String {
+    let mut line = String::new();
+    if let Some(agent) = run.and_then(|r| r.agent.as_deref()) {
+        line.push_str(agent);
+        line.push_str(" · ");
+    }
+    line.push_str(kind.code());
+    if let Some(elapsed) = run.and_then(|r| r.elapsed_ms) {
+        line.push(' ');
+        line.push_str(&elapsed_label(elapsed));
+    }
+    line
+}
+
+/// A run age in the tightest readable unit: `40s`, `2m`, `3h`, `4d`.
+///
+/// Seconds matter here (unlike the Kanban tile's minute-resolution age): the card
+/// states this footer exists for — a run that just started, an ASK raised
+/// moments ago — all live inside the first minute, where a bare `0m` says nothing.
+/// A clock skew that puts the start in the future reads as `0s`, never negative.
+fn elapsed_label(elapsed_ms: i64) -> String {
+    let secs = elapsed_ms.max(0) / 1000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+/// The accent a run state paints its glyph in, shared with the matching board
+/// column accent so one run is one colour wherever it appears.
+const fn run_color(state: RunState) -> Color {
+    match state {
+        RunState::Queued | RunState::Cancelled => MUTED_GRAY,
+        RunState::Running => RUNNING_AMBER,
+        RunState::Done => DONE_GREEN,
+        RunState::Failed => FAIL_RED,
+    }
+}
+
+/// The accent an attention code paints its dot in: gold for a question (the
+/// colour the whole app uses for "you"), red for an error, amber for a wait,
+/// muted for an idle session nothing is blocked on.
+const fn attention_color(kind: AttentionKind) -> Color {
+    match kind {
+        AttentionKind::Ask => GOLD,
+        AttentionKind::Err => FAIL_RED,
+        AttentionKind::Idle => MUTED_GRAY,
+        AttentionKind::Wait => WARN_AMBER,
     }
 }
 
@@ -966,16 +1230,19 @@ mod tests {
     use super::*;
 
     /// A board card with the given id, title, priority and assignee.
-    fn card(id: &str, title: &str, priority: PriorityChip, assignee: Option<char>) -> BoardCard {
+    fn card(id: &str, title: &str, priority: PriorityChip, assignee: Option<&str>) -> BoardCard {
         BoardCard {
             not_dispatched: false,
             issue_id: id.to_string(),
             display_id: id.to_string(),
             title: title.to_string(),
             priority,
-            assignee_initial: assignee,
+            assignee: assignee.map(str::to_string),
             linked: false,
             subtasks: None,
+            run: None,
+            pr: None,
+            attention: None,
         }
     }
 
@@ -995,7 +1262,12 @@ mod tests {
             column(
                 '☰',
                 "Backlog",
-                vec![card("HGR-1", "Triage inbox", PriorityChip::Low, Some('a'))],
+                vec![card(
+                    "HGR-1",
+                    "Triage inbox",
+                    PriorityChip::Low,
+                    Some("alice"),
+                )],
             ),
             column(
                 '○',
@@ -1004,7 +1276,7 @@ mod tests {
                     "HGR-2",
                     "Write the parser",
                     PriorityChip::Medium,
-                    Some('b'),
+                    Some("bob"),
                 )],
             ),
             column(
@@ -1014,7 +1286,7 @@ mod tests {
                     "HGR-3",
                     "Refactor the API layer end to end",
                     PriorityChip::Urgent,
-                    Some('c'),
+                    Some("carol"),
                 )],
             ),
             column(
@@ -1024,7 +1296,7 @@ mod tests {
                     "HGR-4",
                     "Wire the mouse hit-test",
                     PriorityChip::High,
-                    Some('d'),
+                    Some("dana"),
                 )],
             ),
             column('●', "Done", vec![]), // empty column
@@ -1147,8 +1419,11 @@ mod tests {
         out.into_iter().collect()
     }
 
-    /// The full painted text (row-major) for substring assertions.
-    fn painted_text(buf: &WireBuffer) -> String {
+    /// The board's painted GRID as text, blank columns included, one line per
+    /// row. NOT [`crate::test_support::painted_text`], which concatenates only
+    /// the painted cells: these assertions pin LAYOUT (`◔ alice`, the glyph and
+    /// the name a blank column apart), which needs the gaps.
+    fn grid_text(buf: &WireBuffer) -> String {
         let mut out = String::new();
         for y in 0..buf.height {
             out.push_str(&row_text(buf, y, buf.width));
@@ -1163,7 +1438,7 @@ mod tests {
     fn renders_five_column_headers_with_counts() {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         for header in [
             "Backlog (1)",
             "Todo (1)",
@@ -1186,7 +1461,7 @@ mod tests {
     fn card_shows_id_title_and_priority_chip() {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         assert!(painted.contains("HGR-3"), "card id: {painted}");
         // The long title wraps — its leading chars appear.
         assert!(painted.contains("Refactor"), "card title: {painted}");
@@ -1203,18 +1478,233 @@ mod tests {
         );
     }
 
+    /// Crisp B1 (defect 8): the footer names the assignee (`◔ alice`), flush
+    /// right after the priority chip; a name too long for the room left by the
+    /// chip is clipped by chars, never allowed to overwrite the chip, and the
+    /// sub-issue badge stays clear of the name.
+    #[test]
+    fn card_footer_names_the_assignee_beside_the_priority_chip() {
+        let mut buf = WireBuffer::new(120, 24);
+        let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
+        let painted = grid_text(&buf);
+        assert!(painted.contains("◔ alice"), "named assignee: {painted}");
+        assert!(
+            painted.contains("◆ Urgent"),
+            "chip intact beside the name: {painted}"
+        );
+
+        // A 26-char name on a narrow card: the chip survives, the name clips.
+        let mut long = card(
+            "HGR-9",
+            "Ship it",
+            PriorityChip::High,
+            Some("01M1FHM2YSRSXZQFR29ZAYF56V"),
+        );
+        long.subtasks = Some((1, 2));
+        let columns = vec![column('○', "Todo", vec![long])];
+        let mut buf = WireBuffer::new(30, 12);
+        let _ = render_card_board(&mut buf, 30, 0, 11, &columns, None);
+        let footer = (0..12)
+            .map(|y| row_text(&buf, y, 30))
+            .find(|r| r.contains('◔'))
+            .expect("footer row painted");
+        assert!(
+            footer.contains("◆ High"),
+            "chip never overwritten: {footer}"
+        );
+        assert!(
+            footer.contains("◔ 01M1"),
+            "name clipped from the tail: {footer}"
+        );
+        assert!(
+            !footer.contains("AYF56V"),
+            "tail dropped, not the chip: {footer}"
+        );
+        assert!(
+            !footer.contains("⊟"),
+            "no room for the badge next to a long name, so it is omitted: {footer}"
+        );
+    }
+
+    /// A run chip in the given state, agent and age.
+    fn run(agent: Option<&str>, state: RunState, elapsed_ms: Option<i64>) -> RunChip {
+        RunChip {
+            agent: agent.map(str::to_string),
+            state,
+            elapsed_ms,
+        }
+    }
+
+    /// The footer row of a single-card board rendered at `w` cells.
+    fn footer_of(card: BoardCard, w: u16) -> String {
+        let columns = vec![column('◔', "In Progress", vec![card])];
+        let mut buf = WireBuffer::new(w, 12);
+        let _ = render_card_board(&mut buf, w, 0, 11, &columns, None);
+        // The footer is the 5th row of the card, which starts at the body top
+        // (row 2): border, id, title, title, footer.
+        row_text(&buf, 6, w)
+    }
+
+    /// Crisp B2 §2.2: a card with a live run wears its run in the footer —
+    /// `◔ impl-1 · running 2m · PR ✓` — instead of the priority chip. Before this,
+    /// a card mid-run rendered identically to an untouched backlog card.
+    #[test]
+    fn a_running_card_wears_its_run_in_the_footer() {
+        let mut card = card("HGR-3", "Add the endpoint", PriorityChip::High, Some("x"));
+        card.run = Some(run(Some("impl-1"), RunState::Running, Some(125_000)));
+        card.pr = Some(PrChip::Pass);
+        let footer = footer_of(card, 34);
+        assert!(
+            footer.contains("◔ impl-1 · running 2m · PR ✓"),
+            "run footer: {footer:?}"
+        );
+        assert!(
+            !footer.contains("High"),
+            "the run REPLACES the priority chip: {footer:?}"
+        );
+    }
+
+    /// The run glyph is painted in the run's own colour, not the card text
+    /// colour — a failed run and a done run must not read the same at a glance.
+    #[test]
+    fn the_run_glyph_carries_the_state_colour() {
+        for (state, color) in [
+            (RunState::Running, RUNNING_AMBER),
+            (RunState::Done, DONE_GREEN),
+            (RunState::Failed, FAIL_RED),
+        ] {
+            let mut card = card("HGR-3", "Ship it", PriorityChip::None, None);
+            card.run = Some(run(Some("impl-1"), state, Some(1_000)));
+            let columns = vec![column('◔', "In Progress", vec![card])];
+            let mut buf = WireBuffer::new(34, 12);
+            let _ = render_card_board(&mut buf, 34, 0, 11, &columns, None);
+            let glyph = state.glyph().to_string();
+            assert!(
+                buf.cells.iter().any(|(_, c)| c.symbol == glyph && c.fg == Some(color)),
+                "{state:?} must paint {glyph} in its own colour"
+            );
+        }
+    }
+
+    /// A card that is ASKING outranks its own run: the footer reads
+    /// `● impl-1 · ASK 40s`, because "this asked you" is the one card state an
+    /// operator has to act on.
+    #[test]
+    fn attention_outranks_the_run_in_the_footer() {
+        let mut card = card("HGR-7", "Decide the location", PriorityChip::Urgent, None);
+        card.run = Some(run(Some("impl-1"), RunState::Running, Some(40_000)));
+        card.attention = Some(AttentionKind::Ask);
+        let footer = footer_of(card, 34);
+        assert!(
+            footer.contains("● impl-1 · ASK 40s"),
+            "ask footer: {footer:?}"
+        );
+        assert!(
+            !footer.contains("running") && !footer.contains("Urgent"),
+            "attention replaces both the run and the chip: {footer:?}"
+        );
+    }
+
+    /// The age reads in the unit that carries information: seconds inside the
+    /// first minute (an ASK is answered in seconds), then minutes, hours, days.
+    #[test]
+    fn elapsed_reads_in_the_tightest_unit() {
+        assert_eq!(elapsed_label(40_000), "40s");
+        assert_eq!(elapsed_label(125_000), "2m");
+        assert_eq!(elapsed_label(3 * 3_600_000), "3h");
+        assert_eq!(elapsed_label(4 * 86_400_000), "4d");
+        // A start stamp in the future (clock skew) reads as 0s, never negative.
+        assert_eq!(elapsed_label(-5_000), "0s");
+    }
+
+    /// A run with no start stamp prints no age rather than a fabricated `0s`, and
+    /// a run with no named agent still names its state.
+    #[test]
+    fn a_run_omits_what_it_does_not_know() {
+        let mut card = card("HGR-3", "Ship it", PriorityChip::None, None);
+        card.run = Some(run(None, RunState::Queued, None));
+        let footer = footer_of(card, 34);
+        assert!(footer.contains("○ queued"), "state alone: {footer:?}");
+        assert!(!footer.contains('s'), "no fabricated age: {footer:?}");
+    }
+
+    /// A narrow card sheds the run footer's parts in reverse order of worth —
+    /// the PR chip, then the agent, then the age — so the STATE always survives.
+    ///
+    /// Tail-clipping instead would leave `◔ impl-1 · ` on the 80×24 floor: the
+    /// one fact the footer exists to carry, gone, and the card back to looking
+    /// exactly like an idle one. Each form is a subsequence of the wider one, so
+    /// widening a card can never show LESS.
+    #[test]
+    fn a_narrow_run_footer_sheds_parts_instead_of_clipping() {
+        let mut card = card("HGR-3", "Ship it", PriorityChip::None, None);
+        card.run = Some(run(Some("impl-1"), RunState::Running, Some(125_000)));
+        card.pr = Some(PrChip::Pass);
+
+        // 25 cells: room for the agent and the state, not the PR chip.
+        let footer = footer_of(card.clone(), 25);
+        assert!(
+            footer.contains("◔ impl-1"),
+            "the agent survives: {footer:?}"
+        );
+        assert!(
+            footer.contains("running 2m"),
+            "so does the state: {footer:?}"
+        );
+        assert!(!footer.contains("PR"), "the chip is dropped: {footer:?}");
+
+        // 15 cells: the agent goes too.
+        let footer = footer_of(card.clone(), 15);
+        assert!(
+            footer.contains("◔ running 2m"),
+            "the state is the last thing standing: {footer:?}"
+        );
+        assert!(!footer.contains("impl"), "the agent is dropped: {footer:?}");
+
+        // 13 cells (the card the 80×24 floor produces): the age goes rather than
+        // the word being cut into `running 2`.
+        let footer = footer_of(card, 13);
+        assert!(
+            footer.contains("◔ running"),
+            "the word is whole: {footer:?}"
+        );
+        assert!(!footer.contains("2m"), "the age is dropped: {footer:?}");
+    }
+
+    /// `◇ None` is the DEFAULT priority, so it printed on every untriaged card and
+    /// said nothing. The chip is dropped entirely; an explicit priority still
+    /// prints, and the sub-issue badge slides left into the freed space.
+    #[test]
+    fn the_default_priority_chip_never_prints() {
+        let mut untriaged = card("HGR-1", "Triage me", PriorityChip::None, None);
+        untriaged.subtasks = Some((1, 2));
+        let footer = footer_of(untriaged, 34);
+        assert!(!footer.contains('◇'), "no hollow chip: {footer:?}");
+        assert!(!footer.contains("None"), "no `None` label: {footer:?}");
+        assert!(
+            footer.trim_start_matches(['│', '┃']).starts_with("⊟ 1/2"),
+            "the badge takes the chip's place, flush against the border: {footer:?}"
+        );
+
+        let explicit = card("HGR-2", "Fix it", PriorityChip::High, None);
+        assert!(
+            footer_of(explicit, 34).contains("◆ High"),
+            "an explicit priority still prints"
+        );
+    }
+
     /// multica parity #12: a card whose newest dispatch attempt was DECLINED
     /// wears an amber `⚠` beside its id, so "this is not running" is discoverable
     /// from the board without opening the card. A healthy card wears none.
     #[test]
     fn undispatched_card_shows_the_warning_glyph() {
-        let mut warned = card("HGR-9", "Ship it", PriorityChip::Low, Some('a'));
+        let mut warned = card("HGR-9", "Ship it", PriorityChip::Low, Some("alice"));
         warned.not_dispatched = true;
         let cols = vec![column('☰', "Backlog", vec![warned])];
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &cols, None);
         assert!(
-            painted_text(&buf).contains('⚠'),
+            grid_text(&buf).contains('⚠'),
             "a declined card shows the ⚠ glyph"
         );
         assert!(
@@ -1226,7 +1716,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
         assert!(
-            !painted_text(&buf).contains('⚠'),
+            !grid_text(&buf).contains('⚠'),
             "healthy cards show no warning glyph"
         );
     }
@@ -1235,13 +1725,13 @@ mod tests {
     /// id line; a card with `linked: false` shows none.
     #[test]
     fn linked_card_shows_the_link_glyph() {
-        let mut linked = card("HGR-9", "Ship it", PriorityChip::Low, Some('a'));
+        let mut linked = card("HGR-9", "Ship it", PriorityChip::Low, Some("alice"));
         linked.linked = true;
         let cols = vec![column('☰', "Backlog", vec![linked])];
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &cols, None);
         assert!(
-            painted_text(&buf).contains('⧉'),
+            grid_text(&buf).contains('⧉'),
             "linked card shows the ⧉ glyph"
         );
 
@@ -1249,7 +1739,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
         assert!(
-            !painted_text(&buf).contains('⧉'),
+            !grid_text(&buf).contains('⧉'),
             "unlinked cards show no link glyph"
         );
     }
@@ -1261,7 +1751,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         // Select the single card in column 2 (In Progress).
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), Some((2, 0)));
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         // Heavy top-left corner present (the rounded `╭` is the unselected look).
         assert!(painted.contains('┏'), "heavy border corner: {painted}");
         // And painted in clay.
@@ -1280,7 +1770,7 @@ mod tests {
     fn empty_column_shows_dashed_placeholder() {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         // The dashed edge glyph + caption mark the empty Done column.
         assert!(painted.contains('╌'), "dashed placeholder edge: {painted}");
         assert!(painted.contains("empty"), "placeholder caption: {painted}");
@@ -1314,7 +1804,7 @@ mod tests {
                             &format!("HGR-{i}-{j}"),
                             "A title long enough to wrap across two lines and then ellipsise",
                             PriorityChip::from_priority(i64::from(j % 4)),
-                            Some('z'),
+                            Some("zed"),
                         )
                     })
                     .collect();
@@ -1402,7 +1892,7 @@ mod tests {
 
         let mut buf = WireBuffer::new(40, 24);
         let layout = render_card_board(&mut buf, 40, 0, 23, &columns, None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
 
         // The scrolled-off cards never paint.
         assert!(
@@ -1515,7 +2005,7 @@ mod tests {
                 "HGR-1",
                 "日本語のタイトルはとても長いのでラップされる必要があります",
                 PriorityChip::High,
-                Some('あ'),
+                Some("あきら"),
             )],
         )];
         let mut buf = WireBuffer::new(40, 24);

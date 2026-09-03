@@ -29,6 +29,9 @@ const VALUE: Color = Color::rgb(220, 220, 230);
 /// workspace slug) always; `Description` only when the issue carries one
 /// (progressive disclosure). Each row is `Label: value`, the label in
 /// cornflower-blue and the value in soft-white, clipped at `width`.
+///
+/// `assignee_name` is the assignee's roster display name when the caller has
+/// resolved it (crisp B1, defect 8); `None` degrades to the ref's short id.
 pub fn render_sidebar(
     buf: &mut WireBuffer,
     x: u16,
@@ -36,12 +39,16 @@ pub fn render_sidebar(
     bottom: u16,
     width: u16,
     issue: &IssueRow,
+    assignee_name: Option<&str>,
 ) {
     let mut row = top;
     // Always-shown rows.
     row = put_field(buf, x, row, bottom, width, "Status", &issue.state);
-    let assignee = issue.assignee.as_deref().unwrap_or("unassigned");
-    row = put_field(buf, x, row, bottom, width, "Assignee", assignee);
+    // The shared fallback: a SHORT id before the roster lands, never the raw
+    // `agent:<ulid>` this row used to paint (crisp B1 review).
+    let assignee = crate::screen::assignee_label(assignee_name, issue.assignee.as_deref())
+        .unwrap_or_else(|| "unassigned".to_string());
+    row = put_field(buf, x, row, bottom, width, "Assignee", &assignee);
     row = put_field(buf, x, row, bottom, width, "Project", &issue.workspace_id);
     // Progressive disclosure: only when present.
     if !issue.labels.is_empty() {
@@ -182,17 +189,57 @@ mod tests {
             8,
             40,
             &issue(None, Some("agent:claude-agent")),
+            None,
         );
         assert!(row_text(&buf, 0, 40).contains("in_progress"));
         assert!(row_text(&buf, 1, 40).contains("agent:claude-agent"));
         assert!(row_text(&buf, 2, 40).contains("acme"));
     }
 
+    /// Crisp B1 (defect 8): a resolved roster name paints over the raw actor ref.
+    #[test]
+    fn resolved_assignee_name_replaces_the_raw_ref() {
+        let mut buf = WireBuffer::new(40, 8);
+        render_sidebar(
+            &mut buf,
+            0,
+            0,
+            8,
+            40,
+            &issue(None, Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V")),
+            Some("impl-1"),
+        );
+        let line = row_text(&buf, 1, 40);
+        assert!(line.contains("Assignee: impl-1"), "resolved name: {line}");
+        assert!(!line.contains("01M1FHM2"), "raw ULID gone: {line}");
+    }
+
+    /// Crisp B1 review: BEFORE the roster lands the row degrades to the ref's
+    /// short id, the same fallback a board card takes, never the raw 26-char
+    /// ULID it used to paint. The actor KIND survives, it is what tells an agent
+    /// assignee from a human one.
+    #[test]
+    fn an_unresolved_ulid_assignee_degrades_to_a_short_id() {
+        let mut buf = WireBuffer::new(40, 8);
+        render_sidebar(
+            &mut buf,
+            0,
+            0,
+            8,
+            40,
+            &issue(None, Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V")),
+            None,
+        );
+        let line = row_text(&buf, 1, 40);
+        assert!(line.contains("Assignee: agent:AYF56V"), "short id: {line}");
+        assert!(!line.contains("01M1FHM2"), "raw ULID gone: {line}");
+    }
+
     /// An unset assignee renders as `unassigned`, not an empty value.
     #[test]
     fn unset_assignee_renders_unassigned() {
         let mut buf = WireBuffer::new(40, 8);
-        render_sidebar(&mut buf, 0, 0, 8, 40, &issue(None, None));
+        render_sidebar(&mut buf, 0, 0, 8, 40, &issue(None, None), None);
         assert!(row_text(&buf, 1, 40).contains("unassigned"));
     }
 
@@ -210,6 +257,7 @@ mod tests {
             8,
             48,
             &issue(None, Some("member:dana")),
+            None,
         );
         let member_row = row_text(&member_buf, 1, 48);
         assert!(
@@ -226,6 +274,7 @@ mod tests {
             8,
             48,
             &issue(None, Some("agent:claude")),
+            None,
         );
         let agent_row = row_text(&agent_buf, 1, 48);
         assert!(
@@ -239,7 +288,15 @@ mod tests {
     #[test]
     fn absent_description_omits_notes_row() {
         let mut buf = WireBuffer::new(40, 8);
-        render_sidebar(&mut buf, 0, 0, 8, 40, &issue(None, Some("member:bob")));
+        render_sidebar(
+            &mut buf,
+            0,
+            0,
+            8,
+            40,
+            &issue(None, Some("member:bob")),
+            None,
+        );
         // Row 3 (after status/assignee/project) must be empty — no Notes line.
         assert_eq!(row_text(&buf, 3, 40).trim(), "");
     }
@@ -255,6 +312,7 @@ mod tests {
             8,
             40,
             &issue(Some("needs review"), Some("member:bob")),
+            None,
         );
         assert!(row_text(&buf, 3, 40).contains("needs review"));
     }
@@ -265,7 +323,15 @@ mod tests {
     fn labels_row_renders_when_present_and_omits_when_empty() {
         // Label-less: no Labels row at index 3 (it would be Notes / empty).
         let mut buf = WireBuffer::new(40, 8);
-        render_sidebar(&mut buf, 0, 0, 8, 40, &issue(None, Some("member:bob")));
+        render_sidebar(
+            &mut buf,
+            0,
+            0,
+            8,
+            40,
+            &issue(None, Some("member:bob")),
+            None,
+        );
         assert!(
             !row_text(&buf, 3, 40).contains("Labels"),
             "label-less issue must omit the Labels row"
@@ -275,7 +341,7 @@ mod tests {
         let mut labelled = issue(None, Some("member:bob"));
         labelled.labels = vec!["bug".into(), "p0".into()];
         let mut buf = WireBuffer::new(40, 8);
-        render_sidebar(&mut buf, 0, 0, 8, 40, &labelled);
+        render_sidebar(&mut buf, 0, 0, 8, 40, &labelled, None);
         let line = row_text(&buf, 3, 40);
         assert!(line.contains("Labels"), "Labels row label: {line:?}");
         assert!(line.contains("‹bug›"), "bug chip: {line:?}");

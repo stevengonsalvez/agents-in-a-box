@@ -21,6 +21,15 @@ mode = "interactive"
 skip_all = true
 
 [[preset]]
+name = "antigravity-interactive-yolo"
+description = "Antigravity CLI, interactive REPL with bypass permissions"
+agent_provider = "antigravity"
+agent_model = "default"
+mode = "interactive"
+[preset.permissions]
+skip_all = true
+
+[[preset]]
 name = "opusplan"
 description = "Claude Code with opusplan hybrid (Opus plans, Sonnet executes), Boss mode, bypass permissions"
 agent_provider = "claude"

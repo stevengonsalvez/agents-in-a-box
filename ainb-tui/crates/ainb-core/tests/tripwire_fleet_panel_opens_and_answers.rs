@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ainb_plugin_hangar::screen::fleet::FleetFilter;
 use ainb_plugin_notifyd::Paths;
 use ainb_plugin_notifyd::broker::{self, BrokerState};
 
@@ -105,6 +106,16 @@ fn demo_pause_with(variable: &str) {
             thread::sleep(Duration::from_millis(milliseconds));
         }
     }
+}
+
+/// One lens as the Fleet row paints it: `<key> <label> <count>`.
+///
+/// Composed from the renderer's own accessors, not spelled out here: the pane is
+/// drawn by `ainb-plugin-hangar` and its lens words come from that crate's
+/// `vocab.rs`, so a wording change there would otherwise break this tripwire from
+/// a crate it never touched.
+fn lens_text(filter: FleetFilter, count: usize) -> String {
+    format!("{} {} {count}", filter.key(), filter.label())
 }
 
 fn open_fleet_screen(session: &str) -> Option<String> {
@@ -282,16 +293,31 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     // traverse TUI -> fleet/action -> Hangar -> broker -> hook stdout, which is
     // the exact JSON Claude receives to resume its AskUserQuestion tool call.
     let paths = Paths::under(&hangar_home);
+    paths.ensure_base().expect("create paths base");
+    ainb_hangar_daemon::rpc::set_approve_socket_for_test(Some(paths.approve_socket.clone()));
+    let surface_dirs = [
+        hangar_home.join("fleet").join("interview-surface"),
+        home_tmp.path().join(".agents-in-a-box").join("fleet").join("interview-surface"),
+        home_tmp.path().join("fleet").join("interview-surface"),
+    ];
+    for d in &surface_dirs {
+        fs::create_dir_all(d).expect("create surface dir");
+        fs::write(d.join("fleet-panel-ask-1"), "fleet").expect("write surface file");
+    }
+    let (bound_tx, bound_rx) = std::sync::mpsc::channel();
     let broker_runtime = tokio::runtime::Runtime::new().expect("broker runtime");
-    let broker_state = BrokerState::new();
+    let broker_state =
+        BrokerState::with_timeout(ainb_plugin_notifyd::broker::DEFAULT_AWAIT_TIMEOUT);
     {
         let sock = paths.approve_socket.clone();
         let state = broker_state.clone();
         broker_runtime.spawn(async move {
             let listener = tokio::net::UnixListener::bind(&sock).expect("bind approve.sock");
+            let _ = bound_tx.send(());
             broker::serve(listener, state).await;
         });
     }
+    bound_rx.recv_timeout(Duration::from_secs(5)).expect("approve.sock bound");
     let hook_payload = serde_json::json!({
         "tool_use_id": "ask-tool-1",
         "tool_input": { "questions": questions }
@@ -390,13 +416,11 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let opened = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
         c.contains("Fleet")
             && c.contains("Hangar")
-            && c.contains("1 Needs input 2")
-            && c.contains("2 Idle 0")
-            && c.contains("3 Completed 1")
-            && c.contains("4 Running 1")
-            && c.contains("5 All 4")
-            && c.contains("2 INPUT")
-            && c.contains("1 RUN")
+            && c.contains(&lens_text(FleetFilter::NeedsInput, 2))
+            && c.contains(&lens_text(FleetFilter::Idle, 0))
+            && c.contains(&lens_text(FleetFilter::Completed, 1))
+            && c.contains(&lens_text(FleetFilter::Running, 1))
+            && c.contains(&lens_text(FleetFilter::All, 4))
             && c.contains("ACTION QUEUE")
             && c.contains("What release scope should Fleet use?")
             && c.contains("NEEDS YOU")
@@ -409,7 +433,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         );
     };
     assert!(
-        open_cap.contains("1 Needs input") && open_cap.contains("q back"),
+        open_cap.contains(&lens_text(FleetFilter::NeedsInput, 2)) && open_cap.contains("q back"),
         "Fleet help bar missing answer/back controls:\n{open_cap}"
     );
     assert!(
@@ -450,7 +474,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             && c.contains("completed-project")
             && c.contains("fleet-tripwire-project")
             && c.contains("waiting-project")
-            && c.contains("5 All 4")
+            && c.contains(&lens_text(FleetFilter::All, 4))
     });
     assert!(
         all.is_some(),
@@ -589,6 +613,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             && !c.contains("What release scope should Fleet use?")
     });
     let final_cap = capture_pane(&session);
+    ainb_hangar_daemon::rpc::set_approve_socket_for_test(None);
     assert!(
         back.is_some(),
         "Esc from Fleet panel did not return to Home. Final capture:\n---\n{final_cap}\n---"

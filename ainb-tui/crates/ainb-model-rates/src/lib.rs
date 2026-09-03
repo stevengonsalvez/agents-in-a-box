@@ -55,7 +55,8 @@ pub fn model_rates(model: &str) -> Option<ModelRates> {
     let canonical = canonical_model_name(model);
     let m = canonical.as_str();
 
-    let (input_per_million, output_per_million) = anthropic_rates(m).or_else(|| openai_rates(m))?;
+    let (input_per_million, output_per_million) =
+        anthropic_rates(m).or_else(|| openai_rates(m)).or_else(|| google_rates(m))?;
 
     let input = input_per_million / 1_000_000.0;
     let output = output_per_million / 1_000_000.0;
@@ -186,6 +187,23 @@ fn openai_rates(m: &str) -> Option<(f64, f64)> {
     None
 }
 
+/// Google Gemini list prices, most-specific prefix first.
+fn google_rates(m: &str) -> Option<(f64, f64)> {
+    if m.starts_with("gemini-3.7-flash") || m.starts_with("3.7-flash") {
+        return Some((0.10, 0.40));
+    }
+    if m.starts_with("gemini-2.5-pro") || m.starts_with("2.5-pro") {
+        return Some((1.25, 5.00));
+    }
+    if m.starts_with("gemini-2.5-flash") || m.starts_with("2.5-flash") {
+        return Some((0.075, 0.30));
+    }
+    if m.starts_with("gemini-") || m.starts_with("gemini") {
+        return Some((0.10, 0.40));
+    }
+    None
+}
+
 /// Strip vendor prefixes, `@`-suffixed platform versions, and an 8-digit date
 /// snapshot suffix so `claude-3-5-sonnet-20241022` prices like
 /// `claude-3-5-sonnet`.
@@ -196,6 +214,7 @@ pub fn canonical_model_name(model: &str) -> String {
         .unwrap_or(model)
         .trim_start_matches("anthropic/")
         .trim_start_matches("openai/")
+        .trim_start_matches("google/")
         .to_string();
 
     if without_prefix
@@ -316,7 +335,29 @@ mod tests {
     fn vendor_prefix_and_platform_version_are_stripped() {
         assert_eq!(input_per_million("anthropic/claude-opus-5"), 5.0);
         assert_eq!(input_per_million("openai/gpt-5.6-sol"), 5.0);
+        assert_eq!(input_per_million("google/gemini-3.7-flash"), 0.10);
         assert_eq!(input_per_million("claude-opus-4-5@20251101"), 15.0);
+    }
+
+    #[test]
+    fn gemini_rates_are_priced_correctly() {
+        assert_eq!(input_per_million("gemini-3.7-flash"), 0.10);
+        assert_eq!(output_per_million("gemini-3.7-flash"), 0.40);
+        assert_eq!(input_per_million("3.7-flash"), 0.10);
+        assert_eq!(output_per_million("3.7-flash"), 0.40);
+
+        assert_eq!(input_per_million("gemini-2.5-pro"), 1.25);
+        assert_eq!(output_per_million("gemini-2.5-pro"), 5.00);
+        assert_eq!(input_per_million("2.5-pro"), 1.25);
+        assert_eq!(output_per_million("2.5-pro"), 5.00);
+
+        assert_eq!(input_per_million("gemini-2.5-flash"), 0.075);
+        assert_eq!(output_per_million("gemini-2.5-flash"), 0.30);
+        assert_eq!(input_per_million("2.5-flash"), 0.075);
+        assert_eq!(output_per_million("2.5-flash"), 0.30);
+
+        assert_eq!(input_per_million("gemini-pro"), 0.10);
+        assert_eq!(output_per_million("gemini-pro"), 0.40);
     }
 
     #[test]

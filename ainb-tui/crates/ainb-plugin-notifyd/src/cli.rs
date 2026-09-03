@@ -17,8 +17,14 @@ use crate::{Paths, RunConfig, install_for, run_daemon, status, uninstall};
 /// or `--all` means every known agent. The empty-selection guard MUST
 /// list every flag — a missing one silently turns a single-agent
 /// install into an install-for-everyone.
-pub fn agents_from_flags(claude: bool, codex: bool, copilot: bool, all: bool) -> Vec<Agent> {
-    if all || (!claude && !codex && !copilot) {
+pub fn agents_from_flags(
+    claude: bool,
+    codex: bool,
+    copilot: bool,
+    antigravity: bool,
+    all: bool,
+) -> Vec<Agent> {
+    if all || (!claude && !codex && !copilot && !antigravity) {
         return Agent::ALL.to_vec();
     }
     let mut out = Vec::new();
@@ -30,6 +36,9 @@ pub fn agents_from_flags(claude: bool, codex: bool, copilot: bool, all: bool) ->
     }
     if copilot {
         out.push(Agent::Copilot);
+    }
+    if antigravity {
+        out.push(Agent::Antigravity);
     }
     out
 }
@@ -145,9 +154,20 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
     println!("hook script:   {}", record.hook_script.display());
     if let Some(p) = &record.codex_hooks_json {
         println!("codex hooks:   {}", p.display());
+        println!("note: {}", crate::install::CODEX_TRUST_NOTE);
     }
     if let Some(p) = &record.copilot_hooks_json {
         println!("copilot hooks: {}", p.display());
+    }
+    if let Some(p) = &record.antigravity_hooks_json {
+        println!("antigravity hooks: {}", p.display());
+    }
+    // A per-agent install failure is isolated, so without this the command
+    // reports a clean install of something that did not happen. Read off the
+    // report, never off `record.agents`: that list is cumulative, so an agent
+    // wired yesterday and broken today is still in it.
+    for (agent, error) in &report.failures {
+        println!("{}: FAILED: {error}", agent.name());
     }
     match &report.claude {
         Some(ClaudeRegister::Registered) => println!(
@@ -156,8 +176,17 @@ pub fn cmd_install(agents: &[Agent]) -> Result<()> {
         Some(ClaudeRegister::ClaudeCliMissing) => {
             println!("claude plugin: SKIPPED — `claude` CLI not found on PATH")
         }
-        Some(ClaudeRegister::Failed(e)) => println!("claude plugin: FAILED — {e}"),
+        Some(ClaudeRegister::Failed(e)) => println!("claude plugin: FAILED: {e}"),
         None => {}
+    }
+    // A partial install must not exit 0: a provisioning script or a `set -e`
+    // installer gating on the status would record hooks that never fire.
+    if !report.failures.is_empty() {
+        anyhow::bail!(
+            "{} of {} agents failed to install",
+            report.failures.len(),
+            agents.len()
+        );
     }
     Ok(())
 }
@@ -269,11 +298,11 @@ mod tests {
     fn agents_from_flags_defaults_to_all() {
         // No flags → all; `--all` (with or without per-agent flags) → all.
         assert_eq!(
-            agents_from_flags(false, false, false, false),
+            agents_from_flags(false, false, false, false, false),
             Agent::ALL.to_vec()
         );
         assert_eq!(
-            agents_from_flags(true, true, true, true),
+            agents_from_flags(true, true, true, true, true),
             Agent::ALL.to_vec()
         );
     }
@@ -281,30 +310,41 @@ mod tests {
     #[test]
     fn agents_from_flags_respects_single_selection() {
         assert_eq!(
-            agents_from_flags(true, false, false, false),
+            agents_from_flags(true, false, false, false, false),
             vec![Agent::Claude]
         );
         assert_eq!(
-            agents_from_flags(false, true, false, false),
+            agents_from_flags(false, true, false, false, false),
             vec![Agent::Codex]
         );
         // Regression guard: `--copilot` alone must NOT fall through the
         // empty-selection branch and install for everyone.
         assert_eq!(
-            agents_from_flags(false, false, true, false),
+            agents_from_flags(false, false, true, false, false),
             vec![Agent::Copilot]
+        );
+        // Regression guard: `--antigravity` alone must NOT fall through the
+        // empty-selection branch and install for everyone.
+        assert_eq!(
+            agents_from_flags(false, false, false, true, false),
+            vec![Agent::Antigravity]
         );
     }
 
     #[test]
     fn agents_from_flags_both_explicit() {
         assert_eq!(
-            agents_from_flags(true, true, false, false),
+            agents_from_flags(true, true, false, false, false),
             vec![Agent::Claude, Agent::Codex]
         );
         assert_eq!(
-            agents_from_flags(true, true, true, false),
-            vec![Agent::Claude, Agent::Codex, Agent::Copilot]
+            agents_from_flags(true, true, true, true, false),
+            vec![
+                Agent::Claude,
+                Agent::Codex,
+                Agent::Copilot,
+                Agent::Antigravity
+            ]
         );
     }
 }

@@ -243,6 +243,37 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Idle read bound for a request/response connection (no live subscription).
+const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Idle read bound for a connection holding a live subscription: long enough
+/// that a quiet operator never trips it, finite so a wedged peer is reclaimed.
+const DEFAULT_SUBSCRIBED_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24 * 3600);
+/// Longest a fresh connection may sit silent before its `auth/hello`: a peer
+/// that connects and never authenticates holds a task and an fd for this long
+/// at most (capped further by the idle window when that is shorter).
+const AUTH_FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Concurrent connections served at once; an accept past this is closed at
+/// once instead of spawning another task (an operator box has a handful of
+/// TUIs and CLIs, so this is a runaway-client guard, not a capacity plan).
+const MAX_CONNECTIONS: usize = 256;
+/// Operator override (milliseconds) for [`DEFAULT_IDLE_TIMEOUT`].
+const IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_IDLE_MS";
+/// Operator override (milliseconds) for [`DEFAULT_SUBSCRIBED_IDLE_TIMEOUT`].
+const SUBSCRIBED_IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_SUBSCRIBED_IDLE_MS";
+
+/// `var` as a millisecond duration, else `default`. A supported knob: the
+/// integration tests shrink both windows to hundreds of milliseconds, and an
+/// operator may tune them the same way; an unset, empty, non-numeric or zero
+/// value keeps the default.
+fn idle_timeout_from_env(var: &str, default: std::time::Duration) -> std::time::Duration {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(default, std::time::Duration::from_millis)
+}
+
 /// Accept connections forever, serving each on its own task.
 ///
 /// `broker` is the daemon-global event broker: each connection that subscribes
@@ -257,13 +288,33 @@ pub async fn serve(
     health: DaemonHealth,
     broker: EventBroker,
 ) {
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    // The cap is logged once per saturation, not once per refused accept: the
+    // runaway client it contains must not turn into a log flood.
+    let mut saturated = false;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    if !saturated {
+                        tracing::warn!(
+                            max = MAX_CONNECTIONS,
+                            "hangar rpc: connection cap reached; closing new connections until one frees"
+                        );
+                        saturated = true;
+                    }
+                    drop(stream);
+                    continue;
+                };
+                if saturated {
+                    tracing::info!("hangar rpc: connection cap cleared");
+                    saturated = false;
+                }
                 let pool = pool.clone();
                 let health = health.clone();
                 let broker = broker.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     if let Err(e) = serve_conn(stream, pool, health, broker).await {
                         tracing::debug!(error = %e, "hangar rpc connection closed");
                     }
@@ -317,8 +368,24 @@ async fn serve_conn(
     // valid `auth/hello`. Unauthenticated or wrong-token connections get an
     // UNAUTHORIZED error envelope back, then the connection closes — no
     // `hangar/*` method is dispatched and no event forwarder ever exists.
+    // The first frame is read under a short bound: a peer that connects and
+    // says nothing is closed like one that closed on us, so an unauthenticated
+    // connection can never sit on the idle window.
+    let idle_timeout = idle_timeout_from_env(IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT);
     let authed = async {
-        let Some(first) = read_frame(&mut reader).await? else {
+        let first = match tokio::time::timeout(
+            idle_timeout.min(AUTH_FIRST_FRAME_TIMEOUT),
+            read_frame(&mut reader),
+        )
+        .await
+        {
+            Ok(frame) => frame?,
+            Err(_elapsed) => {
+                tracing::debug!("hangar rpc: no auth/hello within the first-frame window");
+                None
+            }
+        };
+        let Some(first) = first else {
             // A peer that closes before sending its first frame is
             // unauthenticated, same as a rejected one: no caller identity.
             return Ok(None);
@@ -353,6 +420,10 @@ async fn serve_conn(
     // The connection's event subscription: at most one forwarder; a
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // The TRANSCRIPT half of the same workspace subscription (track A step A2),
+    // on its own broadcast so a run's line volume cannot evict the lifecycle
+    // events `forwarder` carries. Registered and replaced with it.
+    let mut task_stream_forwarder: Option<tokio::task::JoinHandle<()>> = None;
     // The connection's FLEET-WIDE attention subscription (spec P2), independent
     // of the workspace forwarder: a connection may hold both (workspace events +
     // attention nudges) or either. A re-subscribe replaces it.
@@ -372,25 +443,51 @@ async fn serve_conn(
     let mut notification_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     // Idle read timeout so an abandoned / half-open client connection cannot pin
-    // this per-connection task (and its fd) forever. The RPC is request/response
-    // and clients reconnect per request, so a generous idle window only reclaims
-    // dead connections — it never interrupts an in-flight exchange.
-    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    // this per-connection task (and its fd) forever. Request/response clients
+    // reconnect per request, so a generous idle window only reclaims dead
+    // connections. A connection holding a LIVE subscription is a push channel,
+    // not a request/response one: the TUI plugin subscribes once and then may
+    // legitimately send nothing for an hour while the operator watches a run.
+    // Idle-closing it after ten quiet minutes made the plugin read EOF and paint
+    // "daemon offline" with the daemon perfectly healthy. A subscribed connection
+    // therefore gets the long bound instead (a wedged peer that never closes is
+    // still reclaimed, just not a quiet one), and a forwarder that has already
+    // exited no longer counts as a subscription.
+    let subscribed_idle_timeout =
+        idle_timeout_from_env(SUBSCRIBED_IDLE_TIMEOUT_ENV, DEFAULT_SUBSCRIBED_IDLE_TIMEOUT);
     let served: std::io::Result<()> = async {
-        while let Some(body) =
-            match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut reader)).await {
+        while let Some(body) = {
+            let live = |h: &Option<tokio::task::JoinHandle<()>>| {
+                h.as_ref().is_some_and(|h| !h.is_finished())
+            };
+            let subscribed = live(&forwarder)
+                || live(&task_stream_forwarder)
+                || live(&attention_forwarder)
+                || live(&fleet_forwarder)
+                || live(&message_forwarder)
+                || live(&transcript_forwarder);
+            let window = if subscribed {
+                subscribed_idle_timeout
+            } else {
+                idle_timeout
+            };
+            match tokio::time::timeout(window, read_frame(&mut reader)).await {
                 Ok(frame_result) => frame_result?,
                 Err(_elapsed) => {
-                    tracing::debug!("rpc connection idle {IDLE_TIMEOUT:?}; closing");
+                    tracing::debug!(subscribed, "rpc connection idle {window:?}; closing");
                     None
                 }
             }
-        {
+        } {
             let req = serde_json::from_slice::<RpcRequest>(&body);
             // Subscribe before dispatch reads the snapshot. Events raised while
             // the snapshot query runs stay buffered in this receiver and are
             // drained after the acknowledgement, closing the snapshot-to-live
             // handoff gap without allowing an event to precede the response.
+            let pending_task_stream_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::WORKSPACE_SUBSCRIBE)
+                    .then(|| broker.subscribe_task_stream())
+            });
             let pending_attention_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::ATTENTION_SUBSCRIBE)
                     .then(|| broker.subscribe_attention())
@@ -448,6 +545,26 @@ async fn serve_conn(
                             ws.clone(),
                             out_tx.clone(),
                         ));
+                        // A2: the same subscription's TRANSCRIPT half, drained
+                        // from its own broadcast so a chatty run cannot evict the
+                        // lifecycle events above it (see `EventBroker`). Two
+                        // forwarders means the two streams are unordered against
+                        // each other in BOTH directions: a `TaskFinished` can
+                        // overtake its run's last `TaskMessage`, and a
+                        // `TaskMessage` can overtake the `TaskStarted` that opens
+                        // the banner. Only `TaskStarted` constructs a banner and
+                        // every consumer guards on the task id, so a late arrival
+                        // is dropped either way and leaves no state behind (pinned
+                        // by `banner_hides_on_task_finished_event`); the visible
+                        // effect is a banner clearing a beat early, or a first
+                        // transcript line missed before it opens.
+                        if let Some(old) = task_stream_forwarder.take() {
+                            old.abort();
+                        }
+                        let rx = pending_task_stream_rx
+                            .unwrap_or_else(|| broker.subscribe_task_stream());
+                        task_stream_forwarder =
+                            Some(spawn_event_forwarder(rx, ws.clone(), out_tx.clone()));
                         // T1 resume: a client that carried a `since_seq` catches
                         // up on every durable event after that cursor before it
                         // goes live. Best-effort (a read fault is logged, the
@@ -951,10 +1068,13 @@ fn subscribe_after_id(req: &RpcRequest) -> Option<String> {
 /// so a replayed frame is byte-identical to the live one it mirrors — a resuming
 /// subscriber cannot tell catch-up from live.
 ///
-/// The backlog is **paged in-loop**, not read once: the durable log holds one
-/// row per emitted event (including high-frequency `TaskProgress`/`TaskMessage`
-/// heartbeats), so a single active task can exceed [`REPLAY_BATCH`] during a
-/// disconnect. A single capped read delivers the OLDEST `REPLAY_BATCH` events
+/// The backlog is **paged in-loop**, not read once: the durable log holds one row
+/// per emitted event, so a busy workspace (a board advancing a run through its
+/// lifecycle, a squad fanning out) can exceed [`REPLAY_BATCH`] during a
+/// disconnect. Transcript lines are NOT in that backlog since track A step A2
+/// (they ride `emit_live`, off the log), so the volume here is lower than it
+/// once was, but the paging is what makes the read correct rather than merely
+/// sufficient. A single capped read delivers the OLDEST `REPLAY_BATCH` events
 /// and would silently drop the newest `(since_seq + REPLAY_BATCH, head]` window
 /// — the live forwarder (registered before this call) only carries events
 /// emitted after subscribe, and the ack advances the client's cursor to the
@@ -1233,7 +1353,7 @@ async fn handle(
         methods::HANGAR_BOARD_COLUMN_REORDER => handle_board_column_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_ADD => handle_board_card(pool, req, true).await,
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
-        methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
+        methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req, events).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
         methods::HANGAR_ISSUE_RUN => handle_issue_run(pool, req).await,
         methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
@@ -4248,11 +4368,14 @@ async fn execute_fleet_start(
                 Some("Codex managed transport is not active".to_string()),
             ),
         },
-        // Codex is the only provider with a managed start transport. Copilot
-        // sits with Claude here: Fleet can SEE a copilot pane, but it cannot
+        // Codex is the only provider with a managed start transport. Copilot,
+        // Antigravity, and Claude sit here: Fleet can SEE their panes, but it cannot
         // launch one, so a start request is honestly rejected rather than
         // silently accepted.
-        FleetProvider::Claude | FleetProvider::Copilot | FleetProvider::Unknown => (
+        FleetProvider::Claude
+        | FleetProvider::Copilot
+        | FleetProvider::Antigravity
+        | FleetProvider::Unknown => (
             ActionReceiptStatus::Rejected,
             Some("provider start transport is unavailable".to_string()),
         ),
@@ -4281,6 +4404,7 @@ fn prospective_start_session_key(
         ainb_hangar_proto::fleet::FleetProvider::Claude => "claude",
         ainb_hangar_proto::fleet::FleetProvider::Codex => "codex",
         ainb_hangar_proto::fleet::FleetProvider::Copilot => "copilot",
+        ainb_hangar_proto::fleet::FleetProvider::Antigravity => "antigravity",
         ainb_hangar_proto::fleet::FleetProvider::Acp => "acp",
         ainb_hangar_proto::fleet::FleetProvider::Unknown => "unknown",
     };
@@ -4373,7 +4497,9 @@ fn managed_codex_tmux_name(thread_id: &str, now_ms: i64) -> String {
 async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
     let tmux_binary = std::ffi::OsString::from("tmux");
     let output = tokio::process::Command::new(tmux_binary)
-        .args(["kill-session", "-t", session_name])
+        // The name says exact, so the target has to be: a bare `-t` resolves
+        // exact, then prefix, then fnmatch.
+        .args(["kill-session", "-t", &format!("={session_name}")])
         .output()
         .await
         .map_err(|error| format!("exact tmux stop failed: {error}"))?;
@@ -5807,9 +5933,9 @@ fn normalize_picker_text(value: &str) -> String {
 /// `session_key`, in ONE transaction, with NO process spawn.
 ///
 /// R3's entry point. Without it no ACP recipient can ever exist, and
-/// `message_send` deliberately never auto-provisions one. The pool spawns the
-/// adapter lazily on the first prompt, so a create that never receives a message
-/// costs nothing but a row.
+/// `message_send` deliberately never auto-provisions one. The write and its
+/// validation are [`crate::acp_session::ensure`], shared with the task
+/// executor; this handler is the capability gate in front of it.
 async fn handle_fleet_acp_session_create(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -5818,145 +5944,27 @@ async fn handle_fleet_acp_session_create(
     use ainb_hangar_proto::fleet::{
         FLEET_CAPABILITY_ACP_SPAWN, FleetAcpSessionCreateParams, FleetAcpSessionCreateResult,
     };
-    use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
-    use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionRepo, NewFleetAcpSession};
+
+    use crate::acp_session::EnsureError;
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
     let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
-    if params.cwd.trim().is_empty() {
-        return Err(invalid_params("cwd must not be empty"));
-    }
-    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
-        return Err(invalid_params("scope_key must not be empty"));
-    }
-    // Validated against the ADAPTER REGISTRY, not the schema: the store only
-    // length-checks `provider` so the next adapter needs no migration, which
-    // makes this the one place an unknown token is refused.
-    let acp = crate::acp_pool::active_handle().await;
-    let known = acp.as_ref().map_or_else(
-        || ainb_acp::config::AdapterConfig::is_known_adapter(&params.provider),
-        |pool| pool.config().knows(&params.provider),
-    );
-    if !known {
-        return Err(invalid_params(&format!(
-            "unknown ACP provider {:?}; known adapters are {} and {}",
-            params.provider,
-            ainb_acp::config::CLAUDE_ADAPTER,
-            ainb_acp::config::CODEX_ADAPTER
-        )));
-    }
-    let permission_mode = acp.as_ref().map_or_else(
-        || "default".to_string(),
-        |pool| pool.config().permission_mode(&params.provider),
-    );
-
-    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
-    let scope_key = params.scope_key.clone().unwrap_or_else(|| format!("session:{session_key}"));
-    let now = SystemClock.now_ms();
-    let event = NewFleetEvent {
-        event_id: format!("acp-session-create:{session_key}"),
-        session_key: session_key.clone(),
-        observed_at: now,
-        authority: ObservationAuthority::Authoritative,
-        event_type: "acp_session_created".to_string(),
-        payload: serde_json::json!({
-            "provider": params.provider,
-            "cwd": params.cwd,
-            "scopeKey": scope_key,
-            "permissionMode": permission_mode,
-        })
-        .to_string(),
-        patch: FleetSessionPatch {
-            // `acp` on the WIRE, with the concrete adapter in
-            // `fleet_acp_session.provider`. The snapshot maps this token to
-            // `FleetProvider::Acp`; anything else would render as Unknown.
-            provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
-            cwd: Some(params.cwd.clone()),
-            display_name: crate::fleet::display_name_for_cwd(&params.cwd),
-            management_state: Some("MANAGED".to_string()),
-            capabilities: Some(acp_capabilities()),
-            confidence: Some("HIGH".to_string()),
-            lifecycle_state: Some("IDLE".to_string()),
-            attention_state: Some("NONE".to_string()),
-            transport_health: Some("HEALTHY".to_string()),
-            ..FleetSessionPatch::default()
-        },
-    };
-    let (row, revision) = FleetAcpSessionRepo::insert_with_fleet_session(
+    let row = crate::acp_session::ensure(
         pool,
-        &NewFleetAcpSession {
-            session_key: session_key.clone(),
-            scope_key,
-            provider: params.provider.clone(),
-            cwd: params.cwd.clone(),
-            permission_mode,
-            state: "IDLE".to_string(),
-            created_at: now,
-            last_active_at: now,
-        },
-        &event,
+        events,
+        &params.provider,
+        &params.cwd,
+        params.scope_key.as_deref(),
     )
     .await
-    .map_err(|error| internal(&format!("acp session create: {error}")))?;
-    // The scope was ALREADY held by a live session, so this create replayed onto
-    // it instead of minting the key above. Idempotent only while the caller
-    // asked for the same SESSION: answering a `codex-acp` create with a live
-    // `claude-agent-acp` key would silently hand back a session that prompts a
-    // DIFFERENT agent than the caller believes it is driving, and answering a
-    // create for `~/work/api` with a session rooted at `~/work/web` would run
-    // every later prompt against a different repository. Both misroute in
-    // silence for the whole life of the scope. Graft 4 rejects the same class
-    // of replay on `fleet_message`; this is its ACP twin.
-    if row.session_key != session_key {
-        let mismatch = if row.provider == params.provider {
-            (row.cwd != params.cwd).then(|| ("cwd", row.cwd.clone(), params.cwd.clone()))
-        } else {
-            Some(("provider", row.provider.clone(), params.provider.clone()))
-        };
-        if let Some((field, held, asked)) = mismatch {
-            return Err(invalid_params(&format!(
-                "scope_key {:?} is already held by a session whose {field} is {held:?}, \
-                 not {asked:?}; stop it before creating a different one",
-                row.scope_key
-            )));
-        }
-    }
-    if let Some(revision) = revision {
-        events.emit_fleet_revision(revision);
-    }
+    .map_err(|error| match error {
+        EnsureError::Store(_) => internal(&error.to_string()),
+        _ => invalid_params(&error.to_string()),
+    })?;
     to_value(&FleetAcpSessionCreateResult {
         session_key: row.session_key,
         scope_key: row.scope_key,
     })
-}
-
-/// EXACTLY the actions Phase 5 wires, and nothing else.
-///
-/// `action_capability` gates on this JSON before any handler runs, so an unset
-/// flag is a Rejected receipt rather than an action that reaches the pool and
-/// fails somewhere less legible.
-fn acp_capabilities() -> String {
-    serde_json::to_string(&ainb_hangar_proto::fleet::FleetCapabilities {
-        structured_answer: true,
-        structured_dismiss: false,
-        approvals: true,
-        approval_session: false,
-        send_prompt: true,
-        continue_turn: false,
-        retry: false,
-        interrupt: true,
-        start: false,
-        stop: true,
-        restart: false,
-        kill: true,
-        archive: false,
-        // An ACP session has no pane. Leaving these true would make the tmux
-        // surfaces offer attach/paste for a session that can never honour it.
-        tmux_attach: false,
-        tmux_text: false,
-        verified_picker: false,
-    })
-    .unwrap_or_else(|_| "{}".to_string())
 }
 
 /// One chat delivery to an ACP recipient: persist nothing new, just hand the
@@ -6017,7 +6025,7 @@ async fn execute_acp_action(
             // An operator prompt joins the SAME bus a chat message does, so it
             // gets a message row, a delivery leg, and a threaded reply rather
             // than a turn nothing can correlate afterwards.
-            match acp_operator_message(pool, &session.session_key, text).await {
+            match crate::acp_session::enqueue(pool, &session.session_key, "operator", text).await {
                 Ok(message_id) => {
                     let outcome = acp.submit_prompt(&session.session_key, &message_id, text).await;
                     match outcome {
@@ -6184,42 +6192,6 @@ fn acp_permission_receipt(
             Some("no live ACP session for this key".to_string()),
         ),
     }
-}
-
-/// Persist an operator's direct `SendPrompt` as a chat message plus its leg, so
-/// the ACP turn resolves through exactly one receipt path.
-async fn acp_operator_message(
-    pool: &SqlitePool,
-    session_key: &str,
-    text: &str,
-) -> Result<String, sqlx::Error> {
-    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
-    use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
-
-    let scope_key = FleetAcpSessionRepo::get(pool, session_key)
-        .await?
-        .map_or_else(|| format!("session:{session_key}"), |row| row.scope_key);
-    let row = FleetMessageRepo::insert_message_with_deliveries(
-        pool,
-        &NewFleetMessage {
-            id: SystemIdGen.new_ulid(),
-            request_id: None,
-            request_fingerprint: None,
-            scope_key,
-            origin_message_id: None,
-            sender: "operator".to_string(),
-            kind: "user".to_string(),
-            body: text.to_string(),
-            created_at: SystemClock.now_ms(),
-        },
-        std::slice::from_ref(&session_key.to_string()),
-    )
-    .await
-    .map_err(|error| match error {
-        ainb_hangar_store::repo::fleet_message::FleetMessageError::Sql(sql) => sql,
-        other => sqlx::Error::Protocol(other.to_string()),
-    })?;
-    Ok(row.id)
 }
 
 fn action_capability(
@@ -7008,6 +6980,7 @@ async fn handle_issue_create(
             title: &params.title,
             description: params.description.as_deref(),
             creator: &creator,
+            assignee: None,
             external_ref,
             parent_issue_id,
             stage: params.stage,
@@ -9249,11 +9222,12 @@ fn normalise_fsm_state<'a>(raw: Option<&'a str>) -> Result<Option<&'a str>, RpcE
 async fn handle_board_card_create(
     pool: &SqlitePool,
     req: &RpcRequest,
+    events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
-    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_proto::events::HangarEvent;
     use ainb_hangar_store::repo::board::BoardRepo;
-    use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
     let params: ainb_hangar_proto::snapshots::BoardCardCreateParams = parse_params(
         req,
@@ -9290,39 +9264,49 @@ async fn handle_board_card_create(
     // The TUI user owns cards it creates — mirror the plugin's `SELF_AUTHOR_REF`.
     let creator = ActorRef::new(ActorKind::Member, "me")
         .map_err(|e| internal(&format!("build creator ref: {e}")))?;
-    let issue_id = SystemIdGen.new_ulid();
-    IssueRepo::insert(
+    // Mint the issue through the SAME helper `issue_create` uses, so a card-made
+    // issue gets the workspace's issue prefix, its `manual` origin stamp and the
+    // same row shape `issue_create` answers and pushes (the `Created` activity
+    // row is recorded below, as `handle_issue_create` does after its create).
+    // The prefix lands on the stored title, which is the brief of EVERY run of
+    // any issue (`run_loop` builds the brief from `issue.title`), so a card in a
+    // prefixed workspace briefs its agent exactly as a wizard issue would. Card
+    // titles are the whole brief, so a card carries no description.
+    let mut row = snapshots::issue_create(
         pool,
-        &NewIssue {
-            id: issue_id.clone(),
-            workspace_id: ws.as_str().to_string(),
-            title: params.title.clone(),
+        &SystemIdGen,
+        &SystemClock,
+        &snapshots::IssueCreateInput {
+            workspace_id: ws.as_str(),
+            title: &params.title,
             description: None,
-            state: "open".to_string(),
-            assignee,
-            creator,
-            created_at: SystemClock.now_ms(),
-            priority: 0,
-            due_date: None,
-            labels: Vec::new(),
-            acceptance_criteria: Vec::new(),
-            context_refs: Vec::new(),
+            creator: &creator,
+            assignee: assignee.as_ref(),
+            external_ref: None,
             parent_issue_id: None,
             stage: None,
+            acceptance_criteria: &[],
+            context_refs: &[],
+            priority: 0,
+            due_date: None,
+            labels: &[],
+            origin: Some(&ainb_hangar_core::origin::IssueOrigin::manual()),
         },
     )
     .await
     .map_err(|e| store_err(&e))?;
-    // 0056: a board card is authored by the TUI user, so its provenance is
-    // `manual` (stamped explicitly, never left NULL — see migration 0056).
-    IssueRepo::set_origin(
+    let issue_id = row.id.as_str().to_string();
+    ActivityService::record(
         pool,
+        &SystemIdGen,
+        &SystemClock,
         ws.as_str(),
         &issue_id,
-        &ainb_hangar_core::origin::IssueOrigin::manual(),
+        &ActivityActor::Actor(creator.clone()),
+        ActivityAction::Created,
+        serde_json::json!({}),
     )
-    .await
-    .map_err(|e| store_err(&e))?;
+    .await;
 
     BoardRepo::card_add(
         pool,
@@ -9364,7 +9348,15 @@ async fn handle_board_card_create(
         )
         .await
         .map_err(|e| store_err(&e))?;
+        row.repo_ref.clone_from(&resolved_repo_ref);
+        row.agent = agent.map(|a| a.as_str().to_string());
     }
+    // A card create inserts a real issue row, so announce it exactly like
+    // `issue_create` does, with the row the create returned (list-shaped, the
+    // two card-parity fields patched in above): without this push the issue
+    // list, Kanban titles and inbox never learn the issue exists until a full
+    // snapshot refresh.
+    events.emit(ws.as_str(), HangarEvent::IssueCreated(row));
     boards_list_value(pool, &ws).await
 }
 
@@ -10274,6 +10266,22 @@ async fn run_card_inner(
             .await
             .map_err(CardRunError::Db)?;
     }
+    // A single-agent Run on a card that sits in a role-gated stage IS that
+    // stage's run: stamp the column the way the pull does, so the stage counts
+    // as finished when the task completes (otherwise the issue-lifecycle gate
+    // sees an unrun current stage forever and never promotes the issue).
+    if let Some(column_id) =
+        ainb_hangar_store::service::pull::current_gated_column(&mut *tx, ws, board_id, issue_id)
+            .await
+            .map_err(CardRunError::Db)?
+    {
+        sqlx::query("UPDATE agent_task_queue SET board_column_id = ?1 WHERE id = ?2")
+            .bind(&column_id)
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(CardRunError::Db)?;
+    }
     CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
         .await
         .map_err(CardRunError::Db)?;
@@ -11091,14 +11099,20 @@ async fn handle_board_card_timeline(
     /// leading partial line a mid-file seek leaves.
     const TAIL_CAP: u64 = 512 * 1024;
 
-    let params: ainb_hangar_proto::snapshots::BoardCardParams =
-        parse_params(req, "{ workspace_id, board_id, issue_id }")?;
+    let params: ainb_hangar_proto::snapshots::BoardCardTimelineParams =
+        parse_params(req, "{ workspace_id, board_id?, issue_id }")?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
 
-    // The issue must be a real card on this board (a timeline is a card affordance).
-    let board = board_in_ws(pool, &ws, &params.board_id).await?;
-    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
-        return Err(invalid_params("that issue is not a card on this board"));
+    // With a board named, the issue must be a real card on it (the Boards overlay
+    // is a card affordance). Without one (the task-detail backfill, crisp B1) the
+    // workspace guard above plus the workspace-scoped task query below are the
+    // whole tenant check: an issue in another workspace yields no task, never a
+    // foreign transcript.
+    if let Some(board_id) = params.board_id.as_deref() {
+        let board = board_in_ws(pool, &ws, board_id).await?;
+        if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+            return Err(invalid_params("that issue is not a card on this board"));
+        }
     }
 
     // The card's newest task (any status) — its run is the one to show.
@@ -13016,7 +13030,10 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
             listener,
-            ainb_plugin_notifyd::broker::BrokerState::default(),
+            // Not `::default()`, which reads the developer's real config.toml.
+            ainb_plugin_notifyd::broker::BrokerState::with_timeout(
+                ainb_plugin_notifyd::broker::DEFAULT_AWAIT_TIMEOUT,
+            ),
         ));
         set_approve_socket_for_test(Some(socket));
         let created = FleetRepo::apply_event(

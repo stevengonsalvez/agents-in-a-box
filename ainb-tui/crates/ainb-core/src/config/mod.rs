@@ -18,8 +18,11 @@ pub mod mcp;
 pub mod mcp_init;
 pub mod onboarding;
 pub mod presets;
+pub mod registry;
+pub mod screen_model;
 pub mod session_defaults;
 pub mod ssh_display_names;
+pub mod tunables;
 
 pub use container::{ContainerTemplate, ContainerTemplateConfig};
 pub use favorites_store::{
@@ -30,8 +33,13 @@ pub use mcp::{McpInitStrategy, McpInstallation, McpServerConfig, McpServerDefini
 pub use mcp_init::{McpInitResult, McpInitializer, apply_mcp_init_result};
 pub use onboarding::OnboardingConfig;
 pub use presets::{PermissionSet, PresetManager, RepositoryPreset, create_default_presets};
+pub use registry::{CONFIG_REGISTRY, ConfigRow, Entry as ConfigEntry, RowKind};
 pub use session_defaults::{PerRepoDefaults, SessionDefaults};
 pub use ssh_display_names::{SessionLabelStore, SshDisplayNameStore, normalize_session_label};
+pub use tunables::{
+    AcpAdapterConfig, AcpConfig, DaemonsConfig, GeneralConfig, NotifydConfig, UiConfig,
+    UsageClientConfig, WebServerConfig,
+};
 
 /// Authentication provider for Claude API
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -105,6 +113,8 @@ pub enum CliProvider {
     Gemini,
     /// GitHub Copilot CLI
     Copilot,
+    /// Google Antigravity CLI
+    Antigravity,
 }
 
 impl CliProvider {
@@ -115,6 +125,7 @@ impl CliProvider {
             CliProvider::Codex => "codex",
             CliProvider::Gemini => "gemini",
             CliProvider::Copilot => "copilot",
+            CliProvider::Antigravity => "agy",
         }
     }
 
@@ -123,7 +134,7 @@ impl CliProvider {
         match self {
             CliProvider::Claude => "ANTHROPIC_API_KEY",
             CliProvider::Codex => "OPENAI_API_KEY",
-            CliProvider::Gemini => "GEMINI_API_KEY",
+            CliProvider::Gemini | CliProvider::Antigravity => "GEMINI_API_KEY",
             CliProvider::Copilot => "GITHUB_TOKEN", // Uses gh OAuth, token optional
         }
     }
@@ -135,6 +146,7 @@ impl CliProvider {
             CliProvider::Codex => "OpenAI Codex",
             CliProvider::Gemini => "Google Gemini",
             CliProvider::Copilot => "GitHub Copilot",
+            CliProvider::Antigravity => "Google Antigravity",
         }
     }
 
@@ -144,6 +156,7 @@ impl CliProvider {
             CliProvider::Codex => "codex",
             CliProvider::Gemini => "gemini",
             CliProvider::Copilot => "copilot",
+            CliProvider::Antigravity => "antigravity",
         }
     }
 
@@ -152,6 +165,7 @@ impl CliProvider {
             "codex" | "openai" => CliProvider::Codex,
             "gemini" | "google" => CliProvider::Gemini,
             "copilot" | "github" => CliProvider::Copilot,
+            "antigravity" | "agy" => CliProvider::Antigravity,
             _ => CliProvider::Claude,
         }
     }
@@ -159,7 +173,7 @@ impl CliProvider {
     /// Get the flag to skip permission prompts for this CLI
     pub fn skip_permissions_flag(&self) -> &'static str {
         match self {
-            CliProvider::Claude => "--dangerously-skip-permissions",
+            CliProvider::Claude | CliProvider::Antigravity => "--dangerously-skip-permissions",
             CliProvider::Codex => "--dangerously-bypass-approvals-and-sandbox",
             CliProvider::Gemini => "-y",
             CliProvider::Copilot => "--yolo",
@@ -213,6 +227,21 @@ fn default_claude_model() -> String {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Every layer EXCEPT the user file, merged.
+    ///
+    /// `save()` writes the user file, but this struct is the merge of every
+    /// layer — so without knowing what the other layers already provide, a
+    /// save bakes their values into the user's own file. Since a project
+    /// config now outranks the user's, that means a repo's `.ainb/config.toml`
+    /// would overwrite the user's global settings the first time they toggled
+    /// anything in that repo. `ainb mcp import` writes such a file by default,
+    /// so this is not a corner case.
+    ///
+    /// Skipped by serde: it is provenance, not configuration, and must never
+    /// reach a config file.
+    #[serde(skip)]
+    inherited: toml::Table,
+
     /// Application version
     #[serde(default = "default_version")]
     pub version: String,
@@ -265,6 +294,37 @@ pub struct AppConfig {
     /// Shared MCP pool settings. See [`McpPoolConfig`].
     #[serde(default)]
     pub mcp_pool: McpPoolConfig,
+
+    /// Cross-cutting knobs with no other home. See [`GeneralConfig`].
+    #[serde(default)]
+    pub general: GeneralConfig,
+
+    /// TUI cadences and query bounds. See [`UiConfig`].
+    #[serde(default)]
+    pub ui: UiConfig,
+
+    /// Daemon-staleness windows. See [`DaemonsConfig`].
+    #[serde(default)]
+    pub daemons: DaemonsConfig,
+
+    /// How usage data is fetched and cached: core's half of usage, distinct
+    /// from the plugin-owned `[usage]`. See [`UsageClientConfig`].
+    #[serde(default)]
+    pub usage_client: UsageClientConfig,
+
+    /// Notification-daemon knobs, parsed by the daemon itself and mirrored
+    /// here so a save round-trips them. See [`NotifydConfig`].
+    #[serde(default)]
+    pub notifyd: NotifydConfig,
+
+    /// `ainb web` defaults, overridden by its CLI flags. See
+    /// [`WebServerConfig`].
+    #[serde(default)]
+    pub web: WebServerConfig,
+
+    /// The ACP adapter registry. See [`AcpConfig`].
+    #[serde(default)]
+    pub acp: AcpConfig,
 }
 
 /// Shared MCP server pool for host (tmux) sessions.
@@ -464,10 +524,86 @@ pub struct FleetConfig {
     /// `Option` for the same presence reason as [`InterviewConfig::surface`].
     #[serde(default)]
     pub terminal: Option<String>,
+    /// Minutes a session must sit quiet before it reads IDLE.
+    ///
+    /// One knob for both IDLE producers (the tmux classifier and notifyd's
+    /// hook-sourced fold), so a session cannot be idle to one and busy to the
+    /// other. Env: `AINB_FLEET_IDLE_MIN`.
+    #[serde(default = "default_fleet_idle_min")]
+    pub idle_min: u64,
+
+    /// How `ainb fleet send` delivers: `tmux` (send-keys first, broker
+    /// fallback), `tmux-only`, or `broker`. Env: `AINB_FLEET_TRANSPORT`.
+    #[serde(default = "default_fleet_transport")]
+    pub transport: String,
+
+    /// Attach cost/hint enrichment to fleet rows. Off means the reader still
+    /// serves free cached suggestions but flags nothing `need_enrich`, so no
+    /// producer runs and no tokens are spent. Env: `AINB_FLEET_ENRICH`.
+    #[serde(default = "default_true")]
+    pub enrich: bool,
+
+    /// Staleness window (ms) for a hook-sourced `current_state` row of a STICKY
+    /// kind (ASK/ERR/WAIT/IDLE) before the reader falls back to a live scan.
+    /// `0` (the default) disables the check: those kinds stay true until a new
+    /// event changes them, so age is a poor staleness signal for them.
+    ///
+    /// Distinct from [`healthy_state_stale_ms`](Self::healthy_state_stale_ms),
+    /// which is the point of splitting them. Both windows used to read the ONE
+    /// env var `AINB_FLEET_STATE_STALE_MS` with two different hardcoded
+    /// fallbacks (0 here, 300000 there), so setting it moved two unrelated
+    /// clocks at once and neither had a single knowable default.
+    /// Env: `AINB_FLEET_STATE_STALE_MS`.
+    #[serde(default)]
+    pub state_stale_ms: i64,
+
+    /// Staleness window (ms) for a hook-sourced row of a HEALTHY-suppressing
+    /// kind (RUNNING/DONE). These are the dangerous ones: a daemon that stopped
+    /// materializing leaves a stale RUNNING row that suppresses the live scan
+    /// forever, so this window has a real floor rather than being off by
+    /// default. Env: `AINB_FLEET_HEALTHY_STATE_STALE_MS`, falling back to the
+    /// legacy `AINB_FLEET_STATE_STALE_MS` so an existing override keeps working.
+    #[serde(default = "default_fleet_healthy_state_stale_ms")]
+    pub healthy_state_stale_ms: i64,
+
+    /// Seconds of pane silence after which tmux discovery calls a live session
+    /// between turns rather than working. Sized above a slow tool call so a
+    /// quiet-but-busy agent is not mislabelled.
+    /// Env: `AINB_FLEET_TMUX_IDLE_AFTER_SECS`.
+    #[serde(default = "default_fleet_tmux_idle_after_secs")]
+    pub tmux_idle_after_secs: i64,
+
+    /// `[fleet.bridge]` carried verbatim, never interpreted here.
+    ///
+    /// The phone bridge parses this table itself, off the same file, with its
+    /// own resolver (`fleet::bridge::config`) — it holds bot tokens, so
+    /// `ainb-core` deliberately does not model its shape. It still has to be a
+    /// field: `save()` preserves unmodelled *top-level* sections, but `fleet`
+    /// IS modelled, so anything nested under it that has no field here would be
+    /// dropped on the next save. That is exactly how the bridge's Telegram,
+    /// Slack and Discord tokens used to get wiped by any settings save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge: Option<toml::Value>,
 }
 
 fn default_fleet_terminal() -> &'static str {
     "warp"
+}
+
+fn default_fleet_idle_min() -> u64 {
+    5
+}
+
+fn default_fleet_transport() -> String {
+    "tmux".to_string()
+}
+
+pub(crate) fn default_fleet_healthy_state_stale_ms() -> i64 {
+    5 * 60_000
+}
+
+fn default_fleet_tmux_idle_after_secs() -> i64 {
+    120
 }
 
 impl Default for FleetConfig {
@@ -476,6 +612,13 @@ impl Default for FleetConfig {
             cost: CostBudgetConfig::default(),
             interview: InterviewConfig::default(),
             terminal: None,
+            idle_min: default_fleet_idle_min(),
+            transport: default_fleet_transport(),
+            enrich: true,
+            state_stale_ms: 0,
+            healthy_state_stale_ms: default_fleet_healthy_state_stale_ms(),
+            tmux_idle_after_secs: default_fleet_tmux_idle_after_secs(),
+            bridge: None,
         }
     }
 }
@@ -660,6 +803,7 @@ pub enum UsagePlanProvider {
     Claude,
     Codex,
     Cursor,
+    Antigravity,
 }
 
 impl Default for UsagePlanProvider {
@@ -722,6 +866,19 @@ pub struct WorkspaceDefaults {
     /// Behavior when a target worktree path already exists
     #[serde(default)]
     pub worktree_collision_behavior: WorktreeCollisionBehavior,
+
+    /// How many directory levels below each scan path the repository scanner
+    /// descends. `WorkspaceScanner::with_max_depth` has always existed and was
+    /// never wired to anything, so the value was effectively frozen at 3. Deep
+    /// trees need more; every extra level multiplies the walk.
+    #[serde(default = "default_scan_max_depth")]
+    pub scan_max_depth: usize,
+
+    /// Seconds a cached repository scan stays fresh before the next scan walks
+    /// the disk again. The cache is also invalidated by a scan path's mtime, so
+    /// this is the ceiling on staleness, not the only guard.
+    #[serde(default = "default_scan_cache_ttl_secs")]
+    pub scan_cache_ttl_secs: i64,
 }
 
 impl Default for WorkspaceDefaults {
@@ -732,6 +889,8 @@ impl Default for WorkspaceDefaults {
             workspace_scan_paths: Vec::new(),
             max_repositories: default_max_repositories(),
             worktree_collision_behavior: WorktreeCollisionBehavior::default(),
+            scan_max_depth: default_scan_max_depth(),
+            scan_cache_ttl_secs: default_scan_cache_ttl_secs(),
         }
     }
 }
@@ -809,6 +968,16 @@ pub struct UiPreferences {
     /// default; `Declined` suppresses the prompt entirely.
     #[serde(default)]
     pub tmux_decision: TmuxDecision,
+
+    /// Which nodes of the Settings screen's category tree are expanded,
+    /// as `"<category label>|<dotted path>"` ids.
+    ///
+    /// Persisted UI state rather than a preference — it sits here beside the
+    /// sidebar widths for the same reason they do: the screen is unusable if
+    /// every section re-collapses on restart, and there is nowhere else that
+    /// survives a restart. Registered `Hidden` in the config registry.
+    #[serde(default)]
+    pub config_tree_expanded: Vec<String>,
 }
 
 /// The user's recorded decision on the Claude Code statusline wiring.
@@ -854,6 +1023,7 @@ impl Default for UiPreferences {
             skill_manager_sources_width: None,
             statusline_decision: StatuslineDecision::default(),
             tmux_decision: TmuxDecision::default(),
+            config_tree_expanded: Vec::new(),
         }
     }
 }
@@ -909,48 +1079,780 @@ fn default_max_repositories() -> usize {
     500
 }
 
-/// Merge a higher-layer per-plugin value table into the lower-layer one in
-/// place: higher-layer keys win, lower-layer keys the higher layer omits
-/// survive. When either side isn't a TOML table (a plugin shipped a scalar
-/// under its name), the higher layer replaces wholesale — there's no
-/// key-level structure to merge.
-fn merge_plugin_value_table(lower: &mut toml::Value, higher: toml::Value) {
-    match (lower.as_table_mut(), higher) {
-        (Some(lower_table), toml::Value::Table(higher_table)) => {
-            for (k, v) in higher_table {
-                lower_table.insert(k, v);
+fn default_scan_max_depth() -> usize {
+    3
+}
+
+fn default_scan_cache_ttl_secs() -> i64 {
+    3600
+}
+
+/// Deep-merge a higher-precedence config layer into a lower one, in place.
+///
+/// Where both layers hold a table under the same key, recurse, so a layer that
+/// sets one key of a section leaves the rest of that section alone. Anything
+/// else — a scalar, an array, or a type change — is replaced wholesale by the
+/// higher layer.
+///
+/// This is the entire precedence rule, and it lives at the TOML level rather
+/// than field-by-field on `AppConfig` for one reason: only here is "the file
+/// never mentioned this key" representable. After deserialization an omitted
+/// key and a key explicitly written with its default value are the same bytes,
+/// so a struct-level merge has to guess between them — and whichever way it
+/// guesses is wrong half the time. The old merge guessed both ways and got
+/// both failures: fields assigned unconditionally reset values no layer had
+/// mentioned, and fields gated on `!= default()` ignored a deliberate write of
+/// a default. An absent key is simply not in the layer's table here, so it
+/// cannot override anything, and an explicit default is an ordinary value that
+/// wins.
+///
+/// Arrays replace rather than concatenate. `exclude_paths`, `plugins.enabled`
+/// and friends are complete statements of intent; a layer has to be able to
+/// shorten one, which concatenation would make impossible.
+fn merge_config_tables(lower: &mut toml::Table, higher: toml::Table) {
+    merge_config_tables_at(lower, higher, &[]);
+}
+
+/// Dotted paths whose VALUE tables are replaced wholesale, not merged into.
+///
+/// Recursing into these unions two layers' entries, which is wrong in three
+/// distinct ways:
+///
+/// * A later layer cannot DROP a key. An `env` that deliberately omits
+///   `GITHUB_TOKEN` would still inherit the earlier layer's, and the
+///   credential is injected into the session anyway. Same for a container
+///   template's `environment` and the bridge's untyped table.
+/// * A tagged enum (`installation`, `definition`, `image_source`, all
+///   `#[serde(tag = "type")]`) would carry the previous variant's keys
+///   alongside the new `type`.
+/// * `[usage.plan]`'s fields have NO serde defaults, so a layer writing only
+///   `id` used to be a loud deserialization error. Merged, it silently inherits
+///   the other layer's `monthly_usd` and `reset_day` and reports a plan neither
+///   file describes.
+///
+/// A `*` segment matches any single map key.
+const REPLACE_WHOLE: &[&str] = &[
+    "usage.plan",
+    // Its fields DO have serde defaults, so unlike `plan` it fails silently: a
+    // layer writing only `code = "EUR"` inherits the other layer's symbol and
+    // rate, and reports euros at a sterling rate with a pound sign.
+    "usage.currency",
+    "mcp_servers.*.installation",
+    "mcp_servers.*.definition",
+    "container_templates.*.config.image_source",
+    "container_templates.*.config.environment",
+    "fleet.bridge",
+];
+
+/// Whether `path` names a table that replaces rather than merges.
+///
+/// Matches on SEGMENTS, never a joined string. A TOML key may legitimately
+/// contain a dot when quoted — `[mcp_servers."github.com"]` — and joining then
+/// re-splitting turns that one key into two, so `mcp_servers.*.definition`
+/// stopped matching and the credential guard silently did not apply. The
+/// inverse misfired too: a server literally named `a.installation` matched a
+/// pattern meant for a different depth.
+fn replaces_wholesale(path: &[&str]) -> bool {
+    REPLACE_WHOLE.iter().any(|pattern| {
+        let pattern_parts: Vec<&str> = pattern.split('.').collect();
+        pattern_parts.len() == path.len()
+            && pattern_parts.iter().zip(path).all(|(p, a)| *p == "*" || p == a)
+    })
+}
+
+fn merge_config_tables_at(lower: &mut toml::Table, higher: toml::Table, path: &[&str]) {
+    for (key, higher_value) in higher {
+        let mut child: Vec<&str> = path.to_vec();
+        child.push(key.as_str());
+        // Take the lower value out so the recursive call owns its table; the
+        // merged result goes back under the same key either way.
+        let merged = match (lower.remove(&key), higher_value) {
+            (Some(toml::Value::Table(mut lower_table)), toml::Value::Table(higher_table))
+                if !replaces_wholesale(&child) =>
+            {
+                merge_config_tables_at(&mut lower_table, higher_table, &child);
+                toml::Value::Table(lower_table)
+            }
+            (_, higher_value) => higher_value,
+        };
+        lower.insert(key, merged);
+    }
+}
+
+/// Parse one config file into a layer table ready for [`merge_config_tables`].
+///
+/// Drops the keys a file is not allowed to speak for. Everything else is
+/// carried through verbatim — including sections `AppConfig` does not model —
+/// so the merge stays ignorant of the schema.
+fn parse_config_layer(content: &str) -> Result<toml::Table> {
+    let mut layer: toml::Table = content.parse()?;
+
+    // `version` names the schema the running binary implements, not a user
+    // preference. The old field-by-field merge expressed this by having no arm
+    // for it ("Don't override version"); at the table level it has to go.
+    layer.remove("version");
+
+    normalise_pre_v04_layer(&mut layer);
+    Ok(layer)
+}
+
+/// Neutralise the two sentinels a pre-v0.4 config file writes for "unset".
+///
+/// Those builds serialized `UiPreferences` and `DockerConfig` without serde
+/// defaults, so a file they left behind states `theme = ""` and `timeout = 0`,
+/// and its display booleans read `false` because that was the struct default,
+/// not because anyone chose it. A TOML merge fixes the *absent* key, but these
+/// keys are present, so they would now win and switch a long-standing user's
+/// panels off on upgrade. Removing them from the layer puts it in exactly the
+/// state a modern file that never mentioned the key would be in.
+///
+/// Scoped to the layer carrying the sentinel: a current project file is
+/// unaffected by a pre-v0.4 user file sitting underneath it. The old
+/// `is_old_config` flag could not make that distinction.
+fn normalise_pre_v04_layer(layer: &mut toml::Table) {
+    if let Some(ui) = layer.get_mut("ui_preferences").and_then(toml::Value::as_table_mut) {
+        if ui.get("theme").and_then(toml::Value::as_str) == Some("") {
+            ui.remove("theme");
+            for key in [
+                "show_container_status",
+                "show_git_status",
+                "show_session_menu_bar",
+                "session_filter",
+            ] {
+                ui.remove(key);
             }
         }
-        (_, higher) => *lower = higher,
+    }
+    // Zero is not a timeout anyone can mean — the config registry rejects it
+    // as below the allowed range — so it can only be the pre-v0.4 "unset".
+    if let Some(docker) = layer.get_mut("docker").and_then(toml::Value::as_table_mut) {
+        if docker.get("timeout").and_then(toml::Value::as_integer) == Some(0) {
+            docker.remove("timeout");
+        }
+    }
+}
+
+/// Sections `ainb-core` reads but must never write back.
+///
+/// `[usage]` is owned by the burndown plugin, which does its own
+/// load-modify-save against this same file. Now that both agree on one path, a
+/// long-lived TUI overwriting `[usage]` from the snapshot it loaded at startup
+/// would silently revert a plan set from another shell mid-session. Core has no
+/// UI for `[usage]` and never assigns to it, so the honest contract is
+/// read-only.
+const READ_ONLY_SECTIONS: &[&str] = &["usage"];
+
+/// Dotted paths `ainb-core` reads but must never write back from its own
+/// snapshot.
+///
+/// A superset of [`READ_ONLY_SECTIONS`], because the rule is not a top-level
+/// one. `[fleet.bridge]` sits INSIDE a section core does model, is carried as an
+/// opaque `toml::Value` passthrough, is never assigned by core, and is the table
+/// `fleet::bridge::config::SETUP_SKELETON` explicitly tells users to hand-edit.
+/// Without this, a settings save writes the startup snapshot back over a bot
+/// token edited while the TUI was open — the data loss this whole change exists
+/// to stop, one section further in than `[usage]`.
+const READ_ONLY_PATHS: &[&str] = &["usage", "fleet.bridge"];
+
+/// Paths `write_keys_into` refuses even for an explicit, key-level edit.
+///
+/// Narrower than [`READ_ONLY_PATHS`] on purpose. That list stops the *wholesale*
+/// overlay clobbering a section from a startup snapshot, which is a staleness
+/// problem, not an ownership one. `[fleet.bridge]` needs that protection but is
+/// still ours to change when the user actually edits one of its rows — writing
+/// the single key they touched is precisely the safe operation. `[usage]` is
+/// different: the burndown plugin owns it, so core must not write it at all.
+const NEVER_WRITE_PATHS: &[&str] = &["usage"];
+
+/// Write `contents` to `path` atomically, so a crash or a full disk cannot
+/// leave a truncated file behind.
+///
+/// This file now carries three writers' data — the bridge's bot tokens, the
+/// skills API key and burndown's `[usage]` — so a partial write is not a
+/// cosmetic problem: the next load sees a syntax error and every consumer falls
+/// back to defaults. The burndown plugin already writes this way; core matches.
+/// A temp filename no other writer can be using.
+///
+/// The old fixed `config.toml.tmp` is the SAME path `ainb-plugin-burndown`
+/// computes for its own atomic save. Now that both write one config.toml, two
+/// concurrent saves could each write that file and then rename the other's
+/// half-written copy over the real config. Process id plus a random word makes
+/// a collision impossible between processes and between threads.
+fn temp_path(path: &Path) -> PathBuf {
+    path.with_extension(format!(
+        "toml.{}.{:08x}.tmp",
+        std::process::id(),
+        rand::random::<u32>()
+    ))
+}
+
+/// Read a config file, mapping ONLY "it is not there" to empty.
+///
+/// `read_to_string(..).unwrap_or_default()` treats a permission error, an I/O
+/// error or a directory in the file's place as an empty file — and the caller
+/// then overwrites it, because `rename` needs permission on the DIRECTORY, not
+/// the file. `[skills]`, `[session_reader]` and `[fleet.bridge]` all live in
+/// that file and would go with it.
+pub(crate) fn read_existing(path: &Path) -> Result<String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(err) => Err(anyhow::Error::new(err).context(format!(
+            "refusing to save over {} — it exists but could not be read",
+            path.display()
+        ))),
+    }
+}
+
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    // Follow a symlink to its target before writing. `rename` REPLACES a
+    // symlink with a regular file, so a config.toml symlinked into a dotfiles
+    // repo would silently stop being the tracked file after the first save,
+    // and the mode carry-over below (which follows the link) would give no
+    // hint that it had happened.
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let path = resolved.as_path();
+    let tmp = temp_path(path);
+    // Every failure below removes the temp file. The name is per-process and
+    // random, so unlike the old fixed `config.toml.tmp` nothing would ever
+    // overwrite a leftover — an aborted write would leave one in the config
+    // directory forever.
+    if let Err(err) = fs::write(&tmp, contents) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    // Carry the target's permissions onto the replacement. `fs::write` used to
+    // truncate in place and keep them; a temp file is created fresh under the
+    // umask, so without this a `chmod 600 config.toml` is silently reverted to
+    // world-readable on the next save. This file holds bot tokens and an API
+    // key, so that is a real downgrade, and the temp file itself sits in the
+    // same directory before the rename.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o600);
+        if let Err(err) = fs::set_permissions(&tmp, fs::Permissions::from_mode(mode)) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+    }
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
+/// Write exactly these dotted keys into a config file, leaving every other byte
+/// of it alone.
+///
+/// The narrow counterpart to [`AppConfig::save`], for the cases where
+/// serializing the whole struct would be wrong: a key the struct does not model
+/// (`[skills]`), or a key whose in-memory snapshot is stale and would revert
+/// another writer. Same safety discipline as `save` — refuses a file it cannot
+/// read or parse, refuses [`READ_ONLY_SECTIONS`], writes atomically.
+///
+/// Path-explicit so it is testable without redirecting `HOME`.
+/// Remove one dotted key from a config file, preserving everything else.
+///
+/// The counterpart to [`write_keys_into`] for an optional key being cleared.
+/// Storing `""` is not the same as unset: an empty `docker.host` means "connect
+/// to nothing" where an absent one means "autodetect", so clearing has to
+/// delete the key rather than blank it.
+pub(crate) fn remove_key_from(path: &Path, key: &str) -> Result<()> {
+    let existing = read_existing(path)?;
+    if existing.trim().is_empty() {
+        return Ok(());
+    }
+    let section = key.split('.').next().unwrap_or_default();
+    if NEVER_WRITE_PATHS
+        .iter()
+        .any(|p| *p == section || key.starts_with(&format!("{p}.")))
+    {
+        anyhow::bail!("'{key}' is in a section ainb-core must not write");
+    }
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().context(
+        "refusing to save over a config.toml that does not parse — fix the syntax error first",
+    )?;
+    remove_document_key(&mut doc, key);
+    write_atomic(path, &doc.to_string())?;
+    Ok(())
+}
+
+/// Whether `key` lives in a section the burndown plugin owns.
+///
+/// Core reads `[usage]` but must never write it: the plugin does its own
+/// load-modify-save against the same file, so a write from here would revert a
+/// plan set from another shell.
+#[must_use]
+pub(crate) fn is_burndown_owned(key: &str) -> bool {
+    let section = key.split('.').next().unwrap_or_default();
+    NEVER_WRITE_PATHS
+        .iter()
+        .any(|p| *p == section || key.starts_with(&format!("{p}.")))
+}
+
+pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let existing = read_existing(path)?;
+    // `toml_edit`, not `toml`: this file is the one users are told to copy from
+    // `config/example.config.toml`, which is almost entirely comments. A
+    // round-trip through `to_string_pretty` deletes every comment and reflows
+    // every line — and this writer runs on a settings edit, not on an explicit
+    // "rewrite my config". `config/presets.rs` uses toml_edit for the same
+    // reason.
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().context(
+        "refusing to save over a config.toml that does not parse — fix the syntax error first",
+    )?;
+
+    for (key, value) in edits {
+        let section = key.split('.').next().unwrap_or_default();
+        if NEVER_WRITE_PATHS
+            .iter()
+            .any(|path| *path == section || key.starts_with(&format!("{path}.")))
+        {
+            anyhow::bail!("'{key}' is in a section ainb-core must not write");
+        }
+        set_document_key(&mut doc, key, value)?;
+    }
+
+    write_atomic(path, &doc.to_string())?;
+    Ok(())
+}
+
+/// Every scalar/array leaf in `table`, as dotted paths.
+///
+/// A leaf is anything that is not a table: writing those individually is what
+/// lets a save edit values in place instead of replacing whole sections and
+/// flattening them into inline tables.
+fn flatten_leaves(
+    table: &toml::map::Map<String, toml::Value>,
+    prefix: String,
+    out: &mut Vec<(String, toml::Value)>,
+) {
+    for (key, value) in table {
+        // Quote a segment that is not a bare TOML key. A model id like
+        // `gpt-4.1` splits back into two segments otherwise, inventing a
+        // nested table and corrupting the file.
+        let segment = registry::quote_key_segment(key.as_ref());
+        let path = if prefix.is_empty() {
+            segment
+        } else {
+            format!("{prefix}.{segment}")
+        };
+        match value {
+            // An empty table is a leaf: it still has to be written, or a
+            // section that exists only to be present would vanish.
+            toml::Value::Table(inner) if !inner.is_empty() => {
+                flatten_leaves(inner, path, out);
+            }
+            other => out.push((path, other.clone())),
+        }
+    }
+}
+
+/// The same walk over a `toml_edit` document, used to find leaves on disk that
+/// our snapshot no longer has.
+fn flatten_document_leaves(table: &toml_edit::Table, prefix: String, out: &mut Vec<String>) {
+    for (key, item) in table.iter() {
+        // Quote a segment that is not a bare TOML key. A model id like
+        // `gpt-4.1` splits back into two segments otherwise, inventing a
+        // nested table and corrupting the file.
+        let segment = registry::quote_key_segment(key.as_ref());
+        let path = if prefix.is_empty() {
+            segment
+        } else {
+            format!("{prefix}.{segment}")
+        };
+        // `as_table_like`, not `as_table`: an inline table
+        // (`installation = { type = "Npm", … }`, which is exactly how
+        // `example.config.toml` documents `[mcp_servers.*]`) is an
+        // `Item::Value`, so `as_table()` says no. The `toml` side descends into
+        // it either way, so treating it as a leaf here made the prune pass
+        // remove it and the set pass re-emit it as `[section.sub]` headers,
+        // destroying the line and its comments on the first save.
+        match item.as_table_like() {
+            Some(inner) if !inner.is_empty() => {
+                flatten_document_leaves_like(inner, path, out);
+            }
+            _ => out.push(path),
+        }
+    }
+}
+
+/// [`flatten_document_leaves`] over anything table-like, including an inline
+/// table.
+fn flatten_document_leaves_like(
+    table: &dyn toml_edit::TableLike,
+    prefix: String,
+    out: &mut Vec<String>,
+) {
+    for (key, item) in table.iter() {
+        let segment = registry::quote_key_segment(key);
+        let path = if prefix.is_empty() {
+            segment
+        } else {
+            format!("{prefix}.{segment}")
+        };
+        match item.as_table_like() {
+            Some(inner) if !inner.is_empty() => {
+                flatten_document_leaves_like(inner, path, out);
+            }
+            _ => out.push(path),
+        }
+    }
+}
+
+/// Remove one dotted key from the document, ignoring a path that is not there.
+fn remove_document_key(doc: &mut toml_edit::DocumentMut, key: &str) {
+    let parts = registry::parse_dot_key(key);
+    let Some((leaf, parents)) = parts.split_last() else {
+        return;
+    };
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    for part in parents {
+        match table.get_mut(part).and_then(toml_edit::Item::as_table_like_mut) {
+            Some(next) => table = next,
+            None => return,
+        }
+    }
+    table.remove(leaf);
+}
+
+/// Set one dotted key in a `toml_edit` document, creating the parent tables it
+/// needs and leaving every other byte of the document untouched.
+fn set_document_key(
+    doc: &mut toml_edit::DocumentMut,
+    key: &str,
+    value: &toml::Value,
+) -> Result<()> {
+    let parts = registry::parse_dot_key(key);
+    let Some((leaf, parents)) = parts.split_last() else {
+        anyhow::bail!("empty config key");
+    };
+
+    let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+    for part in parents {
+        if table.get(part).is_none() {
+            let mut created = toml_edit::Table::new();
+            // Implicit: a parent that only exists to hold a sub-table does not
+            // print an empty `[header]` of its own.
+            created.set_implicit(true);
+            table.insert(part, toml_edit::Item::Table(created));
+        }
+        table = table
+            .get_mut(part)
+            .and_then(toml_edit::Item::as_table_like_mut)
+            .ok_or_else(|| anyhow::anyhow!("cannot set '{key}': '{part}' is not a table"))?;
+    }
+
+    match table.get_mut(leaf) {
+        Some(item) => {
+            let mut next = to_edit_value(value);
+            // Carry the old value's decor across. That decor holds the
+            // whitespace AND the trailing `# comment` on the same line, so
+            // replacing the item without it silently deletes the note the user
+            // wrote next to the setting they just changed.
+            if let Some(previous) = item.as_value() {
+                *next.decor_mut() = previous.decor().clone();
+            }
+            *item = toml_edit::Item::Value(next);
+        }
+        None => {
+            table.insert(leaf, toml_edit::Item::Value(to_edit_value(value)));
+        }
+    }
+    Ok(())
+}
+
+/// Convert a `toml::Value` into the `toml_edit` value the document stores.
+fn to_edit_value(value: &toml::Value) -> toml_edit::Value {
+    match value {
+        toml::Value::String(s) => s.as_str().into(),
+        toml::Value::Integer(i) => (*i).into(),
+        toml::Value::Float(f) => (*f).into(),
+        toml::Value::Boolean(b) => (*b).into(),
+        toml::Value::Datetime(dt) => dt.to_string().into(),
+        toml::Value::Array(items) => {
+            items.iter().map(to_edit_value).collect::<toml_edit::Array>().into()
+        }
+        toml::Value::Table(entries) => {
+            let mut inline = toml_edit::InlineTable::new();
+            for (key, entry) in entries {
+                inline.insert(key, to_edit_value(entry));
+            }
+            inline.into()
+        }
+    }
+}
+
+/// The TOML value an external edit writes, or an error naming why the key is
+/// not one this writer owns.
+///
+/// Split out from [`AppConfig::save_external_keys`] so the guard can be tested
+/// without resolving `HOME` — a test that calls the writer directly writes to
+/// the developer's real config.
+fn external_edit_value(key: &str, raw: &str) -> Result<toml::Value> {
+    // `fleet.bridge.*` belongs here. Its tokens are parsed by
+    // `fleet::bridge::config`, not by serde, and while `[fleet]` IS modelled as
+    // an opaque passthrough, `save()` deliberately preserves `fleet.bridge`
+    // from disk — so routing a bridge edit through the struct made it a no-op.
+    // The key-level write is the one path that actually lands it.
+    if !registry::is_external(key) {
+        anyhow::bail!("'{key}' is not an externally-owned config key — AppConfig::save owns it");
+    }
+    let section = key.split('.').next().unwrap_or_default();
+    if NEVER_WRITE_PATHS
+        .iter()
+        .any(|path| *path == section || key.starts_with(&format!("{path}.")))
+    {
+        anyhow::bail!("'{key}' is in a section ainb-core must not write");
+    }
+    registry::validate(key, raw)
+}
+
+/// Copy the keys of `higher` that `lower` does not already have, descending
+/// into tables both sides define. Returns how many leaves were carried across,
+/// so the caller can leave the file untouched when the answer is zero.
+fn merge_missing_keys(lower: &mut toml::Table, higher: toml::Table) -> usize {
+    let mut carried = 0;
+    for (key, value) in higher {
+        match lower.entry(key) {
+            toml::map::Entry::Vacant(slot) => {
+                slot.insert(value);
+                carried += 1;
+            }
+            toml::map::Entry::Occupied(mut slot) => {
+                // Two tables merge; anything else means the canonical file has
+                // a real value here and canonical wins.
+                if let (Some(existing), toml::Value::Table(incoming)) =
+                    (slot.get_mut().as_table_mut(), value)
+                {
+                    carried += merge_missing_keys(existing, incoming);
+                }
+            }
+        }
+    }
+    carried
+}
+
+/// Fold a stray `~/.agents-in-a-box/config.toml` into the real user config at
+/// `~/.agents-in-a-box/config/config.toml`, then move it aside.
+///
+/// The burndown and session-reader plugins used to read and write the file one
+/// directory up from the one everything else uses, so a user's `[usage]` plan
+/// could end up in a file `ainb-core` never opened. Both plugins now agree on
+/// the `config/` path; this carries the old file's contents across once, taking
+/// the canonical file's value wherever both set the same key.
+///
+/// Deliberately NOT called from [`AppConfig::load`]: that runs in daemons, in
+/// plugin startup and inside the TUI event loop, and a filesystem write as a
+/// side effect of a read races every other process doing the same. Call it once
+/// from a binary's startup instead — see [`AppConfig::migrate_legacy_paths`].
+///
+/// Best effort by design: every failure path leaves BOTH files exactly as they
+/// were. In particular a canonical file that does not parse aborts the
+/// migration rather than being replaced by the stray one — overwriting a config
+/// we failed to understand is the data loss this whole change exists to stop.
+fn migrate_stray_user_config(canonical: &Path) {
+    let Some(stray) = canonical.parent().and_then(Path::parent).map(|d| d.join("config.toml"))
+    else {
+        return;
+    };
+    if !stray.exists() || stray == canonical {
+        return;
+    }
+
+    let Ok(stray_table) = fs::read_to_string(&stray).and_then(|s| {
+        s.parse::<toml::Table>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }) else {
+        return;
+    };
+
+    // An unreadable or unparseable canonical file must abort the migration.
+    // Treating it as empty would write the stray file's contents over a config
+    // whose real contents we could not read.
+    let mut merged = match fs::read_to_string(canonical) {
+        Ok(text) => match text.parse::<toml::Table>() {
+            Ok(table) => table,
+            Err(err) => {
+                tracing::warn!(
+                    path = %canonical.display(),
+                    %err,
+                    "user config does not parse; leaving it alone instead of migrating over it"
+                );
+                return;
+            }
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(err) => {
+            tracing::warn!(path = %canonical.display(), %err, "cannot read user config; skipping migration");
+            return;
+        }
+    };
+
+    // Canonical wins: only keys the real config never set are carried over.
+    // Recursively, because a top-level-only merge loses everything under a
+    // section the canonical file has so much as touched — a canonical
+    // `[fleet.cost]` occupies the `fleet` key, and the stray's
+    // `[fleet.bridge.telegram] token` is then silently dropped. Losing bridge
+    // tokens is the whole reason this migration exists.
+    let carried = merge_missing_keys(&mut merged, stray_table);
+
+    // Nothing to carry across: leave the canonical file byte-for-byte alone.
+    // Rewriting it would strip the comments and layout of a file users are
+    // explicitly pointed at hand-editing.
+    if carried > 0 {
+        // Through `toml_edit`, like every other writer of this file: the
+        // population this migration touches is exactly the people who copied
+        // the ~320-line commented `example.config.toml`, and rendering the
+        // merged table would delete all of it on first launch, silently.
+        let mut doc = match fs::read_to_string(canonical)
+            .unwrap_or_default()
+            .parse::<toml_edit::DocumentMut>()
+        {
+            Ok(doc) => doc,
+            Err(_) => return,
+        };
+        let mut leaves = Vec::new();
+        flatten_leaves(&merged, String::new(), &mut leaves);
+        for (key, value) in &leaves {
+            if set_document_key(&mut doc, key, value).is_err() {
+                return;
+            }
+        }
+        let rendered = doc.to_string();
+        if canonical.parent().is_some_and(|d| fs::create_dir_all(d).is_err()) {
+            return;
+        }
+        if let Err(err) = write_atomic(canonical, &rendered) {
+            tracing::warn!(path = %canonical.display(), %err, "failed to write merged user config");
+            return;
+        }
+    }
+
+    // Keep the old file's contents rather than deleting them, and never clobber
+    // an earlier backup — in the worst case it is the only surviving copy.
+    let mut backup = stray.with_extension("toml.migrated");
+    let mut n = 1;
+    while backup.exists() {
+        backup = stray.with_extension(format!("toml.migrated.{n}"));
+        n += 1;
+    }
+    let _ = fs::rename(&stray, &backup);
+    tracing::info!(
+        stray = %stray.display(),
+        canonical = %canonical.display(),
+        backup = %backup.display(),
+        carried,
+        "merged stray config.toml into the user config"
+    );
+}
+/// Which layer a config file belongs to.
+///
+/// Carried alongside the path so a caller cannot mislabel it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigScope {
+    /// `/etc/agents-in-a-box/config.toml` — lowest precedence.
+    System,
+    /// `~/.agents-in-a-box/config/config.toml`.
+    User,
+    /// `./.agents-box/config.toml`, the legacy project location.
+    ProjectLegacy,
+    /// `./.ainb/config.toml` — highest precedence.
+    Project,
+}
+
+impl ConfigScope {
+    /// Human label for `ainb config path`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::System => "System config",
+            Self::User => "User config",
+            Self::ProjectLegacy => "Project config (legacy .agents-box)",
+            Self::Project => "Project config",
+        }
+    }
+
+    /// Stable machine name for `--format json`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::ProjectLegacy => "project-legacy",
+            Self::Project => "project",
+        }
     }
 }
 
 impl AppConfig {
-    /// Load configuration from default locations
-    pub fn load() -> Result<Self> {
-        // Try loading from multiple locations in order of precedence
-        let config_paths = Self::get_config_paths();
-
-        let mut config = Self::default();
-
-        // Load each config file and merge
-        for path in config_paths {
-            if path.exists() {
-                let content = fs::read_to_string(&path)
-                    .with_context(|| format!("Failed to read config from {}", path.display()))?;
-
-                let usage_present = content
-                    .parse::<toml::Value>()
-                    .ok()
-                    .and_then(|value| value.as_table().cloned())
-                    .is_some_and(|table| table.contains_key("usage"));
-
-                let file_config: AppConfig = toml::from_str(&content)
-                    .with_context(|| format!("Failed to parse config from {}", path.display()))?;
-
-                config.merge_loaded(file_config, usage_present);
-            }
+    /// One-shot cleanup of config files left behind by older builds.
+    ///
+    /// Call this ONCE from a binary's startup, before the first
+    /// [`AppConfig::load`]. It is deliberately separate from `load()`, which
+    /// runs in daemons, plugin startup and the TUI event loop where a
+    /// filesystem write as a side effect of a read would race other processes.
+    pub fn migrate_legacy_paths() {
+        if let Ok(dir) = Self::get_user_config_dir() {
+            migrate_stray_user_config(&dir.join("config.toml"));
         }
+    }
+
+    /// Load configuration from default locations.
+    ///
+    /// The files are merged as TOML tables first and deserialized once at the
+    /// end, so a layer influences exactly the keys it writes — see
+    /// [`merge_config_tables`]. Deserializing each file on its own and merging
+    /// the structs cannot work: the file's silence about a key is gone by
+    /// then.
+    pub fn load() -> Result<Self> {
+        // Read each file ONCE and fold it into both accumulators. Walking the
+        // paths twice meant a file created or rewritten between the passes
+        // landed in one and not the other — and since only the first pass
+        // propagated errors, the result was a `save()` that skipped a leaf
+        // whose value was not actually in the effective config, silently
+        // dropping the user's own setting. It is also half the syscalls and
+        // parsing in a function that runs in daemons, plugin startup and the
+        // TUI event loop.
+        let mut merged = toml::Table::new();
+        let mut inherited = toml::Table::new();
+        let mut loaded: Vec<PathBuf> = Vec::new();
+
+        // `(scope, path)`: the scope travels with the path so `ainb config path`
+        // cannot mislabel it, and `save()` needs it to know which layer is the
+        // user's own.
+        for (scope, path) in Self::get_config_paths() {
+            if !path.exists() {
+                continue;
+            }
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("Failed to read config from {}", path.display()))?;
+            let layer = parse_config_layer(&content)
+                .with_context(|| format!("Failed to parse config from {}", path.display()))?;
+            if scope != ConfigScope::User {
+                merge_config_tables(&mut inherited, layer.clone());
+            }
+            merge_config_tables(&mut merged, layer);
+            loaded.push(path);
+        }
+
+        let mut config = Self::from_merged_layers(merged).with_context(|| {
+            format!(
+                "Failed to load config merged from {}",
+                loaded.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            )
+        })?;
+
+        config.inherited = inherited;
 
         // Load built-in container templates if none exist
         if config.container_templates.is_empty() {
@@ -960,16 +1862,186 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Deserialize an already-merged layer table.
+    ///
+    /// The one place a config file becomes an `AppConfig`. A type error here is
+    /// reported against the merged document rather than a single file, which is
+    /// the honest attribution: a value is only wrong in combination with the
+    /// layers above it.
+    fn from_merged_layers(merged: toml::Table) -> Result<Self> {
+        Ok(toml::Value::Table(merged).try_into()?)
+    }
+
+    /// Build a config from file contents in [`load`](Self::load) order, lowest
+    /// precedence first, without touching the filesystem.
+    ///
+    /// The test seam for layering. It runs the same parse-merge-deserialize
+    /// path `load()` does, so a key the merge drops or a layer that resets a
+    /// value it never mentioned shows up here; a test that hand-builds
+    /// `AppConfig` structs and combines them never exercises any of it.
+    pub(crate) fn from_layers<'a>(layers: impl IntoIterator<Item = &'a str>) -> Result<Self> {
+        let mut merged = toml::Table::new();
+        for content in layers {
+            merge_config_tables(&mut merged, parse_config_layer(content)?);
+        }
+        Self::from_merged_layers(merged)
+    }
+
+    /// Overlay the sections this struct models onto whatever is already on
+    /// disk, leaving every other top-level section untouched.
+    ///
+    /// `AppConfig` does not model the whole file. `[skills]` (catalog release +
+    /// API key) and `[session_reader]` are parsed straight off the same path by
+    /// other crates, and nothing here has a field for them. A plain
+    /// `to_string_pretty(self)` write therefore erased them on every settings
+    /// save. Overlaying key-by-key keeps them, and keeps any section a future
+    /// crate adds, without `ainb-core` needing to know what they are.
+    ///
+    /// Deliberately shallow: a modelled section (`[fleet]`, `[mcp_servers]`, …)
+    /// is replaced wholesale so that *removing* an entry from it actually
+    /// sticks. Unmodelled tables nested under a modelled section need a
+    /// passthrough field instead — see [`FleetConfig::bridge`].
+    fn overlay_onto_existing(&self, existing: &str) -> Result<String> {
+        // A file we cannot parse must abort the save, never be treated as
+        // empty. `AppConfig::load()` falls back to defaults on a parse error,
+        // so defaulting here would let one bad keystroke in a hand-edited file
+        // turn the next settings save into a wipe of every section on disk.
+        let mut table = if existing.trim().is_empty() {
+            toml::Table::new()
+        } else {
+            let table = existing.parse::<toml::Table>().context(
+                "refusing to save over a config.toml that does not parse — fix the syntax error first",
+            )?;
+            // Second gate, and the one that matters in practice. A file can
+            // tokenize perfectly and still fail serde (`timeout = "60"`, a
+            // `Vec<String>` holding an int). `AppConfig::load` returns Err on
+            // such a file, and several callers `unwrap_or_default()` and then
+            // save — so without this, a DEFAULT config gets overlaid and every
+            // modelled section on disk is replaced with defaults. Same wipe the
+            // syntax gate above exists to stop, one layer down.
+            let _: AppConfig = toml::Value::Table(table.clone()).try_into().context(
+                "refusing to save over a config.toml that parses but does not load into ainb's \
+                 schema — saving would replace every section it models with defaults",
+            )?;
+            table
+        };
+        let toml::Value::Table(ours) = toml::Value::try_from(self)? else {
+            anyhow::bail!("AppConfig did not serialize to a TOML table");
+        };
+
+        // Snapshot the read-only paths BEFORE merging: a modelled section is
+        // replaced wholesale, so `[fleet]` takes `[fleet.bridge]` with it and
+        // "skip this key" is not enough for a path more than one level deep.
+        let on_disk = toml::Value::Table(table.clone());
+        let preserved: Vec<(&str, toml::Value)> = READ_ONLY_PATHS
+            .iter()
+            .filter_map(|path| {
+                registry::navigate_toml(&on_disk, path).ok().map(|value| (*path, value.clone()))
+            })
+            .collect();
+
+        for (key, value) in ours {
+            table.insert(key, value);
+        }
+
+        let mut root = toml::Value::Table(table);
+        for (path, value) in preserved {
+            // What is on disk wins for these paths. Absent on disk means core
+            // writes its snapshot, which is what `[usage]` already did.
+            registry::insert_at(&mut root, path, value)?;
+        }
+
+        // Render through `toml_edit`, not `toml::to_string_pretty`, so the
+        // file keeps its comments. Users are told to start from
+        // `config/example.config.toml`, which is ~320 lines of comments
+        // explaining what every key does; a settings save that silently
+        // deleted all of them would leave a file strictly less useful than the
+        // one it replaced.
+        //
+        // Setting LEAVES rather than whole sections is what makes that work: a
+        // top-level `doc["docker"] = <table>` writes `docker = { timeout = 60 }`
+        // as an inline value, flattening the `[docker]` header and taking every
+        // comment attached to it. Walking to leaves edits values in place and
+        // leaves the document's shape alone.
+        let toml::Value::Table(root_table) = root else {
+            anyhow::bail!("config did not render to a TOML table");
+        };
+        let mut doc = existing.parse::<toml_edit::DocumentMut>().unwrap_or_default();
+
+        let mut ours_leaves = Vec::new();
+        flatten_leaves(&root_table, String::new(), &mut ours_leaves);
+
+        // Wholesale replacement of a modelled section has to keep working, or
+        // removing an entry from `[mcp_servers]` would never stick. Leaf-wise
+        // writing cannot express a deletion, so prune first: drop any leaf the
+        // document has under a section we model that our snapshot no longer
+        // carries. Read-only paths are exempt — they are not ours to prune.
+        let ours_keys: std::collections::HashSet<&str> =
+            ours_leaves.iter().map(|(k, _)| k.as_str()).collect();
+        let mut doc_leaves = Vec::new();
+        flatten_document_leaves(doc.as_table(), String::new(), &mut doc_leaves);
+        for key in doc_leaves {
+            let section = key.split('.').next().unwrap_or_default();
+            let is_read_only = READ_ONLY_PATHS
+                .iter()
+                .any(|path| *path == section || key.starts_with(&format!("{path}.")));
+            if is_read_only || !root_table.contains_key(section) {
+                continue;
+            }
+            if !ours_keys.contains(key.as_str()) {
+                remove_document_key(&mut doc, &key);
+            }
+        }
+
+        // Write only what the USER layer owns.
+        //
+        // `ours_leaves` comes from the MERGED table, so for any key another
+        // layer sets, the value here is THAT layer's. Writing it would copy a
+        // project's or the system's setting into the user's global file, where
+        // it then applies everywhere.
+        //
+        // A leaf is not ours when the merged value is exactly what the other
+        // layers provide AND it is not what the user file holds. That second
+        // clause is what distinguishes "the user edited this to the same thing"
+        // from "this value is simply not theirs" — and, crucially, preserves a
+        // user value the project layer disagrees with, which is the common
+        // case and the one a naive check gets backwards.
+        let inherited = toml::Value::Table(self.inherited.clone());
+        let on_disk = existing
+            .parse::<toml::Table>()
+            .map(toml::Value::Table)
+            .unwrap_or_else(|_| toml::Value::Table(toml::Table::new()));
+
+        for (key, value) in &ours_leaves {
+            let from_inherited = registry::navigate_toml(&inherited, key).ok();
+            let from_user = registry::navigate_toml(&on_disk, key).ok();
+            if from_inherited == Some(value) && from_user != Some(value) {
+                // Another layer provides exactly this, and the user file says
+                // something else (or nothing). Leave their file alone.
+                continue;
+            }
+            set_document_key(&mut doc, key, value)?;
+        }
+        Ok(doc.to_string())
+    }
+
     /// Save configuration to user config directory
     pub fn save(&self) -> Result<()> {
         let config_dir = Self::get_user_config_dir()?;
         fs::create_dir_all(&config_dir)?;
 
         let config_path = config_dir.join("config.toml");
-        let content = toml::to_string_pretty(self)?;
+        let existing = read_existing(&config_path)?;
+        let content = self.overlay_onto_existing(&existing)?;
 
-        match fs::write(&config_path, &content) {
+        match write_atomic(&config_path, &content) {
             Ok(()) => {
+                // The promoted tunables read from a process-wide snapshot, so
+                // without this a save reports success and changes nothing until
+                // the next launch: syntax highlighting stays on, the inbox keeps
+                // its old limit. Re-loads rather than installing `self`, because
+                // `load()` also merges the project and system layers.
+                tunables::refresh_snapshot();
                 // Audit log the successful config save
                 audit::audit_config_saved(
                     &config_path.display().to_string(),
@@ -992,25 +2064,88 @@ impl AppConfig {
         }
     }
 
-    /// Get configuration file paths in order of precedence
-    pub fn get_config_paths() -> Vec<PathBuf> {
-        let mut paths = vec![];
-
-        // 1. Local project config — `.ainb/` is canonical; `.agents-box/`
-        //    is the legacy location, still read but listed first so an
-        //    `.ainb/` file wins when both exist (later files override).
-        if let Ok(cwd) = std::env::current_dir() {
-            paths.push(cwd.join(".agents-box").join("config.toml"));
-            paths.push(cwd.join(".ainb").join("config.toml"));
+    /// Write registry keys that live in this file but NOT in `AppConfig`'s
+    /// serde shape — `[skills]` (owned by `ainb-cli`) and `[session_reader]`
+    /// (owned by the session-reader plugin). See
+    /// [`EXTERNAL_PREFIXES`](registry::EXTERNAL_PREFIXES).
+    ///
+    /// [`save`](Self::save) cannot carry these: it serializes `self`, and
+    /// `self` has no field for them, so an edit made in the settings screen
+    /// would be accepted and then silently dropped — the exact failure mode the
+    /// config registry exists to remove. This is a *second* writer over the
+    /// same file rather than a way around `save`: it starts from the on-disk
+    /// table (so every unmodelled section survives byte-for-byte), refuses a
+    /// file that does not parse, validates each value through the registry, and
+    /// writes atomically, exactly as `save` does.
+    ///
+    /// Refuses [`READ_ONLY_SECTIONS`] and any key that is not external, so it
+    /// can never become a back door around either guard.
+    pub fn save_external_keys(edits: &[(String, String)]) -> Result<()> {
+        if edits.is_empty() {
+            return Ok(());
         }
+        let mut prepared = Vec::with_capacity(edits.len());
+        for (key, raw) in edits {
+            prepared.push((key.clone(), external_edit_value(key, raw)?));
+        }
+        let config_path = Self::get_user_config_dir()?.join("config.toml");
+        write_keys_into(&config_path, &prepared)
+    }
 
-        // 2. User config (~/.agents-in-a-box/config.toml)
+    /// Persist the settings screen's tree expansion, and nothing else.
+    ///
+    /// Deliberately NOT `save()`: expanding a section is a navigational
+    /// keystroke, and `save()` writes the whole in-memory `AppConfig`, which is
+    /// the snapshot taken at startup. Navigating would then revert anything
+    /// `ainb config set` or another process had changed since — and multiply the
+    /// window for two writers to collide.
+    pub fn save_tree_expansion(ids: &[String]) -> Result<()> {
+        let value =
+            toml::Value::Array(ids.iter().map(|id| toml::Value::String(id.clone())).collect());
+        let config_path = Self::get_user_config_dir()?.join("config.toml");
+        write_keys_into(
+            &config_path,
+            &[("ui_preferences.config_tree_expanded".to_string(), value)],
+        )
+    }
+
+    /// Every config file location, LOWEST precedence first.
+    ///
+    /// [`Self::load`] merges them in this order and each layer overrides the
+    /// last, so the final entry wins. That makes this list the definition of
+    /// precedence: system, then user, then the project files — most specific
+    /// wins, which is what `config/example.config.toml`, `CLAUDE.md` and
+    /// `ainb config path` have always described.
+    ///
+    /// It ran the other way until now, with the system file strongest.
+    /// Flipping it was unsafe while the merge was field-by-field: several
+    /// fields were assigned unconditionally, so "last file wins" meant "the
+    /// last file's serde DEFAULTS win" for them, and a project config holding
+    /// only `[docker] timeout` reset a user's provider and wizard decisions.
+    /// The per-key TOML merge removed that: a key absent from a layer simply is
+    /// not in that layer's table, so a file can only override what it writes.
+    ///
+    /// Within the project pair, `.agents-box/` is the legacy location and
+    /// `.ainb/` is canonical, so `.ainb/` comes last and wins when both exist.
+    ///
+    /// Returns the scope with each path so a caller cannot mislabel them.
+    pub fn get_config_paths() -> Vec<(ConfigScope, PathBuf)> {
+        let mut paths = vec![(
+            ConfigScope::System,
+            PathBuf::from("/etc/agents-in-a-box/config.toml"),
+        )];
+
         if let Ok(config_dir) = Self::get_user_config_dir() {
-            paths.push(config_dir.join("config.toml"));
+            paths.push((ConfigScope::User, config_dir.join("config.toml")));
         }
 
-        // 3. System config
-        paths.push(PathBuf::from("/etc/agents-in-a-box/config.toml"));
+        if let Ok(cwd) = std::env::current_dir() {
+            paths.push((
+                ConfigScope::ProjectLegacy,
+                cwd.join(".agents-box").join("config.toml"),
+            ));
+            paths.push((ConfigScope::Project, cwd.join(".ainb").join("config.toml")));
+        }
 
         paths
     }
@@ -1020,160 +2155,6 @@ impl AppConfig {
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
         let config_dir = home_dir.join(".agents-in-a-box").join("config");
         Ok(config_dir)
-    }
-
-    /// Merge another config into this one
-    fn merge(&mut self, other: AppConfig) {
-        self.merge_loaded(other, true);
-    }
-
-    /// Merge another config into this one, preserving defaulted tables omitted from config files.
-    fn merge_loaded(&mut self, other: AppConfig, usage_present: bool) {
-        // Don't override version
-
-        // Merge authentication config
-        self.authentication.cli_provider = other.authentication.cli_provider;
-        self.authentication.claude_provider = other.authentication.claude_provider;
-        if other.authentication.default_model != default_claude_model() {
-            self.authentication.default_model = other.authentication.default_model;
-        }
-        if other.authentication.github_method.is_some() {
-            self.authentication.github_method = other.authentication.github_method;
-        }
-
-        if !other.default_container_template.is_empty() {
-            self.default_container_template = other.default_container_template;
-        }
-
-        // Merge maps
-        self.container_templates.extend(other.container_templates);
-        self.mcp_servers.extend(other.mcp_servers);
-
-        // Override workspace defaults if provided
-        if other.workspace_defaults.branch_prefix != default_branch_prefix() {
-            self.workspace_defaults.branch_prefix = other.workspace_defaults.branch_prefix;
-        }
-        if !other.workspace_defaults.exclude_paths.is_empty() {
-            self.workspace_defaults.exclude_paths = other.workspace_defaults.exclude_paths;
-        }
-        if !other.workspace_defaults.workspace_scan_paths.is_empty() {
-            self.workspace_defaults.workspace_scan_paths =
-                other.workspace_defaults.workspace_scan_paths;
-        }
-        // Always take max_repositories from config if loaded from file
-        self.workspace_defaults.max_repositories = other.workspace_defaults.max_repositories;
-        if other.workspace_defaults.worktree_collision_behavior
-            != WorktreeCollisionBehavior::default()
-        {
-            self.workspace_defaults.worktree_collision_behavior =
-                other.workspace_defaults.worktree_collision_behavior;
-        }
-
-        // Override UI preferences
-        // Check if this is an old config (empty theme indicates pre-v0.4 config)
-        let is_old_config = other.ui_preferences.theme.is_empty();
-
-        if !other.ui_preferences.theme.is_empty() && other.ui_preferences.theme != default_theme() {
-            self.ui_preferences.theme = other.ui_preferences.theme;
-        }
-        // For boolean settings: only override default (true) if config explicitly sets false
-        // AND this is NOT an old config with empty defaults
-        if !is_old_config {
-            // New config: respect explicit settings
-            self.ui_preferences.show_container_status = other.ui_preferences.show_container_status;
-            self.ui_preferences.show_git_status = other.ui_preferences.show_git_status;
-            self.ui_preferences.show_session_menu_bar = other.ui_preferences.show_session_menu_bar;
-            self.ui_preferences.session_filter = other.ui_preferences.session_filter;
-        }
-        // Old configs keep the default (true) values
-        if other.ui_preferences.preferred_editor.is_some() {
-            self.ui_preferences.preferred_editor = other.ui_preferences.preferred_editor;
-        }
-        if other.ui_preferences.home_sidebar_width.is_some() {
-            self.ui_preferences.home_sidebar_width = other.ui_preferences.home_sidebar_width;
-        }
-        if other.ui_preferences.sessions_sidebar_width.is_some() {
-            self.ui_preferences.sessions_sidebar_width =
-                other.ui_preferences.sessions_sidebar_width;
-        }
-        if other.ui_preferences.sessions_sidebar_collapsed.is_some() {
-            self.ui_preferences.sessions_sidebar_collapsed =
-                other.ui_preferences.sessions_sidebar_collapsed;
-        }
-        if other.ui_preferences.skill_manager_sources_width.is_some() {
-            self.ui_preferences.skill_manager_sources_width =
-                other.ui_preferences.skill_manager_sources_width;
-        }
-        // Decision fields: always trust on-disk, even when the value equals
-        // the default. "Unset" is itself a meaningful decision (means: prompt
-        // again next time), and "Declined" must round-trip across loads or
-        // the wizard would re-pester the user every run.
-        self.ui_preferences.statusline_decision = other.ui_preferences.statusline_decision;
-        self.ui_preferences.tmux_decision = other.ui_preferences.tmux_decision;
-
-        // Override Docker settings
-        if other.docker.host.is_some() {
-            self.docker.host = other.docker.host;
-        }
-        // Only override timeout if it's non-zero (0 indicates old config with unset value)
-        if other.docker.timeout != 0 && other.docker.timeout != default_docker_timeout() {
-            self.docker.timeout = other.docker.timeout;
-        }
-
-        if usage_present {
-            self.usage = other.usage;
-        }
-
-        // Fleet cost budgets layer like the plugin tables: a higher layer
-        // (project) that declares any cap replaces the lower layer's caps,
-        // so a project can pin a tighter spend ceiling without the user
-        // default leaking through. An all-empty `[fleet.cost]` (the
-        // default) is treated as "not set" and leaves the lower layer
-        // intact.
-        if !other.fleet.cost.is_empty() {
-            self.fleet.cost = other.fleet.cost;
-        }
-        // `merge_loaded` is a hand-written field-by-field merge, so a struct
-        // field that is not named here is silently DROPPED no matter what the
-        // file says. An unset section deserializes to the default, so only a
-        // non-default value counts as "the file set this".
-        if other.fleet.interview.surface.is_some() {
-            self.fleet.interview = other.fleet.interview.clone();
-        }
-        if other.fleet.terminal.is_some() {
-            self.fleet.terminal.clone_from(&other.fleet.terminal);
-        }
-
-        // Pool settings: trust the loaded layer whenever it differs from the
-        // defaults. `enabled = false` must survive (it IS the default-diverging
-        // case); a layer that omits [mcp_pool] deserializes to defaults and
-        // changes nothing.
-        if other.mcp_pool != McpPoolConfig::default() {
-            self.mcp_pool = other.mcp_pool;
-        }
-
-        // Plugin enable/disable lists: a higher layer that sets either list
-        // replaces the lower layer's (matches the allowlist/denylist intent —
-        // the most specific config layer decides which plugins load).
-        if !other.plugins.enabled.is_empty() {
-            self.plugins.enabled = other.plugins.enabled;
-        }
-        if !other.plugins.disabled.is_empty() {
-            self.plugins.disabled = other.plugins.disabled;
-        }
-        // Per-plugin config tables layer per key: the higher layer overrides
-        // shared keys, but keys it omits keep the lower layer's value (so a
-        // project layer can tweak one path without re-declaring the whole
-        // table). Mirrors the usage-layering contract.
-        for (name, higher_table) in other.plugins.values {
-            merge_plugin_value_table(
-                self.plugins
-                    .values
-                    .entry(name)
-                    .or_insert_with(|| toml::Value::Table(toml::value::Table::new())),
-                higher_table,
-            );
-        }
     }
 
     /// Load built-in container templates
@@ -1207,6 +2188,7 @@ impl AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         let mut config = Self {
+            inherited: toml::Table::new(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             authentication: AuthenticationConfig::default(),
             default_container_template: default_container_template(),
@@ -1220,6 +2202,13 @@ impl Default for AppConfig {
             presets: PresetsConfig::default(),
             fleet: FleetConfig::default(),
             mcp_pool: McpPoolConfig::default(),
+            general: GeneralConfig::default(),
+            ui: UiConfig::default(),
+            daemons: DaemonsConfig::default(),
+            usage_client: UsageClientConfig::default(),
+            notifyd: NotifydConfig::default(),
+            web: WebServerConfig::default(),
+            acp: AcpConfig::default(),
         };
 
         // Load built-in templates
@@ -1309,6 +2298,849 @@ impl ProjectConfig {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ================================================================
+    // Review findings #2 #3 #4 #5 #10: what a save is allowed to destroy
+    // ================================================================
+
+    /// #2. A file that TOKENIZES but does not load into `AppConfig` must abort
+    /// the save.
+    ///
+    /// `AppConfig::load()` returns Err on such a file, and three callers
+    /// (`cli/tmux_install.rs`, `app/state.rs`, `cli/run.rs`) `unwrap_or_default()`
+    /// and then save — so a DEFAULT config gets overlaid onto the real file and
+    /// every modelled section is replaced with defaults. The syntax gate does
+    /// not catch it because the syntax is fine.
+    #[test]
+    fn saving_over_a_config_that_parses_but_does_not_load_is_refused() {
+        // `timeout` is a u64; a quoted number is valid TOML and invalid schema.
+        let on_disk = "[docker]\ntimeout = \"60\"\n\n[skills]\napi_key = \"sk-secret\"\n";
+        assert!(
+            toml::from_str::<AppConfig>(on_disk).is_err(),
+            "fixture must be a file that parses but does not load"
+        );
+        assert!(
+            on_disk.parse::<toml::Table>().is_ok(),
+            "fixture must tokenize"
+        );
+
+        let err = AppConfig::default()
+            .overlay_onto_existing(on_disk)
+            .expect_err("a config that does not load must not be overlaid");
+        assert!(
+            err.to_string().contains("does not load"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// #3. Two writers must not share a temp path. `write_atomic` used a fixed
+    /// `config.toml.tmp`, which `ainb-plugin-burndown` computes identically —
+    /// so a concurrent burndown save and TUI save could rename each other's
+    /// half-written temp over the real config.
+    #[test]
+    fn atomic_writes_do_not_share_a_temp_path() {
+        let path = Path::new("/tmp/config.toml");
+        let a = temp_path(path);
+        let b = temp_path(path);
+        assert_ne!(a, b, "two writes reused one temp path: {a:?}");
+        assert!(
+            !a.ends_with("config.toml.tmp"),
+            "temp path is the fixed name burndown also computes: {a:?}"
+        );
+        assert!(
+            a.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "temp path does not identify the writing process: {a:?}"
+        );
+    }
+
+    /// #4. Only "not there" may be treated as empty. An unreadable-but-present
+    /// file read as `""` is overwritten wholesale, destroying `[skills]`,
+    /// `[session_reader]` and `[fleet.bridge]` — the rename needs only
+    /// directory permission, so the write succeeds.
+    #[test]
+    fn an_unreadable_config_is_not_treated_as_empty() {
+        let tmp = TempDir::new().expect("tempdir");
+
+        // A directory in the file's place: present, and not readable as text.
+        let as_dir = tmp.path().join("config.toml");
+        fs::create_dir(&as_dir).expect("mkdir");
+        let err = read_existing(&as_dir).expect_err("an unreadable path must not read as empty");
+        assert!(err.to_string().contains("could not be read"), "{err}");
+
+        // Absent is still empty.
+        assert_eq!(read_existing(&tmp.path().join("absent.toml")).unwrap(), "");
+    }
+
+    /// #5. The stray-config migration merged only TOP-LEVEL keys, so a
+    /// canonical file with any `[fleet]` content already occupied the `fleet`
+    /// key and the stray's `[fleet.bridge.telegram]` tokens were never carried
+    /// across — the precise data loss this change exists to stop.
+    #[test]
+    fn migrate_carries_a_nested_stray_section_into_an_occupied_parent() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        fs::write(&canonical, "[fleet.cost]\nsession_usd = 5.0\n").expect("write canonical");
+        fs::write(
+            root.join("config.toml"),
+            "[fleet.bridge.telegram]\ntoken = \"keychain:ainb-telegram\"\n",
+        )
+        .expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        let merged: toml::Value =
+            toml::from_str(&fs::read_to_string(&canonical).expect("read")).expect("parse");
+        assert_eq!(
+            registry::navigate_toml(&merged, "fleet.bridge.telegram.token").ok(),
+            Some(&toml::Value::String("keychain:ainb-telegram".to_string())),
+            "the stray bridge token was dropped because `fleet` was already occupied: {merged}"
+        );
+        assert_eq!(
+            registry::navigate_toml(&merged, "fleet.cost.session_usd").ok(),
+            Some(&toml::Value::Float(5.0)),
+            "the canonical value must still win"
+        );
+    }
+
+    // ================================================================
+    // Review round 3, findings #1 #2 #3
+    // ================================================================
+
+    /// #1. A key the loader drops is not merely ignored: the next save writes
+    /// the empty value back over what was stored.
+    ///
+    /// Goes through `from_layers`, which is exactly what `load()` runs per
+    /// file — a test built on a hand-made struct never touches the loader and
+    /// so never sees this.
+    #[test]
+    fn loading_restores_the_config_tree_expansion() {
+        let on_disk =
+            "[ui_preferences]\nconfig_tree_expanded = [\"Fleet|fleet\", \"MCP Pool|mcp_pool\"]\n";
+
+        let config = AppConfig::from_layers([on_disk]).expect("loads");
+
+        assert_eq!(
+            config.ui_preferences.config_tree_expanded,
+            vec!["Fleet|fleet".to_string(), "MCP Pool|mcp_pool".to_string()],
+            "the loader dropped the expansion state"
+        );
+
+        // And the round trip back to disk must not erase it.
+        let written = config.overlay_onto_existing(on_disk).expect("overlay");
+        let reread: toml::Value = toml::from_str(&written).expect("parse");
+        assert_eq!(
+            registry::navigate_toml(&reread, "ui_preferences.config_tree_expanded").ok(),
+            Some(&toml::Value::Array(vec![
+                toml::Value::String("Fleet|fleet".to_string()),
+                toml::Value::String("MCP Pool|mcp_pool".to_string()),
+            ])),
+            "saving after a load erased the expansion state:\n{written}"
+        );
+    }
+
+    /// #2. Persisting a setting must not reformat the file.
+    ///
+    /// `config/example.config.toml` is almost entirely comments and users are
+    /// told to copy it. A targeted write that round-trips through
+    /// `to_string_pretty` deletes every one of them — on a navigation keypress,
+    /// with no save and no confirmation.
+    #[test]
+    fn a_targeted_write_preserves_comments_and_layout() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        let hand_written = "\
+# ainb configuration
+# Copied from config/example.config.toml — every line below is load-bearing.
+
+[docker]
+# Connection timeout in seconds
+timeout   = 60
+
+[ui_preferences]
+theme = \"dark\"   # keep it dark
+";
+        fs::write(&path, hand_written).expect("seed");
+
+        write_keys_into(
+            &path,
+            &[(
+                "ui_preferences.config_tree_expanded".to_string(),
+                toml::Value::Array(vec![toml::Value::String("Fleet|fleet".to_string())]),
+            )],
+        )
+        .expect("targeted write");
+
+        let after = fs::read_to_string(&path).expect("read");
+        for comment in [
+            "# ainb configuration",
+            "# Copied from config/example.config.toml",
+            "# Connection timeout in seconds",
+            "# keep it dark",
+        ] {
+            assert!(
+                after.contains(comment),
+                "a settings write deleted {comment:?}:\n---\n{after}\n---"
+            );
+        }
+        assert!(
+            after.contains("timeout   = 60"),
+            "hand-written spacing was reflowed:\n---\n{after}\n---"
+        );
+        assert!(
+            after.contains("config_tree_expanded = [\"Fleet|fleet\"]"),
+            "the value was not written:\n---\n{after}\n---"
+        );
+    }
+
+    /// #3. `[fleet.bridge]` is hand-edited (see `SETUP_SKELETON`) and never
+    /// assigned by core, so a settings save must not write it back from the
+    /// snapshot it loaded at startup — that reverts a token edited while the
+    /// TUI was open. `[usage]` already has this guard; the bridge is the data
+    /// this PR exists to protect and had none.
+    #[test]
+    fn a_save_does_not_revert_a_hand_edited_bridge_token() {
+        // What the TUI loaded at startup.
+        let mut snapshot = AppConfig::default();
+        snapshot.fleet.bridge =
+            Some(toml::from_str("[telegram]\ntoken = \"keychain:stale\"\n").expect("stale bridge"));
+
+        // What is on disk now — the user hand-edited the token meanwhile.
+        let on_disk =
+            "[fleet.bridge.telegram]\ntoken = \"keychain:freshly-edited\"\nuser_id = 42\n";
+
+        let written = snapshot.overlay_onto_existing(on_disk).expect("overlay");
+        let after: toml::Value = toml::from_str(&written).expect("parse");
+
+        assert_eq!(
+            registry::navigate_toml(&after, "fleet.bridge.telegram.token").ok(),
+            Some(&toml::Value::String("keychain:freshly-edited".to_string())),
+            "a settings save reverted a hand-edited bridge token:\n{written}"
+        );
+        assert_eq!(
+            registry::navigate_toml(&after, "fleet.bridge.telegram.user_id").ok(),
+            Some(&toml::Value::Integer(42)),
+            "a settings save dropped a hand-added bridge key:\n{written}"
+        );
+    }
+
+    /// #9. A navigational keystroke must not rewrite the whole file.
+    ///
+    /// `ConfigToggleExpand` used to call `AppConfig::save()`, which serializes
+    /// the in-memory snapshot taken at startup — so expanding a tree node
+    /// reverted anything `ainb config set` or another process had changed since.
+    /// The targeted writer touches one key and leaves every other byte.
+    #[test]
+    fn a_targeted_write_leaves_every_other_section_alone() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        // Stands in for "another writer changed this since we loaded".
+        fs::write(
+            &path,
+            "[docker]\ntimeout = 120\n\n[skills]\napi_key = \"sk-secret\"\n",
+        )
+        .expect("seed");
+
+        write_keys_into(
+            &path,
+            &[(
+                "ui_preferences.config_tree_expanded".to_string(),
+                toml::Value::Array(vec![toml::Value::String("Fleet|fleet".to_string())]),
+            )],
+        )
+        .expect("targeted write");
+
+        let after: toml::Value =
+            toml::from_str(&fs::read_to_string(&path).expect("read")).expect("parse");
+        assert_eq!(
+            registry::navigate_toml(&after, "docker.timeout").ok(),
+            Some(&toml::Value::Integer(120)),
+            "a tree keystroke reverted another writer's value: {after}"
+        );
+        assert_eq!(
+            registry::navigate_toml(&after, "skills.api_key").ok(),
+            Some(&toml::Value::String("sk-secret".to_string()))
+        );
+        assert_eq!(
+            registry::navigate_toml(&after, "ui_preferences.config_tree_expanded").ok(),
+            Some(&toml::Value::Array(vec![toml::Value::String(
+                "Fleet|fleet".to_string()
+            )]))
+        );
+    }
+
+    /// A targeted write is still refused on a file it cannot parse, and on a
+    /// read-only section — the narrow writer is not a way around either guard.
+    #[test]
+    fn a_targeted_write_keeps_the_same_guards() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("config.toml");
+        fs::write(&path, "this is not valid toml\n").expect("seed");
+        assert!(
+            write_keys_into(
+                &path,
+                &[("docker.timeout".to_string(), toml::Value::Integer(1))]
+            )
+            .is_err(),
+            "wrote over a config.toml that does not parse"
+        );
+
+        let ok_path = tmp.path().join("ok.toml");
+        fs::write(&ok_path, "[usage]\n").expect("seed");
+        assert!(
+            write_keys_into(
+                &ok_path,
+                &[(
+                    "usage.currency.code".to_string(),
+                    toml::Value::String("EUR".into())
+                )]
+            )
+            .is_err(),
+            "wrote into a read-only section"
+        );
+    }
+
+    /// `fleet.bridge.*` goes THROUGH the key-level writer, and the genuinely
+    /// modelled keys stay out of it.
+    ///
+    /// This assertion used to be the exact opposite. The reasoning was that
+    /// `[fleet]` is modelled, so `save()` owns it — but `save()` deliberately
+    /// preserves `fleet.bridge` from disk, so routing an edit through the
+    /// struct meant it was overwritten by the value already there. The
+    /// key-level write is the only path that lands it.
+    #[test]
+    fn the_external_writer_accepts_bridge_keys_and_refuses_modelled_ones() {
+        assert!(
+            external_edit_value("fleet.bridge.telegram.token", "keychain:x").is_ok(),
+            "a bridge edit must reach the file"
+        );
+        // The genuinely external sections still go through.
+        assert!(external_edit_value("skills.catalog_release", "v1.2.3").is_ok());
+        assert!(external_edit_value("session_reader.incremental_window_days", "7").is_ok());
+        // A modelled key belongs to `save()`, not here.
+        assert!(external_edit_value("docker.timeout", "60").is_err());
+    }
+
+    /// A canonical config with a syntax error must abort the migration, not be
+    /// replaced by the stray file. Treating an unparseable file as empty would
+    /// destroy exactly the sections this change exists to protect.
+    #[test]
+    fn migrate_leaves_an_unparseable_canonical_config_alone() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        let broken = "[skills]\napi_key = \"sk-secret\"\nthis is not valid toml\n";
+        fs::write(&canonical, broken).expect("write canonical");
+        fs::write(
+            root.join("config.toml"),
+            "[usage.currency]\ncode = \"GBP\"\n",
+        )
+        .expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        assert_eq!(
+            fs::read_to_string(&canonical).expect("read"),
+            broken,
+            "an unparseable canonical config was overwritten by the stray file"
+        );
+        assert!(
+            root.join("config.toml").exists(),
+            "the stray file was consumed even though the migration could not run"
+        );
+    }
+
+    /// A stray file that carries nothing across must leave the canonical file
+    /// byte-for-byte alone — users hand-edit it, and a round-trip through the
+    /// serializer strips every comment.
+    #[test]
+    fn migrate_does_not_reformat_when_nothing_is_carried_across() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        let commented = "# my notes\n[ui_preferences]\ntheme = \"dark\"\n";
+        fs::write(&canonical, commented).expect("write canonical");
+        fs::write(
+            root.join("config.toml"),
+            "[ui_preferences]\ntheme = \"light\"\n",
+        )
+        .expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        assert_eq!(
+            fs::read_to_string(&canonical).expect("read"),
+            commented,
+            "the canonical file was reformatted despite nothing being carried across"
+        );
+        assert!(
+            root.join("config.toml.migrated").exists(),
+            "stray was not moved aside"
+        );
+    }
+
+    /// The backup is sometimes the only surviving copy, so a second migration
+    /// must not clobber the first one's backup.
+    #[test]
+    fn migrate_never_overwrites_an_existing_backup() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+        fs::write(&canonical, "").expect("write canonical");
+        fs::write(root.join("config.toml.migrated"), "first backup\n").expect("write backup");
+        fs::write(root.join("config.toml"), "[docker]\ntimeout = 90\n").expect("write stray");
+
+        migrate_stray_user_config(&canonical);
+
+        assert_eq!(
+            fs::read_to_string(root.join("config.toml.migrated")).expect("read"),
+            "first backup\n",
+            "the earlier backup was destroyed"
+        );
+        assert!(
+            root.join("config.toml.migrated.1").exists(),
+            "the new backup did not fall back to a free name"
+        );
+    }
+
+    /// Saving over a file we cannot parse must fail loudly. `AppConfig::load()`
+    /// falls back to defaults on a parse error, so silently treating the file as
+    /// empty would turn the next settings save into a wipe of everything on disk.
+    #[test]
+    fn save_refuses_to_overlay_an_unparseable_file() {
+        let config = AppConfig::default();
+        let err = config
+            .overlay_onto_existing("[skills]\napi_key = \"sk\"\nnot valid toml\n")
+            .expect_err("overlaying an unparseable file must fail");
+        assert!(
+            err.to_string().contains("does not parse"),
+            "error should say the file is unparseable, got: {err}"
+        );
+    }
+
+    /// `[usage]` is owned by the burndown plugin, which load-modify-saves the
+    /// same file. A long-lived TUI must not revert a plan set from another
+    /// shell mid-session.
+    #[test]
+    fn save_does_not_rewrite_usage_owned_by_the_burndown_plugin() {
+        // What the TUI loaded at startup: no plan.
+        let config = AppConfig::default();
+        // What another process wrote to the file since then.
+        let on_disk = "[usage.currency]\ncode = \"GBP\"\nsymbol = \"£\"\nusd_rate = 0.79\n";
+
+        let saved = config.overlay_onto_existing(on_disk).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["usage"]["currency"]["code"].as_str(),
+            Some("GBP"),
+            "a settings save reverted [usage] to the snapshot loaded at startup"
+        );
+    }
+
+    /// The overlay serializes a `toml::Table`, not the struct, so field
+    /// declaration order no longer protects us: TOML requires every top-level
+    /// scalar before the first table, and a sorted map interleaves them
+    /// (`authentication` sorts before `version`). Prove a fully-populated
+    /// config still renders to something that parses back.
+    #[test]
+    fn overlay_output_is_valid_toml_for_a_full_config() {
+        let mut config = AppConfig::default();
+        config.load_builtin_templates();
+
+        let rendered = config
+            .overlay_onto_existing("[skills]\napi_key = \"sk-secret\"\n")
+            .expect("overlay must not fail on a fully-populated config");
+
+        let reparsed: AppConfig = toml::from_str(&rendered).expect("overlay emitted invalid TOML");
+        assert_eq!(reparsed.version, config.version);
+        assert_eq!(
+            reparsed.default_container_template,
+            config.default_container_template
+        );
+        assert_eq!(
+            reparsed.container_templates.len(),
+            config.container_templates.len()
+        );
+
+        let table: toml::Table = rendered.parse().expect("valid TOML");
+        assert_eq!(table["skills"]["api_key"].as_str(), Some("sk-secret"));
+    }
+
+    /// A user who set `[usage]` while the plugins still read the file one
+    /// directory up must not lose it. The stray file is folded in and moved
+    /// aside, and the canonical file wins wherever both set the same key.
+    #[test]
+    fn migrate_folds_stray_config_in_and_moves_it_aside() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join(".agents-in-a-box");
+        let canonical = root.join("config").join("config.toml");
+        fs::create_dir_all(canonical.parent().unwrap()).expect("mkdir");
+
+        fs::write(
+            root.join("config.toml"),
+            "[usage.currency]\ncode = \"GBP\"\n\n[ui_preferences]\ntheme = \"light\"\n",
+        )
+        .expect("write stray");
+        fs::write(&canonical, "[ui_preferences]\ntheme = \"dark\"\n").expect("write canonical");
+
+        migrate_stray_user_config(&canonical);
+
+        let merged: toml::Table =
+            fs::read_to_string(&canonical).expect("read").parse().expect("valid TOML");
+        assert_eq!(
+            merged["usage"]["currency"]["code"].as_str(),
+            Some("GBP"),
+            "the stray file's [usage] was not carried across"
+        );
+        assert_eq!(
+            merged["ui_preferences"]["theme"].as_str(),
+            Some("dark"),
+            "the stray file overwrote a key the canonical config already set"
+        );
+        assert!(
+            !root.join("config.toml").exists(),
+            "stray file was left in place"
+        );
+        assert!(
+            root.join("config.toml.migrated").exists(),
+            "stray file's contents were destroyed rather than kept"
+        );
+    }
+
+    /// A `fleet.bridge.*` edit must actually reach the file.
+    ///
+    /// This is the row class the whole PR exists to protect, and it was broken
+    /// twice in a row: first routed through the struct, where `save()`'s
+    /// preservation of `fleet.bridge` silently overwrote it, then routed to the
+    /// key-level writer which still refused the prefix. Both times the screen
+    /// reported "Setting saved to config.toml" and nothing changed.
+    #[test]
+    fn a_bridge_edit_is_accepted_by_the_external_writer() {
+        let value = external_edit_value("fleet.bridge.telegram.token", "keychain:ainb-telegram")
+            .expect("a bridge edit must be an accepted external write");
+        assert_eq!(value.as_str(), Some("keychain:ainb-telegram"));
+    }
+
+    /// The counterpart: `[usage]` belongs to the burndown plugin, and core must
+    /// keep refusing it.
+    #[test]
+    fn a_usage_edit_is_refused_by_the_external_writer() {
+        // Refused at the `is_external` gate, before the ownership check even
+        // runs — `[usage]` is not an externally-owned section, it is a modelled
+        // one core reads and the burndown plugin writes.
+        assert!(
+            external_edit_value("usage.currency.code", "GBP").is_err(),
+            "core must not write a section the burndown plugin owns"
+        );
+    }
+
+    /// And it must be refused with something actionable, not a bare failure
+    /// three calls downstream.
+    #[test]
+    fn burndown_owned_keys_are_recognised() {
+        assert!(is_burndown_owned("usage.currency.code"));
+        assert!(is_burndown_owned("usage"));
+        assert!(!is_burndown_owned("fleet.bridge.telegram.token"));
+        assert!(!is_burndown_owned("docker.timeout"));
+    }
+
+    /// An inline table must survive a save intact.
+    ///
+    /// `example.config.toml` documents `[mcp_servers.*]` with inline
+    /// `installation = { type = "Npm", … }` / `definition = { … }` values. An
+    /// inline table is an `Item::Value`, so `as_table()` says no: the document
+    /// walk called it a leaf while the `toml` walk descended into it, the
+    /// prune pass then removed it and the set pass re-emitted it as
+    /// `[section.sub]` headers — destroying the line and its comment.
+    #[test]
+    fn save_keeps_an_inline_table_and_its_comment() {
+        let existing = "\
+# my mcp servers
+[mcp_servers.context7]
+name = \"context7\"
+description = \"docs\"
+required_env = []
+enabled_by_default = true
+shared = true
+installation = { type = \"Npm\", package = \"@context7/mcp-server\", version = \"latest\" }  # inline
+definition = { type = \"Command\", command = \"npx\", args = [\"-y\"], env = {} }
+
+[docker]
+timeout = 60
+";
+        let config: AppConfig = toml::from_str(existing).expect("parses");
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+
+        assert!(
+            saved.contains("installation = {"),
+            "the inline table was expanded into headers:\n{saved}"
+        );
+        assert!(
+            saved.contains("# inline"),
+            "the inline comment was lost:\n{saved}"
+        );
+        assert!(
+            saved.contains("# my mcp servers"),
+            "the section comment was lost:\n{saved}"
+        );
+        assert!(
+            !saved.contains("[mcp_servers.context7.installation]"),
+            "the inline table was re-emitted as a header:\n{saved}"
+        );
+        toml::from_str::<AppConfig>(&saved).expect("saved config no longer deserializes");
+    }
+
+    /// A map key containing a dot must survive a save.
+    ///
+    /// Model ids routinely have dots, and `[usage.model_aliases]` is keyed by
+    /// them. Flattening `gpt-4.1` into a dotted path and splitting it again
+    /// invented a `[usage.model_aliases.gpt-4]` table with a `1` inside,
+    /// alongside the untouched original — after which the file no longer
+    /// deserialized and every consumer silently fell back to defaults.
+    #[test]
+    fn save_keeps_a_map_key_that_contains_a_dot() {
+        let existing = "\
+[usage.model_aliases]
+\"gpt-4.1\" = \"claude-sonnet-4-5\"
+
+[docker]
+timeout = 60
+";
+        let config: AppConfig = toml::from_str(existing).expect("parses");
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+
+        let reparsed: toml::Table = saved.parse().expect("still valid TOML");
+        assert_eq!(
+            reparsed["usage"]["model_aliases"]["gpt-4.1"].as_str(),
+            Some("claude-sonnet-4-5"),
+            "the dotted map key did not survive the save:\n{saved}"
+        );
+        assert!(
+            reparsed["usage"]["model_aliases"].get("gpt-4").is_none(),
+            "the dotted key was split into a nested table:\n{saved}"
+        );
+        // The whole point: it must still load.
+        toml::from_str::<AppConfig>(&saved).expect("saved config no longer deserializes");
+    }
+
+    /// A save must not copy another layer's values into the user's file.
+    ///
+    /// This struct is the merge of every layer, and `save()` writes the USER
+    /// file. Now that a project config outranks the user's, a repo's
+    /// `.ainb/config.toml` would otherwise be baked into
+    /// `~/.agents-in-a-box/config/config.toml` the first time anything was
+    /// toggled in that repo — and `ainb mcp import` creates such a file by
+    /// default, so it is a path people actually walk.
+    #[test]
+    fn save_does_not_persist_values_another_layer_provides() {
+        let project = "[docker]\ntimeout = 22\n[fleet]\nterminal = \"ghostty\"\n";
+        let user_file = "[ui_preferences]\ntheme = \"dark\"\n";
+
+        // What `load()` would produce: user then project, project winning.
+        let mut config = AppConfig::from_layers([user_file, project]).expect("layers");
+        config.inherited = project.parse().expect("project layer");
+        // The user changes one thing in the settings screen.
+        config.ui_preferences.theme = "light".to_string();
+
+        let saved = config.overlay_onto_existing(user_file).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["ui_preferences"]["theme"].as_str(),
+            Some("light"),
+            "the user's own edit was not saved"
+        );
+        // Asserted on VALUES, not section presence: a section whose fields all
+        // have serde defaults still serializes as an empty table, which is
+        // noise rather than a leaked setting.
+        assert!(
+            registry::navigate_toml(&toml::Value::Table(reparsed.clone()), "fleet.terminal")
+                .is_err(),
+            "the project's fleet.terminal was copied into the user's file:\n{saved}"
+        );
+        assert!(
+            registry::navigate_toml(&toml::Value::Table(reparsed.clone()), "docker.timeout")
+                .is_err(),
+            "the project's docker.timeout was copied into the user's file:\n{saved}"
+        );
+    }
+
+    /// The case both other tests miss: the user file has the key AND the
+    /// project sets it to something ELSE.
+    ///
+    /// `ours_leaves` is flattened from the MERGED table, where the project has
+    /// already won, so writing it back put the project's value into the user's
+    /// global file — the exact clobber this whole change exists to stop, just
+    /// reachable only when the two layers disagree.
+    #[test]
+    fn save_does_not_overwrite_a_user_value_with_a_project_one() {
+        let project = "[docker]\ntimeout = 22\n";
+        let user_file = "[docker]\ntimeout = 11\n";
+
+        let mut config = AppConfig::from_layers([user_file, project]).expect("layers");
+        config.inherited = project.parse().expect("project layer");
+        assert_eq!(
+            config.docker.timeout, 22,
+            "the merge should favour the project"
+        );
+
+        let saved = config.overlay_onto_existing(user_file).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["docker"]["timeout"].as_integer(),
+            Some(11),
+            "the project's value was written into the user's own file:\n{saved}"
+        );
+    }
+
+    /// The other half: a value the user file already carries stays, even when
+    /// another layer happens to agree. Dropping it would be a silent deletion
+    /// of something they set.
+    #[test]
+    fn save_keeps_a_user_value_another_layer_agrees_with() {
+        let project = "[docker]\ntimeout = 22\n";
+        let user_file = "[docker]\ntimeout = 22\n";
+
+        let mut config = AppConfig::from_layers([user_file, project]).expect("layers");
+        config.inherited = project.parse().expect("project layer");
+
+        let saved = config.overlay_onto_existing(user_file).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("valid TOML");
+
+        assert_eq!(
+            reparsed["docker"]["timeout"].as_integer(),
+            Some(22),
+            "a value the user file already held was dropped:\n{saved}"
+        );
+    }
+
+    /// A settings save must not strip the file's comments.
+    ///
+    /// Users are told to start from `config/example.config.toml`, which is
+    /// ~320 lines of comments explaining what every key does. Rendering the
+    /// save through `toml::to_string_pretty` deleted all of them, so the first
+    /// time anyone changed a setting the file they were left with was strictly
+    /// less useful than the one they copied.
+    #[test]
+    fn save_keeps_the_comments_in_a_hand_written_config() {
+        let existing = "\
+# The theme the TUI paints with.
+# Options: \"dark\" | \"light\"
+[ui_preferences]
+theme = \"dark\"   # trailing note
+
+# How long to wait on the Docker daemon.
+[docker]
+timeout = 60
+";
+        let mut config: AppConfig = toml::from_str(existing).expect("parses");
+        config.ui_preferences.theme = "light".to_string();
+
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+
+        assert!(
+            saved.contains("# The theme the TUI paints with."),
+            "a leading comment was stripped by save:\n{saved}"
+        );
+        assert!(
+            saved.contains("# How long to wait on the Docker daemon."),
+            "a section comment was stripped by save:\n{saved}"
+        );
+        assert!(
+            saved.contains("# trailing note"),
+            "a trailing comment was stripped by save:\n{saved}"
+        );
+        assert!(
+            saved.contains("theme = \"light\""),
+            "the edited value did not reach the file:\n{saved}"
+        );
+    }
+
+    /// Saving must not eat the sections `AppConfig` does not model.
+    ///
+    /// `[skills]` and `[session_reader]` are read off this same file by
+    /// `ainb-cli` and the session-reader plugin; `[fleet.bridge]` holds the
+    /// phone bridge's bot tokens. Before the overlay write, every settings save
+    /// replaced the file wholesale and silently destroyed all three.
+    #[test]
+    fn save_preserves_sections_app_config_does_not_model() {
+        let existing = r#"
+[skills]
+catalog_release = "v1.5.0"
+api_key = "sk-secret"
+
+[session_reader]
+incremental_window_days = 90
+
+[fleet.bridge.telegram]
+token = "keychain:ainb-telegram"
+user_id = 123456789
+
+[ui_preferences]
+theme = "dark"
+"#;
+        // Round-trip through load so `[fleet.bridge]` reaches the struct the
+        // way a real save does, then write back over the same content.
+        let loaded: AppConfig = toml::from_str(existing).expect("parses");
+        let saved = loaded.overlay_onto_existing(existing).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("still valid TOML");
+
+        assert_eq!(
+            reparsed["skills"]["catalog_release"].as_str(),
+            Some("v1.5.0"),
+            "[skills] was dropped by save"
+        );
+        assert_eq!(
+            reparsed["skills"]["api_key"].as_str(),
+            Some("sk-secret"),
+            "the skills API key was dropped by save"
+        );
+        assert_eq!(
+            reparsed["session_reader"]["incremental_window_days"].as_integer(),
+            Some(90),
+            "[session_reader] was dropped by save"
+        );
+        assert_eq!(
+            reparsed["fleet"]["bridge"]["telegram"]["token"].as_str(),
+            Some("keychain:ainb-telegram"),
+            "[fleet.bridge] was dropped by save — bridge tokens are gone"
+        );
+    }
+
+    /// The flip side of the overlay: a modelled section is replaced wholesale,
+    /// so deleting an entry from it actually sticks instead of being resurrected
+    /// from the previous file contents.
+    #[test]
+    fn save_replaces_modelled_sections_wholesale() {
+        let existing = r#"
+[ui_preferences]
+theme = "light"
+show_git_status = false
+"#;
+        let mut config: AppConfig = toml::from_str(existing).expect("parses");
+        config.ui_preferences.show_git_status = true;
+
+        let saved = config.overlay_onto_existing(existing).expect("overlays");
+        let reparsed: toml::Table = saved.parse().expect("still valid TOML");
+
+        assert_eq!(
+            reparsed["ui_preferences"]["show_git_status"].as_bool(),
+            Some(true),
+            "a modelled field kept its stale on-disk value"
+        );
+    }
 
     #[test]
     fn test_default_config() {
@@ -1472,22 +3304,17 @@ mod tests {
 
     #[test]
     fn test_app_config_merge_preserves_docker_settings() {
-        let mut base = AppConfig::default();
-        let mut other = AppConfig::default();
+        let config = AppConfig::from_layers([
+            "",
+            "[docker]\nhost = \"unix:///custom/docker.sock\"\ntimeout = 90\n",
+        ])
+        .expect("layers");
 
-        // Set docker settings in other config
-        other.docker.host = Some("unix:///custom/docker.sock".to_string());
-        other.docker.timeout = 90;
-
-        // Merge
-        base.merge(other);
-
-        // Verify docker settings were merged
         assert_eq!(
-            base.docker.host,
+            config.docker.host,
             Some("unix:///custom/docker.sock".to_string())
         );
-        assert_eq!(base.docker.timeout, 90);
+        assert_eq!(config.docker.timeout, 90);
     }
 
     #[test]
@@ -1496,44 +3323,116 @@ mod tests {
         assert_eq!(UsagePlanId::ClaudeMax5x.monthly_usd(), Some(100.0));
     }
 
+    /// `[usage]` is owned by the burndown plugin and passes through `ainb-core`
+    /// untouched, so a layer that says nothing about it must leave every part
+    /// of it alone — plan, currency and aliases alike.
     #[test]
     fn layered_merge_preserves_usage_when_higher_layer_omits_usage() {
-        let mut base = AppConfig::default();
-        base.usage.plan = Some(UsagePlan {
-            id: UsagePlanId::ClaudePro,
-            monthly_usd: 20.0,
-            provider: UsagePlanProvider::Claude,
-            reset_day: 12,
-            set_at: "2026-04-29T00:00:00Z".to_string(),
-        });
-        base.usage.currency = CurrencyConfig {
-            code: "GBP".to_string(),
-            symbol: "GBP".to_string(),
-            usd_rate: 1.0,
-        };
-        base.usage
-            .model_aliases
-            .insert("cursor-auto".to_string(), "claude-sonnet-4-5".to_string());
+        let user = r#"
+[usage.plan]
+id = "claude-pro"
+monthly_usd = 20.0
+provider = "claude"
+reset_day = 12
+set_at = "2026-04-29T00:00:00Z"
 
-        let mut higher = AppConfig::default();
-        higher.ui_preferences.theme = "light".to_string();
+[usage.currency]
+code = "GBP"
+symbol = "GBP"
+usd_rate = 1.0
 
-        base.merge_loaded(higher, false);
+[usage.model_aliases]
+cursor-auto = "claude-sonnet-4-5"
+"#;
+        let higher = "[ui_preferences]\ntheme = \"light\"\n";
 
-        assert_eq!(base.ui_preferences.theme, "light");
-        assert_eq!(base.usage.plan.as_ref().unwrap().reset_day, 12);
-        assert_eq!(base.usage.currency.code, "GBP");
+        let config = AppConfig::from_layers([user, higher]).expect("layers");
+
+        assert_eq!(config.ui_preferences.theme, "light");
+        assert_eq!(config.usage.plan.as_ref().unwrap().reset_day, 12);
+        assert_eq!(config.usage.currency.code, "GBP");
         assert_eq!(
-            base.usage.model_aliases.get("cursor-auto"),
+            config.usage.model_aliases.get("cursor-auto"),
             Some(&"claude-sonnet-4-5".to_string())
+        );
+    }
+
+    /// Precedence is most-specific-wins, and this list's ORDER is what defines
+    /// it: `load` merges in order and each layer overrides the last.
+    ///
+    /// It used to run the other way, so the system config beat the user's and a
+    /// project's — the inverse of what every document and `ainb config path`
+    /// described.
+    #[test]
+    fn config_paths_run_from_lowest_to_highest_precedence() {
+        let scopes: Vec<ConfigScope> =
+            AppConfig::get_config_paths().into_iter().map(|(scope, _)| scope).collect();
+
+        let position = |wanted: ConfigScope| {
+            scopes
+                .iter()
+                .position(|scope| *scope == wanted)
+                .unwrap_or_else(|| panic!("{wanted:?} missing from {scopes:?}"))
+        };
+
+        assert!(
+            position(ConfigScope::System) < position(ConfigScope::User),
+            "the user config must override the system's, got {scopes:?}"
+        );
+        assert!(
+            position(ConfigScope::User) < position(ConfigScope::ProjectLegacy),
+            "a project config must override the user's, got {scopes:?}"
+        );
+        assert!(
+            position(ConfigScope::ProjectLegacy) < position(ConfigScope::Project),
+            "canonical .ainb must override legacy .agents-box, got {scopes:?}"
+        );
+    }
+
+    /// The pair of properties this change depends on, asserted together: the
+    /// project layer wins for what it writes, and does NOT touch what it omits.
+    ///
+    /// The second half is why this reorder had to wait for the per-key merge.
+    /// With the old field-by-field merge, this same project file reset
+    /// `cli_provider` to `claude` and `statusline_decision` to `unset`.
+    #[test]
+    fn a_project_layer_wins_only_for_the_keys_it_writes() {
+        let user = r#"
+[authentication]
+cli_provider = "codex"
+
+[ui_preferences]
+statusline_decision = "declined"
+
+[workspace_defaults]
+max_repositories = 99
+
+[docker]
+timeout = 11
+"#;
+        let project = "[docker]\ntimeout = 22\n";
+
+        // In `load()` order: system, user, then project.
+        let config = AppConfig::from_layers([user, project]).expect("layers");
+
+        assert_eq!(
+            config.docker.timeout, 22,
+            "the project layer must win its own key"
+        );
+        assert_eq!(config.authentication.cli_provider, CliProvider::Codex);
+        assert_eq!(config.workspace_defaults.max_repositories, 99);
+        assert_eq!(
+            config.ui_preferences.statusline_decision,
+            StatuslineDecision::Declined,
+            "a project file that never mentions the wizard decision must not reset it"
         );
     }
 
     #[test]
     fn project_config_paths_prefer_ainb_over_legacy() {
         let paths = AppConfig::get_config_paths();
-        let ainb = paths.iter().position(|p| p.ends_with(".ainb/config.toml"));
-        let legacy = paths.iter().position(|p| p.ends_with(".agents-box/config.toml"));
+        let ainb = paths.iter().position(|(_, p)| p.ends_with(".ainb/config.toml"));
+        let legacy = paths.iter().position(|(_, p)| p.ends_with(".agents-box/config.toml"));
         let (ainb, legacy) = (
             ainb.expect(".ainb path missing"),
             legacy.expect("legacy path missing"),
@@ -1581,19 +3480,20 @@ mod tests {
 
     #[test]
     fn layered_merge_respects_mcp_pool_disable() {
-        let mut base = AppConfig::default();
-        let mut higher = AppConfig::default();
-        higher.mcp_pool.enabled = false;
+        let disable = "[mcp_pool]\nenabled = false\n";
 
-        base.merge_loaded(higher, false);
+        let config = AppConfig::from_layers(["", disable]).expect("layers");
         assert!(
-            !base.mcp_pool.enabled,
+            !config.mcp_pool.enabled,
             "explicit disable must survive merge"
         );
 
-        // A layer that omits [mcp_pool] (== defaults) must not clobber it back.
-        base.merge_loaded(AppConfig::default(), false);
-        assert!(!base.mcp_pool.enabled, "defaulted layer must not re-enable");
+        // A layer that omits [mcp_pool] must not clobber it back on, and one
+        // that mentions only a sibling key must not either.
+        let config = AppConfig::from_layers([disable, "", "[mcp_pool]\nidle_grace_secs = 42\n"])
+            .expect("layers");
+        assert!(!config.mcp_pool.enabled, "silent layer must not re-enable");
+        assert_eq!(config.mcp_pool.idle_grace_secs, 42);
     }
 
     #[test]
@@ -1698,51 +3598,47 @@ group_usd = 25.0
         assert_eq!(bare.fleet.cost.session_limit("x"), None);
     }
 
+    /// `[fleet.cost]` layers per cap, not wholesale.
+    ///
+    /// The old merge replaced the whole table as soon as the higher layer
+    /// declared any cap, which quietly deleted the user's `group_usd` because
+    /// a project pinned a tighter `session_usd`. These are spend ceilings —
+    /// dropping one nobody asked to drop is the wrong failure — so each cap is
+    /// now overridden only by a layer that states that cap.
     #[test]
-    fn test_fleet_cost_project_layer_overrides_user_layer() {
-        // User layer sets a $5 session cap; an empty project `[fleet.cost]`
-        // must NOT clobber it, but a populated one must replace it.
-        let mut user: AppConfig = toml::from_str("[fleet.cost]\nsession_usd = 5.0\n").unwrap();
+    fn fleet_cost_caps_merge_per_cap_across_layers() {
+        let user = "[fleet.cost]\nsession_usd = 5.0\ngroup_usd = 25.0\n";
 
-        // Empty project fleet config → user cap preserved.
-        let empty_project: AppConfig = toml::from_str("[fleet]\n").unwrap();
-        let mut merged = user.clone();
-        merged.merge(empty_project);
+        // A project layer silent about costs preserves both caps.
+        let merged = AppConfig::from_layers([user, "[fleet]\n"]).expect("layers");
         assert_eq!(merged.fleet.cost.session_usd, Some(5.0));
+        assert_eq!(merged.fleet.cost.group_usd, Some(25.0));
 
-        // Populated project config → replaces the user cap.
-        let project: AppConfig = toml::from_str("[fleet.cost]\nsession_usd = 2.0\n").unwrap();
-        user.merge(project);
-        assert_eq!(user.fleet.cost.session_usd, Some(2.0));
+        // A project layer that pins one cap replaces that cap only.
+        let merged =
+            AppConfig::from_layers([user, "[fleet.cost]\nsession_usd = 2.0\n"]).expect("layers");
+        assert_eq!(merged.fleet.cost.session_usd, Some(2.0));
+        assert_eq!(
+            merged.fleet.cost.group_usd,
+            Some(25.0),
+            "a session cap must not delete the user's group cap"
+        );
     }
 
     #[test]
     fn test_plugins_values_layering() {
         // A higher (project) layer overrides the lower (user) layer for the
         // same `[plugins.<n>].<key>`, mirroring the usage-layering contract.
-        let mut base = AppConfig::default();
-        let mut user_table = toml::value::Table::new();
-        user_table.insert("learnings_dir".into(), toml::Value::String("user".into()));
-        user_table.insert(
-            "qmd_collection".into(),
-            toml::Value::String("base-only".into()),
-        );
-        base.plugins.values.insert("learnings".into(), toml::Value::Table(user_table));
+        let user = r#"
+[plugins.learnings]
+learnings_dir = "user"
+qmd_collection = "base-only"
+"#;
+        let project = "[plugins.learnings]\nlearnings_dir = \"project\"\n";
 
-        let mut higher = AppConfig::default();
-        let mut project_table = toml::value::Table::new();
-        project_table.insert(
-            "learnings_dir".into(),
-            toml::Value::String("project".into()),
-        );
-        higher
-            .plugins
-            .values
-            .insert("learnings".into(), toml::Value::Table(project_table));
+        let config = AppConfig::from_layers([user, project]).expect("layers");
 
-        base.merge_loaded(higher, false);
-
-        let merged = base
+        let merged = config
             .plugins
             .values
             .get("learnings")
@@ -1757,6 +3653,298 @@ group_usd = 25.0
         assert_eq!(
             merged.get("qmd_collection").and_then(toml::Value::as_str),
             Some("base-only")
+        );
+    }
+
+    /// A layer must influence exactly the keys it writes.
+    ///
+    /// The bug this whole merge rewrite exists for: the old field-by-field
+    /// merge assigned several fields unconditionally, so a project file
+    /// carrying one Docker key reset the user's provider, repository cap,
+    /// panel toggles and recorded statusline decision to their serde defaults.
+    /// Commands that load-mutate-save then wrote that reset into the user's
+    /// own file.
+    #[test]
+    fn a_layer_only_changes_the_keys_it_writes() {
+        let earlier = r#"
+[authentication]
+cli_provider = "codex"
+
+[ui_preferences]
+statusline_decision = "declined"
+show_git_status = false
+
+[workspace_defaults]
+max_repositories = 99
+"#;
+        let later = "[docker]\ntimeout = 22\n";
+
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+
+        assert_eq!(config.docker.timeout, 22, "the project layer's own key");
+        assert_eq!(config.authentication.cli_provider, CliProvider::Codex);
+        assert_eq!(config.workspace_defaults.max_repositories, 99);
+        assert!(!config.ui_preferences.show_git_status);
+        assert_eq!(
+            config.ui_preferences.statusline_decision,
+            StatuslineDecision::Declined
+        );
+    }
+
+    /// The other half of the same bug: gating on `!= default()` made an
+    /// explicitly written default unreachable, so a project layer could never
+    /// pull a knob back to its shipped value once the user had moved it.
+    #[test]
+    fn an_explicit_default_in_a_later_layer_beats_an_earlier_non_default() {
+        let earlier = r#"
+[authentication]
+cli_provider = "codex"
+default_model = "opus"
+
+[ui_preferences]
+theme = "light"
+
+[workspace_defaults]
+branch_prefix = "user/"
+max_repositories = 99
+
+[docker]
+timeout = 90
+"#;
+        // Every value here IS the coded default, written out on purpose —
+        // `branch_prefix` included, which `default_branch_prefix()` returns as
+        // "agents/". It said "ainb/" before, which made that one field an
+        // ordinary override and not a test of this property at all.
+        let later = r#"
+[authentication]
+cli_provider = "claude"
+default_model = "sonnet"
+
+[ui_preferences]
+theme = "dark"
+
+[workspace_defaults]
+branch_prefix = "agents/"
+max_repositories = 500
+
+[docker]
+timeout = 60
+"#;
+
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+
+        assert_eq!(config.authentication.cli_provider, CliProvider::Claude);
+        assert_eq!(config.authentication.default_model, "sonnet");
+        assert_eq!(config.ui_preferences.theme, "dark");
+        assert_eq!(config.workspace_defaults.branch_prefix, "agents/");
+        assert_eq!(config.workspace_defaults.max_repositories, 500);
+        assert_eq!(config.docker.timeout, 60);
+    }
+
+    /// Arrays are complete statements, not accumulators: a higher layer must
+    /// be able to shorten or empty one.
+    /// A later layer must be able to DROP a key from a credential map.
+    ///
+    /// Merging into `env` meant a token an earlier layer set survived a
+    /// redefinition that deliberately omitted it, and was injected into the
+    /// session anyway.
+    /// The credential guard must survive a map key that contains a dot.
+    ///
+    /// Paths were matched as joined strings, so `[mcp_servers."github.com"]`
+    /// produced four segments where the pattern has three, stopped matching,
+    /// and deep-merged the definition — leaking exactly the token the guard
+    /// exists to drop.
+    #[test]
+    fn the_replace_guard_survives_a_dotted_map_key() {
+        let earlier = r#"
+[mcp_servers."github.com"]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { GITHUB_TOKEN = "sk-user", KEEP = "1" } }
+"#;
+        let later = r#"
+[mcp_servers."github.com"]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { KEEP = "1" } }
+"#;
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+        let server = config.mcp_servers.get("github.com").expect("server");
+        let McpServerDefinition::Command { env, .. } = &server.definition else {
+            panic!("expected a Command definition");
+        };
+        assert!(
+            !env.contains_key("GITHUB_TOKEN"),
+            "a dotted server name defeated the replace guard: {env:?}"
+        );
+    }
+
+    /// `[usage.currency]` must come from one file.
+    ///
+    /// Its fields have serde defaults, so a partial layer does not error the
+    /// way `[usage.plan]` does — it silently splices, and reports one currency
+    /// converted at another's rate.
+    #[test]
+    fn a_partial_currency_does_not_splice_across_layers() {
+        let earlier = r#"
+[usage.currency]
+code = "GBP"
+symbol = "£"
+usd_rate = 0.79
+"#;
+        let later = "[usage.currency]\ncode = \"EUR\"\n";
+
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+
+        assert_eq!(config.usage.currency.code, "EUR");
+        assert_eq!(
+            config.usage.currency.symbol, "$",
+            "the earlier layer's symbol spliced into a currency it does not describe"
+        );
+        assert!(
+            (config.usage.currency.usd_rate - 1.0).abs() < f64::EPSILON,
+            "the earlier layer's rate spliced in: {}",
+            config.usage.currency.usd_rate
+        );
+    }
+
+    #[test]
+    fn a_redefined_mcp_server_does_not_inherit_the_old_env() {
+        let earlier = r#"
+[mcp_servers.github]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { GITHUB_TOKEN = "sk-user", KEEP = "1" } }
+"#;
+        let later = r#"
+[mcp_servers.github]
+name = "github"
+description = "gh"
+installation = { type = "PreInstalled" }
+definition = { type = "Command", command = "gh-mcp", args = [], env = { KEEP = "1" } }
+"#;
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+        let server = config.mcp_servers.get("github").expect("server");
+        let McpServerDefinition::Command { env, .. } = &server.definition else {
+            panic!("expected a Command definition");
+        };
+        assert!(
+            !env.contains_key("GITHUB_TOKEN"),
+            "a dropped credential survived the merge: {env:?}"
+        );
+        assert_eq!(env.get("KEEP").map(String::as_str), Some("1"));
+    }
+
+    /// `[usage.plan]`'s fields have no serde defaults, so a partial plan used
+    /// to be a loud error. Merging made it silently inherit the other layer's
+    /// numbers and report a plan neither file wrote.
+    #[test]
+    fn a_partial_usage_plan_does_not_inherit_the_other_layers_numbers() {
+        let earlier = r#"
+[usage.plan]
+id = "claude-max"
+monthly_usd = 200.0
+provider = "claude"
+reset_day = 1
+set_at = "2026-01-01T00:00:00Z"
+"#;
+        let later = "[usage.plan]\nid = \"claude-pro\"\n";
+
+        let result = AppConfig::from_layers([earlier, later]);
+
+        assert!(
+            result.is_err(),
+            "a partial [usage.plan] silently inherited the earlier layer's numbers: {:?}",
+            result.map(|c| c.usage.plan)
+        );
+    }
+
+    /// Arrays are complete statements, not accumulators: a later layer must be
+    /// able to shorten or empty one.
+    #[test]
+    fn arrays_replace_rather_than_concatenate() {
+        let earlier = r#"
+[workspace_defaults]
+exclude_paths = ["node_modules", "target", "vendor"]
+workspace_scan_paths = ["/home/u/a", "/home/u/b"]
+
+[plugins]
+enabled = ["burndown", "learnings"]
+disabled = ["skills"]
+
+[ui_preferences]
+config_tree_expanded = ["Fleet|fleet", "MCP Pool|mcp_pool"]
+"#;
+        let later = r#"
+[workspace_defaults]
+exclude_paths = ["target"]
+workspace_scan_paths = []
+
+[plugins]
+enabled = ["learnings"]
+
+[ui_preferences]
+config_tree_expanded = ["Docker|docker"]
+"#;
+
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+
+        assert_eq!(config.workspace_defaults.exclude_paths, vec!["target"]);
+        assert!(
+            config.workspace_defaults.workspace_scan_paths.is_empty(),
+            "an explicitly empty array must be able to clear the lower layer"
+        );
+        assert_eq!(config.plugins.enabled, vec!["learnings"]);
+        assert_eq!(
+            config.plugins.disabled,
+            vec!["skills"],
+            "a list the project layer never mentions is left alone"
+        );
+        assert_eq!(
+            config.ui_preferences.config_tree_expanded,
+            vec!["Docker|docker"]
+        );
+    }
+
+    /// `version` names the schema the binary implements. A file that carries a
+    /// stale one (every saved config does, eventually) must not downgrade it.
+    #[test]
+    fn a_file_cannot_override_the_schema_version() {
+        let config = AppConfig::from_layers(["version = \"0.0.1\"\n", "[docker]\ntimeout = 22\n"])
+            .expect("layers");
+        assert_eq!(config.version, default_version());
+    }
+
+    /// Named entries in `[container_templates]` / `[mcp_servers]` / `[acp]`
+    /// merge per key, so a layer can repoint one field of one entry without
+    /// restating the entry, and entries it never names survive untouched.
+    #[test]
+    fn map_entries_merge_by_name_and_by_field() {
+        let earlier = r#"
+[acp.adapters.gemini]
+command = "gemini"
+permission_mode = "accept_edits"
+
+[acp.adapters.codex]
+command = "codex"
+"#;
+        let later = "[acp.adapters.gemini]\ncommand = \"/opt/gemini\"\n";
+
+        let config = AppConfig::from_layers([earlier, later]).expect("layers");
+
+        let gemini = &config.acp.adapters["gemini"];
+        assert_eq!(gemini.command.as_deref(), Some("/opt/gemini"));
+        assert_eq!(
+            gemini.permission_mode, "accept_edits",
+            "a field the project layer omitted must survive"
+        );
+        assert_eq!(
+            config.acp.adapters["codex"].command.as_deref(),
+            Some("codex"),
+            "an entry the project layer never named must survive"
         );
     }
 }
@@ -1776,111 +3964,78 @@ mod old_config_tests {
         assert_eq!(decoded.session_filter, SessionFilter::ActiveOnly);
     }
 
+    /// A pre-v0.4 file states `theme = ""` and `timeout = 0` and carries its
+    /// display booleans as `false` — all three are that build's serialization
+    /// of "unset", not choices the user made. Under a TOML merge those keys
+    /// are present and would otherwise win, so `normalise_pre_v04_layer`
+    /// removes them from the layer.
     #[test]
     fn test_old_config_merge_keeps_default_true_for_booleans() {
-        // Start with defaults (which have true for show_container_status and show_git_status)
-        let mut defaults = AppConfig::default();
+        let old_config = r#"
+[ui_preferences]
+theme = ""
+show_container_status = false
+show_git_status = false
+show_session_menu_bar = false
+
+[docker]
+timeout = 0
+"#;
+
+        let config = AppConfig::from_layers([old_config]).expect("layers");
+
         assert!(
-            defaults.ui_preferences.show_container_status,
-            "Default should be true"
+            config.ui_preferences.show_container_status,
+            "an old config must not switch show_container_status off"
         );
         assert!(
-            defaults.ui_preferences.show_git_status,
-            "Default should be true"
+            config.ui_preferences.show_git_status,
+            "an old config must not switch show_git_status off"
         );
-
-        // Simulate an "old config" with empty theme and false values
-        let old_config = AppConfig {
-            ui_preferences: UiPreferences {
-                theme: "".to_string(), // Empty theme indicates old config
-                show_container_status: false,
-                show_git_status: false,
-                show_session_menu_bar: false,
-                session_filter: SessionFilter::default(),
-                preferred_editor: None,
-                home_sidebar_width: None,
-                sessions_sidebar_width: None,
-                sessions_sidebar_collapsed: None,
-                skill_manager_sources_width: None,
-                statusline_decision: StatuslineDecision::default(),
-                tmux_decision: TmuxDecision::default(),
-            },
-            docker: DockerConfig {
-                host: None,
-                timeout: 0, // 0 indicates old config
-            },
-            ..AppConfig::default()
-        };
-
-        // Merge the old config into defaults
-        defaults.merge(old_config);
-
-        // Old config should NOT override the default true values
-        assert!(
-            defaults.ui_preferences.show_container_status,
-            "Old config should not override show_container_status to false"
-        );
-        assert!(
-            defaults.ui_preferences.show_git_status,
-            "Old config should not override show_git_status to false"
-        );
-
-        // Old config timeout=0 should be ignored, keeping default (60)
+        assert_eq!(config.ui_preferences.theme, default_theme());
         assert_eq!(
-            defaults.docker.timeout, 60,
-            "Old config timeout=0 should be ignored, keeping default"
+            config.docker.timeout, 60,
+            "an old config's timeout = 0 is 'unset', not a zero timeout"
         );
+    }
+
+    /// The sentinel is scoped to the layer that carries it: a current project
+    /// file layered over a pre-v0.4 user file still gets its own values.
+    #[test]
+    fn old_config_sentinel_does_not_disarm_a_newer_layer() {
+        let old_user = "[ui_preferences]\ntheme = \"\"\nshow_git_status = false\n";
+        let project = "[ui_preferences]\ntheme = \"light\"\nshow_git_status = false\n";
+
+        let config = AppConfig::from_layers([old_user, project]).expect("layers");
+
+        assert_eq!(config.ui_preferences.theme, "light");
+        assert!(!config.ui_preferences.show_git_status);
     }
 
     #[test]
     fn test_new_config_merge_respects_explicit_false() {
-        let mut defaults = AppConfig::default();
+        let new_config = r#"
+[ui_preferences]
+theme = "light"
+show_container_status = false
+show_git_status = false
+show_session_menu_bar = false
+home_sidebar_width = 38
+sessions_sidebar_width = 46
+sessions_sidebar_collapsed = true
 
-        // Simulate a "new config" with non-empty theme and explicit false values
-        let new_config = AppConfig {
-            ui_preferences: UiPreferences {
-                theme: "light".to_string(), // Non-empty theme indicates new config
-                show_container_status: false,
-                show_git_status: false,
-                show_session_menu_bar: false,
-                session_filter: SessionFilter::default(),
-                preferred_editor: None,
-                home_sidebar_width: Some(38),
-                sessions_sidebar_width: Some(46),
-                sessions_sidebar_collapsed: Some(true),
-                skill_manager_sources_width: None,
-                statusline_decision: StatuslineDecision::default(),
-                tmux_decision: TmuxDecision::default(),
-            },
-            docker: DockerConfig {
-                host: None,
-                timeout: 30, // Non-zero timeout
-            },
-            ..AppConfig::default()
-        };
+[docker]
+timeout = 30
+"#;
 
-        defaults.merge(new_config);
+        let config = AppConfig::from_layers([new_config]).expect("layers");
 
-        // New config should override the defaults with explicit false
-        assert!(
-            !defaults.ui_preferences.show_container_status,
-            "New config should be able to set show_container_status to false"
-        );
-        assert!(
-            !defaults.ui_preferences.show_git_status,
-            "New config should be able to set show_git_status to false"
-        );
-
-        // Theme should be updated
-        assert_eq!(defaults.ui_preferences.theme, "light");
-        assert_eq!(defaults.ui_preferences.home_sidebar_width, Some(38));
-        assert_eq!(defaults.ui_preferences.sessions_sidebar_width, Some(46));
-        assert_eq!(
-            defaults.ui_preferences.sessions_sidebar_collapsed,
-            Some(true)
-        );
-
-        // Timeout should be updated
-        assert_eq!(defaults.docker.timeout, 30);
+        assert!(!config.ui_preferences.show_container_status);
+        assert!(!config.ui_preferences.show_git_status);
+        assert_eq!(config.ui_preferences.theme, "light");
+        assert_eq!(config.ui_preferences.home_sidebar_width, Some(38));
+        assert_eq!(config.ui_preferences.sessions_sidebar_width, Some(46));
+        assert_eq!(config.ui_preferences.sessions_sidebar_collapsed, Some(true));
+        assert_eq!(config.docker.timeout, 30);
     }
 }

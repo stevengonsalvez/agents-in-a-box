@@ -133,7 +133,9 @@ impl<'a> AttachHandler<'a> {
         let check = Command::new("tmux")
             .arg("has-session")
             .arg("-t")
-            .arg(session_name)
+            // Exact target: a bare name prefix-matches, so a live
+            // "feat-auth-2" would answer for a dead "feat-auth".
+            .arg(format!("={session_name}"))
             .output()
             .await
             .context("Failed to check if tmux session exists")?;

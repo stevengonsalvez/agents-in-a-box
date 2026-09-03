@@ -50,6 +50,7 @@ concurrency:
 jobs:
   contract:
     name: Fixture daemon and Fleet macOS
+    timeout-minutes: 45
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

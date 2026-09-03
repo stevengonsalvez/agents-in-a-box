@@ -18,7 +18,7 @@ pub async fn execute(args: AttachArgs) -> Result<()> {
 
     // Check tmux session exists
     let exists = Command::new("tmux")
-        .args(["has-session", "-t", tmux_name])
+        .args(["has-session", "-t", &format!("={tmux_name}")])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);

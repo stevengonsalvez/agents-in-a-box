@@ -40,13 +40,17 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use ainb_hangar_core::ids::TaskId;
+use ainb_hangar_proto::events::{HangarEvent, MessageKind};
+use ainb_hangar_proto::transcript::StreamJsonClassifier;
 use ainb_hangar_store::service::fail::FailureReason;
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+use crate::events::EventSink;
 use crate::execenv::ExecEnv;
 
 /// Where a provider run executes (spec F5).
@@ -83,6 +87,96 @@ impl RunLocation {
     }
 }
 
+/// Floor on how often a running task republishes its
+/// [`HangarEvent::TaskProgress`] tally.
+///
+/// The transcript itself is unthrottled (one event per classified line) because
+/// a transcript line is the thing the operator is watching; the tool COUNT beside
+/// it changes far less often and does not need a repaint per line.
+///
+/// Not a timer: the tick is driven by stdout, so a silent provider publishes
+/// nothing until it speaks again (or until the closing tick at EOF). The elapsed
+/// clock rides along because the event carries the field, but no consumer reads
+/// it today, and a consumer that wanted a ticking clock would have to run its own
+/// rather than wait on this.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The live half of one run's transcript: every stdout line the provider writes,
+/// classified and pushed to the task's workspace subscribers as it happens
+/// (track A step A2).
+///
+/// The durable half is unchanged: [`stream_stdout`] still tees every raw line
+/// to `{logs}/<provider>.jsonl`, which stays the source of truth the
+/// `hangar/board_card_timeline` read replays from. This publishes the SAME lines
+/// through the SAME [`StreamJsonClassifier`] the durable read classifies with, so
+/// a line appended live and its later re-read twin are byte-identical.
+///
+/// Bound per RUN rather than per daemon (it carries this task's id + workspace),
+/// so it hangs off [`Runner::with_task_stream`] instead of the static
+/// [`RunnerConfig`].
+#[derive(Debug, Clone)]
+pub struct RunStream {
+    events: EventSink,
+    /// The task's owning workspace, resolved row id (the subscription filter).
+    workspace_id: String,
+    task_id: TaskId,
+}
+
+impl RunStream {
+    /// Publish one classified transcript line.
+    fn line(&self, kind: MessageKind, body: String) {
+        self.events.emit_live(
+            &self.workspace_id,
+            HangarEvent::TaskMessage {
+                task_id: self.task_id.clone(),
+                kind,
+                body,
+            },
+        );
+    }
+
+    /// Publish the run's cumulative tool count + elapsed clock.
+    fn progress(&self, tool_calls: u32, elapsed: Duration) {
+        self.events.emit_live(
+            &self.workspace_id,
+            HangarEvent::TaskProgress {
+                task_id: self.task_id.clone(),
+                tool_calls,
+                elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+            },
+        );
+    }
+}
+
+/// A spawned task aborted when dropped, rather than detached.
+///
+/// `tokio::spawn`'s handle detaches on drop, which on the cancel path would
+/// leave the stdout reader alive and still emitting. `tokio_util`'s
+/// `AbortOnDropHandle` is the same thing but gated behind its `rt` feature,
+/// which is not enabled here and is not worth turning on across the workspace
+/// for twelve lines.
+#[derive(Debug)]
+struct AbortOnDrop<T>(Option<tokio::task::JoinHandle<T>>);
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Take the handle back, disarming the abort (the normal completion path).
+    fn into_inner(mut self) -> tokio::task::JoinHandle<T> {
+        self.0.take().expect("the handle is taken exactly once")
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 /// The env vars a provider subprocess is allowed to inherit.
 ///
 /// Deny-by-default: the child receives *only* these 12 vars (when present in the
@@ -111,6 +205,7 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CLAUDE_HOME",
     "CODEX_HOME",
     "CURSOR_HOME",
+    "ANTIGRAVITY_HOME",
     // ccc / D11: the parent-session linkage the daemon stamps onto every task it
     // spawns (see `run_loop`). It is daemon-controlled config, not an inherited
     // ambient secret, so allowlisting it leaks nothing — and it MUST survive the
@@ -277,6 +372,20 @@ const CLAUDE_MODEL_FLAG: &str = "--model";
 ///
 /// See [`Runner::claude_spec`] for the trust posture this implies.
 const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
+/// `--settings <json>`: per-launch settings claude merges over the operator's
+/// `~/.claude/settings.json` for THIS process only (verified against Claude
+/// Code 2.1.257, whose usage lists `--settings <file-or-json>`).
+const CLAUDE_SETTINGS_FLAG: &str = "--settings";
+/// The per-launch settings an INTERACTIVE claude carries: Claude gates
+/// `--dangerously-skip-permissions` behind a one-time "Bypass Permissions"
+/// acceptance it records as `skipDangerousModePermissionPrompt` in user or
+/// local settings; without it the pane parks on that dialog with nobody there
+/// to accept (the daemon spawns the session detached). Passing the acceptance
+/// as flag settings scopes it to the one launch the operator explicitly chose as
+/// YOLO from `Run ▾` after the TUI's danger-full-access acknowledgement,
+/// instead of writing a machine-wide acceptance into the operator's config.
+/// Headless `-p` runs never show the dialog and do not carry it.
+const CLAUDE_INTERACTIVE_SETTINGS_JSON: &str = r#"{"skipDangerousModePermissionPrompt":true}"#;
 /// The claude flag selecting the machine-readable event stream (bead 48c). Under
 /// `--print`, `--output-format stream-json` makes claude emit one JSON event per
 /// line — a `system` line carrying `session_id`, per-turn `assistant` lines, and
@@ -343,6 +452,21 @@ const COPILOT_ALLOW_ALL_TOOLS_FLAG: &str = "--allow-all-tools";
 /// The copilot model flag (`copilot --model <model>`), verified against Copilot
 /// CLI 1.0.68 (`$ copilot --model gpt-5.6-terra`).
 const COPILOT_MODEL_FLAG: &str = "--model";
+/// The provider-log file written under [`ExecEnv::logs`] for the `antigravity`
+/// provider. Its own log keeps an antigravity transcript separate from claude/codex/copilot.
+const ANTIGRAVITY_LOG_FILE: &str = "antigravity.jsonl";
+/// The antigravity flag that makes a run non-interactive.
+const ANTIGRAVITY_PRINT_FLAG: &str = "-p";
+/// The antigravity flag that starts interactive mode.
+const ANTIGRAVITY_INTERACTIVE_FLAG: &str = "-i";
+/// The antigravity flag selecting the output format.
+const ANTIGRAVITY_OUTPUT_FORMAT_FLAG: &str = "--output-format";
+/// The `--output-format` value for the per-line JSON event stream.
+const ANTIGRAVITY_STREAM_JSON_FORMAT: &str = "stream-json";
+/// The antigravity flag that auto-approves tool calls.
+const ANTIGRAVITY_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
+/// The antigravity model flag (`agy --model <model>`).
+const ANTIGRAVITY_MODEL_FLAG: &str = "--model";
 
 /// Static configuration for a [`Runner`].
 #[derive(Debug, Clone)]
@@ -357,6 +481,10 @@ pub struct RunnerConfig {
     /// [`Runner::run_copilot`]; a daemon that never dispatches a copilot task
     /// simply never spawns it.
     pub copilot_path: PathBuf,
+    /// Absolute path to the `antigravity` binary (or a test stand-in script). Used by
+    /// [`Runner::run_antigravity`]; a daemon that never dispatches an antigravity task
+    /// simply never spawns it.
+    pub antigravity_path: PathBuf,
     /// Hard wall-clock deadline; the subprocess is killed past it
     /// ([`FailureReason::Timeout`]). Reference default: 2.5h.
     pub max_runtime: Duration,
@@ -584,8 +712,8 @@ struct StreamCapture {
 /// Which provider exec path the daemon routes a task to (e38.16).
 ///
 /// Resolved from the task's AGENT `provider` when set (migration 0041), else its
-/// runtime's advertised `provider`. Every wired provider — `claude`, `codex`,
-/// `copilot` — has its own exec path; only a genuinely unrecognised name falls
+/// runtime's advertised `provider`. Every wired provider: `claude`, `codex`,
+/// `copilot`, `antigravity`: has its own exec path; only a genuinely unrecognised name falls
 /// back to [`Self::Claude`] so a misconfigured agent still dispatches (rather than
 /// stranding the task).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -598,10 +726,12 @@ pub enum Backend {
     Codex,
     /// The `copilot` provider (GitHub Copilot CLI) — [`Runner::run_copilot`].
     Copilot,
+    /// The `antigravity` provider (Google Antigravity) — [`Runner::run_antigravity`].
+    Antigravity,
 }
 
 impl Backend {
-    /// Resolve a provider wire name (`"claude"`, `"codex"`, `"copilot"`) to a
+    /// Resolve a provider wire name (`"claude"`, `"codex"`, `"copilot"`, `"antigravity"`) to a
     /// backend.
     ///
     /// Matching is case-insensitive. Only a genuinely UNKNOWN name falls back to
@@ -612,6 +742,7 @@ impl Backend {
         match provider.to_ascii_lowercase().as_str() {
             "codex" => Self::Codex,
             "copilot" => Self::Copilot,
+            "antigravity" | "agy" => Self::Antigravity,
             _ => Self::Claude,
         }
     }
@@ -623,6 +754,7 @@ impl Backend {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot",
+            Self::Antigravity => "antigravity",
         }
     }
 }
@@ -728,6 +860,10 @@ pub trait Provider {
 #[derive(Debug, Clone)]
 pub struct Runner {
     cfg: RunnerConfig,
+    /// Where this run's live transcript goes, or `None` for a runner not bound
+    /// to a task (the daemon-wide one the claim loop clones per run, and every
+    /// test harness). See [`Self::with_task_stream`].
+    stream: Option<RunStream>,
 }
 
 impl Provider for Runner {
@@ -740,7 +876,29 @@ impl Runner {
     /// Construct a runner from its static [`RunnerConfig`].
     #[must_use]
     pub const fn new(cfg: RunnerConfig) -> Self {
-        Self { cfg }
+        Self { cfg, stream: None }
+    }
+
+    /// This runner, bound to one task's live transcript stream (track A step A2).
+    ///
+    /// The claim loop already clones the daemon-wide runner per run, so binding
+    /// here costs nothing extra and keeps the task id off the daemon-wide
+    /// [`RunnerConfig`], where it does not belong. A run whose id is not a
+    /// well-formed [`TaskId`] simply streams nothing, best-effort, mirroring
+    /// every other emission site: the durable jsonl and the FSM are unaffected.
+    ///
+    /// Only the HEADLESS path streams. The interactive (tmux) path captures no
+    /// stdout at all, so there is nothing to classify there.
+    #[must_use]
+    pub fn with_task_stream(&self, workspace_id: &str, task_id: &str, events: &EventSink) -> Self {
+        Self {
+            cfg: self.cfg.clone(),
+            stream: TaskId::from_str(task_id.to_string()).ok().map(|task_id| RunStream {
+                events: events.clone(),
+                workspace_id: workspace_id.to_string(),
+                task_id,
+            }),
+        }
     }
 
     /// The hard wall-clock deadline each run is bounded by (the interactive tmux
@@ -1082,6 +1240,85 @@ impl Runner {
         .await
     }
 
+    /// Run the `antigravity` provider (Google Antigravity) for one task.
+    ///
+    /// The antigravity counterpart of [`Self::run_claude`]: same orchestration
+    /// ([`Self::run_provider`]), same env allowlist + sandbox confinement, its own
+    /// program path, argv, and log file.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_antigravity<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        self.run_antigravity_with_env(env, source_env, std::iter::empty(), invocation)
+            .await
+    }
+
+    /// [`Self::run_antigravity`], plus per-agent `extra_env` overrides layered onto the
+    /// child env *after* the allowlist filter.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_antigravity_with_env<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        self.run_antigravity_in(
+            env,
+            source_env,
+            extra_env,
+            invocation,
+            &RunLocation::in_task_tree(env),
+        )
+        .await
+    }
+
+    /// [`Self::run_antigravity_with_env`], but executing in an explicit [`RunLocation`]
+    /// (F5).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_antigravity_in<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        let spec = Self::antigravity_spec(invocation, Mode::Headless);
+        self.run_provider(
+            &self.cfg.antigravity_path,
+            env,
+            source_env,
+            extra_env,
+            spec,
+            location,
+        )
+        .await
+    }
+
     /// The program path + argv for a provider run in `mode`, WITHOUT spawning it
     /// (ccc / D6).
     ///
@@ -1111,11 +1348,15 @@ impl Runner {
                 self.cfg.copilot_path.clone(),
                 Self::copilot_spec(invocation, mode).argv,
             ),
+            Backend::Antigravity => (
+                self.cfg.antigravity_path.clone(),
+                Self::antigravity_spec(invocation, mode).argv,
+            ),
         }
     }
 
     /// The `claude` provider spec: claude log file + `[-p]
-    /// --dangerously-skip-permissions [--model <model>] [<cli_args>…] -- <prompt>`.
+    /// --dangerously-skip-permissions [--settings <json>] [--model <model>] [<cli_args>…] -- <prompt>`.
     ///
     /// Verified against Claude Code 2.1.210, whose usage is
     /// `claude [options] [command] [prompt]`:
@@ -1125,7 +1366,9 @@ impl Runner {
     ///   nothing.
     /// * [`Mode::Interactive`] OMITS it: the brief is still delivered (as the same
     ///   trailing positional), but claude starts the real session the operator
-    ///   attaches to. `-p` here would print and exit into an empty pane.
+    ///   attaches to. `-p` here would print and exit into an empty pane. It
+    ///   carries [`CLAUDE_INTERACTIVE_SETTINGS_JSON`] instead, so the detached
+    ///   pane does not park on the bypass-permissions acceptance dialog.
     ///
     /// The prompt is a POSITIONAL either way — `-p` is a boolean and never takes
     /// it — and rides last, after [`ARG_SEPARATOR`], so a `-`-leading brief cannot
@@ -1175,6 +1418,10 @@ impl Runner {
             argv.push(CLAUDE_PRINT_FLAG.to_string());
         }
         argv.push(CLAUDE_SKIP_PERMISSIONS_FLAG.to_string());
+        if mode == Mode::Interactive {
+            argv.push(CLAUDE_SETTINGS_FLAG.to_string());
+            argv.push(CLAUDE_INTERACTIVE_SETTINGS_JSON.to_string());
+        }
         if mode == Mode::Headless {
             // bead 48c: emit the structured event stream so the runner can pin
             // session_id + usage and finalize on claude's OWN reported outcome,
@@ -1360,6 +1607,40 @@ impl Runner {
         }
     }
 
+    /// The `antigravity` provider spec: antigravity log file + `[-p]
+    /// --dangerously-skip-permissions [--output-format stream-json] [-i] [--model <model>] [<cli_args>…] -- <prompt>`.
+    ///
+    /// Headless (`Mode::Headless`): `agy -p --dangerously-skip-permissions --output-format stream-json [--model <model>] [<cli_args>…] -- <prompt>`.
+    /// Interactive (`Mode::Interactive`): `agy --dangerously-skip-permissions -i [--model <model>] [<cli_args>…] -- <prompt>`.
+    fn antigravity_spec(invocation: &ProviderInvocation, mode: Mode) -> ProviderSpec {
+        let mut argv = Vec::new();
+        match mode {
+            Mode::Headless => {
+                argv.push(ANTIGRAVITY_PRINT_FLAG.to_string());
+                argv.push(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG.to_string());
+                argv.push(ANTIGRAVITY_OUTPUT_FORMAT_FLAG.to_string());
+                argv.push(ANTIGRAVITY_STREAM_JSON_FORMAT.to_string());
+            }
+            Mode::Interactive => {
+                argv.push(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG.to_string());
+                argv.push(ANTIGRAVITY_INTERACTIVE_FLAG.to_string());
+            }
+        }
+        if let Some(model) = &invocation.model {
+            argv.push(ANTIGRAVITY_MODEL_FLAG.to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(invocation.cli_args.iter().cloned());
+        argv.push(ARG_SEPARATOR.to_string());
+        argv.push(invocation.prompt.clone());
+        ProviderSpec {
+            backend: Backend::Antigravity,
+            log_file: ANTIGRAVITY_LOG_FILE,
+            argv,
+            structured: mode == Mode::Headless,
+        }
+    }
+
     /// The provider-agnostic run core shared by every provider (e38.16).
     ///
     /// Spawns `program` (through the OS sandbox) with `spec.argv` in
@@ -1471,8 +1752,20 @@ impl Runner {
         // tail. Both run concurrently with the wait so a chatty provider can
         // never deadlock on a full pipe buffer.
         let tail_lines = self.cfg.tail_lines;
-        let stdout_task =
-            tokio::spawn(async move { stream_stdout(stdout, log_file, tail_lines).await });
+        let stream = self.stream.clone();
+        // A2: aborted if this future is DROPPED, which is the cancel arm in
+        // `run_loop` and ALSO the `child.wait()` error below (`status?` returns
+        // without awaiting this handle). A bare `JoinHandle` detaches on drop, so
+        // the reader would keep draining the pipe and emitting `TaskMessage` (plus
+        // the closing `TaskProgress`) after the task had already finalised and
+        // pushed `TaskFinished`, painting transcript onto a run the operator was
+        // told was over. The cost on the wait-error path is that the JSONL tail is
+        // cut where the abort lands instead of at EOF; that path is an OS-level
+        // wait fault, where the run is failing anyway and a truncated log beats a
+        // reader still writing to a finalised task's file.
+        let stdout_task = AbortOnDrop::new(tokio::spawn(async move {
+            stream_stdout(stdout, log_file, tail_lines, stream).await
+        }));
         let stderr_task = tokio::spawn(async move { tail_reader(stderr, tail_lines).await });
 
         let timed_out = match tokio::time::timeout(self.cfg.max_runtime, child.wait()).await {
@@ -1498,6 +1791,7 @@ impl Runner {
             terminal,
             stdout_tail,
         } = stdout_task
+            .into_inner()
             .await
             .map_err(|e| std::io::Error::other(format!("stdout task join: {e}")))??;
         let stderr_tail = stderr_task
@@ -1719,6 +2013,13 @@ where
 /// stream's final tally/outcome wins). A `result` reporting neither tokens nor
 /// cost (e.g. a bare `{"type":"result","content":"ok"}`) leaves `usage` `None`.
 ///
+/// With a [`RunStream`] bound (track A step A2) this is also the run's LIVE
+/// transcript producer: each line is classified as it is read and published to
+/// the task's workspace subscribers. The durable tee is untouched: the live
+/// pass reads the same line the `writeln!` just wrote and never gates it, so a
+/// stream fault could not cost the run its log even if emission could fail
+/// (it cannot: the sink is non-blocking and lossy by contract).
+///
 /// # Drift canary
 ///
 /// The terminal shapes matched here are pinned against claude 2.1.211 / codex
@@ -1734,6 +2035,7 @@ async fn stream_stdout(
     stdout: tokio::process::ChildStdout,
     mut log_file: std::fs::File,
     tail_lines: usize,
+    stream: Option<RunStream>,
 ) -> std::io::Result<StreamCapture> {
     use std::io::Write;
 
@@ -1742,10 +2044,45 @@ async fn stream_stdout(
     let mut usage: Option<ProviderUsage> = None;
     let mut terminal: Option<TerminalSignal> = None;
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    // A2 live transcript. ONE classifier for the whole run, never one per line:
+    // a `tool_result` takes its tool name and duration from the `tool_use` line
+    // that came before it, so the state has to span lines. `started` clocks from
+    // just before the first read, so the elapsed it reports excludes the spawn and
+    // sandbox setup: this reader's own view of how long the agent has been
+    // talking, not the task's wall clock (the FSM owns that).
+    let mut classifier = StreamJsonClassifier::default();
+    let started = Instant::now();
+    let mut tool_calls: u32 = 0;
+    let mut next_progress = started;
 
     while let Some(line) = reader.next_line().await? {
         writeln!(log_file, "{line}")?;
-        if let Ok(parsed) = serde_json::from_str::<StreamLine>(&line) {
+        // Parsed ONCE and read twice: the transcript classifier and the runner's
+        // own session / usage / terminal fields want the same bytes, and
+        // `StreamLine` deserialises from a borrowed `&Value` so the second read
+        // costs no re-parse (its owned `String` fields are still cloned out of the
+        // `Value`; the saving is the parse, not the copy). A line that is not
+        // valid JSON is skipped by both, exactly as it was when each parsed for
+        // itself.
+        let parsed_line = serde_json::from_str::<serde_json::Value>(line.trim()).ok();
+        if let (Some(stream), Some(value)) = (&stream, &parsed_line) {
+            for (kind, body) in classifier.classify_value(value) {
+                if kind == MessageKind::ToolCall {
+                    tool_calls = tool_calls.saturating_add(1);
+                }
+                stream.line(kind, body);
+            }
+            // Republish the tally on a coarse tick so a chatty provider does not
+            // turn the run banner into a per-line repaint. Checked after the lines
+            // so the first tick (which fires immediately) already carries the first
+            // tool count.
+            let now = Instant::now();
+            if now >= next_progress {
+                next_progress = now + PROGRESS_INTERVAL;
+                stream.progress(tool_calls, now.duration_since(started));
+            }
+        }
+        if let Some(parsed) = parsed_line.as_ref().and_then(|v| StreamLine::deserialize(v).ok()) {
             match parsed.kind.as_str() {
                 // claude session handle — first wins.
                 "system" => {
@@ -1788,6 +2125,12 @@ async fn stream_stdout(
             }
         }
         push_tail(&mut tail, line, tail_lines);
+    }
+    // One last heartbeat at EOF. Without it a run whose whole transcript lands
+    // inside a single tick publishes only the tick that fired on its FIRST line,
+    // so the banner would report the tool count from before any tool ran.
+    if let Some(stream) = &stream {
+        stream.progress(tool_calls, started.elapsed());
     }
     log_file.flush()?;
     Ok(StreamCapture {
@@ -1880,6 +2223,7 @@ mod tests {
             claude_path: "claude".into(),
             codex_path: "codex".into(),
             copilot_path: "copilot".into(),
+            antigravity_path: "agy".into(),
             max_runtime: Duration::from_secs(1),
             tail_lines: 1,
             sandbox: true,
@@ -2202,5 +2546,58 @@ mod tests {
             vec!["hangar-daemon"],
             "the daemon parent stamp must be the ONLY AINB_PARENT_SESSION in the child env"
         );
+    }
+
+    #[test]
+    fn antigravity_spec_headless_and_interactive() {
+        let inv = ProviderInvocation {
+            prompt: "fix the bug".to_string(),
+            model: Some("gemini-2.5-pro".to_string()),
+            cli_args: vec!["--flag".to_string()],
+        };
+
+        let headless = Runner::antigravity_spec(&inv, Mode::Headless);
+        assert_eq!(headless.backend, Backend::Antigravity);
+        assert_eq!(headless.log_file, "antigravity.jsonl");
+        assert!(headless.structured);
+        assert_eq!(
+            headless.argv,
+            vec![
+                "-p",
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "stream-json",
+                "--model",
+                "gemini-2.5-pro",
+                "--flag",
+                "--",
+                "fix the bug"
+            ]
+        );
+
+        let interactive = Runner::antigravity_spec(&inv, Mode::Interactive);
+        assert_eq!(interactive.backend, Backend::Antigravity);
+        assert_eq!(interactive.log_file, "antigravity.jsonl");
+        assert!(!interactive.structured);
+        assert_eq!(
+            interactive.argv,
+            vec![
+                "--dangerously-skip-permissions",
+                "-i",
+                "--model",
+                "gemini-2.5-pro",
+                "--flag",
+                "--",
+                "fix the bug"
+            ]
+        );
+    }
+
+    #[test]
+    fn backend_from_provider_resolves_antigravity() {
+        assert_eq!(Backend::from_provider("antigravity"), Backend::Antigravity);
+        assert_eq!(Backend::from_provider("agy"), Backend::Antigravity);
+        assert_eq!(Backend::from_provider("Antigravity"), Backend::Antigravity);
+        assert_eq!(Backend::Antigravity.name(), "antigravity");
     }
 }

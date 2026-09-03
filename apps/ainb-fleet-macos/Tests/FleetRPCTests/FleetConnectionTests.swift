@@ -324,6 +324,7 @@ final class FleetConnectionTests: XCTestCase {
     func testStartPreflightSupportsOnlyCodex() {
         XCTAssertTrue(FleetStartPreflight.supports(.codex))
         XCTAssertFalse(FleetStartPreflight.supports(.claude))
+        XCTAssertFalse(FleetStartPreflight.supports(.antigravity))
         XCTAssertFalse(FleetStartPreflight.supports(.unknown))
     }
 
