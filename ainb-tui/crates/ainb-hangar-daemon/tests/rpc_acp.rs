@@ -1203,7 +1203,58 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         .await;
     assert!(sent["error"].is_null(), "{sent}");
     let message_id = sent["result"]["message_id"].as_str().expect("message id").to_string();
-    let (second_id, _) = harness.await_open_attention(&session_key).await;
+    let (second_id, second_payload) = harness.await_open_attention(&session_key).await;
+
+    // The one pool refusal that DOES reopen: a row whose options drifted from
+    // the adapter's live ask (same fingerprint, an id the adapter never
+    // offered). The pool refuses with the responder still parked, so the row
+    // goes back to open for a corrected answer, and the real ask is untouched.
+    let mut drifted = second_payload.clone();
+    drifted["options"] =
+        serde_json::json!([{"optionId": "bogus", "name": "Bogus", "kind": "allow_once"}]);
+    AttentionRepo::insert(
+        harness.store.pool(),
+        &NewAttention {
+            id: "drifted-options".to_string(),
+            session_id: session_key.clone(),
+            cwd: harness.dir.to_string_lossy().into_owned(),
+            workspace_id: None,
+            kind: AttentionKind::Approval,
+            payload: drifted.to_string(),
+            degraded: false,
+            created_at: 1,
+            raise_transcript: None,
+            channels: ainb_hangar_core::channel::ChannelSet::default(),
+        },
+    )
+    .await
+    .expect("plant a drifted row");
+    let unknown = client
+        .call(
+            methods::ATTENTION_ANSWER,
+            serde_json::json!({
+                "attention_id": "drifted-options",
+                "answer": "Bogus",
+                "answered_by": "tui",
+            }),
+        )
+        .await;
+    assert_eq!(unknown["result"]["outcome"], "delivery_failed", "{unknown}");
+    assert!(
+        unknown["result"]["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("never offered option Bogus"),
+        "{unknown}"
+    );
+    let (state, answered_by): (String, Option<String>) =
+        sqlx::query_as("SELECT state, answered_by FROM attention WHERE id = 'drifted-options'")
+            .fetch_one(harness.store.pool())
+            .await
+            .expect("attention row");
+    assert_eq!(state, "open", "an unknown option reopens the row");
+    assert_eq!(answered_by, None);
+
     let denied = client
         .call(
             methods::ATTENTION_ANSWER,
