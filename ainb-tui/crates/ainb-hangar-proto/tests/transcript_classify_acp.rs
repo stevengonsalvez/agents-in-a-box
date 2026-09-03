@@ -290,3 +290,51 @@ fn a_plan_is_one_line_per_entry() {
         ]
     );
 }
+
+/// The ACP path goes through the SAME `capped()` backstop the stream-json path
+/// does, asserted rather than assumed.
+///
+/// The gate is shared in code today, but nothing pinned it from this side: a
+/// refactor dropping the `capped(out)` call from `classify_row` broke no test,
+/// which is the exact "agrees by discipline" failure this whole step exists to
+/// remove. `BODY_MAX` is 8192, so the assertion is that a huge body comes back
+/// SHORTER than it went in and ends in the shared ellipsis.
+#[test]
+fn a_huge_acp_body_is_capped_by_the_same_gate() {
+    let huge = "x".repeat(50_000);
+    let lanes = classify(&[(
+        "acp.message",
+        &serde_json::json!({ "kind": "acp.message", "text": huge, "coalescedDeltas": 1 })
+            .to_string(),
+    )]);
+    assert_eq!(lanes.len(), 1, "one line in, one line out: {lanes:?}");
+    assert_eq!(lanes[0].0, MessageKind::Agent);
+    assert_eq!(
+        lanes[0].1.chars().count(),
+        8192,
+        "capped at BODY_MAX by the shared gate"
+    );
+    assert!(
+        lanes[0].1.ends_with('…'),
+        "and capped by the SHARED truncator, which marks what it cut"
+    );
+}
+
+/// The entry-count backstop, from the ACP side: one row carrying more lines
+/// than `ENTRIES_PER_LINE_MAX` is truncated and SAYS how many it dropped,
+/// rather than silently returning a short transcript.
+#[test]
+fn an_acp_row_of_many_lines_admits_what_the_gate_dropped() {
+    let many = (0..600).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n");
+    let lanes = classify(&[(
+        "acp.message",
+        &serde_json::json!({ "kind": "acp.message", "text": many, "coalescedDeltas": 1 })
+            .to_string(),
+    )]);
+    assert_eq!(lanes.len(), 512, "capped at ENTRIES_PER_LINE_MAX");
+    assert_eq!(
+        lanes[511],
+        (MessageKind::ToolResult, "… 89 more lines".to_string()),
+        "the shared gate's own marker closes the run"
+    );
+}

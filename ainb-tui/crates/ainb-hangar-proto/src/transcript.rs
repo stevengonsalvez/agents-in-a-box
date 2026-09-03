@@ -311,16 +311,34 @@ impl AcpClassifier {
         raw_payload: &str,
     ) -> Vec<(MessageKind, String)> {
         let payload = serde_json::from_str::<Value>(raw_payload).unwrap_or(Value::Null);
+        self.classify_value(event_type, &payload)
+    }
+
+    /// [`Self::classify_row`] for a payload the caller ALREADY holds as a
+    /// `Value`.
+    ///
+    /// The live producer has the reducer's own `TranscriptChunk::payload` in
+    /// hand, and serialising it back to a string just so this could parse it
+    /// again would be waste — the same reason
+    /// [`StreamJsonClassifier::classify_value`] exists beside `classify_line`.
+    /// Both entry points fold through this one, so the live line and its later
+    /// durable re-read cannot drift.
+    #[must_use]
+    pub fn classify_value(
+        &mut self,
+        event_type: &str,
+        payload: &Value,
+    ) -> Vec<(MessageKind, String)> {
         let mut out = Vec::new();
         match event_type {
-            "acp.message" => fold_acp_text(&payload, MessageKind::Agent, &mut out),
-            "acp.thought" => fold_acp_text(&payload, MessageKind::Thinking, &mut out),
-            "acp.tool_call" => self.fold_acp_tool(&payload, &mut out),
-            "acp.plan" => fold_acp_plan(&payload, &mut out),
-            "acp.permission" => fold_acp_permission(&payload, &mut out),
-            "acp.transcript_truncated" => fold_acp_truncated(&payload, &mut out),
+            "acp.message" => fold_acp_text(payload, MessageKind::Agent, &mut out),
+            "acp.thought" => fold_acp_text(payload, MessageKind::Thinking, &mut out),
+            "acp.tool_call" => self.fold_acp_tool(payload, &mut out),
+            "acp.plan" => fold_acp_plan(payload, &mut out),
+            "acp.permission" => fold_acp_permission(payload, &mut out),
+            "acp.transcript_truncated" => fold_acp_truncated(payload, &mut out),
             "acp.turn_completed" | "acp.turn_failed" | "acp.turn_interrupted" => {
-                fold_acp_turn_end(event_type, &payload, &mut out);
+                fold_acp_turn_end(event_type, payload, &mut out);
             }
             _ => {}
         }
@@ -514,6 +532,12 @@ fn fold_acp_turn_end(event_type: &str, payload: &Value, out: &mut Vec<(MessageKi
 /// is pulled out: a diff or an embedded terminal contributes NOTHING rather
 /// than a JSON blob rendered as if it were the tool's output. The bare
 /// `{type:"text",…}` fallback is for an adapter that skips the wrapper.
+///
+/// Blocks join on a NEWLINE, not a space. [`acp_row_text`] feeds a whole-line
+/// anchored PR-url parser, and an adapter that splits a command's output across
+/// two blocks would otherwise collapse the url onto a shared line and lose it.
+/// The display path re-flattens this to one line anyway ([`one_line`]), so the
+/// separator only ever matters to the scanner.
 fn tool_output_text(payload: &Value) -> Option<String> {
     let from_content = payload
         .get("content")
@@ -528,7 +552,7 @@ fn tool_output_text(payload: &Value) -> Option<String> {
                         .and_then(Value::as_str)
                 })
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join("\n")
         })
         .filter(|joined| !joined.trim().is_empty());
     from_content.or_else(|| payload.get("rawOutput").and_then(value_text))
