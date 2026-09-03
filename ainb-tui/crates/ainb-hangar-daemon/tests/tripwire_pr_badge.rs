@@ -26,6 +26,10 @@ use common::{TuiSession, can_run_tripwire, prepare_pipeline, seed_completed_task
 /// The PR URL seeded onto the completed task — both the on-screen badge marker
 /// and the expected probe-file contents.
 const PR_URL: &str = "https://example.com/pr/1";
+/// What the run card paints for [`PR_URL`]: the number off the URL's tail, not
+/// the URL (crisp B4 §2.3 — the full URL cost 45 cells to say `#1`, and `o`
+/// still opens it, which step 2 below is now the only proof of).
+const PR_CHIP: &str = "PR #1";
 
 #[test]
 fn pr_badge_renders_and_o_opens_the_url() {
@@ -59,16 +63,13 @@ fn pr_badge_renders_and_o_opens_the_url() {
     sess.send_enter();
     let detail = sess
         .poll_capture(Instant::now() + Duration::from_secs(15), |c| {
-            c.contains(&format!("PR {PR_URL}"))
+            c.contains(PR_CHIP)
         })
         .unwrap_or_else(|| panic!("PR badge never rendered:\n{}", sess.capture()));
 
-    // POSITIVE: the gold badge row carries the captured PR URL. NEGATIVE: the
+    // POSITIVE: the run card carries the captured PR as a chip. NEGATIVE: the
     // issue-list status-group header is gone, so we genuinely left the list.
-    assert!(
-        detail.contains(&format!("PR {PR_URL}")),
-        "PR badge missing:\n{detail}"
-    );
+    assert!(detail.contains(PR_CHIP), "PR chip missing:\n{detail}");
     assert!(
         !detail.contains("Todo (3)"),
         "still on the issue list:\n{detail}"
