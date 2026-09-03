@@ -520,6 +520,15 @@ pub struct HangarPlugin {
     /// [`fold_board_mouse`](crate::board_mouse::fold_board_mouse) against. Rebuilt
     /// each render; `None` off those screens (a click there resolves to nothing).
     board_layout: Option<crate::widgets::card_board::BoardLayout>,
+    /// Live transcript lines that arrived while a `board_card_timeline` fetch was
+    /// in flight, `None` when no fetch is pending (F6 / track A step A2).
+    ///
+    /// The reply REPLACES the overlay's entries with the snapshot the daemon read
+    /// off disk, so without this a line emitted after that read but before the
+    /// reply lands is dropped and never repaired: the durable file is not re-read
+    /// and the live stream has no replay. Buffered here and replayed onto the
+    /// fresh overlay, the transcript is continuous across the open.
+    timeline_fetch_buffer: Option<Vec<(String, ainb_hangar_proto::events::MessageKind, String)>>,
     /// List-screen mouse intents `handle_mouse` produced (63l.6), drained on the
     /// next `render`. Like the issue board's queue, this is the inline,
     /// non-blocking stash: the spawned `render` binds each to the active screen's
@@ -694,6 +703,7 @@ impl Default for HangarPlugin {
             pending_issue_priority_update: None,
             pending_issue_assignee_update: None,
             board_layout: None,
+            timeline_fetch_buffer: None,
             pending_board_mouse_intents: Vec::new(),
             list_context_menu: None,
             wizard_dispatch_in_flight: None,
@@ -1219,6 +1229,9 @@ impl HangarPlugin {
             body,
         } = &event
         {
+            if let Some(buffered) = &mut self.timeline_fetch_buffer {
+                buffered.push((task_id.as_str().to_string(), *kind, body.clone()));
+            }
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
         // A transcript line moves no name the inbox lookup holds (agent label,
@@ -1867,6 +1880,13 @@ impl HangarPlugin {
         self.screens.boards.set_timeline(crate::screen::boards::TimelineView::new(
             title, r.task_id, entries,
         ));
+        // Replay whatever streamed in while the fetch was in flight: the snapshot
+        // above is as of the daemon's read, so those lines are in neither half
+        // without this. `fold_timeline_message` filters by task id, so a line for
+        // a different run is discarded here exactly as it would have been live.
+        for (task_id, kind, body) in self.timeline_fetch_buffer.take().unwrap_or_default() {
+            self.screens.boards.fold_timeline_message(&task_id, kind, body);
+        }
     }
 
     /// Fold a `profile/get` result into the selected profile's detail (P5): the
@@ -3274,6 +3294,11 @@ impl HangarPlugin {
             // Handled above as a local note; never reached here.
             BoardsAction::CardAttach { .. } => return,
         };
+        // Arm the live-line buffer for the timeline round trip (see
+        // `timeline_fetch_buffer`); the reply drains it onto the fresh overlay.
+        if req_id == BOARD_CARD_TIMELINE_REQ_ID {
+            self.timeline_fetch_buffer = Some(Vec::new());
+        }
         let Ok(body) = encode_request(req_id, method, params) else {
             return;
         };
@@ -6251,6 +6276,68 @@ mod tests {
         };
         p.on_daemon_response(&resp);
         assert!(matches!(p.conn.state(), ConnState::Error(_)));
+    }
+
+    /// A line that streams in WHILE a `board_card_timeline` fetch is in flight
+    /// must survive the reply, which replaces the overlay's entries with the
+    /// snapshot the daemon read off disk. Nothing re-reads that file and the live
+    /// stream has no replay, so a dropped line here is a permanent hole in the
+    /// transcript the operator is watching.
+    #[test]
+    fn a_line_streamed_during_the_timeline_fetch_survives_the_reply() {
+        use ainb_hangar_core::ids::TaskId;
+        use ainb_hangar_proto::events::{EVENT_METHOD, MessageKind};
+
+        let mut p = HangarPlugin::new();
+        // The fetch is in flight: the overlay does not exist yet, so without the
+        // buffer this line has nowhere to land.
+        p.timeline_fetch_buffer = Some(Vec::new());
+        p.on_daemon_event(&serde_json::json!({
+            "method": EVENT_METHOD,
+            "params": serde_json::to_value(&HangarEvent::TaskMessage {
+                task_id: TaskId::from_str("t1").unwrap(),
+                kind: MessageKind::Agent,
+                body: "mid-fetch line".into(),
+            })
+            .unwrap(),
+        }));
+
+        // The reply lands with a snapshot taken BEFORE that line was written.
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some("t1".into()),
+                    provider: Some("claude".into()),
+                    jsonl: r#"{"type":"assistant","message":{"content":[{"type":"text","text":"earlier line"}]}}"#
+                        .into(),
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+
+        let bodies: Vec<&str> = p
+            .screens
+            .boards
+            .timeline()
+            .expect("the reply opens the overlay")
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                crate::screen::task_detail::ViewEntry::Line(l) => Some(l.body()),
+                crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+            })
+            .collect();
+        assert!(
+            bodies.contains(&"mid-fetch line"),
+            "the line streamed during the fetch must be replayed onto the overlay; got {bodies:?}"
+        );
+        assert!(
+            p.timeline_fetch_buffer.is_none(),
+            "the buffer is disarmed by the reply"
+        );
     }
 
     /// A `TaskMessage` (transcript line) must NOT arm a snapshot re-pull — the
