@@ -74,6 +74,17 @@ pub struct ScopedEvent {
 pub struct EventBroker {
     tx: broadcast::Sender<ScopedEvent>,
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
+    /// A running task's TRANSCRIPT (`TaskMessage` / `TaskProgress`, track A step
+    /// A2). Its OWN channel, for the same reason the three below have theirs:
+    /// volume. One chatty run emits a `TaskMessage` per stream-json line, which
+    /// on the shared workspace channel would evict other tasks' and other
+    /// WORKSPACES' `TaskStarted` / `TaskFinished` / `IssueUpdated` from the
+    /// 256-slot ring. Those are the events a lagging plugin cannot recover: a
+    /// transcript line deliberately does NOT arm a snapshot re-pull, so nothing
+    /// polls afterwards and a dropped `TaskFinished` pins a run banner at
+    /// "running" forever. Partitioned, a burst can only evict transcript lines,
+    /// which the `board_card_timeline` re-read backfills.
+    task_stream_tx: broadcast::Sender<ScopedEvent>,
     /// The FLEET-WIDE attention channel (spec P2). Attention events are NOT
     /// workspace-partitioned — the control centre answers for the whole host, and
     /// a hand-started session has no workspace to scope by — so `AttentionRaised`
@@ -125,6 +136,7 @@ impl EventBroker {
     #[must_use]
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (task_stream_tx, _tsrx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
@@ -132,6 +144,7 @@ impl EventBroker {
         let (notify_tx, _nrx) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             tx,
+            task_stream_tx,
             outbox_tx: None,
             attention_tx,
             fleet_tx,
@@ -152,6 +165,7 @@ impl EventBroker {
     #[must_use]
     pub fn with_outbox() -> (Self, mpsc::UnboundedReceiver<ScopedEvent>) {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (task_stream_tx, _tsrx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
@@ -161,6 +175,7 @@ impl EventBroker {
         (
             Self {
                 tx,
+                task_stream_tx,
                 outbox_tx: Some(outbox_tx),
                 attention_tx,
                 fleet_tx,
@@ -177,6 +192,7 @@ impl EventBroker {
     pub fn sink(&self) -> EventSink {
         EventSink {
             tx: self.tx.clone(),
+            task_stream_tx: self.task_stream_tx.clone(),
             outbox_tx: self.outbox_tx.clone(),
             attention_tx: self.attention_tx.clone(),
             fleet_tx: self.fleet_tx.clone(),
@@ -192,6 +208,16 @@ impl EventBroker {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<ScopedEvent> {
         self.tx.subscribe()
+    }
+
+    /// A fresh receiver onto the running-task TRANSCRIPT stream (track A step
+    /// A2). The RPC server opens one per `workspace/subscribe` alongside
+    /// [`Self::subscribe`], and filters it by the same workspace: the two are one
+    /// subscription split across two channels so a transcript burst cannot evict
+    /// the lifecycle events beside it.
+    #[must_use]
+    pub fn subscribe_task_stream(&self) -> broadcast::Receiver<ScopedEvent> {
+        self.task_stream_tx.subscribe()
     }
 
     /// A fresh receiver onto the FLEET-WIDE attention stream (spec P2). The RPC
@@ -244,6 +270,7 @@ impl EventBroker {
 #[derive(Debug, Clone)]
 pub struct EventSink {
     tx: broadcast::Sender<ScopedEvent>,
+    task_stream_tx: broadcast::Sender<ScopedEvent>,
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
     attention_tx: broadcast::Sender<HangarEvent>,
     fleet_tx: broadcast::Sender<i64>,
@@ -289,8 +316,12 @@ impl EventSink {
     /// Same shape as [`Self::emit_attention`]: a stream whose durable source is
     /// somewhere other than the event log stays off the log. Best-effort and
     /// non-blocking: with no live subscriber the broadcast is dropped.
+    ///
+    /// It rides its OWN broadcast, not [`Self::emit`]'s: see
+    /// [`EventBroker::task_stream_tx`] for why a run's line volume must not share
+    /// a ring with the lifecycle events nothing re-polls.
     pub fn emit_live(&self, workspace_id: &str, event: HangarEvent) {
-        let _ = self.tx.send(ScopedEvent {
+        let _ = self.task_stream_tx.send(ScopedEvent {
             workspace_id: workspace_id.to_string(),
             event,
         });

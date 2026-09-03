@@ -420,6 +420,10 @@ async fn serve_conn(
     // The connection's event subscription: at most one forwarder; a
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // The TRANSCRIPT half of the same workspace subscription (track A step A2),
+    // on its own broadcast so a run's line volume cannot evict the lifecycle
+    // events `forwarder` carries. Registered and replaced with it.
+    let mut task_stream_forwarder: Option<tokio::task::JoinHandle<()>> = None;
     // The connection's FLEET-WIDE attention subscription (spec P2), independent
     // of the workspace forwarder: a connection may hold both (workspace events +
     // attention nudges) or either. A re-subscribe replaces it.
@@ -457,6 +461,7 @@ async fn serve_conn(
                 h.as_ref().is_some_and(|h| !h.is_finished())
             };
             let subscribed = live(&forwarder)
+                || live(&task_stream_forwarder)
                 || live(&attention_forwarder)
                 || live(&fleet_forwarder)
                 || live(&message_forwarder)
@@ -479,6 +484,10 @@ async fn serve_conn(
             // the snapshot query runs stay buffered in this receiver and are
             // drained after the acknowledgement, closing the snapshot-to-live
             // handoff gap without allowing an event to precede the response.
+            let pending_task_stream_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::WORKSPACE_SUBSCRIBE)
+                    .then(|| broker.subscribe_task_stream())
+            });
             let pending_attention_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::ATTENTION_SUBSCRIBE)
                     .then(|| broker.subscribe_attention())
@@ -536,6 +545,20 @@ async fn serve_conn(
                             ws.clone(),
                             out_tx.clone(),
                         ));
+                        // A2: the same subscription's TRANSCRIPT half, drained
+                        // from its own broadcast so a chatty run cannot evict the
+                        // lifecycle events above it (see `EventBroker`). Two
+                        // forwarders means a `TaskFinished` can overtake the last
+                        // `TaskMessage` of its run; both consumers key on the task
+                        // id and neither orders across the two, so the only effect
+                        // is a banner clearing a beat early.
+                        if let Some(old) = task_stream_forwarder.take() {
+                            old.abort();
+                        }
+                        let rx = pending_task_stream_rx
+                            .unwrap_or_else(|| broker.subscribe_task_stream());
+                        task_stream_forwarder =
+                            Some(spawn_event_forwarder(rx, ws.clone(), out_tx.clone()));
                         // T1 resume: a client that carried a `since_seq` catches
                         // up on every durable event after that cursor before it
                         // goes live. Best-effort (a read fault is logged, the
