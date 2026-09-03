@@ -611,6 +611,14 @@ pub struct ScreenStates {
     /// Inbox screen cache (e38.14), filled from the `hangar/inbox_list` snapshot
     /// (the aggregated issue/comment/task entries + the unread count).
     pub inbox: InboxState,
+    /// The names the inbox resolves its rows through (crisp B1), projected from
+    /// the cached tasks + issues snapshots.
+    ///
+    /// Rebuilt by [`Self::refresh_inbox_names`] when either snapshot moves, NOT
+    /// per paint: the projection is two maps with a `String` clone per row and it
+    /// only changes when a snapshot lands, while the Inbox repaints on every
+    /// frame of a streaming run.
+    inbox_names: super::inbox::InboxLookup,
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
     pub control_center: ControlCenterState,
@@ -790,6 +798,7 @@ impl ScreenStates {
         // Re-label any Kanban card already on the board with its parent issue's
         // title: the tasks snapshot may have landed before this one did.
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
+        self.refresh_inbox_names();
     }
 
     /// Replace the skill-manager rows from an `hangar/skills_list` snapshot.
@@ -815,6 +824,7 @@ impl ScreenStates {
         self.kanban.set_agent_names(&agent_names(&self.actors));
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
         self.resolve_task_detail_names();
+        self.refresh_inbox_names();
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
@@ -911,13 +921,21 @@ impl ScreenStates {
         self.inbox = InboxState::from_snapshot(entries, unread, recipient);
     }
 
-    /// The names the inbox resolves its rows through (crisp B1), projected from
-    /// the cached tasks (agent label + parent issue) and issues (display id +
-    /// title) snapshots at render time, so whichever order they landed in the
-    /// rows read `impl-1 done  HGR-3 <title>` on the next paint. Cheap: a few
-    /// hundred map inserts per frame at most.
+    /// The cached names the inbox resolves its rows through (crisp B1).
     #[must_use]
-    pub fn inbox_lookup(&self, now_ms: i64) -> super::inbox::InboxLookup {
+    pub const fn inbox_lookup(&self) -> &super::inbox::InboxLookup {
+        &self.inbox_names
+    }
+
+    /// Re-project the inbox name lookup from the cached tasks (agent label +
+    /// parent issue) and issues (display id + title) snapshots, so whichever
+    /// order they landed in the rows read `impl-1 done  HGR-3 <title>` on the
+    /// next paint.
+    ///
+    /// Called from EVERY seam that moves either snapshot: the two snapshot
+    /// setters, the roster that re-labels the cards, and the live-event fold.
+    /// Miss one and the inbox shows a stale name until the next snapshot lands.
+    pub fn refresh_inbox_names(&mut self) {
         use super::inbox::{InboxIssueRef, InboxLookup, InboxTaskRef};
         let tasks = self
             .kanban
@@ -951,11 +969,7 @@ impl ScreenStates {
                 )
             })
             .collect();
-        InboxLookup {
-            tasks,
-            issues,
-            now_ms,
-        }
+        self.inbox_names = InboxLookup { tasks, issues };
     }
 
     /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
@@ -1100,6 +1114,7 @@ impl ScreenStates {
         // roster (crisp B1, defect 8); it keeps the map across workspace resets.
         self.usage.set_agent_names(names);
         self.resolve_task_detail_names();
+        self.refresh_inbox_names();
     }
 
     /// Build the settings cache from the four daemon snapshots.
@@ -1521,8 +1536,15 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
         }
         Screen::Inbox => {
-            let lookup = states.inbox_lookup(now_ms());
-            super::inbox::render_inbox(buf, w, top, bottom, &states.inbox, &lookup);
+            super::inbox::render_inbox(
+                buf,
+                w,
+                top,
+                bottom,
+                &states.inbox,
+                states.inbox_lookup(),
+                now_ms(),
+            );
         }
         Screen::ControlCenter => {
             super::control_center::render_control_center(
@@ -3098,7 +3120,8 @@ mod task_detail_open_tests {
         }
     }
 
-    fn issue() -> IssueRow {
+    /// Also the base fixture for the sibling inbox-lookup tests.
+    pub(super) fn issue() -> IssueRow {
         IssueRow {
             subscriber_count: 0,
             subscribed: false,
@@ -3576,6 +3599,78 @@ mod fleet_routing_tests {
                 action: FleetAction::ReconcileStructured { request_fingerprint },
             }) if session_key == "claude:one" && request_fingerprint == "fingerprint"
         ));
+    }
+}
+
+/// Crisp B1 review: the inbox name lookup is a CACHE now, rebuilt on the seams
+/// that move a snapshot rather than on every paint. These pin the seams, which
+/// is where a cache goes wrong: miss one and the inbox paints a stale name until
+/// something unrelated lands.
+#[cfg(test)]
+mod inbox_lookup_cache_tests {
+    use ainb_hangar_core::ids::{IssueId, TaskId};
+    use ainb_hangar_proto::events::{ActorRow, TaskCardRow};
+
+    use super::*;
+
+    const AGENT: &str = "01M1FHM2YSRSXZQFR29ZAYF56V";
+
+    fn task_card(id: &str, agent_id: &str) -> TaskCardRow {
+        TaskCardRow {
+            id: TaskId::from_str(id).unwrap(),
+            workspace_id: "ws".into(),
+            agent_id: agent_id.into(),
+            issue_id: Some("issue-1".into()),
+            status: "running".into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
+    fn issue_row() -> IssueRow {
+        let mut row = super::task_detail_open_tests::issue();
+        row.id = IssueId::from_str("issue-1").unwrap();
+        row.display_id = Some("HGR-3".into());
+        row.title = "Add GET /api/version endpoint".into();
+        row
+    }
+
+    /// Each of the three snapshot seams re-projects the lookup on its own, in
+    /// whichever order the batch lands: tasks alone give the row its task entry,
+    /// issues alone its `HGR-3 <title>`, and the roster relabels the agent from
+    /// the short-id fallback to its display name.
+    #[test]
+    fn every_snapshot_seam_reprojects_the_lookup() {
+        let mut states = ScreenStates::default();
+
+        states.set_tasks(&[task_card("t-1", AGENT)]);
+        let entry = states.inbox_lookup().tasks.get("t-1").expect("tasks seam projects");
+        assert_eq!(entry.agent, "AYF56V", "short-id fallback before the roster");
+        assert_eq!(entry.issue_id.as_deref(), Some("issue-1"));
+        assert!(
+            states.inbox_lookup().issues.is_empty(),
+            "no issues snapshot yet"
+        );
+
+        states.set_issues(vec![issue_row()]);
+        let issue = states.inbox_lookup().issues.get("issue-1").expect("issues seam projects");
+        assert_eq!(issue.display_id, "HGR-3");
+        assert_eq!(issue.title, "Add GET /api/version endpoint");
+
+        states.set_actors(vec![ActorRow {
+            actor_ref: format!("agent:{AGENT}"),
+            display_name: "impl-1".into(),
+            is_agent: true,
+            ..ActorRow::default()
+        }]);
+        assert_eq!(
+            states.inbox_lookup().tasks.get("t-1").expect("still there").agent,
+            "impl-1",
+            "the roster seam relabels the cached card"
+        );
     }
 }
 

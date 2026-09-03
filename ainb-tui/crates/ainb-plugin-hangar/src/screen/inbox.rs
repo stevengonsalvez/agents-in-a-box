@@ -105,17 +105,16 @@ pub struct InboxIssueRef {
 }
 
 /// The snapshot-derived names an inbox row resolves its ULIDs through (crisp
-/// B1): built by the glue at render time from the cached tasks + issues + agents
-/// snapshots, so the arrival order of those snapshots never matters and a row
-/// re-resolves on every paint. `now_ms` drives the relative age column.
+/// B1): projected by the glue from the cached tasks + issues + agents snapshots,
+/// so the arrival order of those snapshots never matters. Rebuilt when a snapshot
+/// moves, not per paint, so the render clock is passed to [`render_inbox`]
+/// separately rather than riding along here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InboxLookup {
     /// `task_id -> (agent label, parent issue)`.
     pub tasks: BTreeMap<String, InboxTaskRef>,
     /// `issue_id -> (display id, title)`.
     pub issues: BTreeMap<String, InboxIssueRef>,
-    /// The render clock (epoch ms) the age column is computed against.
-    pub now_ms: i64,
 }
 
 impl InboxLookup {
@@ -284,6 +283,7 @@ pub fn render_inbox(
     bottom: u16,
     state: &InboxState,
     lookup: &InboxLookup,
+    now_ms: i64,
 ) {
     let mut row = top;
 
@@ -313,11 +313,11 @@ pub fn render_inbox(
         return;
     }
 
-    for entry in ordered(&state.entries, lookup.now_ms) {
+    for entry in ordered(&state.entries, now_ms) {
         if row > bottom {
             break;
         }
-        render_entry(buf, row, area_w, entry, lookup);
+        render_entry(buf, row, area_w, entry, lookup, now_ms);
         row += 1;
     }
 }
@@ -330,6 +330,7 @@ fn render_entry(
     area_w: u16,
     entry: &InboxEntryRow,
     lookup: &InboxLookup,
+    now_ms: i64,
 ) {
     let unread = entry.read_at.is_none();
     let line = compose_line(entry, lookup);
@@ -339,7 +340,7 @@ fn render_entry(
         buf,
         x,
         row,
-        &pad_to(&age_label(entry.created_at, lookup.now_ms), 5),
+        &pad_to(&age_label(entry.created_at, now_ms), 5),
         MUTED_GRAY,
         area_w,
     );
@@ -427,6 +428,9 @@ mod tests {
         s.trim_end().to_string()
     }
 
+    /// The render clock every inbox test ages its rows against.
+    const NOW: i64 = 1_700_000_600_000;
+
     fn task_entry(
         id: &str,
         event: &str,
@@ -447,7 +451,7 @@ mod tests {
     }
 
     /// The snapshots a real session holds: one task by impl-1 on HGR-3.
-    fn lookup(now_ms: i64) -> InboxLookup {
+    fn lookup() -> InboxLookup {
         InboxLookup {
             tasks: BTreeMap::from([(
                 "01M1GVN6MAF3121GEDM1E66KW5".to_string(),
@@ -463,7 +467,6 @@ mod tests {
                     title: "Add GET /api/version endpoint".into(),
                 },
             )]),
-            now_ms,
         }
     }
 
@@ -472,7 +475,6 @@ mod tests {
     /// finished verb comes from the summary's `(Result)`.
     #[test]
     fn task_rows_read_as_agent_verb_issue_with_age_and_unread_dot() {
-        const NOW: i64 = 1_700_000_600_000;
         let task = "01M1GVN6MAF3121GEDM1E66KW5";
         let state = InboxState::from_snapshot(
             vec![
@@ -495,7 +497,7 @@ mod tests {
             "member:me".into(),
         );
         let mut buf = WireBuffer::new(80, 24);
-        render_inbox(&mut buf, 80, 0, 20, &state, &lookup(NOW));
+        render_inbox(&mut buf, 80, 0, 20, &state, &lookup(), NOW);
         let r0 = row_text(&buf, 3, 80);
         let r1 = row_text(&buf, 4, 80);
         assert!(r0.starts_with("● 2m"), "unread dot + age: {r0:?}");
@@ -517,7 +519,6 @@ mod tests {
     /// resolve their issue or keep the daemon's summary. Nothing renders blank.
     #[test]
     fn unresolved_rows_fall_back_to_short_ids_and_summaries() {
-        const NOW: i64 = 1_700_000_600_000;
         let orphan = task_entry(
             "01M1ZZZZZZZZZZZZZZZZZZZZZZ",
             "task_finished",
@@ -545,7 +546,7 @@ mod tests {
             "member:me".into(),
         );
         let mut buf = WireBuffer::new(80, 24);
-        render_inbox(&mut buf, 80, 0, 20, &state, &lookup(NOW));
+        render_inbox(&mut buf, 80, 0, 20, &state, &lookup(), NOW);
         let rows: Vec<String> = (3..8).map(|r| row_text(&buf, r, 80)).collect();
         assert!(
             rows[0].contains("run failed") && rows[0].contains("#ZZZZZZ"),
@@ -579,7 +580,6 @@ mod tests {
     /// above yesterday's failure).
     #[test]
     fn failed_runs_sort_first_within_their_age_bucket() {
-        const NOW: i64 = 1_700_000_600_000;
         let hour = 3_600_000;
         let day = 24 * hour;
         let ok_now = task_entry(
@@ -633,7 +633,7 @@ mod tests {
             "member:me".into(),
         );
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default());
+        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), NOW);
 
         // Title row carries the unread badge.
         let title = row_text(&buf, 0, 60);
@@ -665,7 +665,7 @@ mod tests {
             "member:me".into(),
         );
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default());
+        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), NOW);
 
         let title = row_text(&buf, 0, 60);
         assert!(
@@ -690,7 +690,7 @@ mod tests {
         let state =
             InboxState::from_snapshot(vec![entry("task", "Task finished", true)], 0, String::new());
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default());
+        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), NOW);
 
         // No badge when unread is zero.
         let title = row_text(&buf, 0, 60);
@@ -714,7 +714,7 @@ mod tests {
     fn empty_inbox_renders_placeholder() {
         let state = InboxState::default();
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default());
+        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), NOW);
         // The empty placeholder renders at row 3 (title=0, hint=1, blank=2).
         let body = (3..5).map(|r| row_text(&buf, r, 60)).collect::<Vec<_>>().join("\n");
         assert!(

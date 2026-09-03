@@ -1219,6 +1219,10 @@ impl HangarPlugin {
         )
         .state;
         self.screens.kanban = reduce_kanban(&self.screens.kanban, KanbanEvent::Event(event)).state;
+        // The inbox resolves its rows through a projection of those two caches,
+        // held off the paint path (crisp B1 review), so it is re-projected with
+        // them rather than rebuilt per frame.
+        self.screens.refresh_inbox_names();
     }
 
     /// React to one fully-decoded daemon response.
