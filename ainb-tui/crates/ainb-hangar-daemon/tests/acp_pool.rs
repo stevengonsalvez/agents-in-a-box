@@ -1862,6 +1862,53 @@ async fn a_runtime_registered_adapter_gets_its_own_process_and_removal_reaps_it(
     assert_eq!(state, "DELIVERED", "{detail:?}");
 }
 
+/// `acp_session::ensure` is the ONE door both the create RPC and a task caller
+/// come through, so the input guards live IN it: a blank cwd, an explicit blank
+/// scope or an unknown provider is refused before anything is written,
+/// whichever door asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ensure_refuses_a_blank_cwd_or_scope_before_writing_anything() {
+    use ainb_hangar_daemon::acp_session::{EnsureError, ensure};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    let events = EventBroker::new().sink();
+    let claude = ainb_acp::config::CLAUDE_ADAPTER;
+
+    let blank_cwd = ensure(store.pool(), &events, claude, "  ", None).await;
+    assert!(
+        matches!(blank_cwd, Err(EnsureError::EmptyCwd)),
+        "{blank_cwd:?}"
+    );
+    let blank_scope = ensure(store.pool(), &events, claude, "/tmp/acp", Some(" ")).await;
+    assert!(
+        matches!(blank_scope, Err(EnsureError::EmptyScopeKey)),
+        "{blank_scope:?}"
+    );
+    let unknown = ensure(store.pool(), &events, "gpt-agent-acp", "/tmp/acp", None).await;
+    assert!(
+        matches!(unknown, Err(EnsureError::UnknownProvider { .. })),
+        "{unknown:?}"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fleet_acp_session")
+        .fetch_one(store.pool())
+        .await
+        .expect("count");
+    assert_eq!(rows, 0, "a refused ensure persists nothing");
+
+    // The same call with sound inputs mints the pair, and a replay finds it.
+    let minted = ensure(store.pool(), &events, claude, "/tmp/acp", Some("task:t-9"))
+        .await
+        .expect("mint");
+    let found = ensure(store.pool(), &events, claude, "/tmp/acp", Some("task:t-9"))
+        .await
+        .expect("replay");
+    assert_eq!(
+        found.session_key, minted.session_key,
+        "idempotent per live scope"
+    );
+}
+
 /// A cancel is per SESSION: convergence is idempotent and leaves the scope
 /// reusable without a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

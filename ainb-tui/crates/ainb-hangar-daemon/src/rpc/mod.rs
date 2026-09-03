@@ -5901,9 +5901,9 @@ fn normalize_picker_text(value: &str) -> String {
 /// `session_key`, in ONE transaction, with NO process spawn.
 ///
 /// R3's entry point. Without it no ACP recipient can ever exist, and
-/// `message_send` deliberately never auto-provisions one. The write itself is
-/// [`crate::acp_session::ensure`], shared with the task executor; this handler
-/// is the capability gate and the parameter check in front of it.
+/// `message_send` deliberately never auto-provisions one. The write and its
+/// validation are [`crate::acp_session::ensure`], shared with the task
+/// executor; this handler is the capability gate in front of it.
 async fn handle_fleet_acp_session_create(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -5917,12 +5917,6 @@ async fn handle_fleet_acp_session_create(
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
     let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
-    if params.cwd.trim().is_empty() {
-        return Err(invalid_params("cwd must not be empty"));
-    }
-    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
-        return Err(invalid_params("scope_key must not be empty"));
-    }
     let row = crate::acp_session::ensure(
         pool,
         events,
@@ -5932,10 +5926,8 @@ async fn handle_fleet_acp_session_create(
     )
     .await
     .map_err(|error| match error {
-        EnsureError::UnknownProvider { .. } | EnsureError::ScopeHeld { .. } => {
-            invalid_params(&error.to_string())
-        }
         EnsureError::Store(_) => internal(&error.to_string()),
+        _ => invalid_params(&error.to_string()),
     })?;
     to_value(&FleetAcpSessionCreateResult {
         session_key: row.session_key,

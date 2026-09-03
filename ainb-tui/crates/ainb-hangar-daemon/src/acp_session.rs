@@ -23,16 +23,20 @@ use crate::events::EventSink;
 
 /// Why [`ensure`] refused.
 ///
-/// The first two are the caller's fault and render as `invalid_params` on the
-/// wire; [`EnsureError::Store`] is the daemon's and renders as `internal`.
+/// Everything but [`EnsureError::Store`] is the caller's fault and renders as
+/// `invalid_params` on the wire; `Store` is the daemon's and renders as
+/// `internal`.
 #[derive(Debug, thiserror::Error)]
 pub enum EnsureError {
+    /// A session rooted nowhere cannot be prompted.
+    #[error("cwd must not be empty")]
+    EmptyCwd,
+    /// An explicit scope that is blank is a typo, not a request for a private
+    /// scope (leave it out for that).
+    #[error("scope_key must not be empty")]
+    EmptyScopeKey,
     /// The provider token is in neither the pool's registry nor the built-ins.
-    #[error(
-        "unknown ACP provider {provider:?}; known adapters are {} and {}",
-        ainb_acp::config::CLAUDE_ADAPTER,
-        ainb_acp::config::CODEX_ADAPTER
-    )]
+    #[error("unknown ACP provider {provider:?}; it is not in the adapter registry")]
     UnknownProvider {
         /// The token that was asked for.
         provider: String,
@@ -81,6 +85,15 @@ pub async fn ensure(
     cwd: &str,
     scope_key: Option<&str>,
 ) -> Result<FleetAcpSessionRow, EnsureError> {
+    // Validated HERE, not at the RPC door: the task caller comes through the
+    // same function and must not be able to mint a rootless or blank-scoped
+    // session either.
+    if cwd.trim().is_empty() {
+        return Err(EnsureError::EmptyCwd);
+    }
+    if scope_key.is_some_and(|scope| scope.trim().is_empty()) {
+        return Err(EnsureError::EmptyScopeKey);
+    }
     let acp = crate::acp_pool::active_handle().await;
     let known = acp.as_ref().map_or_else(
         || ainb_acp::config::AdapterConfig::is_known_adapter(provider),
