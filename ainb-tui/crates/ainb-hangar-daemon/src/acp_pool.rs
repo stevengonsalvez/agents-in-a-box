@@ -700,11 +700,13 @@ impl AcpPool {
     /// there was none.
     async fn stop_process(&self, key: &str) -> bool {
         let process = self.providers.lock().await.remove(key);
-        process.is_some_and(|process| {
+        if let Some(process) = process {
             process.stopping.store(true, Ordering::Relaxed);
             process.process.kill();
             true
-        })
+        } else {
+            false
+        }
     }
 
     /// Hand one prompt to the recipient's OWN session (never a broadcast
