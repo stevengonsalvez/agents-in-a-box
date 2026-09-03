@@ -391,21 +391,18 @@ impl FleetProviderEventRepo {
     /// exactly the chatty runs whose usage matters most, and would look like it
     /// worked on the short ones. This walks
     /// `idx_fleet_provider_event_session_order` backwards and stops at the first
-    /// match instead.
+    /// match instead. `the_event_type_read_seeks_on_the_session_index` asserts
+    /// the plan, because a scan here would only ever show up as a slow finalize.
     pub async fn last_by_session_event_type(
         pool: &SqlitePool,
         session_key: &str,
         event_type: &str,
     ) -> Result<Option<FleetProviderEventRow>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
-             FROM fleet_provider_event WHERE session_key = ? AND event_type = ? \
-             ORDER BY ingest_order DESC LIMIT 1",
-        )
-        .bind(session_key)
-        .bind(event_type)
-        .fetch_optional(pool)
-        .await?;
+        let row = sqlx::query(LAST_OF_TYPE_SELECT)
+            .bind(session_key)
+            .bind(event_type)
+            .fetch_optional(pool)
+            .await?;
         row.as_ref().map(row_from).transpose()
     }
 
@@ -644,6 +641,19 @@ const EVICTION_SELECT: &str = "SELECT ingest_order FROM fleet_provider_event \
        AND source <> 'acp' AND observed_at < ? \
      ORDER BY observed_at ASC LIMIT ?";
 
+/// The statement [`FleetProviderEventRepo::last_by_session_event_type`] runs, as
+/// ONE definition, shared with the plan test for the same reason
+/// [`EVICTION_SELECT`] is. Binds `session_key` then `event_type`.
+///
+/// `ORDER BY ingest_order DESC` must stay paired with
+/// `idx_fleet_provider_event_session_order`'s second key column: that is what
+/// makes `LIMIT 1` a backwards seek along the index rather than a sort of every
+/// row of the type. `event_type` is deliberately NOT in the index: it filters
+/// rows the walk visits, and the walk stops at the first match.
+const LAST_OF_TYPE_SELECT: &str = "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
+     FROM fleet_provider_event WHERE session_key = ? AND event_type = ? \
+     ORDER BY ingest_order DESC LIMIT 1";
+
 fn matches_event(
     row: &FleetProviderEventRow,
     event: &NewFleetProviderEvent,
@@ -834,6 +844,14 @@ mod tests {
         )
         .await
         .unwrap();
+        // The `all` below is TRUE of an empty window, and it carries the whole
+        // justification for the query above, so the window has to be shown full
+        // first: 64 rows read, none of them the accounting row.
+        assert_eq!(
+            window.len(),
+            64,
+            "the tail must be a FULL window for the miss below to mean anything"
+        );
         assert!(
             window.iter().all(|row| row.event_type != "acp.usage"),
             "a windowed tail read cannot see this row, which is why the query above exists"
@@ -849,6 +867,75 @@ mod tests {
             .unwrap(),
             None,
             "a type the session never wrote is absent, not an error"
+        );
+    }
+
+    /// The plan for the exact statement `last_by_session_event_type` runs, with
+    /// only its ORDER BY varied. Derived from the production constant, never
+    /// re-typed, so the test and the query cannot drift.
+    async fn last_of_type_plan(pool: &SqlitePool, order_by: &str) -> String {
+        let select = super::LAST_OF_TYPE_SELECT.replace(
+            "ORDER BY ingest_order DESC",
+            &format!("ORDER BY {order_by} DESC"),
+        );
+        assert!(
+            select.contains(&format!("ORDER BY {order_by} DESC")),
+            "LAST_OF_TYPE_SELECT no longer contains the ORDER BY this test rewrites"
+        );
+        let rows = sqlx::query(&format!("EXPLAIN QUERY PLAN {select}"))
+            .bind("acp:s-1")
+            .bind("acp.usage")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        rows.iter()
+            .map(|row| row.try_get::<String, _>("detail").unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The usage read must SEEK `idx_fleet_provider_event_session_order` and
+    /// take its ordering from the index, never sort.
+    ///
+    /// Asserted on the PLAN for the same reason
+    /// `the_sweep_seeks_on_the_retention_index` is: the row returned is correct
+    /// either way and only the cost differs, so a degradation here has no
+    /// symptom except a finalize that got slower on exactly the longest
+    /// transcripts.
+    #[tokio::test]
+    async fn the_event_type_read_seeks_on_the_session_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        // TWO sessions, because one is not a table: with every row sharing a
+        // session_key, ANALYZE would record the leading column as useless and a
+        // planner could reasonably scan, which would make this test agree with
+        // production only by accident.
+        for session in ["acp:s-1", "acp:s-2"] {
+            let batch = (0..200)
+                .map(|i| acp_event(&format!("{session}-{i}"), session))
+                .collect::<Vec<_>>();
+            FleetProviderEventRepo::append_batch(store.pool(), &batch).await.unwrap();
+        }
+        sqlx::query("ANALYZE").execute(store.pool()).await.unwrap();
+
+        let detail = last_of_type_plan(store.pool(), "ingest_order").await;
+        // SEARCH, the index NAME, and no sort. All three: a full index scan
+        // (`SCAN ... USING INDEX ...`) also contains the name, and a plan that
+        // seeks the session and then sorts its whole transcript to find the
+        // newest row is the cost this query exists to avoid.
+        assert!(
+            detail.contains("SEARCH")
+                && detail.contains("idx_fleet_provider_event_session_order")
+                && !detail.contains("TEMP B-TREE"),
+            "the usage read must seek the session index and take its order from \
+             it, plan was:\n{detail}"
+        );
+        let by_observed_at = last_of_type_plan(store.pool(), "observed_at").await;
+        assert!(
+            by_observed_at.contains("TEMP B-TREE"),
+            "ORDER BY and the index's second key column must stay paired; if \
+             ordering by observed_at is also free, the pairing comment on \
+             LAST_OF_TYPE_SELECT is now misleading, plan was:\n{by_observed_at}"
         );
     }
 
