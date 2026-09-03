@@ -1,9 +1,9 @@
 //! P4.4 — Task detail + transcript screen: the pure reducer + width-aware render.
 //!
 //! The task-detail screen (hotkey `2`, or `enter` on an issue-list row) shows a
-//! single task: a header (issue title + status), the streaming transcript in the
-//! main region, and a progressive-disclosure sidebar (assignee / project / dates
-//! / PRs). As with every Hangar screen, the reducer ([`reduce_task_detail`]) is
+//! single task: a detail card (the issue title, ONE meta line, acceptance and
+//! properties) above the streaming transcript. As with every Hangar screen, the
+//! reducer ([`reduce_task_detail`]) is
 //! **pure** — it folds a key press or a host [`HangarEvent`] into a new
 //! [`TaskDetailState`] plus an optional [`TaskDetailIntent`] for the plugin glue
 //! to act on (retry / cancel the task). No IO, no `tokio`, no socket, so every
@@ -934,11 +934,14 @@ fn unchanged(state: &TaskDetailState) -> TaskDetailReduction {
 
 /// Render the task-detail screen into `buf` between rows `top` and `bottom`.
 ///
-/// Three-region layout (width-aware, derived from `area_w`): a one-row header
-/// (issue title + status), the transcript filling the main region, and a
-/// right-hand sidebar (progressive disclosure — see [`crate::widgets::sidebar`]).
-/// The transcript is the dominant region; the sidebar takes a fixed cap on the
-/// right that collapses away under narrow widths.
+/// Two-region layout (width-aware, derived from `area_w`): the issue detail card
+/// at the top, the transcript filling everything below it. The transcript is the
+/// dominant region — the card yields rows to it, never the other way round.
+///
+/// The right-hand metadata sidebar this screen used to carry is gone (crisp B4
+/// §2.3): it repeated `Status` / `Assignee` from the card, added the workspace's
+/// raw ULID under `Project:` and a mid-word-truncated `Notes:`, and it cost the
+/// transcript a quarter of the width to do it.
 ///
 /// At the P4.4 GREEN bar the rendering is linear (no virtualisation): the visible
 /// view ([`TaskDetailState::visible_entries`]) is painted top-down. The
@@ -989,26 +992,8 @@ pub fn render_task_detail(
         bottom
     };
 
-    // Sidebar takes a right-hand cap; it collapses when the area is too narrow
-    // to leave the transcript a usable column.
-    let sidebar_w: u16 = if area_w >= 60 { 24 } else { 0 };
-    let main_w = area_w.saturating_sub(sidebar_w);
-
     // The transcript paints the visible (collapsed) view linearly.
-    render_transcript(buf, main_w, body_top, body_bottom, &state.visible_entries());
-
-    if sidebar_w > 0 {
-        let sidebar_x = main_w;
-        crate::widgets::sidebar::render_sidebar(
-            buf,
-            sidebar_x,
-            body_top,
-            body_bottom,
-            sidebar_w,
-            &state.issue,
-            state.assignee_name.as_deref(),
-        );
-    }
+    render_transcript(buf, area_w, body_top, body_bottom, &state.visible_entries());
 }
 
 /// Paint the single-row comment-compose input bar at `(0, row)` (e38.5):
@@ -1151,9 +1136,9 @@ fn render_detail_card(
     // what remains after this reservation — the transcript feed is the screen's
     // job, the card is context, so the card yields, never the feed.
     const RESERVED_BELOW: u16 = 6;
-    // The card's fixed chrome: top border + 4 field rows + divider + bottom
-    // border = 7 rows; the description adds ≥1 more, a run history line 1 more.
-    const CARD_FIXED_ROWS: u16 = 7;
+    // The card's fixed chrome: top border + the ONE meta row + divider + bottom
+    // border = 4 rows; the description adds ≥1 more, a run history line 1 more.
+    const CARD_FIXED_ROWS: u16 = 4;
     /// The description never exceeds this many wrapped lines, so even a tall
     /// viewport keeps the card compact (≈40% of a 30-row pane at worst).
     const DESC_MAX_LINES: u16 = 4;
@@ -1191,83 +1176,41 @@ fn render_detail_card(
     put_clipped(buf, 2, row, &title, CARD_TITLE, inner_right);
     row = row.saturating_add(1);
 
-    // --- Status / Priority / Created ---
+    // --- The ONE meta line (crisp B4 §2.3), replacing the four key/value rows
+    //     that carried the same six values under labels reading `, ` or
+    //     `unassigned` on most cards. The RUN is the headline here, not the
+    //     card's metadata, so the metadata gets one line and the run gets the
+    //     sticky card above it. ---
     card_field_row(
         buf,
         card_w,
         row,
-        &[
-            ("Status: ", CARD_LABEL),
-            (&issue.state, CARD_VALUE),
-            ("   Priority: ", CARD_LABEL),
-            (&priority_p_label(issue.priority), CARD_VALUE),
-            ("   Created: ", CARD_LABEL),
-            (&fmt_card_date(issue.created_at), CARD_VALUE),
-        ],
+        &[(
+            &meta_line(issue, state.assignee_name.as_deref()),
+            CARD_VALUE,
+        )],
     );
     row = row.saturating_add(1);
 
-    // --- Assignee / Agent: the roster display names once the glue resolved them
-    //     (crisp B1, defect 8), so the row reads `impl-1`, never `agent:<ulid>`;
-    //     before the roster lands the SHORT id stands in, the same fallback the
-    //     board cards take (the shared `assignee_label`). ---
-    let assignee =
-        crate::screen::assignee_label(state.assignee_name.as_deref(), issue.assignee.as_deref())
-            .unwrap_or_else(|| "unassigned".to_string());
-    let agent = state.agent_name.as_deref().or(issue.agent.as_deref()).unwrap_or(CARD_UNSET);
-    card_field_row(
-        buf,
-        card_w,
-        row,
-        &[
-            ("Assignee: ", CARD_LABEL),
-            (assignee.as_str(), CARD_VALUE),
-            ("   Agent: ", CARD_LABEL),
-            (agent, CARD_VALUE),
-        ],
-    );
-    row = row.saturating_add(1);
-
-    // --- Repo / Source → Target ---
-    let repo = issue.repo_ref.as_deref().unwrap_or(CARD_UNSET);
-    let source = issue.source_branch.as_deref().unwrap_or(CARD_UNSET);
-    let target = issue.target_branch.as_deref().unwrap_or(CARD_UNSET);
-    card_field_row(
-        buf,
-        card_w,
-        row,
-        &[
-            ("Repo: ", CARD_LABEL),
-            (repo, CARD_VALUE),
-            ("   Source: ", CARD_LABEL),
-            (source, CARD_VALUE),
-            (" → Target: ", CARD_LABEL),
-            (target, CARD_VALUE),
-        ],
-    );
-    row = row.saturating_add(1);
-
-    // --- Labels / Due (0014: the deadline shares the Labels row, so the card
-    //     height is unchanged and an issue's whole triage state reads in one
-    //     glance: Priority above, Labels + Due here) ---
-    let labels = if issue.labels.is_empty() {
-        CARD_UNSET.to_string()
-    } else {
-        issue.labels.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ")
-    };
-    let due = issue.due_date.map_or_else(|| CARD_UNSET.to_string(), fmt_card_date);
-    card_field_row(
-        buf,
-        card_w,
-        row,
-        &[
-            ("Labels: ", CARD_LABEL),
-            (&labels, CARD_VALUE),
-            ("   Due: ", CARD_LABEL),
-            (&due, CARD_VALUE),
-        ],
-    );
-    row = row.saturating_add(1);
+    // --- Labels / Due: progressive disclosure, unlike the row they came from.
+    //     The old row printed `Labels: —   Due: —` on every untriaged card, the
+    //     same zero-information placeholder as the `◇ None` chip B2 deleted. ---
+    if !issue.labels.is_empty() || issue.due_date.is_some() {
+        let labels = issue.labels.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ");
+        let due = issue.due_date.map(fmt_card_date);
+        let mut cells: Vec<(&str, Color)> = Vec::new();
+        if !labels.is_empty() {
+            cells.push(("Labels: ", CARD_LABEL));
+            cells.push((&labels, CARD_VALUE));
+        }
+        let due_text = due.unwrap_or_default();
+        if !due_text.is_empty() {
+            cells.push(("   Due: ", CARD_LABEL));
+            cells.push((&due_text, CARD_VALUE));
+        }
+        card_field_row(buf, card_w, row, &cells);
+        row = row.saturating_add(1);
+    }
 
     // --- Linked upstream issue (0043): only when the card links one, so an
     //     unlinked card reads unchanged. `⧉` marks the traceability ref. ---
@@ -1518,6 +1461,53 @@ fn draw_card_divider(buf: &mut WireBuffer, row: u16, card_w: u16) {
         s.push('│');
     }
     put_clipped(buf, 0, row, &s, CARD_BORDER, card_w);
+}
+
+/// The ONE meta line (crisp B4 §2.3):
+/// `in progress · P2 · impl-1 · created 2026-09-02 · @boxtrack · main → main`.
+///
+/// Every segment is a value, never a label: the four rows this replaced spent
+/// half their width on `Status: ` / `Assignee: ` / `Repo: ` / `Source: ` and
+/// then printed `—` or `unassigned` into most of them. A segment with nothing to
+/// say is DROPPED, so the line is as long as the issue is real.
+///
+/// The status word comes from [`crate::vocab::issue_word`] (never the raw wire
+/// token) and the repo from [`repo_label`] (never the absolute path).
+fn meta_line(issue: &IssueRow, assignee_name: Option<&str>) -> String {
+    use ainb_hangar_proto::lifecycle::IssueLifecycle;
+
+    let mut parts: Vec<String> = vec![
+        crate::vocab::issue_word(IssueLifecycle::for_state(&issue.state)).to_string(),
+        priority_p_label(issue.priority),
+        crate::screen::assignee_label(assignee_name, issue.assignee.as_deref())
+            .unwrap_or_else(|| "unassigned".to_string()),
+        format!("created {}", fmt_card_date(issue.created_at)),
+    ];
+    if let Some(repo) = issue.repo_ref.as_deref() {
+        parts.push(repo_label(repo));
+    }
+    match (
+        issue.source_branch.as_deref(),
+        issue.target_branch.as_deref(),
+    ) {
+        (Some(source), Some(target)) => parts.push(format!("{source} → {target}")),
+        (Some(one), None) | (None, Some(one)) => parts.push(one.to_string()),
+        (None, None) => {}
+    }
+    parts.join(" · ")
+}
+
+/// The repo as the meta line names it: `@boxtrack`, not
+/// `/home/claude/ainb-e2e-home/projects/boxtrack` (crisp B4 §2.3).
+///
+/// A path is 40+ cells of which only the last segment identifies anything, and
+/// the detail screen has ONE line for six values. A ref that is not a path
+/// (a registered repo label) is already the answer and passes through with the
+/// same `@` marker.
+fn repo_label(repo_ref: &str) -> String {
+    let trimmed = repo_ref.trim_end_matches('/');
+    let name = trimmed.rsplit('/').find(|s| !s.is_empty()).unwrap_or(trimmed);
+    format!("@{name}")
 }
 
 /// The structured acceptance criteria to render for `issue`.
@@ -1815,32 +1805,39 @@ mod card_tests {
         TaskDetailState::new(TaskId::from_str("task-1").unwrap(), issue)
     }
 
-    /// A never-run issue renders a full detail card — title, every field row, the
-    /// description — and NO `Runs:` history line (63d, the headline case).
+    /// The card's six metadata values ride ONE line (crisp B4 §2.3), in order,
+    /// with no `Status: ` / `Assignee: ` / `Repo: ` labels spending the width —
+    /// and the repo reads `@widget`, never the absolute path.
     #[test]
-    fn detail_card_renders_every_field_for_a_never_run_issue() {
+    fn detail_card_renders_one_meta_line_for_a_never_run_issue() {
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 30);
         render_task_detail(&mut buf, 80, 0, 29, &s);
+        let rows = painted_rows(&buf);
         let text = painted_text(&buf);
 
         assert!(text.contains("📋 HGR-1 · Fix the widget"), "title: {text}");
-        assert!(text.contains("Status: "), "status label");
-        assert!(text.contains("todo"), "status value");
-        assert!(text.contains("Priority: "), "priority label");
-        assert!(text.contains("P2"), "priority 1 → P2");
-        assert!(text.contains("Created: "), "created label");
-        assert!(text.contains("2023-11-14"), "created date: {text}");
-        assert!(text.contains("Assignee: "), "assignee label");
-        assert!(text.contains("agent:alice"), "assignee value");
-        assert!(text.contains("Agent: "), "agent label");
-        assert!(text.contains("codex"), "agent value");
-        assert!(text.contains("Repo: "), "repo label");
-        assert!(text.contains("/repos/widget"), "repo value");
-        assert!(text.contains("Source: "), "source label");
-        assert!(text.contains("Target: "), "target label");
-        assert!(text.contains("release"), "target value");
-        assert!(text.contains("Labels: "), "labels label");
+        let meta = rows
+            .iter()
+            .find(|l| l.contains("todo"))
+            .unwrap_or_else(|| panic!("no meta line:\n{}", rows.join("\n")));
+        for want in [
+            "todo",
+            "P2",
+            "agent:alice",
+            "created 2023-11-14",
+            "@widget",
+            "main → release",
+        ] {
+            assert!(meta.contains(want), "{want:?} on the meta line: {meta}");
+        }
+        assert!(
+            !text.contains("/repos/widget"),
+            "the absolute repo path is gone: {text}"
+        );
+        for gone in ["Status: ", "Assignee: ", "Repo: ", "Source: ", "Target: "] {
+            assert!(!text.contains(gone), "{gone:?} label survived: {text}");
+        }
         assert!(text.contains("[bug]"), "label chip bug");
         assert!(text.contains("[p0]"), "label chip p0");
         assert!(text.contains("The widget breaks on resize."), "description");
@@ -1850,10 +1847,12 @@ mod card_tests {
         );
     }
 
-    /// An issue with unset card fields renders the em-dash placeholders and
-    /// "no description", never a blank card (63d).
+    /// An issue with unset fields drops those SEGMENTS from the meta line rather
+    /// than printing an em-dash into them (crisp B4 §2.3): the four rows this
+    /// replaced printed `Repo: —   Source: — → Target: —` on every fresh issue,
+    /// the same zero-information placeholder B2 deleted from the card footer.
     #[test]
-    fn detail_card_renders_placeholders_when_unset() {
+    fn meta_line_drops_unset_segments_instead_of_placeholders() {
         let mut issue = full_issue();
         issue.description = None;
         issue.assignee = None;
@@ -1865,14 +1864,34 @@ mod card_tests {
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
         render_task_detail(&mut buf, 80, 0, 29, &s);
+        let rows = painted_rows(&buf);
         let text = painted_text(&buf);
 
-        assert!(text.contains("unassigned"), "unset assignee");
-        assert!(
-            text.contains("—"),
-            "em-dash placeholder for unset repo/agent"
+        let meta = rows
+            .iter()
+            .find(|l| l.contains("unassigned"))
+            .unwrap_or_else(|| panic!("no meta line:\n{}", rows.join("\n")));
+        assert_eq!(
+            meta.matches('·').count(),
+            3,
+            "four segments, three separators: {meta}"
         );
+        assert!(!meta.contains('—'), "no em-dash placeholder: {meta}");
+        assert!(!meta.contains('@'), "no repo segment: {meta}");
+        assert!(!text.contains("Labels: "), "no labels row: {text}");
+        assert!(!text.contains("Due: "), "no due row: {text}");
         assert!(text.contains("no description"), "unset description");
+    }
+
+    /// `/home/claude/ainb-e2e-home/projects/boxtrack` → `@boxtrack` (§2.3): the
+    /// last segment is the only part that names anything, and a ref that is
+    /// already a label passes through with the same marker.
+    #[test]
+    fn repo_label_names_the_repo_not_the_path() {
+        assert_eq!(repo_label("/home/claude/projects/boxtrack"), "@boxtrack");
+        assert_eq!(repo_label("/home/claude/projects/boxtrack/"), "@boxtrack");
+        assert_eq!(repo_label("boxtrack"), "@boxtrack");
+        assert_eq!(repo_label("/"), "@", "a pathological ref still renders");
     }
 
     /// Crisp B1 review: BEFORE the roster resolves the name, the header degrades
@@ -1887,15 +1906,16 @@ mod card_tests {
         render_task_detail(&mut buf, 80, 0, 29, &s);
         let text = painted_text(&buf);
 
-        assert!(text.contains("Assignee: agent:AYF56V"), "short id: {text}");
+        assert!(text.contains("agent:AYF56V"), "short id: {text}");
         assert!(!text.contains("01M1FHM2"), "raw ULID gone: {text}");
     }
 
-    /// Parity 28: the deadline renders on the card next to the labels — a real
-    /// `YYYY-MM-DD` when set, the unset placeholder when not. Without this the
-    /// wizard could author a due date the user could never see.
+    /// Parity 28: the deadline renders next to the labels when set. Without this
+    /// the wizard could author a due date the user could never see. Crisp B4
+    /// makes the row conditional: a deadline-less issue paints no `Due:` at all
+    /// rather than an em-dash.
     #[test]
-    fn detail_card_renders_the_due_date() {
+    fn detail_card_renders_the_due_date_only_when_set() {
         // Set: the calendar day appears under a `Due:` label.
         let mut issue = full_issue();
         issue.due_date = Some(1_785_542_400_000); // 2026-08-01 UTC midnight
@@ -1906,12 +1926,12 @@ mod card_tests {
         assert!(text.contains("Due: "), "due label: {text}");
         assert!(text.contains("2026-08-01"), "due value: {text}");
 
-        // Unset: the label still renders, with the em-dash placeholder.
+        // Unset: no `Due:` label and no stale date.
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 30);
         render_task_detail(&mut buf, 80, 0, 29, &s);
         let text = painted_text(&buf);
-        assert!(text.contains("Due: "), "due label when unset: {text}");
+        assert!(!text.contains("Due: "), "no due label when unset: {text}");
         assert!(
             !text.contains("2026-08-01"),
             "no stale date on a deadline-less issue: {text}"
@@ -2080,25 +2100,22 @@ mod card_tests {
         );
     }
 
-    /// Crisp B1 (defect 8): once the glue resolves the roster names, the header
-    /// paints `Assignee: alice   Agent: impl-1` over the raw actor ref and the
-    /// provider token; the raw values remain the fallback until then.
+    /// Crisp B1 (defect 8): once the glue resolves the roster names, the meta
+    /// line paints `alice` over the raw actor ref; the raw ref remains the
+    /// fallback until then. The EXECUTING agent moved to the run card (B4 §2.3),
+    /// where it names the run rather than repeating the issue's provider token.
     #[test]
-    fn detail_card_paints_resolved_names_over_raw_refs() {
+    fn meta_line_paints_the_resolved_assignee_over_the_raw_ref() {
         let mut s = state_for(full_issue());
         s.set_resolved_names(Some("alice".into()), Some("impl-1".into()), None);
         let mut buf = WireBuffer::new(80, 30);
         render_task_detail(&mut buf, 80, 0, 29, &s);
         let text = painted_text(&buf);
-        assert!(
-            text.contains("Assignee: alice"),
-            "resolved assignee: {text}"
-        );
-        assert!(text.contains("Agent: impl-1"), "resolved agent: {text}");
+        assert!(text.contains("alice"), "resolved assignee: {text}");
         assert!(!text.contains("agent:alice"), "raw actor ref gone: {text}");
         assert!(
             !text.contains("codex"),
-            "provider token yields to the agent name: {text}"
+            "the issue's provider token is not metadata: {text}"
         );
         assert_eq!(s.assignee_name(), Some("alice"));
         assert_eq!(s.agent_name(), Some("impl-1"));

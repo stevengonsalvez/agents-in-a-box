@@ -17,8 +17,6 @@
 //!   journey 5).
 //! - [`transcript`] — the 5-colour message taxonomy renderer for the task-detail
 //!   transcript (P4.4, reference UX §7 verbatim).
-//! - [`sidebar`] — the task-detail right-hand progressive-disclosure metadata
-//!   column (P4.4, reference UX §12.8).
 
 pub mod actor_row;
 pub mod card_board;
@@ -33,7 +31,6 @@ pub mod key_entry;
 pub mod label_chip;
 pub mod offline_empty_state;
 pub mod presence_dot;
-pub mod sidebar;
 pub mod sparkline_dual;
 pub mod transcript;
 pub mod working_chip;
