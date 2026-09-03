@@ -160,19 +160,24 @@ const fn column_glyph(column: IssueColumn) -> char {
 /// The card's run chip (crisp B2 §2.2): the issue's LATEST run, named and aged,
 /// or `None` when it never ran.
 ///
-/// `last_run_status` is the status of that run and `last_run_at` when it started,
-/// both already on `IssueRow` — this is composition, not a new fetch. A status
-/// OUTSIDE the task FSM (a newer daemon's token) yields no chip at all rather
-/// than a confidently wrong word: the card falls back to its priority chip, which
-/// is stale-looking rather than untrue.
+/// `last_run_status` is the status of that run and `last_run_at` when it was
+/// created, both already on `IssueRow` — this is composition, not a new fetch. A
+/// status OUTSIDE the task FSM (a newer daemon's token) yields no chip at all
+/// rather than a confidently wrong word: the card falls back to its priority
+/// chip, which is stale-looking rather than untrue.
+///
+/// The chip names the assignee ONLY when the issue is assigned to an agent. A
+/// `member:` assignee is a human owner, not the thing executing the run, and
+/// `◔ dana · running 2m` claims dana is running it.
 fn run_chip(
     row: &IssueRow,
     agent: Option<String>,
     now_ms: i64,
 ) -> Option<crate::widgets::card_board::RunChip> {
     let state = crate::vocab::RunState::parse(row.last_run_status.as_deref()?)?;
+    let is_agent = row.assignee.as_deref().is_some_and(|a| a.starts_with("agent:"));
     Some(crate::widgets::card_board::RunChip {
-        agent,
+        agent: agent.filter(|_| is_agent),
         state,
         elapsed_ms: row.last_run_at.map(|at| now_ms.saturating_sub(at)),
     })
@@ -4030,6 +4035,33 @@ mod tests {
         assert!(
             !painted.contains("PR"),
             "a chip that does not fit is dropped, not cut: {painted:?}"
+        );
+    }
+
+    /// A run on a MEMBER-assigned issue names no agent: a human owner is not the
+    /// thing executing the run, and `◔ dana · running 2m` says dana is running it.
+    #[test]
+    fn a_run_on_a_member_assigned_issue_names_no_agent() {
+        let mut r = row("i1", "in_progress", Some("member:dana"));
+        r.last_run_status = Some("running".into());
+        r.last_run_at = Some(0);
+        let mut s = IssueListState::with_rows(vec![r]);
+        s.set_actor_names(
+            std::iter::once(("member:dana".to_string(), "dana".to_string())).collect(),
+        );
+        s.set_now_ms(125_000);
+
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
+        let painted = painted_text(&buf);
+
+        assert!(
+            painted.contains("◔running 2m"),
+            "the run still reads: {painted:?}"
+        );
+        assert!(
+            !painted.contains("dana · running"),
+            "the human owner is not the runner: {painted:?}"
         );
     }
 

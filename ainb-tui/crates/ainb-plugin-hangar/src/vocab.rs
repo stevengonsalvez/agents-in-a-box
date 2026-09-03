@@ -139,10 +139,10 @@ impl AttentionKind {
 
     /// The attention dot every code shares — the colour, not the glyph, tells
     /// them apart, so a row of attention items reads as one column of dots.
-    #[must_use]
-    pub const fn glyph(self) -> char {
-        '●'
-    }
+    ///
+    /// An associated const rather than a method, because it does not vary by
+    /// kind and a `kind.glyph()` call implies it might.
+    pub const GLYPH: char = '●';
 }
 
 /// The issue vocabulary as a lowercase word (`in progress`, never `In Progress`).

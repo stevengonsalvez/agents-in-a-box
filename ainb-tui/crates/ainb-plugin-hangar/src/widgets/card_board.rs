@@ -225,8 +225,14 @@ pub struct RunChip {
     pub agent: Option<String>,
     /// The run's state in the shared vocabulary ([`crate::vocab`]).
     pub state: RunState,
-    /// Milliseconds since the run started, or `None` when the surface has no
-    /// start stamp (the age is then simply omitted, never faked as `0s`).
+    /// Milliseconds since the run was CREATED, or `None` when the surface has no
+    /// stamp (the age is then simply omitted, never faked as `0s`).
+    ///
+    /// Creation, not start: the issue list fills this from `last_run_at`, which
+    /// is when the task row was written, so a task that sat queued for five
+    /// minutes and has been running for thirty seconds reads `running 5m`. That
+    /// is the same age the Kanban tile has always shown, and the daemon sends no
+    /// separate start stamp to do better with.
     pub elapsed_ms: Option<i64>,
 }
 
@@ -747,26 +753,23 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
 fn render_footer(buf: &mut WireBuffer, pos: (u16, u16, u16), fill: Color, card: &BoardCard) {
     let (inner_x, footer_y, inner_right) = pos;
     let inner_w = inner_right.saturating_sub(inner_x);
-    match (card.attention, card.run.as_ref()) {
-        (Some(kind), run) => {
-            return render_state_footer(
-                buf,
-                pos,
-                fill,
-                (kind.glyph(), attention_color(kind)),
-                &attention_footer_text(kind, run),
-            );
-        }
-        (None, Some(run)) => {
-            return render_state_footer(
-                buf,
-                pos,
-                fill,
-                (run.state.glyph(), run_color(run.state)),
-                &run_footer_text(run, card.pr, inner_w),
-            );
-        }
-        (None, None) => {}
+    if let Some(kind) = card.attention {
+        return render_state_footer(
+            buf,
+            pos,
+            fill,
+            (AttentionKind::GLYPH, attention_color(kind)),
+            &attention_footer_text(kind, card.run.as_ref()),
+        );
+    }
+    if let Some(run) = card.run.as_ref() {
+        return render_state_footer(
+            buf,
+            pos,
+            fill,
+            (run.state.glyph(), run_color(run.state)),
+            &run_footer_text(run, card.pr, inner_w),
+        );
     }
 
     // Resting footer: priority chip on the left, `◔ <assignee>` flushed right.
