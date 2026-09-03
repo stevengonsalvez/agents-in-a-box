@@ -630,38 +630,54 @@ impl AcpPool {
     /// a process already running under `key` keeps the recipe it was spawned
     /// with until it stops.
     pub fn register_adapter(&self, key: impl Into<String>, adapter: AdapterConfig) {
-        if let Ok(mut adapters) = self.adapters.lock() {
-            adapters.insert(key.into(), adapter);
-        }
+        self.adapters.lock().expect("adapter registry").insert(key.into(), adapter);
     }
 
     /// Remove `key` from the live registry and stop its process, if one is
     /// running. Returns whether `key` was registered.
     ///
+    /// Runs UNDER the key's spawn gate, the lock
+    /// [`AcpPool::provider_process`] holds for the whole of a spawn, and that
+    /// is what makes the removal complete rather than racy. A spawn already
+    /// past the gate lands in `providers` before this call gets the gate, and
+    /// is stopped below; one that has not taken the gate yet re-reads the
+    /// registry under it and refuses, because the recipe lookup happens INSIDE
+    /// the gate. So no process can exist under an unregistered key once this
+    /// returns. The gate leaves `spawn_locks` only while it is held, so a
+    /// re-register under the same key cannot run two spawns against each other.
+    ///
     /// The stop is INTENTIONAL, exactly like the idle sweep's: it neither counts
     /// on the breaker nor leaves a phantom `exited` row on the health pane, and
-    /// the breaker and spawn-lock entries for the key go with it so a fleet of
-    /// short-lived task keys does not accrete bookkeeping. Sessions hosted on
-    /// the process converge through the ordinary exit path. A spawn still in
-    /// flight under `key` is not interrupted: it lands in `providers` as usual
-    /// and the idle sweep reclaims it once its tenants leave, so a caller that
-    /// wants a clean stop tears its sessions down first.
+    /// the breaker entry goes with it so a fleet of short-lived task keys does
+    /// not accrete bookkeeping. Sessions hosted on the process converge through
+    /// the ordinary exit path.
     pub async fn unregister_adapter(&self, key: &str) -> bool {
-        let was_registered =
-            self.adapters.lock().is_ok_and(|mut adapters| adapters.remove(key).is_some());
-        if let Ok(mut locks) = self.spawn_locks.lock() {
-            locks.remove(key);
-        }
+        let gate = self.spawn_locks.lock().expect("spawn lock map").get(key).map(Arc::clone);
+        let _held = match gate.as_ref() {
+            Some(gate) => Some(gate.lock().await),
+            None => None,
+        };
+        let was_registered = self.adapters.lock().expect("adapter registry").remove(key).is_some();
+        self.spawn_locks.lock().expect("spawn lock map").remove(key);
         if let Ok(mut circuits) = self.circuits.lock() {
             circuits.remove(key);
         }
-        let process = self.providers.lock().await.remove(key);
-        if let Some(process) = process {
-            tracing::info!(provider = %key, "stopping the adapter process of an unregistered key");
-            process.stopping.store(true, Ordering::Relaxed);
-            process.process.kill();
+        if self.stop_process(key).await {
+            tracing::info!(provider = %key, "stopped the adapter process of an unregistered key");
         }
         was_registered
+    }
+
+    /// Stop the process under `key` on purpose: drop it from `providers`, mark
+    /// it so its exit is not counted as a crash, and kill it. `false` when
+    /// there was none.
+    async fn stop_process(&self, key: &str) -> bool {
+        let process = self.providers.lock().await.remove(key);
+        process.is_some_and(|process| {
+            process.stopping.store(true, Ordering::Relaxed);
+            process.process.kill();
+            true
+        })
     }
 
     /// Hand one prompt to the recipient's OWN session (never a broadcast
@@ -984,18 +1000,12 @@ impl AcpPool {
                 .collect()
         };
         for provider in expired {
-            let process = {
-                let mut providers = self.providers.lock().await;
-                providers.remove(&provider)
-            };
-            if let Some(process) = process {
+            if self.stop_process(&provider).await {
                 tracing::info!(
                     %provider,
                     idle_window_secs = self.config.process_idle_window.as_secs(),
-                    "stopping an acp adapter process that has been idle for its whole window"
+                    "stopped an acp adapter process that had been idle for its whole window"
                 );
-                process.stopping.store(true, Ordering::Relaxed);
-                process.process.kill();
             }
         }
     }
@@ -1060,6 +1070,16 @@ impl AcpPool {
         }
     }
 
+    /// The spawn recipe for `provider` from the live registry.
+    fn adapter_config(&self, provider: &str) -> Result<AdapterConfig, AcpError> {
+        self.adapters
+            .lock()
+            .expect("adapter registry")
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| not_in_registry(provider))
+    }
+
     /// The live process for `provider`, or `None` when there is none.
     async fn live_process(&self, provider: &str) -> Option<Arc<ProviderProcess>> {
         let mut providers = self.providers.lock().await;
@@ -1092,6 +1112,12 @@ impl AcpPool {
         if let Some(existing) = self.live_process(provider).await {
             return Ok(existing);
         }
+        // The registry BEFORE the gate: an unknown key must not mint a spawn
+        // lock, or every prompt against a key `unregister_adapter` already
+        // cleaned up would put its entry straight back.
+        if !self.knows(provider) {
+            return Err(not_in_registry(provider));
+        }
         let gate = {
             let mut locks = self.spawn_locks.lock().expect("spawn lock map");
             Arc::clone(
@@ -1101,22 +1127,13 @@ impl AcpPool {
             )
         };
         let _spawning = gate.lock().await;
-        // Another caller may have spawned it while we waited on the gate.
+        // Another caller may have spawned it while we waited on the gate, or an
+        // `unregister_adapter` that held the gate may have taken the key out of
+        // the registry, which is why the recipe is read HERE and not above.
         if let Some(existing) = self.live_process(provider).await {
             return Ok(existing);
         }
-        let config = self
-            .adapters
-            .lock()
-            .ok()
-            .and_then(|adapters| adapters.get(provider).cloned())
-            .ok_or_else(|| AcpError::Spawn {
-                adapter: provider.to_string(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "provider is not in the adapter registry",
-                ),
-            })?;
+        let config = self.adapter_config(provider)?;
         let span = tracing::info_span!(
             "acp.spawn",
             provider = %provider,
@@ -3103,6 +3120,17 @@ async fn resolve_leg(
             "acp delivery leg was already resolved"
         ),
         Err(error) => tracing::error!(%error, "could not claim the acp delivery leg"),
+    }
+}
+
+/// The spawn refusal for a key the live registry does not hold.
+fn not_in_registry(provider: &str) -> AcpError {
+    AcpError::Spawn {
+        adapter: provider.to_string(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "provider is not in the adapter registry",
+        ),
     }
 }
 

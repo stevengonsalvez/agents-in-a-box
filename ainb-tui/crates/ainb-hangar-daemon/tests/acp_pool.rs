@@ -1783,19 +1783,29 @@ async fn a_runtime_registered_adapter_gets_its_own_process_and_removal_reaps_it(
         detail.as_deref().is_some_and(|detail| detail.starts_with("adapter_exit")),
         "the leg names the exit, not a deadline or an operator: {detail:?}"
     );
+    // Only the shared process is left, and no `exited` row lingers for the
+    // removed key: its breaker entry went with it, so the health pane does not
+    // keep advertising a process nobody can prompt.
     let health = pool.health().await;
     let providers: Vec<&str> = health.processes.iter().map(|row| row.provider.as_str()).collect();
     assert_eq!(
         providers,
         [ainb_acp::config::CLAUDE_ADAPTER],
-        "only the shared process survives"
+        "only the shared process survives, with no phantom row for the removed key"
     );
-    assert!(
-        health.processes[0].breaker_failures == 0,
-        "an intentional stop is not a crash on anyone's breaker: {health:?}"
+    let shared_row = health
+        .processes
+        .iter()
+        .find(|row| row.provider == ainb_acp::config::CLAUDE_ADAPTER)
+        .expect("shared process row");
+    assert_eq!(
+        shared_row.breaker_failures, 0,
+        "the neighbour's intentional stop is not a crash on the shared breaker"
     );
 
-    // Nothing respawns under the removed key, and the shared tenant is untouched.
+    // Nothing respawns under the removed key (the registry is consulted before
+    // a spawn lock is minted, and the removal ran under that lock), and the
+    // shared tenant is untouched.
     let after = seed_message(&store, &task.session_key, "ccc").await;
     pool.submit_prompt(&task.session_key, &after, "ccc").await;
     let (state, _) = await_terminal(&store, &after, &task.session_key).await;
