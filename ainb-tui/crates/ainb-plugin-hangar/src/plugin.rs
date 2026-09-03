@@ -4658,20 +4658,21 @@ impl HangarPlugin {
         // P2: on the control center — and, since crisp B3 §2.4, on the Inbox's
         // `needs you` block, which is the same board — the digit keys answer the
         // selected ASK's options inline (①②③) and MUST NOT be swallowed by the
-        // numbered tab-switch (`1`..`4`). They only intercept when the selected
-        // card is an answerable ASK; on an idle board a digit still falls through
-        // to the tab router, so number-key tab navigation off either screen keeps
-        // working (mirrors the issue-list free-text-capture guard above).
+        // numbered tab-switch (`1`..`4`).
+        //
+        // The intercept is exactly as wide as the answer: a digit is taken only
+        // when it names an option that EXISTS. `3` on a two-option ASK falls
+        // through to the tab router rather than being eaten for nothing, so a
+        // key never does nothing at all (mirrors the issue-list free-text-capture
+        // guard above).
         if matches!(app.screen, Screen::ControlCenter | Screen::Inbox) {
             if let KeyCode::Char { ch } = key.code {
-                if ch.is_ascii_digit()
-                    && ch != '0'
-                    && self
-                        .screens
-                        .control_center
-                        .selected_card()
-                        .is_some_and(|c| c.kind.is_answerable())
-                {
+                let picked = ch
+                    .to_digit(10)
+                    .filter(|d| *d > 0)
+                    .and_then(|d| usize::try_from(d).ok())
+                    .unwrap_or(0);
+                if picked > 0 && self.screens.control_center.answer_at(picked).is_some() {
                     let _ = route_key(&app, &mut self.screens, key);
                     return;
                 }
@@ -10020,6 +10021,26 @@ mod inbox_attention_key_tests {
         p.on_key(&char_press('1'));
         assert!(matches!(p.app_state().screen, Screen::IssueList));
         assert!(p.screens.take_pending_answer_action().is_none());
+    }
+
+    /// A digit past the last option is not an answer, so it is not swallowed:
+    /// it navigates like any other digit.
+    ///
+    /// The intercept is exactly as wide as the answer. Guarding on "an ASK is
+    /// focused" instead made `3` on a two-option ASK do nothing at all — no
+    /// answer, no navigation, no feedback — on the screen operators live in.
+    #[test]
+    fn an_out_of_range_digit_falls_through_to_the_tab_router() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('3'));
+        assert!(
+            p.screens.take_pending_answer_action().is_none(),
+            "a two-option ASK has no third option"
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::SkillManager),
+            "so `3` is still the Skills tab"
+        );
     }
 
     /// `h`/`l` move the option cursor and Enter answers what it sits on — the
