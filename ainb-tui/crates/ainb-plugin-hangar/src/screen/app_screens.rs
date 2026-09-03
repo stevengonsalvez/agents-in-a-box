@@ -1697,22 +1697,35 @@ pub(crate) const CLEAR_LINE: char = '\u{15}';
 /// Translate a wire [`KeyEvent`] into the `char` the pure screen reducers expect.
 ///
 /// The reducers model navigation as printable chars (`'j'`, `'/'`, …) plus `'\n'`
-/// for Enter, `'\u{8}'` for Backspace and [`CLEAR_LINE`] for Ctrl+U. Esc and the
-/// tab-switch keys are handled by the caller before reaching a reducer.
+/// for Enter and `'\u{8}'` for Backspace. Esc and the tab-switch keys are handled
+/// by the caller before reaching a reducer.
 ///
-/// The ONE place a Ctrl chord is translated (crisp B1, defect 21). Every key
-/// translation site funnels through here, so no text input can go on typing a
-/// bare `u` for Ctrl+U while its neighbour clears: an unmapped chord is dropped
-/// rather than delivered as its letter.
+/// A Ctrl chord yields `None`. Most reducers here end in a catch-all that PUSHES
+/// the char into a text buffer (a comment body, a workspace name, an API key), so
+/// handing them a C0 control char types something the operator cannot see and
+/// then submits it to the daemon. A screen whose reducer actually models the
+/// chord calls [`key_char_with_chords`] instead.
 const fn key_char(key: &KeyEvent) -> Option<char> {
     if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 {
         return match &key.code {
-            KeyCode::Char { ch: 'u' | 'U' } => Some(CLEAR_LINE),
             KeyCode::Char { .. } => None,
             _ => key_char_unchorded(key),
         };
     }
     key_char_unchorded(key)
+}
+
+/// [`key_char`], plus the Ctrl chords the caller's reducer models: Ctrl+U becomes
+/// [`CLEAR_LINE`]. The ONE chord table (crisp B1, defect 21), so the Boards
+/// overlay, the Issues create wizard and the issue-list filter cannot drift apart
+/// on it. Every OTHER key translation site keeps the dropping [`key_char`].
+const fn key_char_with_chords(key: &KeyEvent) -> Option<char> {
+    if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 {
+        if let KeyCode::Char { ch: 'u' | 'U' } = &key.code {
+            return Some(CLEAR_LINE);
+        }
+    }
+    key_char(key)
 }
 
 /// The plain (unchorded) half of [`key_char`].
@@ -1999,10 +2012,10 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     // carry. Any other key is an unmodelled no-op.
     let ev = if states.issue_list.wizard().is_some() {
         let k = match &key.code {
-            // Text input, including the Ctrl chords, through the one shared
-            // translation ([`key_char`]).
+            // Text input, including the Ctrl chords the wizard models, through
+            // the one shared translation.
             KeyCode::Char { .. } | KeyCode::Enter | KeyCode::Backspace => {
-                super::issue_list::wizard_key_from_char(key_char(key)?)
+                super::issue_list::wizard_key_from_char(key_char_with_chords(key)?)
             }
             KeyCode::Esc => super::issue_list::WizardKey::Esc,
             KeyCode::Up => super::issue_list::WizardKey::Up,
@@ -2053,7 +2066,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             KeyCode::BackTab if states.issue_list.mode() == IssueListMode::Normal => {
                 IssueListEvent::SetFilter(states.issue_list.filter().prev())
             }
-            _ => IssueListEvent::Key(key_char(key)?),
+            // The `/` filter buffer models CLEAR_LINE, so this path takes the
+            // chords too; every other issue-list mode ignores an unknown char.
+            _ => IssueListEvent::Key(key_char_with_chords(key)?),
         }
     };
     let out = reduce_issue_list(&states.issue_list, ev);
@@ -2341,9 +2356,9 @@ fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
         // Overlay-local only: the dep picker cycles its link kind (multica parity
         // #20). No global binding is added, so no host-reserved key is touched.
         KeyCode::Tab => BoardsKey::Tab,
-        // Text input, including the Ctrl chords, through the one shared
-        // translation ([`key_char`]).
-        _ => match key_char(key)? {
+        // Text input, including the Ctrl chords the overlay models, through the
+        // one shared translation.
+        _ => match key_char_with_chords(key)? {
             '\n' => BoardsKey::Enter,
             '\u{8}' => BoardsKey::Backspace,
             CLEAR_LINE => BoardsKey::ClearLine,
@@ -3690,20 +3705,66 @@ mod ctrl_chord_tests {
         }
     }
 
-    /// The shared translation: Ctrl+U is the clear-line char the reducers already
-    /// understand, an unmapped chord types NOTHING, and a bare `u` is still a `u`.
-    /// The Boards overlay mapper reads the same answer.
+    /// The shared translation: a screen that MODELS the chord reads Ctrl+U as the
+    /// clear-line char, an unmapped chord types NOTHING, and a bare `u` is still
+    /// a `u`. The Boards overlay mapper reads the same answer.
     #[test]
     fn a_ctrl_chord_is_translated_in_one_place() {
-        assert_eq!(key_char(&ctrl('u')), Some(CLEAR_LINE));
-        assert_eq!(key_char(&ctrl('U')), Some(CLEAR_LINE));
-        assert_eq!(key_char(&ctrl('k')), None);
-        assert_eq!(key_char(&press('u')), Some('u'));
+        assert_eq!(key_char_with_chords(&ctrl('u')), Some(CLEAR_LINE));
+        assert_eq!(key_char_with_chords(&ctrl('U')), Some(CLEAR_LINE));
+        assert_eq!(key_char_with_chords(&ctrl('k')), None);
+        assert_eq!(key_char_with_chords(&press('u')), Some('u'));
         assert_eq!(
             overlay_key_event(&ctrl('u')),
             Some(BoardsEvent::Key(BoardsKey::ClearLine))
         );
         assert_eq!(overlay_key_event(&ctrl('k')), None);
+    }
+
+    /// The DEFAULT translation drops every Ctrl chord. Most reducers end in a
+    /// catch-all that pushes the char into a text buffer, so a chord that made it
+    /// through as `'\u{15}'` typed an invisible control char into a comment body
+    /// or an API key and then submitted it (crisp B1 round-2 review). Only the
+    /// three screens that decode it opt in.
+    #[test]
+    fn key_char_drops_a_ctrl_chord_for_the_screens_that_do_not_model_it() {
+        assert_eq!(key_char(&ctrl('u')), None);
+        assert_eq!(key_char(&ctrl('U')), None);
+        assert_eq!(key_char(&ctrl('k')), None);
+        assert_eq!(key_char(&press('u')), Some('u'));
+    }
+
+    /// End to end on the surface that would have SENT the control char: the
+    /// task-detail comment-compose buffer takes nothing from Ctrl+U.
+    #[test]
+    fn ctrl_u_types_nothing_into_the_comment_compose_buffer() {
+        use ainb_hangar_core::ids::TaskId;
+        let task = TaskId::from_str("t-1").unwrap();
+        let mut app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        app.screen = Screen::TaskDetail(task.clone());
+        let mut states = ScreenStates::default();
+        states.open_task_detail(
+            task,
+            super::task_detail_open_tests::issue(),
+            None,
+            Some("running"),
+        );
+
+        // `c` opens compose, then type a word.
+        route_key(&app, &mut states, &press('c'));
+        for ch in "note".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        let before = states.task_detail.as_ref().unwrap().compose_buffer().map(str::to_string);
+        assert_eq!(before.as_deref(), Some("note"));
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(
+            states.task_detail.as_ref().unwrap().compose_buffer(),
+            Some("note"),
+            "the chord neither cleared nor typed a control char"
+        );
     }
 
     /// `/` filter query: Ctrl+U empties it in place, without leaving filter mode.
