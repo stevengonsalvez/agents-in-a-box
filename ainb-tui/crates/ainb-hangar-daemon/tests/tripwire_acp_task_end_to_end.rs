@@ -146,6 +146,101 @@ async fn an_acp_task_runs_to_done_with_no_process_and_no_tmux() {
     assert_no_process_executor_trace(&row, &marker, task_id);
 }
 
+/// Spine A7: the `acp.usage` rows a run writes reach `task_usage`, the ledger
+/// the usage dashboard rolls up.
+///
+/// Every hop is real: the fixture adapter emits two `usage_update`
+/// notifications, the reducer classifies them, the store writer persists them
+/// as `acp.usage` rows, and the finalize reads the LAST one back. Before A7 the
+/// run finished with `usage: None` and this table stayed empty.
+///
+/// The script puts agent TEXT after the final report on purpose. That text is
+/// what buries the accounting row, and it is why the read cannot be a windowed
+/// tail scan.
+#[tokio::test]
+async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping acp usage e2e");
+        return;
+    }
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+
+    // Two reports, because the LAST one is the run's answer: `used` is context
+    // occupancy (not a delta) and `cost` is cumulative, so a reader that summed
+    // the rows would bill 5 400 tokens and $0.05 for this turn.
+    let script = home.path().join("turn.ndjson");
+    std::fs::write(
+        &script,
+        concat!(
+            r#"{"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{"amount":0.0125,"currency":"USD"}}"#,
+            "\n",
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}"#,
+            "\n",
+            r#"{"sessionUpdate":"usage_update","used":4200,"size":200000,"cost":{"amount":0.0375,"currency":"USD"}}"#,
+            "\n",
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" and done"}}"#,
+            "\n",
+        ),
+    )
+    .expect("write the turn script");
+
+    let agent = seed_agent_with_env(
+        &pool,
+        &ids,
+        "agent-usage",
+        &serde_json::json!({ "FAKE_ACP_SCRIPT": script.display().to_string() }),
+    )
+    .await;
+    write_acp_adapter_config(home.path(), &fake_acp_adapter(), "default");
+    let marker = home.path().join("process-executor-ran");
+    let fake_claude = write_marker_binary(home.path(), &marker);
+
+    let session = spawn_acp_daemon(home.path(), &ids, &fake_claude);
+    let task_id = "task-acp-usage";
+    enqueue_task(&pool, &ids, task_id, &agent, "headless").await;
+
+    let row = wait_for_terminal(&pool, task_id, Duration::from_mins(1)).await;
+    let pane = session.capture_pane();
+    drop(session);
+    assert_eq!(
+        row.get::<String, _>("status"),
+        "done",
+        "the scripted run must reach done; reason={:?}\n{}\ndaemon:\n{pane}",
+        row.get::<Option<String>, _>("failure_reason"),
+        dump_legs(&pool).await,
+    );
+
+    let usage = sqlx::query(
+        "SELECT input_tokens, output_tokens, cost_usd FROM task_usage WHERE task_id = ?",
+    )
+    .bind(task_id)
+    .fetch_optional(&pool)
+    .await
+    .expect("query task_usage")
+    .expect("an acp run must record usage");
+
+    assert_eq!(
+        usage.get::<i64, _>("input_tokens"),
+        4_200,
+        "the LAST report is the run's context-token count, not the first and not their sum"
+    );
+    assert!(
+        (usage.get::<f64, _>("cost_usd") - 0.0375).abs() < f64::EPSILON,
+        "the cumulative session cost, got {}",
+        usage.get::<f64, _>("cost_usd")
+    );
+    assert_eq!(
+        usage.get::<i64, _>("output_tokens"),
+        0,
+        "ACP reports no completion tokens; this column stays honestly empty"
+    );
+
+    assert_no_process_executor_trace(&row, &marker, task_id);
+}
+
 /// A permission the agent raises lands as an approval row scoped to the task's
 /// WORKSPACE, and answering it through `attention/answer` completes the turn.
 ///
