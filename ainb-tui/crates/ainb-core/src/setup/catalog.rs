@@ -422,6 +422,16 @@ pub fn catalog() -> Vec<Topic> {
                     &[],
                     &[],
                 ),
+                dep(
+                    "antigravity",
+                    "Google Antigravity",
+                    "Google's agentic AI coding assistant",
+                    Optional,
+                    Bin("agy"),
+                    Manual("https://github.com/google/antigravity"),
+                    &[],
+                    &[],
+                ),
             ],
         },
         // ponytail: container runtime topic (docker/colima) removed from the

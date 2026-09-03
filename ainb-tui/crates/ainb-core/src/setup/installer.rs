@@ -19,6 +19,7 @@ pub enum Agent {
     Claude,
     Codex,
     Copilot,
+    Antigravity,
 }
 
 impl Agent {
@@ -27,6 +28,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Copilot => "copilot",
+            Agent::Antigravity => "antigravity",
         }
     }
 
@@ -35,6 +37,7 @@ impl Agent {
             Agent::Claude => "Claude Code",
             Agent::Codex => "Codex",
             Agent::Copilot => "GitHub Copilot",
+            Agent::Antigravity => "Google Antigravity",
         }
     }
 
@@ -44,6 +47,7 @@ impl Agent {
             "claude" | "c" | "claude-code" | "claudecode" => Some(Agent::Claude),
             "codex" | "x" => Some(Agent::Codex),
             "copilot" | "p" | "gh-copilot" => Some(Agent::Copilot),
+            "antigravity" | "agy" | "a" => Some(Agent::Antigravity),
             _ => None,
         }
     }
@@ -54,6 +58,7 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Copilot => "copilot",
+            Agent::Antigravity => "antigravity",
         }
     }
 
@@ -62,13 +67,13 @@ impl Agent {
         match self {
             Agent::Claude => Some("claudecode-statusline"),
             Agent::Codex => Some("codex-statusline"),
-            Agent::Copilot => None,
+            Agent::Copilot | Agent::Antigravity => None,
         }
     }
 }
 
-/// All AI-CLI dep ids — used to keep only the chosen agent's CLI in the script.
-const AI_CLI_IDS: &[&str] = &["claude", "codex", "gemini", "copilot"];
+/// All AI-CLI dep ids: used to keep only the chosen agent's CLI in the script.
+const AI_CLI_IDS: &[&str] = &["claude", "codex", "gemini", "copilot", "antigravity"];
 /// All statusline dep ids — keep only the chosen agent's.
 const STATUSLINE_IDS: &[&str] = &["claudecode-statusline", "codex-statusline"];
 /// ainb-owned / first-party tools installed by default even when tagged
@@ -302,6 +307,8 @@ mod tests {
         assert_eq!(Agent::parse("claude"), Some(Agent::Claude));
         assert_eq!(Agent::parse("x"), Some(Agent::Codex));
         assert_eq!(Agent::parse("copilot"), Some(Agent::Copilot));
+        assert_eq!(Agent::parse("antigravity"), Some(Agent::Antigravity));
+        assert_eq!(Agent::parse("a"), Some(Agent::Antigravity));
         assert_eq!(Agent::parse("nope"), None);
     }
 
@@ -367,6 +374,16 @@ mod tests {
         assert!(!s.contains("@anthropic-ai/claude-code"));
         // reflect Claude plugin is excluded for non-Claude agents (deterministic,
         // independent of host state).
+        assert!(!s.contains("claude plugin install reflect@agents-in-a-box"));
+    }
+
+    #[test]
+    fn antigravity_script_picks_antigravity_cli_not_claude() {
+        let env = MockEnv { present: vec![] };
+        let s = build_script(Agent::Antigravity, &env);
+        assert!(s.contains("Google Antigravity"));
+        assert!(!s.contains("@anthropic-ai/claude-code"));
+        assert!(!s.contains("@openai/codex"));
         assert!(!s.contains("claude plugin install reflect@agents-in-a-box"));
     }
 
