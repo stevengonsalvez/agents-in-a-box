@@ -3150,6 +3150,22 @@ impl HangarPlugin {
         }
     }
 
+    /// Arm the live-line buffer when `req_id` is the timeline fetch, so lines
+    /// streaming in during the round trip are replayed onto the fresh overlay
+    /// (see [`Self::timeline_fetch_buffer`]).
+    ///
+    /// Arms only when UNARMED: both replies carry the same req id, so overwriting
+    /// on a second open would hand reply 1 fetch 2's buffer and leave reply 2
+    /// nothing to replay, reopening the hole this closes.
+    ///
+    /// Split out of the dispatch below purely so it is reachable from a test: the
+    /// dispatch needs a `HostClient`, which has no public constructor.
+    fn arm_timeline_buffer_for(&mut self, req_id: i64) {
+        if req_id == BOARD_CARD_TIMELINE_REQ_ID {
+            self.timeline_fetch_buffer.get_or_insert_with(Default::default);
+        }
+    }
+
     /// Fire a deferred board mutation RPC raised by the Boards screen (P4 / D8,
     /// ccc / D6, D16).
     ///
@@ -3347,14 +3363,7 @@ impl HangarPlugin {
             // Handled above as a local note; never reached here.
             BoardsAction::CardAttach { .. } => return,
         };
-        // Arm the live-line buffer for the timeline round trip (see
-        // `timeline_fetch_buffer`); the reply drains it onto the fresh overlay.
-        if req_id == BOARD_CARD_TIMELINE_REQ_ID {
-            // Arm only when unarmed: both replies carry the same req id, so
-            // overwriting on a second open would hand reply 1 fetch 2's buffer and
-            // leave reply 2 nothing to replay, reopening the hole this closes.
-            self.timeline_fetch_buffer.get_or_insert_with(Default::default);
-        }
+        self.arm_timeline_buffer_for(req_id);
         let Ok(body) = encode_request(req_id, method, params) else {
             return;
         };
@@ -6462,11 +6471,29 @@ mod tests {
             "already here".to_string(),
         ));
         p.timeline_fetch_buffer = Some(armed);
-        p.timeline_fetch_buffer.get_or_insert_with(Default::default);
+        p.arm_timeline_buffer_for(BOARD_CARD_TIMELINE_REQ_ID);
         assert_eq!(
             p.timeline_fetch_buffer.as_ref().map(std::collections::VecDeque::len),
             Some(1),
             "re-arming must keep what the first fetch already buffered"
+        );
+    }
+
+    /// The timeline fetch arms the buffer; no other board RPC does. Pins the
+    /// condition itself, which the two drain tests cannot: they set the buffer by
+    /// hand, so both stay green if the arming is deleted.
+    #[test]
+    fn only_the_timeline_fetch_arms_the_buffer() {
+        let mut p = HangarPlugin::new();
+        p.arm_timeline_buffer_for(BOARDS_REQ_ID);
+        assert!(
+            p.timeline_fetch_buffer.is_none(),
+            "a board list fetch must not arm it"
+        );
+        p.arm_timeline_buffer_for(BOARD_CARD_TIMELINE_REQ_ID);
+        assert!(
+            p.timeline_fetch_buffer.is_some(),
+            "the timeline fetch must arm it"
         );
     }
 
