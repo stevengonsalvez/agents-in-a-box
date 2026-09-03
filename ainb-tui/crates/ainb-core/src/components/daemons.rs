@@ -227,7 +227,19 @@ impl ActionMenu {
         // Same rule as `offers`: with nothing provisioned there is no tmux
         // session, so attaching could only fail. `provision` is the entry that
         // gets you one.
-        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
+        //
+        // LITE has no session either, and that is by design, not a fault to
+        // repair: `fleet atc setup --mode lite` spawns no brain at all, because
+        // a session nothing ever nudges would burn a slot and lie to every
+        // liveness surface. So the entry could only ever attach a session that
+        // was never created, which is the failure this whole method exists to
+        // keep off the menu. An UNKNOWN mode still offers it: `None` means the
+        // meta would not parse or several instances made it ambiguous, and
+        // hiding a working attach on a guess is the worse error.
+        if self.kind == DaemonKind::Atc
+            && !self.row.unprovisioned()
+            && self.row.mode != Some(SupervisorMode::Lite)
+        {
             entries.push(MenuEntry::OpenMissionControl);
         }
         if has_error {
@@ -1623,6 +1635,42 @@ mod tests {
                 mode.id()
             );
         }
+    }
+
+    /// The defect the probe fix exists to clear, asserted where it was actually
+    /// visible: the MENU, not the status field the menu reads.
+    ///
+    /// A probe-level assertion on `atc_instance` pins the input; it says nothing
+    /// about the row being usable, which is the thing that was broken. Both
+    /// halves are needed, because either one can be right while the other is not
+    /// (and was: `atc_instance` alone still leaves mission control offered).
+    #[test]
+    fn a_lite_atc_row_offers_the_lifecycle_verbs_but_not_a_session_lite_never_creates() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Lite);
+        state.open_menu();
+        let entries = state.menu.as_ref().expect("menu opens on the ATC row").entries(false);
+
+        for verb in [Action::Start, Action::Restart, Action::Stop] {
+            assert!(
+                entries.contains(&MenuEntry::Act(verb)),
+                "a provisioned lite row must offer {}: {entries:?}",
+                verb.id()
+            );
+        }
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::ModeFull)),
+            "a lite row must offer the switch out of lite: {entries:?}"
+        );
+        assert!(
+            !entries.contains(&MenuEntry::Act(Action::Provision)),
+            "the instance IS provisioned, and provision refuses: {entries:?}"
+        );
+        // `setup --mode lite` spawns no brain session, so this could only ever
+        // attach one that was never created.
+        assert!(
+            !entries.contains(&MenuEntry::OpenMissionControl),
+            "lite has no mission control to open: {entries:?}"
+        );
     }
 
     #[test]
