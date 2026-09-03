@@ -125,6 +125,21 @@ fn best_effort_codex_agent_message() {
     );
 }
 
+/// A top-level `{"type":"error"}` line and a codex `{"msg":{"type":"error"}}`
+/// both land in the error lane with their message: an error line vanishing
+/// from the timeline is the defect these two arms exist to prevent.
+#[test]
+fn explicit_error_lines_land_in_the_error_lane() {
+    let jsonl = "{\"type\":\"error\",\"error\":\"rate limited\"}\n{\"msg\":{\"type\":\"error\",\"message\":\"codex broke\"}}\n";
+    assert_eq!(
+        classify_stream_json(jsonl),
+        vec![
+            (MessageKind::Error, "rate limited".to_string()),
+            (MessageKind::Error, "codex broke".to_string()),
+        ]
+    );
+}
+
 /// An empty transcript is an empty timeline (not a panic).
 #[test]
 fn empty_input_is_empty() {
