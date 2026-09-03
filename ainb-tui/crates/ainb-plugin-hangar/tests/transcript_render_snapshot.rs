@@ -109,7 +109,7 @@ fn transcript_renders_all_5_colors_in_order() {
         (MessageKind::Error, "boom"),
     ]);
     let mut buf = WireBuffer::new(40, 8);
-    render_task_detail(&mut buf, 40, 0, 8, &s);
+    render_task_detail(&mut buf, 40, 0, 8, &s, 0);
     insta::assert_snapshot!(glyph_map(&buf, 40), @r###"
     ▌ writing code
     * considering edge cases
@@ -132,7 +132,7 @@ fn transcript_renders_collapsed_old_history() {
     let s = seed(&events);
 
     let mut buf = WireBuffer::new(40, 8);
-    render_task_detail(&mut buf, 40, 0, 8, &s);
+    render_task_detail(&mut buf, 40, 0, 8, &s, 0);
     insta::assert_snapshot!(glyph_map(&buf, 40), @r###"
     ▌ start
     * … 12 thinking lines (t to expand)

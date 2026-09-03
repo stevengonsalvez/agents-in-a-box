@@ -469,6 +469,11 @@ pub struct HangarPlugin {
     /// and backfill the transcript from the run's on-disk stream-json. `None`
     /// when nothing is armed; consumed (taken) once fired.
     pending_task_timeline_fetch: Option<String>,
+    /// The issue whose `hangar/issue_timeline` fetch is IN FLIGHT (crisp B4
+    /// §2.3). The reply frame names no issue, so without this the activity pane
+    /// would fold a stale narrative into whatever detail screen is open by the
+    /// time it lands. `None` before the first fetch.
+    activity_fetch_issue: Option<String>,
     /// Log lines raised from the SYNCHRONOUS daemon-response path, drained by
     /// `render`, which owns the [`HostClient`].
     ///
@@ -710,6 +715,7 @@ impl Default for HangarPlugin {
             daemon_start_verdict: None,
             pending_pr_status_refresh: None,
             pending_task_timeline_fetch: None,
+            activity_fetch_issue: None,
             pending_logs: Vec::new(),
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
@@ -3851,6 +3857,9 @@ impl HangarPlugin {
         ) else {
             return;
         };
+        if let Some(issue_id) = self.activity_fetch_issue.clone() {
+            self.screens.set_task_detail_activity(&issue_id, &parsed.entries);
+        }
         if let Some(activity) = self.screens.activity.as_mut() {
             activity.apply_entries(parsed.entries);
         }
@@ -3858,12 +3867,17 @@ impl HangarPlugin {
     }
 
     /// Fire a deferred `hangar/issue_timeline` fetch for the open activity modal
-    /// (multica parity #13). A send failure is logged but non-fatal — the modal
-    /// keeps its loading state and `r` retries.
+    /// (multica parity #13) and the task-detail activity pane (crisp B4 §2.3). A
+    /// send failure is logged but non-fatal — the modal keeps its loading state
+    /// and `r` retries.
     async fn fire_issue_timeline(&mut self, host: &HostClient, issue_id: String) {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
+        // Which issue the in-flight reply is FOR: the reply frame carries no
+        // issue id, and the activity pane must not fold one issue's narrative
+        // into a detail screen that has since opened another.
+        self.activity_fetch_issue = Some(issue_id.clone());
         let ws = self.app_state().ws_id.as_str().to_string();
         let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
         let Ok(body) = encode_request(

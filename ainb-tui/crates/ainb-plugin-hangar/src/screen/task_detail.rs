@@ -59,10 +59,22 @@ pub const THINKING_COLLAPSE_THRESHOLD: usize = 4;
 const BADGE_GOLD: Color = Color::rgb(255, 215, 0);
 /// Muted gray for the `[o] open` keybinding hint next to the badge.
 const HINT_MUTED: Color = Color::rgb(120, 120, 140);
-/// The leading badge glyph + label painted before the URL (`▶ PR `).
-const BADGE_PREFIX: &str = "▶ PR ";
-/// The keybinding hint painted next to the URL (two-space gap + `[o] open`).
-const BADGE_HINT: &str = "  [o] open";
+/// The keybinding hint the live run card offers while the run can be cancelled.
+const CANCEL_HINT: &str = "X cancel";
+/// Rows the execution log spends at most, so a nine-attempt issue cannot push
+/// the transcript it exists to introduce off the screen.
+const RUNS_VISIBLE: usize = 4;
+/// The activity pane takes a third of the width, between these bounds: narrower
+/// than the minimum it says nothing legible, wider than the maximum it starts
+/// competing with the transcript it is meant to annotate.
+const ACTIVITY_MIN_W: u16 = 26;
+/// See [`ACTIVITY_MIN_W`].
+const ACTIVITY_MAX_W: u16 = 40;
+/// What the transcript pane says when the EXPANDED run is not the run whose
+/// transcript the screen holds. `hangar/board_card_timeline` reads an ISSUE's
+/// newest run, so an older attempt has nothing to show until the durable read
+/// takes a task id (track A, A6).
+const OTHER_RUN_NOTE: &str = "no transcript for this run — only the newest run's is readable";
 /// Green for a passing CI rollup / a clean mergeable PR (e38.34).
 const STATUS_GREEN: Color = Color::rgb(120, 220, 120);
 /// Red for a failing CI rollup / a merge conflict (e38.34) — visually distinct
@@ -196,6 +208,72 @@ impl TranscriptEntry {
     }
 }
 
+/// One run of this issue, as the execution log renders it (crisp B4 §2.3).
+///
+/// Projected by the glue from the two snapshots that between them know a run:
+/// `hangar/tasks_list` (which runs exist, for which issue, under which agent, in
+/// which state) and `hangar/run_history` (what a FINISHED run cost). Neither is
+/// enough alone — the history has no issue column and carries nothing for a run
+/// still going, and the task rows carry no cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRow {
+    /// The run's task id — the join key, and how the screen knows which run the
+    /// transcript it is holding belongs to.
+    pub task_id: String,
+    /// The task id's short form, for the row when the agent is unknown.
+    pub short_id: String,
+    /// The executing agent's display name (already resolved by the glue).
+    pub agent: String,
+    /// The run's state in the ONE run vocabulary.
+    pub state: crate::vocab::RunState,
+    /// When the run was queued (epoch ms) — the elapsed clock's zero.
+    pub started_at: i64,
+    /// When the run finished (epoch ms), or `None` while it is still going.
+    pub finished_at: Option<i64>,
+    /// The run's cost in whole cents, or `None` when the history has no row for
+    /// it yet (every running run, and any run that recorded no usage).
+    pub cost_cents: Option<i64>,
+    /// The worktree branch the run committed on, or `None`.
+    pub branch: Option<String>,
+    /// The PR the run opened, or `None`.
+    pub pr_url: Option<String>,
+    /// That PR's CI + merge status, or `None` when it was never fetched.
+    pub pr_status: Option<PrStatus>,
+}
+
+impl RunRow {
+    /// How long the run has been going (still running) or ran for (terminal).
+    #[must_use]
+    pub fn elapsed_ms(&self, now_ms: i64) -> i64 {
+        self.finished_at.unwrap_or(now_ms).saturating_sub(self.started_at)
+    }
+
+    /// The bucket this run sorts into: running first, failed next, everything
+    /// else last (§2.3 "running on top, failed first").
+    const fn order(&self) -> u8 {
+        use crate::vocab::RunState;
+        match self.state {
+            RunState::Running => 0,
+            RunState::Queued => 1,
+            RunState::Failed => 2,
+            RunState::Done | RunState::Cancelled => 3,
+        }
+    }
+}
+
+/// One line of the activity pane: the issue's narrative, not the run's
+/// (crisp B4 §2.3).
+///
+/// Composed by the glue from the `hangar/issue_timeline` rows the activity modal
+/// already reads, so the pane and the modal can never tell different stories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityRow {
+    /// When it happened (epoch ms) — rendered as a relative age.
+    pub at_ms: i64,
+    /// The composed line (`impl-1 claimed the issue`).
+    pub text: String,
+}
+
 /// A view entry the renderer paints: either a single [`TranscriptEntry`] or a
 /// collapsed run of consecutive thinking lines.
 ///
@@ -286,6 +364,22 @@ pub struct TaskDetailState {
     /// the tasks snapshot has one, so an `already_active` dispatch refusal can
     /// name the row that blocks it (crisp B1, defect 5). `None` otherwise.
     blocking_run: Option<String>,
+    /// Every run of this issue, ordered running-first then failed then the rest
+    /// (crisp B4 §2.3), newest first inside each bucket. Empty for an issue that
+    /// never ran, and until the tasks snapshot lands.
+    runs: Vec<RunRow>,
+    /// Which run of [`Self::runs`] is EXPANDED: the one the sticky run card
+    /// describes and the transcript pane belongs to. `enter` walks it.
+    run_cursor: usize,
+    /// The issue's activity narrative for the right-hand pane.
+    activity: Vec<ActivityRow>,
+    /// How many [`MessageKind::ToolCall`] lines the transcript holds — the run
+    /// card's `10 tools`.
+    ///
+    /// Counted on the way IN rather than scanned per paint: the transcript is
+    /// the one buffer on this screen that grows without bound, and the card
+    /// repaints on every frame of a live run.
+    tool_calls: usize,
     /// Whether [`Self::backfill_transcript`] has already run for this open.
     ///
     /// The timeline request rides a CONSTANT id, so a reply is only ever matched
@@ -324,6 +418,10 @@ impl TaskDetailState {
             assignee_name: None,
             agent_name: None,
             blocking_run: None,
+            runs: Vec::new(),
+            run_cursor: 0,
+            activity: Vec::new(),
+            tool_calls: 0,
             transcript_backfilled: false,
         }
     }
@@ -405,6 +503,73 @@ impl TaskDetailState {
         self.agent_name.as_deref()
     }
 
+    /// Replace the execution log (crisp B4 §2.3), ordering it running-first,
+    /// then failed, then the rest, newest first inside each bucket.
+    ///
+    /// The cursor follows the BOUND run wherever the re-order puts it, so a run
+    /// that finishes (and drops out of the running bucket) keeps its expanded
+    /// row rather than handing the transcript pane to whatever slid into its
+    /// index. An issue whose bound task is not in the list — a synthetic
+    /// `task-<issue>` id on a never-run issue — expands the top row.
+    pub fn set_runs(&mut self, mut runs: Vec<RunRow>) {
+        runs.sort_by(|a, b| {
+            a.order()
+                .cmp(&b.order())
+                .then_with(|| b.started_at.cmp(&a.started_at))
+                .then_with(|| a.task_id.cmp(&b.task_id))
+        });
+        let bound = self.task_id.as_str();
+        self.run_cursor = runs.iter().position(|r| r.task_id == bound).unwrap_or(0);
+        self.runs = runs;
+    }
+
+    /// Every run of the issue, in render order.
+    #[must_use]
+    pub fn runs(&self) -> &[RunRow] {
+        &self.runs
+    }
+
+    /// The EXPANDED run — the one the sticky card describes and the transcript
+    /// pane belongs to — or `None` for an issue with no runs.
+    #[must_use]
+    pub fn expanded_run(&self) -> Option<&RunRow> {
+        self.runs.get(self.run_cursor)
+    }
+
+    /// Index of the expanded run in [`Self::runs`].
+    #[must_use]
+    pub const fn run_cursor(&self) -> usize {
+        self.run_cursor
+    }
+
+    /// Replace the activity pane's lines (newest first).
+    pub fn set_activity(&mut self, rows: Vec<ActivityRow>) {
+        self.activity = rows;
+    }
+
+    /// The activity pane's lines.
+    #[must_use]
+    pub fn activity(&self) -> &[ActivityRow] {
+        &self.activity
+    }
+
+    /// How many tool calls the transcript on screen holds.
+    #[must_use]
+    pub const fn tool_calls(&self) -> usize {
+        self.tool_calls
+    }
+
+    /// Whether the transcript on screen belongs to the EXPANDED run.
+    ///
+    /// The durable read (`hangar/board_card_timeline`) serves an ISSUE's newest
+    /// run, so expanding an older attempt has nothing to show. Saying so beats
+    /// painting the newest run's transcript under an older run's card, which is
+    /// the same lie the four status vocabularies were.
+    #[must_use]
+    pub fn transcript_is_for_expanded_run(&self) -> bool {
+        self.expanded_run().is_none_or(|run| run.task_id == self.task_id.as_str())
+    }
+
     /// Append a SYSTEM line to the transcript in the tool-result lane
     /// (`is_comment: false`, so it is not styled as somebody's comment).
     ///
@@ -438,6 +603,9 @@ impl TaskDetailState {
         }
         self.transcript_backfilled = true;
         let added = entries.len();
+        self.tool_calls = self
+            .tool_calls
+            .saturating_add(entries.iter().filter(|e| e.kind == MessageKind::ToolCall).count());
         let mut transcript = entries;
         transcript.append(&mut self.transcript);
         self.transcript = transcript;
@@ -643,6 +811,11 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
     match c {
         'j' => scroll_down(state),
         'k' => scroll_up(state),
+        // `enter` expands the next run of the issue (crisp B4 §2.3). A walking
+        // cursor, exactly like `a` on the acceptance criteria, so the execution
+        // log needs no arrow keys of its own on a screen where `j`/`k` already
+        // belong to the transcript.
+        '\n' | '\r' => expand_next_run(state),
         // Open the comment-compose modal (`c`); captures input until Enter/Esc.
         'c' => open_compose(state),
         // Retry only a failed / cancelled run. A run that finished cleanly is
@@ -679,6 +852,17 @@ fn refuse_retry(state: &TaskDetailState) -> TaskDetailReduction {
     }
     let mut next = state.clone();
     next.push_system_line(RETRY_REFUSED_NOTE.to_string());
+    no_intent(next)
+}
+
+/// Expand the NEXT run in the execution log, wrapping (crisp B4 §2.3). A no-op
+/// on an issue with fewer than two runs — there is nothing else to expand.
+fn expand_next_run(state: &TaskDetailState) -> TaskDetailReduction {
+    if state.runs.len() < 2 {
+        return unchanged(state);
+    }
+    let mut next = state.clone();
+    next.run_cursor = (state.run_cursor + 1) % state.runs.len();
     no_intent(next)
 }
 
@@ -899,8 +1083,11 @@ fn fold_event(state: &TaskDetailState, event: HangarEvent) -> TaskDetailReductio
 }
 
 /// Append `entry` to the transcript, advancing the scroll offset to the tail
-/// when stuck to the bottom (auto-scroll).
+/// when stuck to the bottom (auto-scroll) and keeping the run card's tool count.
 fn push_entry(state: &mut TaskDetailState, entry: TranscriptEntry) {
+    if entry.kind == MessageKind::ToolCall {
+        state.tool_calls = state.tool_calls.saturating_add(1);
+    }
     state.transcript.push(entry);
     if state.stuck_to_bottom {
         state.scroll_offset = state.transcript.len().saturating_sub(1);
@@ -934,47 +1121,53 @@ fn unchanged(state: &TaskDetailState) -> TaskDetailReduction {
 
 /// Render the task-detail screen into `buf` between rows `top` and `bottom`.
 ///
-/// Two-region layout (width-aware, derived from `area_w`): the issue detail card
-/// at the top, the transcript filling everything below it. The transcript is the
-/// dominant region — the card yields rows to it, never the other way round.
+/// The EXECUTION VIEW (crisp B4 §2.3), top to bottom: the sticky run card and
+/// the run's branch + PR, then the issue detail card (title, ONE meta line,
+/// acceptance, properties), then the execution log of every run of this issue,
+/// then the transcript of the expanded run — with the issue's activity narrative
+/// in a right-hand column beside the last two.
 ///
-/// The right-hand metadata sidebar this screen used to carry is gone (crisp B4
-/// §2.3): it repeated `Status` / `Assignee` from the card, added the workspace's
-/// raw ULID under `Project:` and a mid-word-truncated `Notes:`, and it cost the
-/// transcript a quarter of the width to do it.
+/// ```text
+/// ╭ 📋 HGR-5 · Ticket stats ───────────────────────────────────────╮
+/// │ ◔ impl-1 is working · 7m 17s · 10 tools · $0.42       X cancel │
+/// │ ainb/…N9GP8 → main · PR #8 ✓                                   │
+/// │────────────────────────────────────────────────────────────────│
+/// │ in progress · P2 · impl-1 · created 2026-09-02 · @boxtrack     │
+/// ╰────────────────────────────────────────────────────────────────╯
+/// runs ────────────────────────────────────┬ activity ─────────────
+/// ▶ ◔ impl-1 · running 2m 04s              │ 7m impl-1 claimed it
+///   ✗ rev-1  · failed 9m 12s               │ 6m todo → in progress
+/// transcript ──────────────────────────────┤
+/// ▌ Registering the route…                 │
+/// ```
 ///
-/// At the P4.4 GREEN bar the rendering is linear (no virtualisation): the visible
-/// view ([`TaskDetailState::visible_entries`]) is painted top-down. The
-/// REFACTOR note in `P4.md` defers virtualisation to >500-message buffers.
+/// The right-hand metadata sidebar this screen used to carry is gone: it
+/// repeated `Status` / `Assignee` from the card, added the workspace's raw ULID
+/// under `Project:` and a mid-word-truncated `Notes:`, and it cost the
+/// transcript a quarter of the width to do it. The activity pane took the
+/// column, and it says what HAPPENED rather than restating what is on screen.
+///
+/// `now_ms` is the render clock the elapsed durations tick against — injected,
+/// not read, so a snapshot test pins an exact duration.
+///
+/// The rendering is linear (no virtualisation): the visible view
+/// ([`TaskDetailState::visible_entries`]) is painted top-down. The REFACTOR note
+/// in `P4.md` defers virtualisation to >500-message buffers.
 pub fn render_task_detail(
     buf: &mut WireBuffer,
     area_w: u16,
     top: u16,
     bottom: u16,
     state: &TaskDetailState,
+    now_ms: i64,
 ) {
     // 63d: the issue DETAIL CARD spans the top of the area, so even a never-run
-    // issue reads as a real card. The PR badge / branch / transcript start on the
-    // first row BELOW it (+ its optional `Runs:` line).
-    let card_bottom = render_detail_card(buf, area_w, top, bottom, state);
-
-    // The PR badge (P9.2) takes the first row below the card when present,
-    // pushing the transcript + sidebar down one row. When absent there is NO
-    // badge row at all (the layout shifts up) — never a `PR: none` placeholder.
-    let mut body_top = state.pr_url().map_or(card_bottom, |url| {
-        render_pr_badge(buf, area_w, card_bottom, url, state.pr_status());
-        card_bottom.saturating_add(1)
-    });
-
-    // The run's branch line (tcp T2, agents-in-a-box-ch3) sits right under the PR
-    // badge (or at the top when there is no PR). Progressive disclosure, exactly
-    // like the badge: a run with no committed branch renders NO row (the
-    // transcript shifts up), never a `branch: none` placeholder.
-    if let Some(branch) = state.branch() {
-        if body_top < bottom {
-            render_branch_row(buf, area_w, body_top, branch);
-            body_top = body_top.saturating_add(1);
-        }
+    // issue reads as a real card. It carries the run card at its head; when the
+    // viewport is too short for a card at all, the run head still paints as bare
+    // rows — the run is the one thing this screen must never drop.
+    let mut body_top = render_detail_card(buf, area_w, top, bottom, state, now_ms);
+    if body_top == top {
+        body_top = render_run_head(buf, area_w, top, bottom, state, now_ms, false);
     }
 
     // The compose modal (e38.5) / delete-confirm modal (63l.5), when open, take
@@ -992,8 +1185,38 @@ pub fn render_task_detail(
         bottom
     };
 
-    // The transcript paints the visible (collapsed) view linearly.
-    render_transcript(buf, area_w, body_top, body_bottom, &state.visible_entries());
+    // The activity pane takes a right-hand column beside the feed, and collapses
+    // away when the pane is too narrow to leave the transcript a usable column
+    // or when the issue has no narrative yet.
+    let activity_w: u16 = if area_w >= 60 && !state.activity.is_empty() {
+        (area_w / 3).clamp(ACTIVITY_MIN_W, ACTIVITY_MAX_W)
+    } else {
+        0
+    };
+    let feed_w = area_w.saturating_sub(activity_w);
+
+    // The execution log, then the transcript of whichever run is expanded.
+    let feed_top = render_execution_log(buf, feed_w, body_top, body_bottom, state, now_ms);
+    if state.transcript_is_for_expanded_run() {
+        render_transcript(buf, feed_w, feed_top, body_bottom, &state.visible_entries());
+    } else if feed_top < body_bottom {
+        // The durable read serves the ISSUE's newest run, so an older attempt
+        // has no transcript to show. Say so rather than painting the newest
+        // run's lines under an older run's card.
+        put_clipped(buf, 0, feed_top, OTHER_RUN_NOTE, HINT_MUTED, feed_w);
+    }
+
+    if activity_w > 0 {
+        render_activity_pane(
+            buf,
+            feed_w,
+            body_top,
+            body_bottom,
+            activity_w,
+            state,
+            now_ms,
+        );
+    }
 }
 
 /// Paint the single-row comment-compose input bar at `(0, row)` (e38.5):
@@ -1024,68 +1247,380 @@ fn render_delete_bar(buf: &mut WireBuffer, area_w: u16, row: u16, issue: &IssueR
     let _ = put_clipped(buf, cx, row, DELETE_HINT, HINT_MUTED, area_w);
 }
 
-/// Paint the single-row PR badge at `(0, row)`: `▶ PR <url>` in gold, then the
-/// CI rollup and merge status (e38.34), then a muted `[o] open` keybinding hint
-/// (hint-near-control).
+/// Paint the sticky live RUN CARD and the run's branch + PR beneath it
+/// (crisp B4 §2.3), starting at `top`. Returns the first row below whatever it
+/// painted — `top` itself when the issue has no run and no PR.
 ///
-/// The status reads in two colour-coded segments right after the URL:
-/// - **CI**: ` CI ✓` (green pass) / ` CI ✗` (red fail) / ` CI …` (amber pending /
-///   muted unknown) — so a glance distinguishes a green build from a broken one.
-/// - **mergeable**: ` ✓ mergeable` (green) / ` ✗ CONFLICT` (red) — a conflict is
-///   loud + red, never the same colour as a clean merge. An `Unknown` mergeable
-///   (GitHub still computing) paints nothing, never a false token.
+/// ```text
+/// ◔ impl-1 is working · 7m 17s · 10 tools · $0.42            X cancel
+/// ainb/…N9GP8 → main · PR #8 ✓
+/// ```
 ///
-/// The whole row is clipped at `area_w` by **chars** (never bytes —
-/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates without
-/// panicking on a multi-byte boundary; a tight width drops the trailing segments
-/// first (URL → CI → mergeable → hint), keeping the most-load-bearing data left.
-fn render_pr_badge(buf: &mut WireBuffer, area_w: u16, row: u16, url: &str, status: PrStatus) {
-    let mut cx = 0u16;
-    cx = put_clipped(buf, cx, row, BADGE_PREFIX, BADGE_GOLD, area_w);
-    cx = put_clipped(buf, cx, row, url, BADGE_GOLD, area_w);
-    let (ci_label, ci_color) = ci_segment(status.ci);
-    cx = put_clipped(buf, cx, row, ci_label, ci_color, area_w);
-    if let Some((label, color)) = mergeable_segment(status.mergeable) {
-        cx = put_clipped(buf, cx, row, label, color, area_w);
+/// The card describes the EXPANDED run (the one `enter` walks to), so the two
+/// rows and the transcript below them are always the same run. Every segment is
+/// dropped when unknown: a run with no cost recorded prints no `$`, a run with
+/// no tool calls prints no `tools`, a run with no PR prints no chip. `X cancel`
+/// is offered only while the run can actually be cancelled.
+///
+/// `edges` paints the card's `│ … │` borders around the rows; `false` renders
+/// them bare, for the short viewport where the detail card yielded entirely.
+fn render_run_head(
+    buf: &mut WireBuffer,
+    card_w: u16,
+    top: u16,
+    bottom: u16,
+    state: &TaskDetailState,
+    now_ms: i64,
+    edges: bool,
+) -> u16 {
+    let mut row = top;
+    let run = state.expanded_run();
+
+    if let Some(run) = run {
+        if row >= bottom {
+            return row;
+        }
+        let head = format!("{} {} {}", run.state.glyph(), run.agent, run.state.phrase());
+        let mut parts = vec![crate::vocab::elapsed_word(run.elapsed_ms(now_ms))];
+        // The tool count is the transcript's, so it only speaks for the run the
+        // transcript belongs to.
+        if state.transcript_is_for_expanded_run() && state.tool_calls > 0 {
+            let plural = if state.tool_calls == 1 { "" } else { "s" };
+            parts.push(format!("{} tool{plural}", state.tool_calls));
+        }
+        if let Some(cents) = run.cost_cents {
+            parts.push(crate::vocab::cost_word(cents));
+        }
+        let line = format!("{head} · {}", parts.join(" · "));
+        let cells: Vec<(&str, Color)> = vec![(&line, run_color(run.state))];
+        paint_head_row(buf, card_w, row, &cells, edges);
+        // `X cancel` right-aligned, and only while there is a run to cancel.
+        if run.state == crate::vocab::RunState::Running {
+            let x = card_w.saturating_sub(CANCEL_HINT.chars().count() as u16 + 2);
+            put_clipped(
+                buf,
+                x,
+                row,
+                CANCEL_HINT,
+                HINT_MUTED,
+                card_w.saturating_sub(1),
+            );
+        }
+        row = row.saturating_add(1);
     }
-    let _ = put_clipped(buf, cx, row, BADGE_HINT, HINT_MUTED, area_w);
+
+    // The branch → target and the PR, on one line.
+    let (branch, pr_url) = head_artifacts(state);
+    if branch.is_none() && pr_url.is_none() {
+        return row;
+    }
+    if row >= bottom {
+        return row;
+    }
+    let mut cells: Vec<(&str, Color)> = Vec::new();
+    let branch_text = branch.map(|b| match state.issue.target_branch.as_deref() {
+        Some(target) => format!("{} → {target}", elide_branch(b)),
+        None => elide_branch(b),
+    });
+    if let Some(text) = branch_text.as_deref() {
+        cells.push((text, BRANCH_COLOR));
+    }
+    let status = pr_status_for(state, run);
+    let chip = pr_url.map(|url| pr_chip(url, status));
+    if let Some(chip) = chip.as_deref() {
+        if !cells.is_empty() {
+            cells.push((" · ", CARD_LABEL));
+        }
+        cells.push((chip, BADGE_GOLD));
+        let (glyph, color) = ci_glyph(status.ci);
+        cells.push((glyph, color));
+        if let Some((label, color)) = conflict_segment(status.mergeable) {
+            cells.push((label, color));
+        }
+    }
+    paint_head_row(buf, card_w, row, &cells, edges);
+    row.saturating_add(1)
 }
 
-/// Paint the single-row run-branch line at `(0, row)`: `⎇ branch <name>` in
-/// cornflower-blue (tcp T2, agents-in-a-box-ch3), so a finished run's durable
-/// `ainb/<slug>` branch reads in the detail view exactly as it does on the Kanban
-/// card. Clipped by **chars** at `area_w` (multi-byte safe —
-/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates without
-/// panicking on a multi-byte boundary.
-fn render_branch_row(buf: &mut WireBuffer, area_w: u16, row: u16, branch: &str) {
-    let mut cx = 0u16;
-    cx = put_clipped(buf, cx, row, BRANCH_PREFIX, BRANCH_COLOR, area_w);
-    let _ = put_clipped(buf, cx, row, branch, BRANCH_COLOR, area_w);
+/// Whether `run` is the run whose transcript the screen is bound to.
+fn is_bound_run(state: &TaskDetailState, run: Option<&RunRow>) -> bool {
+    run.is_none_or(|r| r.task_id == state.task_id.as_str())
 }
 
-/// The CI rollup badge segment: ` CI <glyph>` + its colour (e38.34).
+/// The PR status to paint for `run`: the `pr_status_refresh` reply once one has
+/// landed for the BOUND run, else whatever the tasks snapshot recorded for the
+/// run itself, else all-unknown.
 ///
-/// Always painted (the CI axis is the headline status), with `Unknown` /
-/// `Pending` both showing a muted-vs-amber `…` so the badge reads "status
-/// loading" rather than blank.
-const fn ci_segment(ci: CiRollup) -> (&'static str, Color) {
+/// Order matters, and getting it backwards is visible: the screen-level status
+/// starts all-`Unknown`, so preferring it unconditionally made the run card show
+/// a pending `…` beside an execution-log row already reading `✓` for the same PR.
+fn pr_status_for(state: &TaskDetailState, run: Option<&RunRow>) -> PrStatus {
+    if is_bound_run(state, run) {
+        if state.pr_status.ci != CiRollup::Unknown {
+            return state.pr_status;
+        }
+        return run.and_then(|r| r.pr_status).unwrap_or(state.pr_status);
+    }
+    run.and_then(|r| r.pr_status).unwrap_or(UNKNOWN_PR_STATUS)
+}
+
+/// The branch + PR the run head's second row names: the EXPANDED run's own, and
+/// the issue-level pair only when that run is the one the screen is bound to.
+///
+/// The fallback exists because an issue can carry a branch and a PR from a run
+/// the tasks snapshot no longer lists. Letting it apply to any expanded run
+/// would print the bound run's branch under a different run's card.
+fn head_artifacts(state: &TaskDetailState) -> (Option<&str>, Option<&str>) {
+    let run = state.expanded_run();
+    if is_bound_run(state, run) {
+        return (
+            run.and_then(|r| r.branch.as_deref()).or_else(|| state.branch()),
+            run.and_then(|r| r.pr_url.as_deref()).or_else(|| state.pr_url()),
+        );
+    }
+    (
+        run.and_then(|r| r.branch.as_deref()),
+        run.and_then(|r| r.pr_url.as_deref()),
+    )
+}
+
+/// How many rows [`render_run_head`] will paint (0, 1 or 2) — the layout asks
+/// BEFORE painting so the card can budget for them.
+fn run_head_rows(state: &TaskDetailState) -> u16 {
+    let (branch, pr_url) = head_artifacts(state);
+    u16::from(state.expanded_run().is_some()) + u16::from(branch.is_some() || pr_url.is_some())
+}
+
+/// Paint one run-head row, with or without the detail card's side borders.
+fn paint_head_row(
+    buf: &mut WireBuffer,
+    card_w: u16,
+    row: u16,
+    cells: &[(&str, Color)],
+    edges: bool,
+) {
+    if edges {
+        card_field_row(buf, card_w, row, cells);
+        return;
+    }
+    let mut cx = 0u16;
+    for (text, color) in cells {
+        cx = put_clipped(buf, cx, row, text, *color, card_w);
+    }
+}
+
+/// The compact PR chip the run head paints: `PR #8` when the URL ends in a
+/// number, else a bare `PR`.
+///
+/// The URL itself is gone from this screen (crisp B4 §2.3): it cost 45 cells to
+/// say what `#8` says, and `o` opens it. The number is parsed from the URL tail
+/// rather than synthesised from anything else — a PR the daemon never captured
+/// renders no chip at all (track B "do not attempt" #8).
+fn pr_chip(url: &str, _status: PrStatus) -> String {
+    match url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| s.chars().all(|c| c.is_ascii_digit()) && !s.is_empty())
+    {
+        Some(number) => format!("PR #{number}"),
+        None => "PR".to_string(),
+    }
+}
+
+/// The CI rollup glyph + its colour (e38.34): `✓` green pass, `✗` red fail, `…`
+/// amber pending / muted unknown, so a glance distinguishes a green build from a
+/// broken one and neither from "still fetching".
+const fn ci_glyph(ci: CiRollup) -> (&'static str, Color) {
     match ci {
-        CiRollup::Pass => (" CI ✓", STATUS_GREEN),
-        CiRollup::Fail => (" CI ✗", STATUS_RED),
-        CiRollup::Pending => (" CI …", STATUS_AMBER),
-        CiRollup::Unknown => (" CI …", HINT_MUTED),
+        CiRollup::Pass => (" ✓", STATUS_GREEN),
+        CiRollup::Fail => (" ✗", STATUS_RED),
+        CiRollup::Pending => (" …", STATUS_AMBER),
+        CiRollup::Unknown => (" …", HINT_MUTED),
     }
 }
 
-/// The mergeable badge segment: ` ✓ mergeable` / ` ✗ CONFLICT` + colour, or `None`
-/// when GitHub has not finished computing mergeability (`Unknown`) so the badge
-/// never claims a false state (e38.34).
-const fn mergeable_segment(m: Mergeable) -> Option<(&'static str, Color)> {
+/// The merge-conflict segment: ` ✗ CONFLICT` in red, or `None`.
+///
+/// Only a CONFLICT speaks (crisp B4 §2.3). A clean mergeable PR used to paint
+/// ` ✓ mergeable` beside an already-green ` CI ✓` — two ticks for one good
+/// state, on the one line that now has to carry the branch as well. An `Unknown`
+/// mergeable (GitHub still computing) has always painted nothing, and still does.
+const fn conflict_segment(m: Mergeable) -> Option<(&'static str, Color)> {
     match m {
-        Mergeable::Mergeable => Some((" ✓ mergeable", STATUS_GREEN)),
         Mergeable::Conflicting => Some((" ✗ CONFLICT", STATUS_RED)),
-        Mergeable::Unknown => None,
+        Mergeable::Mergeable | Mergeable::Unknown => None,
     }
+}
+
+/// `ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8` → `ainb/…3N9GP8`, the SAME elide the Kanban
+/// card applies (crisp B1, Q14), so one branch reads identically on both.
+fn elide_branch(branch: &str) -> String {
+    crate::screen::kanban::elide_branch(branch)
+}
+
+/// The colour a run's state paints in: the transcript taxonomy's error red for a
+/// failure, the PR green for a clean finish, the branch blue while it runs.
+const fn run_color(state: crate::vocab::RunState) -> Color {
+    use crate::vocab::RunState;
+    match state {
+        RunState::Running => BRANCH_COLOR,
+        RunState::Done => STATUS_GREEN,
+        RunState::Failed => STATUS_RED,
+        RunState::Queued | RunState::Cancelled => HINT_MUTED,
+    }
+}
+
+/// Paint the EXECUTION LOG (crisp B4 §2.3): one row per run of this issue,
+/// running on top and failed first, the expanded one marked `▶`. Returns the
+/// first row below it (`top` when the issue has no runs — no header, no
+/// placeholder).
+///
+/// At most [`RUNS_VISIBLE`] rows paint, windowed so the expanded run is always
+/// one of them: the log is context for the transcript below it, and an issue
+/// retried nine times must not push the transcript off the screen.
+fn render_execution_log(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    top: u16,
+    bottom: u16,
+    state: &TaskDetailState,
+    now_ms: i64,
+) -> u16 {
+    if top >= bottom {
+        return top;
+    }
+    // The rules exist to SEPARATE the log from the transcript. With no log there
+    // is nothing to separate, so an issue with no runs spends no row on chrome —
+    // it is also the case with the least room (the 8-row panes).
+    if state.runs.is_empty() {
+        return top;
+    }
+    let mut row = render_pane_rule(buf, area_w, top, "runs");
+    let window = RUNS_VISIBLE.min(state.runs.len());
+    let start = state
+        .run_cursor
+        .saturating_sub(window.saturating_sub(1))
+        .min(state.runs.len().saturating_sub(window));
+    for (idx, run) in state.runs.iter().enumerate().skip(start).take(window) {
+        if row >= bottom {
+            return row;
+        }
+        let expanded = idx == state.run_cursor;
+        let marker = if expanded { "▶ " } else { "  " };
+        // `running 7m 17s` is an elapsed clock; `failed in 5m 00s` is how long
+        // it took. Same duration, and without the preposition the terminal rows
+        // read as "failed five minutes ago", which they do not mean.
+        let elapsed = crate::vocab::elapsed_word(run.elapsed_ms(now_ms));
+        let line = if run.finished_at.is_some() {
+            format!(
+                "{} {} · {} in {elapsed}",
+                run.state.glyph(),
+                run.agent,
+                run.state.word()
+            )
+        } else {
+            format!(
+                "{} {} · {} {elapsed}",
+                run.state.glyph(),
+                run.agent,
+                run.state.word()
+            )
+        };
+        let mut cx = put_clipped(buf, 0, row, marker, SELECTION_GREEN, area_w);
+        cx = put_clipped(buf, cx, row, &line, run_color(run.state), area_w);
+        if let Some(url) = run.pr_url.as_deref() {
+            cx = put_clipped(buf, cx, row, "  ", CARD_LABEL, area_w);
+            let status = pr_status_for(state, Some(run));
+            cx = put_clipped(buf, cx, row, &pr_chip(url, status), BADGE_GOLD, area_w);
+            let (glyph, color) = ci_glyph(status.ci);
+            cx = put_clipped(buf, cx, row, glyph, color, area_w);
+        }
+        if let Some(cents) = run.cost_cents {
+            cx = put_clipped(buf, cx, row, "  ", CARD_LABEL, area_w);
+            cx = put_clipped(
+                buf,
+                cx,
+                row,
+                &crate::vocab::cost_word(cents),
+                HINT_MUTED,
+                area_w,
+            );
+        }
+        let _ = cx;
+        row = row.saturating_add(1);
+    }
+    if row < bottom {
+        row = render_pane_rule(buf, area_w, row, "transcript");
+    }
+    row
+}
+
+/// Paint the issue's ACTIVITY narrative in the right-hand column (crisp B4
+/// §2.3): `7m  impl-1 claimed the issue`, newest first, behind a `│` divider
+/// that separates it from the feed.
+///
+/// Text the agents wrote (a comment body reaches this pane through
+/// `issue_timeline`) goes through [`crate::screen::display_char`], the one
+/// sanitiser, exactly as the Inbox and Control Center route theirs.
+fn render_activity_pane(
+    buf: &mut WireBuffer,
+    x: u16,
+    top: u16,
+    bottom: u16,
+    width: u16,
+    state: &TaskDetailState,
+    now_ms: i64,
+) {
+    let right = x.saturating_add(width);
+    let text_x = x.saturating_add(2);
+    for row in top..bottom {
+        put_clipped(buf, x, row, "│", CARD_BORDER, right);
+    }
+    let mut row = render_pane_rule_at(buf, text_x, right, top, "activity");
+    for entry in &state.activity {
+        if row >= bottom {
+            return;
+        }
+        let age = crate::vocab::age_word(now_ms.saturating_sub(entry.at_ms));
+        let cx = put_clipped(buf, text_x, row, &format!("{age:>3} "), HINT_MUTED, right);
+        put_sanitised(buf, cx, row, &entry.text, CARD_VALUE, right);
+        row = row.saturating_add(1);
+    }
+}
+
+/// Paint a pane header rule at `(0, row)`: `runs ────────`, the title in gold
+/// over a muted rule to the right edge. Returns the row below it.
+fn render_pane_rule(buf: &mut WireBuffer, area_w: u16, row: u16, title: &str) -> u16 {
+    render_pane_rule_at(buf, 0, area_w, row, title)
+}
+
+/// [`render_pane_rule`] in a column starting at `x` and clipped at `right`.
+fn render_pane_rule_at(buf: &mut WireBuffer, x: u16, right: u16, row: u16, title: &str) -> u16 {
+    let cx = put_clipped(buf, x, row, title, CARD_TITLE, right);
+    let mut rule = String::from(" ");
+    for _ in cx.saturating_add(1)..right {
+        rule.push('─');
+    }
+    put_clipped(buf, cx, row, &rule, CARD_BORDER, right);
+    row.saturating_add(1)
+}
+
+/// [`put_clipped`] for text an AGENT authored: every char goes through
+/// [`crate::screen::display_char`] first, so a control or bidi-override
+/// character renders as a visible middot instead of acting on the terminal.
+fn put_sanitised(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right: u16) -> u16 {
+    let mut cx = x;
+    for ch in s.chars() {
+        if cx >= right {
+            break;
+        }
+        let mut cell = Cell::new(crate::screen::display_char(ch).to_string());
+        cell.fg = Some(color);
+        buf.push(Coord::new(cx, row), cell);
+        cx = cx.saturating_add(1);
+    }
+    cx
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping by **chars** at column `right`
@@ -1105,36 +1640,38 @@ fn put_clipped(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, ri
 }
 
 /// Render the issue DETAIL CARD at the top of the task-detail screen (63d): a
-/// cornflower-bordered box carrying the issue's status / priority / created /
-/// assignee / agent / repo / branches / labels / description, so a never-run
-/// issue reads as a real card instead of an almost-empty page. Returns the first
-/// row BELOW the card (+ its optional `Runs:` history line) — the caller starts
-/// the PR badge / branch / transcript there.
+/// cornflower-bordered box carrying the sticky run card, the run's branch + PR,
+/// the ONE meta line, and the issue's acceptance / properties / description, so
+/// a never-run issue reads as a real card instead of an almost-empty page.
+/// Returns the first row BELOW the card (+ its optional `Runs:` history line) —
+/// the caller starts the execution log / transcript there.
 ///
 /// Width-aware: every value is clipped by **chars** (never bytes — the utf8
 /// truncate trap this file documents), and the description wraps to the inner
 /// width, capped so the card always leaves room for the transcript below.
 ///
 /// HEIGHT CONTRACT: the card budgets itself to `available - RESERVED_BELOW`
-/// (badge + branch + a minimum transcript region) and paints nothing (returns
-/// `top` unchanged) when that budget cannot fit a legible card — a short
-/// viewport (e.g. the 8-row snapshot panes) keeps the pre-card layout intact,
-/// with the PR badge / branch / transcript exactly where they always were.
+/// (a minimum legible feed region) and paints nothing (returns `top` unchanged)
+/// when that budget cannot fit a legible card — a short viewport (e.g. the 8-row
+/// snapshot panes) drops to the run head + transcript alone, which is the pair
+/// that carries the run.
 fn render_detail_card(
     buf: &mut WireBuffer,
     area_w: u16,
     top: u16,
     bottom: u16,
     state: &TaskDetailState,
+    now_ms: i64,
 ) -> u16 {
     let issue = state.issue();
     let card_w = area_w;
     let available = bottom.saturating_sub(top);
 
-    // The rows the card must LEAVE BELOW itself: the PR badge (1) + branch line
-    // (1) + a minimum legible transcript region (4). The card's whole budget is
-    // what remains after this reservation — the transcript feed is the screen's
-    // job, the card is context, so the card yields, never the feed.
+    // The rows the card must LEAVE BELOW itself: the execution log's rule + one
+    // run row, the transcript's rule, and a minimum legible transcript region.
+    // The card's whole budget is what remains after this reservation — the
+    // transcript feed is the screen's job, the card is context, so the card
+    // yields, never the feed.
     const RESERVED_BELOW: u16 = 6;
     // The card's fixed chrome: top border + the ONE meta row + divider + bottom
     // border = 4 rows; the description adds ≥1 more, a run history line 1 more.
@@ -1143,13 +1680,18 @@ fn render_detail_card(
     /// viewport keeps the card compact (≈40% of a 30-row pane at worst).
     const DESC_MAX_LINES: u16 = 4;
 
-    let runs_line = issue.run_count > 0;
+    // The `Runs:` history line is the FALLBACK for the execution log: it says
+    // how many times the issue ran when the tasks snapshot has not landed (or
+    // holds no row for it), and stays quiet once the log itself can say more.
+    let runs_line = issue.run_count > 0 && state.runs.is_empty();
     let runs_rows = u16::from(runs_line);
+    // The run head takes up to two rows inside the card, plus its divider.
+    let head_rows = run_head_rows(state);
+    let head_block = head_rows + u16::from(head_rows > 0);
     let budget = available.saturating_sub(RESERVED_BELOW);
-    let min_needed = CARD_FIXED_ROWS + 1 + runs_rows;
+    let min_needed = CARD_FIXED_ROWS + head_block + 1 + runs_rows;
     // Too narrow, or the viewport can't fit a legible card AND the reserved
-    // badge/branch/transcript region — skip the card entirely (the pre-card
-    // layout), never squeeze the transcript out.
+    // feed region — skip the card entirely, never squeeze the transcript out.
     if card_w < 16 || budget < min_needed {
         return top;
     }
@@ -1162,6 +1704,7 @@ fn render_detail_card(
     let desc_text = issue.description.as_deref().unwrap_or("no description");
     let desc_budget = budget
         .saturating_sub(CARD_FIXED_ROWS)
+        .saturating_sub(head_block)
         .saturating_sub(runs_rows)
         .clamp(1, DESC_MAX_LINES) as usize;
     let desc_lines = wrap_chars(desc_text, inner_w, desc_budget);
@@ -1169,12 +1712,21 @@ fn render_detail_card(
 
     // --- top border with the gold title overlaid ---
     draw_card_hline(buf, row, card_w, '╭', '╮');
+    // The trailing space keeps the title off the border rule it is painted over.
     let title = match &issue.display_id {
-        Some(d) => format!(" 📋 {} · {}", d, issue.title),
-        None => format!(" 📋 {}", issue.title),
+        Some(d) => format!(" 📋 {} · {} ", d, issue.title),
+        None => format!(" 📋 {} ", issue.title),
     };
     put_clipped(buf, 2, row, &title, CARD_TITLE, inner_right);
     row = row.saturating_add(1);
+
+    // --- the sticky live RUN CARD + the run's branch / PR, then a divider, so
+    //     the run reads FIRST and the issue's metadata reads under it ---
+    if head_rows > 0 {
+        row = render_run_head(buf, card_w, row, bottom, state, now_ms, true);
+        draw_card_divider(buf, row, card_w);
+        row = row.saturating_add(1);
+    }
 
     // --- The ONE meta line (crisp B4 §2.3), replacing the four key/value rows
     //     that carried the same six values under labels reading `, ` or
@@ -1805,6 +2357,23 @@ mod card_tests {
         TaskDetailState::new(TaskId::from_str("task-1").unwrap(), issue)
     }
 
+    /// One execution-log row started at epoch 0, so an elapsed assertion reads
+    /// straight off the render clock the test passes in.
+    fn run_row(task_id: &str, agent: &str, state: crate::vocab::RunState) -> RunRow {
+        RunRow {
+            task_id: task_id.into(),
+            short_id: task_id.into(),
+            agent: agent.into(),
+            state,
+            started_at: 0,
+            finished_at: None,
+            cost_cents: None,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
     /// The card's six metadata values ride ONE line (crisp B4 §2.3), in order,
     /// with no `Status: ` / `Assignee: ` / `Repo: ` labels spending the width —
     /// and the repo reads `@widget`, never the absolute path.
@@ -1812,7 +2381,7 @@ mod card_tests {
     fn detail_card_renders_one_meta_line_for_a_never_run_issue() {
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let rows = painted_rows(&buf);
         let text = painted_text(&buf);
 
@@ -1863,7 +2432,7 @@ mod card_tests {
         issue.labels = Vec::new();
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let rows = painted_rows(&buf);
         let text = painted_text(&buf);
 
@@ -1903,7 +2472,7 @@ mod card_tests {
         issue.assignee = Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V".into());
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
 
         assert!(text.contains("agent:AYF56V"), "short id: {text}");
@@ -1921,7 +2490,7 @@ mod card_tests {
         issue.due_date = Some(1_785_542_400_000); // 2026-08-01 UTC midnight
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("Due: "), "due label: {text}");
         assert!(text.contains("2026-08-01"), "due value: {text}");
@@ -1929,7 +2498,7 @@ mod card_tests {
         // Unset: no `Due:` label and no stale date.
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(!text.contains("Due: "), "no due label when unset: {text}");
         assert!(
@@ -1947,7 +2516,7 @@ mod card_tests {
         issue.external_ref = Some("acme/api#42".into());
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("Linked: "), "linked label: {text}");
         assert!(text.contains('⧉'), "link glyph");
@@ -1956,7 +2525,7 @@ mod card_tests {
         // Unlinked: no Linked line at all.
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         assert!(
             !painted_text(&buf).contains("Linked: "),
             "an unlinked issue shows no Linked line"
@@ -1977,7 +2546,7 @@ mod card_tests {
             issue.origin_id = Some("prov-1".into());
             let s = state_for(issue);
             let mut buf = WireBuffer::new(80, 30);
-            render_task_detail(&mut buf, 80, 0, 29, &s);
+            render_task_detail(&mut buf, 80, 0, 29, &s, 0);
             let text = painted_text(&buf);
             assert!(text.contains("Origin: "), "origin label for {kind}: {text}");
             assert!(text.contains(expected), "origin value for {kind}: {text}");
@@ -1988,7 +2557,7 @@ mod card_tests {
             issue.origin_type = manual.clone();
             let s = state_for(issue);
             let mut buf = WireBuffer::new(80, 30);
-            render_task_detail(&mut buf, 80, 0, 29, &s);
+            render_task_detail(&mut buf, 80, 0, 29, &s, 0);
             assert!(
                 !painted_text(&buf).contains("Origin: "),
                 "no badge for {manual:?}"
@@ -2007,7 +2576,7 @@ mod card_tests {
         issue.last_dispatch_at = Some(1_700_000_000_000);
         let s = state_for(issue);
         let mut buf = WireBuffer::new(100, 40);
-        render_task_detail(&mut buf, 100, 0, 39, &s);
+        render_task_detail(&mut buf, 100, 0, 39, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("Not dispatched: "), "label: {text}");
         assert!(
@@ -2024,7 +2593,7 @@ mod card_tests {
     fn detail_card_omits_the_not_dispatched_line_when_healthy() {
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(100, 40);
-        render_task_detail(&mut buf, 100, 0, 39, &s);
+        render_task_detail(&mut buf, 100, 0, 39, &s, 0);
         assert!(
             !painted_text(&buf).contains("Not dispatched"),
             "a healthy card shows no dispatch warning"
@@ -2041,7 +2610,7 @@ mod card_tests {
         issue.last_dispatch_detail = Some("something new happened".into());
         let s = state_for(issue);
         let mut buf = WireBuffer::new(100, 40);
-        render_task_detail(&mut buf, 100, 0, 39, &s);
+        render_task_detail(&mut buf, 100, 0, 39, &s, 0);
         let text = painted_text(&buf);
         assert!(
             text.contains("Not dispatched: "),
@@ -2109,7 +2678,7 @@ mod card_tests {
         let mut s = state_for(full_issue());
         s.set_resolved_names(Some("alice".into()), Some("impl-1".into()), None);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("alice"), "resolved assignee: {text}");
         assert!(!text.contains("agent:alice"), "raw actor ref gone: {text}");
@@ -2162,7 +2731,7 @@ mod card_tests {
         ];
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let text = painted_text(&buf);
 
         assert!(text.contains("Links:"), "the block header: {text}");
@@ -2189,7 +2758,7 @@ mod card_tests {
     fn detail_card_omits_the_links_block_when_empty() {
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         assert!(
             !painted_text(&buf).contains("Links:"),
             "no links ⇒ no block (an old daemon leaves the card unchanged)"
@@ -2217,7 +2786,7 @@ mod card_tests {
         ];
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(squashed.contains("Subs: 3"), "the count: {squashed}");
@@ -2235,7 +2804,7 @@ mod card_tests {
     fn detail_card_omits_subs_and_react_when_empty() {
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let text = painted_text(&buf);
         assert!(!text.contains("Subs:"), "no subscribers ⇒ no line: {text}");
         assert!(!text.contains("React:"), "no reactions ⇒ no line: {text}");
@@ -2263,7 +2832,7 @@ mod card_tests {
         ];
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(squashed.contains("Props:"), "the header: {squashed}");
@@ -2288,7 +2857,7 @@ mod card_tests {
         }];
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(squashed.contains("Meta:"), "the header: {squashed}");
@@ -2304,7 +2873,7 @@ mod card_tests {
     fn detail_card_omits_props_and_meta_when_empty() {
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let text = painted_text(&buf);
         assert!(!text.contains("Props:"), "no properties ⇒ no line: {text}");
         assert!(!text.contains("Meta:"), "no metadata ⇒ no line: {text}");
@@ -2323,7 +2892,7 @@ mod card_tests {
         }];
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
             squashed.contains("◆ Risk:"),
@@ -2344,7 +2913,7 @@ mod card_tests {
         issue.subscribed = false;
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 40);
-        render_task_detail(&mut buf, 80, 0, 39, &s);
+        render_task_detail(&mut buf, 80, 0, 39, &s, 0);
         let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(squashed.contains("Subs: 2"), "the count: {squashed}");
         assert!(!squashed.contains("✓ you"), "not subscribed: {squashed}");
@@ -2374,7 +2943,7 @@ mod card_tests {
         issue.acceptance = vec![crit("ac-a", "builds"), crit("ac-b", "tests green")];
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("Acceptance:"), "acceptance header: {text}");
         assert!(text.contains("builds"), "first criterion");
@@ -2383,7 +2952,7 @@ mod card_tests {
         // Empty list: no header at all.
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         assert!(
             !painted_text(&buf).contains("Acceptance:"),
             "an issue with no criteria shows no Acceptance header"
@@ -2398,7 +2967,7 @@ mod card_tests {
     fn task_detail_renders_checked_criterion() {
         let s = state_for(issue_with_one_ticked());
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
 
         assert!(text.contains("Acceptance: 1/2"), "counted header: {text}");
@@ -2429,7 +2998,7 @@ mod card_tests {
         plain.acceptance = vec![crit("ac-a", "builds"), crit("ac-b", "tests green")];
         let s = state_for(plain);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("Acceptance: 0/2"), "header: {text}");
         assert!(
@@ -2448,7 +3017,7 @@ mod card_tests {
         issue.acceptance = Vec::new();
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("Acceptance: 0/2"), "header: {text}");
         assert!(
@@ -2526,7 +3095,7 @@ mod card_tests {
         let s = state_for(issue_with_one_ticked());
         let selected = reduce_task_detail(&s, TaskDetailEvent::Key('a')).state;
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &selected);
+        render_task_detail(&mut buf, 80, 0, 29, &selected, 0);
         let rows = painted_rows(&buf);
         let line = rows.iter().find(|l| l.contains("builds")).expect("criterion line");
         assert!(line.contains('▶'), "marker on the selected line: {line}");
@@ -2542,7 +3111,7 @@ mod card_tests {
         issue.context_refs = vec!["acme/api#42".into(), "https://docs".into()];
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("Context:"), "context header: {text}");
         assert!(text.contains("acme/api#42"), "first reference");
@@ -2551,7 +3120,7 @@ mod card_tests {
         // Empty list: no header at all.
         let s = state_for(full_issue());
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         assert!(
             !painted_text(&buf).contains("Context:"),
             "an issue with no context refs shows no Context header"
@@ -2568,7 +3137,7 @@ mod card_tests {
         issue.last_run_at = Some(1_700_000_000_000);
         let s = state_for(issue);
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
 
         assert!(text.contains("Runs: 3"), "run count: {text}");
@@ -2577,28 +3146,31 @@ mod card_tests {
     }
 
     /// HEIGHT CONTRACT regression (the coordinator's Finding 1): at a short
-    /// viewport (the 8-row snapshot panes) the card is skipped entirely so the
-    /// PR badge stays on row 0 and the transcript region is preserved — the card
-    /// must never squeeze the feed out.
+    /// viewport (the 8-row snapshot panes) the card is skipped entirely and the
+    /// RUN HEAD paints bare on row 0 — the card must never squeeze the feed out,
+    /// and the run must never be the thing that goes missing when it does yield.
     #[test]
-    fn detail_card_yields_to_badge_and_transcript_at_short_viewports() {
+    fn detail_card_yields_to_the_run_head_and_transcript_at_short_viewports() {
         let mut issue = full_issue();
         issue.pr_url = Some("https://github.com/o/r/pull/7".into());
-        let s = state_for(issue);
+        let mut s = state_for(issue);
+        s.set_runs(vec![run_row(
+            "task-1",
+            "impl-1",
+            crate::vocab::RunState::Running,
+        )]);
         let mut buf = WireBuffer::new(100, 8);
-        render_task_detail(&mut buf, 100, 0, 8, &s);
-        let text = painted_text(&buf);
+        render_task_detail(&mut buf, 100, 0, 8, &s, 60_000);
+        let rows = painted_rows(&buf);
+        let text = rows.join("\n");
 
         assert!(!text.contains('╭'), "no card border at 8 rows: {text}");
-        assert!(text.contains("▶ PR "), "PR badge still renders: {text}");
-        // The badge sits on row 0 exactly as before the card existed.
-        let row0: String = buf
-            .cells
-            .iter()
-            .filter(|(c, _)| c.y == 0)
-            .map(|(_, cell)| cell.symbol.as_str())
-            .collect();
-        assert!(row0.contains("▶ PR "), "badge pinned to row 0: {row0}");
+        assert!(
+            rows[0].contains("◔ impl-1 is working"),
+            "the run card is pinned to row 0: {}",
+            rows[0]
+        );
+        assert!(rows[1].contains("PR #7"), "the PR rides row 1: {}", rows[1]);
     }
 
     /// When the delete-confirm modal is open the bottom row paints the red
@@ -2609,7 +3181,7 @@ mod card_tests {
         s = reduce_task_detail(&s, TaskDetailEvent::Key('x')).state;
         assert!(s.delete_modal_open(), "x opened the delete modal");
         let mut buf = WireBuffer::new(80, 30);
-        render_task_detail(&mut buf, 80, 0, 29, &s);
+        render_task_detail(&mut buf, 80, 0, 29, &s, 0);
         let text = painted_text(&buf);
         assert!(text.contains("delete"), "delete prompt painted: {text}");
         assert!(text.contains("Fix the widget"), "names the target issue");

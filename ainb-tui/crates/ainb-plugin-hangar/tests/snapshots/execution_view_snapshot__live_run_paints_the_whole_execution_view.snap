@@ -1,0 +1,28 @@
+---
+source: crates/ainb-plugin-hangar/tests/execution_view_snapshot.rs
+expression: "glyph_map(&buf, 100)"
+---
+╭─ 📋 HGR-5 · Ticket stats: GET /api/tickets/stats ─────────────────────────────────────────────────╮
+│ ◔ impl-1 is working · 7m 17s · 1 tool · $0.42                                           X cancel │
+│ ainb/…3N9GP8 → main · PR #8 ✓                                                                    │
+│──────────────────────────────────────────────────────────────────────────────────────────────────│
+│ in progress · P2 · impl-1 · created 2026-09-01 · @boxtrack · main → main                         │
+│──────────────────────────────────────────────────────────────────────────────────────────────────│
+│ Add GET /api/tickets/stats to the hono api under api/: returns {total, open, closed}.            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+runs ──────────────────────────────────────────────────────────────│ activity ──────────────────────
+▶ ◔ impl-1 · running 7m 17s  PR #8 ✓  $0.42                        │  7m impl-1 claimed the issue
+  ✗ rev-1 · failed in 5m 00s  $0.11                                │  6m you moved todo → in progres
+  ● impl-1 · done in 3m 00s                                        │
+transcript ────────────────────────────────────────────────────────│
+* reading api/src/db.ts                                            │
+→ Edit api/src/routes.ts                                           │
+← 3 files changed                                                  │
+▌ Registering the route before the 404 handler                     │
+                                                                   │
+                                                                   │
+                                                                   │
+                                                                   │
+                                                                   │
+                                                                   │
+                                                                   │

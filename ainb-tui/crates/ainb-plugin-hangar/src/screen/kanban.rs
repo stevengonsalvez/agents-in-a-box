@@ -289,6 +289,23 @@ impl KanbanState {
             .max_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.task_id.cmp(&b.task_id)))
     }
 
+    /// EVERY card whose parent issue is `issue_id`, in board order — the issue's
+    /// run history as the tasks snapshot knows it.
+    ///
+    /// The task-detail execution log (crisp B4 §2.3) enumerates through this:
+    /// `hangar/run_history` has no issue column, so the board's cards are the
+    /// only client-side answer to "which runs belong to this issue", and the
+    /// only one that includes a run still going.
+    pub fn cards_for_issue<'a>(
+        &'a self,
+        issue_id: &'a str,
+    ) -> impl Iterator<Item = &'a CardSummary> {
+        self.columns
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .filter(move |card| card.issue_id.as_deref() == Some(issue_id))
+    }
+
     /// The NEWEST card for `issue_id` whose run is still live (not in a terminal
     /// status), or `None` when every run of the issue has finished. The
     /// task-detail header names this row on an `already_active` dispatch
@@ -556,7 +573,10 @@ fn card_title(c: &CardSummary, now_ms: i64) -> String {
 /// nothing). Only the daemon's own `ainb/<task id>` run branch (minted by
 /// `workdir_provision::worktree_branch`) is elided, and its tail is the half that
 /// ties the card to its `#<short id>` title.
-fn elide_branch(branch: &str) -> String {
+///
+/// Crate-visible: the task-detail run head paints the SAME branch (crisp B4
+/// §2.3), and two elides would drift the moment one of them was tuned.
+pub(crate) fn elide_branch(branch: &str) -> String {
     let (prefix, last) = branch.rsplit_once('/').map_or(("", branch), |(p, l)| (p, l));
     if !is_ulid(last) {
         return branch.to_string();

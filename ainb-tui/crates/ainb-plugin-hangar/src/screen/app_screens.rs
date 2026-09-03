@@ -1363,6 +1363,59 @@ fn issue_titles(rows: &[IssueRow]) -> std::collections::BTreeMap<String, String>
     rows.iter().map(|r| (r.id.as_str().to_string(), r.title.clone())).collect()
 }
 
+/// Project every run of `issue_id` for the task-detail execution log
+/// (crisp B4 §2.3), joining the two snapshots that between them know a run.
+///
+/// `hangar/tasks_list` (through the Kanban cards) is the SPINE: it is the only
+/// snapshot that says which runs belong to which issue, and the only one that
+/// carries a run still going. `hangar/run_history` is joined on the task id for
+/// what a finished run cost — it has no issue column of its own, so it can only
+/// ever enrich, never enumerate. A run with no history row simply prints no
+/// cost, which is every running run.
+///
+/// The join is a map build over the history (≤ the daemon's row cap, a few
+/// hundred) plus one lookup per card, and it runs when a SNAPSHOT lands, not per
+/// paint.
+fn project_runs(
+    kanban: &KanbanState,
+    history: &[ainb_hangar_proto::snapshots::RunHistoryRow],
+    issue_id: &str,
+    names: &std::collections::BTreeMap<String, String>,
+) -> Vec<super::task_detail::RunRow> {
+    let cost_by_task: std::collections::BTreeMap<&str, i64> = history
+        .iter()
+        .filter_map(|r| {
+            let task = r.task_id.as_deref()?;
+            #[allow(clippy::cast_possible_truncation)]
+            Some((task, (r.cost_usd * 100.0).round() as i64))
+        })
+        .collect();
+    let finished_by_task: std::collections::BTreeMap<&str, i64> = history
+        .iter()
+        .filter_map(|r| r.task_id.as_deref().map(|task| (task, r.finished_at)))
+        .collect();
+    kanban
+        .cards_for_issue(issue_id)
+        // A status outside the CHECK'd FSM (a daemon newer than this plugin) has
+        // no word in the vocabulary, and the log would rather drop a row than
+        // paint a confident `queued` over a state it does not know.
+        .filter_map(|card| {
+            Some(super::task_detail::RunRow {
+                state: crate::vocab::RunState::parse(&card.status)?,
+                agent: names.get(&card.agent_id).unwrap_or(&card.agent_label).clone(),
+                started_at: card.created_at,
+                finished_at: finished_by_task.get(card.task_id.as_str()).copied(),
+                cost_cents: cost_by_task.get(card.task_id.as_str()).copied(),
+                short_id: card.short_id.clone(),
+                task_id: card.task_id.clone(),
+                branch: card.branch.clone(),
+                pr_url: card.pr_url.clone(),
+                pr_status: card.pr_status,
+            })
+        })
+        .collect()
+}
+
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
 /// rebuilt for whichever issue it is opened on.
 impl ScreenStates {
@@ -1401,6 +1454,7 @@ impl ScreenStates {
         branch: Option<String>,
         status: Option<&str>,
     ) {
+        let issue_id = issue.id.as_str().to_string();
         let mut td = TaskDetailState::new(task_id, issue);
         td.set_branch(branch);
         if let Some(lifecycle) =
@@ -1410,6 +1464,10 @@ impl ScreenStates {
         }
         self.task_detail = Some(td);
         self.resolve_task_detail_names();
+        // Crisp B4 §2.3: the activity pane rides the SAME deferred
+        // `hangar/issue_timeline` fetch the activity modal arms — one RPC, one
+        // reply, both surfaces. Fired by `render`, never inline in the key path.
+        self.pending_activity_fetch = Some(issue_id);
     }
 
     /// Resolve the open task-detail header's names against the cached agents +
@@ -1433,11 +1491,60 @@ impl ScreenStates {
             .kanban
             .card_for_task(td.task_id().as_str())
             .and_then(|c| names.get(&c.agent_id).cloned());
-        let blocking_run = self.kanban.active_card_for_issue(issue.id.as_str()).map(|c| {
+        let issue_id = issue.id.as_str().to_string();
+        let blocking_run = self.kanban.active_card_for_issue(&issue_id).map(|c| {
             let agent = names.get(&c.agent_id).unwrap_or(&c.agent_label);
             format!("#{} {agent} ({})", c.short_id, c.status)
         });
         td.set_resolved_names(assignee_name, agent_name, blocking_run);
+        // Crisp B4 §2.3: the execution log rides the same two snapshots, and the
+        // same seam, so it can never disagree with the header about which runs
+        // this issue has.
+        td.set_runs(project_runs(
+            &self.kanban,
+            self.usage.runs(),
+            &issue_id,
+            &names,
+        ));
+    }
+
+    /// Compose the open task-detail's ACTIVITY pane from an `hangar/issue_timeline`
+    /// reply (crisp B4 §2.3), newest first — the same rows the activity modal
+    /// renders, through the same three label helpers, so the pane and the modal
+    /// can never tell different stories. A no-op when no task-detail is open or
+    /// the reply is for a different issue.
+    pub fn set_task_detail_activity(
+        &mut self,
+        issue_id: &str,
+        entries: &[ainb_hangar_proto::snapshots::TimelineEntryRow],
+    ) {
+        let names = agent_names(&self.actors);
+        let Some(td) = self.task_detail.as_mut() else {
+            return;
+        };
+        if td.issue().id.as_str() != issue_id {
+            return;
+        }
+        let resolve = |id: &str| names.get(id).cloned();
+        let mut rows: Vec<super::task_detail::ActivityRow> = entries
+            .iter()
+            .map(|e| {
+                let actor = super::activity::actor_label(e, &resolve);
+                let action = super::activity::action_label(e);
+                let detail = super::activity::detail_label(e);
+                let text = if detail.is_empty() {
+                    format!("{actor} {action}")
+                } else {
+                    format!("{actor} {action} {detail}")
+                };
+                super::task_detail::ActivityRow {
+                    at_ms: e.created_at,
+                    text,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+        td.set_activity(rows);
     }
 
     /// Apply a freshly-fetched PR status to the open task-detail screen (e38.34)
@@ -1599,7 +1706,7 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::TaskDetail(_) => {
             if let Some(td) = &states.task_detail {
-                crate::screen::task_detail::render_task_detail(buf, w, top, bottom, td);
+                crate::screen::task_detail::render_task_detail(buf, w, top, bottom, td, now_ms());
             }
         }
         Screen::AgentPicker(_) => {
@@ -3292,6 +3399,103 @@ mod task_detail_open_tests {
         }
     }
 
+    /// Crisp B4 §2.3: the execution log enumerates EVERY task-FSM state the
+    /// issue has runs in, ordered running on top then failed then the rest, with
+    /// the cost joined on from `run_history` for the runs that have one.
+    ///
+    /// The assertion is over the WHOLE known set (one run per `TaskStatus`, fed
+    /// in a deliberately wrong order), not over a "running is first" sample: a
+    /// sixth FSM state has to be placed here to keep this green.
+    #[test]
+    fn the_execution_log_covers_every_run_state_running_on_top_then_failed() {
+        use ainb_hangar_core::task_status::TaskStatus;
+
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1")]);
+        // One run per FSM state, newest first on the way IN so a stable sort
+        // alone could not produce the expected order.
+        let tasks: Vec<_> = TaskStatus::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, status)| {
+                let mut t = task(&format!("t-{i}"), "a1", status.as_str());
+                t.created_at = i as i64 * 1_000;
+                t
+            })
+            .collect();
+        states.set_tasks(&tasks);
+        states.set_run_history(
+            "ws",
+            RunHistoryResult {
+                runs: vec![ainb_hangar_proto::snapshots::RunHistoryRow {
+                    run_id: "r-1".into(),
+                    task_id: Some("t-3".into()),
+                    session_id: None,
+                    provider: "claude".into(),
+                    profile: None,
+                    started_at: Some(0),
+                    finished_at: 90_000,
+                    outcome: "success".into(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: 0.425,
+                    diff_add: 0,
+                    diff_del: 0,
+                }],
+            },
+        );
+        states.open_task_detail(TaskId::from_str("t-2").unwrap(), issue(), None, None);
+        let td = states.task_detail.as_ref().unwrap();
+
+        // `queued` and `dispatched` share the `queued` word, so the six FSM
+        // states are six rows in five vocabulary words.
+        let words: Vec<&str> = td.runs().iter().map(|r| r.state.word()).collect();
+        assert_eq!(
+            words,
+            vec!["running", "queued", "queued", "failed", "cancelled", "done"],
+            "running on top, failed first, newest first inside each bucket"
+        );
+        assert_eq!(td.runs().len(), TaskStatus::ALL.len(), "no run dropped");
+
+        // The cursor opens on the BOUND run wherever the ordering put it.
+        assert_eq!(
+            td.expanded_run().map(|r| r.task_id.as_str()),
+            Some("t-2"),
+            "the expanded run is the one the screen is bound to"
+        );
+        // The history join is by task id, and it rounds to whole cents.
+        let joined: Vec<Option<i64>> = td.runs().iter().map(|r| r.cost_cents).collect::<Vec<_>>();
+        assert_eq!(
+            joined.iter().filter(|c| c.is_some()).count(),
+            1,
+            "only the run with a history row has a cost: {joined:?}"
+        );
+        let with_cost = td.runs().iter().find(|r| r.cost_cents.is_some()).unwrap();
+        assert_eq!(with_cost.task_id, "t-3");
+        assert_eq!(with_cost.cost_cents, Some(43), "0.425 USD → 43 cents");
+        assert_eq!(with_cost.finished_at, Some(90_000));
+        assert_eq!(with_cost.agent, "impl-1", "the roster name, not the id");
+    }
+
+    /// A run of ANOTHER issue never reaches this issue's log — the tasks
+    /// snapshot is workspace-wide, so the filter is the only thing keeping the
+    /// screens apart.
+    #[test]
+    fn the_execution_log_holds_only_this_issues_runs() {
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1")]);
+        let mut other = task("t-other", "a1", "running");
+        other.issue_id = Some("issue-2".into());
+        let mut orphan = task("t-orphan", "a1", "running");
+        orphan.issue_id = None;
+        states.set_tasks(&[task("t-1", "a1", "running"), other, orphan]);
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue(), None, None);
+
+        let td = states.task_detail.as_ref().unwrap();
+        let ids: Vec<&str> = td.runs().iter().map(|r| r.task_id.as_str()).collect();
+        assert_eq!(ids, vec!["t-1"], "only issue-1's run");
+    }
+
     /// Crisp B1 (defects 5 + 8): the header's names resolve from the agents +
     /// tasks snapshots whichever order they land in, at open or afterwards. The
     /// assignee resolves through the roster, the bound run's agent through its
@@ -3351,6 +3555,7 @@ mod task_detail_open_tests {
             0,
             39,
             states.task_detail.as_ref().unwrap(),
+            0,
         );
         let text = painted_text(&buf);
         assert!(
@@ -3367,6 +3572,7 @@ mod task_detail_open_tests {
             0,
             39,
             states.task_detail.as_ref().unwrap(),
+            0,
         );
         let text = painted_text(&buf);
         assert!(
