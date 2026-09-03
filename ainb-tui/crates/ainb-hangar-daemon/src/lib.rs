@@ -930,6 +930,12 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // would cancel every task past half an hour while the same task on the
         // process executor gets 2.5 h. Raise the pool's floor to the task budget
         // rather than leave a 5x cut invisible from the flag.
+        // ponytail: the raise lands AFTER `from_env` has already coupled
+        // `sweep_interval` down to the configured deadline, so
+        // `AINB_ACP_TURN_DEADLINE_MS=2000` with `executor=acp` leaves a raised
+        // deadline and a 1 s sweep that can never match it: harmless (the sweep
+        // is idempotent and only costs one indexed read) and test-only config
+        // today. Recouple the interval to the EFFECTIVE deadline with A6.
         let configured_deadline = acp_config.turn_deadline;
         acp_config.turn_deadline = crate::run_loop::reconcile_turn_deadline(
             configured_deadline,
