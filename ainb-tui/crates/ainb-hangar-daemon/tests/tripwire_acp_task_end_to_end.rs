@@ -17,7 +17,7 @@
 //! `[acp.adapters.claude-agent-acp]` entry is repointed at
 //! `ainb-acp`'s `fake_acp_adapter` fixture through the same config.toml an
 //! operator edits, and the fixture is SCRIPTED through the agent's own
-//! `agent_env` — which is also the proof that the per-agent environment reaches
+//! `agent_env`, which is also the proof that the per-agent environment reaches
 //! a per-task adapter process at all.
 //!
 //! The negative assertions are the ones that stop a silent fallback: a flag
@@ -150,8 +150,8 @@ async fn an_acp_task_runs_to_done_with_no_process_and_no_tmux() {
 /// WORKSPACE, and answering it through `attention/answer` completes the turn.
 ///
 /// The workspace id is the half that used to be missing: `raise_permission`
-/// hardcoded `None`, so the row existed but no workspace-filtered surface — and
-/// every operator surface is one — could show it.
+/// hardcoded `None`, so the row existed but no workspace-filtered surface (and
+/// every operator surface is one) could show it.
 #[tokio::test]
 async fn a_task_raised_approval_is_workspace_scoped_and_answerable() {
     if !tripwire_support::tmux_available() {
@@ -192,7 +192,7 @@ async fn a_task_raised_approval_is_workspace_scoped_and_answerable() {
         "a task-raised approval must carry the task's workspace, or no filtered inbox shows it"
     );
     // Rooted in THIS run's directory, not the daemon's cwd. The task row's own
-    // `work_dir` is still NULL here — it is written at finalize — which is
+    // `work_dir` is still NULL here (it is written at finalize), which is
     // exactly why the approval has to carry the session's cwd itself.
     let cwd: String = attention.get::<Option<String>, _>("cwd").unwrap_or_default();
     assert!(
@@ -200,8 +200,8 @@ async fn a_task_raised_approval_is_workspace_scoped_and_answerable() {
         "the approval must be rooted in the run's own worktree, got {cwd:?}"
     );
 
-    // Answer it the way Control Center does — `attention/answer`, not
-    // `fleet/action` — and the turn completes.
+    // Answer it the way Control Center does (`attention/answer`, not
+    // `fleet/action`) and the turn completes.
     let attention_id: String = attention.get("id");
     let payload: String = attention.get("payload");
     let payload: serde_json::Value = serde_json::from_str(&payload).expect("payload json");
@@ -333,6 +333,78 @@ async fn cancelling_an_acp_task_cancels_the_adapter_turn() {
     assert!(
         log.contains("cancel"),
         "the adapter must be told session/cancel, not merely abandoned: {log}"
+    );
+    assert_no_process_executor_trace(&row, &marker, task_id);
+}
+
+/// A turn that outlives `HANGAR_PROVIDER_MAX_RUNTIME_MS` is cancelled by the
+/// EXECUTOR's own deadline and finalized `timeout`, and the adapter is told.
+///
+/// The task budget is the one the flag does not mention: the pool applies its
+/// own turn deadline to every scope, so without the boot-time reconciliation an
+/// ACP task would instead die on the pool's 30-minute default while the same
+/// task on the process executor ran for 2.5 h. This pins the executor end of
+/// that contract: its poll bound is `max_runtime`, not the pool's.
+#[tokio::test]
+async fn an_acp_turn_past_the_task_budget_times_out_and_tells_the_adapter() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping acp deadline e2e");
+        return;
+    }
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+
+    let rpc_log = home.path().join("rpc.log");
+    let agent = seed_agent_with_env(
+        &pool,
+        &ids,
+        "agent-deadline",
+        &serde_json::json!({
+            "FAKE_ACP_HANG_SESSIONS": "*",
+            "FAKE_ACP_RPC_LOG": rpc_log.display().to_string(),
+        }),
+    )
+    .await;
+    write_acp_adapter_config(home.path(), &fake_acp_adapter(), "default");
+    let marker = home.path().join("process-executor-ran");
+    let fake_claude = write_marker_binary(home.path(), &marker);
+
+    let home_str = home.path().display().to_string();
+    let claude = fake_claude.display().to_string();
+    let session = DaemonSession::spawn(
+        &daemon_bin(),
+        home.path(),
+        &[
+            ("AINB_HANGAR_HOME", &home_str),
+            ("HOME", &home_str),
+            ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
+            ("HANGAR_TASK_EXECUTOR", "acp"),
+            ("HANGAR_CLAUDE_PATH", &claude),
+            ("HANGAR_DAEMON_POLL_MS", "200"),
+            ("HANGAR_DAEMON_DISABLE_SANDBOX", "1"),
+            // Far below the pool's 30-minute deadline, so the executor's own
+            // bound is unambiguously the one that fired.
+            ("HANGAR_PROVIDER_MAX_RUNTIME_MS", "4000"),
+        ],
+    );
+    let task_id = "task-acp-deadline";
+    enqueue_task(&pool, &ids, task_id, &agent, "headless").await;
+
+    let row = wait_for_db(&pool, task_id, "failed", Duration::from_mins(1)).await;
+    drop(session);
+
+    assert_eq!(
+        row.get::<Option<String>, _>("failure_reason").as_deref(),
+        Some("timeout"),
+        "a turn past the task budget is a timeout, not drift: {}",
+        dump_legs(&pool).await
+    );
+    let log = std::fs::read_to_string(&rpc_log).expect("rpc log");
+    assert!(
+        log.contains("cancel"),
+        "the deadline path must tell the adapter too, not just stop polling: {log}"
     );
     assert_no_process_executor_trace(&row, &marker, task_id);
 }

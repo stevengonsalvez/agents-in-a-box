@@ -24,7 +24,7 @@
 //! leg in one transaction on turn end, on adapter exit, on the deadline sweep
 //! and on boot convergence ([`crate::acp_pool`]), so it is the one signal that
 //! is always written. A `oneshot` on the prompt job would be ~40 lines and one
-//! missed send would freeze the task at `running` until the multi-hour TTL —
+//! missed send would freeze the task at `running` until the multi-hour TTL:
 //! the exact black hole `execute_claimed`'s spawn-setup umbrella exists to
 //! close.
 //!
@@ -65,6 +65,19 @@ const LEG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// window that has to be tuned.
 const REPLY_SCAN_LIMIT: i64 = 8;
 
+/// How long a cancel waits for the pool actor to converge the session before
+/// the adapter process is torn down anyway. See [`await_converged`].
+const CONVERGE_WAIT: Duration = Duration::from_secs(2);
+
+/// The `fleet_acp_session.scope_key` namespace RESERVED for task runs.
+///
+/// Reserved, not merely used: `fleet/acp_session_create` refuses it, because a
+/// chat session minted under a real task's scope would make that task's later
+/// run fail `ScopeHeld` (terminal, `SpawnError`) and would make
+/// [`workspace_for_scope`] stamp the chat session's approvals with the task's
+/// workspace.
+pub const TASK_SCOPE_PREFIX: &str = "task:";
+
 /// The `fleet_acp_session.scope_key` a task's session is created under.
 ///
 /// Deliberately derivable from the task id alone: the cancel arm, the durable
@@ -73,7 +86,7 @@ const REPLY_SCAN_LIMIT: i64 = 8;
 /// live scope.
 #[must_use]
 pub fn scope_key(task_id: &str) -> String {
-    format!("task:{task_id}")
+    format!("{TASK_SCOPE_PREFIX}{task_id}")
 }
 
 /// The workspace an ACP session's scope belongs to, or `None` when the scope
@@ -81,10 +94,10 @@ pub fn scope_key(task_id: &str) -> String {
 ///
 /// The one place the `task:<id>` scope convention is read back, so the pool
 /// does not have to know it. An attention row raised by a task's session lands
-/// unscoped without this, and a workspace-filtered inbox — which is every
-/// operator surface — never shows it.
+/// unscoped without this, and a workspace-filtered inbox (which is every
+/// operator surface) never shows it.
 pub async fn workspace_for_scope(pool: &SqlitePool, scope: &str) -> Option<String> {
-    let task_id = scope.strip_prefix("task:")?;
+    let task_id = scope.strip_prefix(TASK_SCOPE_PREFIX)?;
     ainb_hangar_store::repo::task::TaskRepo::get_by_id(pool, task_id)
         .await
         .ok()
@@ -117,11 +130,18 @@ fn task_config_dir(env: &ExecEnv) -> std::path::PathBuf {
 /// Refused rather than defaulted for anything else: silently prompting
 /// `claude-agent-acp` for a task whose agent asked for copilot is the same
 /// class of bug as spawning the headless argv into an interactive pane.
+///
+/// `codex-acp` is deliberately NOT served yet, even though the pool knows how
+/// to spawn it. [`task_adapter`] scopes `CLAUDE_CONFIG_DIR` and nothing else,
+/// while `HOME` rides the base allowlist, so a codex task would read the
+/// operator's `~/.codex`, which is the exact trap `CLAUDE_CONFIG_DIR` exists to
+/// close, and would be denied it under the Linux-default sandbox besides.
+/// Enabling it means scoping codex's own config home and proving it with a
+/// tripwire, which belongs with A8's per-agent provider selection.
 const fn adapter_for(backend: Backend) -> Option<&'static str> {
     match backend {
         Backend::Claude => Some(ainb_acp::config::CLAUDE_ADAPTER),
-        Backend::Codex => Some(ainb_acp::config::CODEX_ADAPTER),
-        Backend::Copilot | Backend::Antigravity => None,
+        Backend::Codex | Backend::Copilot | Backend::Antigravity => None,
     }
 }
 
@@ -249,10 +269,18 @@ pub async fn run_acp(
 
     let (state, detail) = await_leg(pool, &acp, &session_key, &message_id, max_runtime).await;
     let result = build_result(pool, &session_key, &message_id).await;
+    // Stop HOSTING the session. The lease below drops the adapter process, but
+    // the actor is a task of its own that nothing else retires: `ProcessExited`
+    // does not stop it, `retire_actor` only runs from the actor's own exit, and
+    // a per-task adapter key means `evict_if_at_cap` never fires. Without this
+    // every completed run leaks one actor plus a `pool.sessions` entry for the
+    // daemon's lifetime. The `fleet_acp_session` row survives, so a later
+    // resume-across-retry still has something to resume.
+    acp.teardown(&session_key, ConvergeCause::OperatorStop).await;
     Ok(outcome_for(&state, detail.as_deref(), result))
 }
 
-/// `session/cancel` the task's open turn — the ACP analogue of the interactive
+/// `session/cancel` the task's open turn: the ACP analogue of the interactive
 /// arm's `kill_session`.
 ///
 /// Dropping [`run_acp`] stops POLLING; it does not stop the agent, which lives
@@ -265,7 +293,7 @@ pub async fn run_acp(
 /// would mean the adapter never saw the `session/cancel` it is being stopped
 /// by. Bounded, so a wedged actor delays a cancel by seconds rather than
 /// forever.
-pub async fn cancel_run(pool: &SqlitePool, task_id: &str) {
+pub async fn cancel_run(pool: &SqlitePool, events: &EventSink, task_id: &str) {
     let Some(acp) = crate::acp_pool::active_handle().await else {
         return;
     };
@@ -273,19 +301,42 @@ pub async fn cancel_run(pool: &SqlitePool, task_id: &str) {
     let Ok(Some(session)) = session else {
         return;
     };
-    if !acp.cancel(&session.session_key, ConvergeCause::OperatorStop).await {
+    if acp.cancel(&session.session_key, ConvergeCause::OperatorStop).await {
+        await_converged(pool, &session.session_key).await;
         return;
     }
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // No live actor took the cancel, so nothing is going to resolve the leg it
+    // left PENDING. Converge the session here instead of leaving an orphan row
+    // for the next boot scan to find.
+    if let Err(error) = crate::acp_pool::converge_dirty_session(
+        pool,
+        events,
+        &session.session_key,
+        ConvergeCause::OperatorStop,
+    )
+    .await
+    {
+        tracing::warn!(task_id, %error, "could not converge a task session with no live actor");
+    }
+}
+
+/// Wait, bounded, for the pool actor to have HANDLED a cancel rather than
+/// merely received it: its convergence resolves every pending leg on the
+/// session, so an empty pending set is the observable.
+///
+/// Both cancel paths need this and for the same reason. The caller's next act
+/// is the lease drop that kills the adapter process, and killing it first would
+/// mean the adapter never saw the `session/cancel` it is being stopped by.
+async fn await_converged(pool: &SqlitePool, session_key: &str) {
+    let deadline = Instant::now() + CONVERGE_WAIT;
     while Instant::now() < deadline {
-        match FleetMessageRepo::pending_deliveries_for_session(pool, &session.session_key).await {
+        match FleetMessageRepo::pending_deliveries_for_session(pool, session_key).await {
             Ok(legs) if legs.is_empty() => return,
             _ => tokio::time::sleep(Duration::from_millis(20)).await,
         }
     }
     tracing::warn!(
-        task_id,
-        session_key = %session.session_key,
+        %session_key,
         "acp cancel did not converge in time; tearing the adapter down anyway"
     );
 }
@@ -336,6 +387,14 @@ fn task_adapter(
         if let Some(root) = location.extra_root.as_deref() {
             policy = policy.allow_read(root).allow_write(root);
         }
+        // The adapter's OWN binary. Unlike a provider CLI, which the daemon
+        // canonicalises into the system read roots at startup, an ACP adapter is
+        // typically an npm global install or `~/.local/bin`, outside every
+        // system root, so Landlock would deny the exec of the very program this
+        // policy is being built for.
+        if let Some(dir) = adapter.command.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            policy = policy.allow_read(dir);
+        }
         adapter.sandbox = Some(policy);
     }
     adapter
@@ -353,8 +412,8 @@ fn sandbox_enabled() -> bool {
 /// Poll the delivery leg until it leaves `PENDING`, or the run outlives
 /// `max_runtime`, and answer the `(state, detail)` the outcome mapping reads.
 ///
-/// On the deadline the turn is CANCELLED on the way out — the adapter would
-/// otherwise keep working on a run nobody is waiting for — and the pair
+/// On the deadline the turn is CANCELLED on the way out (the adapter would
+/// otherwise keep working on a run nobody is waiting for) and the pair
 /// returned is the same one the pool's own deadline sweep would have written,
 /// so both routes to a timed-out task map identically.
 async fn await_leg(
@@ -380,6 +439,10 @@ async fn await_leg(
         }
         if Instant::now() >= deadline {
             acp.cancel(session_key, ConvergeCause::TurnDeadline).await;
+            // Same bounded wait the operator-cancel path takes, and for the
+            // same reason: the lease drop that follows kills the adapter, and
+            // killing it first would mean it never saw the `session/cancel`.
+            await_converged(pool, session_key).await;
             return (
                 "UNKNOWN".to_string(),
                 Some(crate::acp_pool::DELIVERY_TURN_DEADLINE.to_string()),
@@ -418,7 +481,7 @@ async fn build_result(pool: &SqlitePool, session_key: &str, message_id: &str) ->
     }
 }
 
-/// [`FailureReason::SpawnError`] with no captured output — the pool or its
+/// [`FailureReason::SpawnError`] with no captured output: the pool or its
 /// registry could not produce an adapter at all.
 fn spawn_error() -> RunOutcome {
     RunOutcome::Failed {
@@ -432,14 +495,14 @@ fn spawn_error() -> RunOutcome {
 ///
 /// The token is the whole answer, and the state is not part of the key. The
 /// pool writes the SAME converge cause under two different states depending on
-/// where the prompt was standing when the session converged — `drain_queue`
+/// where the prompt was standing when the session converged (`drain_queue`
 /// resolves a still-queued prompt `FAILED`, `converge_dirty_session` resolves
-/// an issued one `UNKNOWN` — and `attach_with_one_requeue` writes
+/// an issued one `UNKNOWN`), and `attach_with_one_requeue` writes
 /// `adapter_exit` on a `FAILED` leg while the exit watcher writes it on an
 /// `UNKNOWN` one. Neither difference changes how the task should be retried, so
 /// keying on the pair meant four reachable combinations (`FAILED`+`adapter_exit`,
 /// `FAILED`+`turn_deadline`, `FAILED`+`daemon_restart`, `UNKNOWN`+`operator_stop`)
-/// answered `ProviderContractDrift`/NoRetry — burning the retry chain on
+/// answered `ProviderContractDrift`/`NoRetry`, burning the retry chain on
 /// exactly the transient faults that should resume.
 fn outcome_for_token(token: &str, result: &RunnerResult) -> Option<RunOutcome> {
     use crate::acp_pool as tokens;
@@ -474,7 +537,7 @@ fn outcome_for_token(token: &str, result: &RunnerResult) -> Option<RunOutcome> {
 /// success can read `resume=loaded`, a budget stop `stop=max_tokens;
 /// resume=reprimed`, and an adapter exit appends the raw error text after its
 /// token. An unmapped detail is
-/// [`FailureReason::ProviderContractDrift`] on purpose — an unknown token means
+/// [`FailureReason::ProviderContractDrift`] on purpose: an unknown token means
 /// the pool's taxonomy grew, not that the agent succeeded.
 ///
 /// Only two shapes read the STATE: a `DELIVERED` leg, where the stop reason
@@ -553,9 +616,13 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_acp_backends_are_servable() {
+    fn only_claude_is_servable_over_acp_today() {
         assert_eq!(adapter_for(Backend::Claude), Some("claude-agent-acp"));
-        assert_eq!(adapter_for(Backend::Codex), Some("codex-acp"));
+        // Refused, not defaulted. `codex-acp` waits on a task-scoped codex
+        // config home: `task_adapter` pins `CLAUDE_CONFIG_DIR` only, and `HOME`
+        // rides the base allowlist, so a codex task would read the operator's
+        // `~/.codex`, the exact trap `CLAUDE_CONFIG_DIR` exists to close.
+        assert_eq!(adapter_for(Backend::Codex), None);
         assert_eq!(adapter_for(Backend::Copilot), None);
         assert_eq!(adapter_for(Backend::Antigravity), None);
     }
