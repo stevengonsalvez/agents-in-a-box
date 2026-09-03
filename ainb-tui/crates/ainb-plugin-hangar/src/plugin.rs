@@ -753,9 +753,17 @@ fn answer_verdict_note(
 /// it. Both halves are the same `(kind, body)` from the same classifier, so the
 /// overlap is an exact prefix/suffix match. Returns 0 when they do not overlap.
 ///
-/// ponytail: the longest match wins, checked longest-first over at most the
-/// buffer's length; that is O(n*m) worst case on a few thousand short entries,
-/// which happens once per timeline open. A rolling hash if a profile ever says so.
+/// Both sides are scoped to ONE task before this runs, so a concurrent run's
+/// lines cannot break the match.
+///
+/// ponytail: the seam is GUESSED from content, not identified. Longest match
+/// wins, so a repeated `(kind, body)` at the seam (snapshot tail `[X, X]`,
+/// buffer `[X, Y]`) reads as overlap 2 and drops a genuine `X`. Losing a
+/// duplicate line beats printing one twice, which is why the bias is this way
+/// round; carrying the daemon's line ordinal on `TaskMessage` would identify the
+/// seam instead of guessing it, and that is the fix if it ever matters.
+/// Longest-first costs O(n*m) worst case on a few thousand short entries, once
+/// per timeline open.
 fn leading_overlap(
     snapshot: &[crate::screen::task_detail::ViewEntry],
     buffered: &std::collections::VecDeque<(String, ainb_hangar_proto::events::MessageKind, String)>,
@@ -764,7 +772,7 @@ fn leading_overlap(
         .iter()
         .filter_map(|e| match e {
             crate::screen::task_detail::ViewEntry::Line(l) => Some((l.kind(), l.body())),
-            crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+            _ => None,
         })
         .collect();
     let max = buffered.len().min(tail.len());
@@ -1911,6 +1919,12 @@ impl HangarPlugin {
             return;
         };
         let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl);
+        // The buffer collects EVERY task's lines, so drop the foreign ones before
+        // measuring: a concurrent run's line at or before the seam would otherwise
+        // break the match and replay the whole overlap twice. The replay below
+        // discards them anyway, so this only moves the filter earlier.
+        let mut buffered = buffered;
+        buffered.retain(|(t, _, _)| Some(t.as_str()) == r.task_id.as_deref());
         // The buffer arms before the request goes out, while the snapshot covers
         // the log up to the daemon's read, and the runner writes each line to the
         // JSONL BEFORE it emits it. So every line in that window is in BOTH halves,
