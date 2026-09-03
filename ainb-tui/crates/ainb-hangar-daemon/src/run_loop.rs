@@ -28,6 +28,7 @@
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
 //! | `HANGAR_DAEMON_DISABLE_SANDBOX` | `1` forces providers UNCONFINED (security downgrade); `0` forces the OS sandbox ON | unset (platform default: ON on Linux, OFF on macOS) |
+//! | `HANGAR_TASK_EXECUTOR` | `acp` runs tasks through an ACP adapter ([`crate::acp_task`]); `process` spawns the provider CLI. An unrecognised value warns and falls back | `process` |
 //!
 //! When `HANGAR_DAEMON_RUNTIME_ID` is unset the claim loop is a no-op (the
 //! daemon still sweeps) — a daemon with no runtime has nothing to claim.
@@ -191,7 +192,7 @@ pub struct DaemonConfig {
 /// A second FIRST-CLASS executor, not a mode: `Process` spawns the provider CLI
 /// (`claude -p`, `codex exec`) and keeps its jsonl transcript; `Acp` prompts an
 /// ACP adapter over JSON-RPC and keeps its transcript in `fleet_provider_event`.
-/// Deliberately a different axis from [`Mode`] — executor and interactivity are
+/// Deliberately a different axis from [`Mode`]: executor and interactivity are
 /// two questions, and conflating them is the bug [`interactive_command`] was
 /// extracted to prevent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -205,6 +206,52 @@ pub enum TaskExecutor {
 
 /// The `HANGAR_TASK_EXECUTOR` value that asks for the ACP path.
 const ACP_EXECUTOR: &str = "acp";
+
+/// The wall-clock ceiling on one provider run (`HANGAR_PROVIDER_MAX_RUNTIME_MS`).
+///
+/// Read through one function because two callers need it: [`DaemonConfig`],
+/// and [`acp_turn_budget`], which is consulted where no `DaemonConfig` exists
+/// yet. Two reads would be two places for the default to drift.
+fn provider_max_runtime_from_env() -> Duration {
+    env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
+        .map_or(PROVIDER_MAX_RUNTIME, Duration::from_millis)
+}
+
+/// How long ONE ACP turn must be allowed to run on this daemon's pool, or
+/// `None` when tasks do not run on it.
+///
+/// Under `HANGAR_TASK_EXECUTOR=acp` a task turn IS a pool turn, and the pool
+/// applies its own [`PoolConfig::turn_deadline`](crate::acp_pool::PoolConfig)
+/// to every scope with no exemption. Its 30-minute default would therefore
+/// cancel every task past half an hour while the identical task on the process
+/// executor gets `HANGAR_PROVIDER_MAX_RUNTIME_MS` (2.5 h by default): a 5x
+/// budget cut that is invisible from the flag that caused it.
+///
+/// Read from the environment rather than a [`DaemonConfig`] because the pool is
+/// built before one exists ([`crate::boot`]); the executor comes through the
+/// same pure resolver the daemon config uses, so the two cannot disagree.
+#[must_use]
+pub fn acp_turn_budget() -> Option<Duration> {
+    let executor =
+        DaemonConfig::resolve_task_executor(std::env::var_os("HANGAR_TASK_EXECUTOR").as_deref());
+    (executor == TaskExecutor::Acp).then(provider_max_runtime_from_env)
+}
+
+/// The turn deadline a pool needs given the task budget riding on it.
+///
+/// Raise only: a deadline an operator lengthened deliberately
+/// (`AINB_ACP_TURN_DEADLINE_MS`) is never shortened, and a daemon whose tasks
+/// run on the process executor keeps the pool's own default untouched. The cost
+/// of raising it is that a wedged CHAT turn on the same daemon converges on the
+/// longer backstop; an operator can still stop one from the fleet surface at
+/// any time, and the alternative is tasks dying silently at 30 minutes.
+#[must_use]
+pub fn reconcile_turn_deadline(pool_deadline: Duration, task_budget: Option<Duration>) -> Duration {
+    match task_budget {
+        Some(budget) => pool_deadline.max(budget),
+        None => pool_deadline,
+    }
+}
 
 impl DaemonConfig {
     /// Build the config from the process environment (see the module table).
@@ -245,8 +292,7 @@ impl DaemonConfig {
         );
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
-        let provider_max_runtime = env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
-            .map_or(PROVIDER_MAX_RUNTIME, Duration::from_millis);
+        let provider_max_runtime = provider_max_runtime_from_env();
 
         let mut sweeper = SweeperConfig::default();
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_INTERVAL_MS") {
@@ -300,8 +346,8 @@ impl DaemonConfig {
     /// Resolve the task executor from the explicit `HANGAR_TASK_EXECUTOR`
     /// value (`None` when unset).
     ///
-    /// `acp` selects the ACP path; anything else — including an unset variable
-    /// and an unrecognised value — resolves to [`TaskExecutor::Process`], the
+    /// `acp` selects the ACP path; anything else (including an unset variable
+    /// and an unrecognised value) resolves to [`TaskExecutor::Process`], the
     /// documented default, with a warning on the typo so a misspelled opt-in is
     /// diagnosable rather than a silent no-op. Split out as a pure function so
     /// the precedence is testable without mutating process env, exactly like
@@ -1236,9 +1282,9 @@ async fn execute_claimed(
     };
 
     // An `interactive` task under the ACP executor is REFUSED, never silently
-    // run headless. There is no attachable pane on the ACP path — the axis
+    // run headless. There is no attachable pane on the ACP path: the axis
     // there is the adapter's `permission_mode` (`default` asks and a human
-    // answers through `attention/answer`, `bypassPermissions` does not) — and
+    // answers through `attention/answer`, `bypassPermissions` does not), and
     // downgrading an operator's explicit "give me a session to drive" into a
     // print-and-exit run is the exact class of bug `interactive_command` was
     // extracted to prevent. Terminalises BEFORE the worktree is provisioned and
@@ -1559,9 +1605,9 @@ async fn execute_claimed(
             if executor == TaskExecutor::Acp {
                 // Dropping `provider_run` stops POLLING; it does not stop the
                 // agent, which lives in an adapter process that has been told
-                // nothing. `session/cancel` it explicitly — the exact analogue
+                // nothing. `session/cancel` it explicitly: the exact analogue
                 // of the interactive arm's `kill_session` below.
-                crate::acp_task::cancel_run(pool, &task.id).await;
+                crate::acp_task::cancel_run(pool, events, &task.id).await;
             } else if mode == Mode::Interactive {
                 // The detached session survives `run_interactive`'s dropped `wait`,
                 // so kill it by its EXACT name and clear the shutdown-reap entry the
@@ -3140,6 +3186,33 @@ mod tests {
         assert!(
             detail.contains("claude"),
             "the synthesized diagnostic must name the provider: {detail}"
+        );
+    }
+
+    /// A5: the pool's turn deadline never cuts a task's runtime budget, and
+    /// never shortens a deadline an operator set deliberately.
+    #[test]
+    fn the_pool_deadline_is_raised_to_the_task_budget_and_never_lowered() {
+        let pool_default = Duration::from_secs(30 * 60);
+        // No tasks on this pool: its own default stands.
+        assert_eq!(
+            reconcile_turn_deadline(pool_default, None),
+            pool_default,
+            "the process executor must not touch the pool's deadline"
+        );
+        // The 5x cut this exists to close: a 2.5h task on a 30min pool.
+        assert_eq!(
+            reconcile_turn_deadline(pool_default, Some(PROVIDER_MAX_RUNTIME)),
+            PROVIDER_MAX_RUNTIME,
+            "an acp task must get its full HANGAR_PROVIDER_MAX_RUNTIME_MS"
+        );
+        // Raise only: an operator who lengthened AINB_ACP_TURN_DEADLINE_MS past
+        // the task budget keeps it.
+        let operator_set = PROVIDER_MAX_RUNTIME * 2;
+        assert_eq!(
+            reconcile_turn_deadline(operator_set, Some(PROVIDER_MAX_RUNTIME)),
+            operator_set,
+            "a longer configured deadline must never be shortened"
         );
     }
 

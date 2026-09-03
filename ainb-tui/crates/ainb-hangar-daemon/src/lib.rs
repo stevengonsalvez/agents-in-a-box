@@ -921,11 +921,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // The ACP agent pool. Installed BEFORE the socket accepts a connection so
         // `fleet/acp_session_create` can never answer "no pool" on a daemon that
         // has one; nothing is spawned until the first prompt reaches it.
-        let acp_pool = crate::acp_pool::AcpPool::new(
-            store.clone(),
-            broker.sink(),
-            crate::acp_pool::PoolConfig::from_env(),
+        let mut acp_config = crate::acp_pool::PoolConfig::from_env();
+        // Under `HANGAR_TASK_EXECUTOR=acp` a TASK turn is a pool turn, and the
+        // pool's deadline sweep exempts no scope, so its 30-minute default
+        // would cancel every task past half an hour while the same task on the
+        // process executor gets 2.5 h. Raise the pool's floor to the task budget
+        // rather than leave a 5x cut invisible from the flag.
+        acp_config.turn_deadline = crate::run_loop::reconcile_turn_deadline(
+            acp_config.turn_deadline,
+            crate::run_loop::acp_turn_budget(),
         );
+        let acp_pool = crate::acp_pool::AcpPool::new(store.clone(), broker.sink(), acp_config);
         let _acp_sweeper = acp_pool.spawn_sweeper();
         crate::acp_pool::install(acp_pool).await;
 
