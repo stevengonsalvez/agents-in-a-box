@@ -451,8 +451,27 @@ async fn test_keeping_dead_pane_survives_an_immediate_exit() -> Result<()> {
     session.start(temp_dir.path()).await?;
     let live = session.name().to_string();
 
-    // Let the program run and exit.
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    // Poll for the program's own output, do not sleep a guessed interval. The
+    // echo and the exit are two separate events, and a loaded runner can put
+    // the capture between them: the dead-pane marker is drawn while the line is
+    // not readable yet. The sibling assertion in `session_manager` went red on
+    // ubuntu that way while macOS passed the same commit.
+    //
+    // On timeout, fall through and let the assertions below report what the
+    // pane actually held.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = tokio::process::Command::new("tmux")
+            .args(["capture-pane", "-p", "-S", "-", "-t", &format!("={live}:")])
+            .output()
+            .await?;
+        if String::from_utf8_lossy(&seen.stdout).contains("codex-startup-failed")
+            || tokio::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     assert!(
         tmux_session_exists(&live),
