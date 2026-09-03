@@ -1,13 +1,17 @@
-//! P9.2 RED — task-detail PR badge render snapshots (insta inline).
+//! P9.2 — task-detail PR badge render snapshots (insta inline).
 //!
 //! When the bound issue's row carries a `pr_url` (captured by P9.1, surfaced on
-//! the wire by P9.2), the task-detail screen paints a single gold badge row
-//! `▶ PR <url>` with a muted `[o] open` hint next to it (keybinding-hint-near-
-//! control). When `pr_url` is `None` there is NO badge row at all — the snapshot
-//! delta is a *removed* line, never a `PR: none` placeholder.
+//! the wire by P9.2), the task-detail screen names it on the RUN HEAD's second
+//! row alongside the run's branch: `ainb/…N9GP8 → main · PR #8 ✓` (crisp B4
+//! §2.3). When `pr_url` is `None` there is NO chip at all — the snapshot delta
+//! is a *removed* token, never a `PR: none` placeholder.
 //!
-//! Width-aware (60 / 100 / 160 cols): the URL is truncated by `chars()` (never
-//! bytes — `reference_rust_utf8_truncate_trap`) so a narrow pane clips the URL
+//! The row replaced the full-URL badge (`▶ PR https://… CI …  [o] open`): the
+//! URL cost 45 cells to say what `#8` says, on the one line that now has to
+//! carry the branch as well, and `o` still opens it.
+//!
+//! Width-aware (60 / 100 / 160 cols): every segment is clipped by `chars()`
+//! (never bytes — `reference_rust_utf8_truncate_trap`) so a narrow pane clips
 //! without panicking on a multi-byte boundary.
 //!
 //! Snapshots are built from a glyph map of the rendered [`WireBuffer`] (one line
@@ -113,9 +117,9 @@ fn glyph_map(buf: &WireBuffer, cols: u16) -> String {
         .to_string()
 }
 
-/// The rendered badge row (row 0) only, `trim_end`-ed. The sidebar paints below
-/// the badge at a width-dependent column offset, so the badge-shape goldens pin
-/// only the badge row (the no-badge case asserts the whole map separately).
+/// The rendered badge row (row 0) only, `trim_end`-ed. These states carry no
+/// runs, so the head's artifact row IS row 0 (the run card above it appears only
+/// once the tasks snapshot gives the screen a run).
 fn badge_row(buf: &WireBuffer, cols: u16) -> String {
     let mut row = vec![' '; cols as usize];
     for (coord, cell) in &buf.cells {
@@ -128,50 +132,51 @@ fn badge_row(buf: &WireBuffer, cols: u16) -> String {
     row.into_iter().collect::<String>().trim_end().to_string()
 }
 
-/// At 100 cols, a present PR URL paints the gold badge row + the `[o] open`
-/// hint next to it.
+/// At 100 cols, a present PR URL paints the gold chip with its CI glyph.
 #[test]
 fn pr_badge_renders_at_100_cols() {
     let s = state(Some("https://example.com/pr/1"));
     let mut buf = WireBuffer::new(100, 8);
-    render_task_detail(&mut buf, 100, 0, 8, &s);
-    insta::assert_snapshot!(badge_row(&buf, 100), @"▶ PR https://example.com/pr/1 CI …  [o] open");
+    render_task_detail(&mut buf, 100, 0, 8, &s, 0);
+    insta::assert_snapshot!(badge_row(&buf, 100), @"PR #1 …");
 }
 
-/// At 160 cols, the full URL fits with the hint.
+/// At 160 cols, the same chip — the row does not grow with the pane.
 #[test]
 fn pr_badge_renders_at_160_cols() {
     let s = state(Some("https://example.com/pr/1"));
     let mut buf = WireBuffer::new(160, 8);
-    render_task_detail(&mut buf, 160, 0, 8, &s);
-    insta::assert_snapshot!(badge_row(&buf, 160), @"▶ PR https://example.com/pr/1 CI …  [o] open");
+    render_task_detail(&mut buf, 160, 0, 8, &s, 0);
+    insta::assert_snapshot!(badge_row(&buf, 160), @"PR #1 …");
 }
 
-/// At 60 cols (the narrow sidebar-collapse threshold), the badge still paints;
-/// a long URL is clipped by `chars()` within the row.
+/// At 60 cols (the narrow-pane threshold), the chip still paints in full: it is
+/// six cells, so there is no width at which the PR goes missing.
 #[test]
 fn pr_badge_renders_at_60_cols() {
     let s = state(Some("https://example.com/pr/1"));
     let mut buf = WireBuffer::new(60, 8);
-    render_task_detail(&mut buf, 60, 0, 8, &s);
-    insta::assert_snapshot!(badge_row(&buf, 60), @"▶ PR https://example.com/pr/1 CI …  [o] open");
+    render_task_detail(&mut buf, 60, 0, 8, &s, 0);
+    insta::assert_snapshot!(badge_row(&buf, 60), @"PR #1 …");
 }
 
-/// A multi-byte URL is truncated on a char boundary (never a byte split), so a
-/// narrow pane clips without panicking.
+/// A URL whose tail is not a number renders a bare `PR` rather than a fabricated
+/// number, and a multi-byte tail is clipped on a char boundary (never a byte
+/// split), so a narrow pane clips without panicking.
 #[test]
 fn pr_badge_truncates_long_url_on_char_boundary() {
-    // A deliberately long URL with a multi-byte char near the clip point.
+    // A deliberately long URL with a multi-byte char in the tail.
     let s = state(Some(
         "https://example.com/pull/привет-very-long-branch-name-here-1234567890",
     ));
     let mut buf = WireBuffer::new(40, 8);
     // Should not panic; the row is clipped to the 40-col width.
-    render_task_detail(&mut buf, 40, 0, 8, &s);
+    render_task_detail(&mut buf, 40, 0, 8, &s, 0);
     let line0 = badge_row(&buf, 40);
+    assert!(line0.starts_with("PR "), "got: {line0}");
     assert!(
-        line0.starts_with("▶ PR https://example.com/pull/"),
-        "got: {line0}"
+        !line0.contains("привет"),
+        "a non-numeric tail is not a PR number: {line0}"
     );
     // Clipped to the pane width by chars (≤ 40 glyphs), never split mid-codepoint.
     assert!(
@@ -197,7 +202,7 @@ fn failing_conflict_renders_distinctly_from_passing_mergeable() {
         },
     );
     let mut green_buf = WireBuffer::new(120, 8);
-    render_task_detail(&mut green_buf, 120, 0, 8, &green);
+    render_task_detail(&mut green_buf, 120, 0, 8, &green, 0);
     let green_row = badge_row(&green_buf, 120);
 
     let red = state_with_status(
@@ -209,7 +214,7 @@ fn failing_conflict_renders_distinctly_from_passing_mergeable() {
         },
     );
     let mut red_buf = WireBuffer::new(120, 8);
-    render_task_detail(&mut red_buf, 120, 0, 8, &red);
+    render_task_detail(&mut red_buf, 120, 0, 8, &red, 0);
     let red_row = badge_row(&red_buf, 120);
 
     // The two badges read differently at the glyph level.
@@ -217,17 +222,13 @@ fn failing_conflict_renders_distinctly_from_passing_mergeable() {
         green_row, red_row,
         "a failing/conflicting PR must not render the same row as a passing one"
     );
-    // Passing + mergeable reads green check + the word `mergeable`, no CONFLICT.
-    assert!(green_row.contains("CI ✓"), "green row: {green_row:?}");
-    assert!(
-        green_row.contains("✓ mergeable"),
-        "green row: {green_row:?}"
-    );
+    // Passing + mergeable reads a green check and stays quiet about the merge:
+    // a clean PR beside an already-green CI tick needs no second tick.
+    assert!(green_row.contains("PR #1 ✓"), "green row: {green_row:?}");
     assert!(!green_row.contains("CONFLICT"), "green row: {green_row:?}");
-    // Failing + conflicting reads a red cross + a loud `CONFLICT`, no mergeable.
-    assert!(red_row.contains("CI ✗"), "red row: {red_row:?}");
+    // Failing + conflicting reads a red cross + a loud `CONFLICT`.
+    assert!(red_row.contains("PR #1 ✗"), "red row: {red_row:?}");
     assert!(red_row.contains("✗ CONFLICT"), "red row: {red_row:?}");
-    assert!(!red_row.contains("mergeable"), "red row: {red_row:?}");
 
     // And the colours differ: the failing badge paints a red accent the all-green
     // badge never uses (a colour-blind glyph delta alone would not prove this).
@@ -242,21 +243,21 @@ fn failing_conflict_renders_distinctly_from_passing_mergeable() {
     );
 }
 
-/// e38.34 — the default (un-refreshed) status shows a muted `CI …` and no
-/// mergeable token, so the badge reads "status loading" rather than a false
-/// state until a refresh answers.
+/// e38.34 — the default (un-refreshed) status shows a muted `…` and no conflict
+/// token, so the chip reads "status loading" rather than a false state until a
+/// refresh answers.
 #[test]
 fn unknown_status_shows_muted_ci_and_no_mergeable() {
     let s = state_with_status("https://example.com/pr/1", PrStatus::default());
     let mut buf = WireBuffer::new(120, 8);
-    render_task_detail(&mut buf, 120, 0, 8, &s);
+    render_task_detail(&mut buf, 120, 0, 8, &s, 0);
     let row = badge_row(&buf, 120);
     assert!(
-        row.contains("CI …"),
+        row.contains("PR #1 …"),
         "unknown CI shows a muted ellipsis: {row:?}"
     );
     assert!(
-        !row.contains("mergeable") && !row.contains("CONFLICT"),
+        !row.contains("CONFLICT"),
         "an unknown mergeable paints no token: {row:?}"
     );
 }
@@ -279,9 +280,9 @@ fn applying_refresh_reply_updates_the_open_badge() {
     // Before the reply: muted unknown CI, no mergeable token.
     let before = states.task_detail.as_ref().unwrap();
     let mut buf = WireBuffer::new(120, 8);
-    render_task_detail(&mut buf, 120, 0, 8, before);
+    render_task_detail(&mut buf, 120, 0, 8, before, 0);
     let row = badge_row(&buf, 120);
-    assert!(row.contains("CI …"), "pre-refresh badge: {row:?}");
+    assert!(row.contains("PR #1 …"), "pre-refresh badge: {row:?}");
     assert!(!row.contains("CONFLICT"), "pre-refresh badge: {row:?}");
 
     // Apply the reply (the daemon answered a failing, conflicting PR).
@@ -294,9 +295,9 @@ fn applying_refresh_reply_updates_the_open_badge() {
     // After the reply: the badge reflects the fetched state.
     let after = states.task_detail.as_ref().unwrap();
     let mut buf = WireBuffer::new(120, 8);
-    render_task_detail(&mut buf, 120, 0, 8, after);
+    render_task_detail(&mut buf, 120, 0, 8, after, 0);
     let row = badge_row(&buf, 120);
-    assert!(row.contains("CI ✗"), "post-refresh badge: {row:?}");
+    assert!(row.contains("PR #1 ✗"), "post-refresh badge: {row:?}");
     assert!(row.contains("✗ CONFLICT"), "post-refresh badge: {row:?}");
 }
 
@@ -306,15 +307,11 @@ fn applying_refresh_reply_updates_the_open_badge() {
 fn no_pr_url_renders_no_badge_row() {
     let s = state(None);
     let mut buf = WireBuffer::new(100, 8);
-    render_task_detail(&mut buf, 100, 0, 8, &s);
+    render_task_detail(&mut buf, 100, 0, 8, &s, 0);
     let map = glyph_map(&buf, 100);
     assert!(
         !map.contains("PR "),
         "no-PR task must not render a PR badge: {map:?}"
-    );
-    assert!(
-        !map.contains("[o] open"),
-        "no-PR task must not render the open hint: {map:?}"
     );
 }
 
@@ -338,40 +335,49 @@ fn state_with_branch(pr_url: Option<&str>, branch: &str) -> TaskDetailState {
     s
 }
 
-/// agents-in-a-box-ch3: a run with a committed branch surfaces it in the detail
-/// view on its OWN line right under the PR badge — `⎇ branch ainb/<slug>` — so the
-/// durable artifact reads in the detail exactly as it does on the Kanban card.
+/// agents-in-a-box-ch3 + crisp B4 §2.3: a run with a committed branch surfaces
+/// it on the run head's artifact row, ahead of the PR chip and pointing at the
+/// target it merges into, so the run's two durable artifacts read as one fact.
 #[test]
-fn branch_line_renders_under_the_pr_badge() {
+fn branch_line_renders_beside_the_pr_badge() {
     let s = state_with_branch(Some("https://example.com/pr/1"), "ainb/refactor-api-a1b2c3");
     let mut buf = WireBuffer::new(100, 8);
-    render_task_detail(&mut buf, 100, 0, 8, &s);
+    render_task_detail(&mut buf, 100, 0, 8, &s, 0);
 
-    // Row 0 is the PR badge; row 1 is the branch line right beneath it.
-    insta::assert_snapshot!(nth_row(&buf, 0, 100), @"▶ PR https://example.com/pr/1 CI …  [o] open");
-    insta::assert_snapshot!(nth_row(&buf, 1, 100), @"⎇ branch ainb/refactor-api-a1b2c3");
+    insta::assert_snapshot!(nth_row(&buf, 0, 100), @"ainb/refactor-api-a1b2c3 · PR #1 …");
 }
 
-/// With no PR badge, the branch line still surfaces — at the TOP row (the layout
-/// shifts up), so a run that opened no PR but committed a branch still shows it.
+/// A human branch is NOT elided (only the daemon's `ainb/<ulid>` run branch is),
+/// and with no PR it still surfaces alone — a run that opened no PR but
+/// committed a branch must still show it.
 #[test]
-fn branch_line_renders_at_top_when_no_pr_badge() {
+fn branch_line_renders_alone_when_there_is_no_pr() {
     let s = state_with_branch(None, "ainb/hotfix-9f9f9f");
     let mut buf = WireBuffer::new(100, 8);
-    render_task_detail(&mut buf, 100, 0, 8, &s);
-    assert_eq!(nth_row(&buf, 0, 100), "⎇ branch ainb/hotfix-9f9f9f");
+    render_task_detail(&mut buf, 100, 0, 8, &s, 0);
+    assert_eq!(nth_row(&buf, 0, 100), "ainb/hotfix-9f9f9f");
 }
 
-/// Progressive disclosure: a run with NO branch renders no branch line — never a
+/// The daemon's run branch is elided to the same `…<short id>` tail the Kanban
+/// card shows, so one branch reads identically on both screens.
+#[test]
+fn a_run_branch_elides_exactly_as_the_kanban_card_does() {
+    let s = state_with_branch(None, "ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8");
+    let mut buf = WireBuffer::new(100, 8);
+    render_task_detail(&mut buf, 100, 0, 8, &s, 0);
+    assert_eq!(nth_row(&buf, 0, 100), "ainb/…3N9GP8");
+}
+
+/// Progressive disclosure: a run with NO branch renders no branch text — never a
 /// `branch: none` placeholder (the transcript occupies the row instead).
 #[test]
 fn no_branch_renders_no_branch_line() {
     let s = state(Some("https://example.com/pr/1"));
     let mut buf = WireBuffer::new(100, 8);
-    render_task_detail(&mut buf, 100, 0, 8, &s);
+    render_task_detail(&mut buf, 100, 0, 8, &s, 0);
     let map = glyph_map(&buf, 100);
     assert!(
-        !map.contains("⎇ branch"),
-        "a branchless run must not render a branch line: {map:?}"
+        !map.contains("ainb/"),
+        "a branchless run must not render a branch: {map:?}"
     );
 }
