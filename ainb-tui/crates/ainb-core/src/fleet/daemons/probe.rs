@@ -266,6 +266,7 @@ fn probe_atc_lite(
             kind,
             state: DaemonState::Degraded,
             channel,
+            atc_instance: Some(name.clone()),
             last_activity_at: last_active,
             reason: format!(
                 "lite mode is the owner of this fleet but no scanner is running; \
@@ -282,6 +283,7 @@ fn probe_atc_lite(
             state: DaemonState::Stopped,
             pid: Some(hb.pid),
             channel,
+            atc_instance: Some(name.clone()),
             last_activity_at: last_active,
             ..DaemonStatus::stopped(
                 kind,
@@ -296,6 +298,7 @@ fn probe_atc_lite(
             state: DaemonState::Degraded,
             pid: Some(hb.pid),
             channel,
+            atc_instance: Some(name.clone()),
             last_activity_at: last_active,
             reason: format!(
                 "lite scanner alive (pid {}) but its last scan was {}s ago — wedged?",
@@ -311,6 +314,7 @@ fn probe_atc_lite(
         pid: Some(hb.pid),
         connected: true,
         channel,
+        atc_instance: Some(name.clone()),
         last_activity_at: last_active,
         error_count: hb.error_count,
         last_error: hb.last_error.clone(),
@@ -2570,6 +2574,27 @@ mod tests {
             s.reason.contains("heartbeat timer for 'main'"),
             "the orphan timer must be named: {}",
             s.reason
+        );
+    }
+
+    #[test]
+    fn a_lite_row_names_its_instance_so_the_menu_offers_real_verbs() {
+        // The Daemons menu is state-driven off `atc_instance`: `None` means
+        // "nothing provisioned", and the row then offers ONLY `provision`.
+        // Every lite status left that field unset, so a perfectly healthy lite
+        // fleet showed a menu with no lifecycle verbs and no mode switch — and
+        // `provision` itself refuses, because an instance does exist. The row
+        // became unusable. Only driving the TUI showed it; every unit test
+        // asserted on state and channel, which were both correct.
+        let home = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+        write_lite_instance(home.path(), "tower", now - 1000);
+
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
+        assert_eq!(
+            s.atc_instance.as_deref(),
+            Some("tower"),
+            "a lite row must name its instance or the menu treats it as unprovisioned"
         );
     }
 
