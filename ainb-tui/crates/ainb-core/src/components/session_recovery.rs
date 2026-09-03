@@ -885,6 +885,7 @@ impl SessionRecoveryState {
                     SessionAgentType::Codex => CliProvider::Codex,
                     SessionAgentType::Gemini => CliProvider::Gemini,
                     SessionAgentType::Copilot => CliProvider::Copilot,
+                    SessionAgentType::Antigravity => CliProvider::Antigravity,
                     _ => CliProvider::Claude,
                 };
                 InteractiveSessionManager::build_cli_cmd_parts(
