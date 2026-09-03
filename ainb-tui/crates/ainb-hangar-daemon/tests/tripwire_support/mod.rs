@@ -573,6 +573,22 @@ impl DaemonSession {
                 |o| String::from_utf8_lossy(&o.stdout).into_owned(),
             )
     }
+
+    /// The pane INCLUDING scrollback (`-S -`).
+    ///
+    /// [`Self::capture_pane`] returns only what is currently visible, so a line
+    /// the daemon logged at BOOT has scrolled off by the time a run finishes.
+    /// Separate rather than a wider default: the existing callers assert on the
+    /// visible pane, and history would let a stale line satisfy them.
+    pub fn capture_pane_history(&self) -> String {
+        Command::new("tmux")
+            .args(["capture-pane", "-p", "-S", "-", "-t", &self.name])
+            .output()
+            .map_or_else(
+                |_| String::new(),
+                |o| String::from_utf8_lossy(&o.stdout).into_owned(),
+            )
+    }
 }
 
 impl Drop for DaemonSession {

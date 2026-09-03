@@ -409,6 +409,96 @@ async fn an_acp_turn_past_the_task_budget_times_out_and_tells_the_adapter() {
     assert_no_process_executor_trace(&row, &marker, task_id);
 }
 
+/// The pool's own turn deadline does NOT cap a task, because boot raises it to
+/// the task budget.
+///
+/// The 4-second case above proves the executor's poll bound, but the raise is a
+/// no-op there (30 min vs 4 s), so it exercises no reconciliation wiring at all;
+/// the unit test pins the `max()` while touching neither `boot` nor
+/// `sweep_once`. This is the case that fails on the unfixed code: the pool
+/// deadline is 2 s and its sweep runs every 1 s, the task budget is 30 s, and
+/// the turn is paced to about 4 s. Without the raise the sweep cancels the turn
+/// at 2 s and the task finalizes `failed`/`timeout`; with it the turn finishes.
+#[tokio::test]
+async fn the_pool_deadline_does_not_cap_a_task_that_outlives_it() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping acp deadline reconciliation e2e");
+        return;
+    }
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+
+    let agent = seed_agent_with_env(
+        &pool,
+        &ids,
+        "agent-slow",
+        &serde_json::json!({
+            // About 4 seconds of turn: twice the pool's deadline below, so an
+            // unreconciled sweep has two clean chances to kill it.
+            "FAKE_ACP_CHUNKS": "8",
+            "FAKE_ACP_CHUNK_DELAY_MS": "500",
+        }),
+    )
+    .await;
+    write_acp_adapter_config(home.path(), &fake_acp_adapter(), "default");
+    let marker = home.path().join("process-executor-ran");
+    let fake_claude = write_marker_binary(home.path(), &marker);
+
+    let home_str = home.path().display().to_string();
+    let claude = fake_claude.display().to_string();
+    let session = DaemonSession::spawn(
+        &daemon_bin(),
+        home.path(),
+        &[
+            ("AINB_HANGAR_HOME", &home_str),
+            ("HOME", &home_str),
+            ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
+            ("HANGAR_TASK_EXECUTOR", "acp"),
+            ("HANGAR_CLAUDE_PATH", &claude),
+            ("HANGAR_DAEMON_POLL_MS", "200"),
+            ("HANGAR_DAEMON_DISABLE_SANDBOX", "1"),
+            // The pool would cancel this turn at 2 s. Its sweep follows the
+            // deadline down to a 1 s cadence, so it gets two passes inside the
+            // turn: nothing here is a timing near-miss.
+            ("AINB_ACP_TURN_DEADLINE_MS", "2000"),
+            // The task budget the raise must lift the pool deadline to.
+            ("HANGAR_PROVIDER_MAX_RUNTIME_MS", "30000"),
+        ],
+    );
+    let task_id = "task-acp-outlives-pool";
+    enqueue_task(&pool, &ids, task_id, &agent, "headless").await;
+
+    let row = wait_for_terminal(&pool, task_id, Duration::from_mins(1)).await;
+    // History, not the visible pane: the boot warn asserted below has scrolled
+    // off by the time the run finishes.
+    let pane = session.capture_pane_history();
+    drop(session);
+
+    assert_eq!(
+        row.get::<String, _>("status"),
+        "done",
+        "a turn outliving the POOL deadline but inside the TASK budget must finish; \
+         reason={:?}\n{}\ndaemon:\n{pane}",
+        row.get::<Option<String>, _>("failure_reason"),
+        dump_legs(&pool).await,
+    );
+    assert!(
+        row.get::<Option<String>, _>("failure_reason").is_none(),
+        "and record no failure reason"
+    );
+    // The raise is not silent. This daemon's chat sessions now share the longer
+    // deadline, so boot says so where whoever flipped the flag will read it.
+    // Newlines stripped first: tmux hard-wraps the pane at its width, which
+    // splits the message mid-word.
+    assert!(
+        pane.replace('\n', "").contains("raised the acp turn deadline"),
+        "boot must warn that it raised the deadline:\n{pane}"
+    );
+    assert_no_process_executor_trace(&row, &marker, task_id);
+}
+
 // ------------------------------------------------------------------ helpers
 
 /// Spawn the real daemon under `HANGAR_TASK_EXECUTOR=acp`, with the fixture
