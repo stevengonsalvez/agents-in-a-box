@@ -552,10 +552,18 @@ async fn usage_from_transcript(pool: &SqlitePool, session_key: &str) -> Option<P
 ///   `size` is the window, not the reply. Left 0 (the struct's field is `i64`,
 ///   not `Option`, so 0 is the only available "unreported") rather than derived
 ///   from `size - used`, which would be a number the agent never reported.
-/// * `cost_usd` <- `cost.amount`, and ONLY when `cost.currency` is USD. The
-///   field is named for its unit; an EUR amount copied into it is a wrong
-///   number, not a converted one, so a foreign currency is dropped loudly and
-///   the tokens still land.
+/// * `cost_usd` <- `cost.amount`, and ONLY when `cost.currency` is USD and the
+///   amount is finite and non-negative. The field is named for its unit; an EUR
+///   amount copied into it is a wrong number, not a converted one, and a
+///   negative one is a wrong number that SUBTRACTS from every other run's, since
+///   `UsageRepo::workspace_totals` SUMs this column. The finiteness half guards
+///   the sharper version of the same thing (one NaN makes that SUM NaN for the
+///   whole workspace, and NaN satisfies the `!= 0.0` record check below, so it
+///   would land rather than be dropped), and is belt-and-braces today: serde
+///   rejects an overflowing literal outright, which
+///   `a_negative_or_non_finite_cost_is_dropped_and_the_tokens_still_land` pins
+///   rather than assumes. Every rejected amount is dropped loudly and the tokens
+///   still land.
 ///
 /// All-zero reports `None`, the same contract `runner::provider_usage` applies
 /// to the process executor: "no usage -> record nothing".
@@ -566,12 +574,16 @@ fn provider_usage_from_update(raw_payload: &str) -> Option<ProviderUsage> {
         return None;
     };
     let cost_usd = update.cost.map_or(0.0, |cost| {
-        if cost.currency.eq_ignore_ascii_case("USD") {
+        if cost.currency.eq_ignore_ascii_case("USD")
+            && cost.amount.is_finite()
+            && cost.amount >= 0.0
+        {
             cost.amount
         } else {
             tracing::warn!(
                 currency = %cost.currency,
-                "acp reported a non-USD session cost; recording tokens only"
+                amount = cost.amount,
+                "acp reported an unusable session cost; recording tokens only"
             );
             0.0
         }
@@ -965,6 +977,64 @@ mod tests {
                 cost_usd: 0.0,
             })
         );
+    }
+
+    /// A negative amount never reaches the column the dashboard SUMs, and a
+    /// non-finite one cannot arrive at all.
+    ///
+    /// The two halves are asserted differently on purpose, because only one is
+    /// reachable. NaN is the sharp case the finiteness half of the guard exists
+    /// for (`NaN != 0.0` is TRUE, so it would satisfy "this report has something
+    /// in it" and be RECORDED, after which `UsageRepo::workspace_totals` is NaN
+    /// for the whole workspace rather than the one task), but `serde_json`
+    /// rejects an overflowing literal outright rather than yielding an infinity,
+    /// so no payload can carry one today. That is pinned below rather than
+    /// assumed: if it ever stops being true, this goes red and points at the
+    /// guard that already covers it.
+    #[test]
+    fn a_negative_or_non_finite_cost_is_dropped_and_the_tokens_still_land() {
+        use agent_client_protocol::schema::v1::SessionUpdate;
+
+        let payload = |amount: &str| {
+            format!(
+                r#"{{"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{{"amount":{amount},"currency":"USD"}}}}"#
+            )
+        };
+
+        // Reachable, and the GUARD is what must drop it, not the parser: a
+        // payload rejected whole would answer `None`, so `Some` with the tokens
+        // intact is what says the amount got as far as the guard.
+        let negative = payload("-0.5");
+        let SessionUpdate::UsageUpdate(update) =
+            serde_json::from_str(&negative).expect("a negative amount is valid JSON")
+        else {
+            panic!("the payload above is a usage_update");
+        };
+        let reached = update.cost.expect("the cost survives parsing").amount;
+        assert!(reached < 0.0, "the guard must be handed {reached}");
+        assert_eq!(
+            provider_usage_from_update(&negative),
+            Some(ProviderUsage {
+                input_tokens: 1_200,
+                output_tokens: 0,
+                cost_usd: 0.0,
+            }),
+            "a negative cost must not reach the summed column, and must not \
+             take the tokens down with it"
+        );
+
+        // Unreachable: an overflowing literal fails the NUMBER parse, which
+        // `Cost`'s `DefaultOnError` does not recover from, so the whole update
+        // is rejected and no infinity (and hence no NaN) can be built from a
+        // payload.
+        for overflow in ["1e999", "-1e999"] {
+            let error = serde_json::from_str::<SessionUpdate>(&payload(overflow))
+                .expect_err("serde_json must still reject an overflowing amount");
+            assert!(
+                error.to_string().contains("number out of range"),
+                "an overflowing amount must be rejected, not coerced, got: {error}"
+            );
+        }
     }
 
     #[test]
