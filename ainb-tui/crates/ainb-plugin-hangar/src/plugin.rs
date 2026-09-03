@@ -528,7 +528,9 @@ pub struct HangarPlugin {
     /// reply lands is dropped and never repaired: the durable file is not re-read
     /// and the live stream has no replay. Buffered here and replayed onto the
     /// fresh overlay, the transcript is continuous across the open.
-    timeline_fetch_buffer: Option<Vec<(String, ainb_hangar_proto::events::MessageKind, String)>>,
+    timeline_fetch_buffer: Option<
+        std::collections::VecDeque<(String, ainb_hangar_proto::events::MessageKind, String)>,
+    >,
     /// List-screen mouse intents `handle_mouse` produced (63l.6), drained on the
     /// next `render`. Like the issue board's queue, this is the inline,
     /// non-blocking stash: the spawned `render` binds each to the active screen's
@@ -741,6 +743,40 @@ fn answer_verdict_note(
             format!("answer failed: {detail}")
         }
     })
+}
+
+/// How many LEADING entries of `buffered` the tail of `snapshot` already carries.
+///
+/// The timeline snapshot and the live buffer overlap by construction: the buffer
+/// arms when the request is written, the snapshot covers the log up to the
+/// daemon's read, and the runner writes each line to the JSONL before emitting
+/// it. Both halves are the same `(kind, body)` from the same classifier, so the
+/// overlap is an exact prefix/suffix match. Returns 0 when they do not overlap.
+///
+/// ponytail: the longest match wins, checked longest-first over at most the
+/// buffer's length; that is O(n*m) worst case on a few thousand short entries,
+/// which happens once per timeline open. A rolling hash if a profile ever says so.
+fn leading_overlap(
+    snapshot: &[crate::screen::task_detail::ViewEntry],
+    buffered: &std::collections::VecDeque<(String, ainb_hangar_proto::events::MessageKind, String)>,
+) -> usize {
+    let tail: Vec<(ainb_hangar_proto::events::MessageKind, &str)> = snapshot
+        .iter()
+        .filter_map(|e| match e {
+            crate::screen::task_detail::ViewEntry::Line(l) => Some((l.kind(), l.body())),
+            crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+        })
+        .collect();
+    let max = buffered.len().min(tail.len());
+    (1..=max)
+        .rev()
+        .find(|&n| {
+            tail[tail.len() - n..]
+                .iter()
+                .zip(buffered.iter().take(n))
+                .all(|((sk, sb), (_, bk, bb))| sk == bk && sb == bb)
+        })
+        .unwrap_or(0)
 }
 
 impl HangarPlugin {
@@ -1235,9 +1271,9 @@ impl HangarPlugin {
                 // every run for the rest of the session. Oldest out, same as
                 // `TimelineView::append_line`.
                 if buffered.len() >= crate::screen::boards::TimelineView::MAX_ENTRIES {
-                    buffered.remove(0);
+                    buffered.pop_front();
                 }
-                buffered.push((task_id.as_str().to_string(), *kind, body.clone()));
+                buffered.push_back((task_id.as_str().to_string(), *kind, body.clone()));
             }
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
@@ -1875,6 +1911,12 @@ impl HangarPlugin {
             return;
         };
         let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl);
+        // The buffer arms before the request goes out, while the snapshot covers
+        // the log up to the daemon's read, and the runner writes each line to the
+        // JSONL BEFORE it emits it. So every line in that window is in BOTH halves,
+        // and `append_line` does not dedupe. Measure the overlap here, while
+        // `entries` is still ours, and skip that many on replay below.
+        let overlap = leading_overlap(&entries, &buffered);
         // A card that NEVER ran (no task) with no transcript: a note, not an empty
         // overlay. But a run that HAS started (task present) yet not emitted its
         // first JSONL line still opens the overlay with zero entries, so the F6
@@ -1891,11 +1933,11 @@ impl HangarPlugin {
         self.screens.boards.set_timeline(crate::screen::boards::TimelineView::new(
             title, r.task_id, entries,
         ));
-        // Replay whatever streamed in while the fetch was in flight: the snapshot
-        // above is as of the daemon's read, so those lines are in neither half
-        // without this. `fold_timeline_message` filters by task id, so a line for
-        // a different run is discarded here exactly as it would have been live.
-        for (task_id, kind, body) in buffered {
+        // Replay whatever streamed in while the fetch was in flight, minus the
+        // overlap measured above. `fold_timeline_message` filters by task id, so a
+        // line for a different run is discarded here exactly as it would have been
+        // live.
+        for (task_id, kind, body) in buffered.into_iter().skip(overlap) {
             self.screens.boards.fold_timeline_message(&task_id, kind, body);
         }
     }
@@ -3308,7 +3350,10 @@ impl HangarPlugin {
         // Arm the live-line buffer for the timeline round trip (see
         // `timeline_fetch_buffer`); the reply drains it onto the fresh overlay.
         if req_id == BOARD_CARD_TIMELINE_REQ_ID {
-            self.timeline_fetch_buffer = Some(Vec::new());
+            // Arm only when unarmed: both replies carry the same req id, so
+            // overwriting on a second open would hand reply 1 fetch 2's buffer and
+            // leave reply 2 nothing to replay, reopening the hole this closes.
+            self.timeline_fetch_buffer.get_or_insert_with(Default::default);
         }
         let Ok(body) = encode_request(req_id, method, params) else {
             return;
@@ -6302,7 +6347,7 @@ mod tests {
         let mut p = HangarPlugin::new();
         // The fetch is in flight: the overlay does not exist yet, so without the
         // buffer this line has nowhere to land.
-        p.timeline_fetch_buffer = Some(Vec::new());
+        p.timeline_fetch_buffer = Some(std::collections::VecDeque::new());
         p.on_daemon_event(&serde_json::json!({
             "method": EVENT_METHOD,
             "params": serde_json::to_value(&HangarEvent::TaskMessage {
@@ -6351,13 +6396,87 @@ mod tests {
         );
     }
 
+    /// A line in the window `[buffer armed, daemon read]` is in BOTH halves: the
+    /// runner writes it to the JSONL before it emits it. `append_line` does not
+    /// dedupe, so replaying the buffer whole duplicates the overlap.
+    #[test]
+    fn the_overlap_between_snapshot_and_buffer_is_not_replayed_twice() {
+        use ainb_hangar_proto::events::MessageKind;
+
+        let mut p = HangarPlugin::new();
+        // Both lines are already in the snapshot; the second also streamed live.
+        let mut armed = std::collections::VecDeque::new();
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "second".to_string()));
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "third".to_string()));
+        p.timeline_fetch_buffer = Some(armed);
+
+        let jsonl = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#,
+        ]
+        .join("\n");
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some("t1".into()),
+                    provider: Some("claude".into()),
+                    jsonl,
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+
+        let bodies: Vec<&str> = p
+            .screens
+            .boards
+            .timeline()
+            .expect("overlay opens")
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                crate::screen::task_detail::ViewEntry::Line(l) => Some(l.body()),
+                crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second", "third"],
+            "the overlapping line appears once, and the live-only line still lands"
+        );
+    }
+
+    /// A second open while one fetch is in flight must NOT overwrite the buffer:
+    /// both replies carry the same req id, so reply 1 would drain fetch 2's buffer
+    /// and reply 2 would find nothing.
+    #[test]
+    fn a_second_timeline_fetch_keeps_the_buffered_lines() {
+        use ainb_hangar_proto::events::MessageKind;
+        let mut p = HangarPlugin::new();
+        let mut armed = std::collections::VecDeque::new();
+        armed.push_back((
+            "t1".to_string(),
+            MessageKind::Agent,
+            "already here".to_string(),
+        ));
+        p.timeline_fetch_buffer = Some(armed);
+        p.timeline_fetch_buffer.get_or_insert_with(Default::default);
+        assert_eq!(
+            p.timeline_fetch_buffer.as_ref().map(std::collections::VecDeque::len),
+            Some(1),
+            "re-arming must keep what the first fetch already buffered"
+        );
+    }
+
     /// A failed timeline fetch must DISARM the buffer, not leave it armed. The
     /// handler returns early on a daemon error, so an armed buffer would keep
     /// growing for the rest of the session, holding every line of every run.
     #[test]
     fn a_failed_timeline_fetch_disarms_the_buffer() {
         let mut p = HangarPlugin::new();
-        p.timeline_fetch_buffer = Some(Vec::new());
+        p.timeline_fetch_buffer = Some(std::collections::VecDeque::new());
         p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
             jsonrpc: "2.0".into(),
             id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
