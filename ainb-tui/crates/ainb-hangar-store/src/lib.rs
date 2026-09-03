@@ -155,6 +155,15 @@ const FOREIGN_MIGRATION_93_INDEX: &str = "idx_fleet_provider_event_retention";
 ///
 /// Keyed on the foreign description, so a database whose 93 is main's own is
 /// untouched, and so is one that never reached 93.
+///
+/// This runs OUTSIDE `store::backup_before_pending_migrations`, whose gate is
+/// numeric: `MAX(version)` is already 93 here, so it reads an ordinary boot and
+/// takes no snapshot. That is deliberate rather than an oversight. Teaching the
+/// gate about this row would make a failed `VACUUM INTO` abort the open, so a
+/// host short on disk would be left with a database it cannot repair AND cannot
+/// boot, which is the exact failure this function exists to remove. The trade
+/// is only sound because the repair touches no user data: one index drop, whose
+/// definition lives in the file that owns it, and one bookkeeping row.
 async fn reconcile_foreign_migration_93(pool: &SqlitePool) -> anyhow::Result<()> {
     let mut connection = pool.acquire().await?;
     (&mut *connection).ensure_migrations_table().await?;
@@ -319,6 +328,37 @@ mod migration_tests {
         count == 1
     }
 
+    /// Rewind an up-to-date database to what a machine that booted a build of
+    /// the unmerged branch carries: main's 93 never ran, the branch's did, and
+    /// 93 is recorded under the branch file's description and checksum.
+    async fn seed_unmerged_0093(pool: &SqlitePool) {
+        sqlx::query("DROP INDEX IF EXISTS idx_board_card_issue")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 93")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (93, 'fleet provider event retention', TRUE, ?, -1)",
+        )
+        .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_fleet_provider_event_retention \
+             ON fleet_provider_event(observed_at) \
+             WHERE raw_payload <> '' AND projection_revision IS NOT NULL AND source <> 'acp'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
     /// The property that matters, and the one a recorded-versions check cannot
     /// see: after migrating, the COLUMNS are actually there.
     ///
@@ -461,34 +501,7 @@ mod migration_tests {
     async fn a_database_that_ran_the_unmerged_0093_still_upgrades() {
         let pool = memory_pool().await;
         apply_migrations(&pool).await.unwrap();
-
-        // Rewind to what such a database looks like: main's 93 never ran, the
-        // branch's did, and 93 is recorded under its description and checksum.
-        sqlx::query("DROP INDEX IF EXISTS idx_board_card_issue")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 93")
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO _sqlx_migrations \
-             (version, description, success, checksum, execution_time) \
-             VALUES (93, 'fleet provider event retention', TRUE, ?, -1)",
-        )
-        .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE INDEX idx_fleet_provider_event_retention \
-             ON fleet_provider_event(observed_at) \
-             WHERE raw_payload <> '' AND projection_revision IS NOT NULL AND source <> 'acp'",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        seed_unmerged_0093(&pool).await;
 
         apply_migrations(&pool)
             .await
@@ -522,6 +535,37 @@ mod migration_tests {
         apply_migrations(&pool).await.unwrap();
         apply_migrations(&pool).await.unwrap();
         assert!(index_exists(&pool, "idx_board_card_issue").await);
+    }
+
+    /// The daemon does not call [`apply_migrations`] directly: it boots through
+    /// [`Store::open_in`], which runs `backup_before_pending_migrations` first.
+    /// That gate compares version NUMBERS only, and on this database
+    /// `MAX(version)` is already 93, so it reads an ordinary boot and takes no
+    /// snapshot. Pin the real path, including the absent backup, because that
+    /// absence is why the repair has to be safe without one.
+    #[tokio::test]
+    async fn the_daemon_boot_path_repairs_the_unmerged_0093() {
+        let home = tempfile::tempdir().expect("create a home for the database");
+        let store = Store::open_in(home.path()).await.expect("first boot");
+        seed_unmerged_0093(store.pool()).await;
+        drop(store);
+
+        let store = Store::open_in(home.path())
+            .await
+            .expect("the daemon must boot against a database carrying the unmerged 0093");
+
+        let description: String =
+            sqlx::query_scalar("SELECT description FROM _sqlx_migrations WHERE version = 93")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(description, "board card issue index");
+        assert!(index_exists(store.pool(), "idx_board_card_issue").await);
+        assert!(!index_exists(store.pool(), "idx_fleet_provider_event_retention").await);
+        assert!(
+            !home.path().join("hangar.db.pre-93.bak").exists(),
+            "the numeric backup gate cannot see this repair, so nothing must depend on a snapshot"
+        );
     }
 }
 
