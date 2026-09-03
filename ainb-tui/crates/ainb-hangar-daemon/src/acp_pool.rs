@@ -139,6 +139,17 @@ pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = "provider_at_capacity";
 /// Terminal, never requeued: retrying an adapter that will not hold the mode
 /// just drives the same session in the wrong permission regime a second time.
 pub const DELIVERY_MODE_UNPROVEN: &str = "mode_unproven";
+/// Prefix of the token a leg carries when the turn stopped for a reason worth
+/// naming: `stop=<reason>`, in the ACP wire spelling ([`stop_reason_token`]),
+/// so `stop=max_tokens`, `stop=max_turn_requests`, `stop=refusal`.
+///
+/// ABSENT on a DELIVERED leg means the ordinary `EndTurn`, the same way an
+/// absent [`RESUME_LOADED`] on the same leg means the context never had to be
+/// rebuilt: `DELIVERED` already says the agent finished, so a token on every
+/// turn would put a non-event in front of the operator, and in front of the
+/// `resume=` half they do need on a narrow pane. A FAILED turn carries its
+/// reason after [`DELIVERY_TURN_FAILED`] instead.
+pub const DELIVERY_STOP_PREFIX: &str = "stop=";
 
 /// The resume path fingerprint carried on the next delivery's receipt detail
 /// and in the `acp.context_rebuilt` marker: the adapter still had the session.
@@ -217,8 +228,10 @@ fn acp_adapters_from_config() -> std::collections::HashMap<String, AcpAdapterTom
 /// Pool tuning. Every knob the plan names, with its documented default.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
-    /// The adapter registry: token to spawn recipe. A provider absent here
-    /// cannot be created by `fleet/acp_session_create`.
+    /// The adapter registry the pool STARTS with: token to spawn recipe. The
+    /// live registry ([`AcpPool::register_adapter`]) grows past this at
+    /// runtime; a provider in neither cannot be created by
+    /// `fleet/acp_session_create`.
     pub adapters: HashMap<String, AdapterConfig>,
     /// Sessions multiplexed on ONE provider process before the LRU evicts.
     ///
@@ -340,21 +353,6 @@ impl PoolConfig {
             }
         }
         config
-    }
-
-    /// The pinned permission mode for `provider`, or `default`.
-    #[must_use]
-    pub fn permission_mode(&self, provider: &str) -> String {
-        self.adapters.get(provider).map_or_else(
-            || "default".to_string(),
-            |config| config.permission_mode.clone(),
-        )
-    }
-
-    /// Whether the registry knows how to spawn `provider`.
-    #[must_use]
-    pub fn knows(&self, provider: &str) -> bool {
-        self.adapters.contains_key(provider)
     }
 }
 
@@ -561,6 +559,11 @@ pub struct AcpPool {
     store: Store,
     events: crate::events::EventSink,
     config: PoolConfig,
+    /// The LIVE adapter registry: seeded from [`PoolConfig::adapters`], grown
+    /// by [`AcpPool::register_adapter`] and shrunk by
+    /// [`AcpPool::unregister_adapter`]. Keyed by the same string as
+    /// `providers`, so one key is one spawn recipe AND at most one process.
+    adapters: StdMutex<HashMap<String, AdapterConfig>>,
     providers: tokio::sync::Mutex<HashMap<String, Arc<ProviderProcess>>>,
     /// One spawn at a time per provider, held INSTEAD of the `providers` map
     /// lock: `AdapterProcess::spawn` runs initialize plus the mode assertion and
@@ -584,6 +587,7 @@ impl AcpPool {
         Arc::new(Self {
             store,
             events,
+            adapters: StdMutex::new(config.adapters.clone()),
             config,
             providers: tokio::sync::Mutex::new(HashMap::new()),
             spawn_locks: StdMutex::new(HashMap::new()),
@@ -595,11 +599,114 @@ impl AcpPool {
         })
     }
 
-    /// The adapter registry this pool validates `fleet/acp_session_create`
-    /// against.
+    /// The tuning this pool was built with. Its `adapters` is the SEED; ask
+    /// [`AcpPool::knows`] and [`AcpPool::permission_mode`] about the live
+    /// registry.
     #[must_use]
     pub const fn config(&self) -> &PoolConfig {
         &self.config
+    }
+
+    /// Whether the live registry knows how to spawn `provider`.
+    ///
+    /// Panics on a poisoned registry rather than answering `false`, which
+    /// [`AcpPool::provider_process`] would report as "provider is not in the
+    /// adapter registry": a lie about which thing broke, now that this gates
+    /// the spawn.
+    #[must_use]
+    pub fn knows(&self, provider: &str) -> bool {
+        self.adapters.lock().expect("adapter registry").contains_key(provider)
+    }
+
+    /// The pinned permission mode for `provider`, or `default`.
+    #[must_use]
+    pub fn permission_mode(&self, provider: &str) -> String {
+        self.adapters
+            .lock()
+            .ok()
+            .and_then(|adapters| {
+                adapters.get(provider).map(|config| config.permission_mode.clone())
+            })
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// Add `adapter` to the live registry under `key`, so a session whose
+    /// `provider` is `key` spawns from THIS recipe on its first prompt.
+    ///
+    /// This is how a task gets its own adapter process: register under a
+    /// synthetic key (`claude-agent-acp#task:<id>`) whose recipe carries the
+    /// task's command wrapper, environment and permission mode, and the pool's
+    /// one-process-per-key rule does the isolation. Replaces an existing entry;
+    /// a process already running under `key` keeps the recipe it was spawned
+    /// with until it stops.
+    pub fn register_adapter(&self, key: impl Into<String>, adapter: AdapterConfig) {
+        self.adapters.lock().expect("adapter registry").insert(key.into(), adapter);
+    }
+
+    /// Remove `key` from the live registry and stop its process, if one is
+    /// running. Returns whether `key` was registered.
+    ///
+    /// The registry entry goes FIRST, and only then does this take the key's
+    /// spawn gate. That order is the whole proof, and the other one is a race.
+    ///
+    /// A spawn reads the recipe ([`AcpPool::adapter_config`]) inside the gate,
+    /// so by then it has already published its gate in `spawn_locks`. Order
+    /// that recipe read against the `adapters` removal below, the two being
+    /// mutations of one mutex-guarded map and so totally ordered:
+    ///
+    /// * recipe read FIRST: its gate was published even earlier, therefore
+    ///   before the removal, therefore before the `spawn_locks` read here, so
+    ///   this call sees that gate and blocks on it until the spawn has put its
+    ///   process in `providers`, where `stop_process` below then kills it;
+    /// * removal FIRST: the recipe read finds nothing and the spawn refuses.
+    ///
+    /// Either way no process exists under an unregistered key once this
+    /// returns. Read `spawn_locks` before removing the registry entry and the
+    /// second case gains a third leg (gate not yet published, recipe read still
+    /// wins the race), which leaves a live process under the removed key that
+    /// `provider_process` keeps serving, because `live_process` runs before its
+    /// `knows` check.
+    ///
+    /// NOT claimed: "exactly one spawn per key across an unregister then a
+    /// re-register". A spawn parked between publishing its gate and taking it
+    /// holds a stale `Arc` while a re-registered spawn mints a fresh gate, so
+    /// the two do not serialise. Closing that needs a generation counter, which
+    /// is a different claim and has no caller yet.
+    ///
+    /// The stop is INTENTIONAL, exactly like the idle sweep's: it neither counts
+    /// on the breaker nor leaves a phantom `exited` row on the health pane, and
+    /// the breaker entry goes with it so a fleet of short-lived task keys does
+    /// not accrete bookkeeping. Sessions hosted on the process converge through
+    /// the ordinary exit path.
+    pub async fn unregister_adapter(&self, key: &str) -> bool {
+        let was_registered = self.adapters.lock().expect("adapter registry").remove(key).is_some();
+        let gate = self.spawn_locks.lock().expect("spawn lock map").get(key).map(Arc::clone);
+        let _held = match gate.as_ref() {
+            Some(gate) => Some(gate.lock().await),
+            None => None,
+        };
+        self.spawn_locks.lock().expect("spawn lock map").remove(key);
+        if let Ok(mut circuits) = self.circuits.lock() {
+            circuits.remove(key);
+        }
+        if self.stop_process(key).await {
+            tracing::info!(provider = %key, "stopped the adapter process of an unregistered key");
+        }
+        was_registered
+    }
+
+    /// Stop the process under `key` on purpose: drop it from `providers`, mark
+    /// it so its exit is not counted as a crash, and kill it. `false` when
+    /// there was none.
+    async fn stop_process(&self, key: &str) -> bool {
+        let process = self.providers.lock().await.remove(key);
+        if let Some(process) = process {
+            process.stopping.store(true, Ordering::Relaxed);
+            process.process.kill();
+            true
+        } else {
+            false
+        }
     }
 
     /// Hand one prompt to the recipient's OWN session (never a broadcast
@@ -922,18 +1029,12 @@ impl AcpPool {
                 .collect()
         };
         for provider in expired {
-            let process = {
-                let mut providers = self.providers.lock().await;
-                providers.remove(&provider)
-            };
-            if let Some(process) = process {
+            if self.stop_process(&provider).await {
                 tracing::info!(
                     %provider,
                     idle_window_secs = self.config.process_idle_window.as_secs(),
-                    "stopping an acp adapter process that has been idle for its whole window"
+                    "stopped an acp adapter process that had been idle for its whole window"
                 );
-                process.stopping.store(true, Ordering::Relaxed);
-                process.process.kill();
             }
         }
     }
@@ -998,6 +1099,16 @@ impl AcpPool {
         }
     }
 
+    /// The spawn recipe for `provider` from the live registry.
+    fn adapter_config(&self, provider: &str) -> Result<AdapterConfig, AcpError> {
+        self.adapters
+            .lock()
+            .expect("adapter registry")
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| not_in_registry(provider))
+    }
+
     /// The live process for `provider`, or `None` when there is none.
     async fn live_process(&self, provider: &str) -> Option<Arc<ProviderProcess>> {
         let mut providers = self.providers.lock().await;
@@ -1030,6 +1141,12 @@ impl AcpPool {
         if let Some(existing) = self.live_process(provider).await {
             return Ok(existing);
         }
+        // The registry BEFORE the gate: an unknown key must not mint a spawn
+        // lock, or every prompt against a key `unregister_adapter` already
+        // cleaned up would put its entry straight back.
+        if !self.knows(provider) {
+            return Err(not_in_registry(provider));
+        }
         let gate = {
             let mut locks = self.spawn_locks.lock().expect("spawn lock map");
             Arc::clone(
@@ -1039,18 +1156,13 @@ impl AcpPool {
             )
         };
         let _spawning = gate.lock().await;
-        // Another caller may have spawned it while we waited on the gate.
+        // Another caller may have spawned it while we waited on the gate, or an
+        // `unregister_adapter` that held the gate may have taken the key out of
+        // the registry, which is why the recipe is read HERE and not above.
         if let Some(existing) = self.live_process(provider).await {
             return Ok(existing);
         }
-        let config =
-            self.config.adapters.get(provider).cloned().ok_or_else(|| AcpError::Spawn {
-                adapter: provider.to_string(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "provider is not in the adapter registry",
-                ),
-            })?;
+        let config = self.adapter_config(provider)?;
         let span = tracing::info_span!(
             "acp.spawn",
             provider = %provider,
@@ -1934,15 +2046,31 @@ impl SessionActor {
         self.pump().await;
 
         let (marker, state, detail) = match &result {
-            Ok(response) if turn_succeeded(response) => {
-                (Lifecycle::TurnCompleted, "DELIVERED", None)
-            }
+            // The stop reason rides on a SUCCESS too, because `turn_succeeded`
+            // folds `EndTurn`, `MaxTokens` and `MaxTurnRequests` into one
+            // DELIVERED and a task caller has to tell "the agent finished" from
+            // "the agent ran out of budget" without opening the transcript. Only
+            // the two that say something, though: among DELIVERED legs no token
+            // unambiguously means `EndTurn`, so writing one would spend the
+            // operator's line width on every ordinary turn.
+            Ok(response) if turn_succeeded(response) => (
+                Lifecycle::TurnCompleted,
+                "DELIVERED",
+                (!matches!(response.stop_reason, StopReason::EndTurn)).then(|| {
+                    format!(
+                        "{DELIVERY_STOP_PREFIX}{}",
+                        stop_reason_token(response.stop_reason)
+                    )
+                }),
+            ),
+            // The same `stop=` shape as the success arm, so a reader parses ONE
+            // field whichever side of `turn_succeeded` the turn fell on.
             Ok(response) => (
                 Lifecycle::TurnFailed,
                 "FAILED",
                 Some(format!(
-                    "{DELIVERY_TURN_FAILED}; {:?}",
-                    response.stop_reason
+                    "{DELIVERY_TURN_FAILED}; {DELIVERY_STOP_PREFIX}{}",
+                    stop_reason_token(response.stop_reason)
                 )),
             ),
             // The request WAS issued, so the honest answer is UNKNOWN. A resend
@@ -3031,6 +3159,35 @@ async fn resolve_leg(
             "acp delivery leg was already resolved"
         ),
         Err(error) => tracing::error!(%error, "could not claim the acp delivery leg"),
+    }
+}
+
+/// The spawn refusal for a key the live registry does not hold.
+fn not_in_registry(provider: &str) -> AcpError {
+    AcpError::Spawn {
+        adapter: provider.to_string(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "provider is not in the adapter registry",
+        ),
+    }
+}
+
+/// The persisted token for a stop reason: the ACP wire name, snake_case like
+/// every other token in this taxonomy.
+///
+/// An explicit match rather than the enum's Debug name, because the upstream
+/// enum is `#[non_exhaustive]` and a token that reaches the store and the
+/// operator's screen must not change spelling when a variant is renamed
+/// upstream or arrive as a name nothing else in the vocabulary looks like.
+const fn stop_reason_token(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::MaxTurnRequests => "max_turn_requests",
+        StopReason::Refusal => "refusal",
+        StopReason::Cancelled => "cancelled",
+        _ => "unknown",
     }
 }
 
