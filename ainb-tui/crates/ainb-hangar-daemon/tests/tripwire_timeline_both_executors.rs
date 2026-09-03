@@ -148,6 +148,36 @@ async fn each_executor_leaves_the_other_durable_store_empty() {
     );
 }
 
+/// The PR chip on an ACP run's card (A6's second half): the URL is read out of
+/// the TOOL OUTPUT in the transcript, which is where `gh pr create` prints it —
+/// an ACP run has no stdout for the process path's scan to read.
+#[tokio::test]
+async fn an_acp_run_captures_its_pr_url_from_the_transcript() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping the acp pr capture tripwire");
+        return;
+    }
+
+    let acp = run_acp_executor().await;
+    let result: String = acp.result_json;
+    let result: serde_json::Value = serde_json::from_str(&result).expect("result json");
+    assert_eq!(
+        result["pr_url"].as_str(),
+        Some(FAKE_PR_URL),
+        "the ACP run must capture the PR its tool opened: {result}"
+    );
+
+    // The URL is NOT in the run's own result content (the final agent message),
+    // so a capture that only scanned the stdout tail A5 builds from that
+    // message would have found nothing here. This is what makes the assertion
+    // above a real test of the transcript read.
+    assert!(
+        !result["content"].as_str().unwrap_or_default().contains(FAKE_PR_URL),
+        "fixture drift: the agent's final message must NOT repeat the URL, or \
+         this test stops proving the transcript scan: {result}"
+    );
+}
+
 /// What one executor's run left behind.
 struct Run {
     pool: SqlitePool,
@@ -155,6 +185,7 @@ struct Run {
     /// Where the process executor's transcript is (or would be).
     jsonl_path: PathBuf,
     timeline: BoardCardTimelineResult,
+    result_json: String,
     /// Kept so the tempdir outlives every assertion above.
     _home: tempfile::TempDir,
 }
@@ -390,6 +421,7 @@ async fn finish(
         task_id: task_id.to_string(),
         jsonl_path,
         timeline,
+        result_json: row.get::<Option<String>, _>("result").unwrap_or_default(),
         _home: home,
     }
 }

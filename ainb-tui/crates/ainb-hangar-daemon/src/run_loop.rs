@@ -1869,16 +1869,13 @@ async fn finalize_success(
     stats: &HealthStats,
     events: &EventSink,
 ) -> anyhow::Result<()> {
-    // P9.1: v1 gh-CLI-only PR capture. If the agent shelled out to `gh pr
-    // create` inside its worktree, its printed PR-URL line lands in the runner's
-    // bounded stdout tail (the per-task ring buffer, cap `TAIL_LINES`,
-    // oldest-line-evicting — read concurrently in the runner so it never blocks
-    // the claim loop). Scan it for the canonical PR URL (last one wins on a
-    // multi-PR run) and fold it into the structured result. A no-PR run yields
-    // `None`, which the `TaskResult` serializer omits entirely — so the `result`
-    // JSON is byte-identical to the pre-P9 shape and `pr_url` is NULL (no key),
-    // never `""`.
-    let pr_url = ainb_hangar_core::pr_url::parse_gh_pr_create_stdout(&result.stdout_tail);
+    // P9.1: v1 gh-CLI-only PR capture. The EXECUTOR found it (each looks
+    // somewhere different — see `RunnerResult::pr_url`) and this only folds it
+    // into the structured result. A no-PR run yields `None`, which the
+    // `TaskResult` serializer omits entirely — so the `result` JSON is
+    // byte-identical to the pre-P9 shape and `pr_url` is NULL (no key), never
+    // `""`.
+    let pr_url = result.pr_url.clone();
     if let Some(url) = pr_url.as_deref() {
         tracing::info!(task_id = %task.id, pr_url = url, "captured gh pr url");
     }
@@ -4100,6 +4097,7 @@ mod tests {
             exit_code: Some(65),
             session_id: None,
             usage: None,
+            pr_url: None,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
         };

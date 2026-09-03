@@ -69,6 +69,18 @@ const REPLY_SCAN_LIMIT: i64 = 8;
 /// the adapter process is torn down anyway. See [`await_converged`].
 const CONVERGE_WAIT: Duration = Duration::from_secs(2);
 
+/// Rows and payload bytes of the run's TAIL that PR capture scans.
+///
+/// A PR is opened near the end of a run, by construction: the agent pushes and
+/// then `gh pr create`s. Scanning the whole transcript would mean holding an
+/// unbounded run in memory at finalize, for a URL that is in the last few rows
+/// or nowhere. The same two-cap shape the timeline read uses, one order of
+/// magnitude tighter, because this looks for one line rather than rendering a
+/// view.
+const PR_SCAN_ROWS: i64 = 64;
+/// Payload byte budget for [`PR_SCAN_ROWS`].
+const PR_SCAN_BYTES: usize = 64 * 1024;
+
 /// The `fleet_acp_session.scope_key` namespace RESERVED for task runs.
 ///
 /// Reserved, not merely used: `fleet/acp_session_create` refuses it, because a
@@ -468,7 +480,8 @@ async fn await_leg(
 }
 
 /// The run artefacts a finalize reads: the session key as the run's session id,
-/// and the turn's final agent message as the stdout tail PR capture scans.
+/// the turn's final agent message as the run's result content, and the PR the
+/// turn opened.
 async fn build_result(pool: &SqlitePool, session_key: &str, message_id: &str) -> RunnerResult {
     // The turn's final message is already persisted as a threaded `agent` reply
     // in the task's own scope (`acp_pool::finish_turn`), so this reads ONE row
@@ -489,11 +502,47 @@ async fn build_result(pool: &SqlitePool, session_key: &str, message_id: &str) ->
         // A7 parses the `acp.usage` rows; until then an ACP run reports none
         // rather than a fabricated zero.
         usage: None,
+        pr_url: pr_url_from_transcript(pool, session_key).await,
         stdout_tail,
         // The adapter's stderr is INHERITED by the daemon (`ainb_acp::client`),
         // so there is no tail to capture here.
         stderr_tail: String::new(),
     }
+}
+
+/// The PR this ACP turn opened, read out of its own transcript.
+///
+/// The process executor finds this URL on the agent's stdout. An ACP run has no
+/// stdout to find it on: the adapter's is the JSON-RPC pipe and its stderr is
+/// inherited by the daemon. What it has instead is the transcript, and the URL
+/// lands in one of exactly two places there — the OUTPUT of the tool call that
+/// ran `gh pr create`, or the agent's own closing prose. Both are read, so the
+/// capture does not depend on the agent choosing to mention it.
+///
+/// [`acp_row_text`](ainb_hangar_proto::transcript::acp_row_text), not the
+/// display classification: a rendered tool result is an 84-char summary with
+/// its newlines collapsed, and the parser is anchored to a WHOLE line
+/// (deliberately, so a `gh pr list` row or a URL quoted mid-sentence is not
+/// mistaken for a created PR). Scanning the render would therefore find nothing
+/// on the common path and would have quietly looked like it worked.
+async fn pr_url_from_transcript(pool: &SqlitePool, session_key: &str) -> Option<String> {
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    let rows =
+        FleetProviderEventRepo::list_by_session_tail(pool, session_key, PR_SCAN_ROWS, PR_SCAN_BYTES)
+            .await
+            .inspect_err(
+                |error| tracing::warn!(%session_key, %error, "acp transcript read for pr capture failed"),
+            )
+            .ok()?;
+    let transcript = rows
+        .iter()
+        .filter_map(|row| {
+            ainb_hangar_proto::transcript::acp_row_text(&row.event_type, &row.raw_payload)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ainb_hangar_core::pr_url::parse_gh_pr_create_stdout(&transcript)
 }
 
 /// [`FailureReason::SpawnError`] with no captured output: the pool or its

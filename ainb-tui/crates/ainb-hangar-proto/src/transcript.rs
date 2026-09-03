@@ -416,6 +416,29 @@ impl AcpClassifier {
     }
 }
 
+/// The UNTRUNCATED text an ACP transcript row carries: the agent's own prose,
+/// or a tool call's output. `None` for every other row type.
+///
+/// [`AcpClassifier::classify_row`] renders for DISPLAY — a tool result becomes
+/// an 84-char single-line summary, which is right on a render row and wrong for
+/// anything scanning for content. The PR-URL capture is exactly such a scanner
+/// (`gh pr create` prints its URL on a line of its own, and the parser is
+/// anchored to a whole line on purpose), so it reads the bytes the agent
+/// actually saw through here instead of the summary the operator sees.
+#[must_use]
+pub fn acp_row_text(event_type: &str, raw_payload: &str) -> Option<String> {
+    let payload = serde_json::from_str::<Value>(raw_payload).ok()?;
+    match event_type {
+        "acp.message" => payload
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(ToString::to_string),
+        "acp.tool_call" => tool_output_text(&payload),
+        _ => None,
+    }
+}
+
 /// A `plan` update: one blue line per entry, so the agent's plan reads as the
 /// checklist it is rather than as a JSON blob on one row.
 fn fold_acp_plan(payload: &Value, out: &mut Vec<(MessageKind, String)>) {
