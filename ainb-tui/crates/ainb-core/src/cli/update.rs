@@ -414,44 +414,37 @@ enum InstallOwner {
 impl InstallOwner {
     /// Which installation owns the binary the user actually invoked.
     ///
-    /// The RUNNING executable decides, and every check is keyed on it. This used
-    /// to probe `brew list --versions ainb` first and answer `Homebrew` on
-    /// success, without consulting `exe` at all — so on a machine where Homebrew
-    /// owns one copy and a second copy shadows it on `PATH`, `ainb update`
-    /// upgraded Homebrew's, reported success, and left the binary the user ran
-    /// untouched. The shadowing copy could never be updated by the updater, no
-    /// matter how many times it was run, and it stayed stale silently.
+    /// The RUNNING executable decides. This used to probe
+    /// `brew list --versions ainb` first and answer `Homebrew` on success
+    /// without consulting `exe` at all, so on a machine where Homebrew owns one
+    /// copy and a second copy shadows it on `PATH`, `ainb update` upgraded
+    /// Homebrew's, reported success, and left the binary the user ran
+    /// untouched. That copy could never be updated by the updater however many
+    /// times it was run.
     ///
-    /// That is not hypothetical: a `~/.local/bin/ainb` source build shadowed a
-    /// Homebrew 1.24.0 and pinned the whole machine to 1.23.2, which surfaced
-    /// only when its embedded migrations were too old to open a database a
-    /// newer build had already migrated forward.
-    ///
-    /// Homebrew is still the answer when the running exe IS Homebrew's, and it
-    /// remains the fallback for an exe that matches nothing known — but that
-    /// fallback now says out loud which binary it is about to upgrade, because
-    /// it is not the one that is running.
+    /// Not hypothetical: a `~/.local/bin/ainb` source build shadowed a Homebrew
+    /// 1.24.0 and pinned the machine to 1.23.2, surfacing only when its
+    /// embedded migrations were too old to open a database a newer build had
+    /// already migrated forward.
     fn detect() -> Result<Self> {
         let exe = std::env::current_exe().context("resolving ainb executable")?;
-        let brew_owns = || {
-            Command::new("brew")
-                .args(["list", "--versions", "ainb"])
-                .output()
-                .ok()
-                .is_some_and(|out| out.status.success())
-        };
-
-        if let Some(owner) = classify_exe(
-            &exe,
-            brew_prefix_binary().as_deref(),
-            dirs::home_dir().as_deref(),
-        ) {
+        if let Some(owner) = classify_exe(&exe, dirs::home_dir().as_deref()) {
             return Ok(owner);
         }
-        if brew_owns() {
-            eprintln!(
-                "warning: upgrading the Homebrew ainb, but you are running {}. \
-                 That copy shadows Homebrew's on PATH and will stay at this version.",
+        if Command::new("brew")
+            .args(["list", "--versions", "ainb"])
+            .output()
+            .ok()
+            .is_some_and(|out| out.status.success())
+        {
+            // Printed on stdout, beside the completion line `apply_command`
+            // writes, NOT on stderr. A caller capturing only stdout would
+            // otherwise read an unqualified success for an upgrade that did not
+            // touch the running binary, which is the same silent
+            // wrong-binary failure this function exists to remove.
+            println!(
+                "warning: upgrading the Homebrew ainb, but you are running {}, \
+                 which is not it. That copy stays at its current version.",
                 exe.display()
             );
             return Ok(Self::Homebrew);
@@ -708,40 +701,44 @@ impl DirectPluginSwap {
 /// Split out of [`InstallOwner::detect`] so the ORDER is testable without a
 /// Homebrew on the machine: the regression this guards is a `Direct` exe being
 /// answered `Homebrew` merely because Homebrew also had a copy somewhere.
-fn classify_exe(
-    exe: &Path,
-    brew_binary: Option<&Path>,
-    home: Option<&Path>,
-) -> Option<InstallOwner> {
-    if brew_binary.is_some_and(|brewed| canonical_eq(brewed, exe)) {
+///
+/// Homebrew is recognised by a `Cellar` ancestor, not by asking
+/// `brew --prefix ainb` where its binary is. The formula installs the real
+/// executable at `<keg>/libexec/ainb` and writes `<keg>/bin/ainb` as a shell
+/// wrapper that `exec`s it, so `current_exe` under Homebrew reports the libexec
+/// path and never equals the prefix's `bin/ainb`. Comparing against that
+/// wrapper made the Homebrew arm unreachable and gave every ordinary Homebrew
+/// user a warning naming their own live binary as a stale shadow. The ancestor
+/// walk is the same rule `ainb_plugin_notifyd::install::homebrew_launcher`
+/// uses, and it costs no subprocess.
+///
+/// Checked BEFORE the direct paths on purpose: a brew-managed
+/// `/usr/local/bin/ainb` is a symlink into the Cellar, and canonicalising it
+/// reaches the keg, so answering `Direct` there would let
+/// `apply_direct_release` replace a Homebrew-owned link with an unmanaged file.
+fn classify_exe(exe: &Path, home: Option<&Path>) -> Option<InstallOwner> {
+    let resolved = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    if resolved
+        .ancestors()
+        .any(|path| path.file_name().is_some_and(|name| name == "Cellar"))
+    {
         return Some(InstallOwner::Homebrew);
     }
-    if exe.parent().is_some_and(|parent| parent.ends_with(".cargo/bin")) {
+    if resolved.parent().is_some_and(|parent| parent.ends_with(".cargo/bin")) {
         return Some(InstallOwner::Cargo);
     }
-    let direct = [
-        PathBuf::from("/usr/local/bin/ainb"),
-        home.unwrap_or(Path::new("")).join(".local/bin/ainb"),
-    ];
+    // `home` guarded rather than defaulted: an empty base yields the RELATIVE
+    // `.local/bin/ainb`, which `canonicalize` resolves against the process
+    // working directory, so an unrelated binary under the cwd could be
+    // classified `Direct` and then overwritten.
+    let mut direct = vec![PathBuf::from("/usr/local/bin/ainb")];
+    if let Some(home) = home {
+        direct.push(home.join(".local/bin/ainb"));
+    }
     direct
         .iter()
-        .any(|path| canonical_eq(path, exe))
+        .any(|path| canonical_eq(path, &resolved))
         .then_some(InstallOwner::Direct)
-}
-
-/// The `ainb` binary Homebrew owns, if Homebrew has it.
-///
-/// `brew --prefix ainb` names the keg; the symlink on `PATH` resolves into it,
-/// so `canonical_eq` against this is what distinguishes "you are running
-/// Homebrew's ainb" from "Homebrew merely has one somewhere".
-fn brew_prefix_binary() -> Option<PathBuf> {
-    let out = Command::new("brew").args(["--prefix", "ainb"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let prefix = String::from_utf8(out.stdout).ok()?;
-    let prefix = prefix.trim();
-    (!prefix.is_empty()).then(|| PathBuf::from(prefix).join("bin").join("ainb"))
 }
 
 /// Whether two paths name the same existing file.
@@ -867,47 +864,72 @@ mod tests {
 
     #[test]
     fn a_shadowing_direct_exe_is_not_claimed_by_homebrew() {
-        // Real files: `canonical_eq` requires both sides to resolve, so a fake
-        // path matches nothing — which is itself pinned by the last case here.
+        // Real files throughout: `canonical_eq` requires both sides to resolve,
+        // and the Cellar walk runs on the CANONICAL exe, so fake paths would
+        // prove nothing.
         let tmp = tempfile::tempdir().expect("tempdir");
         let home = tmp.path().join("home");
         let local_bin = home.join(".local/bin");
-        let brew_bin = tmp.path().join("brew/bin");
         let cargo_bin = home.join(".cargo/bin");
-        for dir in [&local_bin, &brew_bin, &cargo_bin] {
+        let elsewhere = tmp.path().join("elsewhere");
+        // The real formula shape: the executable lives in `<keg>/libexec` and
+        // `<keg>/bin/ainb` is a shell wrapper that execs it, so a Homebrew run
+        // reports the LIBEXEC path. Modelling both as one path is what let the
+        // first version of this test pass while the production arm was dead.
+        let keg = tmp.path().join("Cellar/ainb/1.24.0");
+        let brew_libexec = keg.join("libexec");
+        let brew_bin = keg.join("bin");
+        for dir in [&local_bin, &cargo_bin, &elsewhere, &brew_libexec, &brew_bin] {
             std::fs::create_dir_all(dir).expect("create dir");
             std::fs::write(dir.join("ainb"), b"binary").expect("write binary");
         }
-        let brewed = brew_bin.join("ainb");
 
-        // The regression. Homebrew HAS an ainb, but the running exe is the
-        // ~/.local/bin copy that shadows it on PATH. Answering Homebrew here is
+        // The regression. Homebrew has a copy, but the running exe is the
+        // ~/.local/bin one that shadows it on PATH. Answering Homebrew here is
         // what let `ainb update` upgrade a binary the user was not running,
         // report success, and leave the shadowing copy stale forever.
         assert_eq!(
-            classify_exe(&local_bin.join("ainb"), Some(&brewed), Some(&home)),
+            classify_exe(&local_bin.join("ainb"), Some(&home)),
             Some(InstallOwner::Direct),
-            "a shadowing ~/.local/bin exe owns itself even when Homebrew has a copy"
+            "a shadowing ~/.local/bin exe owns itself"
+        );
+
+        // The arm that was unreachable in production: the libexec binary, not
+        // the wrapper, is what `current_exe` reports under Homebrew.
+        assert_eq!(
+            classify_exe(&brew_libexec.join("ainb"), Some(&home)),
+            Some(InstallOwner::Homebrew),
+            "the real Homebrew binary lives in libexec and must classify as Homebrew"
+        );
+        assert_eq!(
+            classify_exe(&brew_bin.join("ainb"), Some(&home)),
+            Some(InstallOwner::Homebrew),
+            "the wrapper is Homebrew's too"
         );
 
         assert_eq!(
-            classify_exe(&brewed, Some(&brewed), Some(&home)),
-            Some(InstallOwner::Homebrew),
-            "running Homebrew's own binary is still Homebrew"
-        );
-        assert_eq!(
-            classify_exe(&cargo_bin.join("ainb"), Some(&brewed), Some(&home)),
+            classify_exe(&cargo_bin.join("ainb"), Some(&home)),
             Some(InstallOwner::Cargo),
-            "a ~/.cargo/bin exe is Cargo's, not Homebrew's"
+            "a ~/.cargo/bin exe is Cargo's"
         );
         assert_eq!(
-            classify_exe(
-                &tmp.path().join("elsewhere/ainb"),
-                Some(&brewed),
-                Some(&home)
-            ),
+            classify_exe(&elsewhere.join("ainb"), Some(&home)),
             None,
-            "an exe matching nothing known must fall through to the probe"
+            "a real binary in an unrecognised directory falls through to the probe"
+        );
+
+        // No home: the `~/.local/bin` candidate must not degrade to the
+        // relative `.local/bin/ainb`, which canonicalises against the process
+        // working directory.
+        assert_eq!(
+            classify_exe(&local_bin.join("ainb"), None),
+            None,
+            "without a home there is no ~/.local/bin candidate to match"
+        );
+        assert_eq!(
+            classify_exe(&brew_libexec.join("ainb"), None),
+            Some(InstallOwner::Homebrew),
+            "Homebrew is decided by the Cellar ancestor, with or without a home"
         );
     }
 
