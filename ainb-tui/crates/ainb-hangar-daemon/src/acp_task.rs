@@ -163,7 +163,9 @@ impl Drop for AdapterLease {
 // One over the lint's 7, and the same shape the sibling run functions in
 // `run_loop` carry: every argument is a distinct collaborator the run needs and
 // bundling them into a context struct is a wider refactor than this arm wants.
-#[allow(clippy::too_many_arguments)]
+// `task_env` is the map `prepare_spawn_inputs` returns verbatim; generalising
+// its hasher would only make the one call site spell out a type parameter.
+#[allow(clippy::too_many_arguments, clippy::implicit_hasher)]
 pub async fn run_acp(
     pool: &SqlitePool,
     events: &EventSink,
@@ -205,6 +207,7 @@ pub async fn run_acp(
             location,
             task_env,
             dispatch.agent_env.clone().expose_for_child_env(),
+            sandbox_enabled(),
         ),
     );
     // Held from BEFORE the session exists: a store fault below still has to
@@ -244,14 +247,7 @@ pub async fn run_acp(
         ));
     }
 
-    let (state, detail) = match await_leg(pool, &acp, &session_key, &message_id, max_runtime).await
-    {
-        Some(resolved) => resolved,
-        None => (
-            "UNKNOWN".to_string(),
-            Some(crate::acp_pool::DELIVERY_TURN_DEADLINE.to_string()),
-        ),
-    };
+    let (state, detail) = await_leg(pool, &acp, &session_key, &message_id, max_runtime).await;
     let result = build_result(pool, &session_key, &message_id).await;
     Ok(outcome_for(&state, detail.as_deref(), result))
 }
@@ -303,6 +299,7 @@ fn task_adapter(
     location: &RunLocation,
     task_env: HashMap<String, String>,
     agent_env: Vec<(String, String)>,
+    sandbox: bool,
 ) -> AdapterConfig {
     let config_dir = task_config_dir(env);
     // Best-effort: an adapter handed a config dir it has to create itself still
@@ -334,7 +331,7 @@ fn task_adapter(
         config_options: base.config_options.clone(),
         sandbox: None,
     };
-    if sandbox_enabled() {
+    if sandbox {
         let mut policy = ainb_hangar_sandbox::SandboxPolicy::confined_to(env.root());
         if let Some(root) = location.extra_root.as_deref() {
             policy = policy.allow_read(root).allow_write(root);
@@ -354,34 +351,39 @@ fn sandbox_enabled() -> bool {
 }
 
 /// Poll the delivery leg until it leaves `PENDING`, or the run outlives
-/// `max_runtime`.
+/// `max_runtime`, and answer the `(state, detail)` the outcome mapping reads.
 ///
-/// `None` means the deadline was hit: the turn is cancelled on the way out so
-/// the adapter is not left working on a run nobody is waiting for.
+/// On the deadline the turn is CANCELLED on the way out — the adapter would
+/// otherwise keep working on a run nobody is waiting for — and the pair
+/// returned is the same one the pool's own deadline sweep would have written,
+/// so both routes to a timed-out task map identically.
 async fn await_leg(
     pool: &SqlitePool,
     acp: &Arc<AcpPool>,
     session_key: &str,
     message_id: &str,
     max_runtime: Duration,
-) -> Option<(String, Option<String>)> {
+) -> (String, Option<String>) {
     let deadline = Instant::now() + max_runtime;
     loop {
         match FleetMessageRepo::deliveries_for_message(pool, message_id).await {
             Ok(legs) => match legs.into_iter().find(|leg| leg.session_key == session_key) {
-                Some(leg) if leg.state != "PENDING" => return Some((leg.state, leg.detail)),
+                Some(leg) if leg.state != "PENDING" => return (leg.state, leg.detail),
                 Some(_) => {}
                 // The leg is written in the same transaction as the message, so
                 // its absence is not a race: it is a store that lost a row.
                 // Answered as drift by the caller rather than polled forever.
-                None => return Some(("MISSING".to_string(), None)),
+                None => return ("MISSING".to_string(), None),
             },
             // Transient: keep polling, the deadline is still the bound.
             Err(error) => tracing::warn!(%session_key, %error, "acp delivery leg read failed"),
         }
         if Instant::now() >= deadline {
             acp.cancel(session_key, ConvergeCause::TurnDeadline).await;
-            return None;
+            return (
+                "UNKNOWN".to_string(),
+                Some(crate::acp_pool::DELIVERY_TURN_DEADLINE.to_string()),
+            );
         }
         tokio::time::sleep(LEG_POLL_INTERVAL).await;
     }
@@ -539,6 +541,7 @@ mod tests {
             &location,
             HashMap::from([("PATH".to_string(), "/usr/bin".to_string())]),
             vec![("SECRET_TOKEN".to_string(), "sk-live-1".to_string())],
+            false,
         );
 
         assert_eq!(adapter.name, "claude-agent-acp#task:t-1");
@@ -573,6 +576,47 @@ mod tests {
             config_dir.is_dir(),
             "the task config dir is created up front"
         );
+    }
+
+    #[test]
+    fn the_sandbox_policy_widens_to_the_run_worktree() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env = exec_env(dir.path());
+        let worktree = dir.path().join("worktree");
+        let location = RunLocation {
+            cwd: worktree.clone(),
+            extra_root: Some(worktree.clone()),
+        };
+        let base = AdapterConfig::new(ainb_acp::config::CLAUDE_ADAPTER, "default");
+        let build = |sandbox| {
+            task_adapter(
+                &base,
+                "k",
+                &env,
+                &location,
+                HashMap::new(),
+                Vec::new(),
+                sandbox,
+            )
+        };
+
+        // Sandbox OFF is an explicit posture, not an accident of construction.
+        assert!(build(false).sandbox.is_none());
+
+        let policy = build(true).sandbox.expect("a confined per-task adapter");
+        assert!(
+            policy.write_roots.contains(&env.root().to_path_buf()),
+            "the task tree must be writable: {:?}",
+            policy.write_roots
+        );
+        // The provisioned worktree lives OUTSIDE the task tree, so without the
+        // widening the confined agent could not touch its own checkout.
+        assert!(
+            policy.write_roots.contains(&worktree),
+            "the run worktree must be writable: {:?}",
+            policy.write_roots
+        );
+        assert!(policy.read_roots.contains(&worktree));
     }
 
     #[test]
