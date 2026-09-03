@@ -154,9 +154,11 @@ async fn an_acp_task_runs_to_done_with_no_process_and_no_tmux() {
 /// as `acp.usage` rows, and the finalize reads the LAST one back. Before A7 the
 /// run finished with `usage: None` and this table stayed empty.
 ///
-/// The script puts agent TEXT after the final report on purpose. That text is
-/// what buries the accounting row, and it is why the read cannot be a windowed
-/// tail scan.
+/// The script puts 70 rows of agent chatter after the final report on purpose,
+/// and the test COUNTS them: that is what buries the accounting row past the
+/// 64-row tail window, and it is what makes "the read cannot be a windowed tail
+/// scan" a claim this test would catch rather than one only the store test
+/// falsifies.
 #[tokio::test]
 async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
     if !tripwire_support::tmux_available() {
@@ -171,21 +173,34 @@ async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
     // Two reports, because the LAST one is the run's answer: `used` is context
     // occupancy (not a delta) and `cost` is cumulative, so a reader that summed
     // the rows would bill 5 400 tokens and $0.05 for this turn.
+    //
+    // Then 70 chatter updates AFTER the last report, ALTERNATING message and
+    // thought. The alternation is load-bearing, not decoration: the reducer
+    // coalesces contiguous same-kind text, so 70 `agent_message_chunk` lines
+    // would persist as ONE row and bury nothing. A kind switch flushes the
+    // pending chunk, so this is 70 rows, and the accounting row ends up out of
+    // reach of the 64-row tail window. That is what makes the daemon's indexed
+    // read falsifiable end to end: swap it for a filter over
+    // `list_by_session_tail` and the usage assertion below must go red.
     let script = home.path().join("turn.ndjson");
-    std::fs::write(
-        &script,
-        concat!(
-            r#"{"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{"amount":0.0125,"currency":"USD"}}"#,
-            "\n",
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}"#,
-            "\n",
-            r#"{"sessionUpdate":"usage_update","used":4200,"size":200000,"cost":{"amount":0.0375,"currency":"USD"}}"#,
-            "\n",
-            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" and done"}}"#,
-            "\n",
-        ),
-    )
-    .expect("write the turn script");
+    let chatter = (0..70).map(|index| {
+        let kind = if index % 2 == 0 {
+            "agent_message_chunk"
+        } else {
+            "agent_thought_chunk"
+        };
+        format!(r#"{{"sessionUpdate":"{kind}","content":{{"type":"text","text":"step {index}"}}}}"#)
+    });
+    let turn = [
+        r#"{"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{"amount":0.0125,"currency":"USD"}}"#.to_string(),
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"working"}}"#.to_string(),
+        r#"{"sessionUpdate":"usage_update","used":4200,"size":200000,"cost":{"amount":0.0375,"currency":"USD"}}"#.to_string(),
+    ]
+    .into_iter()
+    .chain(chatter)
+    .collect::<Vec<_>>()
+    .join("\n");
+    std::fs::write(&script, format!("{turn}\n")).expect("write the turn script");
 
     let agent = seed_agent_with_env(
         &pool,
@@ -211,6 +226,33 @@ async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
         "the scripted run must reach done; reason={:?}\n{}\ndaemon:\n{pane}",
         row.get::<Option<String>, _>("failure_reason"),
         dump_legs(&pool).await,
+    );
+
+    // The burial, COUNTED rather than assumed from the script's line count: the
+    // reducer decides how many rows those 70 updates become, and if it ever
+    // coalesced them back into a handful the assertions below would still pass
+    // while proving nothing about the read.
+    let session_key: String =
+        sqlx::query_scalar("SELECT session_key FROM fleet_acp_session WHERE scope_key = ?")
+            .bind(format!("task:{task_id}"))
+            .fetch_one(&pool)
+            .await
+            .expect("a session under the task scope");
+    let buried_under: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM fleet_provider_event WHERE session_key = ? \
+           AND ingest_order > (SELECT MAX(ingest_order) FROM fleet_provider_event \
+                               WHERE session_key = ? AND event_type = 'acp.usage')",
+    )
+    .bind(&session_key)
+    .bind(&session_key)
+    .fetch_one(&pool)
+    .await
+    .expect("count the transcript rows above the last usage row");
+    assert!(
+        buried_under >= 64,
+        "the accounting row must sit past the 64-row tail window, or a \
+         list_by_session_tail filter would satisfy this test too; only \
+         {buried_under} rows follow it"
     );
 
     let usage = sqlx::query(
