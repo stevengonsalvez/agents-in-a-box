@@ -268,7 +268,7 @@ the reason is painted on the title row in red and the card stays.
 | Screen | Keys |
 |--------|------|
 | Logs | `a` all · `i` info · `w` warn · `e` error (level floor; re-reads the newest daemon log file) |
-| Inbox | `r` mark all read |
+| Inbox | `j` / `k` move the attention row · `h` / `l` move the option cursor · `Enter` or `1`-`9` answer the focused ASK · `r` mark all read · `f` cycle the filter (all → asks → runs → issues) |
 | Profiles | `j` / `k` move · `t` cycle the tier premium → balanced → fast |
 
 ## Agent picker (modal)
