@@ -20,13 +20,21 @@
 //! └────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! **`needs you`** is the open `attention/list` rows — the SAME
-//! [`ControlCenterState`] the Control Center paints, handed in at render time
-//! rather than copied, so the two surfaces cannot disagree about what is
-//! waiting. The inline answer is [`control_center::render_options`] paired with
+//! **`needs you`** is EVERY open `attention/list` row, not only the ones that
+//! need a decision: an `ERR` or an `IDLE` row is something a human must see,
+//! and hiding it here would leave it on no surface at all. The header's
+//! `[N need you]` badge counts the narrower set (the ASK-family rows, via
+//! [`ControlCenterState::needs_you_count`]), so the block and the badge are
+//! deliberately different numbers — one is "what is open", the other "what is
+//! blocking an agent".
+//!
+//! The rows are the SAME [`ControlCenterState`] the Control Center paints,
+//! handed in at render time rather than copied, so the two surfaces cannot
+//! disagree about what is waiting. The inline answer is
+//! [`control_center::render_options`] paired with
 //! [`reduce_control_center`](super::control_center::reduce_control_center):
 //! moved, not rewritten, so `I` raises the identical `attention/answer` RPC `C`
-//! raises.
+//! raises — including its refusal note, painted on the header.
 //!
 //! **`recent`** is the durable `hangar/inbox_list` aggregate — events that
 //! survive a detach. The wire row carries a pre-rendered `summary` full of ULIDs
@@ -36,6 +44,12 @@
 //! [`crate::vocab`], and `created_at` a relative age. A row nothing resolves
 //! keeps the daemon's summary, never a blank. Failed runs float to the top of
 //! their age bucket.
+//!
+//! That leading glyph is the run STATE (§2.4's target), which is why B1's
+//! separate per-row unread dot is gone: read state is now carried by colour
+//! (amber unread, soft white read) plus the header's `[N unread]` badge, and `r`
+//! still clears them all. Both glyph columns read one age ladder,
+//! [`crate::vocab::age_word`].
 //!
 //! **Filters** `(all) asks runs issues` are client-side over the cached rows
 //! (`f` cycles): no refetch, and every cached row is reachable from at least one
@@ -48,7 +62,7 @@ use ainb_hangar_proto::events::InboxEntryRow;
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use super::control_center::{self, ControlCenterState};
-use super::kanban::{age_label, short_id};
+use super::kanban::short_id;
 use crate::vocab::{AttentionKind, RunState};
 
 /// Title / accent gold (also the ASK code and the active filter chip).
@@ -77,7 +91,8 @@ pub enum InboxFilter {
     /// Everything: both blocks.
     #[default]
     All,
-    /// Only the `needs you` block.
+    /// Only the `needs you` block — every open attention row, `ERR` and `IDLE`
+    /// included. Named for the chip strip in §2.4, not for the ASK family.
     Asks,
     /// Only run rows in `recent`.
     Runs,
@@ -162,29 +177,13 @@ pub struct InboxState {
 }
 
 impl InboxState {
-    /// Build the state from an `hangar/inbox_list` snapshot result, tagged with
-    /// the actor the snapshot was requested for, filtered to [`InboxFilter::All`].
-    #[must_use]
-    pub const fn from_snapshot(
-        entries: Vec<InboxEntryRow>,
-        unread: i64,
-        recipient: String,
-    ) -> Self {
-        Self {
-            entries,
-            unread,
-            recipient,
-            filter: InboxFilter::All,
-        }
-    }
-
     /// Replace the rows + unread count from a fresh `hangar/inbox_list`
     /// snapshot, KEEPING the human's filter.
     ///
-    /// In place rather than rebuilding the state, which is what makes the
-    /// keeping structural: the `filter` field is never assigned here, so a
-    /// refresh landing while `runs` is picked cannot snap the pane back to
-    /// `all` by omission.
+    /// The ONLY way rows enter this state, in place rather than by rebuilding
+    /// it, which is what makes the keeping structural: the `filter` field is
+    /// never assigned here, so a refresh landing while `runs` is picked cannot
+    /// snap the pane back to `all` by omission.
     pub fn replace_rows(&mut self, entries: Vec<InboxEntryRow>, unread: i64, recipient: String) {
         self.entries = entries;
         self.unread = unread;
@@ -507,6 +506,14 @@ fn render_header(
         };
         x = put_str(buf, x, row, &text, color, area_w);
     }
+    // An `attention/answer` that did NOT deliver (refused as ambiguous, no live
+    // target, delivery failed, already answered elsewhere). This is the answer
+    // path's only failure feedback, and the Inbox is now where answers are
+    // pressed: without it the operator answers, is refused, sees an unchanged
+    // pane, and presses the digit again while the agent stays blocked.
+    if let Some(note) = attention.note() {
+        x = put_str(buf, x, row, &format!("  ⚠ {note}"), ALERT_RED, area_w);
+    }
     // The hotkey hint next to the control (feedback_keybinding_hints_near_control).
     let hint = "I inbox";
     let hint_w = u16::try_from(hint.chars().count()).unwrap_or(0);
@@ -530,20 +537,10 @@ fn needs_you_height(attention: &ControlCenterState) -> u16 {
 
 /// The rows [`control_center::render_options`] paints under the selected card.
 ///
-/// The ONE place that shape is counted: the block sizing and the row the next
-/// card starts on both read it, so they cannot drift into overlapping paints.
+/// Counted by the renderer's own module ([`control_center::options_height`]) so
+/// a row added there cannot silently shift this block's sizing.
 fn answer_block_height(attention: &ControlCenterState) -> u16 {
-    let Some(card) = attention.selected_card() else {
-        return 0;
-    };
-    if !card.kind.is_answerable() || card.options().is_empty() {
-        // The single "(no inline options — surfaced for visibility)" note.
-        return 1;
-    }
-    // `OPTIONS` header + one row per option (two when it carries a description)
-    // + the answer hint line.
-    let options: u16 = card.options().iter().map(|o| u16::from(o.description.is_some()) + 1).sum();
-    options.saturating_add(2)
+    attention.selected_card().map_or(0, control_center::options_height)
 }
 
 /// Render the `needs you` block: one row per open attention row, the focused
@@ -558,18 +555,30 @@ fn render_needs_you(
 ) {
     let right = area_w.saturating_sub(1);
     if attention.cards().is_empty() {
-        put_str(buf, 1, top, "✓ nothing needs you", MUTED_GRAY, right);
+        put_str(buf, 2, top, "✓ nothing needs you", MUTED_GRAY, right);
         return;
     }
     let selected = attention.selected_id();
+    // Follow the selection, as the Control Center's card list does: with more
+    // open rows than fit, painting from index 0 would leave the `▸`, the options
+    // and the answer hint below the fold while Enter and `1`-`9` still answered
+    // the card nobody can see.
+    //
+    // Against a viewport shortened by the answer block, because here the focused
+    // card owns the rows underneath it too: land it on the LAST visible row and
+    // its own options scroll off the bottom, which is the same bug one row down.
+    let visible_rows = usize::from(bottom.saturating_sub(top)) + 1;
+    let rows_for_cards =
+        visible_rows.saturating_sub(usize::from(answer_block_height(attention))).max(1);
+    let offset =
+        control_center::first_visible(attention.selected_index().unwrap_or(0), rows_for_cards);
     let mut row = top;
-    for card in attention.cards() {
+    for card in attention.cards().iter().skip(offset) {
         if row > bottom {
             break;
         }
         let is_selected = Some(card.id.as_str()) == selected;
-        let kind = card.vocab_kind();
-        let color = code_color(kind);
+        let (code, color) = card.badge();
         let mut x = put_str(
             buf,
             1,
@@ -579,15 +588,8 @@ fn render_needs_you(
             right,
         );
         x = put_str(buf, x, row, &AttentionKind::GLYPH.to_string(), color, right);
-        x = put_str(
-            buf,
-            x,
-            row,
-            &format!(" {} ", pad_to(kind.code(), 4)),
-            color,
-            right,
-        );
-        let age = control_center::format_age(now_ms.saturating_sub(card.created_at));
+        x = put_str(buf, x, row, &format!(" {code} "), color, right);
+        let age = crate::vocab::age_word(now_ms.saturating_sub(card.created_at));
         x = put_str(buf, x, row, &pad_to(&age, 6), MUTED_GRAY, right);
         // The attention feed carries a session id and a cwd, never an issue, so
         // the row names the session's directory and what it said. Resolving it
@@ -632,7 +634,7 @@ fn render_recent(
     if rows.is_empty() {
         put_str(
             buf,
-            1,
+            2,
             top,
             "no notifications",
             MUTED_GRAY,
@@ -664,14 +666,10 @@ fn render_entry(
     // The leading space keeps the glyph column under the `needs you` rows'
     // dots rather than flush against the frame rail.
     let mut x = put_str(buf, 1, row, &format!(" {glyph} "), glyph_color, right);
-    x = put_str(
-        buf,
-        x,
-        row,
-        &pad_to(&age_label(entry.created_at, now_ms), 5),
-        MUTED_GRAY,
-        right,
-    );
+    // The same age ladder the `needs you` rows use: one pane, one age
+    // vocabulary, or a 40-second run reads `0m` beside a 40-second ASK's `40s`.
+    let age = crate::vocab::age_word(now_ms.saturating_sub(entry.created_at));
+    x = put_str(buf, x, row, &pad_to(&age, 5), MUTED_GRAY, right);
     // The head column pads to the longest common shape (`impl-1 running`) so the
     // subjects align; a longer head simply pushes its own subject right.
     x = put_str(buf, x, row, &pad_to(&line.head, 15), MUTED_GRAY, right);
@@ -699,17 +697,6 @@ const fn run_color(state: RunState) -> Color {
     match state {
         RunState::Failed => ALERT_RED,
         _ => MUTED_GRAY,
-    }
-}
-
-/// The accent an attention code paints in: gold for a question, red for an
-/// error, muted for an idle session, amber for an explicit wait.
-const fn code_color(kind: AttentionKind) -> Color {
-    match kind {
-        AttentionKind::Ask => GOLD,
-        AttentionKind::Err => ALERT_RED,
-        AttentionKind::Idle => MUTED_GRAY,
-        AttentionKind::Wait => UNREAD_AMBER,
     }
 }
 
@@ -756,16 +743,13 @@ fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right:
         if cx >= right {
             break;
         }
-        // Same hardening as the Control Center's renderer, for the same reason:
-        // this pane now paints fleet-wide, session-originated free text (ASK
-        // questions, error snippets, cwd labels) and daemon-authored summaries
-        // char by char, and each char becomes a Cell symbol the host paints
-        // verbatim. A raw ESC/BEL/C1 byte would reassemble on flush into a live
-        // control sequence (OSC 52 clipboard write, title set) in the operator's
-        // terminal. Every control char is surfaced as a visible middot, never
-        // executed; `put_str` is the one choke point all rendered text flows
-        // through.
-        put_cell(buf, cx, row, if ch.is_control() { '·' } else { ch }, color);
+        // The same rule the Control Center's renderer applies, from the same
+        // place: this pane paints fleet-wide, session-originated free text (ASK
+        // labels, error snippets, cwd labels) and daemon-authored summaries char
+        // by char, and each char becomes a Cell symbol the host paints verbatim.
+        // `display_char` neutralises both the chars that ACT on the terminal and
+        // the ones that reorder what the operator reads before they pick it.
+        put_cell(buf, cx, row, super::display_char(ch), color);
         cx = cx.saturating_add(1);
     }
     cx
@@ -787,6 +771,8 @@ pub mod colors {
     pub const UNREAD: Color = super::UNREAD_AMBER;
     /// Read-entry soft white.
     pub const READ: Color = super::SOFT_WHITE;
+    /// A failed run's glyph, and the answer-refusal warning on the header.
+    pub const ALERT: Color = super::ALERT_RED;
 }
 
 #[cfg(test)]
@@ -808,13 +794,18 @@ mod tests {
     }
 
     /// Collect the rendered glyphs at `row` into a string (for assertions).
+    ///
+    /// LAST write at a coordinate wins, matching what the host paints: the pane
+    /// runs two block renderers over a frame, so a first-wins read would assert
+    /// a glyph the operator never sees.
     fn row_text(buf: &WireBuffer, row: u16, width: u16) -> String {
         let mut s = String::new();
         for x in 0..width {
             let ch = buf
                 .cells
                 .iter()
-                .find(|(coord, _)| coord.x == x && coord.y == row)
+                .filter(|(coord, _)| coord.x == x && coord.y == row)
+                .next_back()
                 .map_or(' ', |(_, c)| c.symbol.chars().next().unwrap_or(' '));
             s.push(ch);
         }
@@ -832,6 +823,17 @@ mod tests {
 
     /// The render clock every inbox test ages its rows against.
     const NOW: i64 = 1_700_000_600_000;
+
+    /// A state carrying `entries`, built the only way production builds one.
+    ///
+    /// There is deliberately no `from_snapshot` constructor: one would take the
+    /// filter as a fourth argument or silently reset it, and the second of those
+    /// is the bug `replace_rows` exists to make unrepresentable.
+    fn state(entries: Vec<InboxEntryRow>, unread: i64, recipient: String) -> InboxState {
+        let mut state = InboxState::default();
+        state.replace_rows(entries, unread, recipient);
+        state
+    }
 
     /// An empty attention board — the `needs you` block with nothing in it.
     fn no_attention() -> ControlCenterState {
@@ -942,7 +944,7 @@ mod tests {
                 r#"{"kind":"ERR","context":{"pattern":"rate_limited","snippet":"429 slow down"}}"#,
             ),
         ]);
-        let state = InboxState::from_snapshot(vec![], 0, "member:me".into());
+        let state = state(vec![], 0, "member:me".into());
         let mut buf = WireBuffer::new(80, 24);
         render_inbox(&mut buf, 80, 0, 20, &state, &lookup(), &attention, NOW);
 
@@ -991,7 +993,7 @@ mod tests {
                 r#"{"kind":"ERR","context":{"pattern":"x"}}"#,
             ),
         ]);
-        let state = InboxState::from_snapshot(vec![], 0, "member:me".into());
+        let state = state(vec![], 0, "member:me".into());
         let mut buf = WireBuffer::new(100, 24);
         render_inbox(&mut buf, 100, 0, 20, &state, &lookup(), &attention, NOW);
         let header = row_text(&buf, 0, 100);
@@ -999,11 +1001,112 @@ mod tests {
         assert!(header.contains("[2 need you]"), "header: {header:?}");
     }
 
+    /// The block follows the selection past the fold.
+    ///
+    /// MUTATION GUARD: drop the `first_visible` offset and this fails. The card
+    /// the operator has selected is the card Enter and `1`-`9` answer, so a
+    /// selection that scrolls out of view is an answer aimed at something
+    /// nobody can see — and the options and the answer hint go with it.
+    #[test]
+    fn the_needs_you_block_follows_the_selection_past_the_fold() {
+        let mut attention = ControlCenterState::default();
+        let rows: Vec<AttentionRow> = (0..30)
+            .map(|i| {
+                attention_row(
+                    &format!("ask-{i:02}"),
+                    "ask_user_question",
+                    NOW - i64::from(i) * 1_000,
+                    &ask_payload(&format!("question {i}"), &[("yes", None)]),
+                )
+            })
+            .collect();
+        attention.set_attention(&rows);
+        // Walk to the last card, as `j` held down would.
+        for _ in 0..40 {
+            attention.select_next();
+        }
+        let last = attention.selected_card().expect("a card is selected").clone();
+
+        let mut buf = WireBuffer::new(80, 24);
+        render_inbox(
+            &mut buf,
+            80,
+            0,
+            20,
+            &state(vec![], 0, "member:me".into()),
+            &lookup(),
+            &attention,
+            NOW,
+        );
+        let pane: Vec<String> = (0..=20).map(|r| row_body(&buf, r, 80)).collect();
+        let painted = pane.join("\n");
+        assert!(
+            pane.iter().any(|r| r.starts_with('▸')),
+            "the selection marker must stay on screen:\n{painted}"
+        );
+        assert!(
+            painted.contains(&last.short_label()),
+            "and it must be the selected card's row:\n{painted}"
+        );
+        assert!(
+            painted.contains("enter/1-9 answer"),
+            "the answer affordance travels with it:\n{painted}"
+        );
+    }
+
+    /// An answer that did not deliver is visible on the surface it was pressed on.
+    ///
+    /// MUTATION GUARD: the note is the answer path's ONLY failure feedback.
+    /// Without it the operator presses a digit, the daemon refuses, the pane is
+    /// unchanged, and they press it again while the agent stays blocked.
+    #[test]
+    fn an_answer_refusal_is_painted_on_the_inbox_header() {
+        let mut attention = ControlCenterState::default();
+        attention.set_attention(&[attention_row(
+            "ask-1",
+            "ask_user_question",
+            NOW,
+            &ask_payload("Ship?", &[("yes", None)]),
+        )]);
+        attention.set_note("ask-1", "not delivered (no live session): target exited");
+        let mut buf = WireBuffer::new(120, 24);
+        render_inbox(
+            &mut buf,
+            120,
+            0,
+            20,
+            &state(vec![], 0, "member:me".into()),
+            &lookup(),
+            &attention,
+            NOW,
+        );
+        let header = row_text(&buf, 0, 120);
+        assert!(
+            header.contains("not delivered (no live session)"),
+            "the refusal must be on screen: {header:?}"
+        );
+
+        // A delivered answer clears it.
+        attention.clear_note();
+        let mut buf = WireBuffer::new(120, 24);
+        render_inbox(
+            &mut buf,
+            120,
+            0,
+            20,
+            &state(vec![], 0, "member:me".into()),
+            &lookup(),
+            &attention,
+            NOW,
+        );
+        assert!(!row_text(&buf, 0, 120).contains("not delivered"));
+    }
+
     /// An empty attention board still renders the block, saying so — the surface
     /// is the anchor whether or not anything is waiting.
     #[test]
     fn needs_you_block_says_so_when_nothing_is_waiting() {
-        let state = InboxState::from_snapshot(vec![], 0, "member:me".into());
+        let state = state(vec![], 0, "member:me".into());
         let mut buf = WireBuffer::new(80, 24);
         render_inbox(&mut buf, 80, 0, 20, &state, &lookup(), &no_attention(), NOW);
         let header = row_text(&buf, 0, 80);
@@ -1113,7 +1216,7 @@ mod tests {
             NOW,
             &ask_payload("Ship?", &[("yes", None)]),
         )]);
-        let mut state = InboxState::from_snapshot(
+        let mut state = state(
             vec![entry("issue", "New issue: Refactor API", false)],
             1,
             "member:me".into(),
@@ -1159,7 +1262,7 @@ mod tests {
     /// as the pane randomly un-filtering itself.
     #[test]
     fn a_refresh_keeps_the_operators_filter() {
-        let mut state = InboxState::from_snapshot(vec![], 0, "member:me".into());
+        let mut state = state(vec![], 0, "member:me".into());
         state.cycle_filter();
         state.cycle_filter();
         assert_eq!(state.filter(), InboxFilter::Runs);
@@ -1182,7 +1285,7 @@ mod tests {
     #[test]
     fn task_rows_read_as_glyph_agent_verb_issue_with_age() {
         let task = "01M1GVN6MAF3121GEDM1E66KW5";
-        let state = InboxState::from_snapshot(
+        let state = state(
             vec![
                 task_entry(
                     task,
@@ -1243,7 +1346,7 @@ mod tests {
             event: "something_new".into(),
             ..entry("issue", "A future summary", false)
         };
-        let state = InboxState::from_snapshot(
+        let state = state(
             vec![orphan, created, deleted, comment, unknown],
             5,
             "member:me".into(),
@@ -1343,7 +1446,7 @@ mod tests {
 
     #[test]
     fn renders_unread_badge_and_entries() {
-        let state = InboxState::from_snapshot(
+        let state = state(
             vec![
                 entry("issue", "New issue: Refactor API", false),
                 entry("comment", "New comment on issue-1", false),
@@ -1388,7 +1491,7 @@ mod tests {
     /// plane returns one actor's rows.
     #[test]
     fn header_names_the_recipient_and_only_their_entries_render() {
-        let state = InboxState::from_snapshot(
+        let state = state(
             vec![entry("comment", "New comment on issue-1", false)],
             1,
             "member:me".into(),
@@ -1428,8 +1531,7 @@ mod tests {
 
     #[test]
     fn unread_entries_render_amber_read_entries_white() {
-        let state =
-            InboxState::from_snapshot(vec![entry("task", "Task finished", true)], 0, String::new());
+        let state = state(vec![entry("task", "Task finished", true)], 0, String::new());
         let mut buf = WireBuffer::new(60, 24);
         render_inbox(
             &mut buf,
@@ -1492,7 +1594,7 @@ mod tests {
             NOW,
             "{\"kind\":\"IDLE\",\"context\":{\"last_assistant_text\":\"\u{1b}]52;c;AAAA\u{07}\"}}",
         )]);
-        let state = InboxState::from_snapshot(
+        let state = state(
             vec![entry("issue", "New issue: \u{1b}]0;pwned\u{07}", false)],
             1,
             "member:me".into(),
@@ -1526,7 +1628,7 @@ mod tests {
             NOW,
             &ask_payload("Ship?", &[("yes", None), ("no", None)]),
         )]);
-        let state = InboxState::from_snapshot(
+        let state = state(
             vec![entry("issue", "New issue: Refactor API", false)],
             1,
             "member:me".into(),
