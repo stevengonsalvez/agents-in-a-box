@@ -608,9 +608,14 @@ impl AcpPool {
     }
 
     /// Whether the live registry knows how to spawn `provider`.
+    ///
+    /// Panics on a poisoned registry rather than answering `false`, which
+    /// [`AcpPool::provider_process`] would report as "provider is not in the
+    /// adapter registry": a lie about which thing broke, now that this gates
+    /// the spawn.
     #[must_use]
     pub fn knows(&self, provider: &str) -> bool {
-        self.adapters.lock().is_ok_and(|adapters| adapters.contains_key(provider))
+        self.adapters.lock().expect("adapter registry").contains_key(provider)
     }
 
     /// The pinned permission mode for `provider`, or `default`.
