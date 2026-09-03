@@ -314,6 +314,16 @@ fn acp_adapters_from_config() -> std::collections::HashMap<String, AcpAdapterTom
     })
 }
 
+/// How often the deadline/idle sweep runs on a production daemon, and the
+/// CEILING [`PoolConfig::set_turn_deadline`] recouples against.
+pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Floor on the recoupled sweep cadence.
+///
+/// A test that pins a 100 ms deadline must not turn the sweep into a spin loop
+/// on the store; the sweep's own read is indexed but it is still a read.
+const MIN_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Pool tuning. Every knob the plan names, with its documented default.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -364,7 +374,7 @@ impl Default for PoolConfig {
             queue_depth: 32,
             process_idle_window: Duration::from_mins(10),
             turn_deadline: Duration::from_mins(30),
-            sweep_interval: Duration::from_secs(15),
+            sweep_interval: DEFAULT_SWEEP_INTERVAL,
             writer: WriterConfig::default(),
             circuit: CircuitConfig::default(),
         }
@@ -377,10 +387,7 @@ impl PoolConfig {
     ///
     /// The 30-minute default is right for a human waiting on a real adapter and
     /// useless to a smoke run that has to PROVE the deadline converges a wedged
-    /// turn (`scripts/chat-bus-smoke.sh`, journey `j5b`). The sweep interval
-    /// follows the deadline down, because a 15 s sweep cannot observe a 2 s
-    /// deadline promptly; it is never lengthened, so the production cadence is
-    /// untouched when the variable is unset or junk.
+    /// turn (`scripts/chat-bus-smoke.sh`, journey `j5b`).
     #[must_use]
     pub fn from_env() -> Self {
         let mut config = Self::from_config();
@@ -389,12 +396,29 @@ impl PoolConfig {
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
         {
-            config.turn_deadline = Duration::from_millis(ms);
-            config.sweep_interval = config
-                .sweep_interval
-                .min(Duration::from_millis(ms / 2).max(Duration::from_millis(100)));
+            config.set_turn_deadline(Duration::from_millis(ms));
         }
         config
+    }
+
+    /// Pin the turn deadline, and recouple the sweep cadence to it.
+    ///
+    /// The ONE way to move the deadline, because moving it alone is a bug the
+    /// two callers found in opposite directions. A sweep cannot observe a
+    /// deadline shorter than its own period, so the cadence follows the
+    /// deadline DOWN; and it is never lengthened past
+    /// [`DEFAULT_SWEEP_INTERVAL`], so production cadence is untouched.
+    ///
+    /// Recoupling matters because the deadline is set TWICE on a task-executor
+    /// daemon: `AINB_ACP_TURN_DEADLINE_MS` sets it here, then
+    /// `HANGAR_TASK_EXECUTOR=acp` raises it to the task runtime budget
+    /// (`ainb_hangar_daemon::run`). While each site did its own coupling
+    /// arithmetic, the raise left the cadence pinned to the value it REPLACED —
+    /// a 1 s sweep chasing a 2.5 h deadline it can never match.
+    pub fn set_turn_deadline(&mut self, deadline: Duration) {
+        self.turn_deadline = deadline;
+        self.sweep_interval =
+            DEFAULT_SWEEP_INTERVAL.min((deadline / 2).max(MIN_SWEEP_INTERVAL));
     }
 
     /// [`PoolConfig::default`] with `[acp.adapters.*]` from the host config
@@ -3418,7 +3442,10 @@ fn permission_fingerprint(session_key: &str, permission: &PermissionRequest) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, HashMap, holds_process, retire_if_current};
+    use super::{
+        Arc, DEFAULT_SWEEP_INTERVAL, Duration, HashMap, MIN_SWEEP_INTERVAL, PoolConfig,
+        holds_process, retire_if_current,
+    };
 
     /// The exit event is PROCESS-SCOPED. The interleaving it defends against
     /// (the watcher snapshots the routes a dying process hosted, the actor then
@@ -3480,5 +3507,43 @@ mod tests {
         retire_if_current(&mut sessions, "acp:1", 8, |generation| *generation);
         retire_if_current(&mut sessions, "acp:missing", 1, |generation| *generation);
         assert!(sessions.is_empty());
+    }
+
+    /// A5 review N3: the sweep cadence follows the EFFECTIVE deadline, both
+    /// ways, however many times the deadline moves.
+    ///
+    /// The sequence pinned here is the one a task-executor daemon actually
+    /// performs (`ainb_hangar_daemon::run`): `AINB_ACP_TURN_DEADLINE_MS`
+    /// shortens the deadline, then `HANGAR_TASK_EXECUTOR=acp` raises it to the
+    /// task runtime budget. The RAISE is the arm that was broken — the cadence
+    /// stayed pinned to the value it replaced — so a guard that only checked
+    /// the shortening direction would have passed on the bug it exists to
+    /// catch.
+    #[test]
+    fn the_sweep_cadence_recouples_to_the_deadline_in_both_directions() {
+        let mut config = PoolConfig::default();
+        assert_eq!(config.sweep_interval, DEFAULT_SWEEP_INTERVAL);
+
+        // Down: a 2 s deadline a 15 s sweep could never observe promptly.
+        config.set_turn_deadline(Duration::from_secs(2));
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(1),
+            "a short deadline pulls the cadence down to half of it"
+        );
+
+        // Back up: the task budget. The cadence must return to the production
+        // default, not stay at the 1 s the previous line set.
+        config.set_turn_deadline(Duration::from_mins(150));
+        assert_eq!(
+            config.sweep_interval, DEFAULT_SWEEP_INTERVAL,
+            "a raised deadline must restore the production cadence"
+        );
+        assert_eq!(config.turn_deadline, Duration::from_mins(150));
+
+        // The floor holds, so a pathologically short test deadline cannot turn
+        // the sweep into a spin loop on the store.
+        config.set_turn_deadline(Duration::from_millis(10));
+        assert_eq!(config.sweep_interval, MIN_SWEEP_INTERVAL);
     }
 }
