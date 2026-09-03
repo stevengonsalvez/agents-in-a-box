@@ -1151,7 +1151,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         } else if state.daemon_connecting() {
             "Connecting to the Fleet daemon…"
         } else {
-            "No Fleet sessions yet, press t to start managed Codex"
+            "no fleet sessions yet, press t to start managed codex"
         };
         frame.render_widget(
             Paragraph::new(message).style(Style::default().fg(MUTED_GRAY)),

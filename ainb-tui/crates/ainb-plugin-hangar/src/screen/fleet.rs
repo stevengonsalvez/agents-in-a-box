@@ -2698,31 +2698,34 @@ fn render_empty_lens(
     right: u16,
     state: &FleetPaneState,
 ) {
+    // All three branches are one voice (crisp B2 §2.1, lowercase): they are three
+    // states of ONE line, and casing that changes with which lens is empty reads
+    // as two different screens.
     if state.roster.is_empty() {
-        put_str(buffer, left, row, "No Fleet sessions yet", FG, right);
+        put_str(buffer, left, row, "no fleet sessions yet", FG, right);
         put_str(
             buffer,
             left,
             row.saturating_add(2),
-            "Press t to start a managed Codex session.",
+            "press t to start a managed codex session",
             MUTED,
             right,
         );
     } else if state.filter == FleetFilter::NeedsInput {
-        put_str(buffer, left, row, "✓ Nothing needs you", GREEN, right);
+        put_str(buffer, left, row, "✓ nothing needs you", GREEN, right);
         put_str(
             buffer,
             left,
             row.saturating_add(2),
-            "Sessions are running, idle, or complete. Press 5 for All.",
+            "sessions are running, idle, or complete · press 5 for all",
             MUTED,
             right,
         );
     } else {
-        // Crisp B2 (Q15): this used to interpolate the lens label into
-        // `No {label} sessions`, which read `No all sessions` on the All lens and
-        // `No needs input sessions` on the others. The lens is already named one
-        // row up, highlighted; the empty state only has to say it is empty.
+        // Q15: this used to interpolate the lens label into `No {label} sessions`,
+        // which read `No all sessions` on the All lens and `No needs input
+        // sessions` on the others. The lens is already named one row up,
+        // highlighted; the empty state only has to say it is empty.
         put_str(
             buffer,
             left,
@@ -5540,8 +5543,8 @@ mod tests {
         let rendered =
             (0..15).map(|row| row_text(&buffer, row, 100)).collect::<Vec<_>>().join("\n");
         assert!(rendered.contains("1 needs input 0"));
-        assert!(rendered.contains("✓ Nothing needs you"));
-        assert!(rendered.contains("Press 5 for All."));
+        assert!(rendered.contains("✓ nothing needs you"));
+        assert!(rendered.contains("press 5 for all"));
     }
 
     #[test]
