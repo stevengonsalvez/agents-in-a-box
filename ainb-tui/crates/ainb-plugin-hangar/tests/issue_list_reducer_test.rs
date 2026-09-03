@@ -182,7 +182,9 @@ fn ready_to_create() -> IssueListState {
 }
 
 /// `c` opens the create wizard as a fresh single form focused on Title, with the
-/// branches prefilled `main`, no repo picked, and the default agent. No intent.
+/// branches prefilled `main`, no repo picked, and the default agent. The only
+/// intent is the repo-roster refresh (crisp B1, defect 6), so a repo added since
+/// connect is pickable in this very wizard.
 #[test]
 fn c_opens_wizard_focused_on_title() {
     let s = seeded_state();
@@ -198,7 +200,7 @@ fn c_opens_wizard_focused_on_title() {
     assert_eq!(w.source_branch(), "main");
     assert_eq!(w.target_branch(), "main");
     assert_eq!(w.agent_cursor(), 0);
-    assert!(out.intent.is_none());
+    assert_eq!(out.intent, Some(IssueListIntent::RefreshRepos));
 }
 
 /// ↓ / Tab advance the focused row, ↑ / Shift+Tab retreat, both wrapping around
@@ -338,6 +340,35 @@ fn wizard_at_opens_repo_dropdown() {
     let s = wiz(&s, WizardKey::Char('z')).state;
     assert_eq!(s.wizard().unwrap().repo_dropdown(), Some(0));
     assert_eq!(s.wizard().unwrap().repo_query(), "z");
+}
+
+/// Proving run defect 12 (crisp B1): typing `@box` narrows the dropdown to the
+/// one matching repo, and Enter picks THAT repo. Scratch used to be pinned at
+/// row 0 whatever the query, with the cursor reset there on every keystroke, so
+/// Enter picked scratch despite the visible filter. An empty query still leads
+/// with scratch, so a repo-less workspace can always launch.
+#[test]
+fn wizard_dropdown_enter_picks_the_filtered_repo_not_scratch() {
+    use ainb_plugin_hangar::screen::boards::RepoOption;
+    let mut s = open_wizard();
+    s.set_repos(vec![RepoOption {
+        label: "boxtrack".into(),
+        repo_ref: "/home/dev/boxtrack".into(),
+        is_favorite: false,
+        is_remote_only: false,
+    }]);
+    let s = type_str(s, "Fix");
+    let s = focus_row(s, WizardRow::Repo);
+    let s = wiz(&s, WizardKey::Char('@')).state;
+    let s = type_str(s, "box");
+    let s = wiz(&s, WizardKey::Enter).state;
+    assert_eq!(s.wizard().unwrap().repo_ref(), Some("/home/dev/boxtrack"));
+    assert_eq!(s.wizard().unwrap().repo_dropdown(), None);
+
+    // The empty query keeps scratch first.
+    let s = wiz(&s, WizardKey::Char('@')).state;
+    let s = wiz(&s, WizardKey::Enter).state;
+    assert_eq!(s.wizard().unwrap().repo_ref(), Some("scratch"));
 }
 
 /// Tabbing away from an open repo dropdown commits the highlighted candidate
@@ -871,7 +902,11 @@ fn s_key_opens_subissue_wizard_with_parent_prebound() {
 
     let out = reduce_issue_list(&s, IssueListEvent::Key('s'));
 
-    assert!(out.intent.is_none(), "opening the wizard raises no intent");
+    assert_eq!(
+        out.intent,
+        Some(IssueListIntent::RefreshRepos),
+        "opening the wizard only re-pulls the repo roster"
+    );
     assert_eq!(out.state.mode(), IssueListMode::CreateInput);
     let w = out.state.wizard().expect("wizard is open");
     assert_eq!(

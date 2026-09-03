@@ -2755,6 +2755,26 @@ pub struct BoardCardReorderParams {
     pub issue_ids: Vec<String>,
 }
 
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_TIMELINE`] (tcp T3 / F6): the
+/// issue whose newest run transcript to read.
+///
+/// `board_id` is OPTIONAL (crisp B1): the Boards overlay sends it and the daemon
+/// checks the issue is a card on that board; the task-detail screen omits it so
+/// an issue that was never placed on a board can still backfill its transcript.
+/// The workspace tenant guard applies either way. Additive: an older caller's
+/// `{ workspace_id, board_id, issue_id, column_id }` still decodes (`column_id`
+/// is ignored as before).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardTimelineParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the issue must be a card on, or `None` to skip that check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<String>,
+    /// The issue whose newest run's transcript to read.
+    pub issue_id: String,
+}
+
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_TIMELINE`] (tcp T3 / F6): the
 /// card's latest run transcript, raw, for the plugin to parse + render.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

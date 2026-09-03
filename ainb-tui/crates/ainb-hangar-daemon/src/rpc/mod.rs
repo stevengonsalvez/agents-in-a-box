@@ -11067,14 +11067,20 @@ async fn handle_board_card_timeline(
     /// leading partial line a mid-file seek leaves.
     const TAIL_CAP: u64 = 512 * 1024;
 
-    let params: ainb_hangar_proto::snapshots::BoardCardParams =
-        parse_params(req, "{ workspace_id, board_id, issue_id }")?;
+    let params: ainb_hangar_proto::snapshots::BoardCardTimelineParams =
+        parse_params(req, "{ workspace_id, board_id?, issue_id }")?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
 
-    // The issue must be a real card on this board (a timeline is a card affordance).
-    let board = board_in_ws(pool, &ws, &params.board_id).await?;
-    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
-        return Err(invalid_params("that issue is not a card on this board"));
+    // With a board named, the issue must be a real card on it (the Boards overlay
+    // is a card affordance). Without one (the task-detail backfill, crisp B1) the
+    // workspace guard above plus the workspace-scoped task query below are the
+    // whole tenant check: an issue in another workspace yields no task, never a
+    // foreign transcript.
+    if let Some(board_id) = params.board_id.as_deref() {
+        let board = board_in_ws(pool, &ws, board_id).await?;
+        if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+            return Err(invalid_params("that issue is not a card on this board"));
+        }
     }
 
     // The card's newest task (any status) — its run is the one to show.

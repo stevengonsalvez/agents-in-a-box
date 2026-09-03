@@ -9,19 +9,19 @@ expression: list_pane(&buf)
 ┃commit                    ┃
 ┃used                      ┃
 ┃                          ┃
-┃◇ None                  ◔c┃
+┃◇ None                    ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 ╭──────────────────────────╮
 │find-missing-tests        │
 │used                      │
 │                          │
-│◇ None                  ◔f│
+│◇ None                    │
 ╰──────────────────────────╯
 
 ╭──────────────────────────╮
 │brainstorm                │
 │unused                    │
 │                          │
-│◇ None                  ◔b│
+│◇ None                    │
 ╰──────────────────────────╯

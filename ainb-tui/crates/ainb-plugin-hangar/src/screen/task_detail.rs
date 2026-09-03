@@ -273,6 +273,26 @@ pub struct TaskDetailState {
     /// #11-rest), or `None` when none is selected yet. `t` toggles the selected
     /// one; both keys are no-ops on an issue with no criteria.
     acceptance_cursor: Option<usize>,
+    /// The issue assignee's roster display name (crisp B1, defect 8), resolved
+    /// by the glue from the cached `hangar/agents_list`; `None` until the roster
+    /// lands or when the assignee is not an agent on it. The header paints this
+    /// over the raw `agent:<ulid>` actor ref.
+    assignee_name: Option<String>,
+    /// The display name of the agent executing the bound task, resolved by the
+    /// glue from the tasks + agents snapshots; `None` for an issue with no run.
+    /// The header's `Agent:` slot paints this ahead of the provider token.
+    agent_name: Option<String>,
+    /// The issue's currently ACTIVE run (`#<short id> <agent> (<status>)`) when
+    /// the tasks snapshot has one, so an `already_active` dispatch refusal can
+    /// name the row that blocks it (crisp B1, defect 5). `None` otherwise.
+    blocking_run: Option<String>,
+    /// Whether [`Self::backfill_transcript`] has already run for this open.
+    ///
+    /// The timeline request rides a CONSTANT id, so a reply is only ever matched
+    /// to the bound task, never to the open that asked for it: open, Esc, open
+    /// again, and a late first reply would prepend the run's whole history a
+    /// second time. One apply per state, and a state is rebuilt on every open.
+    transcript_backfilled: bool,
 }
 
 /// The all-`Unknown` PR status, const-constructible so [`TaskDetailState::new`]
@@ -301,6 +321,10 @@ impl TaskDetailState {
             pr_status: UNKNOWN_PR_STATUS,
             branch: None,
             acceptance_cursor: None,
+            assignee_name: None,
+            agent_name: None,
+            blocking_run: None,
+            transcript_backfilled: false,
         }
     }
 
@@ -353,6 +377,34 @@ impl TaskDetailState {
         self.pr_status = status;
     }
 
+    /// Resolve the header's names from the cached snapshots (crisp B1): the
+    /// assignee's roster display name, the bound run's agent name, and the
+    /// issue's active run when one blocks a dispatch. The glue calls this at
+    /// open AND whenever the agents / tasks snapshot lands, so the order the
+    /// batched snapshots arrive in never leaves a raw ULID on screen.
+    pub fn set_resolved_names(
+        &mut self,
+        assignee_name: Option<String>,
+        agent_name: Option<String>,
+        blocking_run: Option<String>,
+    ) {
+        self.assignee_name = assignee_name;
+        self.agent_name = agent_name;
+        self.blocking_run = blocking_run;
+    }
+
+    /// The assignee's resolved display name, if the roster knows it.
+    #[must_use]
+    pub fn assignee_name(&self) -> Option<&str> {
+        self.assignee_name.as_deref()
+    }
+
+    /// The bound run's agent display name, if the snapshots know it.
+    #[must_use]
+    pub fn agent_name(&self) -> Option<&str> {
+        self.agent_name.as_deref()
+    }
+
     /// Append a SYSTEM line to the transcript in the tool-result lane
     /// (`is_comment: false`, so it is not styled as somebody's comment).
     ///
@@ -369,6 +421,32 @@ impl TaskDetailState {
                 is_comment: false,
             },
         );
+    }
+
+    /// Backfill the transcript from the run's durable stream-json (crisp B1,
+    /// defect 7): `entries` are the parsed lines in stream order and go BEFORE
+    /// anything already on screen, so a system line pushed since the open (or a
+    /// live message that beat the reply) keeps its place after the history.
+    /// Sticky-bottom follows the new tail; a released viewport keeps its line.
+    ///
+    /// ONCE per open ([`Self::transcript_backfilled`]): a second reply, from an
+    /// earlier open of the same task, is dropped rather than doubling the history.
+    /// Returns whether this call applied the history.
+    pub fn backfill_transcript(&mut self, entries: Vec<TranscriptEntry>) -> bool {
+        if entries.is_empty() || self.transcript_backfilled {
+            return false;
+        }
+        self.transcript_backfilled = true;
+        let added = entries.len();
+        let mut transcript = entries;
+        transcript.append(&mut self.transcript);
+        self.transcript = transcript;
+        self.scroll_offset = if self.stuck_to_bottom {
+            self.transcript.len().saturating_sub(1)
+        } else {
+            self.scroll_offset.saturating_add(added)
+        };
+        true
     }
 
     /// The current lifecycle.
@@ -567,7 +645,10 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
         'k' => scroll_up(state),
         // Open the comment-compose modal (`c`); captures input until Enter/Esc.
         'c' => open_compose(state),
-        // Retry only once terminal; otherwise a no-op.
+        // Retry only a failed / cancelled run. A run that finished cleanly is
+        // refused by the store (`force_requeue` answers DoNotRetry), which used
+        // to make `R` a silent no-op (crisp B1, defect 9): say so instead.
+        'R' if state.lifecycle == TaskLifecycle::Succeeded => refuse_retry(state),
         'R' if state.lifecycle.is_terminal() => with_intent(
             state.clone(),
             TaskDetailIntent::RetryTask(state.task_id.clone()),
@@ -584,6 +665,21 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
         't' => toggle_selected_criterion(state),
         _ => unchanged(state),
     }
+}
+
+/// What `R` says on a run that finished cleanly (crisp B1, defect 9).
+const RETRY_REFUSED_NOTE: &str = "this run finished; R only retries a failed or cancelled run";
+
+/// Say why `R` does nothing on a succeeded run, ONCE. The line is a no-op when
+/// it is already the tail of the transcript: key repeat used to grow the
+/// transcript by a copy per press (crisp B1 review).
+fn refuse_retry(state: &TaskDetailState) -> TaskDetailReduction {
+    if state.transcript.last().is_some_and(|e| e.body == RETRY_REFUSED_NOTE) {
+        return unchanged(state);
+    }
+    let mut next = state.clone();
+    next.push_system_line(RETRY_REFUSED_NOTE.to_string());
+    no_intent(next)
 }
 
 /// Move the acceptance cursor to the next criterion, wrapping; select the FIRST
@@ -910,6 +1006,7 @@ pub fn render_task_detail(
             body_bottom,
             sidebar_w,
             &state.issue,
+            state.assignee_name.as_deref(),
         );
     }
 }
@@ -1110,16 +1207,21 @@ fn render_detail_card(
     );
     row = row.saturating_add(1);
 
-    // --- Assignee / Agent ---
-    let assignee = issue.assignee.as_deref().unwrap_or("unassigned");
-    let agent = issue.agent.as_deref().unwrap_or(CARD_UNSET);
+    // --- Assignee / Agent: the roster display names once the glue resolved them
+    //     (crisp B1, defect 8), so the row reads `impl-1`, never `agent:<ulid>`;
+    //     before the roster lands the SHORT id stands in, the same fallback the
+    //     board cards take (the shared `assignee_label`). ---
+    let assignee =
+        crate::screen::assignee_label(state.assignee_name.as_deref(), issue.assignee.as_deref())
+            .unwrap_or_else(|| "unassigned".to_string());
+    let agent = state.agent_name.as_deref().or(issue.agent.as_deref()).unwrap_or(CARD_UNSET);
     card_field_row(
         buf,
         card_w,
         row,
         &[
             ("Assignee: ", CARD_LABEL),
-            (assignee, CARD_VALUE),
+            (assignee.as_str(), CARD_VALUE),
             ("   Agent: ", CARD_LABEL),
             (agent, CARD_VALUE),
         ],
@@ -1204,6 +1306,7 @@ fn render_detail_card(
     if let Some(line) = dispatch_decline_line(
         issue.last_dispatch_reason.as_deref(),
         issue.last_dispatch_detail.as_deref(),
+        state.blocking_run.as_deref(),
     ) {
         card_field_row(
             buf,
@@ -1478,16 +1581,34 @@ fn origin_badge(origin_type: Option<&str>) -> Option<&'static str> {
 /// all. A code this build does not know falls back to the RAW token rather than
 /// hiding the line — an older plugin against a newer daemon must still tell the
 /// user something is wrong, and the detail carries the specifics regardless.
-fn dispatch_decline_line(reason: Option<&str>, detail: Option<&str>) -> Option<String> {
+///
+/// An `already_active` refusal names the blocking row when the tasks snapshot
+/// knows it (`a run is already active: #1J7MR7 impl-1 (running)`, crisp B1,
+/// defect 5). A detail that merely restates the label prints once, never
+/// `a run is already active, a run is already active (queued)`.
+fn dispatch_decline_line(
+    reason: Option<&str>,
+    detail: Option<&str>,
+    blocking_run: Option<&str>,
+) -> Option<String> {
+    use ainb_hangar_core::dispatch_reason::DispatchReason;
+
     let raw = reason?.trim();
     if raw.is_empty() {
         return None;
     }
-    let label: &str = match ainb_hangar_core::dispatch_reason::DispatchReason::parse(raw) {
+    let code = DispatchReason::parse(raw);
+    let label: &str = match code {
         Some(code) => code.label(),
         None => raw,
     };
+    if code == Some(DispatchReason::AlreadyActive) {
+        if let Some(run) = blocking_run {
+            return Some(format!("{label}: {run}"));
+        }
+    }
     Some(match detail.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) if d.starts_with(label) => d.to_string(),
         Some(d) => format!("{label} — {d}"),
         None => label.to_string(),
     })
@@ -1626,19 +1747,7 @@ mod card_tests {
     use ainb_hangar_core::ids::{IssueId, TaskId};
     use ainb_plugin_sdk::WireBuffer;
 
-    /// Reconstruct the full painted text of a rendered buffer (row-major) so a
-    /// render assertion can search for the card's labels / values.
-    fn painted_text(buf: &WireBuffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.height {
-            for (coord, cell) in &buf.cells {
-                if coord.y == y {
-                    out.push_str(&cell.symbol);
-                }
-            }
-        }
-        out
-    }
+    use crate::test_support::painted_text;
 
     /// The painted buffer as one string PER ROW, so an assertion can pin a glyph
     /// to the same line as its criterion instead of anywhere on the screen.
@@ -1764,6 +1873,22 @@ mod card_tests {
             "em-dash placeholder for unset repo/agent"
         );
         assert!(text.contains("no description"), "unset description");
+    }
+
+    /// Crisp B1 review: BEFORE the roster resolves the name, the header degrades
+    /// to the ref's short id, never the raw 26-char ULID it used to paint. The
+    /// actor kind stays: this row is wide enough, and it says agent or human.
+    #[test]
+    fn an_unresolved_ulid_assignee_degrades_to_a_short_id() {
+        let mut issue = full_issue();
+        issue.assignee = Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V".into());
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("Assignee: agent:AYF56V"), "short id: {text}");
+        assert!(!text.contains("01M1FHM2"), "raw ULID gone: {text}");
     }
 
     /// Parity 28: the deadline renders on the card next to the labels — a real
@@ -1910,19 +2035,73 @@ mod card_tests {
     #[test]
     fn dispatch_decline_line_maps_codes_and_details() {
         assert_eq!(
-            dispatch_decline_line(Some("target_unavailable"), Some("no agent")),
+            dispatch_decline_line(Some("target_unavailable"), Some("no agent"), None),
             Some("no dispatch target — no agent".to_string())
         );
         assert_eq!(
-            dispatch_decline_line(Some("deferred"), None),
+            dispatch_decline_line(Some("deferred"), None, None),
             Some("waiting on blockers".to_string())
         );
         assert_eq!(
-            dispatch_decline_line(Some("future_code"), None),
+            dispatch_decline_line(Some("future_code"), None, None),
             Some("future_code".to_string())
         );
-        assert_eq!(dispatch_decline_line(None, Some("orphan detail")), None);
-        assert_eq!(dispatch_decline_line(Some("   "), None), None);
+        assert_eq!(
+            dispatch_decline_line(None, Some("orphan detail"), None),
+            None
+        );
+        assert_eq!(dispatch_decline_line(Some("   "), None, None), None);
+    }
+
+    /// Crisp B1 (defect 5): the daemon's `already_active` detail restates the
+    /// label, so the line prints it ONCE; and when the tasks snapshot knows the
+    /// active row, the line names it instead of the bare status.
+    #[test]
+    fn dispatch_decline_line_names_the_blocking_run_once() {
+        let detail = Some("a run is already active (queued)");
+        assert_eq!(
+            dispatch_decline_line(Some("already_active"), detail, None),
+            Some("a run is already active (queued)".to_string()),
+            "a detail that restates the label is not doubled"
+        );
+        assert_eq!(
+            dispatch_decline_line(
+                Some("already_active"),
+                detail,
+                Some("#1J7MR7 impl-1 (running)")
+            ),
+            Some("a run is already active: #1J7MR7 impl-1 (running)".to_string()),
+            "the blocking row is named when known"
+        );
+        // A blocking run is only relevant to `already_active`.
+        assert_eq!(
+            dispatch_decline_line(Some("deferred"), None, Some("#1J7MR7 impl-1 (running)")),
+            Some("waiting on blockers".to_string())
+        );
+    }
+
+    /// Crisp B1 (defect 8): once the glue resolves the roster names, the header
+    /// paints `Assignee: alice   Agent: impl-1` over the raw actor ref and the
+    /// provider token; the raw values remain the fallback until then.
+    #[test]
+    fn detail_card_paints_resolved_names_over_raw_refs() {
+        let mut s = state_for(full_issue());
+        s.set_resolved_names(Some("alice".into()), Some("impl-1".into()), None);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("Assignee: alice"),
+            "resolved assignee: {text}"
+        );
+        assert!(text.contains("Agent: impl-1"), "resolved agent: {text}");
+        assert!(!text.contains("agent:alice"), "raw actor ref gone: {text}");
+        assert!(
+            !text.contains("codex"),
+            "provider token yields to the agent name: {text}"
+        );
+        assert_eq!(s.assignee_name(), Some("alice"));
+        assert_eq!(s.agent_name(), Some("impl-1"));
     }
 
     /// The badge mapper itself: only the two platform kinds earn a badge, and an

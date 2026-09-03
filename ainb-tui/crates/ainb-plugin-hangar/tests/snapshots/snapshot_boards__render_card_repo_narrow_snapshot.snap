@@ -10,7 +10,7 @@ Repo for "Refactor" (@ to search, Enter pick — REQUIRED): +
 ┃#bk01      ┃││#q002      │││#r003      │││#f004           │
 ┃Write the s┃││Wire the RP│││Build the b│││Flaky migration │
 ┃pec        ┃││C          │││oard       │││                │
-┃◇ None   ◔W┃││◇ None   ◔W│││◇ None   ◔B│││◇ None        ◔F│
+┃◇ None     ┃││◇ None     │││◇ None     │││◇ None          │
 ┗━━━━━━━━━━━┛│╰───────────╯│╰───────────╯│╰────────────────╯
              │             │             │
              │             │             │

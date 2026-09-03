@@ -800,13 +800,14 @@ fn render_detail(
     let (status, status_color) = status_line(card);
     row = put_line(buf, x0, row, bottom, area_w, &status, status_color);
 
-    // Stat strip: age (live) + source + workspace. The token/tool/diff columns
-    // are the P10 observability fill-in (spec §4.9) — rendered as `—` so the
-    // agentpeek strip shape is present without inventing numbers we don't have.
+    // Stat strip: age (live) + source + workspace. Only what is known: the
+    // token / tool / diff columns have no producer on this row yet (P10 §4.9),
+    // and three permanent dash placeholders read as dead data (crisp B1, Q16);
+    // they return with the numbers.
     let age = format_age(now_ms.saturating_sub(card.created_at));
     let source = if card.degraded { "~pane" } else { "hook" };
     let scope = card.workspace_id.as_deref().unwrap_or("host");
-    let strip = format!("age {age} · tok — · tools — · Δ — · {source} · {scope}");
+    let strip = format!("age {age} · {source} · {scope}");
     row = put_line(buf, x0, row, bottom, area_w, &strip, MUTED_GRAY);
     row = row.saturating_add(1);
 
