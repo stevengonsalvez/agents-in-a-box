@@ -286,7 +286,9 @@ pub(crate) const fn tab_hotkey(screen: &Screen) -> Option<char> {
         | Screen::Squads
         | Screen::Profiles => None,
         // Modals overlay a tab; they are not one.
-        Screen::AgentPicker(_) | Screen::ActivityTimeline(_) | Screen::Help
+        Screen::AgentPicker(_)
+        | Screen::ActivityTimeline(_)
+        | Screen::Help
         | Screen::CommandPalette => None,
     }
 }
@@ -600,7 +602,13 @@ mod tests {
     #[test]
     fn the_seven_tab_strip_fits_the_eighty_column_floor() {
         let mut buf = WireBuffer::new(80, 24);
-        render_top_bar(&mut buf, 80, &Screen::IssueList, "default", Presence::Online);
+        render_top_bar(
+            &mut buf,
+            80,
+            &Screen::IssueList,
+            "default",
+            Presence::Online,
+        );
         let row0 = row_text(&buf, 0, 80);
         for (hotkey, label) in PRIMARY_TABS {
             assert!(
@@ -616,7 +624,13 @@ mod tests {
 
         // 93 columns is where it fits, and there it paints.
         let mut wide = WireBuffer::new(93, 24);
-        render_top_bar(&mut wide, 93, &Screen::IssueList, "default", Presence::Online);
+        render_top_bar(
+            &mut wide,
+            93,
+            &Screen::IssueList,
+            "default",
+            Presence::Online,
+        );
         let wide0 = row_text(&wide, 0, 93);
         assert!(
             wide0.contains("default · ● online"),

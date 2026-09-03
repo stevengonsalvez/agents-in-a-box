@@ -650,9 +650,15 @@ mod tests {
         render_command_palette(&mut buf, 80, 24, &s);
         let text = buf_text(&buf);
         for (word, _) in GO_SCREENS {
-            assert!(text.contains(&format!("Go: {word}")), "missing `Go: {word}`");
+            assert!(
+                text.contains(&format!("Go: {word}")),
+                "missing `Go: {word}`"
+            );
         }
-        assert!(text.contains("Refactor API"), "results still render: {text}");
+        assert!(
+            text.contains("Refactor API"),
+            "results still render: {text}"
+        );
 
         // Nothing of the screen underneath reads through BETWEEN the rows. The
         // palette paints `│` only on its two border columns, so an interior `│`
@@ -676,8 +682,7 @@ mod tests {
         let modal_h = (24_u16 * 6 / 10).clamp(8, 24) as usize;
         let (mx, my) = ((80 - modal_w) / 2, (24 - modal_h) / 2);
         for row in grid_of(&under, 80, 24).iter().skip(my + 1).take(modal_h - 2) {
-            let interior: String =
-                row.chars().skip(mx + 1).take(modal_w - 2).collect();
+            let interior: String = row.chars().skip(mx + 1).take(modal_w - 2).collect();
             assert!(
                 !interior.contains('│'),
                 "the board bled through the palette: {interior:?}"

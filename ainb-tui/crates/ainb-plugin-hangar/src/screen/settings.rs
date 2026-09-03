@@ -1117,9 +1117,9 @@ fn move_list(state: &SettingsState, delta: i32) -> SettingsReduction {
         // Notifications owns its own 2D cursor (see `reduce_notify_key`); the
         // generic list mover is never reached for it, nor for the static
         // More-screens list.
-        SettingsSection::Daemon
-        | SettingsSection::Notifications
-        | SettingsSection::MoreScreens => 0,
+        SettingsSection::Daemon | SettingsSection::Notifications | SettingsSection::MoreScreens => {
+            0
+        }
     };
     if delta < 0 {
         next.list_selected = next.list_selected.saturating_sub(1);
