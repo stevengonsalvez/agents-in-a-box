@@ -4671,6 +4671,18 @@ impl HangarPlugin {
             let _ = route_key(&app, &mut self.screens, key);
             return;
         }
+        // The command-palette query is a text-capture surface like any other, and
+        // the one `captures_text` already declared to the host without a matching
+        // guard here: the host forwards `q` into the plugin, and the routing layer
+        // then quit the TUI mid-word. A palette you cannot type `q` into cannot
+        // search for `queued`, and after the crisp B5 shrink it cannot reach
+        // `squads` either.
+        if matches!(app.screen, Screen::CommandPalette) {
+            if let Some(nav) = route_key(&app, &mut self.screens, key) {
+                self.apply_nav(&app, nav);
+            }
+            return;
+        }
 
         // e38.13: `Ctrl+P` opens the global command palette from any non-modal
         // screen. It is a modifier chord, so it never shadows a per-screen `p`
@@ -7454,6 +7466,36 @@ mod tests {
             Some("issue-1"),
             "the jumped-to issue is selected"
         );
+    }
+
+    /// Every char the ROUTER claims is query text once the palette is open.
+    ///
+    /// `captures_text` already told the host the palette is a text surface, so the
+    /// host forwards `q` / `1` / `,` / `B` into the plugin instead of eating them —
+    /// and the routing layer then quit the TUI, or teleported to a tab, mid-word.
+    /// Pinned over the WHOLE reserved set, not one char: `queued`, `Boards`, `1:1`
+    /// and `Kanban` are all things an operator types into a search box.
+    #[test]
+    fn the_palette_query_swallows_every_router_key() {
+        for ch in crate::screen::router::ROUTER_KEYS {
+            let mut p = connected_plugin_with_issue();
+            p.on_key(&ctrl_p_press());
+            p.on_key(&char_press(ch));
+            assert!(
+                matches!(p.app_state().screen, Screen::CommandPalette),
+                "typing `{ch}` into the palette left it for {:?}",
+                p.app_state().screen
+            );
+            assert!(
+                !p.close_request_pending,
+                "typing `{ch}` into the palette asked the host to close"
+            );
+            assert_eq!(
+                p.screens.command_palette.as_ref().map(|s| s.query().to_string()),
+                Some(ch.to_string()),
+                "`{ch}` must land in the query"
+            );
+        }
     }
 
     /// Esc closes the palette back to the screen that opened it, with no jump.
