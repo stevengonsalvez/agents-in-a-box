@@ -75,6 +75,13 @@ const ACTIVITY_MAX_W: u16 = 40;
 /// newest run, so an older attempt has nothing to show until the durable read
 /// takes a task id (track A, A6).
 const OTHER_RUN_NOTE: &str = "no transcript for this run — only the newest run's is readable";
+/// What the transcript pane says for a run that is GOING but has produced no
+/// line yet. States the fact, not the reason: it is equally true of a run that
+/// started a second ago and of one whose executor has no live producer.
+const WAITING_NOTE: &str = "waiting for the first line of this run";
+/// What the transcript pane says for a FINISHED run that left no transcript
+/// behind (no log written, or the log is gone).
+const NO_TRANSCRIPT_NOTE: &str = "this run recorded no transcript";
 /// Green for a passing CI rollup / a clean mergeable PR (e38.34).
 const STATUS_GREEN: Color = Color::rgb(120, 220, 120);
 /// Red for a failing CI rollup / a merge conflict (e38.34) — visually distinct
@@ -1195,15 +1202,15 @@ pub fn render_task_detail(
     };
     let feed_w = area_w.saturating_sub(activity_w);
 
-    // The execution log, then the transcript of whichever run is expanded.
+    // The execution log, then the transcript of whichever run is expanded — or
+    // one muted line saying why there is nothing to paint.
     let feed_top = render_execution_log(buf, feed_w, body_top, body_bottom, state, now_ms);
-    if state.transcript_is_for_expanded_run() {
-        render_transcript(buf, feed_w, feed_top, body_bottom, &state.visible_entries());
-    } else if feed_top < body_bottom {
-        // The durable read serves the ISSUE's newest run, so an older attempt
-        // has no transcript to show. Say so rather than painting the newest
-        // run's lines under an older run's card.
-        put_clipped(buf, 0, feed_top, OTHER_RUN_NOTE, HINT_MUTED, feed_w);
+    match empty_transcript_note(state) {
+        Some(note) if feed_top < body_bottom => {
+            put_clipped(buf, 0, feed_top, note, HINT_MUTED, feed_w);
+        }
+        Some(_) => {}
+        None => render_transcript(buf, feed_w, feed_top, body_bottom, &state.visible_entries()),
     }
 
     if activity_w > 0 {
@@ -1217,6 +1224,28 @@ pub fn render_task_detail(
             now_ms,
         );
     }
+}
+
+/// The one muted line the transcript pane paints INSTEAD of a transcript, or
+/// `None` when there are lines to paint.
+///
+/// The case this exists for: a RUNNING run whose transcript is empty. The run
+/// card's elapsed reads the render clock, so it ticks whether or not anything is
+/// streaming — an advancing number over a blank pane reads as evidence that
+/// something is happening, and it is the one state on this screen that can
+/// actively mislead. Every arm describes the STATE, never the cause, so none of
+/// them goes stale when a producer that is missing today starts streaming.
+fn empty_transcript_note(state: &TaskDetailState) -> Option<&'static str> {
+    if !state.transcript_is_for_expanded_run() {
+        return Some(OTHER_RUN_NOTE);
+    }
+    if !state.transcript.is_empty() {
+        return None;
+    }
+    Some(match state.expanded_run()?.state {
+        crate::vocab::RunState::Queued | crate::vocab::RunState::Running => WAITING_NOTE,
+        _ => NO_TRANSCRIPT_NOTE,
+    })
 }
 
 /// Paint the single-row comment-compose input bar at `(0, row)` (e38.5):

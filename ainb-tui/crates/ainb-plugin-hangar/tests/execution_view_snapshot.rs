@@ -183,6 +183,50 @@ fn a_never_run_issue_paints_no_run_card_and_no_log() {
     insta::assert_snapshot!(glyph_map(&buf, 100));
 }
 
+/// A running run whose transcript is still empty says so. This is the state
+/// that can mislead: the run card's elapsed reads the render clock, so it ticks
+/// whether or not anything is streaming, and an advancing number over a blank
+/// pane reads as evidence that something is happening. A finished run that left
+/// no transcript says a different, equally factual thing.
+#[test]
+fn an_empty_transcript_says_why_rather_than_ticking_over_a_blank_pane() {
+    let mut s = state_with("01M1GVN6MAF3121GEDM1E66KW5", &[]);
+    s.set_runs(vec![run(
+        "01M1GVN6MAF3121GEDM1E66KW5",
+        "impl-1",
+        RunState::Running,
+        7,
+    )]);
+    let mut buf = WireBuffer::new(100, 24);
+    render_task_detail(&mut buf, 100, 0, 24, &s, NOW);
+    let live = glyph_map(&buf, 100);
+    assert!(
+        live.contains("◔ impl-1 is working · 7m 00s"),
+        "the clock ticks:\n{live}"
+    );
+    assert!(
+        live.contains("waiting for the first line of this run"),
+        "and the empty pane says why:\n{live}"
+    );
+
+    // The same run, finished with nothing recorded: a different, still factual
+    // line — never the waiting one, which would now be a lie.
+    let mut done = run("01M1GVN6MAF3121GEDM1E66KW5", "impl-1", RunState::Done, 7);
+    done.finished_at = Some(NOW - 2 * MINUTE);
+    s.set_runs(vec![done]);
+    let mut buf = WireBuffer::new(100, 24);
+    render_task_detail(&mut buf, 100, 0, 24, &s, NOW);
+    let terminal = glyph_map(&buf, 100);
+    assert!(
+        terminal.contains("this run recorded no transcript"),
+        "a finished run with no log says so:\n{terminal}"
+    );
+    assert!(
+        !terminal.contains("waiting for"),
+        "and never claims it is still coming:\n{terminal}"
+    );
+}
+
 /// `enter` expands the NEXT run. The card, the `▶` marker and the transcript
 /// pane move together — and the pane says why it is empty for a run whose
 /// transcript the durable read cannot serve.
