@@ -5640,6 +5640,12 @@ impl HangarPlugin {
             NavIntent::NavigateToEntity { screen, id, kind } => {
                 self.navigate_to_entity(app, &screen, &id, &kind);
             }
+            NavIntent::GoToScreen(screen) => {
+                let mut next = app.clone();
+                next.screen = screen;
+                next.prior_screen = None;
+                self.app = Some(next);
+            }
         }
     }
 
@@ -7424,6 +7430,11 @@ mod tests {
             "a keystroke arms hangar/search for the typed query, got {:?}",
             p.screens.pending_palette_action
         );
+        // Narrow past every `Go:` word so the entity path is what Enter takes
+        // (crisp B5 merged the nine screen rows ahead of the daemon's results).
+        for ch in "efactor".chars() {
+            p.on_key(&char_press(ch));
+        }
 
         // Feed a ranked result back (as the `hangar/search` reply would) and prove
         // it renders inside the overlay.
@@ -7498,12 +7509,26 @@ mod tests {
         }
     }
 
+    /// Drive the palette exactly as an operator does — `^P`, the screen's word,
+    /// Enter — to land on a screen crisp B5 took off the tab strip.
+    ///
+    /// The tests below used the tab hotkey (`4`, `C`, `F`) to get there. Routing
+    /// them through the palette instead means the replacement route is exercised
+    /// by every one of them, not only by its own guard.
+    fn go_to(p: &mut HangarPlugin, word: &str) {
+        p.on_key(&ctrl_p_press());
+        for ch in word.chars() {
+            p.on_key(&char_press(ch));
+        }
+        p.on_key(&enter_press());
+    }
+
     /// Esc closes the palette back to the screen that opened it, with no jump.
     #[test]
     fn esc_closes_palette_back_to_prior_screen() {
         let mut p = connected_plugin_with_issue();
         // Open from the Autopilots screen so the restore target is non-default.
-        p.on_key(&char_press('4'));
+        go_to(&mut p, "autopilots");
         assert!(matches!(p.app_state().screen, Screen::Autopilots));
         p.on_key(&ctrl_p_press());
         assert!(matches!(p.app_state().screen, Screen::CommandPalette));
@@ -8525,11 +8550,13 @@ mod tests {
             "an open card-title overlay must declare text-capture (8hx)"
         );
 
-        // Typing the title's leading `C` must be captured, not switch to Control.
+        // Typing the title's leading `C` must be captured. `C` stopped being a
+        // router key with the crisp B5 shrink, so this now guards the overlay's
+        // own capture rather than a live tab switch.
         p.on_key(&char_press('C'));
         assert!(
             matches!(p.app_state().screen, Screen::Boards),
-            "typing `C` into the title must NOT switch to the control center, got {:?}",
+            "typing `C` into the title must NOT leave the boards screen, got {:?}",
             p.app_state().screen
         );
 
@@ -9085,7 +9112,7 @@ mod tests {
         p.on_key(&char_press('C'));
         assert!(
             matches!(p.app_state().screen, Screen::TaskDetail(_)),
-            "typing `C` in the compose draft must NOT switch to the control center, got {:?}",
+            "typing `C` in the compose draft must NOT leave task detail, got {:?}",
             p.app_state().screen
         );
         assert_eq!(
@@ -9136,7 +9163,7 @@ mod tests {
         p.on_key(&char_press('C'));
         assert!(
             matches!(p.app_state().screen, Screen::Settings),
-            "typing `C` in the key-entry modal must NOT switch to the control center, got {:?}",
+            "typing `C` in the key-entry modal must NOT leave settings, got {:?}",
             p.app_state().screen
         );
         assert!(
@@ -9172,8 +9199,8 @@ mod tests {
     /// REGRESSION (routing level, not the pure reducer): the Daemon-section
     /// numeric-config overlay is a text-capture surface. Every realistic value for
     /// an int knob (30, 120, 240, 1440) contains a digit `routing_event` claims as
-    /// a tab switch, so without the capture guard typing `3` teleported the user to
-    /// the Skill Manager and dropped the keystroke — the headline editing path did
+    /// a tab switch, so without the capture guard typing `1` teleports the user to
+    /// the issue list and drops the keystroke — the headline editing path does
     /// not work at all. Drive the real `on_key` (which consults `routing_event`
     /// BEFORE `route_key`), not `reduce_settings`, or the bug is invisible.
     #[test]
@@ -9199,25 +9226,29 @@ mod tests {
             "Enter on an int knob opens an empty numeric overlay"
         );
 
-        // THE REGRESSION: `3` must extend the buffer, not switch to the Skill
-        // Manager tab (`routing_event` maps '3' → Screen::SkillManager).
-        p.on_key(&key_press(KeyCode::Char { ch: '3' }));
+        // THE REGRESSION: `1` must extend the buffer, not switch tabs. Typed as
+        // `120`, not the `30` this test used to type: crisp B5 demoted `3`, so a
+        // value starting with it no longer crosses the routing layer at all, and
+        // the guard would have passed with the capture guard deleted. `1` and `2`
+        // are still router keys, and `120` is as realistic a minute count as `30`.
+        p.on_key(&key_press(KeyCode::Char { ch: '1' }));
         assert!(
             matches!(p.app_state().screen, Screen::Settings),
-            "typing `3` in the config overlay must NOT switch tabs, got {:?}",
+            "typing `1` in the config overlay must NOT switch tabs, got {:?}",
             p.app_state().screen
         );
         assert_eq!(
             p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()),
-            Some("3"),
-            "`3` must land in the overlay buffer"
+            Some("1"),
+            "`1` must land in the overlay buffer"
         );
 
-        // `0` completes `30`; the overlay is still open on Settings.
+        // `2` then `0` complete `120`; the overlay is still open on Settings.
+        p.on_key(&key_press(KeyCode::Char { ch: '2' }));
         p.on_key(&key_press(KeyCode::Char { ch: '0' }));
         assert_eq!(
             p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()),
-            Some("30"),
+            Some("120"),
             "digits accumulate in the overlay"
         );
         assert!(matches!(p.app_state().screen, Screen::Settings));
@@ -9427,13 +9458,24 @@ mod tests {
         assert!(!p.captures_text(), "capture is released with the overlay");
     }
 
+    /// `^P fleet` lands on the Fleet pane, and bare `F` no longer does.
+    ///
+    /// Was `fleet_hotkey_routes_to_dedicated_pane`, asserting `routing_event('F')`
+    /// yielded the Fleet tab switch. Crisp B5 §2.5 demoted `F`; the negative half
+    /// is kept so freeing the key stays deliberate — `F` now reaches the screen
+    /// reducer, which is the point.
     #[test]
-    fn fleet_hotkey_routes_to_dedicated_pane() {
+    fn the_palette_word_routes_to_the_dedicated_fleet_pane() {
+        let mut p = connected_plugin_with_issue();
+        go_to(&mut p, "fleet");
+        assert_eq!(p.app_state().screen, Screen::Fleet);
+
         let app =
             AppState::new(WorkspaceId::from_str("default").expect("valid default workspace id"));
-        let event = routing_event(&char_press('F'), &app).expect("Fleet route event");
-        let out = crate::screen::reduce(&app, event);
-        assert_eq!(out.state.screen, Screen::Fleet);
+        assert!(
+            routing_event(&char_press('F'), &app).is_none(),
+            "`F` is no longer a router key"
+        );
     }
 
     #[test]
@@ -9522,7 +9564,7 @@ mod tests {
         };
         plugin.screens.fleet.set_sessions(vec![row("claude:one"), row("claude:two")]);
 
-        plugin.on_key(&char_press('F'));
+        go_to(&mut plugin, "fleet");
         plugin.on_key(&key_press(KeyCode::Down));
         assert!(matches!(plugin.app_state().screen, Screen::Fleet));
         assert_eq!(plugin.screens.fleet.selected_key(), Some("claude:two"));
@@ -9535,7 +9577,7 @@ mod tests {
     #[test]
     fn fleet_f5_arms_direct_snapshot_refresh() {
         let mut plugin = connected_plugin_with_issue();
-        plugin.on_key(&char_press('F'));
+        go_to(&mut plugin, "fleet");
         assert!(matches!(plugin.app_state().screen, Screen::Fleet));
 
         plugin.fleet_fetch_pending = false;
@@ -10253,14 +10295,19 @@ mod inbox_attention_key_tests {
         assert!(p.screens.take_pending_answer_action().is_none());
     }
 
-    /// A digit past the last option is not an answer, so it is not swallowed:
-    /// it navigates like any other digit.
+    /// A digit past the last option is never swallowed as an answer.
     ///
     /// The intercept is exactly as wide as the answer. Guarding on "an ASK is
-    /// focused" instead made `3` on a two-option ASK do nothing at all — no
-    /// answer, no navigation, no feedback — on the screen operators live in.
+    /// focused" instead ate every digit on the screen operators live in.
+    ///
+    /// This was `an_out_of_range_digit_falls_through_to_the_tab_router`, pressing
+    /// `3` on a two-option ASK and landing on the Skills tab. Crisp B5 demoted
+    /// `3`, and the only router digits left (`1`, `2`) are both IN range on a
+    /// two-option ASK, so "out of range AND a tab key" is no longer a state that
+    /// exists. The other half of the contract — a digit with nothing to answer
+    /// still navigates — is `a_digit_still_switches_tabs_when_nothing_is_answerable`.
     #[test]
-    fn an_out_of_range_digit_falls_through_to_the_tab_router() {
+    fn a_freed_digit_never_answers_an_option_that_does_not_exist() {
         let mut p = plugin_on_inbox(&[ask_row("a1")]);
         p.on_key(&char_press('3'));
         assert!(
@@ -10268,8 +10315,9 @@ mod inbox_attention_key_tests {
             "a two-option ASK has no third option"
         );
         assert!(
-            matches!(p.app_state().screen, Screen::SkillManager),
-            "so `3` is still the Skills tab"
+            matches!(p.app_state().screen, Screen::Inbox),
+            "`3` is no longer a tab key, so the Inbox keeps the screen, got {:?}",
+            p.app_state().screen
         );
     }
 

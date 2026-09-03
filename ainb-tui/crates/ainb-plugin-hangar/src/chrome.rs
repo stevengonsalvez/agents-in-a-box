@@ -37,26 +37,21 @@ const ACTIVE_TAB_BG: Color = Color::rgb(40, 40, 60);
 /// though it is only reachable with a selection — it keeps the tab positions
 /// stable so the eye doesn't jump when a task is opened.
 ///
-/// The numbered hotkeys are **contiguous** (`1`→`4`, no gap): the old `[3]Agents`
-/// tab was folded into the issue-list `[Agents]` filter chip, so `Skills` and
-/// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
-/// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
-/// `Agents` slot renumber, and only by one.
-const PRIMARY_TABS: [(char, &str); 16] = [
+/// SEVEN, down from sixteen (crisp B5 §2.5). The strip was 138 columns and never
+/// fitted the 80×24 floor, advertising a screen for every noun in the daemon;
+/// these seven are the loop an operator actually runs (author, run, answer, read
+/// the result). It measures 74 columns, pinned by
+/// `the_seven_tab_strip_fits_the_eighty_column_floor`.
+///
+/// The numbered hotkeys stay **contiguous** (`1`→`2`, no gap) and keep their
+/// muscle memory; the nine demoted screens are reached with `^P` + their word
+/// ([`crate::screen::command_palette::GO_SCREENS`]) and listed under Settings.
+const PRIMARY_TABS: [(char, &str); 7] = [
     ('1', "Issues"),
     ('2', "Task"),
-    ('3', "Skills"),
-    ('4', "Autopilots"),
     ('K', "Kanban"),
     ('B', "Boards"),
-    ('D', "Daemon"),
-    ('U', "Usage"),
-    ('L', "Logs"),
     ('I', "Inbox"),
-    ('C', "Control"),
-    ('F', "Fleet"),
-    ('S', "Squads"),
-    ('P', "Profiles"),
     ('A', "Agents"),
     (',', "Settings"),
 ];
@@ -262,30 +257,46 @@ pub(crate) fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)>
     hints
 }
 
+/// The tab-strip hotkey that lights up for `screen`, or `None` for a screen with
+/// no tab: the nine crisp B5 demoted, and the four modals (which overlay a tab
+/// rather than being one, so nothing lights while one is open).
+///
+/// Keyed off the SCREEN, not off the hotkey, so it is the one place that decides
+/// what is on the strip. `tab_is_active` reads it, and
+/// `every_tab_on_the_strip_is_reachable_and_labelled` pins it against both
+/// [`PRIMARY_TABS`] and `ROUTER_KEYS` — the previous shape was a second
+/// hotkey→screen table that could keep an arm for a tab the strip had dropped.
+pub(crate) const fn tab_hotkey(screen: &Screen) -> Option<char> {
+    match screen {
+        Screen::IssueList => Some('1'),
+        Screen::TaskDetail(_) => Some('2'),
+        Screen::Kanban => Some('K'),
+        Screen::Boards => Some('B'),
+        Screen::Inbox => Some('I'),
+        Screen::Agents => Some('A'),
+        Screen::Settings => Some(','),
+        // Demoted off the strip by crisp B5 §2.5; reached through `^P`.
+        Screen::SkillManager
+        | Screen::Autopilots
+        | Screen::DaemonHealth
+        | Screen::Usage
+        | Screen::Logs
+        | Screen::ControlCenter
+        | Screen::Fleet
+        | Screen::Squads
+        | Screen::Profiles => None,
+        // Modals overlay a tab; they are not one.
+        Screen::AgentPicker(_) | Screen::ActivityTimeline(_) | Screen::Help
+        | Screen::CommandPalette => None,
+    }
+}
+
 /// Whether `hotkey`'s tab is the active one. `Task` (`2`) highlights for any
 /// task-detail screen; the agent-picker modal keeps the screen *under* it
 /// highlighted, so it falls through to no match (no tab lit) which is correct —
 /// the modal is an overlay, not a tab.
 const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
-    match hotkey {
-        '1' => matches!(active, Screen::IssueList),
-        '2' => matches!(active, Screen::TaskDetail(_)),
-        '3' => matches!(active, Screen::SkillManager),
-        '4' => matches!(active, Screen::Autopilots),
-        'K' => matches!(active, Screen::Kanban),
-        'B' => matches!(active, Screen::Boards),
-        'D' => matches!(active, Screen::DaemonHealth),
-        'U' => matches!(active, Screen::Usage),
-        'L' => matches!(active, Screen::Logs),
-        'I' => matches!(active, Screen::Inbox),
-        'C' => matches!(active, Screen::ControlCenter),
-        'F' => matches!(active, Screen::Fleet),
-        'S' => matches!(active, Screen::Squads),
-        'P' => matches!(active, Screen::Profiles),
-        'A' => matches!(active, Screen::Agents),
-        ',' => matches!(active, Screen::Settings),
-        _ => false,
-    }
+    matches!(tab_hotkey(active), Some(key) if key == hotkey)
 }
 
 /// Column at which the right cluster should start, or `None` if it doesn't fit
@@ -363,9 +374,11 @@ mod tests {
     fn active_tab_detection() {
         assert!(tab_is_active(&Screen::IssueList, '1'));
         assert!(!tab_is_active(&Screen::IssueList, '2'));
-        assert!(tab_is_active(&Screen::SkillManager, '3'));
-        assert!(tab_is_active(&Screen::Autopilots, '4'));
+        assert!(tab_is_active(&Screen::Kanban, 'K'));
+        assert!(tab_is_active(&Screen::Inbox, 'I'));
         assert!(tab_is_active(&Screen::Settings, ','));
+        // A demoted screen lights no tab at all — the strip has none for it.
+        assert!(!tab_is_active(&Screen::SkillManager, '3'));
         let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
         assert!(!tab_is_active(&Screen::AgentPicker(issue), '1'));
     }
@@ -532,32 +545,83 @@ mod tests {
         }
     }
 
-    /// Every `Screen` variant, for the tests that must hold across all of them.
-    fn every_screen() -> Vec<Screen> {
-        let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
-        let task = ainb_hangar_core::ids::TaskId::from_str("01HANGARTASK000000000001").unwrap();
-        vec![
-            Screen::IssueList,
-            Screen::TaskDetail(task),
-            Screen::AgentPicker(issue.clone()),
-            Screen::ActivityTimeline(issue),
-            Screen::SkillManager,
-            Screen::Autopilots,
-            Screen::Kanban,
-            Screen::Boards,
-            Screen::DaemonHealth,
-            Screen::Usage,
-            Screen::Logs,
-            Screen::Inbox,
-            Screen::ControlCenter,
-            Screen::Fleet,
-            Screen::Squads,
-            Screen::Profiles,
-            Screen::Agents,
-            Screen::Settings,
-            Screen::Help,
-            Screen::CommandPalette,
-        ]
+    use crate::test_support::every_screen;
+
+    /// COVERAGE (crisp B5 §2.5): the strip, the active-tab map and the router key
+    /// set name exactly the same seven tabs.
+    ///
+    /// A tab is a promise of three things at once — it is painted, it lights up
+    /// when you are on it, and its key gets you there. This walks every `Screen`
+    /// variant and both directions of [`PRIMARY_TABS`], so shrinking the strip
+    /// without shrinking [`tab_hotkey`] (a tab that never highlights), or without
+    /// shrinking `ROUTER_KEYS` (a key the router no longer claims painted as if it
+    /// worked), fails here. A count assertion would have passed for both.
+    #[test]
+    fn every_tab_on_the_strip_is_reachable_and_labelled() {
+        use crate::screen::router::ROUTER_KEYS;
+        for screen in every_screen() {
+            let Some(hotkey) = tab_hotkey(&screen) else {
+                assert!(
+                    !PRIMARY_TABS.iter().any(|(_, label)| *label == screen.tab_label()),
+                    "{screen:?} is painted on the strip but lights no tab"
+                );
+                continue;
+            };
+            assert!(
+                PRIMARY_TABS.iter().any(|(key, _)| *key == hotkey),
+                "{screen:?} claims tab `{hotkey}` but the strip does not paint it"
+            );
+            assert!(
+                ROUTER_KEYS.contains(&hotkey),
+                "the strip paints `{hotkey}` for {screen:?} but the router no longer claims it"
+            );
+        }
+        // The other direction: no tab is painted for a screen that dropped out.
+        for (hotkey, label) in PRIMARY_TABS {
+            let owner = every_screen().into_iter().find(|s| tab_hotkey(s) == Some(hotkey));
+            assert_eq!(
+                owner.as_ref().map(Screen::tab_label),
+                Some(label),
+                "the strip paints `[{hotkey}]{label}` but no screen answers to it"
+            );
+        }
+    }
+
+    /// The seven-tab strip measures 74 columns and clears the 80×24 floor with
+    /// every label intact — the sixteen-tab strip was 138 and truncated four tabs
+    /// off the right edge at the floor (crisp B5 §2.5).
+    ///
+    /// The right-hand cluster still yields at 80, which §2.5 predicted it would
+    /// not: the strip is 74 columns of ink and the cursor lands at 76 (each tab
+    /// carries a two-space separator), so `default · ● online` at 18 columns needs
+    /// 95. The tabs winning that contest is the documented rule
+    /// (`right_cluster_yields_to_tabs_when_tight`); pinned here at both widths so
+    /// the trade is a measured number rather than an assumption.
+    #[test]
+    fn the_seven_tab_strip_fits_the_eighty_column_floor() {
+        let mut buf = WireBuffer::new(80, 24);
+        render_top_bar(&mut buf, 80, &Screen::IssueList, "default", Presence::Online);
+        let row0 = row_text(&buf, 0, 80);
+        for (hotkey, label) in PRIMARY_TABS {
+            assert!(
+                row0.contains(&format!("[{hotkey}]{label}")),
+                "`[{hotkey}]{label}` is cut off at the 80-column floor: {row0:?}"
+            );
+        }
+        assert_eq!(row0.trim_end().chars().count(), 74, "row0 = {row0:?}");
+        assert!(
+            !row0.contains("online"),
+            "the right cluster does not fit at 80 and must yield: {row0:?}"
+        );
+
+        // 95 columns is where it fits, and there it paints.
+        let mut wide = WireBuffer::new(95, 24);
+        render_top_bar(&mut wide, 95, &Screen::IssueList, "default", Presence::Online);
+        let wide0 = row_text(&wide, 0, 95);
+        assert!(
+            wide0.contains("default · ● online"),
+            "the cluster paints once there is room: {wide0:?}"
+        );
     }
 
     /// The right cluster yields to the tabs: when there isn't room after the
@@ -573,13 +637,11 @@ mod tests {
     }
 
     /// The top bar renders every tab hotkey + the workspace slug on row 0 at a
-    /// realistic width. The six-tab strip (P8.4 added Kanban) needs >80 cols to
-    /// also fit the right cluster; the slug-yields-to-tabs behaviour at the 80×24
-    /// floor is covered by `chrome_renders_at_80x24_floor_without_overflow`.
+    /// realistic width. The width the strip needs is pinned separately by
+    /// `the_seven_tab_strip_fits_the_eighty_column_floor`.
     #[test]
     fn top_bar_renders_tabs_and_slug() {
-        // Wide enough that the full fifteen-tab strip (P4 added `[B]Boards`, P7
-        // `[S]Squads`, P5 `[P]Profiles`, slice 2 `[A]Agents` — ~168 cols) AND the
+        // Wide enough that the seven-tab strip (74 cols, crisp B5 §2.5) AND the
         // right-side workspace-slug cluster both fit; the tabs win width
         // contention, so a narrower buffer drops the slug (covered by the 80x24
         // floor smoke).
@@ -588,9 +650,9 @@ mod tests {
         // Reconstruct row 0 text from the wire buffer cells.
         let row0 = row_text(&buf, 0, 200);
         assert!(row0.contains("Issues"), "row0 = {row0:?}");
-        assert!(row0.contains("Skills"), "row0 = {row0:?}");
+        assert!(row0.contains("Inbox"), "row0 = {row0:?}");
         assert!(row0.contains("Kanban"), "row0 = {row0:?}");
-        assert!(row0.contains("Usage"), "row0 = {row0:?}");
+        assert!(row0.contains("Settings"), "row0 = {row0:?}");
         assert!(row0.contains("acme"), "row0 = {row0:?}");
     }
 

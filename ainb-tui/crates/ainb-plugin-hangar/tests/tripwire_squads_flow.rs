@@ -391,6 +391,20 @@ async fn send_char<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: cha
     send_key(host_write, KeyCode::Char { ch }).await;
 }
 
+/// Walk the command palette to a screen crisp B5 §2.5 took off the tab strip:
+/// `^P`, the screen's word, Enter. `\u{10}` is the bare-DLE spelling of Ctrl+P
+/// the plugin accepts alongside the modifier flag (`plugin::is_ctrl_p`).
+///
+/// `squads` is the word with a `q` in it, which is why the palette had to stop
+/// letting the router eat its query first.
+async fn go_to_screen<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, word: &str) {
+    send_char(host_write, '\u{10}').await;
+    for ch in word.chars() {
+        send_char(host_write, ch).await;
+    }
+    send_char(host_write, '\n').await;
+}
+
 /// Boot the plugin + mock daemon, relay the connect handshake, and pump renders
 /// until BOTH the agents and squads snapshots have been fetched + folded (so the
 /// Squads screen has resolved rows). Returns the live handles + recorder.
@@ -475,8 +489,9 @@ async fn squads_screen_shows_leader_and_member_rows() {
             "the squad must not be on the landing screen:\n{pre}"
         );
 
-        // Press `S` to open the Squads screen, then render.
-        send_char(&mut hw, 'S').await;
+        // `^P squads` opens the Squads screen, then render. Was the `S` tab key
+        // until crisp B5 §2.5 demoted it.
+        go_to_screen(&mut hw, "squads").await;
         let mut post = String::new();
         for _ in 0..30 {
             post = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
@@ -514,8 +529,8 @@ async fn create_and_assign_fire_the_squad_rpcs() {
         let (mut hw, mut hr, mut dr, mut dw, server) =
             boot(home.path(), &stream_id, seen.clone()).await;
 
-        // Open the Squads screen.
-        send_char(&mut hw, 'S').await;
+        // Open the Squads screen (crisp B5 §2.5 demoted the `S` tab key).
+        go_to_screen(&mut hw, "squads").await;
         let _ = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
 
         // Create a squad: `c`, type "qa", Enter.

@@ -117,11 +117,11 @@ fn daemon_health_sparkline_renders_with_red_failure_band() {
          the throughput ring needs them to drive the sparkline"
     );
 
-    // Press `D` (single-char nav, no Enter) until the health pane chrome is on
-    // screen with at least one sparkline block glyph.
+    // `^P daemon` until the health pane chrome is on screen with at least one
+    // sparkline block glyph. Was the `D` tab key until crisp B5 §2.5 demoted it.
     let deadline = Instant::now() + Duration::from_secs(45);
     let pane = session
-        .switch_tab_until("D", deadline, |c| {
+        .go_to_screen_until("daemon", deadline, |c| {
             hangar_chrome_visible(c)
                 && c.contains("Daemon health")
                 && c.contains("throughput (60s):")

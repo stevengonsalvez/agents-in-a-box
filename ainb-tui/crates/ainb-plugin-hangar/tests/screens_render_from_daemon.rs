@@ -337,6 +337,17 @@ async fn send_key<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: char
         .unwrap();
 }
 
+/// Walk the command palette to a screen crisp B5 §2.5 took off the tab strip:
+/// `^P`, the screen's word, Enter. `\u{10}` is the bare-DLE spelling of Ctrl+P
+/// the plugin accepts alongside the modifier flag (`plugin::is_ctrl_p`).
+async fn go_to_screen<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, word: &str) {
+    send_key(host_write, '\u{10}').await;
+    for ch in word.chars() {
+        send_key(host_write, ch).await;
+    }
+    send_key(host_write, '\n').await;
+}
+
 #[tokio::test]
 async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
     let body = async {
@@ -390,9 +401,9 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         assert!(!last.contains("Loading"), "stuck on loading:\n{last}");
         assert!(last.contains("Todo"), "Todo column header missing:\n{last}");
 
-        // Route the `3` tab key → skill manager renders `commit` (e38.38: Skills
-        // renumbered 4→3 to close the `[3]Agents` gap).
-        send_key(&mut host_write, '3').await;
+        // `^P skills` → skill manager renders `commit`. Was the `3` tab key until
+        // crisp B5 §2.5 demoted it; the palette is the replacement route.
+        go_to_screen(&mut host_write, "skills").await;
         let (skills, last2) = poll_render_for(&mut host_write, &mut host_read, "commit").await;
         assert!(skills, "tab to skills did not render `commit`:\n{last2}");
         assert!(
@@ -490,9 +501,9 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
         )
         .await;
 
-        // Tab to the skill manager (`3`), then press `s` (sync). (e38.38: Skills
-        // renumbered 4→3 to close the `[3]Agents` gap.)
-        send_key(&mut host_write, '3').await;
+        // `^P skills` to the skill manager, then press `s` (sync). Was the `3`
+        // tab key until crisp B5 §2.5 demoted it.
+        go_to_screen(&mut host_write, "skills").await;
         send_key(&mut host_write, 's').await;
 
         // Pump renders until the plugin's deferred skill action fires the sync

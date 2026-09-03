@@ -125,6 +125,7 @@ fn tui_renders_members_with_roles() {
         scope: global · [g] toggle
                       phone   web     os      atc
         ] [ kind · h/l channel · space toggle
+      More screens
     "###);
 
     // NON-VACUOUS COLOUR CHECK: the owner row's glyphs paint in `SELECTION_GREEN`.

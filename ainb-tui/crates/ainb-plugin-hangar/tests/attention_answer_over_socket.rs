@@ -342,8 +342,14 @@ async fn pressing_one_answers_the_selected_ask() {
             .await;
         }
 
-        // Open the control center and answer option ① (staging).
-        send_key(&mut host_write, 'C').await;
+        // Open the control center with `^P control` (crisp B5 §2.5 demoted the `C`
+        // tab key; `\u{10}` is the bare-DLE spelling of Ctrl+P) and answer option
+        // ① (staging).
+        send_key(&mut host_write, '\u{10}').await;
+        for ch in "control".chars() {
+            send_key(&mut host_write, ch).await;
+        }
+        send_key(&mut host_write, '\n').await;
         send_key(&mut host_write, '1').await;
 
         let mut answered = None;

@@ -559,9 +559,14 @@ async fn autopilot_right_click_run_now_fires_autopilot() {
         let home = tempfile::tempdir().expect("home");
         let mut h = boot(home.path(), "ap-menu").await;
 
-        // Open the Autopilots screen (`4`), then render so the board layout is
-        // recorded for the autopilot card.
-        send_key(&mut h.host_write, KeyCode::Char { ch: '4' }).await;
+        // Open the Autopilots screen with `^P autopilots` (crisp B5 §2.5 demoted
+        // the `4` tab key), then render so the board layout is recorded for the
+        // autopilot card. `\u{10}` is the bare-DLE spelling of Ctrl+P.
+        send_key(&mut h.host_write, KeyCode::Char { ch: '\u{10}' }).await;
+        for ch in "autopilots".chars() {
+            send_key(&mut h.host_write, KeyCode::Char { ch }).await;
+        }
+        send_key(&mut h.host_write, KeyCode::Char { ch: '\n' }).await;
         relay_one_send_or_render(
             &mut h.host_write,
             &mut h.host_read,

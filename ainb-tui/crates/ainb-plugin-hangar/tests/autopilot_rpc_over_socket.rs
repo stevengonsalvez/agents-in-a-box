@@ -308,6 +308,17 @@ async fn send_key<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: char
         .unwrap();
 }
 
+/// Walk the command palette to a screen crisp B5 §2.5 took off the tab strip:
+/// `^P`, the screen's word, Enter. `\u{10}` is the bare-DLE spelling of Ctrl+P
+/// the plugin accepts alongside the modifier flag (`plugin::is_ctrl_p`).
+async fn go_to_screen<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, word: &str) {
+    send_key(host_write, '\u{10}').await;
+    for ch in word.chars() {
+        send_key(host_write, ch).await;
+    }
+    send_key(host_write, '\n').await;
+}
+
 /// Boot the plugin + mock daemon, run subscribe + snapshot pump, and return the
 /// live host/daemon handles plus the shared `seen` recorder.
 async fn boot(
@@ -366,9 +377,9 @@ async fn key_r_fires_now() {
         let (mut host_write, mut host_read, mut daemon_reader, mut daemon_write, server) =
             boot(home.path(), &stream_id, seen.clone(), enabled).await;
 
-        // Tab to the autopilot screen (`4`), then press `r` (run now). (e38.38:
-        // Autopilots renumbered 5→4 to close the `[3]Agents` gap.)
-        send_key(&mut host_write, '4').await;
+        // `^P autopilots` to the autopilot screen, then press `r` (run now). Was
+        // the `4` tab key until crisp B5 §2.5 demoted it.
+        go_to_screen(&mut host_write, "autopilots").await;
         send_key(&mut host_write, 'r').await;
 
         let mut sent = false;
@@ -415,10 +426,10 @@ async fn key_d_toggles_enabled() {
         let (mut host_write, mut host_read, mut daemon_reader, mut daemon_write, server) =
             boot(home.path(), &stream_id, seen.clone(), enabled).await;
 
-        // Tab to the autopilot screen (`4`), then press `d` (disable; the seeded
-        // row is enabled → set_enabled(false)). (e38.38: Autopilots renumbered 5→4
-        // to close the `[3]Agents` gap.)
-        send_key(&mut host_write, '4').await;
+        // `^P autopilots` to the autopilot screen, then press `d` (disable; the
+        // seeded row is enabled → set_enabled(false)). Was the `4` tab key until
+        // crisp B5 §2.5 demoted it.
+        go_to_screen(&mut host_write, "autopilots").await;
         send_key(&mut host_write, 'd').await;
 
         // Pump until the daemon records set_enabled(false). The daemon flips its
