@@ -9913,3 +9913,139 @@ mod answer_verdict_tests {
         );
     }
 }
+
+/// Crisp B3 §2.4 — the Inbox is the one attention surface, so every key that
+/// answers on the Control Center must answer from `I` too.
+///
+/// Drives the REAL [`Plugin::on_key`], which is where the numbered-tab guard
+/// lives: a test that called `route_key` directly would pass while `2` still
+/// switched tabs on the operator.
+#[cfg(test)]
+mod inbox_attention_key_tests {
+    use super::*;
+    use crate::screen::inbox::InboxFilter;
+    use ainb_hangar_proto::events::AttentionRow;
+
+    fn char_press(ch: char) -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    fn enter_press() -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Enter,
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    fn attention_row(id: &str, kind: &str, payload: serde_json::Value) -> AttentionRow {
+        AttentionRow {
+            id: id.to_string(),
+            session_id: format!("sess-{id}"),
+            cwd: format!("/work/{id}"),
+            workspace_id: None,
+            kind: kind.into(),
+            payload: payload.to_string(),
+            degraded: false,
+            created_at: 1,
+            channels: ainb_hangar_proto::ChannelSet::NONE,
+        }
+    }
+
+    /// An answerable ASK with two options, `x` then `y`.
+    fn ask_row(id: &str) -> AttentionRow {
+        attention_row(
+            id,
+            "ask_user_question",
+            serde_json::json!({
+                "kind": "ASK",
+                "context": { "question": "which?", "options": [{ "label": "x" }, { "label": "y" }] }
+            }),
+        )
+    }
+
+    /// An error row: surfaced for visibility, not answerable inline.
+    fn err_row(id: &str) -> AttentionRow {
+        attention_row(
+            id,
+            "error",
+            serde_json::json!({ "kind": "ERR", "context": { "pattern": "boom" } }),
+        )
+    }
+
+    /// A connected plugin sitting on the Inbox with `rows` open.
+    fn plugin_on_inbox(rows: &[AttentionRow]) -> HangarPlugin {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        p.conn.on_dialed("s1");
+        p.conn.on_subscribe_ack();
+        p.screens.set_attention(rows);
+        p.on_key(&char_press('I'));
+        assert!(
+            matches!(p.app_state().screen, Screen::Inbox),
+            "`I` opens the inbox"
+        );
+        p
+    }
+
+    /// A digit answers the focused ASK from the Inbox rather than switching to
+    /// the numbered tab it normally claims.
+    ///
+    /// MUTATION GUARD: measured. Drop `Screen::Inbox` from the digit guard in
+    /// `on_key` and this fails — the tab router eats the key and no answer is
+    /// raised, so the operator presses `2` and the agent stays blocked. That is
+    /// the regression the Control Center's guard exists for, one screen over.
+    #[test]
+    fn a_digit_answers_the_focused_ask_from_the_inbox() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('2'));
+        assert!(
+            matches!(p.app_state().screen, Screen::Inbox),
+            "answering never navigates away"
+        );
+        let action = p.screens.take_pending_answer_action().expect("`2` answers option two");
+        assert_eq!(action.attention_id, "a1");
+        assert_eq!(action.answer, "y");
+    }
+
+    /// With nothing answerable focused, a digit still navigates: number-key tab
+    /// switching off the Inbox keeps working.
+    #[test]
+    fn a_digit_still_switches_tabs_when_nothing_is_answerable() {
+        let mut p = plugin_on_inbox(&[err_row("e1")]);
+        p.on_key(&char_press('1'));
+        assert!(matches!(p.app_state().screen, Screen::IssueList));
+        assert!(p.screens.take_pending_answer_action().is_none());
+    }
+
+    /// `h`/`l` move the option cursor and Enter answers what it sits on — the
+    /// Control Center's reducer, driven from `I`.
+    #[test]
+    fn the_option_cursor_and_enter_answer_from_the_inbox() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('l'));
+        p.on_key(&enter_press());
+        let action = p.screens.take_pending_answer_action().expect("enter answers");
+        assert_eq!(action.attention_id, "a1");
+        assert_eq!(action.answer, "y", "the cursor had moved to option two");
+    }
+
+    /// `r` and `f` stay the Inbox's own keys, and neither raises an answer.
+    #[test]
+    fn r_marks_read_and_f_cycles_the_filter() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('r'));
+        assert!(p.screens.take_pending_inbox_mark_read(), "`r` marks read");
+        assert_eq!(p.screens.inbox.filter(), InboxFilter::All);
+        p.on_key(&char_press('f'));
+        assert_eq!(p.screens.inbox.filter(), InboxFilter::Asks, "`f` cycles");
+        assert!(
+            p.screens.take_pending_answer_action().is_none(),
+            "neither key answers anything"
+        );
+    }
+}
