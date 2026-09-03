@@ -54,6 +54,19 @@ pub struct AdapterConfig {
     /// Empty by default: part 1 ships no configured model or reasoning value,
     /// only the mechanism that keeps one from being silently lost on resume.
     pub config_options: Vec<(String, String)>,
+    /// OS-level FS confinement for this adapter's child, or `None` to spawn it
+    /// unconfined (the daemon-wide adapters, which serve every chat tenant).
+    ///
+    /// A POLICY rather than a wrapped command, because the two platforms
+    /// express confinement differently and only one of them is expressible as
+    /// `(command, args)`: macOS swaps the program for `/usr/bin/sandbox-exec`,
+    /// but Linux installs a Landlock ruleset in a `pre_exec` closure that lives
+    /// ON the command object. Carrying the policy and building the command at
+    /// spawn ([`crate::client`]) is the one shape that confines both.
+    ///
+    /// Set by the per-task adapter a hangar task registers, whose child is one
+    /// agent working in one worktree and so has a confinable blast radius.
+    pub sandbox: Option<ainb_hangar_sandbox::SandboxPolicy>,
 }
 
 impl AdapterConfig {
@@ -69,6 +82,7 @@ impl AdapterConfig {
             env_passthrough: Vec::new(),
             extra_env: Vec::new(),
             config_options: Vec::new(),
+            sandbox: None,
         }
     }
 
@@ -97,6 +111,13 @@ impl AdapterConfig {
     #[must_use]
     pub fn config_options(mut self, options: Vec<(String, String)>) -> Self {
         self.config_options = options;
+        self
+    }
+
+    /// Confine this adapter's child to `policy` (see [`AdapterConfig::sandbox`]).
+    #[must_use]
+    pub fn sandbox(mut self, policy: ainb_hangar_sandbox::SandboxPolicy) -> Self {
+        self.sandbox = Some(policy);
         self
     }
 
