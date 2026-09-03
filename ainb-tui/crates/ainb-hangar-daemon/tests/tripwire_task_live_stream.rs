@@ -98,7 +98,7 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
 
     let scale = u64::from(tripwire_support::budget_scale());
     let run = sub.collect_run(Duration::from_secs(30 * scale)).await;
-    let live = run.transcript;
+    let live = run.transcript.clone();
 
     // The FSM terminal is the signal the provider's stdout is closed and its log
     // flushed, so the durable read below sees the whole file.
@@ -134,9 +134,11 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
     assert!(
         !live.is_empty(),
         "a running task must stream TaskMessage events; got none.\n\
+         events seen on the connection: {:?}\n\
          durable jsonl was:\n{}\ndaemon logs:\n{}",
+        run.seen,
         durable.jsonl,
-        tripwire_support::dump_daemon_logs(home.path())
+        read_daemon_log(home.path())
     );
     // And it must be a real transcript, not one lane: the fake provider emits
     // prose, thinking, a tool call and its result, so all four lanes must show.
@@ -267,6 +269,21 @@ async fn enqueue_task(pool: &SqlitePool, ids: &tripwire_support::SeededIds) {
     .execute(pool)
     .await
     .expect("enqueue task");
+}
+
+/// The daemon's own structured log under the test's `AINB_HANGAR_HOME` (NOT
+/// `$HOME`, which is where `tripwire_support::dump_daemon_logs` looks and why it
+/// found nothing here).
+fn read_daemon_log(home: &Path) -> String {
+    let dir = home.join("hangar").join("logs");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return format!("(no daemon logs at {})", dir.display());
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The daemon's control socket under `AINB_HANGAR_HOME`.
@@ -433,6 +450,11 @@ impl Client {
                 continue;
             }
             let event = &frame["params"];
+            run.seen.push(format!(
+                "{}({})",
+                event["event"].as_str().unwrap_or("?"),
+                event["task_id"].as_str().unwrap_or("-")
+            ));
             if event["task_id"] != TASK_ID {
                 continue;
             }
@@ -462,4 +484,8 @@ struct LiveRun {
     /// The tool count off the LAST `TaskProgress`: the run's final tally, since
     /// the producer emits a closing tick at stdout EOF.
     last_tool_calls: Option<u64>,
+    /// Every event tag seen on the connection, ANY task, in arrival order. Only
+    /// read when an assertion fails: it separates "the producer emitted nothing"
+    /// from "the subscription went live too late to see it".
+    seen: Vec<String>,
 }
