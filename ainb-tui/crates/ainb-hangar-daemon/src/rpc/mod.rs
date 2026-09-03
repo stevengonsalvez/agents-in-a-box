@@ -552,10 +552,10 @@ async fn serve_conn(
                         // each other in BOTH directions: a `TaskFinished` can
                         // overtake its run's last `TaskMessage`, and a
                         // `TaskMessage` can overtake the `TaskStarted` that opens
-                        // the banner. Every consumer guards on the task id and on
-                        // the banner already existing, so the late arrival is
-                        // dropped either way (pinned by
-                        // `banner_hides_on_task_finished_event`); the visible
+                        // the banner. Only `TaskStarted` constructs a banner and
+                        // every consumer guards on the task id, so a late arrival
+                        // is dropped either way and leaves no state behind (pinned
+                        // by `banner_hides_on_task_finished_event`); the visible
                         // effect is a banner clearing a beat early, or a first
                         // transcript line missed before it opens.
                         if let Some(old) = task_stream_forwarder.take() {

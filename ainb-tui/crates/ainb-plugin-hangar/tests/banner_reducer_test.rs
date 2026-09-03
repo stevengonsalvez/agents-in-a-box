@@ -98,6 +98,10 @@ fn banner_hides_on_task_finished_event() {
             s.banner().is_none(),
             "a late transcript event must not revive the banner"
         );
+        assert!(
+            s.latest_message().is_empty(),
+            "and must not write through to the hidden banner's message"
+        );
     }
 }
 
