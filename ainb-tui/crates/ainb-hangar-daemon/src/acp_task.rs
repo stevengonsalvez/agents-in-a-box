@@ -46,7 +46,7 @@ use ainb_hangar_store::repo::task::Task;
 use ainb_hangar_store::service::fail::FailureReason;
 use sqlx::SqlitePool;
 
-use crate::acp_pool::{AcpPool, ConvergeCause, SubmitOutcome};
+use crate::acp_pool::{AcpPool, ConvergeCause, DeliveryToken, SubmitOutcome};
 use crate::events::EventSink;
 use crate::execenv::ExecEnv;
 use crate::runner::{Backend, RunLocation, RunOutcome, RunnerResult};
@@ -154,13 +154,31 @@ const fn adapter_for(backend: Backend) -> Option<&'static str> {
 struct AdapterLease {
     pool: Arc<AcpPool>,
     key: String,
+    /// Set once the session exists. The lease is held from BEFORE that, so a
+    /// store fault between registering the adapter and minting the session
+    /// still releases the key.
+    session_key: Option<String>,
 }
 
 impl Drop for AdapterLease {
     fn drop(&mut self) {
         let pool = Arc::clone(&self.pool);
         let key = std::mem::take(&mut self.key);
+        let session_key = self.session_key.take();
         tokio::spawn(async move {
+            // Session actor FIRST, then the process it was talking to. Nothing
+            // else retires the actor: `ProcessExited` does not stop it,
+            // `retire_actor` runs only from the actor's own exit, and a
+            // per-task adapter key means eviction never fires, so every run
+            // that skipped this left a live tokio task ticking `pump()` on the
+            // writer flush interval for the daemon's lifetime. `teardown` is
+            // the only `Control::Shutdown` sender. Doing it HERE rather than at
+            // the normal return is what makes "an actor that exists is torn
+            // down" true by construction: the cancel that drops this future and
+            // the early return on a refused prompt both get it too.
+            if let Some(session_key) = session_key {
+                pool.teardown(&session_key, ConvergeCause::OperatorStop).await;
+            }
             if pool.unregister_adapter(&key).await {
                 tracing::debug!(adapter = %key, "released a task's adapter process");
             }
@@ -232,9 +250,10 @@ pub async fn run_acp(
     );
     // Held from BEFORE the session exists: a store fault below still has to
     // release the key, and an early `?` would otherwise leak a registry entry.
-    let _lease = AdapterLease {
+    let mut lease = AdapterLease {
         pool: Arc::clone(&acp),
         key: key.clone(),
+        session_key: None,
     };
 
     // The session is minted against the TASK's key, not the base adapter, so
@@ -244,6 +263,10 @@ pub async fn run_acp(
         crate::acp_session::ensure(pool, events, &key, &cwd.to_string_lossy(), Some(&scope))
             .await?;
     let session_key = session.session_key;
+    // The lease now owns the session too, so every exit below tears the actor
+    // down: the `Rejected` early return, the `?` on `enqueue`, a panic unwind,
+    // and the cancel that drops this future mid-poll.
+    lease.session_key = Some(session_key.clone());
     // Written the moment it exists, so a run that later fails or is cancelled
     // still points at the transcript it produced; the success path would
     // otherwise be the only one that records it (`CompleteTaskService`).
@@ -269,14 +292,6 @@ pub async fn run_acp(
 
     let (state, detail) = await_leg(pool, &acp, &session_key, &message_id, max_runtime).await;
     let result = build_result(pool, &session_key, &message_id).await;
-    // Stop HOSTING the session. The lease below drops the adapter process, but
-    // the actor is a task of its own that nothing else retires: `ProcessExited`
-    // does not stop it, `retire_actor` only runs from the actor's own exit, and
-    // a per-task adapter key means `evict_if_at_cap` never fires. Without this
-    // every completed run leaks one actor plus a `pool.sessions` entry for the
-    // daemon's lifetime. The `fleet_acp_session` row survives, so a later
-    // resume-across-retry still has something to resume.
-    acp.teardown(&session_key, ConvergeCause::OperatorStop).await;
     Ok(outcome_for(&state, detail.as_deref(), result))
 }
 
@@ -504,30 +519,35 @@ fn spawn_error() -> RunOutcome {
 /// `FAILED`+`turn_deadline`, `FAILED`+`daemon_restart`, `UNKNOWN`+`operator_stop`)
 /// answered `ProviderContractDrift`/`NoRetry`, burning the retry chain on
 /// exactly the transient faults that should resume.
-fn outcome_for_token(token: &str, result: &RunnerResult) -> Option<RunOutcome> {
-    use crate::acp_pool as tokens;
-
-    let failed = |reason| {
-        Some(RunOutcome::Failed {
-            reason,
-            result: result.clone(),
-        })
+///
+/// EXHAUSTIVE on [`DeliveryToken`], with no wildcard arm on purpose: a token the
+/// pool grows stops compiling here until someone decides whether it should
+/// retry. The previous shape matched `&str` with a `_ => None` fall-through, so
+/// a new token reached a task run as contract drift and the test that claimed
+/// to guard this could not see it.
+fn outcome_for_token(token: DeliveryToken, result: &RunnerResult) -> RunOutcome {
+    let failed = |reason| RunOutcome::Failed {
+        reason,
+        result: result.clone(),
     };
     match token {
-        tokens::DELIVERY_OPERATOR_STOP => Some(RunOutcome::Cancelled(result.clone())),
+        DeliveryToken::OperatorStop => RunOutcome::Cancelled(result.clone()),
         // Infrastructure, not the work: resume the same conversation.
-        tokens::DELIVERY_ADAPTER_EXIT
-        | tokens::DELIVERY_BREAKER_OPEN
-        | tokens::DELIVERY_PROVIDER_AT_CAPACITY
-        | tokens::DELIVERY_QUEUE_FULL => failed(FailureReason::RuntimeOffline),
-        tokens::DELIVERY_TURN_DEADLINE => failed(FailureReason::Timeout),
-        tokens::DELIVERY_DAEMON_RESTART => failed(FailureReason::RuntimeRecovery),
+        DeliveryToken::AdapterExit
+        | DeliveryToken::BreakerOpen
+        | DeliveryToken::ProviderAtCapacity
+        | DeliveryToken::QueueFull => failed(FailureReason::RuntimeOffline),
+        DeliveryToken::TurnDeadline => failed(FailureReason::Timeout),
+        DeliveryToken::DaemonRestart => failed(FailureReason::RuntimeRecovery),
         // A misconfigured adapter will not self-heal on a re-dispatch.
-        tokens::DELIVERY_SPAWN_FAILED
-        | tokens::DELIVERY_MODE_UNPROVEN
-        | tokens::DELIVERY_TURN_UNRECORDED => failed(FailureReason::SpawnError),
-        tokens::DELIVERY_SESSION_GONE => failed(FailureReason::ProvisionError),
-        _ => None,
+        DeliveryToken::SpawnFailed
+        | DeliveryToken::ModeUnproven
+        | DeliveryToken::TurnUnrecorded => failed(FailureReason::SpawnError),
+        DeliveryToken::SessionGone => failed(FailureReason::ProvisionError),
+        // Handled by the caller's stop-reason arm, which reads this token
+        // POSITIONALLY. Reaching it here means it was not first, which the pool
+        // never writes.
+        DeliveryToken::TurnFailed => failed(FailureReason::ProviderContractDrift),
     }
 }
 
@@ -575,7 +595,11 @@ pub fn outcome_for(state: &str, detail: Option<&str>, result: RunnerResult) -> R
             Some(_) => drift(),
         },
         // The agent ended the turn itself; only the stop reason says how.
-        _ if set.contains(&tokens::DELIVERY_TURN_FAILED) => match stop {
+        // Positional, like every other token read. `finish_turn` writes this
+        // token FIRST or not at all, and an `adapter_exit; <error>` leg whose
+        // free error text happened to carry a `; `-delimited `turn_failed`
+        // would otherwise be hijacked into this arm and answer drift/NoRetry.
+        _ if set.first() == Some(&tokens::DELIVERY_TURN_FAILED) => match stop {
             Some("refusal") => RunOutcome::Failed {
                 reason: FailureReason::AgentError,
                 result,
@@ -583,10 +607,12 @@ pub fn outcome_for(state: &str, detail: Option<&str>, result: RunnerResult) -> R
             Some("cancelled") => RunOutcome::Cancelled(result),
             _ => drift(),
         },
+        // The FIRST token of ours in the set decides. Free error text after a
+        // token (`adapter_exit; <error>`) parses as nothing and is skipped.
         "FAILED" | "UNKNOWN" | "REJECTED" => set
             .iter()
-            .find_map(|token| outcome_for_token(token, &result))
-            .unwrap_or_else(drift),
+            .find_map(|raw| DeliveryToken::parse(raw))
+            .map_or_else(drift, |token| outcome_for_token(token, &result)),
         _ => drift(),
     }
 }
