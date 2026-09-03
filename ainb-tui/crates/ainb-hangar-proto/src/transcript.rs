@@ -313,8 +313,8 @@ impl AcpClassifier {
         let payload = serde_json::from_str::<Value>(raw_payload).unwrap_or(Value::Null);
         let mut out = Vec::new();
         match event_type {
-            "acp.message" => self.fold_acp_text(&payload, MessageKind::Agent, &mut out),
-            "acp.thought" => self.fold_acp_text(&payload, MessageKind::Thinking, &mut out),
+            "acp.message" => fold_acp_text(&payload, MessageKind::Agent, &mut out),
+            "acp.thought" => fold_acp_text(&payload, MessageKind::Thinking, &mut out),
             "acp.tool_call" => self.fold_acp_tool(&payload, &mut out),
             "acp.plan" => fold_acp_plan(&payload, &mut out),
             "acp.permission" => fold_acp_permission(&payload, &mut out),
@@ -325,35 +325,6 @@ impl AcpClassifier {
             _ => {}
         }
         capped(out)
-    }
-
-    /// A coalesced text chunk (`{kind, text, coalescedDeltas}`), one entry per
-    /// line so a multi-line reply never overflows a render row.
-    ///
-    /// The same `event_type` also carries the reducer's NON-text shape (an
-    /// image / audio / embedded resource block, `text` empty and the verbatim
-    /// update under `block`). That one has no text to show, so it is NAMED
-    /// rather than dropped: a transcript that silently omits a row reads as a
-    /// complete one.
-    fn fold_acp_text(
-        &self,
-        payload: &Value,
-        kind: MessageKind,
-        out: &mut Vec<(MessageKind, String)>,
-    ) {
-        let text = payload.get("text").and_then(Value::as_str).unwrap_or_default();
-        if !text.trim().is_empty() {
-            push_lines(out, kind, text);
-            return;
-        }
-        if let Some(block) = payload.get("block") {
-            let content_type = block
-                .get("content")
-                .and_then(|c| c.get("type"))
-                .and_then(Value::as_str)
-                .unwrap_or("non-text");
-            out.push((kind, format!("· {content_type} content")));
-        }
     }
 
     /// A `tool_call` / `tool_call_update` update.
@@ -445,6 +416,29 @@ pub fn acp_row_text(event_type: &str, raw_payload: &str) -> Option<String> {
             .map(ToString::to_string),
         "acp.tool_call" => tool_output_text(&payload),
         _ => None,
+    }
+}
+
+/// A coalesced text chunk (`{kind, text, coalescedDeltas}`), one entry per
+/// line so a multi-line reply never overflows a render row.
+///
+/// The same `event_type` also carries the reducer's NON-text shape (an image /
+/// audio / embedded resource block, `text` empty and the verbatim update under
+/// `block`). That one has no text to show, so it is NAMED rather than dropped:
+/// a transcript that silently omits a row reads as a complete one.
+fn fold_acp_text(payload: &Value, kind: MessageKind, out: &mut Vec<(MessageKind, String)>) {
+    let text = payload.get("text").and_then(Value::as_str).unwrap_or_default();
+    if !text.trim().is_empty() {
+        push_lines(out, kind, text);
+        return;
+    }
+    if let Some(block) = payload.get("block") {
+        let content_type = block
+            .get("content")
+            .and_then(|c| c.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("non-text");
+        out.push((kind, format!("· {content_type} content")));
     }
 }
 
