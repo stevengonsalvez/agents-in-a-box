@@ -306,11 +306,9 @@ async fn a_forced_load_failure_falls_back_to_reprime(adapter: &str, key: &str) {
     .await;
     let (state, detail) = await_terminal(&store, &asked, key).await;
     assert_eq!(state, "DELIVERED", "{detail}");
-    // A delivered leg leads with the adapter's stop reason; the resume path is
-    // appended after it, and that is the half this probe is about.
-    assert!(
-        detail.ends_with("; resume=reprimed"),
-        "the load could not have succeeded, so the rebuild leg must have run: {detail}"
+    assert_eq!(
+        detail, "resume=reprimed",
+        "the load could not have succeeded, so the rebuild leg must have run"
     );
     assert!(
         transcript_kinds(&store, key).await.iter().any(|(kind, payload)| {

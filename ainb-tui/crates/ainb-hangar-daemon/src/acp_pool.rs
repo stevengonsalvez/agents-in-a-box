@@ -139,10 +139,14 @@ pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = "provider_at_capacity";
 /// Terminal, never requeued: retrying an adapter that will not hold the mode
 /// just drives the same session in the wrong permission regime a second time.
 pub const DELIVERY_MODE_UNPROVEN: &str = "mode_unproven";
-/// Prefix of the token a DELIVERED leg carries: `stop=<StopReason>`.
+/// Prefix of the token a leg carries when the turn stopped for a reason worth
+/// naming: `stop=<StopReason>`.
 ///
-/// The reason is the upstream enum's Debug name, so `stop=EndTurn`,
-/// `stop=MaxTokens`, `stop=MaxTurnRequests`. A FAILED turn carries the same
+/// ABSENT on a DELIVERED leg means the ordinary `EndTurn`, the same way an
+/// absent [`RESUME_LOADED`] on the same leg means the context never had to be
+/// rebuilt: `DELIVERED` already says the agent finished, so a token on every
+/// turn would put a non-event in front of the operator, and in front of the
+/// `resume=` half they do need on a narrow pane. A FAILED turn carries its
 /// reason after [`DELIVERY_TURN_FAILED`] instead.
 pub const DELIVERY_STOP_PREFIX: &str = "stop=";
 
@@ -2017,14 +2021,18 @@ impl SessionActor {
         self.pump().await;
 
         let (marker, state, detail) = match &result {
-            // The stop reason rides on a SUCCESS too: `turn_succeeded` folds
-            // `EndTurn`, `MaxTokens` and `MaxTurnRequests` into one DELIVERED,
-            // and a task caller has to tell "the agent finished" from "the
-            // agent ran out of budget" without opening the transcript.
+            // The stop reason rides on a SUCCESS too, because `turn_succeeded`
+            // folds `EndTurn`, `MaxTokens` and `MaxTurnRequests` into one
+            // DELIVERED and a task caller has to tell "the agent finished" from
+            // "the agent ran out of budget" without opening the transcript. Only
+            // the two that say something, though: among DELIVERED legs no token
+            // unambiguously means `EndTurn`, so writing one would spend the
+            // operator's line width on every ordinary turn.
             Ok(response) if turn_succeeded(response) => (
                 Lifecycle::TurnCompleted,
                 "DELIVERED",
-                Some(format!("{DELIVERY_STOP_PREFIX}{:?}", response.stop_reason)),
+                (!matches!(response.stop_reason, StopReason::EndTurn))
+                    .then(|| format!("{DELIVERY_STOP_PREFIX}{:?}", response.stop_reason)),
             ),
             Ok(response) => (
                 Lifecycle::TurnFailed,
