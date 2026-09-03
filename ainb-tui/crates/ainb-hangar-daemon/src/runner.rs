@@ -1753,11 +1753,16 @@ impl Runner {
         // never deadlock on a full pipe buffer.
         let tail_lines = self.cfg.tail_lines;
         let stream = self.stream.clone();
-        // A2: aborted if this future is DROPPED (the cancel arm in `run_loop`).
-        // A bare `JoinHandle` detaches on drop, so the reader would keep draining
-        // the pipe and emitting `TaskMessage` (plus the closing `TaskProgress`)
-        // after the task had already finalised and pushed `TaskFinished`, painting
-        // transcript onto a run the operator was told was over.
+        // A2: aborted if this future is DROPPED, which is the cancel arm in
+        // `run_loop` and ALSO the `child.wait()` error below (`status?` returns
+        // without awaiting this handle). A bare `JoinHandle` detaches on drop, so
+        // the reader would keep draining the pipe and emitting `TaskMessage` (plus
+        // the closing `TaskProgress`) after the task had already finalised and
+        // pushed `TaskFinished`, painting transcript onto a run the operator was
+        // told was over. The cost on the wait-error path is that the JSONL tail is
+        // cut where the abort lands instead of at EOF; that path is an OS-level
+        // wait fault, where the run is failing anyway and a truncated log beats a
+        // reader still writing to a finalised task's file.
         let stdout_task = AbortOnDrop::new(tokio::spawn(async move {
             stream_stdout(stdout, log_file, tail_lines, stream).await
         }));
@@ -2054,9 +2059,11 @@ async fn stream_stdout(
         writeln!(log_file, "{line}")?;
         // Parsed ONCE and read twice: the transcript classifier and the runner's
         // own session / usage / terminal fields want the same bytes, and
-        // `StreamLine` deserialises from a borrowed `&Value` so neither pass costs
-        // a re-parse or a clone. A line that is not valid JSON is skipped by both,
-        // exactly as it was when each parsed for itself.
+        // `StreamLine` deserialises from a borrowed `&Value` so the second read
+        // costs no re-parse (its owned `String` fields are still cloned out of the
+        // `Value`; the saving is the parse, not the copy). A line that is not
+        // valid JSON is skipped by both, exactly as it was when each parsed for
+        // itself.
         let parsed_line = serde_json::from_str::<serde_json::Value>(line.trim()).ok();
         if let (Some(stream), Some(value)) = (&stream, &parsed_line) {
             for (kind, body) in classifier.classify_value(value) {

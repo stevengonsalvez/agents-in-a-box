@@ -58,8 +58,8 @@ use ainb_hangar_proto::transcript::classify_stream_json;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Row, SqlitePool};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -114,12 +114,9 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
     // flushed, so the durable read below sees the whole file. A run that never
     // reached `done` would leave the equality below comparing against a partial
     // file, so read the status back rather than trusting the wait.
-    let row = wait_for_db(&pool, TASK_ID, "done", Duration::from_secs(30 * scale)).await;
-    assert_eq!(
-        row.get::<String, _>("status"),
-        "done",
-        "the run must finish before the durable file is read"
-    );
+    // `wait_for_db` returns ONLY on a match and panics on timeout, so reaching the
+    // next line is the assertion.
+    let _ = wait_for_db(&pool, TASK_ID, "done", Duration::from_secs(30 * scale)).await;
 
     let timeline = sub
         .call(
