@@ -810,9 +810,7 @@ mod tests {
         ];
         // The chatter after the last report. 200 rows is well past the 64-row
         // window the PR capture scans with.
-        batch.extend(
-            (0..200).map(|i| typed(&format!("m-{i}"), "acp.message", r#"{"text":"hi"}"#)),
-        );
+        batch.extend((0..200).map(|i| typed(&format!("m-{i}"), "acp.message", r#"{"text":"hi"}"#)));
         FleetProviderEventRepo::append_batch(store.pool(), &batch).await.unwrap();
 
         let found = FleetProviderEventRepo::last_by_session_event_type(
@@ -828,10 +826,14 @@ mod tests {
             "the LAST usage row wins, not the first"
         );
 
-        let (window, _truncated) =
-            FleetProviderEventRepo::list_by_session_tail(store.pool(), "claude:session-1", 64, 64 * 1024)
-                .await
-                .unwrap();
+        let (window, _truncated) = FleetProviderEventRepo::list_by_session_tail(
+            store.pool(),
+            "claude:session-1",
+            64,
+            64 * 1024,
+        )
+        .await
+        .unwrap();
         assert!(
             window.iter().all(|row| row.event_type != "acp.usage"),
             "a windowed tail read cannot see this row, which is why the query above exists"
