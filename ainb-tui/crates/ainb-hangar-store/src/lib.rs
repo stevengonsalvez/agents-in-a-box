@@ -334,28 +334,39 @@ mod migration_tests {
     /// Rewind an up-to-date database to what a machine that booted a build of
     /// the unmerged branch carries: main's 93 never ran, the branch's did, and
     /// 93 is recorded under the branch file's description and checksum.
+    /// Seed the state a machine reached by booting the OLD branch build: the
+    /// retention text recorded at version 93, its index present, and no 94.
+    ///
+    /// Every statement runs on ONE connection inside ONE transaction. The
+    /// earlier version issued them straight at the pool, which hands each
+    /// `execute` whatever connection is free, and the `DROP INDEX` and the
+    /// `CREATE INDEX` that follows it then landed on different connections. It
+    /// passed on an in-memory pool capped at one connection and on Linux, and
+    /// failed on a macOS runner with `index
+    /// idx_fleet_provider_event_retention already exists` — the drop not yet
+    /// visible to the connection doing the create. A fixture that rewrites
+    /// schema and bookkeeping together has no reason to be spread across
+    /// connections at all.
     async fn seed_unmerged_0093(pool: &SqlitePool) {
+        let mut tx = pool.begin().await.unwrap();
         sqlx::query("DROP INDEX IF EXISTS idx_board_card_issue")
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
         // The caller migrated first, and this tree carries the renumbered
         // `0094_fleet_provider_event_retention.sql`, so 94 is already recorded
-        // and its index already exists. The machine being modelled ran the OLD
-        // branch build, which had that text at 93 and no 94 at all, so unwind
-        // both before seeding the broken state. Without this the bare
-        // `CREATE INDEX` below dies on "index ... already exists" and the test
-        // never reaches the repair it is here to exercise.
+        // and its index already exists. The machine being modelled had that
+        // text at 93 and no 94 at all, so unwind both before seeding.
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 94")
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
         sqlx::query("DROP INDEX IF EXISTS idx_fleet_provider_event_retention")
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 93")
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
         sqlx::query(
@@ -364,7 +375,7 @@ mod migration_tests {
              VALUES (93, 'fleet provider event retention', TRUE, ?, -1)",
         )
         .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .unwrap();
         sqlx::query(
@@ -372,9 +383,10 @@ mod migration_tests {
              ON fleet_provider_event(observed_at) \
              WHERE raw_payload <> '' AND projection_revision IS NOT NULL AND source <> 'acp'",
         )
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .unwrap();
+        tx.commit().await.unwrap();
     }
 
     /// The property that matters, and the one a recorded-versions check cannot
