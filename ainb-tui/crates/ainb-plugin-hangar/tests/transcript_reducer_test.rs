@@ -264,6 +264,16 @@ fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
         last,
         Some("this run finished; R only retries a failed or cancelled run")
     );
+
+    // Crisp B1 review: it says so ONCE. Key repeat used to append a copy per
+    // press, growing the transcript without bound.
+    let held = reduce_task_detail(&noted.state, TaskDetailEvent::Key('R'));
+    let held = reduce_task_detail(&held.state, TaskDetailEvent::Key('R'));
+    assert_eq!(
+        held.state.transcript_len(),
+        noted.state.transcript_len(),
+        "the refusal is not repeated while it is already the last line"
+    );
 }
 
 /// `X` opens the cancel-confirm modal only while the task is running; pressing

@@ -648,13 +648,7 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
         // Retry only a failed / cancelled run. A run that finished cleanly is
         // refused by the store (`force_requeue` answers DoNotRetry), which used
         // to make `R` a silent no-op (crisp B1, defect 9): say so instead.
-        'R' if state.lifecycle == TaskLifecycle::Succeeded => {
-            let mut next = state.clone();
-            next.push_system_line(
-                "this run finished; R only retries a failed or cancelled run".to_string(),
-            );
-            no_intent(next)
-        }
+        'R' if state.lifecycle == TaskLifecycle::Succeeded => refuse_retry(state),
         'R' if state.lifecycle.is_terminal() => with_intent(
             state.clone(),
             TaskDetailIntent::RetryTask(state.task_id.clone()),
@@ -671,6 +665,21 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
         't' => toggle_selected_criterion(state),
         _ => unchanged(state),
     }
+}
+
+/// What `R` says on a run that finished cleanly (crisp B1, defect 9).
+const RETRY_REFUSED_NOTE: &str = "this run finished; R only retries a failed or cancelled run";
+
+/// Say why `R` does nothing on a succeeded run, ONCE. The line is a no-op when
+/// it is already the tail of the transcript: key repeat used to grow the
+/// transcript by a copy per press (crisp B1 review).
+fn refuse_retry(state: &TaskDetailState) -> TaskDetailReduction {
+    if state.transcript.last().is_some_and(|e| e.body == RETRY_REFUSED_NOTE) {
+        return unchanged(state);
+    }
+    let mut next = state.clone();
+    next.push_system_line(RETRY_REFUSED_NOTE.to_string());
+    no_intent(next)
 }
 
 /// Move the acceptance cursor to the next criterion, wrapping; select the FIRST
