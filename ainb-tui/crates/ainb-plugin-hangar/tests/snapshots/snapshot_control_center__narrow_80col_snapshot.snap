@@ -17,12 +17,12 @@ Control  · 20 sessions · 8 need you                             C control-cent
  ERR  api-3        6m            │① staging
  ERR  api-4        8m            │② prod
  ERR  api-5        10m           │③ hold
- WAIT ui-0         0s            │h/l option · enter/1-9 answer
- WAIT ui-1         5m            │
- WAIT ui-2         10m           │
- WAIT ui-3         15m           │
- WAIT ui-4         20m           │
- WAIT ui-5         25m           │
+ IDLE ui-0         0s            │h/l option · enter/1-9 answer
+ IDLE ui-1         5m            │
+ IDLE ui-2         10m           │
+ IDLE ui-3         15m           │
+ IDLE ui-4         20m           │
+ IDLE ui-5         25m           │
                                  │
                                  │
                                  │

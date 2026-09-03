@@ -8,10 +8,12 @@
 //!   * `narrow_80col` — the same load at the 80-column floor, proving the two
 //!     framed blocks and the header chips clip without bleeding;
 //!   * `filtered_to_asks` — `f` pressed once: `recent` is gone and the
-//!     attention block owns the pane.
+//!     attention block owns the pane;
+//!   * `empty_inbox_and_empty_attention_board` — the cold-start pane, both
+//!     blocks framed and saying what is not there.
 //!
-//! Two non-vacuous colour assertions guard the unread amber and the error red
-//! independently of the golden text.
+//! Non-vacuous colour assertions guard the unread amber, the `ERR` code's red
+//! and a failed run's red by EQUALITY, independently of the golden text.
 
 use ainb_hangar_proto::events::{AttentionRow, InboxEntryRow};
 use ainb_plugin_hangar::screen::control_center::ControlCenterState;
@@ -94,7 +96,8 @@ fn attention() -> ControlCenterState {
 
 /// The aggregate rows: a failed run, a finished run, a live run, a new issue.
 fn inbox() -> InboxState {
-    InboxState::from_snapshot(
+    let mut state = InboxState::default();
+    state.replace_rows(
         vec![
             entry(
                 "ie-1",
@@ -127,7 +130,8 @@ fn inbox() -> InboxState {
         ],
         4,
         "member:me".into(),
-    )
+    );
+    state
 }
 
 /// The names the rows resolve through: impl-1 on HGR-3, qa-1 on HGR-5.
@@ -294,12 +298,44 @@ fn unread_rows_are_amber_and_the_error_code_is_red() {
     let amber = buf.cells.iter().any(|(_, c)| c.fg == Some(colors::UNREAD));
     assert!(amber, "an unread row must be painted unread-amber");
 
-    // The `ERR` code is red — the one thing on the pane that must not read as
-    // ordinary text.
+    // The `ERR` code is alert-red, by equality — the one thing on the pane that
+    // must not read as ordinary text. A "not the body colours" assertion would
+    // pass on muted gray, which is exactly how an error stops looking like one.
     let err_red = buf
         .cells
         .iter()
         .filter(|(_, c)| c.symbol == "E")
-        .any(|(_, c)| c.fg != Some(colors::READ) && c.fg != Some(colors::UNREAD));
-    assert!(err_red, "the ERR code must not be painted as body text");
+        .any(|(_, c)| c.fg == Some(colors::ALERT));
+    assert!(err_red, "the ERR code must be painted alert-red");
+
+    // ...and so is the failed run's glyph in `recent`.
+    let failed_glyph =
+        buf.cells.iter().any(|(_, c)| c.symbol == "✗" && c.fg == Some(colors::ALERT));
+    assert!(failed_glyph, "a failed run's ✗ must be painted alert-red");
+}
+
+/// The pane with nothing in it at all: both blocks still frame themselves and
+/// say so, rather than leaving the operator on a blank screen wondering whether
+/// the daemon is down.
+#[test]
+fn empty_inbox_and_empty_attention_board() {
+    let mut buf = WireBuffer::new(100, 24);
+    render_inbox(
+        &mut buf,
+        100,
+        0,
+        23,
+        &InboxState::default(),
+        &InboxLookup::default(),
+        &ControlCenterState::default(),
+        NOW_MS,
+    );
+    let full = glyph_map(&buf, 100);
+    assert!(full.contains("nothing needs you"), "\n{full}");
+    assert!(full.contains("no notifications"), "\n{full}");
+    assert!(
+        !full.contains("need you]"),
+        "no badge when nothing is open:\n{full}"
+    );
+    insta::assert_snapshot!(full);
 }
