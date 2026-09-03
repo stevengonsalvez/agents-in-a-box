@@ -641,15 +641,32 @@ impl AcpPool {
     /// Remove `key` from the live registry and stop its process, if one is
     /// running. Returns whether `key` was registered.
     ///
-    /// Runs UNDER the key's spawn gate, the lock
-    /// [`AcpPool::provider_process`] holds for the whole of a spawn, and that
-    /// is what makes the removal complete rather than racy. A spawn already
-    /// past the gate lands in `providers` before this call gets the gate, and
-    /// is stopped below; one that has not taken the gate yet re-reads the
-    /// registry under it and refuses, because the recipe lookup happens INSIDE
-    /// the gate. So no process can exist under an unregistered key once this
-    /// returns. The gate leaves `spawn_locks` only while it is held, so a
-    /// re-register under the same key cannot run two spawns against each other.
+    /// The registry entry goes FIRST, and only then does this take the key's
+    /// spawn gate. That order is the whole proof, and the other one is a race.
+    ///
+    /// A spawn reads the recipe ([`AcpPool::adapter_config`]) inside the gate,
+    /// so by then it has already published its gate in `spawn_locks`. Order
+    /// that recipe read against the `adapters` removal below, the two being
+    /// mutations of one mutex-guarded map and so totally ordered:
+    ///
+    /// * recipe read FIRST: its gate was published even earlier, therefore
+    ///   before the removal, therefore before the `spawn_locks` read here, so
+    ///   this call sees that gate and blocks on it until the spawn has put its
+    ///   process in `providers`, where `stop_process` below then kills it;
+    /// * removal FIRST: the recipe read finds nothing and the spawn refuses.
+    ///
+    /// Either way no process exists under an unregistered key once this
+    /// returns. Read `spawn_locks` before removing the registry entry and the
+    /// second case gains a third leg (gate not yet published, recipe read still
+    /// wins the race), which leaves a live process under the removed key that
+    /// `provider_process` keeps serving, because `live_process` runs before its
+    /// `knows` check.
+    ///
+    /// NOT claimed: "exactly one spawn per key across an unregister then a
+    /// re-register". A spawn parked between publishing its gate and taking it
+    /// holds a stale `Arc` while a re-registered spawn mints a fresh gate, so
+    /// the two do not serialise. Closing that needs a generation counter, which
+    /// is a different claim and has no caller yet.
     ///
     /// The stop is INTENTIONAL, exactly like the idle sweep's: it neither counts
     /// on the breaker nor leaves a phantom `exited` row on the health pane, and
@@ -657,12 +674,12 @@ impl AcpPool {
     /// not accrete bookkeeping. Sessions hosted on the process converge through
     /// the ordinary exit path.
     pub async fn unregister_adapter(&self, key: &str) -> bool {
+        let was_registered = self.adapters.lock().expect("adapter registry").remove(key).is_some();
         let gate = self.spawn_locks.lock().expect("spawn lock map").get(key).map(Arc::clone);
         let _held = match gate.as_ref() {
             Some(gate) => Some(gate.lock().await),
             None => None,
         };
-        let was_registered = self.adapters.lock().expect("adapter registry").remove(key).is_some();
         self.spawn_locks.lock().expect("spawn lock map").remove(key);
         if let Ok(mut circuits) = self.circuits.lock() {
             circuits.remove(key);
