@@ -1708,35 +1708,36 @@ pub(crate) const CLEAR_LINE: char = '\u{15}';
 /// then submits it to the daemon. A screen whose reducer actually models the
 /// chord calls [`key_char_with_chords`] instead.
 const fn key_char(key: &KeyEvent) -> Option<char> {
-    if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 {
-        return match &key.code {
-            KeyCode::Char { .. } => None,
-            _ => key_char_unchorded(key),
-        };
-    }
-    key_char_unchorded(key)
-}
-
-/// [`key_char`], plus the Ctrl chords the caller's reducer models: Ctrl+U becomes
-/// [`CLEAR_LINE`]. The ONE chord table (crisp B1, defect 21), so the Boards
-/// overlay, the Issues create wizard and the issue-list filter cannot drift apart
-/// on it. Every OTHER key translation site keeps the dropping [`key_char`].
-const fn key_char_with_chords(key: &KeyEvent) -> Option<char> {
-    if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 {
-        if let KeyCode::Char { ch: 'u' | 'U' } = &key.code {
-            return Some(CLEAR_LINE);
-        }
-    }
-    key_char(key)
-}
-
-/// The plain (unchorded) half of [`key_char`].
-const fn key_char_unchorded(key: &KeyEvent) -> Option<char> {
     match &key.code {
+        // A chord in EITHER spelling the terminals use: the modifier flag, or the
+        // bare control char with no flag at all (`plugin::is_ctrl_p` documents the
+        // same split for Ctrl+P). Neither is text the operator meant to type, so
+        // both are dropped rather than pushed into a buffer.
+        //
+        // Only the kill-line char, NOT every C0: `'\r'` / `'\n'` / `'\u{8}'` are
+        // how a caller spells Enter and Backspace on this path, and the reducers
+        // model them (`tripwire_issue_acceptance_tick` sends Enter as `'\r'`).
+        KeyCode::Char { .. } if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 => None,
+        KeyCode::Char { ch: CLEAR_LINE } => None,
         KeyCode::Char { ch } => Some(*ch),
         KeyCode::Enter => Some('\n'),
         KeyCode::Backspace => Some('\u{8}'),
         _ => None,
+    }
+}
+
+/// [`key_char`], plus the Ctrl chords the caller's reducer models: Ctrl+U becomes
+/// [`CLEAR_LINE`], in either spelling. The ONE chord table (crisp B1, defect 21),
+/// so the Boards overlay, the Issues create wizard and the issue-list filter
+/// cannot drift apart on it. Every OTHER translation site keeps the dropping
+/// [`key_char`].
+const fn key_char_with_chords(key: &KeyEvent) -> Option<char> {
+    match &key.code {
+        KeyCode::Char { ch: 'u' | 'U' } if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 => {
+            Some(CLEAR_LINE)
+        }
+        KeyCode::Char { ch: CLEAR_LINE } => Some(CLEAR_LINE),
+        _ => key_char(key),
     }
 }
 
@@ -3707,6 +3708,12 @@ mod ctrl_chord_tests {
         }
     }
 
+    /// The OTHER spelling of a chord: the bare C0 control char, no modifier flag,
+    /// which is how some terminals deliver it (`plugin::is_ctrl_p`).
+    fn bare_nak() -> KeyEvent {
+        press(CLEAR_LINE)
+    }
+
     /// The shared translation: a screen that MODELS the chord reads Ctrl+U as the
     /// clear-line char, an unmapped chord types NOTHING, and a bare `u` is still
     /// a `u`. The Boards overlay mapper reads the same answer.
@@ -3714,10 +3721,18 @@ mod ctrl_chord_tests {
     fn a_ctrl_chord_is_translated_in_one_place() {
         assert_eq!(key_char_with_chords(&ctrl('u')), Some(CLEAR_LINE));
         assert_eq!(key_char_with_chords(&ctrl('U')), Some(CLEAR_LINE));
+        // The same chord spelled as a bare NAK, which is how some terminals send
+        // it: the opt-in sites must read BOTH as clear-line or the key works on
+        // one terminal and not another.
+        assert_eq!(key_char_with_chords(&bare_nak()), Some(CLEAR_LINE));
         assert_eq!(key_char_with_chords(&ctrl('k')), None);
         assert_eq!(key_char_with_chords(&press('u')), Some('u'));
         assert_eq!(
             overlay_key_event(&ctrl('u')),
+            Some(BoardsEvent::Key(BoardsKey::ClearLine))
+        );
+        assert_eq!(
+            overlay_key_event(&bare_nak()),
             Some(BoardsEvent::Key(BoardsKey::ClearLine))
         );
         assert_eq!(overlay_key_event(&ctrl('k')), None);
@@ -3733,7 +3748,14 @@ mod ctrl_chord_tests {
         assert_eq!(key_char(&ctrl('u')), None);
         assert_eq!(key_char(&ctrl('U')), None);
         assert_eq!(key_char(&ctrl('k')), None);
+        // Both spellings, or the terminal that sends the bare control char walks
+        // straight past the modifier check into a text buffer.
+        assert_eq!(key_char(&bare_nak()), None);
         assert_eq!(key_char(&press('u')), Some('u'));
+        // The kill-line char only. Enter and Backspace are spelled as chars on
+        // this path too, and the reducers model them.
+        assert_eq!(key_char(&press('\r')), Some('\r'));
+        assert_eq!(key_char(&press('\u{8}')), Some('\u{8}'));
     }
 
     /// End to end on the surface that would have SENT the control char: the
