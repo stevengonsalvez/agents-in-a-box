@@ -217,8 +217,10 @@ pub(crate) fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)>
         // `a`/`i`/`w`/`e` carry their hints in the body next to each chip, not in
         // the footer).
         Screen::DaemonHealth | Screen::Usage | Screen::Logs => vec![],
-        // The inbox surfaces its mark-all-read key (e38.14).
-        Screen::Inbox => vec![("r", "mark read")],
+        // The one attention surface (crisp B3 §2.4): answer an ASK inline, clear
+        // the badge, narrow the list. The `h/l` option cursor and the `1`-`9`
+        // direct picks render in the body next to the options they move.
+        Screen::Inbox => vec![("enter", "answer"), ("r", "mark read"), ("f", "filter")],
         // The control center: navigate sessions + answer an ASK inline (P2). The
         // option / number-key answer hints render in the body next to the options.
         Screen::ControlCenter => vec![("j/k", "sessions"), ("enter", "answer")],

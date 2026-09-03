@@ -4655,13 +4655,14 @@ impl HangarPlugin {
             return;
         }
 
-        // P2: on the control center, the digit keys answer the selected ASK's
-        // options inline (①②③) and MUST NOT be swallowed by the numbered
-        // tab-switch (`1`..`4`). They only intercept when the selected card is an
-        // answerable ASK; on an idle board a digit still falls through to the tab
-        // router, so number-key tab navigation off the control center keeps working
-        // (mirrors the issue-list free-text-capture guard above).
-        if matches!(app.screen, Screen::ControlCenter) {
+        // P2: on the control center — and, since crisp B3 §2.4, on the Inbox's
+        // `needs you` block, which is the same board — the digit keys answer the
+        // selected ASK's options inline (①②③) and MUST NOT be swallowed by the
+        // numbered tab-switch (`1`..`4`). They only intercept when the selected
+        // card is an answerable ASK; on an idle board a digit still falls through
+        // to the tab router, so number-key tab navigation off either screen keeps
+        // working (mirrors the issue-list free-text-capture guard above).
+        if matches!(app.screen, Screen::ControlCenter | Screen::Inbox) {
             if let KeyCode::Char { ch } = key.code {
                 if ch.is_ascii_digit()
                     && ch != '0'
