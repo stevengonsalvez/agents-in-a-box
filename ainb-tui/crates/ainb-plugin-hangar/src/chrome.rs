@@ -1,7 +1,7 @@
 //! Shared chrome: the top tab bar and bottom footer that wrap every screen.
 //!
 //! The chrome is the persistent frame around the Core 5 screens (P4.1). The
-//! [top tab bar](render_top_bar) shows the four primary tabs, the active
+//! [top tab bar](render_top_bar) shows the seven primary tabs, the active
 //! workspace slug, and an online/offline presence dot; the
 //! [footer](render_footer) shows the contextual key hints for the active
 //! screen. Both are **width-aware**: they derive their sub-region widths from
@@ -40,8 +40,8 @@ const ACTIVE_TAB_BG: Color = Color::rgb(40, 40, 60);
 /// SEVEN, down from sixteen (crisp B5 §2.5). The strip was 138 columns and never
 /// fitted the 80×24 floor, advertising a screen for every noun in the daemon;
 /// these seven are the loop an operator actually runs (author, run, answer, read
-/// the result). It measures 74 columns, pinned by
-/// `the_seven_tab_strip_fits_the_eighty_column_floor`.
+/// the result). It measures 72 columns of ink (74 with the trailing separator),
+/// pinned by `the_seven_tab_strip_fits_the_eighty_column_floor`.
 ///
 /// The numbered hotkeys stay **contiguous** (`1`→`2`, no gap) and keep their
 /// muscle memory; the nine demoted screens are reached with `^P` + their word
@@ -49,7 +49,7 @@ const ACTIVE_TAB_BG: Color = Color::rgb(40, 40, 60);
 const PRIMARY_TABS: [(char, &str); 7] = [
     ('1', "Issues"),
     ('2', "Task"),
-    ('K', "Kanban"),
+    ('K', "Runs"),
     ('B', "Boards"),
     ('I', "Inbox"),
     ('A', "Agents"),
@@ -77,7 +77,7 @@ impl Presence {
 
 /// Render the top tab bar onto row 0 of `buf`.
 ///
-/// Layout: `[1]Issues [2]Task [3]Skills [,]Settings` on the left, and
+/// Layout: `[1]Issues [2]Task [K]Runs … [,]Settings` on the left, and
 /// `<workspace> · <dot> <presence>` flushed to the right. The right cluster is
 /// dropped first when width is too tight to fit both — the tabs always win the
 /// space contest so navigation stays visible at the 80×24 floor.
@@ -592,9 +592,9 @@ mod tests {
     /// off the right edge at the floor (crisp B5 §2.5).
     ///
     /// The right-hand cluster still yields at 80, which §2.5 predicted it would
-    /// not: the strip is 74 columns of ink and the cursor lands at 76 (each tab
+    /// not: the strip is 72 columns of ink and the cursor lands at 74 (each tab
     /// carries a two-space separator), so `default · ● online` at 18 columns needs
-    /// 95. The tabs winning that contest is the documented rule
+    /// 93. The tabs winning that contest is the documented rule
     /// (`right_cluster_yields_to_tabs_when_tight`); pinned here at both widths so
     /// the trade is a measured number rather than an assumption.
     #[test]
@@ -608,16 +608,16 @@ mod tests {
                 "`[{hotkey}]{label}` is cut off at the 80-column floor: {row0:?}"
             );
         }
-        assert_eq!(row0.trim_end().chars().count(), 74, "row0 = {row0:?}");
+        assert_eq!(row0.trim_end().chars().count(), 72, "row0 = {row0:?}");
         assert!(
             !row0.contains("online"),
             "the right cluster does not fit at 80 and must yield: {row0:?}"
         );
 
-        // 95 columns is where it fits, and there it paints.
-        let mut wide = WireBuffer::new(95, 24);
-        render_top_bar(&mut wide, 95, &Screen::IssueList, "default", Presence::Online);
-        let wide0 = row_text(&wide, 0, 95);
+        // 93 columns is where it fits, and there it paints.
+        let mut wide = WireBuffer::new(93, 24);
+        render_top_bar(&mut wide, 93, &Screen::IssueList, "default", Presence::Online);
+        let wide0 = row_text(&wide, 0, 93);
         assert!(
             wide0.contains("default · ● online"),
             "the cluster paints once there is room: {wide0:?}"
@@ -651,7 +651,7 @@ mod tests {
         let row0 = row_text(&buf, 0, 200);
         assert!(row0.contains("Issues"), "row0 = {row0:?}");
         assert!(row0.contains("Inbox"), "row0 = {row0:?}");
-        assert!(row0.contains("Kanban"), "row0 = {row0:?}");
+        assert!(row0.contains("Runs"), "row0 = {row0:?}");
         assert!(row0.contains("Settings"), "row0 = {row0:?}");
         assert!(row0.contains("acme"), "row0 = {row0:?}");
     }

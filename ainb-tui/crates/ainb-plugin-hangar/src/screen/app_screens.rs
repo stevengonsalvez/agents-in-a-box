@@ -1858,7 +1858,7 @@ fn render_prior(buf: &mut WireBuffer, w: u16, h: u16, prior: &Screen, states: &S
 pub const HELP_LINES: &[&str] = &[
     "Hangar — keys",
     "",
-    "screens   1 issues  2 task  K kanban  B boards  I inbox  A agents  , settings",
+    "screens   1 issues  2 task  K runs  B boards  I inbox  A agents  , settings",
     "          ^P search  q back to ainb home",
     "more      ^P then the word:  skills  autopilots  daemon  usage  logs",
     "                            control  fleet  squads  profiles",
