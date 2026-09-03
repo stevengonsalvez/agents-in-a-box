@@ -1421,17 +1421,15 @@ impl IssueListState {
         self.actor_names = names;
     }
 
-    /// The footer label for an issue's assignee, through the shared
-    /// [`crate::screen::assignee_label`]: the roster display name, or a readable
-    /// short form until the roster lands. `None` when unassigned.
+    /// The footer label for an issue's assignee: the roster display name, or a
+    /// readable short form until the roster lands. `None` when unassigned.
     ///
-    /// The ID HALF is what goes in: a card is ~21 cells, and the `agent:` /
-    /// `member:` kind the wide rows keep would push the name itself off the tile.
-    /// The shortening rule is the shared one either way.
+    /// The BARE variant of the shared helper, because a card is ~21 cells and the
+    /// `agent:` / `member:` kind the wide rows keep would push the name itself off
+    /// the tile. Same shortening rule, owned there.
     fn assignee_label(&self, assignee: Option<&str>) -> Option<String> {
         let resolved = assignee.and_then(|r| self.actor_names.get(r)).map(String::as_str);
-        let id = assignee.map(|r| r.split_once(':').map_or(r, |(_, id)| id));
-        crate::screen::assignee_label(resolved, id)
+        crate::screen::assignee_label_bare(resolved, assignee)
     }
 
     /// The transient status note (dispatch feedback / failure), if any.

@@ -1875,6 +1875,22 @@ mod card_tests {
         assert!(text.contains("no description"), "unset description");
     }
 
+    /// Crisp B1 review: BEFORE the roster resolves the name, the header degrades
+    /// to the ref's short id, never the raw 26-char ULID it used to paint. The
+    /// actor kind stays: this row is wide enough, and it says agent or human.
+    #[test]
+    fn an_unresolved_ulid_assignee_degrades_to_a_short_id() {
+        let mut issue = full_issue();
+        issue.assignee = Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V".into());
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("Assignee: agent:AYF56V"), "short id: {text}");
+        assert!(!text.contains("01M1FHM2"), "raw ULID gone: {text}");
+    }
+
     /// Parity 28: the deadline renders on the card next to the labels — a real
     /// `YYYY-MM-DD` when set, the unset placeholder when not. Without this the
     /// wizard could author a due date the user could never see.

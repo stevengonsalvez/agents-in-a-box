@@ -272,6 +272,26 @@ pub fn assignee_label(resolved: Option<&str>, actor_ref: Option<&str>) -> Option
     Some(format!("{kind}:{}", shorten_ulid(id)))
 }
 
+/// [`assignee_label`] WITHOUT the actor kind, for a surface too narrow to spend
+/// the prefix: a board card footer is ~21 cells, where `agent:` pushes the name
+/// itself off the tile.
+///
+/// Same shortening rule, so the callers cannot drift; the kind is dropped here
+/// rather than by the caller pre-splitting the ref, which left the caller owning
+/// half the rule (crisp B1 round-2 review). A RESOLVED display name is returned
+/// verbatim, never split on a colon it happens to contain.
+#[must_use]
+pub fn assignee_label_bare(resolved: Option<&str>, actor_ref: Option<&str>) -> Option<String> {
+    let label = assignee_label(resolved, actor_ref)?;
+    if resolved.is_some() {
+        return Some(label);
+    }
+    Some(match label.split_once(':') {
+        Some((_, name)) => name.to_string(),
+        None => label,
+    })
+}
+
 /// `id` cut to its last-6 short form when it is a ULID, else `id` unchanged.
 fn shorten_ulid(id: &str) -> String {
     if kanban::is_ulid(id) {
