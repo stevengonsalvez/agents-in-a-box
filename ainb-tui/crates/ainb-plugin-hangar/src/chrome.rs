@@ -191,6 +191,7 @@ pub(crate) fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)>
         // `X` cancel and `x` delete sat next to each other on one bar, one
         // keystroke apart, one of them irreversible.
         Screen::TaskDetail(_) => vec![
+            ("↵", "expand"),
             ("R", "retry"),
             ("X", "cancel"),
             ("o", "PR"),
