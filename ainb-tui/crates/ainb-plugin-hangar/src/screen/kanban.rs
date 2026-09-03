@@ -1179,6 +1179,46 @@ mod tests {
         assert_eq!(card.display_id, "#0SCAKH · Cardbranchprtripwire");
     }
 
+    /// The same budget with a LONG HUMAN branch, which no longer elides now that
+    /// the cut is gated on ULID shape (crisp B1 round-2 review). The name survives
+    /// whole AND the `PR ✓` chip still fits, so the fix that stopped mangling
+    /// `ainb/add-user-auth` did not bring back the symptom the elide existed for.
+    #[test]
+    fn a_long_human_branch_keeps_the_pr_chip_on_the_tile() {
+        let mut t = task("01KYTV3EWKS8C5G66G850SCAKH", "done");
+        t.branch = Some("feature/add-user-authentication".into());
+        t.pr_url = Some("https://github.com/o/r/pull/8".into());
+        t.pr_status = Some(PrStatus {
+            ci: CiRollup::Pass,
+            ..PrStatus::default()
+        });
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        state.set_agent_names(&roster(&[("claude-agent", "claude-agent")]));
+        state.set_issue_titles(&BTreeMap::from([(
+            "issue-1".to_string(),
+            "Cardbranchprtripwire".to_string(),
+        )]));
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert!(
+            card.title.contains("feature/add-user-authentication"),
+            "the human branch is not mangled: {:?}",
+            card.title
+        );
+        assert!(
+            card.title.ends_with("PR ✓"),
+            "the PR chip is still on the title: {:?}",
+            card.title
+        );
+        assert!(
+            card.title.chars().count() <= TWO_LINE_TITLE_BUDGET,
+            "a whole human branch still fits the two-line budget ({} chars): {:?}",
+            card.title.chars().count(),
+            card.title
+        );
+    }
+
     /// The branch elide keeps a human slug whole at ANY length (the test is
     /// ULID-ness, not width) and only shortens a ULID last segment, prefix
     /// intact, to the id line's last-6 token.
