@@ -657,7 +657,13 @@ fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let ok = out.status.success();
-            let first_line = |s: &str| {
+            // The LAST non-empty line, not the first — it was named `first_line`
+            // for long enough that a CLI ending its output with a help block
+            // badged the row with the help's closing line. Every verb reachable
+            // from this menu therefore has to end its stdout with the sentence
+            // worth badging; `fleet atc mode --set` prints its notes first for
+            // exactly this reason.
+            let badge_line = |s: &str| {
                 s.lines()
                     .rev()
                     .find(|l| !l.trim().is_empty())
@@ -666,7 +672,7 @@ fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome
                     .to_string()
             };
             let summary = if ok {
-                let line = first_line(&stdout);
+                let line = badge_line(&stdout);
                 if line.is_empty() {
                     format!("{verb} ok")
                 } else {
