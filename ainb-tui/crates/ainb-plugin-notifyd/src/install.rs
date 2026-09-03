@@ -269,8 +269,17 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether two paths name the same existing file.
+///
+/// Both sides must resolve. Comparing `canonicalize(..).ok()` made two paths
+/// that BOTH fail to resolve compare equal, so "neither of these exists" read
+/// as "these are the same binary". The `is_executable` guard on the calling
+/// side masks it today; the next caller would inherit it.
 fn canonical_eq(left: &Path, right: &Path) -> bool {
-    std::fs::canonicalize(left).ok() == std::fs::canonicalize(right).ok()
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Return the unversioned Homebrew launcher for a Cellar executable.
