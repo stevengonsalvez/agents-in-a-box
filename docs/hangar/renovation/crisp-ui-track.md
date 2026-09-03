@@ -175,8 +175,10 @@ never `Completed`. One glyph per token, shared: `○ queued  ◔ running  ● do
 
 ### 2.2 Issue board card
 
-Footer swaps by state instead of growing a row. `CARD_ROWS` (`card_board.rs:355`) stays 5,
-so no geometry change and no column-capacity loss.
+Footer swaps by state instead of growing a row. `CARD_ROWS` (`card_board.rs:355`) stays 6,
+so no geometry change and no column-capacity loss. (The planning pass wrote 5: that is the
+count of a card's content elements — id, two title lines, footer, and one border — not of
+its rows, which are top border, id, title, title, footer, bottom border.)
 
 ```
  idle card                            running card
