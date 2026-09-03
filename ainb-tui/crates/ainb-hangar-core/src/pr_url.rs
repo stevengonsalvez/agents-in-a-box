@@ -2,10 +2,16 @@
 //!
 //! v1 GitHub integration is `gh`-CLI-only (no App, no webhook): an agent that
 //! shells out to `gh pr create` inside its worktree prints the created PR's URL
-//! on its own stdout line. The daemon captures the agent's stdout (a bounded
-//! ring buffer) and runs [`parse_gh_pr_create_stdout`] over it on completion to
-//! stamp `agent_task_queue.result.pr_url` (see [`crate::result::TaskResult`]),
-//! so the TUI can surface the PR.
+//! on its own line. Each executor runs [`parse_gh_pr_create_stdout`] over
+//! whatever it captured of that output, to stamp
+//! `agent_task_queue.result.pr_url` (see [`crate::result::TaskResult`]) so the
+//! TUI can surface the PR: the process executor over the agent's stdout (a
+//! bounded ring buffer), the ACP executor over its own transcript, because an
+//! adapter's stdout is the JSON-RPC pipe and carries no agent output at all.
+//!
+//! Which is why the whole-line anchoring below is a contract and not a detail:
+//! both corpora interleave the URL with prose, and only "on a line of its own"
+//! separates a PR that was CREATED from one merely mentioned.
 //!
 //! # What counts as a match
 //!
