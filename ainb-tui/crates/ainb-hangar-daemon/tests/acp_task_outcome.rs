@@ -43,54 +43,56 @@ const fn classify(outcome: &RunOutcome) -> Want {
     }
 }
 
-/// EVERY enumerated delivery token, under EVERY terminal state that can carry
-/// it, resolves to something other than contract drift.
+/// EVERY delivery token the pool can write, under EVERY terminal state that can
+/// carry it, resolves to something other than contract drift.
 ///
 /// The hand-written table below cannot do this job: it lists the pairs someone
 /// thought of, and the four it originally missed (`FAILED`+`adapter_exit`,
 /// `FAILED`+`turn_deadline`, `FAILED`+`daemon_restart`,
 /// `UNKNOWN`+`operator_stop`) were all reachable and all answered
-/// `ProviderContractDrift`/NoRetry. This one enumerates the vocabulary from the
-/// pool's own constants, so a token the pool grows without a mapping here fails
-/// the build rather than silently burning a retry chain.
+/// `ProviderContractDrift`/NoRetry.
+///
+/// The vocabulary is read from [`DeliveryToken::ALL`], not copied into a list
+/// here. An earlier version of this test DID copy it, which made the guarantee
+/// it claimed to enforce imaginary: a reviewer added a real
+/// `DELIVERY_RATE_LIMITED` write site to the pool and all four tests still
+/// passed. `DeliveryToken`'s exhaustive `as_str` and `outcome_for_token`'s
+/// wildcard-free match are what now make that a compile error; this test is the
+/// runtime half, covering the states and the `resume=` suffix.
 #[test]
 fn no_state_and_token_the_pool_can_write_falls_through_to_drift() {
-    use ainb_hangar_daemon::acp_pool::{self, ConvergeCause};
+    use ainb_hangar_daemon::acp_pool::{ConvergeCause, DeliveryToken};
 
-    // The enumerated taxonomy at `acp_pool.rs`'s "detail taxonomy" block, plus
-    // every `ConvergeCause::detail()` (which is a subset, listed so a new cause
-    // is caught even if its token is not added to the block above).
-    let tokens: Vec<&str> = [
-        acp_pool::DELIVERY_QUEUE_FULL,
-        acp_pool::DELIVERY_BREAKER_OPEN,
-        acp_pool::DELIVERY_ADAPTER_EXIT,
-        acp_pool::DELIVERY_OPERATOR_STOP,
-        acp_pool::DELIVERY_TURN_DEADLINE,
-        acp_pool::DELIVERY_DAEMON_RESTART,
-        acp_pool::DELIVERY_SPAWN_FAILED,
-        acp_pool::DELIVERY_TURN_UNRECORDED,
-        acp_pool::DELIVERY_SESSION_GONE,
-        acp_pool::DELIVERY_PROVIDER_AT_CAPACITY,
-        acp_pool::DELIVERY_MODE_UNPROVEN,
-    ]
-    .into_iter()
-    .chain(
-        [
-            ConvergeCause::DaemonRestart,
-            ConvergeCause::AdapterExit,
-            ConvergeCause::TurnDeadline,
-            ConvergeCause::OperatorStop,
-        ]
-        .into_iter()
-        .map(ConvergeCause::detail),
-    )
-    .collect();
+    // Every cause's token too. `detail()` still returns `&str`, so a new cause
+    // whose token bypassed the enum would fail to parse and land on drift here.
+    let tokens: Vec<String> = DeliveryToken::ALL
+        .iter()
+        .map(|token| token.as_str().to_string())
+        .chain(
+            [
+                ConvergeCause::DaemonRestart,
+                ConvergeCause::AdapterExit,
+                ConvergeCause::TurnDeadline,
+                ConvergeCause::OperatorStop,
+            ]
+            .into_iter()
+            .map(|cause| cause.detail().to_string()),
+        )
+        .collect();
 
     // `drain_queue` resolves FAILED, `converge_dirty_session` UNKNOWN, and
     // `submit_prompt` REJECTED: all three from the same vocabulary.
     for state in ["FAILED", "UNKNOWN", "REJECTED"] {
         for token in &tokens {
-            for detail in [(*token).to_string(), format!("{token}; resume=loaded")] {
+            // `finish_turn` never writes `turn_failed` without a stop reason,
+            // and the stop reason is what distinguishes a refusal from a
+            // cancellation, so a bare one is genuinely drift.
+            let base = if token == DeliveryToken::TurnFailed.as_str() {
+                format!("{token}; stop=refusal")
+            } else {
+                token.clone()
+            };
+            for detail in [base.clone(), format!("{base}; resume=loaded")] {
                 let got = outcome_for(state, Some(&detail), RunnerResult::default());
                 assert_ne!(
                     classify(&got),
