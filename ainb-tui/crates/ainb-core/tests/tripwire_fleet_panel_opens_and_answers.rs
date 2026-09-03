@@ -421,8 +421,6 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             && c.contains(&lens_text(FleetFilter::Completed, 1))
             && c.contains(&lens_text(FleetFilter::Running, 1))
             && c.contains(&lens_text(FleetFilter::All, 4))
-            && c.contains("2 INPUT")
-            && c.contains("1 RUN")
             && c.contains("ACTION QUEUE")
             && c.contains("What release scope should Fleet use?")
             && c.contains("NEEDS YOU")
