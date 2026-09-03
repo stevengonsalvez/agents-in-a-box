@@ -29,6 +29,11 @@ pub mod acp_session;
 /// as one ACP turn against a PER-TASK adapter process and maps the delivery leg
 /// onto the same [`runner::RunOutcome`] the process executor returns.
 pub mod acp_task;
+/// One ACP session's transcript, live and durable, behind one door. A separate
+/// module so the `StoreWriter` inside it is unreachable from [`acp_pool`],
+/// which is what makes "every durable row was published live" a compile error
+/// rather than a convention.
+mod acp_transcript;
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
 /// The answer router (spec P2): deliver one attention answer from any surface,
