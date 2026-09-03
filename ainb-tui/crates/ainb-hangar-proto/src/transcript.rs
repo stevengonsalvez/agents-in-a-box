@@ -40,6 +40,17 @@ use crate::events::MessageKind;
 /// Clip a one-line summary / snippet to this many display chars (char-safe).
 const SUMMARY_MAX: usize = 84;
 
+/// Hard ceiling on a single classified body, in display chars.
+///
+/// Generous on purpose: this is a leak backstop, not a display width. A provider
+/// is free to emit a megabyte of prose or a base64 blob in one block, and since
+/// A2 every classified body is also a live `TaskMessage` held in a bounded
+/// broadcast ring and framed to every subscriber, so an uncapped body is an
+/// unbounded allocation on the hot path. Applied in [`push_lines`], through which
+/// BOTH the live producer and the durable re-read classify, so the two stay
+/// byte-identical. No real transcript line comes close.
+const BODY_MAX: usize = 8192;
+
 /// Most `tool_use` ids remembered while awaiting their `tool_result`. Claude
 /// issues a handful per message; this is a leak backstop, not a working limit.
 const MAX_PENDING_TOOLS: usize = 256;
@@ -314,7 +325,7 @@ fn push_lines(out: &mut Vec<(MessageKind, String)>, kind: MessageKind, text: &st
         if line.trim().is_empty() {
             continue;
         }
-        out.push((kind, line.to_string()));
+        out.push((kind, truncate_chars(line, BODY_MAX)));
     }
 }
 
@@ -423,6 +434,26 @@ fn short_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// An arbitrarily large provider block is capped, not carried whole: since A2
+    /// every classified body is also a live `TaskMessage` sitting in a bounded
+    /// broadcast ring and framed to every subscriber.
+    #[test]
+    fn a_huge_text_block_is_capped() {
+        let huge = "x".repeat(100_000);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": huge }] },
+        })
+        .to_string();
+        let out = classify_stream_json(&line);
+        assert_eq!(out.len(), 1, "one block, one body");
+        assert_eq!(
+            out[0].1.chars().count(),
+            BODY_MAX,
+            "the body is capped at BODY_MAX display chars"
+        );
+    }
+
     use super::*;
 
     /// A live classifier lives for a whole run, so a resolved tool must leave
