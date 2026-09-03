@@ -33,6 +33,16 @@
 //!   `tool_result`'s tool name) would diverge here even though both halves
 //!   "work".
 //!
+//! # The equality holds under the read's 512 KiB tail, not beyond it
+//!
+//! `board_card_timeline` returns a bounded TAIL of the provider log, so this
+//! equality is exact only for a run whose whole transcript fits it. Past that the
+//! re-read starts mid-file with a fresh classifier, and a `tool_result` whose
+//! `tool_use` fell outside the window degrades to the unnamed `tool` form while
+//! the live line kept the name. That is a property of the READ, not of the
+//! producer, and A6 (which replaces this read) must not inherit "live always
+//! equals durable" as an unconditional invariant.
+//!
 //! SKIPs cleanly when tmux is unavailable, like every other tripwire.
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -48,8 +58,8 @@ use ainb_hangar_proto::transcript::classify_stream_json;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
-use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::{Row, SqlitePool};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -101,8 +111,15 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
     let live = run.transcript.clone();
 
     // The FSM terminal is the signal the provider's stdout is closed and its log
-    // flushed, so the durable read below sees the whole file.
-    let _ = wait_for_db(&pool, TASK_ID, "done", Duration::from_secs(30 * scale)).await;
+    // flushed, so the durable read below sees the whole file. A run that never
+    // reached `done` would leave the equality below comparing against a partial
+    // file, so read the status back rather than trusting the wait.
+    let row = wait_for_db(&pool, TASK_ID, "done", Duration::from_secs(30 * scale)).await;
+    assert_eq!(
+        row.get::<String, _>("status"),
+        "done",
+        "the run must finish before the durable file is read"
+    );
 
     let timeline = sub
         .call(
@@ -162,6 +179,21 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
         "the live TaskMessage sequence must equal the durable re-read\n\
          durable jsonl was:\n{}",
         durable.jsonl
+    );
+
+    // The one deliberate design decision in this change, pinned: the transcript
+    // rides `emit_live`, so it never lands an `event_log` row. Swapping it back to
+    // `emit` would leave every assertion above green while putting thousands of
+    // INSERTs per run through the one write lock the control plane shares.
+    let logged: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_log WHERE event_type IN ('task_message', 'task_progress')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count transcript rows in the durable event log");
+    assert_eq!(
+        logged, 0,
+        "a transcript line must never reach the durable event log"
     );
 
     // The run banner's other half: the heartbeat lands, and its FINAL tally
