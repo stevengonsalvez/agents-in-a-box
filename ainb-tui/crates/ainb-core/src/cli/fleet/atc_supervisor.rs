@@ -161,6 +161,20 @@ its next action, but neither controller was started or stopped"
     });
 
     if matches!(format, OutputFormat::Text) {
+        // Notes FIRST, the transition LAST.
+        //
+        // The Daemons screen badges a row with the last non-empty line of the
+        // action's stdout, so whatever ends this block becomes the ATC row's
+        // health. Ending with the mode help made the row report
+        // `switch: `ainb fleet atc mode <name> --set full`` in place of what the
+        // switch actually did; ending with a note made it report a scheduler
+        // detail. The one line worth badging is the transition.
+        //
+        // The full help is not reprinted at all: whoever switched has just read
+        // it, inline on that same screen, and `mode <name>` prints it on demand.
+        for note in &reconcile.notes {
+            println!("  {note}");
+        }
         if unchanged {
             println!(
                 "ATC '{}' already in {} mode — nothing changed.",
@@ -169,18 +183,12 @@ its next action, but neither controller was started or stopped"
             );
         } else {
             println!(
-                "ATC '{}' switched {} → {}.",
+                "ATC '{}' switched {} → {} (owner: {}).",
                 meta.name,
                 previous.id(),
-                meta.mode.id()
+                meta.mode.id(),
+                meta.mode.owner().label()
             );
-        }
-        for note in &reconcile.notes {
-            println!("  {note}");
-        }
-        println!();
-        for line in mode_help(meta.mode, &meta.provider) {
-            println!("  {line}");
         }
     } else {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -387,9 +395,10 @@ it down — but check `ps -p {pid}` if it lingers"
                 Ok(None) => {}
                 Err(e) => out.notes.push(format!("policy not rendered for the new brain: {e}")),
             }
-            if let Some(pid) = out.lite_stopped_pid {
-                out.notes.push(format!("lite scanner stopped (pid {pid})"));
-            }
+            // The stop is already noted where it happens, in the `Signalled`
+            // arm above. Repeating it here printed "lite scanner stopped (pid
+            // N)" twice on every lite → full switch that actually stopped one.
+            //
             // Re-assert the scheduler through `repair`, which is the verb that
             // already guarantees exactly one of (daemon cron, local timer) ends
             // up active. Reimplementing that choice here is how a second

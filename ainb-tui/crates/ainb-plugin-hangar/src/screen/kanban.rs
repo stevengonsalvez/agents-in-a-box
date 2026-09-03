@@ -289,6 +289,22 @@ impl KanbanState {
             .max_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.task_id.cmp(&b.task_id)))
     }
 
+    /// The NEWEST card for `issue_id` whose run is still live (not in a terminal
+    /// status), or `None` when every run of the issue has finished. The
+    /// task-detail header names this row on an `already_active` dispatch
+    /// refusal (crisp B1, defect 5) instead of the bare `(queued)` the daemon
+    /// records.
+    #[must_use]
+    pub fn active_card_for_issue(&self, issue_id: &str) -> Option<&CardSummary> {
+        use ainb_hangar_core::task_status::TaskStatus;
+        self.columns
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .filter(|card| card.issue_id.as_deref() == Some(issue_id))
+            .filter(|card| TaskStatus::parse(&card.status).is_some_and(|s| !s.is_terminal()))
+            .max_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.task_id.cmp(&b.task_id)))
+    }
+
     /// Resolve every card's [`issue_title`](CardSummary::issue_title) against the
     /// `issue_id -> title` map the `hangar/issues_list` snapshot carries, so N
     /// dispatch runs of ONE issue read as N runs of that issue rather than N
@@ -319,7 +335,7 @@ impl KanbanState {
     /// `#<short_id> · <issue>`, the two title lines carry
     /// `<agent> · <age> · <status>` plus the run's artifacts (so the bead's
     /// required id + title + state + age all read on the tile), the priority chip
-    /// comes from the row, and the assignee initial is the agent NAME's first char.
+    /// comes from the row, and the footer assignee is the agent NAME.
     /// The same geometry feeds `render_kanban` and the hit-map, so paint + hit-test
     /// never drift.
     #[must_use]
@@ -336,7 +352,7 @@ impl KanbanState {
                         display_id: card_id_line(c),
                         title: card_title(c, now_ms),
                         priority: PriorityChip::from_priority(0),
-                        assignee_initial: c.agent_label.chars().next(),
+                        assignee: Some(c.agent_label.clone()),
                         linked: false,
                         subtasks: None,
                     })
@@ -515,13 +531,44 @@ fn card_title(c: &CardSummary, now_ms: i64) -> String {
     );
     if let Some(branch) = c.branch.as_deref() {
         title.push_str(" · ");
-        title.push_str(branch);
+        title.push_str(&elide_branch(branch));
     }
     if let Some(chip) = card_pr_chip(c) {
         title.push_str(" · ");
         title.push_str(&chip);
     }
     title
+}
+
+/// `ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8` -> `ainb/…3N9GP8` (crisp B1, Q14): a branch
+/// whose last segment is a ULID keeps its prefix plus the same last-6 chars the
+/// `#<short_id>` id line shows, so a 31-char run branch no longer wraps the title
+/// and pushes the PR chip off the tile.
+///
+/// Gated on ULID SHAPE, not length: a human branch is left whole however long it
+/// is (`ainb/add-user-auth` used to render as `ainb/…r-auth`, which named
+/// nothing). Only the daemon's own `ainb/<task id>` run branch (minted by
+/// `workdir_provision::worktree_branch`) is elided, and its tail is the half that
+/// ties the card to its `#<short id>` title.
+fn elide_branch(branch: &str) -> String {
+    let (prefix, last) = branch.rsplit_once('/').map_or(("", branch), |(p, l)| (p, l));
+    if !is_ulid(last) {
+        return branch.to_string();
+    }
+    let sep = if prefix.is_empty() { "" } else { "/" };
+    format!("{prefix}{sep}…{}", short_id(last))
+}
+
+/// Whether `s` has ULID shape: 26 chars of uppercase Crockford base32 (the digits
+/// plus the alphabet minus `I`, `L`, `O`, `U`), which is what the store mints and
+/// what every id on the wire looks like. Crate-visible so every "shorten an id
+/// the operator cannot read" seam tests the same shape (crisp B1).
+pub(crate) fn is_ulid(s: &str) -> bool {
+    s.chars().count() == 26
+        && s.chars().all(|c| {
+            c.is_ascii_digit()
+                || matches!(c, 'A'..='H' | 'J' | 'K' | 'M' | 'N' | 'P'..='T' | 'V'..='Z')
+        })
 }
 
 /// Build the [`CardSummary`] list for one board column from the wire rows.
@@ -577,8 +624,9 @@ fn elide(s: &str, cap: usize) -> String {
 }
 
 /// The short id rendered on a card: the last 6 chars of the id (char-safe), or
-/// the whole id when it is already short.
-fn short_id(id: &str) -> String {
+/// the whole id when it is already short. Crate-visible so the Inbox falls back
+/// to the same token for a task it cannot resolve (crisp B1).
+pub(crate) fn short_id(id: &str) -> String {
     let n = id.chars().count();
     if n <= 6 {
         return id.to_string();
@@ -820,7 +868,7 @@ pub fn render_kanban(
 /// A compact relative-age label (`5m` / `2h` / `3d`) from `created_at` to `now`.
 /// A future / zero delta reads `0m`; sub-hour is minutes, sub-day is hours, else
 /// days. (Char-cheap and deterministic for a fixed render clock.)
-fn age_label(created_at_ms: i64, now_ms: i64) -> String {
+pub(crate) fn age_label(created_at_ms: i64, now_ms: i64) -> String {
     let delta_ms = now_ms.saturating_sub(created_at_ms).max(0);
     let mins = delta_ms / 60_000;
     if mins < 60 {
@@ -981,9 +1029,9 @@ mod tests {
             card.title
         );
         assert_eq!(
-            card.assignee_initial,
-            Some('c'),
-            "the assignee pip is the NAME's initial, not the ULID's"
+            card.assignee.as_deref(),
+            Some("claude"),
+            "the footer assignee is the NAME, not the ULID"
         );
     }
 
@@ -1110,8 +1158,13 @@ mod tests {
 
         let card = &state.board_columns(NOW)[2].cards[0];
         assert!(
-            card.title.contains(&format!("ainb/{TASK_ULID}")) && card.title.ends_with("PR ✓"),
-            "branch + PR chip both on the title: {:?}",
+            card.title.contains("ainb/…0SCAKH") && card.title.ends_with("PR ✓"),
+            "elided branch + PR chip both on the title: {:?}",
+            card.title
+        );
+        assert!(
+            !card.title.contains(TASK_ULID),
+            "the 26-char branch slug never reaches the tile (crisp B1, Q14): {:?}",
             card.title
         );
         assert!(
@@ -1124,6 +1177,77 @@ mod tests {
         // The parent issue still names the card, on the id line, where it costs
         // the run's artifacts nothing.
         assert_eq!(card.display_id, "#0SCAKH · Cardbranchprtripwire");
+    }
+
+    /// The same budget with a LONG HUMAN branch, which no longer elides now that
+    /// the cut is gated on ULID shape (crisp B1 round-2 review). The name survives
+    /// whole AND the `PR ✓` chip still fits, so the fix that stopped mangling
+    /// `ainb/add-user-auth` did not bring back the symptom the elide existed for.
+    #[test]
+    fn a_long_human_branch_keeps_the_pr_chip_on_the_tile() {
+        let mut t = task("01KYTV3EWKS8C5G66G850SCAKH", "done");
+        t.branch = Some("feature/add-user-authentication".into());
+        t.pr_url = Some("https://github.com/o/r/pull/8".into());
+        t.pr_status = Some(PrStatus {
+            ci: CiRollup::Pass,
+            ..PrStatus::default()
+        });
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        state.set_agent_names(&roster(&[("claude-agent", "claude-agent")]));
+        state.set_issue_titles(&BTreeMap::from([(
+            "issue-1".to_string(),
+            "Cardbranchprtripwire".to_string(),
+        )]));
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert!(
+            card.title.contains("feature/add-user-authentication"),
+            "the human branch is not mangled: {:?}",
+            card.title
+        );
+        assert!(
+            card.title.ends_with("PR ✓"),
+            "the PR chip is still on the title: {:?}",
+            card.title
+        );
+        assert!(
+            card.title.chars().count() <= TWO_LINE_TITLE_BUDGET,
+            "a whole human branch still fits the two-line budget ({} chars): {:?}",
+            card.title.chars().count(),
+            card.title
+        );
+    }
+
+    /// The branch elide keeps a human slug whole at ANY length (the test is
+    /// ULID-ness, not width) and only shortens a ULID last segment, prefix
+    /// intact, to the id line's last-6 token.
+    #[test]
+    fn elide_branch_shortens_only_ulid_length_slugs() {
+        assert_eq!(elide_branch("ainb/fix-login"), "ainb/fix-login");
+        assert_eq!(elide_branch("main"), "main");
+        // A long HUMAN slug is not a ULID and must survive whole: eliding it to
+        // `ainb/…r-auth` named nothing at all (crisp B1 review).
+        assert_eq!(elide_branch("ainb/add-user-auth"), "ainb/add-user-auth");
+        assert_eq!(
+            elide_branch("feature/add-user-authentication"),
+            "feature/add-user-authentication"
+        );
+        // 26 chars, but `I`/`L`/`O`/`U` and lowercase are outside Crockford
+        // base32, so a same-width human slug is still left alone.
+        assert_eq!(
+            elide_branch("ainb/lookup-and-refactor-branch"),
+            "ainb/lookup-and-refactor-branch"
+        );
+        assert_eq!(
+            elide_branch("ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8"),
+            "ainb/…3N9GP8"
+        );
+        assert_eq!(elide_branch("01M1FKF4BDNQ3JK5CQSS3N9GP8"), "…3N9GP8");
+        assert_eq!(
+            elide_branch("feature/ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8"),
+            "feature/ainb/…3N9GP8"
+        );
     }
 
     /// A captured PR whose CI has not resolved yet (or is unknown) renders the

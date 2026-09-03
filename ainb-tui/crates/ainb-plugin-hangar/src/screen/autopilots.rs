@@ -148,7 +148,8 @@ impl AutopilotsState {
                         ap.cron_expr
                     ),
                     priority: PriorityChip::from_priority(0),
-                    assignee_initial: ap.name.chars().next(),
+                    // The name is the id line already; no footer glyph (crisp B1).
+                    assignee: None,
                     linked: false,
                     subtasks: None,
                 }

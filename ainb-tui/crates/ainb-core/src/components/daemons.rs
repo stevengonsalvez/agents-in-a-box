@@ -210,28 +210,36 @@ impl ActionMenu {
     /// The entries for this menu. `view last error` only appears when there IS
     /// one — an always-present entry that usually does nothing is noise.
     fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
-        // Per-kind, not `Action::ALL`: only the daemon that owns the Codex
-        // transport offers `pair`.
-        let mut entries: Vec<MenuEntry> = Action::for_kind(self.kind)
+        // Per-kind AND per-mode, not `Action::ALL`: only the daemon that owns
+        // the Codex transport offers `pair`, and ATC offers exactly the
+        // supervisor mode it is NOT in.
+        //
+        // `for_kind_in_mode` is asked for that rather than the menu re-deriving
+        // it: the same rule already decides what `ainb daemon atc --help`
+        // documents, and a second copy here is a rule that can drift on one
+        // surface while the other keeps the old answer. `offers` still gates
+        // every verb it returns, so an unprovisioned row is filtered as before.
+        let mut entries: Vec<MenuEntry> = Action::for_kind_in_mode(self.kind, self.row.mode)
             .into_iter()
             .filter(|action| self.offers(*action))
             .map(MenuEntry::Act)
             .collect();
-        // The supervisor mode the fleet is NOT in. Offering both would put
-        // "switch to the mode you are already in" on screen, and offering it on
-        // an unprovisioned row would name a switch with nothing to switch.
-        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
-            if let Some(mode) = self.row.mode {
-                entries.push(MenuEntry::Act(match mode.other() {
-                    SupervisorMode::Lite => Action::ModeLite,
-                    SupervisorMode::Full => Action::ModeFull,
-                }));
-            }
-        }
         // Same rule as `offers`: with nothing provisioned there is no tmux
         // session, so attaching could only fail. `provision` is the entry that
         // gets you one.
-        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
+        //
+        // LITE has no session either, and that is by design, not a fault to
+        // repair: `fleet atc setup --mode lite` spawns no brain at all, because
+        // a session nothing ever nudges would burn a slot and lie to every
+        // liveness surface. So the entry could only ever attach a session that
+        // was never created, which is the failure this whole method exists to
+        // keep off the menu. An UNKNOWN mode still offers it: `None` means the
+        // meta would not parse or several instances made it ambiguous, and
+        // hiding a working attach on a guess is the worse error.
+        if self.kind == DaemonKind::Atc
+            && !self.row.unprovisioned()
+            && self.row.mode != Some(SupervisorMode::Lite)
+        {
             entries.push(MenuEntry::OpenMissionControl);
         }
         if has_error {
@@ -661,7 +669,13 @@ fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let ok = out.status.success();
-            let first_line = |s: &str| {
+            // The LAST non-empty line, not the first — it was named `first_line`
+            // for long enough that a CLI ending its output with a help block
+            // badged the row with the help's closing line. Every verb reachable
+            // from this menu therefore has to end its stdout with the sentence
+            // worth badging; `fleet atc mode --set` prints its notes first for
+            // exactly this reason.
+            let badge_line = |s: &str| {
                 s.lines()
                     .rev()
                     .find(|l| !l.trim().is_empty())
@@ -670,7 +684,7 @@ fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome
                     .to_string()
             };
             let summary = if ok {
-                let line = first_line(&stdout);
+                let line = badge_line(&stdout);
                 if line.is_empty() {
                     format!("{verb} ok")
                 } else {
@@ -1621,6 +1635,42 @@ mod tests {
                 mode.id()
             );
         }
+    }
+
+    /// The defect the probe fix exists to clear, asserted where it was actually
+    /// visible: the MENU, not the status field the menu reads.
+    ///
+    /// A probe-level assertion on `atc_instance` pins the input; it says nothing
+    /// about the row being usable, which is the thing that was broken. Both
+    /// halves are needed, because either one can be right while the other is not
+    /// (and was: `atc_instance` alone still leaves mission control offered).
+    #[test]
+    fn a_lite_atc_row_offers_the_lifecycle_verbs_but_not_a_session_lite_never_creates() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Lite);
+        state.open_menu();
+        let entries = state.menu.as_ref().expect("menu opens on the ATC row").entries(false);
+
+        for verb in [Action::Start, Action::Restart, Action::Stop] {
+            assert!(
+                entries.contains(&MenuEntry::Act(verb)),
+                "a provisioned lite row must offer {}: {entries:?}",
+                verb.id()
+            );
+        }
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::ModeFull)),
+            "a lite row must offer the switch out of lite: {entries:?}"
+        );
+        assert!(
+            !entries.contains(&MenuEntry::Act(Action::Provision)),
+            "the instance IS provisioned, and provision refuses: {entries:?}"
+        );
+        // `setup --mode lite` spawns no brain session, so this could only ever
+        // attach one that was never created.
+        assert!(
+            !entries.contains(&MenuEntry::OpenMissionControl),
+            "lite has no mission control to open: {entries:?}"
+        );
     }
 
     #[test]

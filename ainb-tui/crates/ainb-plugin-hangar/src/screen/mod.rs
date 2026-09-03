@@ -246,6 +246,74 @@ pub enum Intent {
     Quit,
 }
 
+/// The label an assignee slot paints: the roster display name once `resolved`
+/// carries one, else the actor ref with a ULID id cut to its short form.
+/// `None` when there is no assignee at all (the caller words its own blank).
+///
+/// Shared by the three surfaces that paint an assignee (board card footer,
+/// task-detail header, issue sidebar) so they degrade the same way: two of them
+/// fell back to a whole 26-char ULID while the cards fell back to a bare short id
+/// (crisp B1 review).
+///
+/// Only a ULID is unreadable, so only a ULID is cut. A human ref
+/// (`member:dana`, `agent:claude-agent`) is already its own label and survives
+/// whole, KIND prefix included: that prefix is what tells a human assignee apart
+/// from an agent one, and shortening it blindly turned `agent:claude-agent` into
+/// `e-agent`.
+#[must_use]
+pub fn assignee_label(resolved: Option<&str>, actor_ref: Option<&str>) -> Option<String> {
+    if let Some(name) = resolved {
+        return Some(name.to_string());
+    }
+    let actor_ref = actor_ref?;
+    let Some((kind, id)) = actor_ref.split_once(':') else {
+        return Some(shorten_ulid(actor_ref));
+    };
+    Some(format!("{kind}:{}", shorten_ulid(id)))
+}
+
+/// [`assignee_label`] WITHOUT the actor kind, for a surface too narrow to spend
+/// the prefix: a board card footer is ~21 cells, where `agent:` pushes the name
+/// itself off the tile.
+///
+/// Same shortening rule, so the callers cannot drift; the kind is dropped here
+/// rather than by the caller pre-splitting the ref, which left the caller owning
+/// half the rule (crisp B1 round-2 review). A RESOLVED display name is returned
+/// verbatim, never split on a colon it happens to contain.
+#[must_use]
+pub fn assignee_label_bare(resolved: Option<&str>, actor_ref: Option<&str>) -> Option<String> {
+    let label = assignee_label(resolved, actor_ref)?;
+    if resolved.is_some() {
+        return Some(label);
+    }
+    Some(match label.split_once(':') {
+        Some((_, name)) => name.to_string(),
+        None => label,
+    })
+}
+
+/// `id` cut to its last-6 short form when it is a ULID, else `id` unchanged.
+fn shorten_ulid(id: &str) -> String {
+    if kanban::is_ulid(id) {
+        kanban::short_id(id)
+    } else {
+        id.to_string()
+    }
+}
+
+/// Whether a run's terminal `outcome` token is a FAILURE, the one row an
+/// operator opens a list to find. The daemon writes exactly three tokens
+/// (`success` / `failed` / `cancelled`, `run_loop::record_run_history`), so
+/// "not success" is NOT the same rule: it floats a user's own cancel, and a
+/// running row whose outcome has not landed, up with the real failures.
+///
+/// Shared so the inbox and the usage dashboard cannot drift apart on what
+/// "failed" means (crisp B1 review): both float the same rows first.
+#[must_use]
+pub fn is_failed_outcome(outcome: &str) -> bool {
+    outcome == "failed"
+}
+
 /// The result of folding one [`AppEvent`] into an [`AppState`].
 ///
 /// Carries the next state plus an optional [`Intent`] for the IO layer. A

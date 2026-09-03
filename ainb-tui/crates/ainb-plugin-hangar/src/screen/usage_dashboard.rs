@@ -11,6 +11,8 @@
 //! the wire [`UsageRollupResult`] the daemon hands back, and the renderer is a
 //! pure width-aware paint over it (`project_ainb_tui_width_aware_panels`).
 
+use std::collections::BTreeMap;
+
 use ainb_hangar_proto::snapshots::{
     AgentUsageRow, RunHistoryResult, RunHistoryRow, UsageRollupResult,
 };
@@ -63,8 +65,14 @@ pub struct UsageState {
     total_runs: i64,
     /// The per-agent breakdown rows, heaviest cost first.
     agents: Vec<AgentUsageRow>,
-    /// The recent-runs timeline rows, newest finished first (P10 / D19).
+    /// The recent-runs timeline rows: failed first, then successes, each group
+    /// newest finished first (P10 / D19, crisp B1).
     runs: Vec<RunHistoryRow>,
+    /// The `agent_id -> display_name` roster from the cached `hangar/agents_list`
+    /// (crisp B1, defect 8), so the per-agent rows read `impl-1`, not a ULID.
+    /// Host-cached rather than per-workspace: it survives [`Self::enter_ws`]
+    /// because the roster refresh arrives on its own reply.
+    agent_names: BTreeMap<String, String>,
 }
 
 impl UsageState {
@@ -86,9 +94,17 @@ impl UsageState {
         if self.ws.as_deref() != Some(ws) {
             *self = Self {
                 ws: Some(ws.to_string()),
+                agent_names: std::mem::take(&mut self.agent_names),
                 ..Self::default()
             };
         }
+    }
+
+    /// Replace the `agent_id -> display_name` roster the per-agent rows label
+    /// themselves from (crisp B1). Idempotent; the glue calls it whenever the
+    /// `hangar/agents_list` snapshot lands, whichever side of the rollup reply.
+    pub fn set_agent_names(&mut self, names: BTreeMap<String, String>) {
+        self.agent_names = names;
     }
 
     /// Update the rollup-derived fields (totals + per-agent) for workspace `ws`.
@@ -113,6 +129,12 @@ impl UsageState {
     pub fn apply_run_history(&mut self, ws: &str, history: RunHistoryResult) {
         self.enter_ws(ws);
         self.runs = history.runs;
+        // Failed runs first (crisp B1, Q10): the one row an operator opens this
+        // screen for was at the bottom of a chronological list. Stable, so each
+        // group keeps the daemon's newest-first order. The predicate is shared
+        // with the inbox, which floats the same rows: sorting on "not success"
+        // instead floated a user's own cancel up with the real failures.
+        self.runs.sort_by_key(|r| !crate::screen::is_failed_outcome(&r.outcome));
     }
 
     /// The per-agent rows (read accessor for tests / glue).
@@ -202,7 +224,11 @@ pub fn render_usage(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, st
             if row > bottom {
                 return;
             }
-            render_agent_row(buf, row, area_w, agent);
+            let name = state
+                .agent_names
+                .get(&agent.agent_id)
+                .map_or(agent.agent_id.as_str(), String::as_str);
+            render_agent_row(buf, row, area_w, name, agent);
             row += 1;
         }
     }
@@ -300,9 +326,16 @@ fn fmt_duration(started_at: Option<i64>, finished_at: i64) -> String {
     }
 }
 
-/// Render one per-agent row: `<agent>  <in> in  <out> out  <cost>  <runs> runs`.
-fn render_agent_row(buf: &mut WireBuffer, row: u16, area_w: u16, agent: &AgentUsageRow) {
-    let mut x = put_str(buf, 0, row, &agent.agent_id, SOFT_WHITE, area_w);
+/// Render one per-agent row: `<agent>  <in> in  <out> out  <cost>  <runs> runs`,
+/// `name` being the roster display name (or the raw id until the roster lands).
+fn render_agent_row(
+    buf: &mut WireBuffer,
+    row: u16,
+    area_w: u16,
+    name: &str,
+    agent: &AgentUsageRow,
+) {
+    let mut x = put_str(buf, 0, row, name, SOFT_WHITE, area_w);
     x += 2;
     x = put_str(
         buf,
@@ -460,6 +493,48 @@ mod tests {
         assert!(a1.contains("codex-agent"), "agent row 1: {a1}");
     }
 
+    /// Crisp B1 (defect 8): the per-agent rows paint the roster display name
+    /// over the raw agent id, and the roster survives a workspace switch (it
+    /// arrives on its own reply, not with the rollup).
+    #[test]
+    fn per_agent_rows_resolve_names_and_keep_them_across_workspaces() {
+        let ulid = "01M1FHM2YSRSXZQFR29ZAYF56V";
+        let mut state = UsageState::from_rollup(
+            "ws-a",
+            UsageRollupResult {
+                total_input_tokens: 10,
+                total_output_tokens: 5,
+                total_cost_usd: 0.001,
+                total_runs: 1,
+                agents: vec![agent(ulid, 10, 5, 0.001, 1)],
+            },
+        );
+        state.set_agent_names(BTreeMap::from([(ulid.to_string(), "impl-1".to_string())]));
+        let mut buf = WireBuffer::new(80, 24);
+        render_usage(&mut buf, 80, 0, 20, &state);
+        let a0 = row_text(&buf, 5, 80);
+        assert!(a0.starts_with("impl-1"), "roster name painted: {a0}");
+        assert!(!a0.contains(ulid), "raw ULID gone: {a0}");
+
+        // A rollup for another workspace resets the totals but not the roster.
+        state.apply_rollup(
+            "ws-b",
+            UsageRollupResult {
+                total_input_tokens: 1,
+                total_output_tokens: 1,
+                total_cost_usd: 0.5,
+                total_runs: 1,
+                agents: vec![agent(ulid, 1, 1, 0.5, 1)],
+            },
+        );
+        let mut buf = WireBuffer::new(80, 24);
+        render_usage(&mut buf, 80, 0, 20, &state);
+        assert!(
+            row_text(&buf, 5, 80).starts_with("impl-1"),
+            "roster kept across ws switch"
+        );
+    }
+
     #[test]
     fn empty_state_renders_placeholder() {
         let state = UsageState::default();
@@ -499,19 +574,61 @@ mod tests {
         let mut buf = WireBuffer::new(80, 24);
         render_usage(&mut buf, 80, 0, 22, &state);
 
-        // Find the "recent runs" header row, then assert the two run rows below it.
+        // Find the "recent runs" header row, then assert the two run rows below
+        // it: the FAILED run floats first (crisp B1, Q10) although the daemon
+        // listed the newer success ahead of it.
         let header = (0..22)
             .find(|&r| row_text(&buf, r, 80) == "recent runs")
             .expect("recent runs header rendered");
         let r0 = row_text(&buf, header + 1, 80);
-        assert!(r0.contains('✓'), "success glyph: {r0}");
-        assert!(r0.contains("codex"), "provider: {r0}");
-        assert!(r0.contains("success"), "outcome: {r0}");
-        assert!(r0.contains("$0.0231"), "cost: {r0}");
-        assert!(r0.contains("1.4s"), "duration 1400ms -> 1.4s: {r0}");
+        assert!(r0.contains('✗'), "failure glyph first: {r0}");
+        assert!(r0.contains("failed"), "outcome: {r0}");
         let r1 = row_text(&buf, header + 2, 80);
-        assert!(r1.contains('✗'), "failure glyph: {r1}");
-        assert!(r1.contains("failed"), "outcome: {r1}");
+        assert!(r1.contains('✓'), "success glyph: {r1}");
+        assert!(r1.contains("codex"), "provider: {r1}");
+        assert!(r1.contains("success"), "outcome: {r1}");
+        assert!(r1.contains("$0.0231"), "cost: {r1}");
+        assert!(r1.contains("1.4s"), "duration 1400ms -> 1.4s: {r1}");
+    }
+
+    /// Crisp B1 (Q10): failed first is a STABLE partition, so successes keep the
+    /// daemon's newest-first order among themselves and so do failures.
+    #[test]
+    fn recent_runs_partition_failed_first_keeping_order_within_each_group() {
+        let mut state = UsageState::default();
+        state.apply_run_history(
+            "ws-a",
+            RunHistoryResult {
+                runs: vec![
+                    run_row("s2", "claude", "success", 1, 1, 0.0, Some(0), 400),
+                    run_row("f2", "claude", "failed", 1, 1, 0.0, Some(0), 300),
+                    run_row("s1", "claude", "success", 1, 1, 0.0, Some(0), 200),
+                    run_row("f1", "claude", "failed", 1, 1, 0.0, Some(0), 100),
+                ],
+            },
+        );
+        let ids: Vec<&str> = state.runs().iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, vec!["f2", "f1", "s2", "s1"]);
+    }
+
+    /// Crisp B1 review: "failed first" means FAILED, not "not success". Sorting
+    /// on the negation floated a user's own cancel to the top of the screen, and
+    /// disagreed with the inbox, which floats only real failures.
+    #[test]
+    fn a_cancelled_run_does_not_float_above_a_success() {
+        let mut state = UsageState::default();
+        state.apply_run_history(
+            "ws-a",
+            RunHistoryResult {
+                runs: vec![
+                    run_row("s1", "claude", "success", 1, 1, 0.0, Some(0), 300),
+                    run_row("c1", "claude", "cancelled", 1, 1, 0.0, Some(0), 200),
+                    run_row("f1", "claude", "failed", 1, 1, 0.0, Some(0), 100),
+                ],
+            },
+        );
+        let ids: Vec<&str> = state.runs().iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, vec!["f1", "s1", "c1"]);
     }
 
     #[test]

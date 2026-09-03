@@ -611,6 +611,16 @@ pub struct ScreenStates {
     /// Inbox screen cache (e38.14), filled from the `hangar/inbox_list` snapshot
     /// (the aggregated issue/comment/task entries + the unread count).
     pub inbox: InboxState,
+    /// The names the inbox resolves its rows through (crisp B1), projected from
+    /// the cached tasks + issues snapshots.
+    ///
+    /// Rebuilt by [`Self::refresh_inbox_names`] when either snapshot moves, NOT
+    /// per paint: the projection is two maps with a `String` clone per row, it
+    /// only changes when a snapshot lands, and the Inbox repaints on every frame.
+    /// It rides the SNAPSHOT path instead, which is quieter by construction: the
+    /// one high-rate event, a streaming run's transcript line, moves no name in
+    /// here and is skipped (`plugin::apply_hangar_event`).
+    inbox_names: super::inbox::InboxLookup,
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
     pub control_center: ControlCenterState,
@@ -742,6 +752,10 @@ pub struct ScreenStates {
     /// awaiting the `render` pass to fire `hangar/inbox_mark_read` over the daemon
     /// socket. Drained by the `render` pass. `false` when idle.
     pub pending_inbox_mark_read: bool,
+    /// Set when the Issues create wizard opened (crisp B1, defect 6), awaiting the
+    /// `render` pass to re-fire `hangar/repo_list` so a repo added since connect
+    /// is pickable. Drained by the `render` pass. `false` when idle.
+    pub pending_repo_refresh: bool,
     /// An `attention/answer` raised by the control-center screen (Enter / a number
     /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
     /// (P2). `None` when idle.
@@ -786,6 +800,7 @@ impl ScreenStates {
         // Re-label any Kanban card already on the board with its parent issue's
         // title: the tasks snapshot may have landed before this one did.
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
+        self.refresh_inbox_names();
     }
 
     /// Replace the skill-manager rows from an `hangar/skills_list` snapshot.
@@ -810,6 +825,8 @@ impl ScreenStates {
         // `set_issues` re-apply their half the other way round.
         self.kanban.set_agent_names(&agent_names(&self.actors));
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
+        self.resolve_task_detail_names();
+        self.refresh_inbox_names();
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
@@ -906,10 +923,69 @@ impl ScreenStates {
         self.inbox = InboxState::from_snapshot(entries, unread, recipient);
     }
 
+    /// The cached names the inbox resolves its rows through (crisp B1).
+    #[must_use]
+    pub const fn inbox_lookup(&self) -> &super::inbox::InboxLookup {
+        &self.inbox_names
+    }
+
+    /// Re-project the inbox name lookup from the cached tasks (agent label +
+    /// parent issue) and issues (display id + title) snapshots, so whichever
+    /// order they landed in the rows read `impl-1 done  HGR-3 <title>` on the
+    /// next paint.
+    ///
+    /// Called from EVERY seam that moves either snapshot: the two snapshot
+    /// setters, the roster that re-labels the cards, and the live-event fold.
+    /// Miss one and the inbox shows a stale name until the next snapshot lands.
+    pub fn refresh_inbox_names(&mut self) {
+        use super::inbox::{InboxIssueRef, InboxLookup, InboxTaskRef};
+        let tasks = self
+            .kanban
+            .columns()
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .map(|c| {
+                (
+                    c.task_id.clone(),
+                    InboxTaskRef {
+                        agent: c.agent_label.clone(),
+                        issue_id: c.issue_id.clone(),
+                    },
+                )
+            })
+            .collect();
+        let issues = self
+            .issue_list
+            .all_rows()
+            .iter()
+            .map(|r| {
+                (
+                    r.id.as_str().to_string(),
+                    InboxIssueRef {
+                        display_id: r
+                            .display_id
+                            .clone()
+                            .unwrap_or_else(|| super::kanban::short_id(r.id.as_str())),
+                        title: r.title.clone(),
+                    },
+                )
+            })
+            .collect();
+        self.inbox_names = InboxLookup { tasks, issues };
+    }
+
     /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
     pub const fn take_pending_inbox_mark_read(&mut self) -> bool {
         let pending = self.pending_inbox_mark_read;
         self.pending_inbox_mark_read = false;
+        pending
+    }
+
+    /// Take the pending repo-roster refresh (the create wizard opened), if any
+    /// (crisp B1, defect 6).
+    pub const fn take_pending_repo_refresh(&mut self) -> bool {
+        let pending = self.pending_repo_refresh;
+        self.pending_repo_refresh = false;
         pending
     }
 
@@ -1011,6 +1087,11 @@ impl ScreenStates {
             })
             .collect();
         self.issue_list.set_agents(named);
+        // Every actor (agents AND members) by ref, so a board card's footer names
+        // its assignee whichever kind it is (crisp B1, defect 8).
+        self.issue_list.set_actor_names(
+            actors.iter().map(|a| (a.actor_ref.clone(), a.display_name.clone())).collect(),
+        );
         // Rebuild the Agents roster screen from the same snapshot (agent actors
         // only), preserving the selection + any open create/delete overlay so a
         // background refresh mid-interaction does not wipe the user's input. A
@@ -1029,7 +1110,13 @@ impl ScreenStates {
         // Re-label any Kanban card already on the board: the tasks snapshot may
         // have landed before this roster did, in which case its cards are still
         // on the short-id fallback.
-        self.kanban.set_agent_names(&agent_names(&self.actors));
+        let names = agent_names(&self.actors);
+        self.kanban.set_agent_names(&names);
+        // The usage dashboard's per-agent rows label themselves from the same
+        // roster (crisp B1, defect 8); it keeps the map across workspace resets.
+        self.usage.set_agent_names(names);
+        self.resolve_task_detail_names();
+        self.refresh_inbox_names();
     }
 
     /// Build the settings cache from the four daemon snapshots.
@@ -1303,6 +1390,35 @@ impl ScreenStates {
             td.seed_lifecycle(lifecycle);
         }
         self.task_detail = Some(td);
+        self.resolve_task_detail_names();
+    }
+
+    /// Resolve the open task-detail header's names against the cached agents +
+    /// tasks snapshots (crisp B1, defects 5 + 8): the assignee's roster name, the
+    /// bound run's agent name, and the issue's still-active run (the row an
+    /// `already_active` dispatch refusal names). Called at open AND whenever
+    /// either snapshot lands, so their arrival order never leaves a raw ULID on
+    /// the header. A no-op when no task detail is open.
+    fn resolve_task_detail_names(&mut self) {
+        let Some(td) = self.task_detail.as_mut() else {
+            return;
+        };
+        let names = agent_names(&self.actors);
+        let issue = td.issue();
+        let assignee_name = issue
+            .assignee
+            .as_deref()
+            .and_then(|a| a.strip_prefix("agent:"))
+            .and_then(|id| names.get(id).cloned());
+        let agent_name = self
+            .kanban
+            .card_for_task(td.task_id().as_str())
+            .and_then(|c| names.get(&c.agent_id).cloned());
+        let blocking_run = self.kanban.active_card_for_issue(issue.id.as_str()).map(|c| {
+            let agent = names.get(&c.agent_id).unwrap_or(&c.agent_label);
+            format!("#{} {agent} ({})", c.short_id, c.status)
+        });
+        td.set_resolved_names(assignee_name, agent_name, blocking_run);
     }
 
     /// Apply a freshly-fetched PR status to the open task-detail screen (e38.34)
@@ -1323,6 +1439,23 @@ impl ScreenStates {
     pub fn push_task_detail_system_line(&mut self, body: String) {
         if let Some(td) = self.task_detail.as_mut() {
             td.push_system_line(body);
+        }
+    }
+
+    /// Backfill the OPEN task-detail transcript with `entries` parsed from the
+    /// durable run log (crisp B1, defect 7), but only when that screen is bound
+    /// to `task_id`: the daemon serves an issue's NEWEST run, and a detail opened
+    /// on an older attempt must not show another run's transcript. Returns
+    /// whether anything was applied (a screen already backfilled by an earlier
+    /// open's reply refuses a second one). A no-op on a closed screen.
+    pub fn backfill_task_detail_transcript(
+        &mut self,
+        task_id: &str,
+        entries: Vec<super::task_detail::TranscriptEntry>,
+    ) -> bool {
+        match self.task_detail.as_mut() {
+            Some(td) if td.task_id().as_str() == task_id => td.backfill_transcript(entries),
+            _ => false,
         }
     }
 }
@@ -1405,7 +1538,15 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
         }
         Screen::Inbox => {
-            super::inbox::render_inbox(buf, w, top, bottom, &states.inbox);
+            super::inbox::render_inbox(
+                buf,
+                w,
+                top,
+                bottom,
+                &states.inbox,
+                states.inbox_lookup(),
+                now_ms(),
+            );
         }
         Screen::ControlCenter => {
             super::control_center::render_control_center(
@@ -1436,7 +1577,7 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::TaskDetail(_) => {
             if let Some(td) = &states.task_detail {
-                super::task_detail::render_task_detail(buf, w, top, bottom, td);
+                crate::screen::task_detail::render_task_detail(buf, w, top, bottom, td);
             }
         }
         Screen::AgentPicker(_) => {
@@ -1550,17 +1691,53 @@ fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     }
 }
 
+/// Kill-line: clear the whole text input (Ctrl+U). `\u{15}` is the NAK control
+/// char a terminal itself sends for the chord, so the reducer vocabulary carries
+/// it the same way it carries `'\u{8}'` for Backspace.
+pub(crate) const CLEAR_LINE: char = '\u{15}';
+
 /// Translate a wire [`KeyEvent`] into the `char` the pure screen reducers expect.
 ///
 /// The reducers model navigation as printable chars (`'j'`, `'/'`, …) plus `'\n'`
 /// for Enter and `'\u{8}'` for Backspace. Esc and the tab-switch keys are handled
 /// by the caller before reaching a reducer.
+///
+/// A Ctrl chord yields `None`. Most reducers here end in a catch-all that PUSHES
+/// the char into a text buffer (a comment body, a workspace name, an API key), so
+/// handing them a C0 control char types something the operator cannot see and
+/// then submits it to the daemon. A screen whose reducer actually models the
+/// chord calls [`key_char_with_chords`] instead.
 const fn key_char(key: &KeyEvent) -> Option<char> {
     match &key.code {
+        // A chord in EITHER spelling the terminals use: the modifier flag, or the
+        // bare control char with no flag at all (`plugin::is_ctrl_p` documents the
+        // same split for Ctrl+P). Neither is text the operator meant to type, so
+        // both are dropped rather than pushed into a buffer.
+        //
+        // Only the kill-line char, NOT every C0: `'\r'` / `'\n'` / `'\u{8}'` are
+        // how a caller spells Enter and Backspace on this path, and the reducers
+        // model them (`tripwire_issue_acceptance_tick` sends Enter as `'\r'`).
+        KeyCode::Char { .. } if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 => None,
+        KeyCode::Char { ch: CLEAR_LINE } => None,
         KeyCode::Char { ch } => Some(*ch),
         KeyCode::Enter => Some('\n'),
         KeyCode::Backspace => Some('\u{8}'),
         _ => None,
+    }
+}
+
+/// [`key_char`], plus the Ctrl chords the caller's reducer models: Ctrl+U becomes
+/// [`CLEAR_LINE`], in either spelling. The ONE chord table (crisp B1, defect 21),
+/// so the Boards overlay, the Issues create wizard and the issue-list filter
+/// cannot drift apart on it. Every OTHER translation site keeps the dropping
+/// [`key_char`].
+const fn key_char_with_chords(key: &KeyEvent) -> Option<char> {
+    match &key.code {
+        KeyCode::Char { ch: 'u' | 'U' } if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 => {
+            Some(CLEAR_LINE)
+        }
+        KeyCode::Char { ch: CLEAR_LINE } => Some(CLEAR_LINE),
+        _ => key_char(key),
     }
 }
 
@@ -1838,9 +2015,11 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     // carry. Any other key is an unmodelled no-op.
     let ev = if states.issue_list.wizard().is_some() {
         let k = match &key.code {
-            KeyCode::Char { ch } => super::issue_list::WizardKey::Char(*ch),
-            KeyCode::Enter => super::issue_list::WizardKey::Enter,
-            KeyCode::Backspace => super::issue_list::WizardKey::Backspace,
+            // Text input, including the Ctrl chords the wizard models, through
+            // the one shared translation.
+            KeyCode::Char { .. } | KeyCode::Enter | KeyCode::Backspace => {
+                super::issue_list::wizard_key_from_char(key_char_with_chords(key)?)
+            }
             KeyCode::Esc => super::issue_list::WizardKey::Esc,
             KeyCode::Up => super::issue_list::WizardKey::Up,
             KeyCode::Down => super::issue_list::WizardKey::Down,
@@ -1890,7 +2069,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             KeyCode::BackTab if states.issue_list.mode() == IssueListMode::Normal => {
                 IssueListEvent::SetFilter(states.issue_list.filter().prev())
             }
-            _ => IssueListEvent::Key(key_char(key)?),
+            // The `/` filter buffer models CLEAR_LINE, so this path takes the
+            // chords too; every other issue-list mode ignores an unknown char.
+            _ => IssueListEvent::Key(key_char_with_chords(key)?),
         }
     };
     let out = reduce_issue_list(&states.issue_list, ev);
@@ -1955,6 +2136,11 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         // reply the plugin retries the delete (cancel commits before delete).
         Some(IssueListIntent::CancelAndDeleteIssue(id)) => {
             states.pending_cancel_delete_action = Some(id);
+            None
+        }
+        // Crisp B1 (defect 6): a wizard open re-pulls the repo roster in `render`.
+        Some(IssueListIntent::RefreshRepos) => {
+            states.pending_repo_refresh = true;
             None
         }
         None => None,
@@ -2167,16 +2353,20 @@ fn route_timeline_key(states: &mut ScreenStates, key: &KeyEvent) {
 /// the input; unmapped keys are dropped.
 fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
     let k = match &key.code {
-        KeyCode::Enter => BoardsKey::Enter,
         KeyCode::Esc => BoardsKey::Esc,
-        KeyCode::Backspace => BoardsKey::Backspace,
         KeyCode::Up => BoardsKey::Up,
         KeyCode::Down => BoardsKey::Down,
-        KeyCode::Char { ch } => BoardsKey::Char(*ch),
         // Overlay-local only: the dep picker cycles its link kind (multica parity
         // #20). No global binding is added, so no host-reserved key is touched.
         KeyCode::Tab => BoardsKey::Tab,
-        _ => return None,
+        // Text input, including the Ctrl chords the overlay models, through the
+        // one shared translation.
+        _ => match key_char_with_chords(key)? {
+            '\n' => BoardsKey::Enter,
+            '\u{8}' => BoardsKey::Backspace,
+            CLEAR_LINE => BoardsKey::ClearLine,
+            c => BoardsKey::Char(c),
+        },
     };
     Some(BoardsEvent::Key(k))
 }
@@ -2550,11 +2740,14 @@ fn route_profiles(states: &mut ScreenStates, key: &KeyEvent) {
 /// reducer-closed state) raises [`NavIntent::CloseModal`] with no assign, popping
 /// the modal back to its prior screen.
 fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
-    let picker = states.agent_picker.take()?;
+    // The event is built BEFORE the take: an unmodelled key returns here, and
+    // returning between a take and its write-back DROPS the whole modal off the
+    // screen (crisp B1 round-2 review).
     let ev = match key.code {
         KeyCode::Esc => AgentPickerEvent::Esc,
         _ => AgentPickerEvent::Key(key_char(key)?),
     };
+    let picker = states.agent_picker.take()?;
     let out = reduce_agent_picker(&picker, ev);
 
     // Enter on a picked actor: queue the assign RPC and dismiss the modal.
@@ -2619,13 +2812,16 @@ fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent
 /// [`PaletteAction::Search`] the `render` pass drains + fires (the sync key router
 /// can't `await`).
 fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
-    let palette = states.command_palette.take()?;
+    // The event is built BEFORE the take: an unmodelled key returns here, and
+    // returning between a take and its write-back DROPS the whole modal off the
+    // screen (crisp B1 round-2 review).
     let ev = match key.code {
         KeyCode::Esc => CommandPaletteEvent::Esc,
         KeyCode::Down => CommandPaletteEvent::SelectDown,
         KeyCode::Up => CommandPaletteEvent::SelectUp,
         _ => CommandPaletteEvent::Key(key_char(key)?),
     };
+    let palette = states.command_palette.take()?;
     let out = reduce_command_palette(&palette, ev);
 
     match out.intent {
@@ -2948,7 +3144,8 @@ mod task_detail_open_tests {
         }
     }
 
-    fn issue() -> IssueRow {
+    /// Also the base fixture for the sibling inbox-lookup tests.
+    pub(super) fn issue() -> IssueRow {
         IssueRow {
             subscriber_count: 0,
             subscribed: false,
@@ -3029,6 +3226,115 @@ mod task_detail_open_tests {
         route_task_detail(&mut states, &press('R'));
 
         assert!(states.take_pending_task_retry_action().is_none());
+    }
+
+    use crate::test_support::painted_text;
+
+    fn agent(id: &str, name: &str) -> ActorRow {
+        ActorRow {
+            actor_ref: format!("agent:{id}"),
+            display_name: name.into(),
+            is_agent: true,
+            ..ActorRow::default()
+        }
+    }
+
+    fn task(id: &str, agent_id: &str, status: &str) -> ainb_hangar_proto::events::TaskCardRow {
+        ainb_hangar_proto::events::TaskCardRow {
+            id: TaskId::from_str(id).unwrap(),
+            workspace_id: "ws".into(),
+            agent_id: agent_id.into(),
+            issue_id: Some("issue-1".into()),
+            status: status.into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
+    /// Crisp B1 (defects 5 + 8): the header's names resolve from the agents +
+    /// tasks snapshots whichever order they land in, at open or afterwards. The
+    /// assignee resolves through the roster, the bound run's agent through its
+    /// task card, and the issue's live run is named for the dispatch refusal.
+    #[test]
+    fn open_resolves_names_from_snapshots_in_any_order() {
+        let mut issue = issue();
+        issue.assignee = Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V".into());
+
+        // Snapshots landed BEFORE the open: resolved at once.
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![
+            agent("01M1FHM2YSRSXZQFR29ZAYF56V", "impl-1"),
+            agent("rev", "rev-1"),
+        ]);
+        states.set_tasks(&[task("t-1", "rev", "running")]);
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue.clone(), None, None);
+        let td = states.task_detail.as_ref().unwrap();
+        assert_eq!(td.assignee_name(), Some("impl-1"));
+        assert_eq!(td.agent_name(), Some("rev-1"));
+
+        // Snapshots land AFTER the open: the same names, no raw ULID left behind.
+        let mut states = ScreenStates::default();
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue, None, None);
+        assert_eq!(states.task_detail.as_ref().unwrap().assignee_name(), None);
+        states.set_tasks(&[task("t-1", "rev", "running")]);
+        states.set_actors(vec![
+            agent("01M1FHM2YSRSXZQFR29ZAYF56V", "impl-1"),
+            agent("rev", "rev-1"),
+        ]);
+        let td = states.task_detail.as_ref().unwrap();
+        assert_eq!(td.assignee_name(), Some("impl-1"));
+        assert_eq!(td.agent_name(), Some("rev-1"));
+    }
+
+    /// Crisp B1 (defect 5): an `already_active` refusal names the issue's live
+    /// run from the tasks snapshot; once every run is terminal there is nothing
+    /// to name and the line falls back to the daemon's detail.
+    #[test]
+    fn already_active_refusal_names_the_live_run() {
+        let mut issue = issue();
+        issue.last_dispatch_reason = Some("already_active".into());
+        issue.last_dispatch_detail = Some("a run is already active (queued)".into());
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("rev", "rev-1")]);
+        states.set_tasks(&[task("01HANGARTASKRUNNING001", "rev", "running")]);
+        states.open_task_detail(
+            TaskId::from_str("01HANGARTASKRUNNING001").unwrap(),
+            issue.clone(),
+            None,
+            Some("running"),
+        );
+        let mut buf = WireBuffer::new(100, 40);
+        crate::screen::task_detail::render_task_detail(
+            &mut buf,
+            100,
+            0,
+            39,
+            states.task_detail.as_ref().unwrap(),
+        );
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("a run is already active: #ING001 rev-1 (running)"),
+            "the live run is named: {text}"
+        );
+
+        // The run finished: no live row to name, the detail prints once.
+        states.set_tasks(&[task("01HANGARTASKRUNNING001", "rev", "done")]);
+        let mut buf = WireBuffer::new(100, 40);
+        crate::screen::task_detail::render_task_detail(
+            &mut buf,
+            100,
+            0,
+            39,
+            states.task_detail.as_ref().unwrap(),
+        );
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("Not dispatched: a run is already active (queued)"),
+            "falls back to the daemon detail, undoubled: {text}"
+        );
     }
 }
 
@@ -3306,5 +3612,258 @@ mod fleet_routing_tests {
                 action: FleetAction::ReconcileStructured { request_fingerprint },
             }) if session_key == "claude:one" && request_fingerprint == "fingerprint"
         ));
+    }
+}
+
+/// Crisp B1 review: the inbox name lookup is a CACHE now, rebuilt on the seams
+/// that move a snapshot rather than on every paint. These pin the seams, which
+/// is where a cache goes wrong: miss one and the inbox paints a stale name until
+/// something unrelated lands.
+#[cfg(test)]
+mod inbox_lookup_cache_tests {
+    use ainb_hangar_core::ids::{IssueId, TaskId};
+    use ainb_hangar_proto::events::{ActorRow, TaskCardRow};
+
+    use super::*;
+
+    const AGENT: &str = "01M1FHM2YSRSXZQFR29ZAYF56V";
+
+    fn task_card(id: &str, agent_id: &str) -> TaskCardRow {
+        TaskCardRow {
+            id: TaskId::from_str(id).unwrap(),
+            workspace_id: "ws".into(),
+            agent_id: agent_id.into(),
+            issue_id: Some("issue-1".into()),
+            status: "running".into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
+    fn issue_row() -> IssueRow {
+        let mut row = super::task_detail_open_tests::issue();
+        row.id = IssueId::from_str("issue-1").unwrap();
+        row.display_id = Some("HGR-3".into());
+        row.title = "Add GET /api/version endpoint".into();
+        row
+    }
+
+    /// Each of the three snapshot seams re-projects the lookup on its own, in
+    /// whichever order the batch lands: tasks alone give the row its task entry,
+    /// issues alone its `HGR-3 <title>`, and the roster relabels the agent from
+    /// the short-id fallback to its display name.
+    #[test]
+    fn every_snapshot_seam_reprojects_the_lookup() {
+        let mut states = ScreenStates::default();
+
+        states.set_tasks(&[task_card("t-1", AGENT)]);
+        let entry = states.inbox_lookup().tasks.get("t-1").expect("tasks seam projects");
+        assert_eq!(entry.agent, "AYF56V", "short-id fallback before the roster");
+        assert_eq!(entry.issue_id.as_deref(), Some("issue-1"));
+        assert!(
+            states.inbox_lookup().issues.is_empty(),
+            "no issues snapshot yet"
+        );
+
+        states.set_issues(vec![issue_row()]);
+        let issue = states.inbox_lookup().issues.get("issue-1").expect("issues seam projects");
+        assert_eq!(issue.display_id, "HGR-3");
+        assert_eq!(issue.title, "Add GET /api/version endpoint");
+
+        states.set_actors(vec![ActorRow {
+            actor_ref: format!("agent:{AGENT}"),
+            display_name: "impl-1".into(),
+            is_agent: true,
+            ..ActorRow::default()
+        }]);
+        assert_eq!(
+            states.inbox_lookup().tasks.get("t-1").expect("still there").agent,
+            "impl-1",
+            "the roster seam relabels the cached card"
+        );
+    }
+}
+
+/// Crisp B1 (defect 21 review): every text input reads a Ctrl chord through the
+/// ONE translation in [`key_char`]. The chord used to be decoded per screen, so
+/// Ctrl+U cleared a Boards input while the Issues wizard and the issue filter
+/// typed a literal `u` into it.
+#[cfg(test)]
+mod ctrl_chord_tests {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    use super::*;
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    fn ctrl(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: ainb_plugin_sdk::KEY_MOD_CTRL,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// The OTHER spelling of a chord: the bare C0 control char, no modifier flag,
+    /// which is how some terminals deliver it (`plugin::is_ctrl_p`).
+    fn bare_nak() -> KeyEvent {
+        press(CLEAR_LINE)
+    }
+
+    /// The shared translation: a screen that MODELS the chord reads Ctrl+U as the
+    /// clear-line char, an unmapped chord types NOTHING, and a bare `u` is still
+    /// a `u`. The Boards overlay mapper reads the same answer.
+    #[test]
+    fn a_ctrl_chord_is_translated_in_one_place() {
+        assert_eq!(key_char_with_chords(&ctrl('u')), Some(CLEAR_LINE));
+        assert_eq!(key_char_with_chords(&ctrl('U')), Some(CLEAR_LINE));
+        // The same chord spelled as a bare NAK, which is how some terminals send
+        // it: the opt-in sites must read BOTH as clear-line or the key works on
+        // one terminal and not another.
+        assert_eq!(key_char_with_chords(&bare_nak()), Some(CLEAR_LINE));
+        assert_eq!(key_char_with_chords(&ctrl('k')), None);
+        assert_eq!(key_char_with_chords(&press('u')), Some('u'));
+        assert_eq!(
+            overlay_key_event(&ctrl('u')),
+            Some(BoardsEvent::Key(BoardsKey::ClearLine))
+        );
+        assert_eq!(
+            overlay_key_event(&bare_nak()),
+            Some(BoardsEvent::Key(BoardsKey::ClearLine))
+        );
+        assert_eq!(overlay_key_event(&ctrl('k')), None);
+    }
+
+    /// The DEFAULT translation drops every Ctrl chord. Most reducers end in a
+    /// catch-all that pushes the char into a text buffer, so a chord that made it
+    /// through as `'\u{15}'` typed an invisible control char into a comment body
+    /// or an API key and then submitted it (crisp B1 round-2 review). Only the
+    /// three screens that decode it opt in.
+    #[test]
+    fn key_char_drops_a_ctrl_chord_for_the_screens_that_do_not_model_it() {
+        assert_eq!(key_char(&ctrl('u')), None);
+        assert_eq!(key_char(&ctrl('U')), None);
+        assert_eq!(key_char(&ctrl('k')), None);
+        // Both spellings, or the terminal that sends the bare control char walks
+        // straight past the modifier check into a text buffer.
+        assert_eq!(key_char(&bare_nak()), None);
+        assert_eq!(key_char(&press('u')), Some('u'));
+        // The kill-line char only. Enter and Backspace are spelled as chars on
+        // this path too, and the reducers model them.
+        assert_eq!(key_char(&press('\r')), Some('\r'));
+        assert_eq!(key_char(&press('\u{8}')), Some('\u{8}'));
+    }
+
+    /// A modal that does NOT model the chord keeps both its query and its own
+    /// existence. The routers took the modal out of the state before translating
+    /// the key, so an unmodelled key returned between the take and the write-back
+    /// and the modal vanished off the screen (found by driving Ctrl+U into the
+    /// palette in a real terminal, crisp B1 round-2 review).
+    #[test]
+    fn an_unmodelled_key_leaves_a_modal_open_and_unchanged() {
+        let mut app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        app.screen = Screen::CommandPalette;
+        let mut states = ScreenStates::default();
+        states.command_palette =
+            Some(super::super::command_palette::CommandPaletteState::default());
+        for ch in "note".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(
+            states
+                .command_palette
+                .as_ref()
+                .map(super::super::command_palette::CommandPaletteState::query),
+            Some("note")
+        );
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(
+            states
+                .command_palette
+                .as_ref()
+                .map(super::super::command_palette::CommandPaletteState::query),
+            Some("note"),
+            "the palette is still open and its query untouched"
+        );
+    }
+
+    /// End to end on the surface that would have SENT the control char: the
+    /// task-detail comment-compose buffer takes nothing from Ctrl+U.
+    #[test]
+    fn ctrl_u_types_nothing_into_the_comment_compose_buffer() {
+        use ainb_hangar_core::ids::TaskId;
+        let task = TaskId::from_str("t-1").unwrap();
+        let mut app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        app.screen = Screen::TaskDetail(task.clone());
+        let mut states = ScreenStates::default();
+        states.open_task_detail(
+            task,
+            super::task_detail_open_tests::issue(),
+            None,
+            Some("running"),
+        );
+
+        // `c` opens compose, then type a word.
+        route_key(&app, &mut states, &press('c'));
+        for ch in "note".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        let before = states.task_detail.as_ref().unwrap().compose_buffer().map(str::to_string);
+        assert_eq!(before.as_deref(), Some("note"));
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(
+            states.task_detail.as_ref().unwrap().compose_buffer(),
+            Some("note"),
+            "the chord neither cleared nor typed a control char"
+        );
+    }
+
+    /// `/` filter query: Ctrl+U empties it in place, without leaving filter mode.
+    #[test]
+    fn ctrl_u_clears_the_issue_filter_query() {
+        let app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        let mut states = ScreenStates::default();
+
+        route_key(&app, &mut states, &press('/'));
+        for ch in "auth".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(states.issue_list.query(), "auth");
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(states.issue_list.query(), "");
+        assert_eq!(states.issue_list.mode(), IssueListMode::FilterInput);
+    }
+
+    /// Create-wizard title row: Ctrl+U empties it instead of appending a `u`.
+    #[test]
+    fn ctrl_u_clears_the_create_wizard_title() {
+        let app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        let mut states = ScreenStates::default();
+
+        route_key(&app, &mut states, &press('c'));
+        for ch in "Add auth".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(states.issue_list.wizard().unwrap().title(), "Add auth");
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(states.issue_list.wizard().unwrap().title(), "");
     }
 }

@@ -443,20 +443,20 @@ impl RepoOption {
     }
 }
 
-/// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first
-/// (ALWAYS, the F2 guaranteed repo), then the injected roster
-/// (favorites-first + recency order preserved) fuzzy-filtered on `query`.
-/// Crate-visible so the Issues create-wizard repo stage shares the exact same
-/// candidate order + fuzzy filter as the Boards card create.
+/// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first (the
+/// F2 guaranteed repo, so an EMPTY query always leads with it), then the
+/// injected roster (favorites-first + recency order preserved), every entry
+/// fuzzy-filtered on `query`, scratch included. Scratch used to be prepended
+/// unconditionally while the cursor reset to row 0 on every keystroke, so
+/// typing `@box` narrowed the list to boxtrack and Enter still picked scratch
+/// (proving run defect 12). Crate-visible so the Issues create-wizard repo
+/// stage shares the exact same candidate order + fuzzy filter as the Boards
+/// card create.
 pub(crate) fn repo_candidates(repos: &[RepoOption], query: &str) -> Vec<RepoOption> {
-    let mut out = vec![RepoOption::scratch()];
-    out.extend(
-        repos
-            .iter()
-            .filter(|r| fuzzy_matches(&r.label, query) || fuzzy_matches(&r.repo_ref, query))
-            .cloned(),
-    );
-    out
+    std::iter::once(RepoOption::scratch())
+        .chain(repos.iter().cloned())
+        .filter(|r| fuzzy_matches(&r.label, query) || fuzzy_matches(&r.repo_ref, query))
+        .collect()
 }
 
 /// Case-insensitive subsequence match: every char of `query`, in order, appears
@@ -661,6 +661,9 @@ pub enum BoardsKey {
     Up,
     /// Cursor down (move a picker selection down).
     Down,
+    /// Ctrl+U: clear the text input (crisp B1, defect 21). The rename / title /
+    /// repo-query inputs empty their buffer; the pickers and confirms ignore it.
+    ClearLine,
 }
 
 /// The render-state cache for the Boards screen.
@@ -1469,13 +1472,15 @@ fn squad_pick_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
-            state,
-            BoardsOverlay::SquadPick {
-                issue_id: issue_id.to_string(),
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            set_overlay(
+                state,
+                BoardsOverlay::SquadPick {
+                    issue_id: issue_id.to_string(),
+                    cursor,
+                },
+            )
+        }
     }
 }
 
@@ -1542,7 +1547,9 @@ fn dep_pick_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(state, repick(cursor, kind)),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::ClearLine => {
+            set_overlay(state, repick(cursor, kind))
+        }
     }
 }
 
@@ -1572,7 +1579,8 @@ fn remove_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
         | BoardsKey::Backspace
         | BoardsKey::Up
         | BoardsKey::Down
-        | BoardsKey::Tab => set_overlay(
+        | BoardsKey::Tab
+        | BoardsKey::ClearLine => set_overlay(
             state,
             BoardsOverlay::RemoveConfirm {
                 issue_id: issue_id.to_string(),
@@ -1608,7 +1616,8 @@ fn cancel_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
         | BoardsKey::Backspace
         | BoardsKey::Up
         | BoardsKey::Down
-        | BoardsKey::Tab => set_overlay(
+        | BoardsKey::Tab
+        | BoardsKey::ClearLine => set_overlay(
             state,
             BoardsOverlay::CancelConfirm {
                 issue_id: issue_id.to_string(),
@@ -1644,6 +1653,13 @@ fn card_title_key(
             BoardsOverlay::CardTitle {
                 column_id: column_id.to_string(),
                 title,
+            },
+        ),
+        BoardsKey::ClearLine => set_overlay(
+            state,
+            BoardsOverlay::CardTitle {
+                column_id: column_id.to_string(),
+                title: String::new(),
             },
         ),
         BoardsKey::Char(c) => {
@@ -1747,6 +1763,7 @@ fn card_repo_key(
             query.pop();
             reopen(state, query, Some(0))
         }
+        (Some(_), BoardsKey::ClearLine) => reopen(state, String::new(), Some(0)),
         // Tab is the dep picker's kind cycle; here it is inert.
         (Some(cursor), BoardsKey::Tab) => reopen(state, query, Some(cursor)),
         (Some(cursor), BoardsKey::Up) => reopen(state, query, Some(cursor.saturating_sub(1))),
@@ -1757,7 +1774,8 @@ fn card_repo_key(
         (Some(cursor), BoardsKey::Enter) => {
             let candidates = repo_candidates(state.repos(), &query);
             let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) else {
-                // Impossible (scratch is always present), but never advance repo-less.
+                // A query that matches nothing: hold the dropdown open, never
+                // advance repo-less.
                 return reopen(state, query, Some(0));
             };
             set_overlay(
@@ -1859,7 +1877,9 @@ fn card_agent_key(
                 },
             ),
         },
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            reopen(state, cursor)
+        }
     }
 }
 
@@ -1912,7 +1932,9 @@ fn card_profile_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            reopen(state, cursor)
+        }
     }
 }
 
@@ -1943,6 +1965,7 @@ fn column_rename_key(
             name.push(c);
             reopen(state, name)
         }
+        BoardsKey::ClearLine => reopen(state, String::new()),
         BoardsKey::Up | BoardsKey::Down | BoardsKey::Tab => reopen(state, name),
         BoardsKey::Enter => {
             if name.trim().is_empty() {
@@ -2005,13 +2028,15 @@ fn run_mode_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
-            state,
-            BoardsOverlay::RunMode {
-                issue_id: issue_id.to_string(),
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            set_overlay(
+                state,
+                BoardsOverlay::RunMode {
+                    issue_id: issue_id.to_string(),
+                    cursor,
+                },
+            )
+        }
     }
 }
 
@@ -2945,7 +2970,10 @@ fn card_view_to_board_card(c: &CardView) -> BoardCard {
         display_id: format!("{marker}{}", c.display_id),
         title: card_title_with_t4_badges(c),
         priority: PriorityChip::from_priority(0),
-        assignee_initial: c.title.chars().next(),
+        // The Boards wire card carries no agent id to name (only the provider
+        // token + squad chips), so it wears no assignee glyph rather than the
+        // title's first char it used to (crisp B1); B2's run chip replaces it.
+        assignee: None,
         linked: false,
         subtasks: None,
     }
@@ -3523,8 +3551,11 @@ mod tests {
         assert!(out.state.overlay().is_none());
     }
 
-    /// Typing after `@` fuzzy-filters the dropdown; Enter picks the highlighted
-    /// scanned repo. Scratch stays index 0 (always first).
+    /// Typing after `@` fuzzy-filters the dropdown, scratch included, and Enter
+    /// picks the highlighted row: with `wid` typed the ONLY candidate is widget,
+    /// so a bare Enter picks it. Scratch used to be pinned at row 0 regardless
+    /// of the query while every keystroke reset the cursor there, so this exact
+    /// sequence picked scratch (proving run defect 12).
     #[test]
     fn repo_dropdown_fuzzy_filters_on_query() {
         let mut state = BoardsState::from_snapshot(&one_board());
@@ -3532,18 +3563,59 @@ mod tests {
         let s = typed_card(&state, "T");
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
-        // Type "wid" — only "widget" (and scratch, always-first) survive the filter.
+        assert_eq!(
+            repo_candidates(s.repos(), "").first().map(|r| r.label.as_str()),
+            Some("scratch"),
+            "an empty query still leads with the guaranteed repo"
+        );
         let mut s = s;
         for ch in "wid".chars() {
             s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
         }
-        // Candidates are [scratch, widget]; Down + Enter picks widget.
-        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        assert_eq!(
+            repo_candidates(s.repos(), "wid")
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["widget"],
+            "scratch is filtered like any other candidate"
+        );
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
         assert!(matches!(
             s.overlay(),
             Some(BoardsOverlay::CardAgent { repo_ref, .. }) if repo_ref == "/src/widget"
         ));
+    }
+
+    /// A query matching nothing leaves an empty dropdown; Enter holds it open
+    /// (never advances repo-less) and Backspace brings the candidates back.
+    #[test]
+    fn repo_dropdown_with_no_match_holds_open_on_enter() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_repos(repo_roster());
+        let s = typed_card(&state, "T");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('q'))).state;
+        assert!(repo_candidates(s.repos(), "q").is_empty());
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(out.intent, None);
+        assert!(
+            matches!(
+                out.state.overlay(),
+                Some(BoardsOverlay::CardRepo {
+                    dropdown: Some(0),
+                    ..
+                })
+            ),
+            "Enter on an empty dropdown holds the repo stage open"
+        );
+        let s = reduce_boards(&out.state, BoardsEvent::Key(BoardsKey::Backspace)).state;
+        assert_eq!(
+            repo_candidates(s.repos(), "").len(),
+            3,
+            "scratch + the two repos are back"
+        );
     }
 
     /// F2 repo-REQUIRED: Enter with the dropdown closed re-opens it (pointing at
@@ -3686,6 +3758,26 @@ mod tests {
                 name: "Today!".into(),
             })
         );
+
+        // Ctrl+U empties the input instead of typing a `u` (crisp B1, defect 21);
+        // Enter on the emptied input holds it open, typing then commits fresh.
+        let s = reduce_boards(&state, BoardsEvent::RenameColumn).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::ClearLine)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::ColumnRename { name, .. }) if name.is_empty()
+        ));
+        let held = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(held.intent, None, "a blank rename never commits");
+        let mut s = held.state;
+        for ch in "QA".chars() {
+            s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
+        }
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert!(matches!(
+            out.intent,
+            Some(BoardsIntent::RenameColumn { name, .. }) if name == "QA"
+        ));
     }
 
     /// Esc cancels an open overlay without raising an intent.

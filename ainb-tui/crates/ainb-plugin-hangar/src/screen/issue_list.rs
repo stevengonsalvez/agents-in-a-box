@@ -726,6 +726,9 @@ pub enum WizardKey {
     Char(char),
     /// Backspace (delete the last input char).
     Backspace,
+    /// Ctrl+U: clear the focused text row (crisp B1, defect 21), or the `@` repo
+    /// query while the dropdown is open. The picker-only rows ignore it.
+    ClearLine,
     /// Enter (create when the required fields are satisfied, else jump focus to
     /// the missing one).
     Enter,
@@ -1075,6 +1078,11 @@ pub struct IssueListState {
     /// assign picker uses (agent actors only). Empty on a workspace with no named
     /// agents, in which case the Agent row falls back to the provider chips.
     agents: Vec<WizardAgent>,
+    /// The `actor_ref -> display_name` map for EVERY actor (agents and members)
+    /// from the cached `hangar/agents_list`, so a card's footer names its
+    /// assignee (crisp B1, defect 8) instead of painting the first char of a
+    /// ULID. An unknown ref falls back to a short id, never the full ULID.
+    actor_names: BTreeMap<String, String>,
     /// A transient status note (create/run dispatch feedback or failure),
     /// rendered on the bottom row and replaced by the next note / cleared when a
     /// new wizard opens. Errors surface HERE, never silently dropped.
@@ -1123,6 +1131,7 @@ impl Default for IssueListState {
             wizard: None,
             repos: Vec::new(),
             agents: Vec::new(),
+            actor_names: BTreeMap::new(),
             note: None,
             task_issue: HashMap::new(),
             scroll_offsets: [0; COLUMN_COUNT],
@@ -1405,6 +1414,24 @@ impl IssueListState {
         &self.agents
     }
 
+    /// Inject the `actor_ref -> display_name` map the card footers resolve their
+    /// assignee through (crisp B1), from the glue's cached `hangar/agents_list`
+    /// (agents AND members: either can be assigned).
+    pub fn set_actor_names(&mut self, names: BTreeMap<String, String>) {
+        self.actor_names = names;
+    }
+
+    /// The footer label for an issue's assignee: the roster display name, or a
+    /// readable short form until the roster lands. `None` when unassigned.
+    ///
+    /// The BARE variant of the shared helper, because a card is ~21 cells and the
+    /// `agent:` / `member:` kind the wide rows keep would push the name itself off
+    /// the tile. Same shortening rule, owned there.
+    fn assignee_label(&self, assignee: Option<&str>) -> Option<String> {
+        let resolved = assignee.and_then(|r| self.actor_names.get(r)).map(String::as_str);
+        crate::screen::assignee_label_bare(resolved, assignee)
+    }
+
     /// The transient status note (dispatch feedback / failure), if any.
     #[must_use]
     pub fn note(&self) -> Option<&str> {
@@ -1525,33 +1552,31 @@ impl IssueListState {
             .into_iter()
             .enumerate()
             .map(|(idx, column)| {
-                let cards =
-                    self.rows_in_column(column)
-                        .map(|r| BoardCard {
-                            issue_id: r.id.as_str().to_string(),
-                            display_id: r
-                                .display_id
-                                .clone()
-                                .unwrap_or_else(|| r.id.as_str().to_string()),
-                            title: r.title.clone(),
-                            priority: PriorityChip::from_priority(r.priority),
-                            assignee_initial: r.assignee.as_deref().and_then(|a| {
-                                a.split_once(':').map_or(a, |(_, id)| id).chars().next()
-                            }),
-                            linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
-                            // 0046: the sub-issue roll-up, so a PARENT card shows a
-                            // `⊟ done/total` badge that flips to gold `1/1` when its
-                            // last child completes. `None` for a childless issue.
-                            subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
-                            // multica parity #12: the card wears a ⚠ when its
-                            // newest dispatch attempt was declined, so "not
-                            // running, and why" is discoverable from the board.
-                            not_dispatched: r
-                                .last_dispatch_reason
-                                .as_deref()
-                                .is_some_and(|c| !c.trim().is_empty()),
-                        })
-                        .collect::<Vec<_>>();
+                let cards = self
+                    .rows_in_column(column)
+                    .map(|r| BoardCard {
+                        issue_id: r.id.as_str().to_string(),
+                        display_id: r
+                            .display_id
+                            .clone()
+                            .unwrap_or_else(|| r.id.as_str().to_string()),
+                        title: r.title.clone(),
+                        priority: PriorityChip::from_priority(r.priority),
+                        assignee: self.assignee_label(r.assignee.as_deref()),
+                        linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
+                        // 0046: the sub-issue roll-up, so a PARENT card shows a
+                        // `⊟ done/total` badge that flips to gold `1/1` when its
+                        // last child completes. `None` for a childless issue.
+                        subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
+                        // multica parity #12: the card wears a ⚠ when its
+                        // newest dispatch attempt was declined, so "not
+                        // running, and why" is discoverable from the board.
+                        not_dispatched: r
+                            .last_dispatch_reason
+                            .as_deref()
+                            .is_some_and(|c| !c.trim().is_empty()),
+                    })
+                    .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
                 // that shrank (a moved/deleted card) never scrolls past its last
                 // card into a blank body.
@@ -1914,6 +1939,12 @@ pub enum IssueListIntent {
     /// its success reply, retries `hangar/issue_delete` (cancel commits before the
     /// delete).
     CancelAndDeleteIssue(IssueId),
+    /// Re-pull the `@` repo roster (`hangar/repo_list`), raised whenever the
+    /// create wizard opens (crisp B1, defect 6): the roster was fetched once at
+    /// connect and a repo added since (the CLI writes the store with no event)
+    /// was unpickable until a restart. The reply lands through the same
+    /// `set_repos` seam, so an open wizard simply sees more candidates.
+    RefreshRepos,
 }
 
 /// The result of folding one [`IssueListEvent`] into an [`IssueListState`].
@@ -1958,11 +1989,14 @@ fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
     }
 }
 
-/// Map the legacy reducer char vocabulary onto a [`WizardKey`].
-const fn wizard_key_from_char(c: char) -> WizardKey {
+/// Map the reducer char vocabulary onto a [`WizardKey`]. Also the wizard's half
+/// of the ONE key translation ([`crate::screen::app_screens`]), so the wizard's
+/// text rows read a Ctrl chord exactly as every other input does.
+pub(crate) const fn wizard_key_from_char(c: char) -> WizardKey {
     match c {
         '\n' | '\r' => WizardKey::Enter,
         '\u{8}' | '\u{7f}' => WizardKey::Backspace,
+        crate::screen::app_screens::CLEAR_LINE => WizardKey::ClearLine,
         other => WizardKey::Char(other),
     }
 }
@@ -2027,7 +2061,7 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
 }
 
 /// Filter-input-mode key handling: Enter/Esc leave the mode, Backspace deletes,
-/// any other printable char appends to the query.
+/// Ctrl+U clears the query, any other printable char appends to it.
 fn reduce_filter_input_key(state: &IssueListState, c: char) -> IssueListReduction {
     let mut next = state.clone();
     match c {
@@ -2038,6 +2072,9 @@ fn reduce_filter_input_key(state: &IssueListState, c: char) -> IssueListReductio
         '\u{8}' | '\u{7f}' => {
             next.query.pop();
         }
+        // Ctrl+U empties the query without leaving filter mode (crisp B1,
+        // defect 21), the same chord the Boards inputs and the create wizard take.
+        crate::screen::app_screens::CLEAR_LINE => next.query.clear(),
         other => next.query.push(other),
     }
     next.clamp_selection();
@@ -2078,7 +2115,7 @@ fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
     next.wizard = Some(CreateWizard::default());
     // A fresh wizard supersedes any stale dispatch note.
     next.note = None;
-    no_intent(next)
+    with_intent(next, IssueListIntent::RefreshRepos)
 }
 
 /// Open the create wizard as an "add sub-issue" (`s`, 0046): identical to the
@@ -2102,7 +2139,7 @@ fn enter_create_subissue_mode(state: &IssueListState) -> IssueListReduction {
     next.mode = IssueListMode::CreateInput;
     next.wizard = Some(wizard);
     next.note = None;
-    no_intent(next)
+    with_intent(next, IssueListIntent::RefreshRepos)
 }
 
 /// Swap the open wizard for `wizard`, emitting no intent (a stage edit /
@@ -2251,6 +2288,7 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
         WizardKey::Right => wizard_cycle_value(state, wizard, true),
         WizardKey::Char(c) => wizard_type_char(state, wizard, c),
         WizardKey::Backspace => wizard_backspace(state, wizard),
+        WizardKey::ClearLine => wizard_clear_line(state, wizard),
         // Esc handled above.
         WizardKey::Esc => unchanged(state),
     }
@@ -2377,37 +2415,36 @@ fn wizard_type_char(
 /// Delete the last char of the focused text row (Title / Source / Target). A
 /// no-op on the picker rows.
 fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
-    match wizard.focus {
-        WizardRow::Title => {
-            wizard.title.pop();
-        }
-        WizardRow::Brief => {
-            wizard.brief.pop();
-        }
-        WizardRow::Link => {
-            wizard.link.pop();
-        }
-        WizardRow::Acceptance => {
-            wizard.acceptance.pop();
-        }
-        WizardRow::Context => {
-            wizard.context.pop();
-        }
-        WizardRow::Due => {
-            wizard.due.pop();
-        }
-        WizardRow::Labels => {
-            wizard.labels.pop();
-        }
-        WizardRow::Source => {
-            wizard.source_branch.pop();
-        }
-        WizardRow::Target => {
-            wizard.target_branch.pop();
-        }
-        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => {}
+    if let Some(field) = wizard_focused_field(&mut wizard) {
+        field.pop();
     }
     set_wizard(state, wizard)
+}
+
+/// Clear the focused text row (Ctrl+U, crisp B1 defect 21). A no-op on the picker
+/// rows, which hold no typed text to clear.
+fn wizard_clear_line(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
+    if let Some(field) = wizard_focused_field(&mut wizard) {
+        field.clear();
+    }
+    set_wizard(state, wizard)
+}
+
+/// The buffer the focused row types into, or `None` on a picker row (Repo /
+/// Priority / Agent), which is driven by `@` and ←→ rather than free text.
+fn wizard_focused_field(wizard: &mut CreateWizard) -> Option<&mut String> {
+    match wizard.focus {
+        WizardRow::Title => Some(&mut wizard.title),
+        WizardRow::Brief => Some(&mut wizard.brief),
+        WizardRow::Link => Some(&mut wizard.link),
+        WizardRow::Acceptance => Some(&mut wizard.acceptance),
+        WizardRow::Context => Some(&mut wizard.context),
+        WizardRow::Due => Some(&mut wizard.due),
+        WizardRow::Labels => Some(&mut wizard.labels),
+        WizardRow::Source => Some(&mut wizard.source_branch),
+        WizardRow::Target => Some(&mut wizard.target_branch),
+        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => None,
+    }
 }
 
 /// Handle a key while the `@` repo dropdown is open: chars filter, Backspace
@@ -2428,6 +2465,10 @@ fn wizard_dropdown_key(
         }
         WizardKey::Backspace => {
             wizard.repo_query.pop();
+            wizard.repo_dropdown = Some(0);
+        }
+        WizardKey::ClearLine => {
+            wizard.repo_query.clear();
             wizard.repo_dropdown = Some(0);
         }
         WizardKey::Up | WizardKey::Left => {
@@ -4486,19 +4527,7 @@ mod tests {
         })
     }
 
-    /// Reconstruct the full painted text of a rendered buffer (every cell, in
-    /// row-major order) so a render assertion can search for headers / glyphs.
-    fn painted_text(buf: &WireBuffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.height {
-            for (coord, cell) in &buf.cells {
-                if coord.y == y {
-                    out.push_str(&cell.symbol);
-                }
-            }
-        }
-        out
-    }
+    use crate::test_support::painted_text;
 
     /// The Issues screen renders through the seven-column card-board (63l.4):
     /// every canonical lifecycle column appears with its live count header, and a

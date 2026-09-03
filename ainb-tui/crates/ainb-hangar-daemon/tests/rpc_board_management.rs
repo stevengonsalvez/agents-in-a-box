@@ -1149,6 +1149,49 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
         "the run's tool call is in the served transcript: {jsonl}"
     );
 
+    // Crisp B1: the task-detail backfill names NO board. The issue alone resolves
+    // the same transcript under the workspace guard, so an issue that was never
+    // placed on a board can still show its run.
+    let unboarded = c
+        .call(
+            methods::HANGAR_BOARD_CARD_TIMELINE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": issue_id }),
+        )
+        .await;
+    assert!(
+        unboarded["error"].is_null(),
+        "a board-less timeline read is not an error: {unboarded}"
+    );
+    assert_eq!(unboarded["result"]["task_id"], task_id, "same newest task");
+    assert_eq!(
+        unboarded["result"]["jsonl"], tl["result"]["jsonl"],
+        "same transcript with or without the board"
+    );
+
+    // Naming a board the issue is NOT a card on is still refused: the
+    // membership check only relaxes when no board is named at all.
+    let other = c
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "Other" }),
+        )
+        .await;
+    let other_id = other["result"]["boards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["name"] == "Other")
+        .and_then(|b| b["id"].as_str())
+        .unwrap()
+        .to_string();
+    let foreign = c
+        .call(methods::HANGAR_BOARD_CARD_TIMELINE, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": other_id, "issue_id": issue_id }))
+        .await;
+    assert!(
+        !foreign["error"].is_null(),
+        "a named board the issue is not on is still refused: {foreign}"
+    );
+
     std::env::remove_var("AINB_HANGAR_HOME");
 }
 

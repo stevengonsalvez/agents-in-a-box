@@ -141,6 +141,79 @@ fn auto_scroll_releases_when_user_scrolls_up() {
     assert_eq!(after.scroll_offset(), offset_before);
 }
 
+/// Crisp B1 (defect 7): a durable-log backfill lands BEFORE whatever the screen
+/// already holds (a system line pushed since the open), sticky-bottom follows
+/// the new tail, and a released viewport keeps pointing at the same line.
+#[test]
+fn backfill_prepends_history_and_keeps_the_viewport_honest() {
+    let history = || {
+        vec![
+            TranscriptEntry::new(MessageKind::ToolCall, "Edit api.ts".into(), false),
+            TranscriptEntry::new(MessageKind::ToolResult, "3 files changed".into(), false),
+        ]
+    };
+
+    // Sticky: the offset tracks the new tail.
+    let mut s = state_for_task();
+    s.push_system_line("this run finished".into());
+    s.backfill_transcript(history());
+    let lines: Vec<&str> = s.transcript().map(TranscriptEntry::body).collect();
+    assert_eq!(
+        lines,
+        vec!["Edit api.ts", "3 files changed", "this run finished"]
+    );
+    assert!(s.is_stuck_to_bottom());
+    assert_eq!(s.scroll_offset(), 2);
+
+    // Released: the user's line stays the same line after history is prepended.
+    let mut s = state_for_task();
+    for i in 0..3 {
+        s = reduce_task_detail(
+            &s,
+            TaskDetailEvent::Event(message_event(MessageKind::Agent, &format!("live {i}"))),
+        )
+        .state;
+    }
+    let mut s = reduce_task_detail(&s, TaskDetailEvent::Key('k')).state;
+    assert!(!s.is_stuck_to_bottom());
+    let before = s.scroll_offset();
+    s.backfill_transcript(history());
+    assert_eq!(
+        s.scroll_offset(),
+        before + 2,
+        "offset shifts by the prepended count"
+    );
+    assert_eq!(s.transcript_len(), 5);
+
+    // Nothing to backfill: a no-op, not a reset.
+    let mut s = state_for_task();
+    s.backfill_transcript(Vec::new());
+    assert_eq!(s.transcript_len(), 0);
+}
+
+/// Crisp B1 review: the timeline request rides a CONSTANT id, so open / Esc /
+/// open again leaves the FIRST open's reply in flight and it lands on the second
+/// open's screen. The backfill applies once per state or the run's whole history
+/// is prepended twice.
+#[test]
+fn a_second_backfill_reply_does_not_double_the_history() {
+    let history = || {
+        vec![
+            TranscriptEntry::new(MessageKind::ToolCall, "Edit api.ts".into(), false),
+            TranscriptEntry::new(MessageKind::ToolResult, "3 files changed".into(), false),
+        ]
+    };
+
+    let mut s = state_for_task();
+    assert!(s.backfill_transcript(history()), "the first reply applies");
+    assert!(
+        !s.backfill_transcript(history()),
+        "the late duplicate reply is refused"
+    );
+    let lines: Vec<&str> = s.transcript().map(TranscriptEntry::body).collect();
+    assert_eq!(lines, vec!["Edit api.ts", "3 files changed"]);
+}
+
 /// `R` emits a retry intent only after the task reached a terminal state.
 #[test]
 fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
@@ -171,7 +244,9 @@ fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
     let retry = reduce_task_detail(&failed, TaskDetailEvent::Key('R'));
     assert_eq!(retry.intent, Some(TaskDetailIntent::RetryTask(task())));
 
-    // Finished success: retry also allowed (re-run).
+    // Finished success: the store refuses to requeue a done task, so instead of
+    // a silent no-op (crisp B1, defect 9) `R` explains itself in the transcript
+    // and raises no intent.
     let done = reduce_task_detail(
         &running,
         TaskDetailEvent::Event(HangarEvent::TaskFinished {
@@ -182,9 +257,22 @@ fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
     )
     .state;
     assert_eq!(done.lifecycle(), TaskLifecycle::Succeeded);
+    let noted = reduce_task_detail(&done, TaskDetailEvent::Key('R'));
+    assert_eq!(noted.intent, None, "no retry RPC for a finished run");
+    let last = noted.state.transcript().last().map(TranscriptEntry::body);
     assert_eq!(
-        reduce_task_detail(&done, TaskDetailEvent::Key('R')).intent,
-        Some(TaskDetailIntent::RetryTask(task()))
+        last,
+        Some("this run finished; R only retries a failed or cancelled run")
+    );
+
+    // Crisp B1 review: it says so ONCE. Key repeat used to append a copy per
+    // press, growing the transcript without bound.
+    let held = reduce_task_detail(&noted.state, TaskDetailEvent::Key('R'));
+    let held = reduce_task_detail(&held.state, TaskDetailEvent::Key('R'));
+    assert_eq!(
+        held.state.transcript_len(),
+        noted.state.transcript_len(),
+        "the refusal is not repeated while it is already the last line"
     );
 }
 

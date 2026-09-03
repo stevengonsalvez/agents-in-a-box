@@ -241,10 +241,23 @@ pub struct DaemonStatus {
 /// lite mode with no scanner running: the fleet HAS a designated owner and that
 /// owner is absent, which is a different problem from an unconfigured ATC and
 /// takes a different fix (`ainb daemon atc start`, not `fleet atc setup`).
+///
+/// `home` is the ainb home being probed, and the scanner heartbeat is read from
+/// it rather than from the process-global default. The full-mode path already
+/// resolves everything it reads relative to the caller's `home`; reading the
+/// heartbeat from somewhere else made the lite branch the one thing in this
+/// probe that could not be exercised against a fixture, which is how three of
+/// its four returns went untested.
+///
+/// `orphan` is carried in, not recomputed: every full-mode return reports the
+/// installed timer that fires into nothing, and a lite row that dropped it
+/// showed neither the warning nor the `remove-orphan` verb that clears it.
 fn probe_atc_lite(
+    home: &Path,
     paths: &crate::fleet::atc::paths::AtcPaths,
     meta: &crate::fleet::atc::meta::AtcMeta,
     now_ms: i64,
+    orphan: Option<String>,
 ) -> DaemonStatus {
     use crate::fleet::atc::heartbeat::HeartbeatState;
     use crate::fleet::atc::supervisor::{SupervisorMode, lite_heartbeat_id};
@@ -261,11 +274,13 @@ fn probe_atc_lite(
         .map(|s| HeartbeatState::from_json_or_default(&s))
         .and_then(|s| s.last_active_ms);
 
-    let Some(hb) = DaemonHeartbeat::read(&lite_heartbeat_id(&name)) else {
+    let Some(hb) = DaemonHeartbeat::read_in(home, &lite_heartbeat_id(&name)) else {
         return DaemonStatus {
             kind,
             state: DaemonState::Degraded,
             channel,
+            atc_instance: Some(name.clone()),
+            scheduler_orphan: orphan,
             last_activity_at: last_active,
             reason: format!(
                 "lite mode is the owner of this fleet but no scanner is running; \
@@ -282,6 +297,8 @@ fn probe_atc_lite(
             state: DaemonState::Stopped,
             pid: Some(hb.pid),
             channel,
+            atc_instance: Some(name.clone()),
+            scheduler_orphan: orphan,
             last_activity_at: last_active,
             ..DaemonStatus::stopped(
                 kind,
@@ -296,6 +313,8 @@ fn probe_atc_lite(
             state: DaemonState::Degraded,
             pid: Some(hb.pid),
             channel,
+            atc_instance: Some(name.clone()),
+            scheduler_orphan: orphan,
             last_activity_at: last_active,
             reason: format!(
                 "lite scanner alive (pid {}) but its last scan was {}s ago — wedged?",
@@ -311,6 +330,8 @@ fn probe_atc_lite(
         pid: Some(hb.pid),
         connected: true,
         channel,
+        atc_instance: Some(name),
+        scheduler_orphan: orphan,
         last_activity_at: last_active,
         error_count: hb.error_count,
         last_error: hb.last_error.clone(),
@@ -909,10 +930,10 @@ fn hangar_daemon_census() -> usize {
 /// Identity, not bare liveness: a recycled pid is a tombstone from a crashed
 /// scanner, and counting it as running would let a dead lite instance claim the
 /// row from a healthy full one.
-fn lite_scanner_is_live(name: &str) -> bool {
+fn lite_scanner_is_live(home: &Path, name: &str) -> bool {
     use crate::fleet::atc::supervisor::lite_heartbeat_id;
     use crate::fleet::daemons::heartbeat::{DaemonHeartbeat, PidCheck, pid_identity};
-    DaemonHeartbeat::read(&lite_heartbeat_id(name))
+    DaemonHeartbeat::read_in(home, &lite_heartbeat_id(name))
         .is_some_and(|hb| pid_identity(hb.pid, hb.started_at) == PidCheck::Matched)
 }
 
@@ -1005,7 +1026,7 @@ pub(crate) fn probe_atc_with(
         if meta.mode != SupervisorMode::Lite {
             continue;
         }
-        if lite_scanner_is_live(&meta.name) {
+        if lite_scanner_is_live(home, &meta.name) {
             lite_running = Some((p, meta));
             break;
         }
@@ -1014,7 +1035,7 @@ pub(crate) fn probe_atc_with(
         }
     }
     if let Some((p, meta)) = lite_running {
-        return probe_atc_lite(&p, &meta, now_ms);
+        return probe_atc_lite(home, &p, &meta, now_ms, orphan);
     }
 
     // Pick the most-recently-beating instance as the representative row, and
@@ -1075,14 +1096,13 @@ pub(crate) fn probe_atc_with(
         }
     }
 
-    let fall_back_to_idle_lite = |reason_if_none: DaemonStatus| -> DaemonStatus {
-        match &lite_idle {
-            Some((p, meta)) => probe_atc_lite(p, meta, now_ms),
-            None => reason_if_none,
-        }
-    };
-
     let Some((name, hbs, interval_min, provider)) = best else {
+        // A provisioned lite instance has no full-mode heartbeat by design, so
+        // it takes the lite probe rather than any of the stories below, which
+        // are all about a scheduler that has stopped beating.
+        if let Some((p, meta)) = &lite_idle {
+            return probe_atc_lite(home, p, meta, now_ms, orphan);
+        }
         // No enabled instance produced a usable heartbeat. If NONE of the
         // provisioned instances are even enabled, the daemon is configured off.
         let reason = if enabled_count == 0 {
@@ -1093,14 +1113,11 @@ pub(crate) fn probe_atc_with(
         } else {
             format!("{enabled_count} enabled instance(s), none have beaten yet")
         };
-        // Through the lite fallback: a provisioned lite instance has no
-        // full-mode heartbeat by design, so "none have beaten yet" is the wrong
-        // story to tell about it.
-        return fall_back_to_idle_lite(DaemonStatus {
+        return DaemonStatus {
             atc_instance: names.first().cloned(),
             scheduler_orphan: orphan,
             ..DaemonStatus::stopped(kind, reason)
-        });
+        };
     };
 
     if hbs.last_heartbeat_ms == 0 {
@@ -2570,6 +2587,130 @@ mod tests {
             s.reason.contains("heartbeat timer for 'main'"),
             "the orphan timer must be named: {}",
             s.reason
+        );
+    }
+
+    #[test]
+    fn a_lite_row_names_its_instance_so_the_menu_offers_real_verbs() {
+        // The Daemons menu is state-driven off `atc_instance`: `None` means
+        // "nothing provisioned", and the row then offers ONLY `provision`.
+        // Every lite status left that field unset, so a perfectly healthy lite
+        // fleet showed a menu with no lifecycle verbs and no mode switch — and
+        // `provision` itself refuses, because an instance does exist. The row
+        // became unusable. Only driving the TUI showed it; every unit test
+        // asserted on state and channel, which were both correct.
+        let home = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+        write_lite_instance(home.path(), "tower", now - 1000);
+
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
+        assert_eq!(
+            s.atc_instance.as_deref(),
+            Some("tower"),
+            "a lite row must name its instance or the menu treats it as unprovisioned"
+        );
+    }
+
+    /// Write the lite scanner's daemon heartbeat under the probed home.
+    ///
+    /// Under the home, not the process default: the fix that named the instance
+    /// touched all FOUR of `probe_atc_lite`'s returns, and only the
+    /// no-scanner-at-all one was reachable from a fixture while the heartbeat
+    /// was read from wherever the developer's real ainb home happened to be.
+    /// Deleting the field from the other three left the suite green.
+    fn write_lite_heartbeat(
+        home: &std::path::Path,
+        name: &str,
+        pid: u32,
+        started_at: i64,
+        last_heartbeat_at: i64,
+    ) {
+        use crate::fleet::atc::supervisor::lite_heartbeat_id;
+        use crate::fleet::daemons::heartbeat::heartbeat_path_in;
+        let path = heartbeat_path_in(home, &lite_heartbeat_id(name));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"pid":{pid},"started_at":{started_at},"last_heartbeat_at":{last_heartbeat_at},"connected":true,"error_count":0}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    /// Our own pid, with the `started_at` that makes the identity check MATCH.
+    /// A fabricated timestamp reads as a recycled pid and takes a different
+    /// branch, so the healthy row can only be reached through the real one.
+    fn live_self() -> (u32, i64) {
+        let pid = std::process::id();
+        let started = super::super::heartbeat::process_start_ms(pid).expect("self start readable");
+        (pid, started)
+    }
+
+    #[test]
+    fn every_lite_row_names_its_instance_whatever_its_scanner_is_doing() {
+        // The menu reads `atc_instance` and nothing else to decide whether the
+        // row is provisioned, so ONE branch getting it right is not the fix:
+        // a wedged or crashed scanner is exactly when the operator opens the
+        // menu, and those rows must offer the same verbs a healthy one does.
+        let now = super::super::heartbeat::now_ms();
+        let (pid, started) = live_self();
+        let stale = stale_after_ms();
+
+        for (case, hb, expected) in [
+            ("no scanner at all", None, DaemonState::Degraded),
+            (
+                "crashed: nothing owns the recorded pid",
+                Some((0x7fff_ffff, now - 60_000, now)),
+                DaemonState::Stopped,
+            ),
+            (
+                "wedged: alive but not scanning",
+                Some((pid, started, now - stale - 60_000)),
+                DaemonState::Degraded,
+            ),
+            (
+                "healthy: alive and scanning",
+                Some((pid, started, now)),
+                DaemonState::Running,
+            ),
+        ] {
+            let home = TempDir::new().unwrap();
+            write_lite_instance(home.path(), "tower", now - 1000);
+            if let Some((pid, started, beat)) = hb {
+                write_lite_heartbeat(home.path(), "tower", pid, started, beat);
+            }
+
+            let s = probe_atc_with(home.path(), now, &|_| Some(true), &[]);
+            assert_eq!(s.state, expected, "{case}: reason {}", s.reason);
+            assert_eq!(
+                s.atc_instance.as_deref(),
+                Some("tower"),
+                "{case}: a lite row must name its instance or the menu treats it as unprovisioned"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lite_row_still_names_a_timer_firing_into_nothing() {
+        // Every full-mode return carries the orphan; the lite ones dropped it,
+        // so a lite fleet with a stale full-mode unit beside it showed neither
+        // the warning nor `remove-orphan`, the one verb that clears it. The
+        // orphan outlives the switch that made the fleet lite, so this is the
+        // ordinary state after `mode --set lite` fails to tear a unit down.
+        let now = super::super::heartbeat::now_ms();
+        let (pid, started) = live_self();
+        let home = TempDir::new().unwrap();
+        write_lite_instance(home.path(), "tower", now - 1000);
+        write_lite_heartbeat(home.path(), "tower", pid, started, now);
+
+        let s = probe_atc_with(home.path(), now, &|_| Some(true), &["gone".to_string()]);
+
+        assert_eq!(s.state, DaemonState::Running, "reason: {}", s.reason);
+        assert_eq!(
+            s.scheduler_orphan.as_deref(),
+            Some("gone"),
+            "the stale unit must be named on a lite row too"
         );
     }
 

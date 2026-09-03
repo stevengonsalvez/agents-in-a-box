@@ -364,6 +364,62 @@ fn switching_reports_the_transition_and_is_idempotent() {
 }
 
 #[test]
+fn the_switch_ends_with_the_transition_so_the_daemons_row_badges_it() {
+    // The Daemons screen badges an ATC row with the LAST non-empty line of the
+    // action's stdout (`run_daemon_action` in components/daemons.rs). That makes
+    // the print order here a contract, not a layout choice: ending the block
+    // with the mode help badged the row with the help's closing line,
+    // "switch: `ainb fleet atc mode <name> --set full`", in place of what the
+    // switch did. Ending with a note badged it with a scheduler detail.
+    //
+    // Asserted against the real binary's stdout, because the ordering is the
+    // whole fix and nothing else in the tree would notice it being undone.
+    let home = home_for("badge");
+    let name = instance("badge");
+    assert!(setup(&home, &name, &[]).status.success());
+
+    // --no-reconcile both keeps the test off the developer's schedulers AND
+    // guarantees a note, so this proves the notes really do come FIRST rather
+    // than passing on an empty list.
+    let out = run(
+        &home,
+        &[
+            "fleet",
+            "atc",
+            "mode",
+            &name,
+            "--set",
+            "lite",
+            "--no-reconcile",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = String::from_utf8_lossy(&out.stdout);
+
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .expect("the switch says something")
+        .trim();
+    assert!(
+        last.starts_with(&format!("ATC '{name}' switched full → lite")),
+        "the row badges this line, so it must be the transition, got {last:?} from:\n{text}"
+    );
+    assert!(
+        text.contains("--no-reconcile:"),
+        "the note must still be printed, above the transition:\n{text}"
+    );
+    // The help belongs to `mode <name>` and to the inline panel on that same
+    // screen. Reprinting it here is what put a help line where health goes.
+    assert!(
+        !text.contains("--set full"),
+        "the switch must not reprint the mode help:\n{text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
 fn reading_the_mode_never_changes_it() {
     // Switching the thing that drives a whole fleet must take an explicit
     // --set; looking at it must not be enough.
