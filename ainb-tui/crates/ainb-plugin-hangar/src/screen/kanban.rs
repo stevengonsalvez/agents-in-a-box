@@ -561,8 +561,9 @@ fn elide_branch(branch: &str) -> String {
 
 /// Whether `s` has ULID shape: 26 chars of uppercase Crockford base32 (the digits
 /// plus the alphabet minus `I`, `L`, `O`, `U`), which is what the store mints and
-/// what every id on the wire looks like.
-fn is_ulid(s: &str) -> bool {
+/// what every id on the wire looks like. Crate-visible so every "shorten an id
+/// the operator cannot read" seam tests the same shape (crisp B1).
+pub(crate) fn is_ulid(s: &str) -> bool {
     s.chars().count() == 26
         && s.chars().all(|c| {
             c.is_ascii_digit()

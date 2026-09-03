@@ -1200,12 +1200,11 @@ fn render_detail_card(
 
     // --- Assignee / Agent: the roster display names once the glue resolved them
     //     (crisp B1, defect 8), so the row reads `impl-1`, never `agent:<ulid>`;
-    //     the raw ref / provider token stays as the fallback until then. ---
-    let assignee = state
-        .assignee_name
-        .as_deref()
-        .or(issue.assignee.as_deref())
-        .unwrap_or("unassigned");
+    //     before the roster lands the SHORT id stands in, the same fallback the
+    //     board cards take (the shared `assignee_label`). ---
+    let assignee =
+        crate::screen::assignee_label(state.assignee_name.as_deref(), issue.assignee.as_deref())
+            .unwrap_or_else(|| "unassigned".to_string());
     let agent = state.agent_name.as_deref().or(issue.agent.as_deref()).unwrap_or(CARD_UNSET);
     card_field_row(
         buf,
@@ -1213,7 +1212,7 @@ fn render_detail_card(
         row,
         &[
             ("Assignee: ", CARD_LABEL),
-            (assignee, CARD_VALUE),
+            (assignee.as_str(), CARD_VALUE),
             ("   Agent: ", CARD_LABEL),
             (agent, CARD_VALUE),
         ],

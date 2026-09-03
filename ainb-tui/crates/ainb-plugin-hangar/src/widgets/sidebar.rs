@@ -31,7 +31,7 @@ const VALUE: Color = Color::rgb(220, 220, 230);
 /// cornflower-blue and the value in soft-white, clipped at `width`.
 ///
 /// `assignee_name` is the assignee's roster display name when the caller has
-/// resolved it (crisp B1, defect 8); `None` paints the issue's raw actor ref.
+/// resolved it (crisp B1, defect 8); `None` degrades to the ref's short id.
 pub fn render_sidebar(
     buf: &mut WireBuffer,
     x: u16,
@@ -44,8 +44,11 @@ pub fn render_sidebar(
     let mut row = top;
     // Always-shown rows.
     row = put_field(buf, x, row, bottom, width, "Status", &issue.state);
-    let assignee = assignee_name.or(issue.assignee.as_deref()).unwrap_or("unassigned");
-    row = put_field(buf, x, row, bottom, width, "Assignee", assignee);
+    // The shared fallback: a SHORT id before the roster lands, never the raw
+    // `agent:<ulid>` this row used to paint (crisp B1 review).
+    let assignee = crate::screen::assignee_label(assignee_name, issue.assignee.as_deref())
+        .unwrap_or_else(|| "unassigned".to_string());
+    row = put_field(buf, x, row, bottom, width, "Assignee", &assignee);
     row = put_field(buf, x, row, bottom, width, "Project", &issue.workspace_id);
     // Progressive disclosure: only when present.
     if !issue.labels.is_empty() {
@@ -208,6 +211,27 @@ mod tests {
         );
         let line = row_text(&buf, 1, 40);
         assert!(line.contains("Assignee: impl-1"), "resolved name: {line}");
+        assert!(!line.contains("01M1FHM2"), "raw ULID gone: {line}");
+    }
+
+    /// Crisp B1 review: BEFORE the roster lands the row degrades to the ref's
+    /// short id, the same fallback a board card takes, never the raw 26-char
+    /// ULID it used to paint. The actor KIND survives, it is what tells an agent
+    /// assignee from a human one.
+    #[test]
+    fn an_unresolved_ulid_assignee_degrades_to_a_short_id() {
+        let mut buf = WireBuffer::new(40, 8);
+        render_sidebar(
+            &mut buf,
+            0,
+            0,
+            8,
+            40,
+            &issue(None, Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V")),
+            None,
+        );
+        let line = row_text(&buf, 1, 40);
+        assert!(line.contains("Assignee: agent:AYF56V"), "short id: {line}");
         assert!(!line.contains("01M1FHM2"), "raw ULID gone: {line}");
     }
 
