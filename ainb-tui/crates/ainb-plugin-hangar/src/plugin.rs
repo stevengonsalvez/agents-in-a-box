@@ -588,6 +588,20 @@ fn read_daemon_token() -> Option<String> {
     (!token.is_empty()).then_some(token)
 }
 
+/// Whether `event` can move a name the inbox lookup holds (an agent label, a
+/// parent issue's display id or title) — i.e. whether it must re-project.
+///
+/// Everything can EXCEPT a live transcript line. A streaming run pushes
+/// `TaskMessage` faster than anything else on this path and moves no name at all,
+/// so re-projecting on one would rebuild two maps per line of agent output.
+///
+/// Named rather than inlined so the gate can be pinned: inverting it is silent
+/// (the inbox stays correct, the plugin just does the work per transcript line),
+/// which is exactly the kind of regression nothing notices.
+const fn names_may_move(event: &HangarEvent) -> bool {
+    !matches!(event, HangarEvent::TaskMessage { .. })
+}
+
 /// The current wall-clock time in epoch milliseconds, for the Kanban card-age
 /// derivation when (re)building the hit-map (63l.6). Mirrors the render clock in
 /// [`crate::screen::app_screens`]; a clock skew before the epoch saturates to `0`.
@@ -1221,10 +1235,7 @@ impl HangarPlugin {
         {
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
-        // A transcript line moves no name the inbox lookup holds (agent label,
-        // parent issue, display id, title), and a streaming run pushes them
-        // faster than anything else on this path, so it does not re-project.
-        let names_may_move = !matches!(event, HangarEvent::TaskMessage { .. });
+        let names_may_move = names_may_move(&event);
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
             IssueListEvent::Event(event.clone()),
@@ -6289,6 +6300,49 @@ mod tests {
             p.fetch_pending,
             "a non-transcript event must arm the reconciling re-fetch"
         );
+    }
+
+    /// The SECOND gate on the same event: a `TaskMessage` must not re-project the
+    /// inbox name lookup either (crisp B1 review).
+    ///
+    /// The refetch gate above and this one are separate decisions that happen to
+    /// share a condition, and this one is silent when it breaks: inverting it
+    /// leaves the inbox correct and simply rebuilds two maps per line of streamed
+    /// agent output, which no other test notices. Every non-transcript event
+    /// re-projects, because any of them can move an agent label or an issue title.
+    #[test]
+    fn a_transcript_line_does_not_reproject_the_inbox_names() {
+        use ainb_hangar_core::ids::{AgentId, IssueId, TaskId};
+        use ainb_hangar_proto::events::{MessageKind, PresenceState};
+
+        assert!(
+            !names_may_move(&HangarEvent::TaskMessage {
+                task_id: TaskId::from_str("t1").unwrap(),
+                kind: MessageKind::Agent,
+                body: "streaming line".into(),
+            }),
+            "a transcript line moves no name the inbox holds"
+        );
+
+        for event in [
+            HangarEvent::IssueDeleted {
+                issue_id: IssueId::from_str("i1").unwrap(),
+            },
+            HangarEvent::TaskQueued {
+                task_id: TaskId::from_str("t1").unwrap(),
+                issue_id: IssueId::from_str("i1").unwrap(),
+                agent_id: AgentId::from_str("a1").unwrap(),
+            },
+            HangarEvent::AgentPresence {
+                agent_id: AgentId::from_str("a1").unwrap(),
+                state: PresenceState::Online,
+            },
+        ] {
+            assert!(
+                names_may_move(&event),
+                "{event:?} may move a name, so it must re-project"
+            );
+        }
     }
 
     /// An EOF socket event drops a connected link back to Disconnected.

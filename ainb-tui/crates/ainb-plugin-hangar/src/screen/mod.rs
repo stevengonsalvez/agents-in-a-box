@@ -326,3 +326,90 @@ pub struct Reduction {
     /// A side-effect for the plugin glue to perform, if any.
     pub intent: Option<Intent>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 26-char ULID, the shape every id on the wire has.
+    const ULID: &str = "01M1FHM2YSRSXZQFR29ZAYF56V";
+
+    /// The BARE label (the card-footer variant) over all four assignee shapes.
+    ///
+    /// Three surfaces share this helper and each one is ~21 cells wide, so every
+    /// rule it encodes is load-bearing: cut a ULID because nobody can read one,
+    /// keep a human ref whole because it is already its own label, and drop the
+    /// actor KIND because `agent:` alone is a third of a card footer.
+    ///
+    /// Pinned directly rather than through a caller (crisp B1 review): the three
+    /// callers each render it through a whole board, so a regression here used to
+    /// surface as an unrelated snapshot diff.
+    #[test]
+    fn assignee_label_bare_over_every_assignee_shape() {
+        for (actor_ref, expected) in [
+            // An agent ref: kind dropped, ULID cut to its last six.
+            (format!("agent:{ULID}"), "AYF56V"),
+            // A bare ULID with no kind at all: still cut.
+            (ULID.to_string(), "AYF56V"),
+            // A human ref: readable already, so it survives whole minus the kind.
+            ("member:dana".to_string(), "dana"),
+            // A ref whose id itself contains a colon: only the KIND is dropped,
+            // never the rest of the ref.
+            ("member:dana:x".to_string(), "dana:x"),
+        ] {
+            assert_eq!(
+                assignee_label_bare(None, Some(&actor_ref)).as_deref(),
+                Some(expected),
+                "bare label for {actor_ref:?}"
+            );
+        }
+        // No assignee at all is `None`, not an empty string the caller would paint
+        // a stray glyph beside.
+        assert_eq!(assignee_label_bare(None, None), None);
+    }
+
+    /// A RESOLVED display name is returned verbatim — including one that happens
+    /// to contain a colon, which the kind-stripping rule must not cut.
+    ///
+    /// `ops: dana` is a legal roster display name; splitting it would render the
+    /// agent as ` dana` and lose the team it belongs to.
+    #[test]
+    fn a_resolved_name_survives_its_own_colon() {
+        assert_eq!(
+            assignee_label_bare(Some("ops: dana"), Some(&format!("agent:{ULID}"))).as_deref(),
+            Some("ops: dana")
+        );
+        // And the WIDE variant agrees: a resolved name is the label on every
+        // surface, kind prefix or not.
+        assert_eq!(
+            assignee_label(Some("ops: dana"), Some("member:dana")).as_deref(),
+            Some("ops: dana")
+        );
+    }
+
+    /// The WIDE label keeps the actor kind — that prefix is what tells a human
+    /// assignee from an agent one on a row with room for it.
+    #[test]
+    fn assignee_label_keeps_the_kind_it_can_afford() {
+        assert_eq!(
+            assignee_label(None, Some(&format!("agent:{ULID}"))).as_deref(),
+            Some("agent:AYF56V")
+        );
+        assert_eq!(
+            assignee_label(None, Some("agent:claude-agent")).as_deref(),
+            Some("agent:claude-agent"),
+            "a named agent is not shortened into nonsense"
+        );
+    }
+
+    /// `failed` is the one outcome the run lists float first — NOT "anything that
+    /// is not success", which would float a user's own cancel and a still-running
+    /// row in with the real failures.
+    #[test]
+    fn only_failed_is_a_failed_outcome() {
+        assert!(is_failed_outcome("failed"));
+        for other in ["success", "cancelled", "running", "", "FAILED"] {
+            assert!(!is_failed_outcome(other), "{other:?} is not a failure");
+        }
+    }
+}
