@@ -109,15 +109,11 @@ use ainb_hangar_store::repo::fleet_acp_session::{
     FleetAcpSessionRepo, FleetAcpSessionRow, TurnEnd, TurnEndOutcome,
 };
 use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
-use ainb_hangar_store::repo::fleet_provider_event::{
-    FleetProviderEventRepo, NewFleetProviderEvent,
-};
+use ainb_hangar_store::repo::fleet_provider_event::NewFleetProviderEvent;
 use sqlx::SqlitePool;
 use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use crate::acp_transcript::TranscriptSink;
-use crate::events::EventSink;
-use crate::runner::RunStream;
 use tracing::Instrument as _;
 
 // ------------------------------------------------------------ detail taxonomy
@@ -1644,23 +1640,11 @@ pub async fn converge_dirty_session(
         };
         // A deterministic event_id makes the SECOND convergence of the same
         // turn a no-op insert rather than a duplicate marker.
-        match FleetProviderEventRepo::append(pool, &marker).await {
-            Ok(stored) => {
-                events.emit_transcript_order(session_key, stored.ingest_order);
-                // This row skips the sink (no actor here, so no writer), so it
-                // publishes itself or it never streams. Convergence is the
-                // operator-stop path: the interruption is the line an operator
-                // is most likely to be watching for.
-                if let Some(stream) =
-                    bind_task_stream(pool.clone(), events.clone(), row.scope_key.clone()).await
-                {
-                    crate::acp_transcript::publish_repo_row(
-                        &stream,
-                        &marker.event_type,
-                        &marker.raw_payload,
-                    );
-                }
-            }
+        // Appended AND published as one operation: this row never touches a
+        // StoreWriter, so nothing else would make it stream.
+        match crate::acp_transcript::append_and_publish(pool, events, &row.scope_key, &marker).await
+        {
+            Ok(stored) => events.emit_transcript_order(session_key, stored.ingest_order),
             Err(error) => tracing::error!(
                 %session_key,
                 %error,
@@ -1816,32 +1800,12 @@ struct SessionActor {
 /// What one turn's `session/prompt` came back with.
 type TurnResult = Result<PromptResponse, AcpError>;
 
-/// Bind a session's live task stream, or `None` when the scope is not a task's.
-///
-/// The scope convention is the whole discriminator: `acp_task` mints
-/// `task:<id>` and nothing else may (`fleet/acp_session_create` refuses the
-/// prefix), so `strip_prefix` is an exact test rather than a heuristic. The
-/// workspace comes from the same `workspace_for_scope` lookup
-/// `SessionActor::raise_permission` already uses to scope a task's approvals.
-///
-/// Free, and taking owned arguments, so the actor's `run` can await it without
-/// holding a borrow of an actor that is `Send` but not `Sync`.
-async fn bind_task_stream(
-    pool: SqlitePool,
-    events: EventSink,
-    scope_key: String,
-) -> Option<RunStream> {
-    let task_id = scope_key.strip_prefix(crate::acp_task::TASK_SCOPE_PREFIX)?;
-    let workspace_id = crate::acp_task::workspace_for_scope(&pool, &scope_key).await?;
-    RunStream::bind(&events, &workspace_id, task_id)
-}
-
 impl SessionActor {
     async fn run(mut self) {
         // Resolved off CLONES, not `&self`: the actor holds a parked-permission
         // responder that is `Send` but not `Sync`, so a future that borrowed
         // `self` across this await would not be spawnable.
-        let stream = bind_task_stream(
+        let stream = crate::acp_transcript::bind_task_stream(
             self.pool.store.pool().clone(),
             self.pool.events.clone(),
             self.scope_key.clone(),
@@ -1978,14 +1942,14 @@ impl SessionActor {
         }
     }
 
-    /// The one path a chunk takes THROUGH THE STORE WRITER: published live,
-    /// then committed durably.
+    /// Published live, then committed durably.
     ///
-    /// Not "the one path a transcript row takes", which was the claim until a
-    /// verify found `converge_dirty_session` appending straight to the repo.
-    /// The writer is unreachable outside [`crate::acp_transcript`] and that part
-    /// is compile-enforced; the ledger underneath it is public and that part is
-    /// not. See [`crate::acp_transcript::publish_repo_row`].
+    /// This is the chunk door into [`crate::acp_transcript`]; the marker door is
+    /// `TranscriptSink::lifecycle` and the append-straight-to-the-ledger door is
+    /// `acp_transcript::append_and_publish`. Every `event_type` the classifier
+    /// RENDERS is minted behind one of those three, which is the guarantee worth
+    /// stating because it is checkable — see that module's header for why
+    /// counting tokens bounds this and counting write sites does not.
     ///
     /// Live BEFORE durable, deliberately: `writer.push` buffers and commits on a
     /// cadence, so publishing after it would hold the operator's transcript back
