@@ -2472,10 +2472,15 @@ mod tests {
         let shared = Mutex::new(Snapshot::default());
         collect_into(&shared);
         let guard = shared.lock().unwrap();
-        assert_eq!(
+        // At most every controllable daemon, and never more. Not equality: the
+        // fleet-daemon row is conditional now (it appears only while one is
+        // actually running, since ATC is the supervisor), so on the machine
+        // running this test it is normally absent.
+        assert!(
+            !guard.rows.is_empty() && guard.rows.len() <= crate::cli::daemon::CONTROLLABLE.len(),
+            "collect published {} rows, expected 1..={}",
             guard.rows.len(),
-            crate::cli::daemon::CONTROLLABLE.len(),
-            "collect publishes every daemon"
+            crate::cli::daemon::CONTROLLABLE.len()
         );
         assert!(
             guard.collected_at_ms > 0,

@@ -1323,7 +1323,7 @@ pub const HANGAR_BOARD_CARD_REMOVE: &str = "hangar/board_card_remove";
 /// [`crate::snapshots::BoardCardTimelineResult`] — the RAW provider stream-json
 /// (`claude.jsonl` / `codex.jsonl`) the card's newest task teed to disk, bounded
 /// to a tail so a huge run never floods the socket. The plugin parses it into the
-/// transcript taxonomy ([`ainb-plugin-hangar`'s `jsonl_timeline`]). A card that
+/// transcript taxonomy ([`crate::transcript::classify_stream_json`]). A card that
 /// never ran (or whose log is gone) yields an empty transcript, never an error. A
 /// read, workspace-scoped via the board.
 pub const HANGAR_BOARD_CARD_TIMELINE: &str = "hangar/board_card_timeline";

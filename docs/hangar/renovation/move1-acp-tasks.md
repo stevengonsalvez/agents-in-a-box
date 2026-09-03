@@ -334,17 +334,22 @@ documents. Poll cost is one indexed read per second per running ACP task, capped
 
 ### 2f. RunOutcome mapping
 
-Needs one 3-line pool change so a success carries its stop reason: at `acp_pool.rs:1936-1947`
-the success arm passes `detail = None`; make it `Some(format!("stop={:?}",
-response.stop_reason))`. Additive -- the detail already gets `resume=...` appended the same
-way (`:1959-1963`) and no reader parses it strictly.
+Landed in A4: a leg carries `stop=<reason>` in the ACP wire spelling
+(`acp_pool::stop_reason_token`, snake_case like every other token here), and carries it only
+when the reason is worth naming. An ordinary `EndTurn` writes NO token, exactly as an
+un-rebuilt context writes no `resume=`, so a DELIVERED leg with no `stop=` IS the success
+case.
+
+Read the detail as a `; `-joined TOKEN SET, never by equality: a leg can be `stop=max_tokens;
+resume=reprimed`, and a plain success can be `resume=loaded` rather than NULL. Match on the
+presence and value of the `stop=` token.
 
 | leg `state` | leg `detail` | `RunOutcome` | retry disposition |
 |---|---|---|---|
-| `DELIVERED` | `stop=EndTurn` | `Success(result)` | n/a |
-| `DELIVERED` | `stop=MaxTokens` / `stop=MaxTurnRequests` | `Failed{IterationLimit}` | FreshRetry |
-| `FAILED` | `turn_failed; Refusal` | `Failed{AgentError}` | NoRetry |
-| `FAILED` | `turn_failed; Cancelled` | `Cancelled(result)` | n/a |
+| `DELIVERED` | no `stop=` token | `Success(result)` | n/a |
+| `DELIVERED` | `stop=max_tokens` / `stop=max_turn_requests` | `Failed{IterationLimit}` | FreshRetry |
+| `FAILED` | `turn_failed; stop=refusal` | `Failed{AgentError}` | NoRetry |
+| `FAILED` | `turn_failed; stop=cancelled` | `Cancelled(result)` | n/a |
 | `FAILED` | `spawn_failed` / `mode_unproven` / `turn_unrecorded` | `Failed{SpawnError}` | NoRetry |
 | `FAILED` | `session_gone` | `Failed{ProvisionError}` | NoRetry |
 | `FAILED` | `breaker_open` / `provider_at_capacity` / `queue_full` | `Failed{RuntimeOffline}` | ResumeRetry |

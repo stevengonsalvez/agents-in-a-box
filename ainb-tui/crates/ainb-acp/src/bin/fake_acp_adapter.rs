@@ -37,6 +37,7 @@
 //! | `FAKE_ACP_PERMISSION_NO_ALLOW` | offer only reject-flavoured options, so `Approve` has nothing to select |
 //! | `FAKE_ACP_DIE_AFTER_CHUNKS` | emit the turn's updates, then exit WITHOUT replying to `session/prompt` |
 //! | `FAKE_ACP_FAIL_TURN_SESSIONS` | comma list (or `*`) whose prompt answers `stopReason: refusal` |
+//! | `FAKE_ACP_STOP_REASON` | `stopReason` answered by every non-refused prompt (default `end_turn`; e.g. `max_tokens`) |
 //! | `FAKE_ACP_HANG_PROMPTS` | comma list (or `*`) of prompt TEXTS whose turn never answers |
 //! | `FAKE_ACP_ECHO_PROMPT` | append the prompt text to the final agent message |
 //! | `FAKE_ACP_GHOST_SESSION` | per turn, emit one `session/update` AND one `session/request_permission` for THIS adapter session id, which no client session owns |
@@ -355,9 +356,9 @@ fn prompt(out: &SharedOut, pending: &Pending, id: &serde_json::Value, params: &s
     }
     flip_mode(out, &session_id);
     let stop = if selected("FAKE_ACP_FAIL_TURN_SESSIONS", &session_id) {
-        "refusal"
+        "refusal".to_string()
     } else {
-        "end_turn"
+        var("FAKE_ACP_STOP_REASON").unwrap_or_else(|| "end_turn".to_string())
     };
     respond(out, id, &serde_json::json!({"stopReason": stop}));
 }
