@@ -3854,7 +3854,7 @@ impl HangarPlugin {
         // The pane folds in only the narrative of the issue the fetch was armed
         // for: the reply frame names no issue, and the detail screen may have
         // moved on to another one since.
-        if let Some(issue_id) = self.screens.activity_fetch_issue().map(ToString::to_string) {
+        if let Some(issue_id) = self.screens.claim_activity_reply().map(ToString::to_string) {
             self.screens.set_task_detail_activity(&issue_id, &parsed.entries);
         }
         if let Some(activity) = self.screens.activity.as_mut() {
@@ -6041,7 +6041,7 @@ impl Plugin for HangarPlugin {
         // multica parity #13: drain a deferred activity-timeline fetch (armed by
         // `y` opening the modal, or `r` inside it) and fire
         // `hangar/issue_timeline`. The reply folds the merged narrative in.
-        if let Some(issue_id) = self.screens.pending_activity_fetch.take() {
+        if let Some(issue_id) = self.screens.take_pending_activity_fetch() {
             self.fire_issue_timeline(host, issue_id).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
@@ -7190,14 +7190,9 @@ mod tests {
         p.on_key(&enter_press());
         assert!(matches!(p.app_state().screen, Screen::TaskDetail(_)));
         assert_eq!(
-            p.screens.pending_activity_fetch.as_deref(),
+            p.screens.take_pending_activity_fetch().as_deref(),
             Some("issue-1"),
             "opening the detail arms the activity fetch for its issue"
-        );
-        assert_eq!(
-            p.screens.activity_fetch_issue(),
-            Some("issue-1"),
-            "and records which issue the reply will be for"
         );
 
         let entries = vec![TimelineEntryRow {
@@ -7216,16 +7211,38 @@ mod tests {
             error: None,
         };
 
-        // A reply armed for ANOTHER issue never reaches this pane.
-        p.screens.arm_activity_fetch("issue-other".into());
-        p.on_daemon_response(&reply(entries.clone()));
         assert!(
             p.screens.task_detail.as_ref().unwrap().activity().is_empty(),
-            "another issue's narrative never lands on this screen"
+            "the pane starts empty"
         );
 
-        // This issue's reply composes and renders.
+        // The open's own fetch is answered: composed, attributed, landed.
+        p.on_daemon_response(&reply(entries.clone()));
+        let landed = p.screens.task_detail.as_ref().unwrap().activity().to_vec();
+        assert_eq!(landed.len(), 1, "one narrative row: {landed:?}");
+
+        // A reply for ANOTHER issue never replaces it: the fetch is attributed
+        // to issue-other, the open detail is issue-1, so the pane keeps what it
+        // had rather than captioning one issue's narrative with another's title.
+        p.screens.arm_activity_fetch("issue-other".into());
+        p.on_daemon_response(&reply(Vec::new()));
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().activity(),
+            landed.as_slice(),
+            "another issue's reply leaves this pane alone"
+        );
+
+        // TWO fetches in flight share one JSON-RPC id, so the first reply back
+        // cannot be told from the second. The pane skips the ambiguous one and
+        // takes the last, which is the one its own arm is for.
+        p.screens.arm_activity_fetch("issue-other".into());
         p.screens.arm_activity_fetch("issue-1".into());
+        p.on_daemon_response(&reply(Vec::new()));
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().activity(),
+            landed.as_slice(),
+            "an unattributable reply is skipped, never guessed"
+        );
         p.on_daemon_response(&reply(entries));
         let pane = p.screens.task_detail.as_ref().unwrap().activity().to_vec();
         assert_eq!(pane.len(), 1, "one narrative row: {pane:?}");

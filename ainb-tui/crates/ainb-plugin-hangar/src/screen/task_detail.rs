@@ -513,11 +513,17 @@ impl TaskDetailState {
     /// Replace the execution log (crisp B4 §2.3), ordering it running-first,
     /// then failed, then the rest, newest first inside each bucket.
     ///
-    /// The cursor follows the BOUND run wherever the re-order puts it, so a run
-    /// that finishes (and drops out of the running bucket) keeps its expanded
-    /// row rather than handing the transcript pane to whatever slid into its
-    /// index. An issue whose bound task is not in the list — a synthetic
-    /// `task-<issue>` id on a never-run issue — expands the top row.
+    /// The cursor follows the run it was ON, by id, wherever the re-order puts
+    /// it — so a run that finishes (and drops out of the running bucket) keeps
+    /// its expanded row rather than handing the transcript pane to whatever slid
+    /// into its index.
+    ///
+    /// It follows the OPERATOR'S choice, not the bound task: this is called on
+    /// every `tasks_list` / `agents_list` snapshot, and every non-`TaskMessage`
+    /// daemon event arms a re-pull, so recomputing from the bound id would snap
+    /// an expanded older attempt back to the live run every few seconds — on a
+    /// live issue, which is the only kind where it matters. The bound run is the
+    /// fallback for the FIRST call, when nothing is expanded yet.
     pub fn set_runs(&mut self, mut runs: Vec<RunRow>) {
         runs.sort_by(|a, b| {
             a.order()
@@ -525,8 +531,12 @@ impl TaskDetailState {
                 .then_with(|| b.started_at.cmp(&a.started_at))
                 .then_with(|| a.task_id.cmp(&b.task_id))
         });
+        let expanded = self.expanded_run().map(|r| r.task_id.clone());
         let bound = self.task_id.as_str();
-        self.run_cursor = runs.iter().position(|r| r.task_id == bound).unwrap_or(0);
+        self.run_cursor = expanded
+            .and_then(|id| runs.iter().position(|r| r.task_id == id))
+            .or_else(|| runs.iter().position(|r| r.task_id == bound))
+            .unwrap_or(0);
         self.runs = runs;
     }
 
@@ -1309,8 +1319,13 @@ fn render_run_head(
         if row >= bottom {
             return row;
         }
-        let head = format!("{} {} {}", run.state.glyph(), run.agent, run.state.phrase());
-        let mut parts = vec![crate::vocab::elapsed_word(run.elapsed_ms(now_ms))];
+        let head = format!(
+            "{} {} {}",
+            run.state.glyph(),
+            run.agent,
+            state_and_duration(run.state.phrase(), run, now_ms)
+        );
+        let mut parts: Vec<String> = Vec::new();
         // The tool count is the transcript's, so it only speaks for the run the
         // transcript belongs to.
         if state.transcript_is_for_expanded_run() && state.tool_calls > 0 {
@@ -1320,7 +1335,11 @@ fn render_run_head(
         if let Some(cents) = run.cost_cents {
             parts.push(crate::vocab::cost_word(cents));
         }
-        let line = format!("{head} · {}", parts.join(" · "));
+        let line = if parts.is_empty() {
+            head
+        } else {
+            format!("{head} · {}", parts.join(" · "))
+        };
         let cells: Vec<(&str, Color)> = vec![(&line, run_color(run.state))];
         paint_head_row(buf, card_w, row, &cells, edges);
         // `X cancel` right-aligned, and only while there is a run to cancel.
@@ -1369,6 +1388,29 @@ fn render_run_head(
     }
     paint_head_row(buf, card_w, row, &cells, edges);
     row.saturating_add(1)
+}
+
+/// A run's state word (or card phrase) plus how long it took, as ONE fragment:
+/// `is working · 7m 17s`, `failed in 5m 00s`, `failed`.
+///
+/// The preposition is the point, and it is shared so the two surfaces cannot
+/// drift: without `in`, a terminal row reads `failed 5m 00s`, which everybody
+/// parses as "failed five minutes AGO" rather than "took five minutes". The run
+/// card and the execution log differ only in the `lead` they pass — the card's
+/// sentence phrase versus the log's compact word.
+///
+/// A terminal run with NO recorded end drops the duration entirely rather than
+/// ticking: `finished_at` is joined from the row-capped `run_history`, so a real
+/// finished run can arrive without one, and an elapsed measured from its START
+/// would grow on every repaint. `failed` alone is true; `failed in 3d 4h` is not.
+fn state_and_duration(lead: &str, run: &RunRow, now_ms: i64) -> String {
+    use crate::vocab::RunState;
+    let elapsed = || crate::vocab::elapsed_word(run.elapsed_ms(now_ms));
+    match (run.finished_at, run.state) {
+        (Some(_), _) => format!("{lead} in {}", elapsed()),
+        (None, RunState::Queued | RunState::Running) => format!("{lead} · {}", elapsed()),
+        (None, _) => lead.to_string(),
+    }
 }
 
 /// Whether `run` is the run whose transcript the screen is bound to.
@@ -1537,25 +1579,12 @@ fn render_execution_log(
         }
         let expanded = idx == state.run_cursor;
         let marker = if expanded { "▶ " } else { "  " };
-        // `running 7m 17s` is an elapsed clock; `failed in 5m 00s` is how long
-        // it took. Same duration, and without the preposition the terminal rows
-        // read as "failed five minutes ago", which they do not mean.
-        let elapsed = crate::vocab::elapsed_word(run.elapsed_ms(now_ms));
-        let line = if run.finished_at.is_some() {
-            format!(
-                "{} {} · {} in {elapsed}",
-                run.state.glyph(),
-                run.agent,
-                run.state.word()
-            )
-        } else {
-            format!(
-                "{} {} · {} {elapsed}",
-                run.state.glyph(),
-                run.agent,
-                run.state.word()
-            )
-        };
+        let line = format!(
+            "{} {} · {}",
+            run.state.glyph(),
+            run.agent,
+            state_and_duration(run.state.word(), run, now_ms)
+        );
         let mut cx = put_clipped(buf, 0, row, marker, SELECTION_GREEN, area_w);
         cx = put_clipped(buf, cx, row, &line, run_color(run.state), area_w);
         if let Some(url) = run.pr_url.as_deref() {

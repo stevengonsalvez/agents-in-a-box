@@ -649,16 +649,25 @@ pub struct ScreenStates {
     /// An issue id whose `hangar/issue_timeline` fetch is armed, awaiting the
     /// `render` pass to fire it over the daemon socket. `None` when idle.
     ///
-    /// Armed only through [`ScreenStates::arm_activity_fetch`], which also
-    /// records WHICH issue the reply will be for: the reply frame names no
-    /// issue, and this queue is `take`n the moment it fires.
-    pub pending_activity_fetch: Option<String>,
+    /// PRIVATE, and the accessors are the point: armed only through
+    /// [`ScreenStates::arm_activity_fetch`] (which also records WHICH issue the
+    /// reply is for) and drained only through
+    /// [`ScreenStates::take_pending_activity_fetch`]. A `pub` field made that a
+    /// doc comment rather than a rule, and the next direct write reopens the
+    /// stale-reply bug this pairing exists to close.
+    pending_activity_fetch: Option<String>,
     /// The issue the most recently armed `hangar/issue_timeline` fetch was for
     /// (crisp B4 §2.3). Survives the fire, unlike
     /// [`Self::pending_activity_fetch`], so a reply can be matched to the screen
     /// that asked for it instead of folding one issue's narrative into another's
     /// detail pane.
     activity_fetch_issue: Option<String>,
+    /// How many armed `hangar/issue_timeline` fetches have not yet been
+    /// answered. Every fetch rides the same constant JSON-RPC id, so two in
+    /// flight are indistinguishable on the way back; while more than one is
+    /// outstanding the pane skips the reply rather than attributing issue A's
+    /// narrative to issue B.
+    activity_fetches_outstanding: u32,
     /// Command-palette modal cache (present only while the palette is open,
     /// e38.13).
     pub command_palette: Option<CommandPaletteState>,
@@ -1481,17 +1490,37 @@ impl ScreenStates {
     }
 
     /// Arm a `hangar/issue_timeline` fetch for `issue_id` and record that the
-    /// next reply is for it. The ONE way to ask for a timeline: arming without
-    /// recording is what lets a stale reply land on the wrong screen.
+    /// next reply is for it. The ONE way to ask for a timeline — enforced by the
+    /// field being private, not by this sentence.
     pub fn arm_activity_fetch(&mut self, issue_id: String) {
         self.activity_fetch_issue = Some(issue_id.clone());
         self.pending_activity_fetch = Some(issue_id);
+        self.activity_fetches_outstanding = self.activity_fetches_outstanding.saturating_add(1);
     }
 
-    /// The issue the in-flight (or most recent) timeline fetch was armed for.
-    #[must_use]
-    pub fn activity_fetch_issue(&self) -> Option<&str> {
-        self.activity_fetch_issue.as_deref()
+    /// Take the armed fetch to fire it, if any. The ONE drain.
+    pub fn take_pending_activity_fetch(&mut self) -> Option<String> {
+        self.pending_activity_fetch.take()
+    }
+
+    /// The issue a just-arrived `hangar/issue_timeline` reply belongs to, or
+    /// `None` when it cannot be attributed.
+    ///
+    /// Consumes one outstanding fetch. While two or more were in flight the
+    /// answer is `None`: they share one JSON-RPC id, so the second reply cannot
+    /// be told from the first, and a wrong narrative under the right title is
+    /// worse than a pane that stays as it was for one more round trip.
+    ///
+    /// ponytail: counter, not a per-request id. Give the fetch its own id if a
+    /// second surface ever needs to read a timeline concurrently.
+    pub fn claim_activity_reply(&mut self) -> Option<&str> {
+        let outstanding = self.activity_fetches_outstanding;
+        self.activity_fetches_outstanding = outstanding.saturating_sub(1);
+        if outstanding == 1 {
+            self.activity_fetch_issue.as_deref()
+        } else {
+            None
+        }
     }
 
     /// Resolve the open task-detail header's names against the cached agents +
@@ -3549,6 +3578,65 @@ mod task_detail_open_tests {
             expanded(&states).as_deref(),
             Some("t-2"),
             "and wraps back round"
+        );
+    }
+
+    /// An expanded run SURVIVES a snapshot refresh.
+    ///
+    /// This is the path that made `enter` useless: `resolve_task_detail_names`
+    /// runs on every `tasks_list` / `agents_list` snapshot, and every
+    /// non-`TaskMessage` daemon event arms a re-pull, so a `set_runs` that
+    /// recomputed the cursor from the bound task id snapped an expanded older
+    /// attempt back to the live run every few seconds — on a LIVE issue, which
+    /// is the only kind with a second run to expand.
+    #[test]
+    fn an_expanded_run_survives_the_snapshot_refresh_that_arrives_seconds_later() {
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1"), agent("a2", "rev-1")]);
+        let mut older = task("t-1", "a2", "failed");
+        older.created_at = 1;
+        let mut live = task("t-2", "a1", "running");
+        live.created_at = 2;
+        states.set_tasks(&[older.clone(), live.clone()]);
+        states.open_task_detail(TaskId::from_str("t-2").unwrap(), issue(), None, None);
+
+        let expanded = |s: &ScreenStates| {
+            s.task_detail
+                .as_ref()
+                .and_then(|td| td.expanded_run().map(|r| r.task_id.clone()))
+        };
+
+        // Expand the older attempt, as the operator would with `enter`.
+        let out = reduce_task_detail(
+            states.task_detail.as_ref().unwrap(),
+            TaskDetailEvent::Key('\r'),
+        );
+        states.task_detail = Some(out.state);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "enter expanded it"
+        );
+
+        // The next snapshot lands (a heartbeat, another card moving, anything).
+        states.set_tasks(&[older, live]);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "the refresh must not snap the cursor back to the bound run"
+        );
+
+        // And a run that FINISHES keeps its expanded row across the re-order
+        // that moves it out of the running bucket.
+        let mut finished = task("t-2", "a1", "done");
+        finished.created_at = 2;
+        let mut older_done = task("t-1", "a2", "failed");
+        older_done.created_at = 1;
+        states.set_tasks(&[finished, older_done]);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "still the operator's choice after the bucket re-order"
         );
     }
 

@@ -11,7 +11,7 @@ expression: "glyph_map(&buf, 100)"
 │ Add GET /api/tickets/stats to the hono api under api/: returns {total, open, closed}.            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 runs ──────────────────────────────────────────────────────────────│ activity ──────────────────────
-▶ ◔ impl-1 · running 7m 17s  PR #8 ✓  $0.42                        │  7m impl-1 claimed the issue
+▶ ◔ impl-1 · running · 7m 17s  PR #8 ✓  $0.42                      │  7m impl-1 claimed the issue
   ✗ rev-1 · failed in 5m 00s  $0.11                                │  6m you moved todo → in progres
   ● impl-1 · done in 3m 00s                                        │
 transcript ────────────────────────────────────────────────────────│
