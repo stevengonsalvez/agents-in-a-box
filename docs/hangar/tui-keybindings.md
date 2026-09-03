@@ -10,28 +10,44 @@ Hints are rendered next to the control they affect (per
 
 ## Routing layer (all screens)
 
+Nine keys, down from eighteen (crisp B5). The tab strip carries the seven
+screens the loop runs through; the rest moved behind the command palette.
+
 | Key | Action |
 |-----|--------|
 | `1` | Issue list (landing) |
 | `2` | Task detail (only when a task is selected) |
-| `3` | Skill manager |
-| `4` | Autopilots |
-| `K` | Kanban |
+| `K` | Runs (the task board; the screen and its widget are still `kanban`) |
 | `B` | Boards |
-| `C` | Control center |
-| `S` | Squads |
-| `P` | Profile editor |
-| `D` | Daemon health |
-| `U` | Usage dashboard |
-| `L` | Logs |
 | `I` | Inbox |
-| `F` | Fleet (every live session: lenses, stop / interrupt / continue / kill, chat) |
 | `A` | Agents (roster + guided create wizard) |
 | `,` | Settings |
-| `Ctrl+P` | Command palette (`hangar/search` as you type; Enter jumps to the entity) |
+| `Ctrl+P` | Command palette: `Go: <screen>` first, then `hangar/search` as you type; Enter jumps |
 | `?` | Help overlay |
 | `Esc` | Close the active modal |
 | `q` | Back to the `ainb` home screen (press `q` again there to quit) |
+
+### Screens behind the palette
+
+These nine kept their screens, their reducers and their per-screen keys; only
+the tab hotkey went. Reach one with `Ctrl+P` and its word, or read the list off
+the Settings screen's **More screens** section.
+
+| Type | Screen |
+|------|--------|
+| `^P skills` | Skill manager |
+| `^P autopilots` | Autopilots |
+| `^P daemon` | Daemon health |
+| `^P usage` | Usage dashboard |
+| `^P logs` | Logs |
+| `^P control` | Control center |
+| `^P fleet` | Fleet (every live session: lenses, stop / interrupt / continue / kill, chat) |
+| `^P squads` | Squads |
+| `^P profiles` | Profile editor |
+
+The freed keys (`3` `4` `C` `D` `F` `L` `P` `S` `U`) now reach the active
+screen's reducer, so a screen-local binding on one of them is live rather than
+eaten by the router.
 
 `?` and `H` belong to the plugin on every hangar screen, typed or not: the host
 never reserves them here, so a title or brief containing `H` reads through
@@ -160,10 +176,10 @@ Every retry chain is capped by the task's `max_attempts` regardless of reason.
 **Where the real error surfaces:** a `provision_error` writes the underlying
 setup error (the failed clone / worktree message) into the task's `result`, so
 the task-detail screen shows it directly. A `spawn_timeout`'s cause is logged by
-the daemon — check the Logs screen (`L`) or the daemon log. For agent-side
+the daemon — check the Logs screen (`^P logs`) or the daemon log. For agent-side
 failures the transcript on this screen carries the run output.
 
-## Skill manager (`3`) — P6.5
+## Skill manager (`^P skills`) — P6.5
 
 The three panes: a left skill list, a middle file tree (collapses below ~100
 cols), and a right detail/editor pane. The action-key hints
@@ -187,9 +203,12 @@ pair (`hangar/skill_attach` returns an error).
 
 ## Settings (`,`)
 
-Six stacked sections: Daemon, Providers, Keys, Workspaces, Members,
-Notifications. `j` / `k` switch sections; `J` / `K` (and `↑` / `↓`) move the
-row cursor within the focused section.
+Seven stacked sections: Daemon, Providers, Keys, Workspaces, Members,
+Notifications, More screens. `j` / `k` switch sections; `J` / `K` (and `↑` /
+`↓`) move the row cursor within the focused section.
+
+**More screens** is read-only: the nine screens the tab strip dropped, each
+beside the `^P` word that reaches it.
 
 | Key | Action |
 |-----|--------|
@@ -232,7 +251,7 @@ A role-gated Pipeline board (`ainb hangar pipeline init`) pulls a card through
 its stages by itself; there is no key for that. Its columns carry no FSM
 mapping, so cards move only when a stage finishes.
 
-## Control center (`C`)
+## Control center (`^P control`)
 
 | Key | Action |
 |-----|--------|
@@ -246,7 +265,7 @@ title row confirms delivery by dropping the card; when the daemon refuses
 (ambiguous target, no live session, delivery failed, already answered elsewhere)
 the reason is painted on the title row in red and the card stays.
 
-## Squads (`S`)
+## Squads (`^P squads`)
 
 | Key | Action |
 |-----|--------|
@@ -264,7 +283,7 @@ the reason is painted on the title row in red and the card stays.
 | `n` | Guided create: Name → Description → Provider (`←`/`→`) → Model → Instructions → confirm (Enter) |
 | `x` | Delete the selected agent (confirm) |
 
-## Kanban (`K`)
+## Runs (`K`)
 
 | Key | Action |
 |-----|--------|
@@ -272,7 +291,7 @@ the reason is painted on the title row in red and the card stays.
 | `Shift+←` / `Shift+→` (or `<` / `>`) | Move the card to the adjacent column |
 | `R` | Force-requeue a focused failed / cancelled card |
 
-## Logs (`L`) · Inbox (`I`) · Profiles (`P`)
+## Logs (`^P logs`) · Inbox (`I`) · Profiles (`^P profiles`)
 
 | Screen | Keys |
 |--------|------|
