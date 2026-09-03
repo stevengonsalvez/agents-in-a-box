@@ -381,6 +381,34 @@ impl FleetProviderEventRepo {
         .await
     }
 
+    /// The NEWEST row of one session carrying `event_type`, or `None` when the
+    /// session wrote none.
+    ///
+    /// Deliberately NOT a filter over [`Self::list_by_session_tail`]: a run's
+    /// accounting row (`acp.usage`) is written whenever the agent reports one,
+    /// and an ordinary turn buries it under an unbounded number of later text
+    /// and tool rows. A tail window would therefore answer "no usage" on
+    /// exactly the chatty runs whose usage matters most, and would look like it
+    /// worked on the short ones. This walks
+    /// `idx_fleet_provider_event_session_order` backwards and stops at the first
+    /// match instead.
+    pub async fn last_by_session_event_type(
+        pool: &SqlitePool,
+        session_key: &str,
+        event_type: &str,
+    ) -> Result<Option<FleetProviderEventRow>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
+             FROM fleet_provider_event WHERE session_key = ? AND event_type = ? \
+             ORDER BY ingest_order DESC LIMIT 1",
+        )
+        .bind(session_key)
+        .bind(event_type)
+        .fetch_optional(pool)
+        .await?;
+        row.as_ref().map(row_from).transpose()
+    }
+
     /// Page one session's rows after an `ingest_order` cursor, oldest first
     /// (the transcript read model; rides `idx_fleet_provider_event_session_order`).
     pub async fn list_by_session_after(
@@ -757,6 +785,68 @@ mod tests {
         assert!(
             FleetProviderEventRepo::get(store.pool(), "acp-2").await.unwrap().is_none(),
             "the batch's other row rolled back with the collision"
+        );
+    }
+
+    /// The newest row OF ITS TYPE, however deeply the run buried it.
+    ///
+    /// Both halves matter and neither is hypothetical. The last `acp.usage` row
+    /// is not the last row (an agent reports usage and then keeps talking), and
+    /// the tail read beside it is windowed, so the assertion that the window
+    /// MISSES this row is what says why the query exists at all rather than
+    /// being a filter over `list_by_session_tail`.
+    #[tokio::test]
+    async fn the_newest_row_of_a_type_is_found_under_a_tail_of_other_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let typed = |id: &str, event_type: &str, payload: &str| NewFleetProviderEvent {
+            event_type: event_type.to_string(),
+            ..event(id, payload)
+        };
+
+        let mut batch = vec![
+            typed("u-0", "acp.usage", r#"{"used":1}"#),
+            typed("u-1", "acp.usage", r#"{"used":2}"#),
+        ];
+        // The chatter after the last report. 200 rows is well past the 64-row
+        // window the PR capture scans with.
+        batch.extend(
+            (0..200).map(|i| typed(&format!("m-{i}"), "acp.message", r#"{"text":"hi"}"#)),
+        );
+        FleetProviderEventRepo::append_batch(store.pool(), &batch).await.unwrap();
+
+        let found = FleetProviderEventRepo::last_by_session_event_type(
+            store.pool(),
+            "claude:session-1",
+            "acp.usage",
+        )
+        .await
+        .unwrap()
+        .expect("the session's usage row");
+        assert_eq!(
+            found.raw_payload, r#"{"used":2}"#,
+            "the LAST usage row wins, not the first"
+        );
+
+        let (window, _truncated) =
+            FleetProviderEventRepo::list_by_session_tail(store.pool(), "claude:session-1", 64, 64 * 1024)
+                .await
+                .unwrap();
+        assert!(
+            window.iter().all(|row| row.event_type != "acp.usage"),
+            "a windowed tail read cannot see this row, which is why the query above exists"
+        );
+
+        assert_eq!(
+            FleetProviderEventRepo::last_by_session_event_type(
+                store.pool(),
+                "claude:session-1",
+                "acp.plan",
+            )
+            .await
+            .unwrap(),
+            None,
+            "a type the session never wrote is absent, not an error"
         );
     }
 
