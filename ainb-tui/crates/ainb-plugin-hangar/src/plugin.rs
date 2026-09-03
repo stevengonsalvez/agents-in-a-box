@@ -1230,6 +1230,13 @@ impl HangarPlugin {
         } = &event
         {
             if let Some(buffered) = &mut self.timeline_fetch_buffer {
+                // Bounded like the overlay it feeds: a reply that never arrives
+                // (daemon gone mid-fetch) would otherwise buffer every line of
+                // every run for the rest of the session. Oldest out, same as
+                // `TimelineView::append_line`.
+                if buffered.len() >= crate::screen::boards::TimelineView::MAX_ENTRIES {
+                    buffered.remove(0);
+                }
                 buffered.push((task_id.as_str().to_string(), *kind, body.clone()));
             }
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
@@ -1851,6 +1858,10 @@ impl HangarPlugin {
     /// that never ran (empty transcript), surfaces a note instead of an overlay so
     /// the key never dead-ends.
     fn apply_board_card_timeline(&mut self, resp: &RpcResponse) {
+        // Disarm FIRST, so every return below drops the buffer rather than leaving
+        // it armed to grow for the rest of the session: this handler returns early
+        // on a daemon error and on two decode failures.
+        let buffered = self.timeline_fetch_buffer.take().unwrap_or_default();
         if let Some(err) = &resp.error {
             self.screens.boards.set_note(format!("timeline failed: {}", err.message));
             return;
@@ -1884,7 +1895,7 @@ impl HangarPlugin {
         // above is as of the daemon's read, so those lines are in neither half
         // without this. `fold_timeline_message` filters by task id, so a line for
         // a different run is discarded here exactly as it would have been live.
-        for (task_id, kind, body) in self.timeline_fetch_buffer.take().unwrap_or_default() {
+        for (task_id, kind, body) in buffered {
             self.screens.boards.fold_timeline_message(&task_id, kind, body);
         }
     }
@@ -6337,6 +6348,29 @@ mod tests {
         assert!(
             p.timeline_fetch_buffer.is_none(),
             "the buffer is disarmed by the reply"
+        );
+    }
+
+    /// A failed timeline fetch must DISARM the buffer, not leave it armed. The
+    /// handler returns early on a daemon error, so an armed buffer would keep
+    /// growing for the rest of the session, holding every line of every run.
+    #[test]
+    fn a_failed_timeline_fetch_disarms_the_buffer() {
+        let mut p = HangarPlugin::new();
+        p.timeline_fetch_buffer = Some(Vec::new());
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32000,
+                message: "no such board".into(),
+                data: None,
+            }),
+        });
+        assert!(
+            p.timeline_fetch_buffer.is_none(),
+            "a rejected fetch must disarm the buffer, not leak it"
         );
     }
 
