@@ -726,6 +726,9 @@ pub enum WizardKey {
     Char(char),
     /// Backspace (delete the last input char).
     Backspace,
+    /// Ctrl+U: clear the focused text row (crisp B1, defect 21), or the `@` repo
+    /// query while the dropdown is open. The picker-only rows ignore it.
+    ClearLine,
     /// Enter (create when the required fields are satisfied, else jump focus to
     /// the missing one).
     Enter,
@@ -1988,11 +1991,14 @@ fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
     }
 }
 
-/// Map the legacy reducer char vocabulary onto a [`WizardKey`].
-const fn wizard_key_from_char(c: char) -> WizardKey {
+/// Map the reducer char vocabulary onto a [`WizardKey`]. Also the wizard's half
+/// of the ONE key translation ([`crate::screen::app_screens`]), so the wizard's
+/// text rows read a Ctrl chord exactly as every other input does.
+pub(crate) const fn wizard_key_from_char(c: char) -> WizardKey {
     match c {
         '\n' | '\r' => WizardKey::Enter,
         '\u{8}' | '\u{7f}' => WizardKey::Backspace,
+        crate::screen::app_screens::CLEAR_LINE => WizardKey::ClearLine,
         other => WizardKey::Char(other),
     }
 }
@@ -2057,7 +2063,7 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
 }
 
 /// Filter-input-mode key handling: Enter/Esc leave the mode, Backspace deletes,
-/// any other printable char appends to the query.
+/// Ctrl+U clears the query, any other printable char appends to it.
 fn reduce_filter_input_key(state: &IssueListState, c: char) -> IssueListReduction {
     let mut next = state.clone();
     match c {
@@ -2068,6 +2074,9 @@ fn reduce_filter_input_key(state: &IssueListState, c: char) -> IssueListReductio
         '\u{8}' | '\u{7f}' => {
             next.query.pop();
         }
+        // Ctrl+U empties the query without leaving filter mode (crisp B1,
+        // defect 21), the same chord the Boards inputs and the create wizard take.
+        crate::screen::app_screens::CLEAR_LINE => next.query.clear(),
         other => next.query.push(other),
     }
     next.clamp_selection();
@@ -2281,6 +2290,7 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
         WizardKey::Right => wizard_cycle_value(state, wizard, true),
         WizardKey::Char(c) => wizard_type_char(state, wizard, c),
         WizardKey::Backspace => wizard_backspace(state, wizard),
+        WizardKey::ClearLine => wizard_clear_line(state, wizard),
         // Esc handled above.
         WizardKey::Esc => unchanged(state),
     }
@@ -2407,37 +2417,36 @@ fn wizard_type_char(
 /// Delete the last char of the focused text row (Title / Source / Target). A
 /// no-op on the picker rows.
 fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
-    match wizard.focus {
-        WizardRow::Title => {
-            wizard.title.pop();
-        }
-        WizardRow::Brief => {
-            wizard.brief.pop();
-        }
-        WizardRow::Link => {
-            wizard.link.pop();
-        }
-        WizardRow::Acceptance => {
-            wizard.acceptance.pop();
-        }
-        WizardRow::Context => {
-            wizard.context.pop();
-        }
-        WizardRow::Due => {
-            wizard.due.pop();
-        }
-        WizardRow::Labels => {
-            wizard.labels.pop();
-        }
-        WizardRow::Source => {
-            wizard.source_branch.pop();
-        }
-        WizardRow::Target => {
-            wizard.target_branch.pop();
-        }
-        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => {}
+    if let Some(field) = wizard_focused_field(&mut wizard) {
+        field.pop();
     }
     set_wizard(state, wizard)
+}
+
+/// Clear the focused text row (Ctrl+U, crisp B1 defect 21). A no-op on the picker
+/// rows, which hold no typed text to clear.
+fn wizard_clear_line(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
+    if let Some(field) = wizard_focused_field(&mut wizard) {
+        field.clear();
+    }
+    set_wizard(state, wizard)
+}
+
+/// The buffer the focused row types into, or `None` on a picker row (Repo /
+/// Priority / Agent), which is driven by `@` and ←→ rather than free text.
+fn wizard_focused_field(wizard: &mut CreateWizard) -> Option<&mut String> {
+    match wizard.focus {
+        WizardRow::Title => Some(&mut wizard.title),
+        WizardRow::Brief => Some(&mut wizard.brief),
+        WizardRow::Link => Some(&mut wizard.link),
+        WizardRow::Acceptance => Some(&mut wizard.acceptance),
+        WizardRow::Context => Some(&mut wizard.context),
+        WizardRow::Due => Some(&mut wizard.due),
+        WizardRow::Labels => Some(&mut wizard.labels),
+        WizardRow::Source => Some(&mut wizard.source_branch),
+        WizardRow::Target => Some(&mut wizard.target_branch),
+        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => None,
+    }
 }
 
 /// Handle a key while the `@` repo dropdown is open: chars filter, Backspace
@@ -2458,6 +2467,10 @@ fn wizard_dropdown_key(
         }
         WizardKey::Backspace => {
             wizard.repo_query.pop();
+            wizard.repo_dropdown = Some(0);
+        }
+        WizardKey::ClearLine => {
+            wizard.repo_query.clear();
             wizard.repo_dropdown = Some(0);
         }
         WizardKey::Up | WizardKey::Left => {

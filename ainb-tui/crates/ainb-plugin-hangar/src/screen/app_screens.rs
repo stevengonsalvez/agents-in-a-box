@@ -1667,12 +1667,34 @@ fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     }
 }
 
+/// Kill-line: clear the whole text input (Ctrl+U). `\u{15}` is the NAK control
+/// char a terminal itself sends for the chord, so the reducer vocabulary carries
+/// it the same way it carries `'\u{8}'` for Backspace.
+pub(crate) const CLEAR_LINE: char = '\u{15}';
+
 /// Translate a wire [`KeyEvent`] into the `char` the pure screen reducers expect.
 ///
 /// The reducers model navigation as printable chars (`'j'`, `'/'`, …) plus `'\n'`
-/// for Enter and `'\u{8}'` for Backspace. Esc and the tab-switch keys are handled
-/// by the caller before reaching a reducer.
+/// for Enter, `'\u{8}'` for Backspace and [`CLEAR_LINE`] for Ctrl+U. Esc and the
+/// tab-switch keys are handled by the caller before reaching a reducer.
+///
+/// The ONE place a Ctrl chord is translated (crisp B1, defect 21). Every key
+/// translation site funnels through here, so no text input can go on typing a
+/// bare `u` for Ctrl+U while its neighbour clears: an unmapped chord is dropped
+/// rather than delivered as its letter.
 const fn key_char(key: &KeyEvent) -> Option<char> {
+    if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 {
+        return match &key.code {
+            KeyCode::Char { ch: 'u' | 'U' } => Some(CLEAR_LINE),
+            KeyCode::Char { .. } => None,
+            _ => key_char_unchorded(key),
+        };
+    }
+    key_char_unchorded(key)
+}
+
+/// The plain (unchorded) half of [`key_char`].
+const fn key_char_unchorded(key: &KeyEvent) -> Option<char> {
     match &key.code {
         KeyCode::Char { ch } => Some(*ch),
         KeyCode::Enter => Some('\n'),
@@ -1955,9 +1977,11 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     // carry. Any other key is an unmodelled no-op.
     let ev = if states.issue_list.wizard().is_some() {
         let k = match &key.code {
-            KeyCode::Char { ch } => super::issue_list::WizardKey::Char(*ch),
-            KeyCode::Enter => super::issue_list::WizardKey::Enter,
-            KeyCode::Backspace => super::issue_list::WizardKey::Backspace,
+            // Text input, including the Ctrl chords, through the one shared
+            // translation ([`key_char`]).
+            KeyCode::Char { .. } | KeyCode::Enter | KeyCode::Backspace => {
+                super::issue_list::wizard_key_from_char(key_char(key)?)
+            }
             KeyCode::Esc => super::issue_list::WizardKey::Esc,
             KeyCode::Up => super::issue_list::WizardKey::Up,
             KeyCode::Down => super::issue_list::WizardKey::Down,
@@ -2288,22 +2312,21 @@ fn route_timeline_key(states: &mut ScreenStates, key: &KeyEvent) {
 /// open. Every printable char / Backspace / Enter / Esc / ↑ / ↓ is folded into
 /// the input; unmapped keys are dropped.
 fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
-    let ctrl = key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0;
     let k = match &key.code {
-        KeyCode::Enter => BoardsKey::Enter,
         KeyCode::Esc => BoardsKey::Esc,
-        KeyCode::Backspace => BoardsKey::Backspace,
         KeyCode::Up => BoardsKey::Up,
         KeyCode::Down => BoardsKey::Down,
-        // Ctrl+U clears the input (crisp B1, defect 21); any other Ctrl chord
-        // is dropped rather than typed as its bare letter.
-        KeyCode::Char { ch: 'u' } if ctrl => BoardsKey::ClearLine,
-        KeyCode::Char { .. } if ctrl => return None,
-        KeyCode::Char { ch } => BoardsKey::Char(*ch),
         // Overlay-local only: the dep picker cycles its link kind (multica parity
         // #20). No global binding is added, so no host-reserved key is touched.
         KeyCode::Tab => BoardsKey::Tab,
-        _ => return None,
+        // Text input, including the Ctrl chords, through the one shared
+        // translation ([`key_char`]).
+        _ => match key_char(key)? {
+            '\n' => BoardsKey::Enter,
+            '\u{8}' => BoardsKey::Backspace,
+            CLEAR_LINE => BoardsKey::ClearLine,
+            c => BoardsKey::Char(c),
+        },
     };
     Some(BoardsEvent::Key(k))
 }
@@ -3553,5 +3576,84 @@ mod fleet_routing_tests {
                 action: FleetAction::ReconcileStructured { request_fingerprint },
             }) if session_key == "claude:one" && request_fingerprint == "fingerprint"
         ));
+    }
+}
+
+/// Crisp B1 (defect 21 review): every text input reads a Ctrl chord through the
+/// ONE translation in [`key_char`]. The chord used to be decoded per screen, so
+/// Ctrl+U cleared a Boards input while the Issues wizard and the issue filter
+/// typed a literal `u` into it.
+#[cfg(test)]
+mod ctrl_chord_tests {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    use super::*;
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    fn ctrl(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: ainb_plugin_sdk::KEY_MOD_CTRL,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// The shared translation: Ctrl+U is the clear-line char the reducers already
+    /// understand, an unmapped chord types NOTHING, and a bare `u` is still a `u`.
+    /// The Boards overlay mapper reads the same answer.
+    #[test]
+    fn a_ctrl_chord_is_translated_in_one_place() {
+        assert_eq!(key_char(&ctrl('u')), Some(CLEAR_LINE));
+        assert_eq!(key_char(&ctrl('U')), Some(CLEAR_LINE));
+        assert_eq!(key_char(&ctrl('k')), None);
+        assert_eq!(key_char(&press('u')), Some('u'));
+        assert_eq!(
+            overlay_key_event(&ctrl('u')),
+            Some(BoardsEvent::Key(BoardsKey::ClearLine))
+        );
+        assert_eq!(overlay_key_event(&ctrl('k')), None);
+    }
+
+    /// `/` filter query: Ctrl+U empties it in place, without leaving filter mode.
+    #[test]
+    fn ctrl_u_clears_the_issue_filter_query() {
+        let app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        let mut states = ScreenStates::default();
+
+        route_key(&app, &mut states, &press('/'));
+        for ch in "auth".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(states.issue_list.query(), "auth");
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(states.issue_list.query(), "");
+        assert_eq!(states.issue_list.mode(), IssueListMode::FilterInput);
+    }
+
+    /// Create-wizard title row: Ctrl+U empties it instead of appending a `u`.
+    #[test]
+    fn ctrl_u_clears_the_create_wizard_title() {
+        let app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        let mut states = ScreenStates::default();
+
+        route_key(&app, &mut states, &press('c'));
+        for ch in "Add auth".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(states.issue_list.wizard().unwrap().title(), "Add auth");
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(states.issue_list.wizard().unwrap().title(), "");
     }
 }
