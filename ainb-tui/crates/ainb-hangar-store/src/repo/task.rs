@@ -300,7 +300,7 @@ impl TaskRepo {
     /// Record the provider `session_id` a run is executing under, mid-run.
     ///
     /// The terminal finalize writes it too ([`crate::service::CompleteTaskService`]),
-    /// but only on SUCCESS — so a run that failed or was cancelled kept no
+    /// but only on SUCCESS, so a run that failed or was cancelled kept no
     /// pointer to the transcript it produced. An ACP run writes it the moment
     /// its session exists, which is also what makes the session reachable while
     /// the run is still live. Returns `true` iff exactly one row was updated.

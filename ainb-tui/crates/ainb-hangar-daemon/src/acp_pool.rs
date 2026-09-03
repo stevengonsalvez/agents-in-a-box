@@ -2674,7 +2674,7 @@ impl SessionActor {
             session_id: self.session_key.clone(),
             cwd: self.cwd.clone(),
             // A TASK's session knows its workspace through its scope, and an
-            // unscoped approval misses every workspace-filtered inbox — which
+            // unscoped approval misses every workspace-filtered inbox, which
             // is every operator surface an ACP task's permission has to reach.
             // A chat session's scope names no workspace, so it stays `None`.
             workspace_id: crate::acp_task::workspace_for_scope(

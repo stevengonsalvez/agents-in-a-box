@@ -16,7 +16,7 @@
 //! The other two cases are the ones the ACP path can get quietly wrong:
 //! `mode=interactive` under `=acp` must be REFUSED rather than downgraded to a
 //! headless run in a pane nobody can attach to, and each task's adapter is its
-//! OWN process, so one task's `agent_env` must never reach another's — nor the
+//! OWN process, so one task's `agent_env` must never reach another's, nor the
 //! daemon's ambient environment reach either.
 //!
 //! Skips cleanly (never fails) when tmux is unavailable.

@@ -87,7 +87,7 @@ fn no_state_and_token_the_pool_can_write_falls_through_to_drift() {
     .collect();
 
     // `drain_queue` resolves FAILED, `converge_dirty_session` UNKNOWN, and
-    // `submit_prompt` REJECTED — all three from the same vocabulary.
+    // `submit_prompt` REJECTED: all three from the same vocabulary.
     for state in ["FAILED", "UNKNOWN", "REJECTED"] {
         for token in &tokens {
             for detail in [(*token).to_string(), format!("{token}; resume=loaded")] {
@@ -205,7 +205,7 @@ fn every_leg_the_pool_can_write_maps_to_a_named_outcome() {
         ),
         // The four 2f's table omitted, all reachable, all previously drift.
         // `attach_with_one_requeue` writes adapter_exit on a FAILED leg when the
-        // adapter cannot be spawned or the transport dies — the single most
+        // adapter cannot be spawned or the transport dies: the single most
         // likely ACP failure, and NoRetry would have burned the chain on it.
         (
             "FAILED",
