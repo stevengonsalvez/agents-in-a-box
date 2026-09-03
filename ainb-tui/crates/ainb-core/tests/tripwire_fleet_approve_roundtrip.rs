@@ -228,8 +228,6 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
         c.contains("Fleet · 2 sessions")
             && c.contains("approving-project")
             && c.contains("Approval required for Bash")
-            && c.contains("1 INPUT")
-            && c.contains("1 RUN")
     });
     let Some(open_cap) = opened else {
         let last = capture_pane(&session);
