@@ -305,7 +305,11 @@ impl AcpClassifier {
     ///   argv and it appears in no transcript.
     /// * `acp.turn_started` / `acp.context_rebuilt` — session bookkeeping.
     #[must_use]
-    pub fn classify_row(&mut self, event_type: &str, raw_payload: &str) -> Vec<(MessageKind, String)> {
+    pub fn classify_row(
+        &mut self,
+        event_type: &str,
+        raw_payload: &str,
+    ) -> Vec<(MessageKind, String)> {
         let payload = serde_json::from_str::<Value>(raw_payload).unwrap_or(Value::Null);
         let mut out = Vec::new();
         match event_type {
@@ -331,7 +335,12 @@ impl AcpClassifier {
     /// update under `block`). That one has no text to show, so it is NAMED
     /// rather than dropped: a transcript that silently omits a row reads as a
     /// complete one.
-    fn fold_acp_text(&self, payload: &Value, kind: MessageKind, out: &mut Vec<(MessageKind, String)>) {
+    fn fold_acp_text(
+        &self,
+        payload: &Value,
+        kind: MessageKind,
+        out: &mut Vec<(MessageKind, String)>,
+    ) {
         let text = payload.get("text").and_then(Value::as_str).unwrap_or_default();
         if !text.trim().is_empty() {
             push_lines(out, kind, text);
@@ -448,7 +457,10 @@ fn fold_acp_plan(payload: &Value, out: &mut Vec<(MessageKind, String)>) {
     for entry in entries {
         let status = entry.get("status").and_then(Value::as_str).unwrap_or("pending");
         let content = entry.get("content").and_then(Value::as_str).unwrap_or_default();
-        let body = truncate_chars(&one_line(&format!("plan · {status} · {content}")), SUMMARY_MAX);
+        let body = truncate_chars(
+            &one_line(&format!("plan · {status} · {content}")),
+            SUMMARY_MAX,
+        );
         out.push((MessageKind::ToolCall, body));
     }
 }

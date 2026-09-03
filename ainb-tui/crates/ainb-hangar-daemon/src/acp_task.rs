@@ -528,13 +528,17 @@ async fn build_result(pool: &SqlitePool, session_key: &str, message_id: &str) ->
 async fn pr_url_from_transcript(pool: &SqlitePool, session_key: &str) -> Option<String> {
     use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
 
-    let rows =
-        FleetProviderEventRepo::list_by_session_tail(pool, session_key, PR_SCAN_ROWS, PR_SCAN_BYTES)
-            .await
-            .inspect_err(
-                |error| tracing::warn!(%session_key, %error, "acp transcript read for pr capture failed"),
-            )
-            .ok()?;
+    let rows = FleetProviderEventRepo::list_by_session_tail(
+        pool,
+        session_key,
+        PR_SCAN_ROWS,
+        PR_SCAN_BYTES,
+    )
+    .await
+    .inspect_err(
+        |error| tracing::warn!(%session_key, %error, "acp transcript read for pr capture failed"),
+    )
+    .ok()?;
     let transcript = rows
         .iter()
         .filter_map(|row| {

@@ -56,13 +56,13 @@ fn a_whole_acp_turn_fills_the_same_lanes_a_process_run_does() {
                 MessageKind::Thinking,
                 "The handler is probably unregistered.".to_string()
             ),
-            (
-                MessageKind::ToolCall,
-                "Edit  api/src/routes.ts".to_string()
-            ),
+            (MessageKind::ToolCall, "Edit  api/src/routes.ts".to_string()),
             (MessageKind::ToolResult, "Edit  1 file changed".to_string()),
             (MessageKind::Agent, "Route registered.".to_string()),
-            (MessageKind::ToolResult, "· turn_completed · 4.2s".to_string()),
+            (
+                MessageKind::ToolResult,
+                "· turn_completed · 4.2s".to_string()
+            ),
         ],
         "the whole turn, lane for lane"
     );
@@ -92,7 +92,10 @@ fn an_update_names_the_tool_its_call_declared() {
         "acp.tool_call",
         r#"{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed","content":[{"type":"content","content":{"type":"text","text":"ok"}}]}"#,
     )]);
-    assert_eq!(orphaned, vec![(MessageKind::ToolResult, "tool  ok".to_string())]);
+    assert_eq!(
+        orphaned,
+        vec![(MessageKind::ToolResult, "tool  ok".to_string())]
+    );
 }
 
 /// A failed tool lands in the RED lane, not the slate one, so a broken run

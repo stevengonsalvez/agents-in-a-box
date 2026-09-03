@@ -6177,9 +6177,7 @@ mod tests {
     fn timeline_entries(jsonl: &str) -> Vec<ainb_hangar_proto::snapshots::TranscriptLine> {
         ainb_hangar_proto::transcript::classify_stream_json(jsonl)
             .into_iter()
-            .map(
-                |(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body },
-            )
+            .map(|(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body })
             .collect()
     }
 

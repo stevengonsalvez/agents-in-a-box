@@ -417,8 +417,7 @@ impl PoolConfig {
     /// a 1 s sweep chasing a 2.5 h deadline it can never match.
     pub fn set_turn_deadline(&mut self, deadline: Duration) {
         self.turn_deadline = deadline;
-        self.sweep_interval =
-            DEFAULT_SWEEP_INTERVAL.min((deadline / 2).max(MIN_SWEEP_INTERVAL));
+        self.sweep_interval = DEFAULT_SWEEP_INTERVAL.min((deadline / 2).max(MIN_SWEEP_INTERVAL));
     }
 
     /// [`PoolConfig::default`] with `[acp.adapters.*]` from the host config

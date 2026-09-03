@@ -552,8 +552,7 @@ async fn serve_conn(
                         // with no durable replay behind it, so one missed in
                         // that window is gone, not merely late.
                         let ws_rx = pending_workspace_rx.unwrap_or_else(|| broker.subscribe());
-                        forwarder =
-                            Some(spawn_event_forwarder(ws_rx, ws.clone(), out_tx.clone()));
+                        forwarder = Some(spawn_event_forwarder(ws_rx, ws.clone(), out_tx.clone()));
                         // A2: the same subscription's TRANSCRIPT half, drained
                         // from its own broadcast so a chatty run cannot evict the
                         // lifecycle events above it (see `EventBroker`). Two
@@ -11275,9 +11274,7 @@ fn transcript_lines(
 ) -> Vec<ainb_hangar_proto::snapshots::TranscriptLine> {
     entries
         .into_iter()
-        .map(
-            |(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body },
-        )
+        .map(|(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body })
         .collect()
 }
 

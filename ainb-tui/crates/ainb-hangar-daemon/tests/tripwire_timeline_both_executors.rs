@@ -106,8 +106,10 @@ async fn both_executors_serve_the_same_transcript_taxonomy() {
     // line for line and not merely lane for lane.
     for (executor, timeline) in [("process", &process.timeline), ("acp", &acp.timeline)] {
         assert!(
-            timeline.entries.iter().any(|entry| entry.kind == MessageKind::ToolCall
-                && entry.body.contains("Bash")),
+            timeline
+                .entries
+                .iter()
+                .any(|entry| entry.kind == MessageKind::ToolCall && entry.body.contains("Bash")),
             "the {executor} transcript must name the tool it ran: {:#?}",
             timeline.entries
         );
@@ -358,7 +360,12 @@ async fn run_acp_executor() -> Run {
     enqueue_for_issue(&pool, &ids, task_id, &agent, &issue_id).await;
     let run = finish(home, pool, session, task_id, &issue_id, "claude.jsonl").await;
     assert!(
-        !run.jsonl_path.parent().expect("logs dir").join("..").join("process-executor-ran").exists(),
+        !run.jsonl_path
+            .parent()
+            .expect("logs dir")
+            .join("..")
+            .join("process-executor-ran")
+            .exists(),
         "executor=acp must never spawn the provider process"
     );
     run
@@ -379,11 +386,12 @@ async fn finish(
 
     let mut client = Client::connect(&home.path().join("hangar.sock")).await;
     client.auth_from_file(home.path()).await;
-    let workspace_id: String = sqlx::query_scalar("SELECT workspace_id FROM agent_task_queue WHERE id = ?")
-        .bind(task_id)
-        .fetch_one(&pool)
-        .await
-        .expect("the task's workspace");
+    let workspace_id: String =
+        sqlx::query_scalar("SELECT workspace_id FROM agent_task_queue WHERE id = ?")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .expect("the task's workspace");
     let reply = client
         .call(
             methods::HANGAR_BOARD_CARD_TIMELINE,
