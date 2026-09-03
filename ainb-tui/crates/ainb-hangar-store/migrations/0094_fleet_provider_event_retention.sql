@@ -1,4 +1,4 @@
--- Hangar v1 schema, migration 0093: fleet_provider_event payload retention.
+-- Hangar v1 schema, migration 0094: fleet_provider_event payload retention.
 --
 -- WHY. fleet_provider_event has had NO automatic retention since 0071. Its
 -- module header budgeted the growth of the projection sources at "~21 rows per
