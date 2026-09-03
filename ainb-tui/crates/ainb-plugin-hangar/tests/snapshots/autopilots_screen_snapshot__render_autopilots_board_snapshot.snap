@@ -1,6 +1,5 @@
 ---
 source: crates/ainb-plugin-hangar/tests/autopilots_screen_snapshot.rs
-assertion_line: 170
 expression: full
 ---
                                                                                             [a]dd [r]un [d]isable [e]dit

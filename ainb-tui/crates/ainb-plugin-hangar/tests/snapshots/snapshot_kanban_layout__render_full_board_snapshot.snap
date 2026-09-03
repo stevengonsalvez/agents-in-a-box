@@ -1,6 +1,5 @@
 ---
 source: crates/ainb-plugin-hangar/tests/snapshot_kanban_layout.rs
-assertion_line: 197
 expression: full
 ---
 ○ queued (2)              ⋯ +│◔ running (1)             ⋯ +│● done (1)                ⋯ +│✕ failed (2)              ⋯ +
