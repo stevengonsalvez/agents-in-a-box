@@ -100,13 +100,9 @@ const CARD_TITLE: Color = Color::rgb(255, 215, 0);
 const CARD_VALUE: Color = Color::rgb(220, 220, 230);
 /// Muted gray for the detail-card field LABELS (63d; the style-guide muted hue).
 const CARD_LABEL: Color = Color::rgb(120, 120, 140);
-/// The em-dash placeholder painted for an unset card field (63d).
-const CARD_UNSET: &str = "—";
 /// Selection green for the `▶` marker on the criterion under the acceptance
 /// cursor (the repo-wide TUI selection colour).
 const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
-/// The leading glyph + label painted before the branch name (`⎇ branch `).
-const BRANCH_PREFIX: &str = "⎇ branch ";
 /// Accent for the comment-compose input bar (a calm emerald, distinct from the
 /// gold PR badge so the two bars never read as the same control).
 const COMPOSE_ACCENT: Color = Color::rgb(120, 220, 160);
