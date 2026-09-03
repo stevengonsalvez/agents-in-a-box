@@ -541,17 +541,33 @@ fn card_title(c: &CardSummary, now_ms: i64) -> String {
 }
 
 /// `ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8` -> `ainb/…3N9GP8` (crisp B1, Q14): a branch
-/// whose last segment is a ULID-length token keeps its prefix plus the same
-/// last-6 chars the `#<short_id>` id line shows, so a 28-char branch no longer
-/// wraps the title and pushes the PR chip off the tile. A short human slug
-/// (`ainb/fix-login`) is left alone.
+/// whose last segment is a ULID keeps its prefix plus the same last-6 chars the
+/// `#<short_id>` id line shows, so a 31-char run branch no longer wraps the title
+/// and pushes the PR chip off the tile.
+///
+/// Gated on ULID SHAPE, not length: a human branch is left whole however long it
+/// is (`ainb/add-user-auth` used to render as `ainb/…r-auth`, which named
+/// nothing). Only the daemon's own `ainb/<task id>` run branch (minted by
+/// `workdir_provision::worktree_branch`) is elided, and its tail is the half that
+/// ties the card to its `#<short id>` title.
 fn elide_branch(branch: &str) -> String {
     let (prefix, last) = branch.rsplit_once('/').map_or(("", branch), |(p, l)| (p, l));
-    if last.chars().count() <= 12 {
+    if !is_ulid(last) {
         return branch.to_string();
     }
     let sep = if prefix.is_empty() { "" } else { "/" };
     format!("{prefix}{sep}…{}", short_id(last))
+}
+
+/// Whether `s` has ULID shape: 26 chars of uppercase Crockford base32 (the digits
+/// plus the alphabet minus `I`, `L`, `O`, `U`), which is what the store mints and
+/// what every id on the wire looks like.
+fn is_ulid(s: &str) -> bool {
+    s.chars().count() == 26
+        && s.chars().all(|c| {
+            c.is_ascii_digit()
+                || matches!(c, 'A'..='H' | 'J' | 'K' | 'M' | 'N' | 'P'..='T' | 'V'..='Z')
+        })
 }
 
 /// Build the [`CardSummary`] list for one board column from the wire rows.
@@ -1162,12 +1178,26 @@ mod tests {
         assert_eq!(card.display_id, "#0SCAKH · Cardbranchprtripwire");
     }
 
-    /// The branch elide keeps a human slug whole and only shortens a ULID-length
-    /// last segment, prefix intact, to the id line's last-6 token.
+    /// The branch elide keeps a human slug whole at ANY length (the test is
+    /// ULID-ness, not width) and only shortens a ULID last segment, prefix
+    /// intact, to the id line's last-6 token.
     #[test]
     fn elide_branch_shortens_only_ulid_length_slugs() {
         assert_eq!(elide_branch("ainb/fix-login"), "ainb/fix-login");
         assert_eq!(elide_branch("main"), "main");
+        // A long HUMAN slug is not a ULID and must survive whole: eliding it to
+        // `ainb/…r-auth` named nothing at all (crisp B1 review).
+        assert_eq!(elide_branch("ainb/add-user-auth"), "ainb/add-user-auth");
+        assert_eq!(
+            elide_branch("feature/add-user-authentication"),
+            "feature/add-user-authentication"
+        );
+        // 26 chars, but `I`/`L`/`O`/`U` and lowercase are outside Crockford
+        // base32, so a same-width human slug is still left alone.
+        assert_eq!(
+            elide_branch("ainb/lookup-and-refactor-branch"),
+            "ainb/lookup-and-refactor-branch"
+        );
         assert_eq!(
             elide_branch("ainb/01M1FKF4BDNQ3JK5CQSS3N9GP8"),
             "ainb/…3N9GP8"
