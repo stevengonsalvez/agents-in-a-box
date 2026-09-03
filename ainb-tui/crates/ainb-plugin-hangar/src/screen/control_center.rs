@@ -225,10 +225,30 @@ impl AttentionCard {
         }
     }
 
+    /// The vocabulary code this card paints (crisp B2 §2.1): the ONE table the
+    /// four attention words live in, so the Inbox's `needs you` row and this
+    /// board can never name the same card two ways.
+    ///
+    /// The seven wire families collapse onto four codes. [`AttentionKind::Waiting`]
+    /// splits on the body it parsed: a session parked at its prompt is `IDLE`, an
+    /// explicit `WAITING:` marker is `WAIT`.
+    #[must_use]
+    pub(crate) fn vocab_kind(&self) -> crate::vocab::AttentionKind {
+        use crate::vocab::AttentionKind as Vocab;
+        match self.kind {
+            AttentionKind::Ask | AttentionKind::Approval | AttentionKind::CodexRequestUser => {
+                Vocab::Ask
+            }
+            AttentionKind::Error | AttentionKind::Escalation => Vocab::Err,
+            AttentionKind::Waiting if matches!(self.body, CardBody::Idle { .. }) => Vocab::Idle,
+            AttentionKind::Waiting | AttentionKind::Other => Vocab::Wait,
+        }
+    }
+
     /// A short human label: the cwd's final path component, else the session id
     /// (truncated). Char-safe throughout.
     #[must_use]
-    fn short_label(&self) -> String {
+    pub(crate) fn short_label(&self) -> String {
         let base = self.cwd.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("");
         if base.is_empty() {
             truncate_chars(&self.session_id, 12)
@@ -239,7 +259,7 @@ impl AttentionCard {
 
     /// The answer options, when this is an answerable ASK card.
     #[must_use]
-    fn options(&self) -> &[CardOption] {
+    pub(crate) fn options(&self) -> &[CardOption] {
         match &self.body {
             CardBody::Ask { options, .. } => options,
             _ => &[],
@@ -486,6 +506,19 @@ impl ControlCenterState {
         }
     }
 
+    /// How many open cards need a DECISION from the human (the rank-0 kinds:
+    /// ASK, approval, Codex request-user), as opposed to being surfaced for
+    /// visibility.
+    ///
+    /// The one place that count is computed. The Control title's `N need you`
+    /// and the Inbox header's `[N need you]` are both this number over this
+    /// store, so the two attention surfaces cannot disagree about how much is
+    /// waiting (crisp B3 §2.4).
+    #[must_use]
+    pub fn needs_you_count(&self) -> usize {
+        self.cards.iter().filter(|c| c.kind.urgency_rank() == 0).count()
+    }
+
     /// The `(attention_id, answer_label)` the selected ASK's highlighted option
     /// would deliver, if a card + option are selected. `None` for a non-ASK card
     /// or an ASK with no options.
@@ -713,7 +746,7 @@ fn render_divider(buf: &mut WireBuffer, list_w: u16, top: u16, bottom: u16) {
 /// Render the title row: `Control · N sessions · M need you` + the hotkey hint.
 fn render_title(buf: &mut WireBuffer, area_w: u16, row: u16, state: &ControlCenterState) {
     let total = state.cards.len();
-    let need = state.cards.iter().filter(|c| c.kind.urgency_rank() == 0).count();
+    let need = state.needs_you_count();
     let mut x = put_str(buf, 0, row, "Control", GOLD, area_w);
     x = put_str(
         buf,
@@ -829,7 +862,12 @@ fn render_detail(
 
 /// Render the ASK options with circled-digit glyphs + the answer hint bar, or a
 /// note for a non-answerable card.
-fn render_options(
+///
+/// Shared with the Inbox's `needs you` block (crisp B3 §2.4): the inline answer
+/// there is THIS renderer paired with [`reduce_control_center`], not a second
+/// implementation of the ①②③ affordance that could drift from the one the
+/// `attention/answer` path expects.
+pub(crate) fn render_options(
     buf: &mut WireBuffer,
     x0: u16,
     top: u16,
@@ -930,7 +968,10 @@ fn status_line(card: &AttentionCard) -> (String, Color) {
 }
 
 /// The LAST REPLY / request-context text a card carries.
-fn last_reply(card: &AttentionCard) -> String {
+///
+/// Also the one line the Inbox's `needs you` row reads (crisp B3 §2.4): the ASK's
+/// question, the error's snippet, the idle session's last words.
+pub(crate) fn last_reply(card: &AttentionCard) -> String {
     match &card.body {
         CardBody::Ask {
             header, question, ..
@@ -972,7 +1013,7 @@ const fn kind_token(kind: AttentionKind) -> &'static str {
 }
 
 /// Format an age in ms as a compact `Ns` / `Nm` / `Nh` string.
-fn format_age(ms: i64) -> String {
+pub(crate) fn format_age(ms: i64) -> String {
     let secs = ms.max(0) / 1000;
     if secs < 60 {
         format!("{secs}s")
@@ -1383,6 +1424,64 @@ mod tests {
         }
         let junk = parse_body("not json at all");
         assert!(matches!(junk, CardBody::Other { .. }));
+    }
+
+    /// The seven wire families collapse onto the vocabulary's four codes, and
+    /// all four are reachable — the Inbox's `needs you` row and this board read
+    /// the same table, so one card is never named two ways (crisp B3 §2.4).
+    ///
+    /// MUTATION GUARD: the expectation is the SET of families, not a count. A
+    /// family that stopped mapping, or started mapping somewhere else, fails
+    /// here; a guard on "four codes exist" would not notice.
+    #[test]
+    fn every_attention_family_maps_to_a_vocab_code() {
+        use crate::vocab::AttentionKind as Vocab;
+        let wait = r#"{"kind":"WAIT","context":{"marker":"WAITING:"}}"#;
+        for (wire, code) in [
+            ("ask_user_question", Vocab::Ask),
+            ("approval", Vocab::Ask),
+            ("codex_request_user", Vocab::Ask),
+            ("error", Vocab::Err),
+            ("escalation", Vocab::Err),
+            ("waiting", Vocab::Wait),
+            ("a_family_a_newer_daemon_grew", Vocab::Wait),
+        ] {
+            let card = AttentionCard::from_row(&row("c", wire, 1, wait));
+            assert_eq!(card.vocab_kind(), code, "wire kind {wire:?}");
+        }
+        // IDLE is the one code that comes from the BODY, not the wire kind: a
+        // waiting row whose payload parsed as an idle-at-prompt session.
+        let idle = AttentionCard::from_row(&row(
+            "i",
+            "waiting",
+            1,
+            r#"{"kind":"IDLE","context":{"idle_minutes":7}}"#,
+        ));
+        assert_eq!(idle.vocab_kind(), Vocab::Idle);
+    }
+
+    /// The `N need you` count is the rank-0 kinds and nothing else: the number
+    /// the Control title and the Inbox badge both read.
+    #[test]
+    fn needs_you_count_is_the_decisions_not_the_board_size() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[
+            row("ask", "ask_user_question", 1, &ask_payload("q", &["y"])),
+            row("perm", "approval", 2, r#"{"kind":"WAIT","context":{}}"#),
+            row(
+                "err",
+                "error",
+                3,
+                r#"{"kind":"ERR","context":{"pattern":"x"}}"#,
+            ),
+            row("idle", "waiting", 4, r#"{"kind":"IDLE","context":{}}"#),
+        ]);
+        assert_eq!(state.cards().len(), 4);
+        assert_eq!(
+            state.needs_you_count(),
+            2,
+            "the ASK and the approval, not the error or the idle row"
+        );
     }
 
     #[test]
