@@ -210,24 +210,20 @@ impl ActionMenu {
     /// The entries for this menu. `view last error` only appears when there IS
     /// one — an always-present entry that usually does nothing is noise.
     fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
-        // Per-kind, not `Action::ALL`: only the daemon that owns the Codex
-        // transport offers `pair`.
-        let mut entries: Vec<MenuEntry> = Action::for_kind(self.kind)
+        // Per-kind AND per-mode, not `Action::ALL`: only the daemon that owns
+        // the Codex transport offers `pair`, and ATC offers exactly the
+        // supervisor mode it is NOT in.
+        //
+        // `for_kind_in_mode` is asked for that rather than the menu re-deriving
+        // it: the same rule already decides what `ainb daemon atc --help`
+        // documents, and a second copy here is a rule that can drift on one
+        // surface while the other keeps the old answer. `offers` still gates
+        // every verb it returns, so an unprovisioned row is filtered as before.
+        let mut entries: Vec<MenuEntry> = Action::for_kind_in_mode(self.kind, self.row.mode)
             .into_iter()
             .filter(|action| self.offers(*action))
             .map(MenuEntry::Act)
             .collect();
-        // The supervisor mode the fleet is NOT in. Offering both would put
-        // "switch to the mode you are already in" on screen, and offering it on
-        // an unprovisioned row would name a switch with nothing to switch.
-        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
-            if let Some(mode) = self.row.mode {
-                entries.push(MenuEntry::Act(match mode.other() {
-                    SupervisorMode::Lite => Action::ModeLite,
-                    SupervisorMode::Full => Action::ModeFull,
-                }));
-            }
-        }
         // Same rule as `offers`: with nothing provisioned there is no tmux
         // session, so attaching could only fail. `provision` is the entry that
         // gets you one.
