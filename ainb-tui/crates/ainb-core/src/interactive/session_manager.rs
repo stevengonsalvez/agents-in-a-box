@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use crate::audit::{self, AuditResult, AuditTrigger};
-use crate::git::WorktreeManager;
+use crate::git::{WorktreeInfo, WorktreeManager};
 use crate::models::{
     CodexModel, Session, SessionAgentType, SessionMode, SessionStatus, is_default_model,
 };
@@ -576,11 +576,47 @@ fn codex_models_cache_path() -> Option<PathBuf> {
     Some(home.join("models_cache.json"))
 }
 
+/// A worktree THIS launch created, and therefore the only one its rollback may
+/// delete.
+///
+/// [`WorktreeManager::remove_worktree`] resolves the tree by following
+/// `by-session/<uuid>`, and
+/// [`InteractiveSessionManager::create_session_with_worktree`] FABRICATES that
+/// symlink over a directory it was handed. A manager on its own therefore
+/// cannot tell a tree Ainb made from the caller's own checkout, and the
+/// rollback deleted the latter over failures as ordinary as an unreachable
+/// daemon.
+///
+/// The proof is a [`WorktreeInfo`], which only
+/// [`WorktreeManager::create_worktree`] returns: a caller that was handed its
+/// tree has nothing to build this from.
+#[derive(Clone, Copy)]
+pub(crate) struct CreatedWorktree<'a> {
+    manager: &'a WorktreeManager,
+    /// The session the tree was created FOR, read off the creation receipt
+    /// rather than from the failing launch, so the delete can only name a tree
+    /// this manager made.
+    session_id: Uuid,
+}
+
+impl<'a> CreatedWorktree<'a> {
+    pub(crate) fn new(manager: &'a WorktreeManager, created: &WorktreeInfo) -> Self {
+        Self {
+            manager,
+            session_id: created.id,
+        }
+    }
+}
+
 /// Roll back resources created before a fresh Interactive session is registered.
+///
+/// `created_worktree` is `None` for a launch that did not create its tree. Such
+/// a launch owns no worktree to roll back, and the directory it was pointed at
+/// (the user's checkout, a remote repo's clone) must survive the failure.
 pub(crate) async fn rollback_failed_interactive_launch(
     session_id: Uuid,
     exact_tmux_name: Option<&str>,
-    worktree_manager: Option<&WorktreeManager>,
+    created_worktree: Option<CreatedWorktree<'_>>,
 ) {
     if let Some(tmux_name) = exact_tmux_name {
         let exact_target = format!("={tmux_name}");
@@ -603,8 +639,8 @@ pub(crate) async fn rollback_failed_interactive_launch(
         }
     }
 
-    if let Some(worktree_manager) = worktree_manager {
-        match worktree_manager.remove_worktree(session_id) {
+    if let Some(created) = created_worktree {
+        match created.manager.remove_worktree(created.session_id) {
             Ok(()) => info!("Rolled back failed launch worktree: {session_id}"),
             Err(crate::git::WorktreeError::NotFound(_)) => {}
             Err(error) => warn!("Failed to roll back worktree for {session_id}: {error}"),
@@ -1010,7 +1046,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         None,
-                        Some(&self.worktree_manager),
+                        Some(CreatedWorktree::new(&self.worktree_manager, &worktree_info)),
                     )
                     .await;
                     return Err(error
@@ -1032,7 +1068,7 @@ impl InteractiveSessionManager {
             rollback_failed_interactive_launch(
                 session_id,
                 Some(&tmux_session_name),
-                Some(&self.worktree_manager),
+                Some(CreatedWorktree::new(&self.worktree_manager, &worktree_info)),
             )
             .await;
             return Err(error);
@@ -1066,7 +1102,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        Some(CreatedWorktree::new(&self.worktree_manager, &worktree_info)),
                     )
                     .await;
                     return Err(error);
@@ -1092,7 +1128,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        Some(CreatedWorktree::new(&self.worktree_manager, &worktree_info)),
                     )
                     .await;
                     return Err(error
@@ -1216,6 +1252,14 @@ impl InteractiveSessionManager {
             existing_worktree_path.display()
         );
 
+        // Nothing for a failed launch to roll back: this session was HANDED its
+        // worktree (a remote repo's checkout from the bare cache, or a
+        // directory the caller chose), so a failure must leave it exactly where
+        // it found it. The `by-session` symlink fabricated just below points
+        // straight at it, which is precisely why the rollback must not be
+        // allowed to follow it.
+        let rollback_worktree: Option<CreatedWorktree<'_>> = None;
+
         // Create session-based symlink for easy lookup
         let session_path =
             self.worktree_manager.base_dir().join("by-session").join(session_id.to_string());
@@ -1252,12 +1296,7 @@ impl InteractiveSessionManager {
             {
                 Ok(remote) => remote,
                 Err(error) => {
-                    rollback_failed_interactive_launch(
-                        session_id,
-                        None,
-                        Some(&self.worktree_manager),
-                    )
-                    .await;
+                    rollback_failed_interactive_launch(session_id, None, rollback_worktree).await;
                     return Err(error
                         .context("Codex failed to start; AINB ran failed-session cleanup")
                         .into());
@@ -1279,7 +1318,7 @@ impl InteractiveSessionManager {
             rollback_failed_interactive_launch(
                 session_id,
                 Some(&tmux_session_name),
-                Some(&self.worktree_manager),
+                rollback_worktree,
             )
             .await;
             return Err(error);
@@ -1313,7 +1352,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        rollback_worktree,
                     )
                     .await;
                     return Err(error);
@@ -1339,7 +1378,7 @@ impl InteractiveSessionManager {
                     rollback_failed_interactive_launch(
                         session_id,
                         Some(&tmux_session_name),
-                        Some(&self.worktree_manager),
+                        rollback_worktree,
                     )
                     .await;
                     return Err(error
@@ -3145,8 +3184,23 @@ trust_level = "trusted"
         }
         store.save().expect("seed store");
 
-        rollback_failed_interactive_launch(session_id, Some(&failed_tmux), Some(&worktree_manager))
-            .await;
+        // The receipt a real launch would hold for this tree: it is the one
+        // `create_worktree` returns, and the only thing that authorises the
+        // delete below.
+        let created = WorktreeInfo {
+            id: session_id,
+            path: worktree.clone(),
+            session_path: session_link.clone(),
+            branch_name: "failed-launch".to_string(),
+            source_repository: PathBuf::from("/repo"),
+            commit_hash: None,
+        };
+        rollback_failed_interactive_launch(
+            session_id,
+            Some(&failed_tmux),
+            Some(CreatedWorktree::new(&worktree_manager, &created)),
+        )
+        .await;
 
         assert!(!worktree.exists());
         assert!(std::fs::symlink_metadata(&session_link).is_err());
@@ -3187,6 +3241,71 @@ trust_level = "trusted"
         let store = SessionStore::load();
         assert!(store.find_by_tmux_name(&failed_tmux).is_none());
         assert!(store.find_by_tmux_name(&sibling_tmux).is_some());
+    }
+
+    /// A failed launch must not delete a worktree it was HANDED.
+    ///
+    /// `create_session_with_worktree` is given a tree somebody else made (a
+    /// remote repo's checkout from the bare cache, or a directory the caller
+    /// chose) and fabricates the `by-session/<uuid>` symlink that
+    /// `remove_worktree` resolves, so the rollback had a path straight into the
+    /// caller's directory and took it, over failures as ordinary as an
+    /// unreachable daemon.
+    ///
+    /// Headroom forces the failure because it is the one that returns before
+    /// any daemon, tmux or network work; the assertion is about what the
+    /// rollback deletes, not about how the launch failed.
+    #[cfg(unix)]
+    #[tokio::test]
+    // The env guard is deliberately held across the awaits: that is what makes
+    // the AINB_HOME isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::await_holding_lock)]
+    async fn a_failed_launch_keeps_the_worktree_it_was_handed() {
+        let _env = crate::headroom::HEADROOM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = tempfile::tempdir().expect("temp home");
+        let prior_home = std::env::var_os("AINB_HOME");
+        std::env::set_var("AINB_HOME", home.path());
+
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(home) => std::env::set_var("AINB_HOME", home),
+                    None => std::env::remove_var("AINB_HOME"),
+                }
+            }
+        }
+        let _restore_home = RestoreHome(prior_home);
+
+        let handed_in = home.path().join("caller-checkout");
+        std::fs::create_dir_all(&handed_in).expect("create handed-in worktree");
+        let unrecoverable = handed_in.join("work.txt");
+        std::fs::write(&unrecoverable, "the only copy").expect("seed the handed-in worktree");
+
+        let session_id = Uuid::new_v4();
+        let mut manager = InteractiveSessionManager::new().expect("manager");
+        let error = manager
+            .create_session_with_worktree(
+                session_id,
+                "caller".to_string(),
+                handed_in.clone(),
+                handed_in.clone(),
+                "main".to_string(),
+                false,
+                SessionAgentType::Codex,
+                None,
+                true,
+                false,
+            )
+            .await
+            .expect_err("Headroom with shared remote control must fail the launch");
+
+        assert!(
+            unrecoverable.exists(),
+            "the rollback deleted a worktree this launch did not create: {error}"
+        );
     }
 
     #[test]

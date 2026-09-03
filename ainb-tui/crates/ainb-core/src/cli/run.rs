@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 use super::RunArgs;
 use crate::config::CliProvider;
-use crate::git::worktree_manager::WorktreeManager;
+use crate::git::worktree_manager::{WorktreeInfo, WorktreeManager};
 use crate::interactive::session_manager::{
-    ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
+    CreatedWorktree, ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
     discard_codex_remote_thread, ensure_codex_remote_thread, rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
@@ -42,6 +42,10 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     let work_dir: PathBuf;
     let branch_name: String;
     let worktree_manager: Option<WorktreeManager>;
+    // The receipt for the tree THIS run created, and so the only tree its
+    // rollback may delete. `None` when the session runs in the checkout the
+    // user pointed at, which the rollback must leave alone.
+    let created_worktree: Option<WorktreeInfo>;
     let session_id = Uuid::new_v4();
     // Set when the session ends up running directly in the user's checkout.
     // Kept so the warning can be REPEATED in the post-creation summary: with
@@ -65,13 +69,15 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             .create_worktree(session_id, &repo_path, &branch, None)
             .context("Failed to create worktree")?;
 
-        work_dir = worktree_info.path;
+        work_dir = worktree_info.path.clone();
         branch_name = branch;
         worktree_manager = Some(manager);
+        created_worktree = Some(worktree_info);
 
         println!("Created worktree at: {}", work_dir.display());
     } else {
         worktree_manager = None;
+        created_worktree = None;
         work_dir = repo_path.clone();
         branch_name =
             crate::git::current_branch_at(&repo_path).unwrap_or_else(|| "main".to_string());
@@ -88,6 +94,15 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             warn_shared_checkout(&work_dir);
         }
     }
+
+    // Both halves are set together above, so a rollback either names the tree
+    // this run created or removes no directory at all.
+    let rollback_worktree = || {
+        worktree_manager
+            .as_ref()
+            .zip(created_worktree.as_ref())
+            .map(|(manager, created)| CreatedWorktree::new(manager, created))
+    };
 
     // Step 4: Generate session name
     let session_name = args.name.clone().unwrap_or_else(|| {
@@ -130,8 +145,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             // without.
             Ok(remote) => remote,
             Err(error) => {
-                rollback_failed_interactive_launch(session_id, None, worktree_manager.as_ref())
-                    .await;
+                rollback_failed_interactive_launch(session_id, None, rollback_worktree()).await;
                 return Err(error)
                     .context("Codex failed to start; AINB ran failed-session cleanup");
             }
@@ -191,12 +205,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Step 7: Create tmux session
     let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone()).with_env(session_env);
     if let Err(error) = tmux.start(&work_dir).await {
-        rollback_failed_interactive_launch(
-            session_id,
-            Some(tmux.name()),
-            worktree_manager.as_ref(),
-        )
-        .await;
+        rollback_failed_interactive_launch(session_id, Some(tmux.name()), rollback_worktree())
+            .await;
         return Err(error).context("Failed to start tmux session");
     }
 
@@ -218,7 +228,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
                 rollback_failed_interactive_launch(
                     session_id,
                     Some(&tmux_name),
-                    worktree_manager.as_ref(),
+                    rollback_worktree(),
                 )
                 .await;
                 return Err(error)
@@ -271,8 +281,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
     // this write must not lost-update the store.
     if let Err(error) = SessionStore::mutate(|store| store.upsert(metadata)) {
-        rollback_failed_interactive_launch(session_id, Some(&tmux_name), worktree_manager.as_ref())
-            .await;
+        rollback_failed_interactive_launch(session_id, Some(&tmux_name), rollback_worktree()).await;
         if codex_thread_id.is_some() {
             if let Err(cleanup_error) = discard_codex_remote_thread(session_id).await {
                 warn!("Failed to discard claimed Codex thread for {session_id}: {cleanup_error:#}");
