@@ -325,6 +325,55 @@ mod migration_tests {
                 .unwrap();
         assert_eq!(present, 1, "0087 must be reconciled, not run");
     }
+    /// Two migration files sharing a version number merge cleanly, because the
+    /// filenames differ and git sees no textual conflict, then fail at runtime
+    /// on `UNIQUE constraint failed: _sqlx_migrations.version` for every fresh
+    /// database. It has happened twice: 0082 (fixed by renumbering the
+    /// attention migration to 0084) and 0093, where an unmerged branch and main
+    /// both took the slot. Diff the numbers, not the filenames.
+    #[test]
+    fn every_migration_file_has_a_unique_version() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut by_version: std::collections::BTreeMap<u32, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for entry in std::fs::read_dir(&dir).expect("migrations/ must be readable") {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix(".sql") else {
+                continue;
+            };
+            let (digits, slug) = stem
+                .split_once('_')
+                .unwrap_or_else(|| panic!("{name} does not follow NNNN_<slug>.sql"));
+            assert_eq!(
+                digits.len(),
+                4,
+                "{name} must use a 4-digit zero-padded ordinal"
+            );
+            assert!(
+                !slug.is_empty(),
+                "{name} must carry a slug after the ordinal"
+            );
+            let version: u32 = digits
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} must start with a 4-digit ordinal"));
+            by_version.entry(version).or_default().push(name);
+        }
+        assert!(
+            !by_version.is_empty(),
+            "no migrations found in {}",
+            dir.display()
+        );
+        let clashes: Vec<String> = by_version
+            .iter()
+            .filter(|(_, files)| files.len() > 1)
+            .map(|(version, files)| format!("{version}: {}", files.join(", ")))
+            .collect();
+        assert!(
+            clashes.is_empty(),
+            "migration versions claimed more than once: {}",
+            clashes.join("; ")
+        );
+    }
 }
 
 /// Probe whether the LIVE database has drifted away from the schema this
