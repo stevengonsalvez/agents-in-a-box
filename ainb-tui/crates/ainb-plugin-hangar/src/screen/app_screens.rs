@@ -818,6 +818,7 @@ impl ScreenStates {
     /// are recomputed at render time, so a placeholder `now` is fine here — the
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
+        self.working_count = working_agent_count(tasks);
         self.kanban = KanbanState::from_tasks(tasks, 0);
         // Resolve each card's agent id to its roster name, and its issue id to
         // that issue's title, against the cached snapshots. All three snapshots
@@ -1317,6 +1318,23 @@ impl ScreenStates {
     pub const fn take_pending_fleet_intent(&mut self) -> Option<FleetIntent> {
         self.pending_fleet_intent.take()
     }
+}
+
+/// How many DISTINCT agents are running a task right now — the count behind the
+/// issue board's `⬡⬡ 2 working` chip (crisp B2, Q11).
+///
+/// Distinct agents, not running tasks: the chip paints one avatar per agent, so
+/// counting rows would draw two people where one agent runs two tasks. The chip
+/// was dead code before this — declared, read, and never assigned, so it painted
+/// `0` on every real board while its test seeded the count by hand.
+fn working_agent_count(tasks: &[TaskCardRow]) -> usize {
+    use ainb_hangar_core::task_status::TaskStatus;
+    tasks
+        .iter()
+        .filter(|t| TaskStatus::parse(&t.status) == Some(TaskStatus::Running))
+        .map(|t| t.agent_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// The `agent_id -> display_name` roster the Kanban cards label themselves from,

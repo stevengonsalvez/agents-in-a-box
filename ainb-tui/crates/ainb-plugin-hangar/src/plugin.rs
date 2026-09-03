@@ -5747,6 +5747,11 @@ impl Plugin for HangarPlugin {
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        // The issue board ages its card run chips against this clock (crisp B2
+        // §2.2), and the `f` facet panel buckets due dates against it. Set per
+        // FRAME, not per snapshot, so a running card's `2m` ticks between pulls.
+        // Nothing set it before, so both read an epoch-zero clock.
+        self.screens.issue_list.set_now_ms(now_ms_clock());
         self.drain_pending_refreshes(host);
         if let Some(intent) = self.screens.take_pending_fleet_intent() {
             self.apply_fleet_intent(host, intent).await;
