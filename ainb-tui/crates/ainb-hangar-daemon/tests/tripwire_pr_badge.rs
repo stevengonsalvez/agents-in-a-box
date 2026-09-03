@@ -23,12 +23,18 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{TuiSession, can_run_tripwire, prepare_pipeline, seed_completed_task_with_pr, skip};
 
-/// The PR URL seeded onto the completed task — both the on-screen badge marker
-/// and the expected probe-file contents.
+/// The PR URL seeded onto the completed task — the expected probe-file contents,
+/// and the source of the on-screen chip.
 const PR_URL: &str = "https://example.com/pr/1";
-/// What the run card paints for [`PR_URL`]: the number off the URL's tail, not
-/// the URL (crisp B4 §2.3 — the full URL cost 45 cells to say `#1`, and `o`
-/// still opens it, which step 2 below is now the only proof of).
+/// What the run card paints for [`PR_URL`]: the number off the URL's tail, never
+/// the URL itself (crisp B4 §2.3).
+///
+/// Asserting the chip still proves the capture travelled daemon → wire → plugin
+/// → screen, because `pr_chip` parses `#1` off the URL's tail: the chip cannot
+/// paint unless the URL arrived. The chip's own shapes (CI glyphs, CONFLICT, the
+/// no-PR negative) are pinned by `ainb-plugin-hangar/tests/pr_badge_snapshot.rs`,
+/// and `o` carrying the URL by `pr_open_keybinding.rs`; what is unique HERE is
+/// the end-to-end trip, which is why this file asserts the chip and not a shape.
 const PR_CHIP: &str = "PR #1";
 
 #[test]
