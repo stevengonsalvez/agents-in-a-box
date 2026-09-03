@@ -23,6 +23,7 @@ pub mod pr_status;
 pub mod reprime;
 pub mod settings;
 pub mod snapshots;
+pub mod transcript;
 
 /// Re-export the notification routing vocabulary (tcp T5) so proto-only consumers
 /// (ainb-web, the hangar plugin) reach [`Channel`] / [`ChannelSet`] without a
