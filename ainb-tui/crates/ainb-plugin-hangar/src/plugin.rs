@@ -1908,11 +1908,15 @@ impl HangarPlugin {
         }
     }
 
-    /// Surface a `hangar/board_card_timeline` reply (tcp T3 / F6, P10 §4.9): parse
-    /// the returned raw stream-json into the prettied transcript taxonomy and open
-    /// the scrollable timeline overlay over the card. A daemon rejection, or a card
-    /// that never ran (empty transcript), surfaces a note instead of an overlay so
-    /// the key never dead-ends.
+    /// Surface a `hangar/board_card_timeline` reply (tcp T3 / F6, P10 §4.9): open
+    /// the scrollable timeline overlay over the card on the transcript the daemon
+    /// classified. A daemon rejection, or a card that never ran (empty
+    /// transcript), surfaces a note instead of an overlay so the key never
+    /// dead-ends.
+    ///
+    /// The classification is daemon-side since A6, so this handler is shape-blind
+    /// to which executor ran and the buffered live lines below (which arrive
+    /// already classified, from the same code) are directly comparable to it.
     fn apply_board_card_timeline(&mut self, resp: &RpcResponse) {
         // Disarm FIRST, so every return below drops the buffer rather than leaving
         // it armed to grow for the rest of the session: this handler returns early
@@ -1930,7 +1934,11 @@ impl HangarPlugin {
         ) else {
             return;
         };
-        let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl);
+        let entries: Vec<_> = r
+            .entries
+            .iter()
+            .map(|line| crate::screen::task_detail::ViewEntry::line(line.kind, line.body.clone()))
+            .collect();
         // The buffer collects EVERY task's lines, so drop the foreign ones before
         // measuring: a concurrent run's line at or before the seam would otherwise
         // break the match and replay the whole overlap twice. The replay below
@@ -3929,12 +3937,13 @@ impl HangarPlugin {
     }
 
     /// Backfill the open task-detail transcript from a `hangar/board_card_timeline`
-    /// reply (crisp B1, defect 7): the run's raw stream-json parsed through the
-    /// same [`jsonl_timeline`](crate::widgets::jsonl_timeline) taxonomy the
-    /// Boards overlay uses. Applied only when the reply's task is the one the
-    /// screen is bound to (the daemon serves the issue's NEWEST run, the screen
-    /// may show an older attempt); an error, a malformed reply, a never-run
-    /// issue, or a closed screen leaves the transcript as it was.
+    /// reply (crisp B1, defect 7): the run's transcript in the same taxonomy the
+    /// Boards overlay and the live `TaskMessage` stream use, classified daemon-side
+    /// from whichever durable record its executor wrote. Applied only when the
+    /// reply's task is the one the screen is bound to (the daemon serves the
+    /// issue's NEWEST run, the screen may show an older attempt); an error, a
+    /// malformed reply, a never-run issue, or a closed screen leaves the
+    /// transcript as it was.
     ///
     /// A reply that carries no usable transcript is LOGGED, never silent: a new
     /// plugin against a pre-#831 daemon is rejected outright (`board_id` used to
@@ -3958,11 +3967,11 @@ impl HangarPlugin {
         let Some(task_id) = r.task_id else {
             return;
         };
-        let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl)
+        let entries = r
+            .entries
             .into_iter()
-            .filter_map(|e| match e {
-                crate::screen::task_detail::ViewEntry::Line(line) => Some(line),
-                crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+            .map(|line| {
+                crate::screen::task_detail::TranscriptEntry::new(line.kind, line.body, false)
             })
             .collect::<Vec<_>>();
         if self.screens.backfill_task_detail_transcript(&task_id, entries) {
@@ -6161,6 +6170,19 @@ mod tests {
     use super::*;
     use ainb_plugin_protocol::manifest::{CapabilityGrant, Manifest};
 
+    /// A `board_card_timeline` reply's `entries`, built from a stream-json
+    /// fixture the way the DAEMON builds them: through
+    /// [`ainb_hangar_proto::transcript`]. Classifying here rather than hand
+    /// writing `(kind, body)` pairs keeps these fixtures comparable to the live
+    /// `TaskMessage` lines the same tests interleave, which is the whole
+    /// property the overlap/dedupe logic under test depends on.
+    fn timeline_entries(jsonl: &str) -> Vec<ainb_hangar_proto::snapshots::TranscriptLine> {
+        ainb_hangar_proto::transcript::classify_stream_json(jsonl)
+            .into_iter()
+            .map(|(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body })
+            .collect()
+    }
+
     /// Both inbox RPCs must carry the local human as the `recipient`, or the
     /// daemon silently answers with `member:me`'s inbox by default while the
     /// screen claims to be someone else's.
@@ -6412,8 +6434,9 @@ mod tests {
                 serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
                     task_id: Some("t1".into()),
                     provider: Some("claude".into()),
-                    jsonl: r#"{"type":"assistant","message":{"content":[{"type":"text","text":"earlier line"}]}}"#
-                        .into(),
+                    entries: timeline_entries(
+                        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"earlier line"}]}}"#,
+                    ),
                 })
                 .unwrap(),
             ),
@@ -6468,7 +6491,7 @@ mod tests {
                 serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
                     task_id: Some("t1".into()),
                     provider: Some("claude".into()),
-                    jsonl,
+                    entries: timeline_entries(&jsonl),
                 })
                 .unwrap(),
             ),
@@ -6526,7 +6549,7 @@ mod tests {
                 serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
                     task_id: Some("t1".into()),
                     provider: Some("claude".into()),
-                    jsonl,
+                    entries: timeline_entries(&jsonl),
                 })
                 .unwrap(),
             ),
@@ -7147,7 +7170,7 @@ mod tests {
                 serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
                     task_id: Some(task_id.into()),
                     provider: Some("claude".into()),
-                    jsonl: fixture.into(),
+                    entries: timeline_entries(fixture),
                 })
                 .unwrap(),
             ),

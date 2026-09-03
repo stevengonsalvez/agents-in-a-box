@@ -443,6 +443,10 @@ const fn interactive_result(exit_code: Option<i32>) -> RunnerResult {
         exit_code,
         session_id: None,
         usage: None,
+        // An interactive run's output is a live terminal nobody captured, so
+        // there is nothing to scan for a PR URL. Unchanged from before A6: the
+        // finalize's scan of the (always empty) stdout tail found none either.
+        pr_url: None,
         stdout_tail: String::new(),
         stderr_tail: String::new(),
     }

@@ -484,6 +484,9 @@ async fn serve_conn(
             // the snapshot query runs stay buffered in this receiver and are
             // drained after the acknowledgement, closing the snapshot-to-live
             // handoff gap without allowing an event to precede the response.
+            let pending_workspace_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::WORKSPACE_SUBSCRIBE).then(|| broker.subscribe())
+            });
             let pending_task_stream_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::WORKSPACE_SUBSCRIBE)
                     .then(|| broker.subscribe_task_stream())
@@ -540,11 +543,16 @@ async fn serve_conn(
                         // This ordering guarantees no gap — at worst a boundary
                         // event delivered twice (live + replayed), which the
                         // plugin reconciles via the next snapshot pull.
-                        forwarder = Some(spawn_event_forwarder(
-                            broker.subscribe(),
-                            ws.clone(),
-                            out_tx.clone(),
-                        ));
+                        //
+                        // The receiver was taken BEFORE dispatch (#835), so the
+                        // window this arm used to leave — the snapshot query,
+                        // the ack write and the `resolve` above, all before
+                        // `subscribe()` — buffers rather than drops. It matters
+                        // more since A2: a transcript line rides `emit_live`
+                        // with no durable replay behind it, so one missed in
+                        // that window is gone, not merely late.
+                        let ws_rx = pending_workspace_rx.unwrap_or_else(|| broker.subscribe());
+                        forwarder = Some(spawn_event_forwarder(ws_rx, ws.clone(), out_tx.clone()));
                         // A2: the same subscription's TRANSCRIPT half, drained
                         // from its own broadcast so a chatty run cannot evict the
                         // lifecycle events above it (see `EventBroker`). Two
@@ -11096,15 +11104,43 @@ async fn handle_board_card_remove(
     }
 }
 
-/// `hangar/board_card_timeline` (tcp T3 / F6, P10 §4.9): the raw stream-json
+/// `hangar/board_card_timeline` (tcp T3 / F6, P10 §4.9): the CLASSIFIED
 /// transcript of a card's newest run, for the prettied timeline overlay.
 ///
-/// Resolves the card's most recent task, derives the deterministic per-task logs
-/// dir ([`crate::execenv::logs_dir`] — the exact tree the run wrote), and reads a
-/// bounded TAIL of whichever provider log exists (`claude.jsonl` / `codex.jsonl`).
-/// The plugin parses the returned text into the transcript taxonomy. A card that
-/// never ran, or whose log is absent/unreadable, yields an empty transcript (a
-/// read: never an `INVALID_PARAMS` on a missing log).
+/// One read, both executors (track A step A6). Each keeps its own durable
+/// transcript, deliberately — dual-writing a chatty process run's stdout into
+/// SQLite would put thousands of rows per run through the one write lock the
+/// whole control plane shares — so the UNIFICATION happens here, on the read:
+///
+/// ```text
+///   task ─▶ an acp session under scope "task:<id>"?
+///             yes ─▶ fleet_provider_event tail  ─▶ AcpClassifier
+///             no  ─▶ {logs}/<provider>.jsonl tail ─▶ StreamJsonClassifier
+///                              └──────▶ Vec<TranscriptLine> ◀──────┘
+/// ```
+///
+/// The caller cannot tell which executor ran, which is the point: the expanded
+/// run view is identical either way, and identical to the live `TaskMessage`
+/// stream because that classifies through the same code.
+///
+/// # Both reads are bounded, and neither is complete
+///
+/// A run's transcript has no ceiling, so both halves return a TAIL under the
+/// same 512 KiB budget and both degrade the same way at that boundary: a
+/// `tool_result` / `tool_call_update` whose opening call fell outside the
+/// window renders in the unnamed `tool` form.
+///
+/// They are not bounded IDENTICALLY, and the differences run in both
+/// directions. The process half can lose half a LINE, because a byte seek
+/// lands mid-file and the classifier skips the leading partial; an ACP row is
+/// atomic, so its tail loses whole rows and never half of one. But the ACP half
+/// carries a second, row-count cap ([`TAIL_ROWS`]) that can bite well before
+/// the byte budget. So the ACP half SAYS when it truncated and the process half
+/// does not — a marker line is the only honest way to close a gap one side can
+/// detect and the other cannot.
+///
+/// A card that never ran, or whose record is absent/unreadable, yields an empty
+/// transcript (a read: never an `INVALID_PARAMS` on a missing log).
 async fn handle_board_card_timeline(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -11113,6 +11149,21 @@ async fn handle_board_card_timeline(
     /// socket; the plugin's timeline is a tail view, and the parser skips the
     /// leading partial line a mid-file seek leaves.
     const TAIL_CAP: u64 = 512 * 1024;
+    /// Row ceiling on the ACP half of the same budget.
+    ///
+    /// The byte budget alone would still make the daemon materialise a whole
+    /// session's rows before it could measure them; this caps what SQLite hands
+    /// back first.
+    ///
+    /// WHICH cap binds depends on the run, and neither dominates: a transcript
+    /// of short structural rows (~100 B each) exhausts 512 ROWS at ~54 KiB, a
+    /// tenth of the byte budget, while one of coalesced 4 KiB text chunks
+    /// exhausts the BYTES after ~128 rows. Raising this so bytes always bound
+    /// first would just move the cost: 8192 rows of 4 KiB payloads is 32 MB
+    /// materialised per timeline open. So both caps stand, and the read reports
+    /// when either one bit (see [`acp_timeline`]) instead of pretending one
+    /// never does.
+    const TAIL_ROWS: i64 = 512;
 
     let params: ainb_hangar_proto::snapshots::BoardCardTimelineParams =
         parse_params(req, "{ workspace_id, board_id?, issue_id }")?;
@@ -11146,6 +11197,19 @@ async fn handle_board_card_timeline(
         return to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult::default());
     };
 
+    // The ACP arm FIRST, because it is the decisive one: an ACP run writes no
+    // jsonl at all, so a session under this task's scope means the file read
+    // below could only ever return an empty transcript.
+    if let Some((provider, entries)) =
+        acp_timeline(pool, &task_id, TAIL_ROWS, TAIL_CAP as usize).await
+    {
+        return to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+            task_id: Some(task_id),
+            provider: Some(provider),
+            entries,
+        });
+    }
+
     let ws_slug = crate::run_loop::workspace_slug(pool, ws.as_str())
         .await
         .map_err(|e| internal(&format!("resolve workspace slug: {e}")))?;
@@ -11172,8 +11236,72 @@ async fn handle_board_card_timeline(
     to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult {
         task_id: Some(task_id),
         provider,
-        jsonl,
+        entries: transcript_lines(ainb_hangar_proto::transcript::classify_stream_json(&jsonl)),
     })
+}
+
+/// The ACP half of [`handle_board_card_timeline`]: `(provider, entries)` when
+/// this task ran over ACP, `None` when it did not.
+///
+/// The task → session hop is the `task:<id>` scope convention
+/// [`crate::acp_task::scope_key`] mints, so neither side needed a new column.
+/// A store fault degrades to `None` — the caller then reads the (empty) jsonl
+/// and renders "no transcript yet", which is the same thing this read does for
+/// a run that has not written a row yet.
+async fn acp_timeline(
+    pool: &SqlitePool,
+    task_id: &str,
+    max_rows: i64,
+    max_bytes: usize,
+) -> Option<(String, Vec<ainb_hangar_proto::snapshots::TranscriptLine>)> {
+    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    let scope = crate::acp_task::scope_key(task_id);
+    let session = FleetAcpSessionRepo::latest_by_scope(pool, &scope)
+        .await
+        .inspect_err(|error| tracing::warn!(%task_id, %error, "acp session lookup failed"))
+        .ok()
+        .flatten()?;
+    let (rows, truncated) = FleetProviderEventRepo::list_by_session_tail(
+        pool,
+        &session.session_key,
+        max_rows,
+        max_bytes,
+    )
+    .await
+    .inspect_err(|error| tracing::warn!(%task_id, %error, "acp transcript read failed"))
+    .unwrap_or_default();
+
+    let mut classifier = ainb_hangar_proto::transcript::AcpClassifier::default();
+    let mut entries = Vec::new();
+    // The read SAYS when it left rows behind, in the error lane and in stream
+    // position, rather than returning a short transcript that reads as a whole
+    // one. It is the same admission `ainb-acp`'s store writer makes when IT
+    // drops rows (`acp.transcript_truncated`), for the same reason, and the
+    // process half of this read is the one that stays silent — it starts
+    // mid-file with nothing to mark the seam.
+    if truncated {
+        entries.push((
+            ainb_hangar_proto::events::MessageKind::Error,
+            "· transcript truncated · older lines not shown".to_string(),
+        ));
+    }
+    entries.extend(
+        rows.iter()
+            .flat_map(|row| classifier.classify_row(&row.event_type, &row.raw_payload)),
+    );
+    Some((session.provider, transcript_lines(entries)))
+}
+
+/// Wire-shape the classifier's `(kind, body)` pairs.
+fn transcript_lines(
+    entries: Vec<(ainb_hangar_proto::events::MessageKind, String)>,
+) -> Vec<ainb_hangar_proto::snapshots::TranscriptLine> {
+    entries
+        .into_iter()
+        .map(|(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body })
+        .collect()
 }
 
 /// Read the last `cap` bytes of `path` as a lossy string, or `None` when the file

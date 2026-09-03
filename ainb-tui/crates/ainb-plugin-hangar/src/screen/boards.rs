@@ -38,14 +38,14 @@ use crate::screen::task_detail::ViewEntry;
 use crate::widgets::card_board::{self, BoardCard, PriorityChip};
 use crate::widgets::transcript::render_transcript;
 
-/// The prettied JSONL timeline overlay opened over a card (`t`, tcp T3 / F6).
+/// The prettied timeline overlay opened over a card (`t`, tcp T3 / F6).
 ///
-/// A read-only, scrollable view of a card's newest run transcript, parsed from the
-/// provider's on-disk stream-json ([`crate::widgets::jsonl_timeline`]) into the
-/// shared transcript taxonomy. Held as a side-cache on [`BoardsState`] (not the
-/// pure overlay enum) because its content is IO-derived: the glue fetches the
-/// transcript over `hangar/board_card_timeline`, parses it, and stashes the entries
-/// here for the render to paint. Scrolls with `j`/`k`, closes with `Esc`.
+/// A read-only, scrollable view of a card's newest run transcript in the shared
+/// transcript taxonomy, whichever executor produced it. Held as a side-cache on
+/// [`BoardsState`] (not the pure overlay enum) because its content is
+/// IO-derived: the glue fetches the transcript over `hangar/board_card_timeline`
+/// (already classified, daemon-side) and stashes the entries here for the render
+/// to paint. Scrolls with `j`/`k`, closes with `Esc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineView {
     /// The overlay title (`Timeline · #<issue> · <provider>`).
@@ -3253,7 +3253,10 @@ mod tests {
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test\"}}]}}\n",
             "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"green\"}\n",
         );
-        let entries = crate::widgets::jsonl_timeline::parse_timeline(jsonl);
+        let entries: Vec<_> = ainb_hangar_proto::transcript::classify_stream_json(jsonl)
+            .into_iter()
+            .map(|(kind, body)| crate::screen::task_detail::ViewEntry::line(kind, body))
+            .collect();
         assert!(!entries.is_empty(), "fixture parses to entries");
         let mut state = BoardsState::from_snapshot(&one_board());
         state.set_timeline(TimelineView::new(

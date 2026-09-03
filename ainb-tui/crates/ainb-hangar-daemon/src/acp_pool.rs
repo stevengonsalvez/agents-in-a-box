@@ -64,6 +64,27 @@
 //!   parallel tool calls blocks on several at once, and `parked` (not
 //!   `fleet_session.current_request_fingerprint`, which has room for one) is
 //!   what says which are live.
+//!
+//! # A TASK session also streams live (track A step A5's live half)
+//!
+//! A session whose scope is `task:<id>` publishes every transcript row it
+//! commits as a `HangarEvent::TaskMessage` as well, through the same
+//! [`crate::runner::RunStream`] the process executor publishes with and the same
+//! [`AcpClassifier`] the durable `board_card_timeline` read classifies with. A
+//! chat session publishes nothing: it has no task to name, and its transcript
+//! has its own stream. [`bind_task_stream`] is the whole discriminator.
+//!
+//! **Live is published BEFORE the durable commit, and that is a real
+//! asymmetry, not a detail.** The writer buffers and commits on a cadence, so
+//! publishing after it would hold the operator's view back by up to a flush
+//! interval. The cost is that [`StoreWriter`] may later DROP a buffered row
+//! under memory pressure (minting an `acp.transcript_truncated` marker in its
+//! place), and that row was already streamed: in that window the live view
+//! carries a line the durable re-read does not. The process executor has no
+//! equivalent, because its tee to disk is unconditional and happens first. So
+//! "live equals durable" holds for any run whose transcript buffer does not
+//! overflow, which is the same shape as the qualification the 512 KiB tail
+//! already puts on the other end of that equality.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -88,11 +109,11 @@ use ainb_hangar_store::repo::fleet_acp_session::{
     FleetAcpSessionRepo, FleetAcpSessionRow, TurnEnd, TurnEndOutcome,
 };
 use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
-use ainb_hangar_store::repo::fleet_provider_event::{
-    FleetProviderEventRepo, NewFleetProviderEvent,
-};
+use ainb_hangar_store::repo::fleet_provider_event::NewFleetProviderEvent;
 use sqlx::SqlitePool;
 use tokio::sync::{Semaphore, mpsc, oneshot};
+
+use crate::acp_transcript::TranscriptSink;
 use tracing::Instrument as _;
 
 // ------------------------------------------------------------ detail taxonomy
@@ -314,6 +335,16 @@ fn acp_adapters_from_config() -> std::collections::HashMap<String, AcpAdapterTom
     })
 }
 
+/// How often the deadline/idle sweep runs on a production daemon, and the
+/// CEILING [`PoolConfig::set_turn_deadline`] recouples against.
+pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Floor on the recoupled sweep cadence.
+///
+/// A test that pins a 100 ms deadline must not turn the sweep into a spin loop
+/// on the store; the sweep's own read is indexed but it is still a read.
+const MIN_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Pool tuning. Every knob the plan names, with its documented default.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -364,7 +395,7 @@ impl Default for PoolConfig {
             queue_depth: 32,
             process_idle_window: Duration::from_mins(10),
             turn_deadline: Duration::from_mins(30),
-            sweep_interval: Duration::from_secs(15),
+            sweep_interval: DEFAULT_SWEEP_INTERVAL,
             writer: WriterConfig::default(),
             circuit: CircuitConfig::default(),
         }
@@ -377,10 +408,7 @@ impl PoolConfig {
     ///
     /// The 30-minute default is right for a human waiting on a real adapter and
     /// useless to a smoke run that has to PROVE the deadline converges a wedged
-    /// turn (`scripts/chat-bus-smoke.sh`, journey `j5b`). The sweep interval
-    /// follows the deadline down, because a 15 s sweep cannot observe a 2 s
-    /// deadline promptly; it is never lengthened, so the production cadence is
-    /// untouched when the variable is unset or junk.
+    /// turn (`scripts/chat-bus-smoke.sh`, journey `j5b`).
     #[must_use]
     pub fn from_env() -> Self {
         let mut config = Self::from_config();
@@ -389,12 +417,28 @@ impl PoolConfig {
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
         {
-            config.turn_deadline = Duration::from_millis(ms);
-            config.sweep_interval = config
-                .sweep_interval
-                .min(Duration::from_millis(ms / 2).max(Duration::from_millis(100)));
+            config.set_turn_deadline(Duration::from_millis(ms));
         }
         config
+    }
+
+    /// Pin the turn deadline, and recouple the sweep cadence to it.
+    ///
+    /// The ONE way to move the deadline, because moving it alone is a bug the
+    /// two callers found in opposite directions. A sweep cannot observe a
+    /// deadline shorter than its own period, so the cadence follows the
+    /// deadline DOWN; and it is never lengthened past
+    /// [`DEFAULT_SWEEP_INTERVAL`], so production cadence is untouched.
+    ///
+    /// Recoupling matters because the deadline is set TWICE on a task-executor
+    /// daemon: `AINB_ACP_TURN_DEADLINE_MS` sets it here, then
+    /// `HANGAR_TASK_EXECUTOR=acp` raises it to the task runtime budget
+    /// (`ainb_hangar_daemon::run`). While each site did its own coupling
+    /// arithmetic, the raise left the cadence pinned to the value it REPLACED —
+    /// a 1 s sweep chasing a 2.5 h deadline it can never match.
+    pub fn set_turn_deadline(&mut self, deadline: Duration) {
+        self.turn_deadline = deadline;
+        self.sweep_interval = DEFAULT_SWEEP_INTERVAL.min((deadline / 2).max(MIN_SWEEP_INTERVAL));
     }
 
     /// [`PoolConfig::default`] with `[acp.adapters.*]` from the host config
@@ -1421,13 +1465,13 @@ impl AcpPool {
             scope_key: row.scope_key.clone(),
             provider: row.provider.clone(),
             cwd: row.cwd.clone(),
-            writer: StoreWriter::new(
+            sink: TranscriptSink::new(StoreWriter::new(
                 self.store.clone(),
                 row.provider.clone(),
                 row.session_key.clone(),
                 Box::new(SystemIdGen),
                 self.pool_writer_config(),
-            ),
+            )),
             reducer: TranscriptReducer::new(String::new()),
             acp_session_id: None,
             process: None,
@@ -1596,7 +1640,10 @@ pub async fn converge_dirty_session(
         };
         // A deterministic event_id makes the SECOND convergence of the same
         // turn a no-op insert rather than a duplicate marker.
-        match FleetProviderEventRepo::append(pool, &marker).await {
+        // Appended AND published as one operation: this row never touches a
+        // StoreWriter, so nothing else would make it stream.
+        match crate::acp_transcript::append_and_publish(pool, events, &row.scope_key, &marker).await
+        {
             Ok(stored) => events.emit_transcript_order(session_key, stored.ingest_order),
             Err(error) => tracing::error!(
                 %session_key,
@@ -1727,7 +1774,9 @@ struct SessionActor {
     scope_key: String,
     provider: String,
     cwd: String,
-    writer: StoreWriter,
+    /// This session's transcript, live and durable. See [`TranscriptSink`] for
+    /// why the store writer is not reachable from here directly.
+    sink: TranscriptSink,
     reducer: TranscriptReducer,
     acp_session_id: Option<String>,
     process: Option<Arc<ProviderProcess>>,
@@ -1753,6 +1802,16 @@ type TurnResult = Result<PromptResponse, AcpError>;
 
 impl SessionActor {
     async fn run(mut self) {
+        // Resolved off CLONES, not `&self`: the actor holds a parked-permission
+        // responder that is `Send` but not `Sync`, so a future that borrowed
+        // `self` across this await would not be spawnable.
+        let stream = crate::acp_transcript::bind_task_stream(
+            self.pool.store.pool().clone(),
+            self.pool.events.clone(),
+            self.scope_key.clone(),
+        )
+        .await;
+        self.sink.stream = stream;
         let (turn_tx, mut turn_rx) = mpsc::channel::<TurnResult>(1);
         let mut ticker = tokio::time::interval(self.pool.config.writer.flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1879,16 +1938,35 @@ impl SessionActor {
     async fn ingest(&mut self, notification: &SessionNotification) {
         let chunks = self.reducer.push(&notification.update);
         for chunk in &chunks {
-            match self.writer.push(chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::error!(
-                        session_key = %self.session_key,
-                        %error,
-                        "acp transcript commit failed"
-                    );
-                }
+            self.commit_chunk(chunk).await;
+        }
+    }
+
+    /// Published live, then committed durably.
+    ///
+    /// This is the chunk door into [`crate::acp_transcript`]; the marker door is
+    /// `TranscriptSink::lifecycle` and the append-straight-to-the-ledger door is
+    /// `acp_transcript::append_and_publish`. Every `event_type` the classifier
+    /// RENDERS is minted behind one of those three, which is the guarantee worth
+    /// stating because it is checkable — see that module's header for why
+    /// counting tokens bounds this and counting write sites does not.
+    ///
+    /// Live BEFORE durable, deliberately: `writer.push` buffers and commits on a
+    /// cadence, so publishing after it would hold the operator's transcript back
+    /// by up to a flush interval for no gain. The ordering costs one guarantee,
+    /// named in the module docs: a row the writer later DROPS under buffer
+    /// pressure was already published, so live can carry a line durable does
+    /// not.
+    async fn commit_chunk(&mut self, chunk: &ainb_acp::reducer::TranscriptChunk) {
+        match self.sink.chunk(chunk).await {
+            Ok(Some(high_water)) => self.wake(&high_water),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    session_key = %self.session_key,
+                    %error,
+                    "acp transcript commit failed"
+                );
             }
         }
     }
@@ -1896,7 +1974,13 @@ impl SessionActor {
     /// The cadence leg: commit whatever is buffered so a slow turn still
     /// streams (I12), then wake subscribers with the committed high-water mark.
     async fn pump(&mut self) {
-        match self.writer.tick().await {
+        // The run banner's other half, on the cadence the writer already ticks
+        // rather than a timer of its own. Only while a turn is open: the tally
+        // and the clock are the RUN's, and an idle session has neither.
+        if let Some(turn) = &self.turn {
+            self.sink.progress(turn.started.elapsed());
+        }
+        match self.sink.tick().await {
             Ok(Some(high_water)) => self.wake(&high_water),
             Ok(None) => {}
             Err(error) => tracing::error!(
@@ -1907,12 +1991,18 @@ impl SessionActor {
         }
     }
 
+    /// Publish one durable transcript row to the LIVE stream too.
+    ///
+    /// The ONE place a row becomes a `TaskMessage`, called beside every write
+    /// that reaches the store writer — chunks from [`Self::ingest`], the parked
+    /// approval from [`Self::raise_permission`], and the closing marker from
+    /// [`Self::finish_turn`] — because a live view missing any of the three
+    /// would differ from the durable re-read that has all of them, which is
+    /// exactly the equality track A step A5 has to hold.
     fn wake(&self, high_water: &HighWater) {
         // The demux channels are unbounded on purpose, so committed bytes are
         // the growth signal the health pane carries in their place.
-        self.stats
-            .transcript_bytes
-            .store(self.writer.bytes_written(), Ordering::Relaxed);
+        self.stats.transcript_bytes.store(self.sink.bytes_written(), Ordering::Relaxed);
         self.pool
             .events
             .emit_transcript_order(&high_water.session_key, high_water.ingest_order);
@@ -2017,6 +2107,7 @@ impl SessionActor {
         self.drain_updates().await;
         self.reducer.begin_turn();
 
+        self.sink.tool_calls = 0;
         self.turn = Some(OpenTurn {
             message_id: job.message_id.clone(),
             started: Instant::now(),
@@ -2077,7 +2168,7 @@ impl SessionActor {
         .await;
         self.set_state("ACTIVE");
         if let Ok(Some(high_water)) = self
-            .writer
+            .sink
             .lifecycle(
                 Lifecycle::TurnStarted,
                 serde_json::json!({ "turnId": message_id }),
@@ -2124,13 +2215,12 @@ impl SessionActor {
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = None;
         }
-        // Everything the reducer still holds belongs to THIS turn.
+        // Everything the reducer still holds belongs to THIS turn. Through the
+        // same commit path as every other chunk: this flush carries the turn's
+        // FINAL agent message, so a live view that skipped it would end without
+        // the one line the operator was waiting for.
         if let Some(chunk) = self.reducer.flush() {
-            match self.writer.push(&chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => tracing::error!(%error, "final transcript chunk failed to commit"),
-            }
+            self.commit_chunk(&chunk).await;
         }
         self.pump().await;
 
@@ -2179,19 +2269,22 @@ impl SessionActor {
             (None, detail) => detail,
         };
         turn.span.record("outcome", state);
-        if let Ok(Some(high_water)) = self
-            .writer
-            .lifecycle(
-                marker,
-                serde_json::json!({
-                    "turnId": turn.message_id,
-                    "durationMs": turn.started.elapsed().as_millis(),
-                }),
-            )
-            .await
-        {
+        let marker_payload = serde_json::json!({
+            "turnId": turn.message_id,
+            "durationMs": turn.started.elapsed().as_millis(),
+        });
+        // The run-status line that closes the transcript. Without it the live
+        // view ends one line short of the durable re-read, which is the whole
+        // equality T1 asserts.
+        if let Ok(Some(high_water)) = self.sink.lifecycle(marker, marker_payload).await {
             self.wake(&high_water);
         }
+        // One last heartbeat, the same closing tick `stream_stdout` fires at
+        // EOF: a turn shorter than the writer's flush interval would otherwise
+        // publish no tally at all, or only the one from before its first tool
+        // ran, and the run banner would read zero on a run that used tools.
+        // AFTER the marker, so the tally counts every tool the turn published.
+        self.sink.progress(turn.started.elapsed());
 
         let now = SystemClock.now_ms();
         // I4/I11: the TIMELINE gets exactly the final agent message, in the
@@ -2587,7 +2680,7 @@ impl SessionActor {
         self.updates = Some(update_rx);
         self.permissions = Some(permission_rx);
         self.reducer = TranscriptReducer::new(acp_session_id.to_string());
-        self.writer.set_acp_session_id(Some(acp_session_id.to_string()));
+        self.sink.set_acp_session_id(Some(acp_session_id.to_string()));
         // Set NOW, not at the end of the attach, so `detach` can unwind a
         // half-built attach (a load that failed) instead of leaking the route.
         self.acp_session_id = Some(acp_session_id.to_string());
@@ -2601,7 +2694,7 @@ impl SessionActor {
     /// agent forgot" and "the agent was never told".
     async fn record_context_rebuilt(&mut self, path: &'static str, acp_session_id: &str) {
         match self
-            .writer
+            .sink
             .lifecycle(
                 Lifecycle::ContextRebuilt,
                 serde_json::json!({
@@ -2664,15 +2757,7 @@ impl SessionActor {
             self.ingest(&notification).await;
         }
         if let Some(chunk) = self.reducer.flush() {
-            match self.writer.push(&chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => tracing::error!(
-                    session_key = %self.session_key,
-                    %error,
-                    "the adapter's last transcript chunk failed to commit"
-                ),
-            }
+            self.commit_chunk(&chunk).await;
         }
         self.pump().await;
     }
@@ -2749,11 +2834,7 @@ impl SessionActor {
             "toolCall": permission.request.tool_call,
         });
         let chunk = self.reducer.permission_chunk(payload.clone());
-        match self.writer.push(&chunk).await {
-            Ok(Some(high_water)) => self.wake(&high_water),
-            Ok(None) => {}
-            Err(error) => tracing::error!(%error, "permission transcript row failed to commit"),
-        }
+        self.commit_chunk(&chunk).await;
         self.pump().await;
 
         let now = SystemClock.now_ms();
@@ -3418,7 +3499,10 @@ fn permission_fingerprint(session_key: &str, permission: &PermissionRequest) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, HashMap, holds_process, retire_if_current};
+    use super::{
+        Arc, DEFAULT_SWEEP_INTERVAL, Duration, HashMap, MIN_SWEEP_INTERVAL, PoolConfig,
+        holds_process, retire_if_current,
+    };
 
     /// The exit event is PROCESS-SCOPED. The interleaving it defends against
     /// (the watcher snapshots the routes a dying process hosted, the actor then
@@ -3480,5 +3564,43 @@ mod tests {
         retire_if_current(&mut sessions, "acp:1", 8, |generation| *generation);
         retire_if_current(&mut sessions, "acp:missing", 1, |generation| *generation);
         assert!(sessions.is_empty());
+    }
+
+    /// A5 review N3: the sweep cadence follows the EFFECTIVE deadline, both
+    /// ways, however many times the deadline moves.
+    ///
+    /// The sequence pinned here is the one a task-executor daemon actually
+    /// performs (`ainb_hangar_daemon::run`): `AINB_ACP_TURN_DEADLINE_MS`
+    /// shortens the deadline, then `HANGAR_TASK_EXECUTOR=acp` raises it to the
+    /// task runtime budget. The RAISE is the arm that was broken — the cadence
+    /// stayed pinned to the value it replaced — so a guard that only checked
+    /// the shortening direction would have passed on the bug it exists to
+    /// catch.
+    #[test]
+    fn the_sweep_cadence_recouples_to_the_deadline_in_both_directions() {
+        let mut config = PoolConfig::default();
+        assert_eq!(config.sweep_interval, DEFAULT_SWEEP_INTERVAL);
+
+        // Down: a 2 s deadline a 15 s sweep could never observe promptly.
+        config.set_turn_deadline(Duration::from_secs(2));
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(1),
+            "a short deadline pulls the cadence down to half of it"
+        );
+
+        // Back up: the task budget. The cadence must return to the production
+        // default, not stay at the 1 s the previous line set.
+        config.set_turn_deadline(Duration::from_mins(150));
+        assert_eq!(
+            config.sweep_interval, DEFAULT_SWEEP_INTERVAL,
+            "a raised deadline must restore the production cadence"
+        );
+        assert_eq!(config.turn_deadline, Duration::from_mins(150));
+
+        // The floor holds, so a pathologically short test deadline cannot turn
+        // the sweep into a spin loop on the store.
+        config.set_turn_deadline(Duration::from_millis(10));
+        assert_eq!(config.sweep_interval, MIN_SWEEP_INTERVAL);
     }
 }

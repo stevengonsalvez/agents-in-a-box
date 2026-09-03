@@ -2775,21 +2775,42 @@ pub struct BoardCardTimelineParams {
     pub issue_id: String,
 }
 
+/// One classified transcript line: the unit both the durable read and the live
+/// [`crate::events::HangarEvent::TaskMessage`] stream carry.
+///
+/// Identical by construction, not by discipline: both are produced by
+/// [`crate::transcript`], so a line appended live and its later re-read twin
+/// are byte-for-byte the same entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptLine {
+    /// Which of the 5 transcript lanes this line paints in.
+    pub kind: crate::events::MessageKind,
+    /// The line's rendered text, already classified and capped.
+    pub body: String,
+}
+
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_TIMELINE`] (tcp T3 / F6): the
-/// card's latest run transcript, raw, for the plugin to parse + render.
+/// card's latest run transcript, CLASSIFIED, for the plugin to render.
+///
+/// Classified daemon-side (track A step A6) rather than shipped raw, because
+/// the two executors keep different durable transcripts — the process one tees
+/// stream-json to `{logs}/<provider>.jsonl`, the ACP one writes
+/// `fleet_provider_event` rows — and a client that parsed the raw form could
+/// only ever read the first. One read, one taxonomy, both executors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BoardCardTimelineResult {
     /// The task whose transcript this is, or `None` when the card never ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// The provider whose log was read (`claude` / `codex`), or `None` when no log
-    /// exists yet.
+    /// The provider the run used (`claude` / `codex` / an ACP adapter token), or
+    /// `None` when no transcript exists yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// The RAW provider stream-json (a bounded tail of `claude.jsonl` /
-    /// `codex.jsonl`). Empty when the card never ran or the log is gone — the
-    /// plugin renders "no transcript yet", never an error.
-    pub jsonl: String,
+    /// The run's transcript in stream order. Empty when the card never ran or
+    /// the record is gone — the plugin renders "no transcript yet", never an
+    /// error.
+    #[serde(default)]
+    pub entries: Vec<TranscriptLine>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_ASSIGN_SQUAD`] (tcp T4 / F7):

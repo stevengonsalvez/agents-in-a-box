@@ -123,8 +123,22 @@ pub struct RunStream {
 }
 
 impl RunStream {
+    /// Bind a live stream to one run, or `None` when `task_id` is not a task id.
+    ///
+    /// `pub(crate)` because the ACP executor publishes through this same type
+    /// (track A step A5's live half): one emitter, one event shape, one place
+    /// where a transcript line becomes a `TaskMessage`, so the two executors
+    /// cannot drift into emitting differently-shaped events for the same thing.
+    pub(crate) fn bind(events: &EventSink, workspace_id: &str, task_id: &str) -> Option<Self> {
+        TaskId::from_str(task_id.to_string()).ok().map(|task_id| Self {
+            events: events.clone(),
+            workspace_id: workspace_id.to_string(),
+            task_id,
+        })
+    }
+
     /// Publish one classified transcript line.
-    fn line(&self, kind: MessageKind, body: String) {
+    pub(crate) fn line(&self, kind: MessageKind, body: String) {
         self.events.emit_live(
             &self.workspace_id,
             HangarEvent::TaskMessage {
@@ -136,7 +150,7 @@ impl RunStream {
     }
 
     /// Publish the run's cumulative tool count + elapsed clock.
-    fn progress(&self, tool_calls: u32, elapsed: Duration) {
+    pub(crate) fn progress(&self, tool_calls: u32, elapsed: Duration) {
         self.events.emit_live(
             &self.workspace_id,
             HangarEvent::TaskProgress {
@@ -535,6 +549,15 @@ pub struct RunnerResult {
     /// Token/cost usage parsed from the final `{"type":"result",...}` JSONL line,
     /// or `None` if the provider reported none (e38.35).
     pub usage: Option<ProviderUsage>,
+    /// The PR this run opened (P9.1), or `None` when it opened none.
+    ///
+    /// Filled by the EXECUTOR, not by the finalize, because the two find it in
+    /// different places: a process run's `gh pr create` prints it on the stdout
+    /// this struct's tail captured, while an ACP run has no stdout at all (the
+    /// adapter's is the JSON-RPC pipe) and reads it out of its own transcript.
+    /// A finalize that re-derived it from [`Self::stdout_tail`] would therefore
+    /// be silently correct for one executor and silently blind for the other.
+    pub pr_url: Option<String>,
     /// Trailing stdout lines (up to [`RunnerConfig::tail_lines`]), newline-joined.
     pub stdout_tail: String,
     /// Trailing stderr lines (up to [`RunnerConfig::tail_lines`]), newline-joined.
@@ -893,11 +916,7 @@ impl Runner {
     pub fn with_task_stream(&self, workspace_id: &str, task_id: &str, events: &EventSink) -> Self {
         Self {
             cfg: self.cfg.clone(),
-            stream: TaskId::from_str(task_id.to_string()).ok().map(|task_id| RunStream {
-                events: events.clone(),
-                workspace_id: workspace_id.to_string(),
-                task_id,
-            }),
+            stream: RunStream::bind(events, workspace_id, task_id),
         }
     }
 
@@ -1811,6 +1830,12 @@ impl Runner {
         let result = RunnerResult {
             exit_code,
             session_id,
+            // P9.1: the agent shelled out to `gh pr create` inside its worktree
+            // and `gh` printed the URL on its own stdout line, which is in the
+            // tail this run just captured. Read HERE, at the executor that owns
+            // that stdout, because the ACP executor has none and finds the same
+            // URL somewhere else entirely.
+            pr_url: ainb_hangar_core::pr_url::parse_gh_pr_create_stdout(&stdout_tail),
             usage,
             stdout_tail,
             stderr_tail,
@@ -2323,6 +2348,7 @@ mod tests {
             exit_code,
             session_id: None,
             usage: None,
+            pr_url: None,
             stdout_tail: String::new(),
             stderr_tail: String::new(),
         }

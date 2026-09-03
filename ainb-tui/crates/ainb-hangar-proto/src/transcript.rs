@@ -1,18 +1,24 @@
-//! Provider `stream-json` transcript classifier: one line taxonomy for every
-//! executor, durable and live.
+//! Transcript classifier: one line taxonomy for every executor, durable and
+//! live.
 //!
-//! A provider run tees its CLI stream-json to disk (`{logs}/claude.jsonl` /
-//! `{logs}/codex.jsonl`, see the daemon runner). This module turns those lines
-//! into `(MessageKind, body)` pairs in the 5-colour transcript taxonomy
-//! ([`MessageKind`]): tool CALLS (name + a compact input), their RESULTS (with
-//! a per-tool duration when the log carries timestamps), assistant prose,
-//! extended thinking, and a closing LAST REPLY + run-status line.
+//! Each executor keeps its OWN durable transcript, and this module is the one
+//! place either shape becomes `(MessageKind, body)` pairs in the 5-colour
+//! transcript taxonomy ([`MessageKind`]): tool CALLS (name + a compact input),
+//! their RESULTS, assistant prose, extended thinking, and a closing run-status
+//! line.
+//!
+//! ```text
+//!   process executor                          acp executor
+//!   {logs}/<provider>.jsonl                   fleet_provider_event rows
+//!         │                                          │
+//!    StreamJsonClassifier                       AcpClassifier
+//!         └──────────────▶ (MessageKind, body) ◀─────┘
+//! ```
 //!
 //! It lives in the proto crate so the daemon (the live `TaskMessage` producer
-//! and the durable timeline read, track A steps A2 and A6) and the plugin (the
-//! on-disk timeline render, the only caller today) can share exactly one
-//! classifier, so that a live-appended line and its later re-read twin are
-//! byte-identical.
+//! and the durable `board_card_timeline` read, track A steps A2 and A6) and the
+//! plugin (which renders what that read returns) share exactly one classifier,
+//! so that a live-appended line and its later re-read twin are byte-identical.
 //!
 //! # Robust to a truncated / mid-write file (the aws lesson: files lag)
 //!
@@ -26,10 +32,16 @@
 //!
 //! # Provider shapes
 //!
-//! Handles the `claude -p --output-format stream-json` line taxonomy
-//! (`system` / `assistant` / `user`(tool_result) / `result`) fully, and the codex
-//! `exec --json` `{"msg":{"type":…}}` envelope on a best-effort basis (an
-//! unrecognised codex line is skipped, never mis-attributed).
+//! [`StreamJsonClassifier`] handles the `claude -p --output-format stream-json`
+//! line taxonomy (`system` / `assistant` / `user`(tool_result) / `result`)
+//! fully, and the codex `exec --json` `{"msg":{"type":…}}` envelope on a
+//! best-effort basis (an unrecognised codex line is skipped, never
+//! mis-attributed).
+//!
+//! [`AcpClassifier`] handles the `acp.*` `fleet_provider_event` rows
+//! `ainb-acp`'s reducer and store writer produce, with the same skip-the-unknown
+//! contract: a row type this taxonomy does not carry (session bookkeeping, the
+//! usage accounting A7 reads) yields nothing rather than a mis-rendered line.
 
 use std::collections::HashMap;
 
@@ -124,25 +136,7 @@ impl StreamJsonClassifier {
     pub fn classify_value(&mut self, line: &Value) -> Vec<(MessageKind, String)> {
         let mut out = Vec::new();
         self.fold(line, &mut out);
-        // The ONE place every entry passes through, so the backstops live here
-        // rather than at the six `out.push` sites: a tool `name` and a `subtype`
-        // are provider strings too, and capping only the prose in `push_lines`
-        // left those uncapped. Both live producer and durable re-read classify
-        // through this function, so the two stay byte-identical.
-        if out.len() > ENTRIES_PER_LINE_MAX {
-            // Say so rather than dropping silently, the way BODY_MAX appends its
-            // ellipsis: a 600-line block otherwise loses 88 lines with no sign, in
-            // both halves.
-            let dropped = out.len() - (ENTRIES_PER_LINE_MAX - 1);
-            out.truncate(ENTRIES_PER_LINE_MAX - 1);
-            out.push((MessageKind::ToolResult, format!("… {dropped} more lines")));
-        }
-        for (_, body) in &mut out {
-            if body.chars().count() > BODY_MAX {
-                *body = truncate_chars(body, BODY_MAX);
-            }
-        }
-        out
+        capped(out)
     }
 
     /// Fold one decoded JSONL line into `out`.
@@ -271,6 +265,322 @@ impl StreamJsonClassifier {
         };
         out.push((lane, body));
     }
+}
+
+/// The running classification state for one ACP session's durable transcript.
+///
+/// The ACP analogue of [`StreamJsonClassifier`], and stateful for the same one
+/// reason: a `tool_call_update` carries only the `toolCallId`, so it can name
+/// its tool only because the earlier `tool_call` row's `title` was remembered.
+/// Feed one session's rows through one instance, oldest first.
+///
+/// Everything else about a row is self-describing, which is the whole
+/// difference between the two durable reads at their tail boundary: a
+/// stream-json tail restarts mid-FILE and can cut a line in half, while an ACP
+/// tail restarts mid-ROW-SET and every row it does return still classifies
+/// completely. Only the tool NAME degrades (to the unnamed `tool` form), and it
+/// degrades exactly as the stream-json tail's does.
+#[derive(Debug, Default)]
+pub struct AcpClassifier {
+    /// `toolCallId` → the tool's human title, so a later update can name it.
+    tool_titles: HashMap<String, String>,
+}
+
+impl AcpClassifier {
+    /// Classify one `fleet_provider_event` row into zero or more `(kind, body)`
+    /// lines, in the same 5-lane taxonomy [`classify_stream_json`] produces.
+    ///
+    /// Total, like its stream-json twin: a payload that is not valid JSON, an
+    /// `event_type` this taxonomy does not carry, and a known type with missing
+    /// fields all yield what they can (usually nothing) rather than failing.
+    ///
+    /// Deliberately silent on three row types, because the process executor's
+    /// transcript has no counterpart for any of them and the execution view has
+    /// to read the same under both:
+    ///
+    /// * `acp.usage` — the run's token/cost accounting, which belongs on the
+    ///   run-status line (track A step A7), not in a transcript lane.
+    /// * `acp.user_message` — the adapter echoing the prompt back. A task's
+    ///   prompt is its brief, not its output; the process executor passes it as
+    ///   argv and it appears in no transcript.
+    /// * `acp.turn_started` / `acp.context_rebuilt` — session bookkeeping.
+    #[must_use]
+    pub fn classify_row(
+        &mut self,
+        event_type: &str,
+        raw_payload: &str,
+    ) -> Vec<(MessageKind, String)> {
+        let payload = serde_json::from_str::<Value>(raw_payload).unwrap_or(Value::Null);
+        self.classify_value(event_type, &payload)
+    }
+
+    /// [`Self::classify_row`] for a payload the caller ALREADY holds as a
+    /// `Value`.
+    ///
+    /// The live producer has the reducer's own `TranscriptChunk::payload` in
+    /// hand, and serialising it back to a string just so this could parse it
+    /// again would be waste — the same reason
+    /// [`StreamJsonClassifier::classify_value`] exists beside `classify_line`.
+    /// Both entry points fold through this one, so the live line and its later
+    /// durable re-read cannot drift.
+    #[must_use]
+    pub fn classify_value(
+        &mut self,
+        event_type: &str,
+        payload: &Value,
+    ) -> Vec<(MessageKind, String)> {
+        let mut out = Vec::new();
+        match event_type {
+            "acp.message" => fold_acp_text(payload, MessageKind::Agent, &mut out),
+            "acp.thought" => fold_acp_text(payload, MessageKind::Thinking, &mut out),
+            "acp.tool_call" => self.fold_acp_tool(payload, &mut out),
+            "acp.plan" => fold_acp_plan(payload, &mut out),
+            "acp.permission" => fold_acp_permission(payload, &mut out),
+            "acp.transcript_truncated" => fold_acp_truncated(payload, &mut out),
+            "acp.turn_completed" | "acp.turn_failed" | "acp.turn_interrupted" => {
+                fold_acp_turn_end(event_type, payload, &mut out);
+            }
+            _ => {}
+        }
+        capped(out)
+    }
+
+    /// A `tool_call` / `tool_call_update` update.
+    ///
+    /// The initial call is the blue lane (`<title>  <compact rawInput>`, the
+    /// shape `tool_use` renders); an update that carries output or reached a
+    /// terminal status is the slate result lane, red when it FAILED. An update
+    /// that only moves `pending → in_progress` is not a transcript line: every
+    /// adapter emits one per call and the process executor has no counterpart.
+    fn fold_acp_tool(&mut self, payload: &Value, out: &mut Vec<(MessageKind, String)>) {
+        let id = payload.get("toolCallId").and_then(Value::as_str).unwrap_or_default();
+        let title = payload.get("title").and_then(Value::as_str);
+        let status = payload.get("status").and_then(Value::as_str).unwrap_or_default();
+        let is_call = payload.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call");
+
+        if is_call {
+            let name = title.unwrap_or("tool");
+            let summary = compact_input(payload.get("rawInput"));
+            let body = if summary.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}  {summary}")
+            };
+            out.push((MessageKind::ToolCall, body));
+            if !id.is_empty() {
+                // ponytail: same backstop the stream-json side takes — past this
+                // many tool calls awaiting an update, forget them all rather
+                // than track age. Raise the cap before adding an LRU.
+                if self.tool_titles.len() >= MAX_PENDING_TOOLS {
+                    self.tool_titles.clear();
+                }
+                self.tool_titles.insert(id.to_string(), name.to_string());
+            }
+        }
+
+        let snippet = tool_output_text(payload)
+            .map(|s| truncate_chars(&one_line(&s), SUMMARY_MAX))
+            .unwrap_or_default();
+        let terminal = matches!(status, "completed" | "failed");
+        if snippet.is_empty() && !terminal {
+            return;
+        }
+        // An initial `tool_call` that ALREADY carries its output names itself;
+        // a later update resolves the name from the call it belongs to, and
+        // degrades to the unnamed form when that call fell outside the tail.
+        let name = title
+            .map(ToString::to_string)
+            .or_else(|| self.tool_titles.get(id).cloned())
+            .unwrap_or_else(|| "tool".to_string());
+        if status == "failed" {
+            self.tool_titles.remove(id);
+            let body = if snippet.is_empty() {
+                format!("{name}  [error]")
+            } else {
+                format!("{name}  {snippet}  [error]")
+            };
+            out.push((MessageKind::Error, body));
+            return;
+        }
+        if terminal {
+            self.tool_titles.remove(id);
+        }
+        let body = if snippet.is_empty() {
+            format!("{name}  ({status})")
+        } else {
+            format!("{name}  {snippet}")
+        };
+        out.push((MessageKind::ToolResult, body));
+    }
+}
+
+/// The UNTRUNCATED text an ACP transcript row carries: the agent's own prose,
+/// or a tool call's output. `None` for every other row type.
+///
+/// [`AcpClassifier::classify_row`] renders for DISPLAY — a tool result becomes
+/// an 84-char single-line summary, which is right on a render row and wrong for
+/// anything scanning for content. The PR-URL capture is exactly such a scanner
+/// (`gh pr create` prints its URL on a line of its own, and the parser is
+/// anchored to a whole line on purpose), so it reads the bytes the agent
+/// actually saw through here instead of the summary the operator sees.
+#[must_use]
+pub fn acp_row_text(event_type: &str, raw_payload: &str) -> Option<String> {
+    let payload = serde_json::from_str::<Value>(raw_payload).ok()?;
+    match event_type {
+        "acp.message" => payload
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(ToString::to_string),
+        "acp.tool_call" => tool_output_text(&payload),
+        _ => None,
+    }
+}
+
+/// A coalesced text chunk (`{kind, text, coalescedDeltas}`), one entry per
+/// line so a multi-line reply never overflows a render row.
+///
+/// The same `event_type` also carries the reducer's NON-text shape (an image /
+/// audio / embedded resource block, `text` empty and the verbatim update under
+/// `block`). That one has no text to show, so it is NAMED rather than dropped:
+/// a transcript that silently omits a row reads as a complete one.
+fn fold_acp_text(payload: &Value, kind: MessageKind, out: &mut Vec<(MessageKind, String)>) {
+    let text = payload.get("text").and_then(Value::as_str).unwrap_or_default();
+    if !text.trim().is_empty() {
+        push_lines(out, kind, text);
+        return;
+    }
+    if let Some(block) = payload.get("block") {
+        let content_type = block
+            .get("content")
+            .and_then(|c| c.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("non-text");
+        out.push((kind, format!("· {content_type} content")));
+    }
+}
+
+/// A `plan` update: one blue line per entry, so the agent's plan reads as the
+/// checklist it is rather than as a JSON blob on one row.
+fn fold_acp_plan(payload: &Value, out: &mut Vec<(MessageKind, String)>) {
+    let Some(entries) = payload.get("entries").and_then(Value::as_array) else {
+        return;
+    };
+    for entry in entries {
+        let status = entry.get("status").and_then(Value::as_str).unwrap_or("pending");
+        let content = entry.get("content").and_then(Value::as_str).unwrap_or_default();
+        let body = truncate_chars(
+            &one_line(&format!("plan · {status} · {content}")),
+            SUMMARY_MAX,
+        );
+        out.push((MessageKind::ToolCall, body));
+    }
+}
+
+/// A parked permission ask: the blue lane, named for the tool it is gating.
+///
+/// The payload is the daemon's own approval envelope (`acp_pool`'s
+/// `raise_permission`), not an adapter update, so the tool sits under
+/// `toolCall`.
+fn fold_acp_permission(payload: &Value, out: &mut Vec<(MessageKind, String)>) {
+    let call = payload.get("toolCall");
+    let name = call
+        .and_then(|c| c.get("title"))
+        .and_then(Value::as_str)
+        .or_else(|| call.and_then(|c| c.get("toolCallId")).and_then(Value::as_str))
+        .unwrap_or("tool");
+    out.push((MessageKind::ToolCall, format!("[approval] {name}")));
+}
+
+/// The writer's own "I threw rows away" marker, in the error lane.
+///
+/// It is the one row the transcript MUST show: a silently short transcript
+/// reads as a complete one, which is the whole reason `ainb-acp`'s store writer
+/// mints it instead of just dropping.
+fn fold_acp_truncated(payload: &Value, out: &mut Vec<(MessageKind, String)>) {
+    let dropped = payload.get("droppedRows").and_then(Value::as_i64).unwrap_or_default();
+    out.push((
+        MessageKind::Error,
+        format!("· transcript truncated · {dropped} rows dropped"),
+    ));
+}
+
+/// A turn's closing marker as the run-status line the stream-json `result` line
+/// renders (`· <subtype> · <duration>`), so both executors close the same way.
+fn fold_acp_turn_end(event_type: &str, payload: &Value, out: &mut Vec<(MessageKind, String)>) {
+    let subtype = event_type.strip_prefix("acp.").unwrap_or(event_type);
+    let mut status = format!("· {subtype}");
+    if let Some(ms) = payload.get("durationMs").and_then(Value::as_i64) {
+        status.push_str(&format!(" · {}", fmt_dur(ms)));
+    }
+    if let Some(cause) = payload.get("cause").and_then(Value::as_str) {
+        status.push_str(&format!(" · {cause}"));
+    }
+    let lane = if event_type == "acp.turn_completed" {
+        MessageKind::ToolResult
+    } else {
+        MessageKind::Error
+    };
+    out.push((lane, status));
+}
+
+/// The displayable output of a tool-call update: its `content` blocks' text,
+/// else its `rawOutput`.
+///
+/// `content` is an array of `{type:"content"|"diff"|"terminal", …}` where the
+/// `content` flavour wraps a `ContentBlock` (`{type:"text",text:…}`). Only text
+/// is pulled out: a diff or an embedded terminal contributes NOTHING rather
+/// than a JSON blob rendered as if it were the tool's output. The bare
+/// `{type:"text",…}` fallback is for an adapter that skips the wrapper.
+///
+/// Blocks join on a NEWLINE, not a space. [`acp_row_text`] feeds a whole-line
+/// anchored PR-url parser, and an adapter that splits a command's output across
+/// two blocks would otherwise collapse the url onto a shared line and lose it.
+/// The display path re-flattens this to one line anyway ([`one_line`]), so the
+/// separator only ever matters to the scanner.
+fn tool_output_text(payload: &Value) -> Option<String> {
+    let from_content = payload
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|b| {
+                    b.get("content")
+                        .and_then(|c| c.get("text"))
+                        .or_else(|| b.get("text"))
+                        .and_then(Value::as_str)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|joined| !joined.trim().is_empty());
+    from_content.or_else(|| payload.get("rawOutput").and_then(value_text))
+}
+
+/// The ONE gate every classified entry passes through, whichever executor
+/// produced it.
+///
+/// It lives here rather than at the dozen `out.push` sites because a tool
+/// `name`, a `subtype` and an ACP tool `title` are provider strings too, and
+/// capping only the prose in [`push_lines`] left those uncapped. The live
+/// producer, the durable stream-json re-read and the durable ACP re-read all
+/// finish here, so the three stay byte-identical.
+fn capped(mut out: Vec<(MessageKind, String)>) -> Vec<(MessageKind, String)> {
+    if out.len() > ENTRIES_PER_LINE_MAX {
+        // Say so rather than dropping silently, the way BODY_MAX appends its
+        // ellipsis: a 600-line block otherwise loses 88 lines with no sign, in
+        // both halves.
+        let dropped = out.len() - (ENTRIES_PER_LINE_MAX - 1);
+        out.truncate(ENTRIES_PER_LINE_MAX - 1);
+        out.push((MessageKind::ToolResult, format!("… {dropped} more lines")));
+    }
+    for (_, body) in &mut out {
+        if body.chars().count() > BODY_MAX {
+            *body = truncate_chars(body, BODY_MAX);
+        }
+    }
+    out
 }
 
 /// A `system` line marks a run boundary: surface it as a slate status line

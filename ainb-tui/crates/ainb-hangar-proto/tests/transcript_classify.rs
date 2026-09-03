@@ -16,7 +16,7 @@ use ainb_hangar_proto::transcript::{StreamJsonClassifier, classify_stream_json};
 fn parses_claude_shape_with_tool_durations_and_last_reply() {
     let jsonl = r#"
 {"type":"system","subtype":"init","session_id":"abc123session","tools":["Bash"]}
-{"type":"assistant","timestamp":1000,"message":{"content":[{"type":"text","text":"Let me check the tests."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test --workspace"}}]}}
+{"type":"assistant","timestamp":1000,"message":{"content":[{"type":"text","text":"Let me check the tests."},{"type":"thinking","thinking":"The suite is probably already green."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"cargo test --workspace"}}]}}
 {"type":"user","timestamp":2500,"message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"test result: ok. 42 passed"}]}}
 {"type":"result","subtype":"success","total_cost_usd":0.1234,"duration_ms":4200,"result":"All 42 tests pass."}
 "#;
@@ -43,6 +43,16 @@ fn parses_claude_shape_with_tool_durations_and_last_reply() {
             .iter()
             .any(|(k, b)| *k == MessageKind::Agent && b.contains("check the tests")),
         "assistant prose in the agent lane: {lanes:?}"
+    );
+    // And a thinking block lands in ITS own lane, not folded into the prose.
+    // The plugin-side test deleted with `widgets/jsonl_timeline.rs` was the only
+    // other unit cover of this arm; the remaining one is tmux-gated and skips
+    // silently on a box without tmux, so losing this would be invisible.
+    assert!(
+        lanes
+            .iter()
+            .any(|(k, b)| *k == MessageKind::Thinking && b.contains("already green")),
+        "the thinking block gets the thinking lane: {lanes:?}"
     );
     // The result surfaces a LAST REPLY block + a status transition with cost +
     // total duration.

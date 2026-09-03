@@ -29,6 +29,11 @@ pub mod acp_session;
 /// as one ACP turn against a PER-TASK adapter process and maps the delivery leg
 /// onto the same [`runner::RunOutcome`] the process executor returns.
 pub mod acp_task;
+/// One ACP session's transcript, live and durable, behind one door. A separate
+/// module so the `StoreWriter` inside it is unreachable from [`acp_pool`],
+/// which is what makes "every durable row was published live" a compile error
+/// rather than a convention.
+mod acp_transcript;
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
 /// The answer router (spec P2): deliver one attention answer from any surface,
@@ -930,17 +935,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // would cancel every task past half an hour while the same task on the
         // process executor gets 2.5 h. Raise the pool's floor to the task budget
         // rather than leave a 5x cut invisible from the flag.
-        // ponytail: the raise lands AFTER `from_env` has already coupled
-        // `sweep_interval` down to the configured deadline, so
-        // `AINB_ACP_TURN_DEADLINE_MS=2000` with `executor=acp` leaves a raised
-        // deadline and a 1 s sweep that can never match it: harmless (the sweep
-        // is idempotent and only costs one indexed read) and test-only config
-        // today. Recouple the interval to the EFFECTIVE deadline with A6.
+        //
+        // Through `set_turn_deadline`, which recouples the sweep cadence: the
+        // raise lands after `from_env` may already have shortened it, and the
+        // two together used to leave a raised deadline with a cadence pinned to
+        // the value it replaced (A5 review N3).
         let configured_deadline = acp_config.turn_deadline;
-        acp_config.turn_deadline = crate::run_loop::reconcile_turn_deadline(
+        acp_config.set_turn_deadline(crate::run_loop::reconcile_turn_deadline(
             configured_deadline,
             crate::run_loop::acp_turn_budget(),
-        );
+        ));
         // Say so when it actually moved. An invisible timeout change triggered
         // by a flag is the defect class this fix exists to close, and raising
         // the floor points it the safer way for tasks while opening a smaller
