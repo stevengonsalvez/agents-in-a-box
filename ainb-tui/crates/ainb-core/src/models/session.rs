@@ -65,9 +65,9 @@ impl SessionAgentType {
             SessionAgentType::Copilot => "\u{ec1e}", // cod-copilot - real GitHub Copilot logo
             SessionAgentType::Gemini => "\u{f1a0}",  // fa-google - Gemini is a Google product
             SessionAgentType::Antigravity => "▲",
-            SessionAgentType::Kiro => "\u{e62f}",        // seti-crystal - Kiro crystal motif
-            SessionAgentType::Shell => "\u{ea85}",       // cod-terminal
-            SessionAgentType::Ssh => "\u{f023}",         // fa-lock
+            SessionAgentType::Kiro => "\u{e62f}", // seti-crystal - Kiro crystal motif
+            SessionAgentType::Shell => "\u{ea85}", // cod-terminal
+            SessionAgentType::Ssh => "\u{f023}",  // fa-lock
         }
     }
 

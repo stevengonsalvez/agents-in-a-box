@@ -10107,9 +10107,7 @@ impl AppState {
                 // all continue the most recent session in the worktree cwd.
                 (SessionAgentType::Codex, _)
                 | (SessionAgentType::Copilot, _)
-                | (SessionAgentType::Antigravity, _) => {
-                    "Resuming most recent session".to_string()
-                }
+                | (SessionAgentType::Antigravity, _) => "Resuming most recent session".to_string(),
                 (other, _) => {
                     format!("Started fresh ({} has no resume support)", other.name())
                 }

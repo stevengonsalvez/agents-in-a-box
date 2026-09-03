@@ -2641,9 +2641,11 @@ impl EventHandler {
                             KeyCode::Char('x') | KeyCode::Char('X') => Some(
                                 AppEvent::OnboardingGenerateScript(crate::setup::Agent::Codex),
                             ),
-                            KeyCode::Char('a') | KeyCode::Char('A') => Some(
-                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Antigravity),
-                            ),
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                Some(AppEvent::OnboardingGenerateScript(
+                                    crate::setup::Agent::Antigravity,
+                                ))
+                            }
                             KeyCode::Char('p') | KeyCode::Char('P') => Some(
                                 AppEvent::OnboardingGenerateScript(crate::setup::Agent::Copilot),
                             ),

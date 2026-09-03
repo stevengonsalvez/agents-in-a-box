@@ -378,6 +378,16 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_script_picks_antigravity_cli_not_claude() {
+        let env = MockEnv { present: vec![] };
+        let s = build_script(Agent::Antigravity, &env);
+        assert!(s.contains("Google Antigravity"));
+        assert!(!s.contains("@anthropic-ai/claude-code"));
+        assert!(!s.contains("@openai/codex"));
+        assert!(!s.contains("claude plugin install reflect@agents-in-a-box"));
+    }
+
+    #[test]
     fn satisfied_deps_are_skipped_and_brew_not_bootstrapped() {
         // Everything the script would install is already present.
         let env = MockEnv {
