@@ -469,11 +469,6 @@ pub struct HangarPlugin {
     /// and backfill the transcript from the run's on-disk stream-json. `None`
     /// when nothing is armed; consumed (taken) once fired.
     pending_task_timeline_fetch: Option<String>,
-    /// The issue whose `hangar/issue_timeline` fetch is IN FLIGHT (crisp B4
-    /// §2.3). The reply frame names no issue, so without this the activity pane
-    /// would fold a stale narrative into whatever detail screen is open by the
-    /// time it lands. `None` before the first fetch.
-    activity_fetch_issue: Option<String>,
     /// Log lines raised from the SYNCHRONOUS daemon-response path, drained by
     /// `render`, which owns the [`HostClient`].
     ///
@@ -715,7 +710,6 @@ impl Default for HangarPlugin {
             daemon_start_verdict: None,
             pending_pr_status_refresh: None,
             pending_task_timeline_fetch: None,
-            activity_fetch_issue: None,
             pending_logs: Vec::new(),
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
@@ -3857,7 +3851,10 @@ impl HangarPlugin {
         ) else {
             return;
         };
-        if let Some(issue_id) = self.activity_fetch_issue.clone() {
+        // The pane folds in only the narrative of the issue the fetch was armed
+        // for: the reply frame names no issue, and the detail screen may have
+        // moved on to another one since.
+        if let Some(issue_id) = self.screens.activity_fetch_issue().map(ToString::to_string) {
             self.screens.set_task_detail_activity(&issue_id, &parsed.entries);
         }
         if let Some(activity) = self.screens.activity.as_mut() {
@@ -3874,10 +3871,6 @@ impl HangarPlugin {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
-        // Which issue the in-flight reply is FOR: the reply frame carries no
-        // issue id, and the activity pane must not fold one issue's narrative
-        // into a detail screen that has since opened another.
-        self.activity_fetch_issue = Some(issue_id.clone());
         let ws = self.app_state().ws_id.as_str().to_string();
         let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
         let Ok(body) = encode_request(
@@ -5512,7 +5505,7 @@ impl HangarPlugin {
                 self.screens.activity = Some(crate::screen::activity::ActivityState::loading(
                     &issue_id, title,
                 ));
-                self.screens.pending_activity_fetch = Some(issue_id.as_str().to_string());
+                self.screens.arm_activity_fetch(issue_id.as_str().to_string());
                 let reduction =
                     crate::screen::reduce(app, AppEvent::OpenActivityTimeline(issue_id));
                 self.app = Some(reduction.state);
@@ -7181,6 +7174,69 @@ mod tests {
         assert!(
             text.contains("cargo test"),
             "the backfilled tool call renders on the detail screen:\n{text}"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (key+reply+render), crisp B4 §2.3: Enter on an issue
+    /// opens task detail AND arms the SAME `hangar/issue_timeline` fetch the
+    /// activity modal uses; the reply's rows compose into the activity pane,
+    /// which renders beside the transcript. A reply armed for a different issue
+    /// never lands.
+    #[test]
+    fn opening_task_detail_fills_the_activity_pane_from_the_timeline_reply() {
+        use ainb_hangar_proto::snapshots::{IssueTimelineResult, TimelineEntryRow};
+
+        let mut p = connected_plugin_with_issue();
+        p.on_key(&enter_press());
+        assert!(matches!(p.app_state().screen, Screen::TaskDetail(_)));
+        assert_eq!(
+            p.screens.pending_activity_fetch.as_deref(),
+            Some("issue-1"),
+            "opening the detail arms the activity fetch for its issue"
+        );
+        assert_eq!(
+            p.screens.activity_fetch_issue(),
+            Some("issue-1"),
+            "and records which issue the reply will be for"
+        );
+
+        let entries = vec![TimelineEntryRow {
+            id: "tl-1".into(),
+            kind: "activity".into(),
+            created_at: 0,
+            actor_type: Some("agent".into()),
+            actor_id: Some("agent-1".into()),
+            action: Some("task_started".into()),
+            ..TimelineEntryRow::default()
+        }];
+        let reply = |entries: Vec<TimelineEntryRow>| ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_TIMELINE_REQ_ID),
+            result: Some(serde_json::to_value(IssueTimelineResult { entries }).unwrap()),
+            error: None,
+        };
+
+        // A reply armed for ANOTHER issue never reaches this pane.
+        p.screens.arm_activity_fetch("issue-other".into());
+        p.on_daemon_response(&reply(entries.clone()));
+        assert!(
+            p.screens.task_detail.as_ref().unwrap().activity().is_empty(),
+            "another issue's narrative never lands on this screen"
+        );
+
+        // This issue's reply composes and renders.
+        p.screens.arm_activity_fetch("issue-1".into());
+        p.on_daemon_response(&reply(entries));
+        let pane = p.screens.task_detail.as_ref().unwrap().activity().to_vec();
+        assert_eq!(pane.len(), 1, "one narrative row: {pane:?}");
+        let text = buf_text(&p.compose_frame(100, 40), 100, 40);
+        assert!(
+            text.contains("activity"),
+            "the pane is titled on screen:\n{text}"
+        );
+        assert!(
+            text.contains(&pane[0].text),
+            "the composed line renders:\n{text}"
         );
     }
 

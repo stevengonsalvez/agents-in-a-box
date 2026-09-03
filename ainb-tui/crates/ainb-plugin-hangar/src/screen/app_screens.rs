@@ -648,7 +648,17 @@ pub struct ScreenStates {
     pub activity: Option<super::activity::ActivityState>,
     /// An issue id whose `hangar/issue_timeline` fetch is armed, awaiting the
     /// `render` pass to fire it over the daemon socket. `None` when idle.
+    ///
+    /// Armed only through [`ScreenStates::arm_activity_fetch`], which also
+    /// records WHICH issue the reply will be for: the reply frame names no
+    /// issue, and this queue is `take`n the moment it fires.
     pub pending_activity_fetch: Option<String>,
+    /// The issue the most recently armed `hangar/issue_timeline` fetch was for
+    /// (crisp B4 §2.3). Survives the fire, unlike
+    /// [`Self::pending_activity_fetch`], so a reply can be matched to the screen
+    /// that asked for it instead of folding one issue's narrative into another's
+    /// detail pane.
+    activity_fetch_issue: Option<String>,
     /// Command-palette modal cache (present only while the palette is open,
     /// e38.13).
     pub command_palette: Option<CommandPaletteState>,
@@ -1467,7 +1477,21 @@ impl ScreenStates {
         // Crisp B4 §2.3: the activity pane rides the SAME deferred
         // `hangar/issue_timeline` fetch the activity modal arms — one RPC, one
         // reply, both surfaces. Fired by `render`, never inline in the key path.
+        self.arm_activity_fetch(issue_id);
+    }
+
+    /// Arm a `hangar/issue_timeline` fetch for `issue_id` and record that the
+    /// next reply is for it. The ONE way to ask for a timeline: arming without
+    /// recording is what lets a stale reply land on the wrong screen.
+    pub fn arm_activity_fetch(&mut self, issue_id: String) {
+        self.activity_fetch_issue = Some(issue_id.clone());
         self.pending_activity_fetch = Some(issue_id);
+    }
+
+    /// The issue the in-flight (or most recent) timeline fetch was armed for.
+    #[must_use]
+    pub fn activity_fetch_issue(&self) -> Option<&str> {
+        self.activity_fetch_issue.as_deref()
     }
 
     /// Resolve the open task-detail header's names against the cached agents +
@@ -2936,7 +2960,7 @@ fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent
     };
     let out = reduce_activity(&state, ActivityEvent::Key(c));
     if let Some(ActivityIntent::Refresh { issue_id }) = out.intent {
-        states.pending_activity_fetch = Some(issue_id);
+        states.arm_activity_fetch(issue_id);
     }
     states.activity = Some(out.state);
     None
@@ -3475,6 +3499,57 @@ mod task_detail_open_tests {
         assert_eq!(with_cost.cost_cents, Some(43), "0.425 USD → 43 cents");
         assert_eq!(with_cost.finished_at, Some(90_000));
         assert_eq!(with_cost.agent, "impl-1", "the roster name, not the id");
+    }
+
+    /// The real Enter key, through the real router, expands the next run.
+    ///
+    /// The reducer models Enter as `'\n'`/`'\r'`, but nothing on the key path
+    /// hands it those bytes directly: `route_key` → `route_task_detail` →
+    /// `key_char` is what turns [`KeyCode::Enter`] into one. A reducer-only test
+    /// stays green even if the screen never receives the key.
+    #[test]
+    fn the_real_enter_key_expands_the_next_run() {
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1"), agent("a2", "rev-1")]);
+        let mut older = task("t-1", "a2", "failed");
+        older.created_at = 1;
+        let mut live = task("t-2", "a1", "running");
+        live.created_at = 2;
+        states.set_tasks(&[older, live]);
+        states.open_task_detail(TaskId::from_str("t-2").unwrap(), issue(), None, None);
+
+        let mut app = AppState::new(
+            ainb_hangar_core::ids::WorkspaceId::from_str("ws").expect("workspace id"),
+        );
+        app.screen = Screen::TaskDetail(TaskId::from_str("t-2").unwrap());
+        let expanded = |s: &ScreenStates| {
+            s.task_detail
+                .as_ref()
+                .and_then(|td| td.expanded_run().map(|r| r.task_id.clone()))
+        };
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-2"),
+            "opens on the bound run"
+        );
+
+        let enter = KeyEvent {
+            code: KeyCode::Enter,
+            mods: 0,
+            kind: KeyKind::Press,
+        };
+        route_key(&app, &mut states, &enter);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "Enter walked the cursor to the other run"
+        );
+        route_key(&app, &mut states, &enter);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-2"),
+            "and wraps back round"
+        );
     }
 
     /// A run of ANOTHER issue never reaches this issue's log — the tasks
