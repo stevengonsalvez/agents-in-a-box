@@ -118,7 +118,71 @@ pub mod test_support;
 pub async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     let migrator = sqlx::migrate!("./migrations");
     reconcile_superseded_codex_launch_migrations(pool, &migrator).await?;
+    reconcile_foreign_migration_93(pool).await?;
     migrator.run(pool).await?;
+    Ok(())
+}
+
+/// The description version 93 carries on a database that booted a build of the
+/// unmerged branch, i.e. `0093_fleet_provider_event_retention.sql`. SQLx spells
+/// a description by replacing the filename slug's underscores with spaces.
+const FOREIGN_MIGRATION_93_DESCRIPTION: &str = "fleet provider event retention";
+
+/// The only object that file created, and the only thing to unwind.
+const FOREIGN_MIGRATION_93_INDEX: &str = "idx_fleet_provider_event_retention";
+
+/// Unwind a version 93 that belongs to a different migration entirely.
+///
+/// Two unrelated files claimed 93 while one of them sat unmerged:
+/// `0093_board_card_issue_index.sql` on main (shipped in v1.23.2) and
+/// `0093_fleet_provider_event_retention.sql` on the branch. A machine that
+/// booted a branch build recorded 93 under the branch file's text, so every
+/// later boot of a released binary dies in SQLx's checksum guard with
+/// `migration 93 was previously applied but has been modified` and the daemon
+/// never starts at all. The guard is right; the version number was wrong.
+///
+/// Unlike the 0087/0089/0090 reconciliation above, the loser here is not an
+/// inert file this binary can record as applied: it is not embedded in this
+/// binary in any form. So the repair is the other direction. Drop the index it
+/// created and delete its row, leaving the database exactly as if that branch
+/// build had never run, and let SQLx apply main's 93 normally.
+///
+/// Nothing is lost. The index is a pure read optimisation over rows the branch
+/// migration never wrote to, and the branch's sweep code is not in this binary.
+/// Unwinding it, rather than only unsticking the row, is what lets the branch
+/// re-land under a free version: its `CREATE INDEX` has no `IF NOT EXISTS`, so
+/// an orphan left behind would fail the renumbered file on this same machine.
+///
+/// Keyed on the foreign description, so a database whose 93 is main's own is
+/// untouched, and so is one that never reached 93.
+async fn reconcile_foreign_migration_93(pool: &SqlitePool) -> anyhow::Result<()> {
+    let mut connection = pool.acquire().await?;
+    (&mut *connection).ensure_migrations_table().await?;
+    let foreign: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 93 AND description = ?",
+    )
+    .bind(FOREIGN_MIGRATION_93_DESCRIPTION)
+    .fetch_one(&mut *connection)
+    .await?;
+    if foreign == 0 {
+        return Ok(());
+    }
+
+    sqlx::query(&format!(
+        "DROP INDEX IF EXISTS {FOREIGN_MIGRATION_93_INDEX}"
+    ))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 93 AND description = ?")
+        .bind(FOREIGN_MIGRATION_93_DESCRIPTION)
+        .execute(&mut *connection)
+        .await?;
+    tracing::warn!(
+        version = 93,
+        description = FOREIGN_MIGRATION_93_DESCRIPTION,
+        "unwound a migration that claimed a version number owned by another file; \
+         re-applying this binary's migration 93"
+    );
     Ok(())
 }
 
@@ -244,6 +308,17 @@ mod migration_tests {
             .collect()
     }
 
+    async fn index_exists(pool: &SqlitePool, name: &str) -> bool {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+        )
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        count == 1
+    }
+
     /// The property that matters, and the one a recorded-versions check cannot
     /// see: after migrating, the COLUMNS are actually there.
     ///
@@ -325,6 +400,7 @@ mod migration_tests {
                 .unwrap();
         assert_eq!(present, 1, "0087 must be reconciled, not run");
     }
+
     /// Two migration files sharing a version number merge cleanly, because the
     /// filenames differ and git sees no textual conflict, then fail at runtime
     /// on `UNIQUE constraint failed: _sqlx_migrations.version` for every fresh
@@ -373,6 +449,79 @@ mod migration_tests {
             "migration versions claimed more than once: {}",
             clashes.join("; ")
         );
+    }
+
+    /// A database that booted a build of PR #790 recorded version 93 as
+    /// `fleet provider event retention`. Main's 93 is `board_card_issue_index`,
+    /// so every later boot dies on `migration 93 was previously applied but has
+    /// been modified` and the daemon never starts. The repair has to undo the
+    /// foreign migration, not just unstick the row: leaving its index behind
+    /// would fail the renumbered file the moment #790 lands.
+    #[tokio::test]
+    async fn a_database_that_ran_the_unmerged_0093_still_upgrades() {
+        let pool = memory_pool().await;
+        apply_migrations(&pool).await.unwrap();
+
+        // Rewind to what such a database looks like: main's 93 never ran, the
+        // branch's did, and 93 is recorded under its description and checksum.
+        sqlx::query("DROP INDEX IF EXISTS idx_board_card_issue")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 93")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations \
+             (version, description, success, checksum, execution_time) \
+             VALUES (93, 'fleet provider event retention', TRUE, ?, -1)",
+        )
+        .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_fleet_provider_event_retention \
+             ON fleet_provider_event(observed_at) \
+             WHERE raw_payload <> '' AND projection_revision IS NOT NULL AND source <> 'acp'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        apply_migrations(&pool)
+            .await
+            .expect("a database carrying the unmerged 0093 must still upgrade");
+
+        assert!(
+            index_exists(&pool, "idx_board_card_issue").await,
+            "main's 0093 never ran"
+        );
+        assert!(
+            !index_exists(&pool, "idx_fleet_provider_event_retention").await,
+            "the foreign migration's index must be unwound, or the renumbered file cannot apply"
+        );
+        let description: String =
+            sqlx::query_scalar("SELECT description FROM _sqlx_migrations WHERE version = 93")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(description, "board card issue index");
+
+        // Re-running is a no-op: the row now matches, so the repair must not fire.
+        apply_migrations(&pool).await.unwrap();
+        assert!(index_exists(&pool, "idx_board_card_issue").await);
+    }
+
+    /// The repair is keyed on the foreign description, so an untouched database
+    /// must pass straight through it with its index intact.
+    #[tokio::test]
+    async fn a_healthy_database_keeps_its_board_card_index() {
+        let pool = memory_pool().await;
+        apply_migrations(&pool).await.unwrap();
+        apply_migrations(&pool).await.unwrap();
+        assert!(index_exists(&pool, "idx_board_card_issue").await);
     }
 }
 
