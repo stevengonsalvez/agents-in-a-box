@@ -1600,9 +1600,12 @@ impl IssueListState {
                             .as_deref()
                             .is_some_and(|u| !u.trim().is_empty())
                             .then_some(crate::widgets::card_board::PrChip::Unknown),
-                        // The attention feed carries a session id and no issue,
-                        // so nothing can resolve "this card asked you" until B3
-                        // projects it (crisp-ui-track.md §2.4).
+                        // Still nothing to project after crisp B3: an
+                        // `AttentionRow` carries a session id and a cwd, never a
+                        // task or an issue, and no snapshot the plugin holds
+                        // joins the two. B3 made the Inbox the attention
+                        // surface; the card flag needs that join first, which is
+                        // spine work, not plugin work.
                         attention: None,
                         linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
                         // 0046: the sub-issue roll-up, so a PARENT card shows a

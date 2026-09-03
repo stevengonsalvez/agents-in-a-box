@@ -914,14 +914,15 @@ impl ScreenStates {
         pending
     }
 
-    /// Replace the inbox cache from a `hangar/inbox_list` snapshot (e38.14).
+    /// Replace the inbox cache from a `hangar/inbox_list` snapshot (e38.14),
+    /// keeping the operator's filter across the refresh (crisp B3 §2.4).
     pub fn set_inbox(
         &mut self,
         entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
         unread: i64,
         recipient: String,
     ) {
-        self.inbox = InboxState::from_snapshot(entries, unread, recipient);
+        self.inbox.replace_rows(entries, unread, recipient);
     }
 
     /// The cached names the inbox resolves its rows through (crisp B1).
@@ -1556,6 +1557,8 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
         }
         Screen::Inbox => {
+            // The attention store is handed in, not copied (crisp B3 §2.4): the
+            // `needs you` block and the Control Center paint the SAME rows.
             super::inbox::render_inbox(
                 buf,
                 w,
@@ -1563,6 +1566,7 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
                 bottom,
                 &states.inbox,
                 states.inbox_lookup(),
+                &states.control_center,
                 now_ms(),
             );
         }
@@ -1679,6 +1683,7 @@ pub const HELP_LINES: &[&str] = &[
     "boards    c card  enter run ▾ (headless / interactive)  a attach  X cancel",
     "          b board  n/r/x column  s squad  w depends-on  R auto-run  d remove",
     "          t timeline  e edit  m auto-move  ⇧↑↓ move card  ⇧←→ reorder column",
+    "inbox     j/k row  h/l option  enter or 1-9 answer  r mark read  f filter",
     "control   j/k card  h/l option  enter or 1-9 answer",
     "squads    n agent  c squad  a/d member  r role  i instructions  x fan out",
     "agents    n create  x delete",
@@ -1926,11 +1931,20 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             None
         }
         Screen::Inbox => {
-            // The inbox owns the mark-all-read key (`r`): it flags a deferred
-            // `hangar/inbox_mark_read` request the `render` pass fires, after
-            // which the re-pulled snapshot drops the unread badge to zero.
-            if key_char(key) == Some('r') {
-                states.pending_inbox_mark_read = true;
+            match key_char(key) {
+                // The inbox owns the mark-all-read key (`r`): it flags a deferred
+                // `hangar/inbox_mark_read` request the `render` pass fires, after
+                // which the re-pulled snapshot drops the unread badge to zero.
+                Some('r') => states.pending_inbox_mark_read = true,
+                // `f` cycles the client-side filter chips (crisp B3 §2.4). No
+                // refetch: the rows the screen already holds are the rows it
+                // filters.
+                Some('f') => states.inbox.cycle_filter(),
+                // Everything else drives the `needs you` block, which IS the
+                // control-center board: the same reducer, the same selection,
+                // the same `attention/answer` RPC. An ASK is answerable from `I`
+                // exactly as it is from `C`.
+                _ => route_control_center(states, key),
             }
             None
         }

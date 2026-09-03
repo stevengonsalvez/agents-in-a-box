@@ -1,0 +1,28 @@
+---
+source: crates/ainb-plugin-hangar/tests/snapshot_inbox.rs
+expression: full
+---
+Inbox  member:me   [1 need you]  [4 unread]    all (asks) runs issues                        I inbox
+┌ needs you ───────────────────────────────────────────────────────────────────────────────────────┐
+│▸● ASK  40s   boxtrack · Decide the Boxtrack sqlite file location                                 │
+│  OPTIONS                                                                                         │
+│  ① data/boxtrack.db                                                                              │
+│     Repo-root data/ dir, outside api/src                                                         │
+│  ② api/app.db                                                                                    │
+│     Sits next to the api package                                                                 │
+│  h/l option · enter/1-9 answer                                                                   │
+│ ● ERR  3m    api · agent_error exit 65                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘

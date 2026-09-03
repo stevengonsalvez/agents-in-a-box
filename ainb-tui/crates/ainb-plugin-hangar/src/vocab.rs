@@ -16,10 +16,10 @@
 //! Rules: **lowercase everywhere except the four attention codes**, and one glyph
 //! per token, shared. Never `Success`, never `DONE`, never `Completed`.
 //!
-//! Two total mappings turn what the daemon sends into this vocabulary —
-//! [`RunState::of`] over the CHECK'd task FSM and [`AttentionKind::of_kind`] over
-//! the attention request families — and each token carries its own glyph, so a
-//! screen can never pair the right word with the wrong mark.
+//! [`RunState::of`] is total over the CHECK'd task FSM, and each token carries
+//! its own glyph, so a screen can never pair the right word with the wrong mark.
+//! The attention families map onto [`AttentionKind`] in exactly one place, named
+//! on that type: it needs the parsed request body, not just the wire token.
 //!
 //! This module MAPS the daemon's three stores onto one vocabulary; it does not
 //! merge them (PLAN.md "do not attempt in track B" #1). The stores collapse in
@@ -97,6 +97,12 @@ impl RunState {
 
 /// The four attention codes — the ONLY uppercase words in the vocabulary, short
 /// enough to sit on a card footer beside an agent name and an age.
+///
+/// The wire `kind` token maps onto these in exactly ONE place,
+/// [`AttentionCard::vocab_kind`](crate::screen::control_center::AttentionCard::vocab_kind):
+/// it needs the parsed body as well as the token (an idle-at-prompt session and
+/// an explicit `WAITING:` marker share the `waiting` family), and a second
+/// token-only mapping here drifted from it the moment it existed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttentionKind {
     /// A question is waiting for an answer (`ask_user_question`,
@@ -111,20 +117,8 @@ pub enum AttentionKind {
 }
 
 impl AttentionKind {
-    /// TOTAL over the attention `kind` wire tokens.
-    ///
-    /// An unrecognised family reads as [`Self::Wait`] — "something wants you and
-    /// we do not know what" — never as a silent drop: an attention row that
-    /// paints nothing is a human waiting on a screen that says all is well.
-    #[must_use]
-    pub fn of_kind(kind: &str) -> Self {
-        match kind.trim().to_ascii_lowercase().as_str() {
-            "ask_user_question" | "codex_request_user" | "approval" => Self::Ask,
-            "error" | "escalation" => Self::Err,
-            "idle" => Self::Idle,
-            _ => Self::Wait,
-        }
-    }
+    /// Every code, for the tests that must hold across all of them.
+    pub const ALL: [Self; 4] = [Self::Ask, Self::Err, Self::Idle, Self::Wait];
 
     /// The uppercase code this kind paints as.
     #[must_use]
@@ -176,6 +170,31 @@ pub const FLEET_NEEDS_INPUT: &str = "needs input";
 /// Lowercase, unlike the [`AttentionKind::Idle`] code: the lens is a filter over
 /// sessions, the code is a flag on one row that needs a human.
 pub const FLEET_IDLE: &str = "idle";
+
+/// How long ago something happened, as one compact word: `40s` · `9m` · `3h` · `2d`.
+///
+/// One ladder, all four units. The Inbox found the §1.10 defect reproduced
+/// inside a single pane: its `needs you` block said `40s` where its `recent`
+/// block said `0m`, and `72h` where the other said `3d`. Two age vocabularies
+/// on one screen is the same bug as four status vocabularies on one app.
+///
+/// Rounds down at every step, so a thing is never reported older than it is.
+#[must_use]
+pub fn age_word(ms: i64) -> String {
+    let secs = ms.max(0) / 1000;
+    let mins = secs / 60;
+    let hours = mins / 60;
+    let days = hours / 24;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if mins < 60 {
+        format!("{mins}m")
+    } else if hours < 24 {
+        format!("{hours}h")
+    } else {
+        format!("{days}d")
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -238,8 +257,8 @@ mod tests {
         for word in [FLEET_NEEDS_INPUT, FLEET_IDLE] {
             assert_eq!(word, word.to_lowercase(), "fleet word {word:?}");
         }
-        for kind in ["ask_user_question", "error", "idle", "waiting"] {
-            let code = AttentionKind::of_kind(kind).code();
+        for kind in AttentionKind::ALL {
+            let code = kind.code();
             assert_eq!(code, code.to_uppercase(), "attention code {code:?}");
             assert!(
                 (3..=4).contains(&code.chars().count()),
@@ -265,25 +284,31 @@ mod tests {
         assert!(!glyphs.contains(&'◆'), "run glyph collides with ◆");
     }
 
-    /// The attention families map onto the four codes, and an unknown family is
-    /// WAIT (fail-visible), never dropped.
+    /// One age ladder, all four units, rounding down at every step.
+    ///
+    /// The boundaries are the point: a screen that says `0m` for a 40-second row
+    /// and `72h` for a three-day one is the pane-level version of the four
+    /// status vocabularies this module exists to collapse.
     #[test]
-    fn attention_families_map_to_codes() {
-        for (kind, code) in [
-            ("ask_user_question", "ASK"),
-            ("codex_request_user", "ASK"),
-            ("approval", "ASK"),
-            ("error", "ERR"),
-            ("escalation", "ERR"),
-            ("idle", "IDLE"),
-            ("waiting", "WAIT"),
-            ("something_new_from_a_newer_daemon", "WAIT"),
-            ("", "WAIT"),
+    fn age_word_covers_seconds_to_days_and_rounds_down() {
+        let sec = 1_000;
+        let min = 60 * sec;
+        let hour = 60 * min;
+        let day = 24 * hour;
+        for (ms, word) in [
+            (-5 * sec, "0s"),
+            (0, "0s"),
+            (40 * sec, "40s"),
+            (59 * sec + 999, "59s"),
+            (min, "1m"),
+            (59 * min + 59 * sec, "59m"),
+            (hour, "1h"),
+            (23 * hour + 59 * min, "23h"),
+            (day, "1d"),
+            (3 * day, "3d"),
         ] {
-            assert_eq!(AttentionKind::of_kind(kind).code(), code, "kind {kind:?}");
+            assert_eq!(age_word(ms), word, "{ms}ms");
         }
-        // Case and padding on the wire are not a different family.
-        assert_eq!(AttentionKind::of_kind("  ERROR  "), AttentionKind::Err);
     }
 
     /// Every issue status has a lowercase word, spelled with spaces rather than
