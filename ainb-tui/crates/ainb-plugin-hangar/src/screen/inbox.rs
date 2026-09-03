@@ -542,11 +542,7 @@ fn answer_block_height(attention: &ControlCenterState) -> u16 {
     }
     // `OPTIONS` header + one row per option (two when it carries a description)
     // + the answer hint line.
-    let options: u16 = card
-        .options()
-        .iter()
-        .map(|o| u16::from(o.description.is_some()) + 1)
-        .sum();
+    let options: u16 = card.options().iter().map(|o| u16::from(o.description.is_some()) + 1).sum();
     options.saturating_add(2)
 }
 
@@ -583,13 +579,24 @@ fn render_needs_you(
             right,
         );
         x = put_str(buf, x, row, &AttentionKind::GLYPH.to_string(), color, right);
-        x = put_str(buf, x, row, &format!(" {} ", pad_to(kind.code(), 4)), color, right);
+        x = put_str(
+            buf,
+            x,
+            row,
+            &format!(" {} ", pad_to(kind.code(), 4)),
+            color,
+            right,
+        );
         let age = control_center::format_age(now_ms.saturating_sub(card.created_at));
         x = put_str(buf, x, row, &pad_to(&age, 6), MUTED_GRAY, right);
         // The attention feed carries a session id and a cwd, never an issue, so
         // the row names the session's directory and what it said. Resolving it
         // to `impl-1 on HGR-7` needs a session→task join no snapshot carries.
-        let text = format!("{} · {}", card.short_label(), control_center::last_reply(card));
+        let text = format!(
+            "{} · {}",
+            card.short_label(),
+            control_center::last_reply(card)
+        );
         put_str(buf, x, row, &text, SOFT_WHITE, right);
         row += 1;
 
@@ -654,7 +661,9 @@ fn render_entry(
     let unread = entry.read_at.is_none();
     let line = compose_line(entry, lookup);
     let (glyph, glyph_color) = row_glyph(entry);
-    let mut x = put_str(buf, 1, row, &format!("{glyph} "), glyph_color, right);
+    // The leading space keeps the glyph column under the `needs you` rows'
+    // dots rather than flush against the frame rail.
+    let mut x = put_str(buf, 1, row, &format!(" {glyph} "), glyph_color, right);
     x = put_str(
         buf,
         x,
@@ -968,7 +977,12 @@ mod tests {
     fn header_badge_is_the_control_center_count() {
         let mut attention = ControlCenterState::default();
         attention.set_attention(&[
-            attention_row("a1", "ask_user_question", 1, &ask_payload("q", &[("y", None)])),
+            attention_row(
+                "a1",
+                "ask_user_question",
+                1,
+                &ask_payload("q", &[("y", None)]),
+            ),
             attention_row("a2", "approval", 2, r#"{"kind":"WAIT","context":{}}"#),
             attention_row(
                 "e1",
@@ -1119,14 +1133,23 @@ mod tests {
         let asks = paint(&state);
         assert!(asks.contains("(asks)"), "{asks}");
         assert!(asks.contains("needs you"), "{asks}");
-        assert!(!asks.contains("recent"), "`asks` drops the recent block: {asks}");
+        assert!(
+            !asks.contains("recent"),
+            "`asks` drops the recent block: {asks}"
+        );
         assert!(!asks.contains("Refactor API"), "{asks}");
 
         state.cycle_filter(); // runs
         let runs = paint(&state);
         assert!(runs.contains("(runs)"), "{runs}");
-        assert!(!runs.contains("needs you"), "`runs` drops the attention block: {runs}");
-        assert!(runs.contains("no notifications"), "no run rows cached: {runs}");
+        assert!(
+            !runs.contains("needs you"),
+            "`runs` drops the attention block: {runs}"
+        );
+        assert!(
+            runs.contains("no notifications"),
+            "no run rows cached: {runs}"
+        );
     }
 
     /// A refresh landing while the operator is filtered keeps the filter.
@@ -1230,12 +1253,16 @@ mod tests {
         let rows: Vec<String> =
             (RECENT_TOP..RECENT_TOP + 5).map(|r| row_body(&buf, r, 80)).collect();
         assert!(
-            rows[0].starts_with("✗ ") && rows[0].contains("run failed") && rows[0].contains("#ZZZZZZ"),
+            rows[0].starts_with("✗ ")
+                && rows[0].contains("run failed")
+                && rows[0].contains("#ZZZZZZ"),
             "{:?}",
             rows[0]
         );
         assert!(
-            rows[1].starts_with("+ ") && rows[1].contains("new issue") && rows[1].contains("HGR-3 Add GET"),
+            rows[1].starts_with("+ ")
+                && rows[1].contains("new issue")
+                && rows[1].contains("HGR-3 Add GET"),
             "{:?}",
             rows[1]
         );
@@ -1325,7 +1352,16 @@ mod tests {
             "member:me".into(),
         );
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), &no_attention(), NOW);
+        render_inbox(
+            &mut buf,
+            60,
+            0,
+            20,
+            &state,
+            &InboxLookup::default(),
+            &no_attention(),
+            NOW,
+        );
 
         // Title row carries the unread badge.
         let title = row_text(&buf, 0, 60);
@@ -1358,7 +1394,16 @@ mod tests {
             "member:me".into(),
         );
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), &no_attention(), NOW);
+        render_inbox(
+            &mut buf,
+            60,
+            0,
+            20,
+            &state,
+            &InboxLookup::default(),
+            &no_attention(),
+            NOW,
+        );
 
         let title = row_text(&buf, 0, 60);
         assert!(
@@ -1386,7 +1431,16 @@ mod tests {
         let state =
             InboxState::from_snapshot(vec![entry("task", "Task finished", true)], 0, String::new());
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), &no_attention(), NOW);
+        render_inbox(
+            &mut buf,
+            60,
+            0,
+            20,
+            &state,
+            &InboxLookup::default(),
+            &no_attention(),
+            NOW,
+        );
 
         // No badge when unread is zero.
         let title = row_text(&buf, 0, 60);
@@ -1409,7 +1463,16 @@ mod tests {
     fn empty_inbox_renders_placeholder() {
         let state = InboxState::default();
         let mut buf = WireBuffer::new(60, 24);
-        render_inbox(&mut buf, 60, 0, 20, &state, &InboxLookup::default(), &no_attention(), NOW);
+        render_inbox(
+            &mut buf,
+            60,
+            0,
+            20,
+            &state,
+            &InboxLookup::default(),
+            &no_attention(),
+            NOW,
+        );
         assert!(
             row_body(&buf, RECENT_TOP, 60).contains("no notifications"),
             "empty placeholder: {:?}",
@@ -1435,7 +1498,16 @@ mod tests {
             "member:me".into(),
         );
         let mut buf = WireBuffer::new(80, 24);
-        render_inbox(&mut buf, 80, 0, 20, &state, &InboxLookup::default(), &attention, NOW);
+        render_inbox(
+            &mut buf,
+            80,
+            0,
+            20,
+            &state,
+            &InboxLookup::default(),
+            &attention,
+            NOW,
+        );
         let has_control = buf.cells.iter().any(|(_, c)| c.symbol.chars().any(char::is_control));
         assert!(
             !has_control,
