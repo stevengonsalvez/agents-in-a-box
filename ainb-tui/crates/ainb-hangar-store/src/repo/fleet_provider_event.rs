@@ -402,15 +402,23 @@ impl FleetProviderEventRepo {
         rows.iter().map(row_from).collect()
     }
 
-    /// The NEWEST rows of one session's transcript, returned oldest first.
+    /// The NEWEST rows of one session's transcript, returned oldest first, and
+    /// whether older rows were left behind.
     ///
     /// The tail read behind `hangar/board_card_timeline`: an execution view
     /// shows the END of a run, and a whole transcript is unbounded in both rows
     /// and bytes (a coalesced text chunk is a few KiB, a tool call's verbatim
     /// update has no ceiling at all). So it is bounded TWICE — `max_rows` in
-    /// SQL, then `max_payload_bytes` walking back from the newest row — and the
-    /// row cap is what keeps the byte walk from having to materialise a whole
-    /// session first.
+    /// SQL, then `max_payload_bytes` walking back from the newest row.
+    ///
+    /// **Neither cap dominates the other, and which one binds depends entirely
+    /// on the run.** A transcript of short structural rows hits `max_rows`
+    /// first; one of coalesced 4 KiB text chunks hits the byte budget first.
+    /// That is why the truncation flag is RETURNED rather than inferable: a
+    /// caller cannot tell from `rows.len()` alone whether it is holding the
+    /// whole transcript, and one that assumed it was would render a partial run
+    /// as a complete one. Returned as a tuple the caller must destructure, so
+    /// ignoring it is a deliberate `_` and not an oversight.
     ///
     /// At least one row always survives the byte budget: a single payload
     /// larger than the whole budget must still be shown (its own renderer caps
@@ -420,29 +428,47 @@ impl FleetProviderEventRepo {
         session_key: &str,
         max_rows: i64,
         max_payload_bytes: usize,
-    ) -> Result<Vec<FleetProviderEventRow>, sqlx::Error> {
+    ) -> Result<(Vec<FleetProviderEventRow>, bool), sqlx::Error> {
+        let max_rows = max_rows.max(1);
+        // One row MORE than the cap, so "was there anything older" is answered by
+        // this query rather than by a second one. A session holding exactly
+        // `max_rows` rows is complete, not truncated, and the extra row is the
+        // only thing that distinguishes the two.
         let rows = sqlx::query(
             "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
              FROM fleet_provider_event WHERE session_key = ? \
              ORDER BY ingest_order DESC LIMIT ?",
         )
         .bind(session_key)
-        .bind(max_rows.max(1))
+        .bind(max_rows.saturating_add(1))
         .fetch_all(pool)
         .await?;
+        let mut truncated = i64::try_from(rows.len()).is_ok_and(|got| got > max_rows);
+        let rows = &rows[..rows.len().min(usize::try_from(max_rows).unwrap_or(usize::MAX))];
         let mut budget = max_payload_bytes;
         let mut tail: Vec<FleetProviderEventRow> = Vec::new();
-        for row in &rows {
-            let row = row_from(row)?;
+        for row in rows {
+            // A row that cannot be decoded is SKIPPED, not fatal: the classifier
+            // reading these same rows is documented total, and aborting here
+            // would lose a whole run's view to one bad row.
+            let row = match row_from(row) {
+                Ok(row) => row,
+                Err(error) => {
+                    tracing::warn!(%session_key, %error, "skipping an undecodable transcript row");
+                    truncated = true;
+                    continue;
+                }
+            };
             let cost = row.raw_payload.len();
             if !tail.is_empty() && cost > budget {
+                truncated = true;
                 break;
             }
             budget = budget.saturating_sub(cost);
             tail.push(row);
         }
         tail.reverse();
-        Ok(tail)
+        Ok((tail, truncated))
     }
 
     /// One PAGE of the rows [`Self::delete_acp_before`] could remove, oldest

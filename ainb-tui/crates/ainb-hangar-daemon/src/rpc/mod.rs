@@ -11128,10 +11128,16 @@ async fn handle_board_card_remove(
 /// A run's transcript has no ceiling, so both halves return a TAIL under the
 /// same 512 KiB budget and both degrade the same way at that boundary: a
 /// `tool_result` / `tool_call_update` whose opening call fell outside the
-/// window renders in the unnamed `tool` form. The process half degrades a
-/// little further, because a byte seek can land mid-LINE and the classifier
-/// skips that leading partial; an ACP row is atomic, so its tail loses whole
-/// rows and never half of one.
+/// window renders in the unnamed `tool` form.
+///
+/// They are not bounded IDENTICALLY, and the differences run in both
+/// directions. The process half can lose half a LINE, because a byte seek
+/// lands mid-file and the classifier skips the leading partial; an ACP row is
+/// atomic, so its tail loses whole rows and never half of one. But the ACP half
+/// carries a second, row-count cap ([`TAIL_ROWS`]) that can bite well before
+/// the byte budget. So the ACP half SAYS when it truncated and the process half
+/// does not — a marker line is the only honest way to close a gap one side can
+/// detect and the other cannot.
 ///
 /// A card that never ran, or whose record is absent/unreadable, yields an empty
 /// transcript (a read: never an `INVALID_PARAMS` on a missing log).
@@ -11147,9 +11153,16 @@ async fn handle_board_card_timeline(
     ///
     /// The byte budget alone would still make the daemon materialise a whole
     /// session's rows before it could measure them; this caps what SQLite hands
-    /// back first. 512 coalesced chunks is far more transcript than the 512 KiB
-    /// below admits, so in practice the BYTE budget is what bites and the two
-    /// executors are bounded alike.
+    /// back first.
+    ///
+    /// WHICH cap binds depends on the run, and neither dominates: a transcript
+    /// of short structural rows (~100 B each) exhausts 512 ROWS at ~54 KiB, a
+    /// tenth of the byte budget, while one of coalesced 4 KiB text chunks
+    /// exhausts the BYTES after ~128 rows. Raising this so bytes always bound
+    /// first would just move the cost: 8192 rows of 4 KiB payloads is 32 MB
+    /// materialised per timeline open. So both caps stand, and the read reports
+    /// when either one bit (see [`acp_timeline`]) instead of pretending one
+    /// never does.
     const TAIL_ROWS: i64 = 512;
 
     let params: ainb_hangar_proto::snapshots::BoardCardTimelineParams =
@@ -11250,7 +11263,7 @@ async fn acp_timeline(
         .inspect_err(|error| tracing::warn!(%task_id, %error, "acp session lookup failed"))
         .ok()
         .flatten()?;
-    let rows = FleetProviderEventRepo::list_by_session_tail(
+    let (rows, truncated) = FleetProviderEventRepo::list_by_session_tail(
         pool,
         &session.session_key,
         max_rows,
@@ -11261,10 +11274,23 @@ async fn acp_timeline(
     .unwrap_or_default();
 
     let mut classifier = ainb_hangar_proto::transcript::AcpClassifier::default();
-    let entries = rows
-        .iter()
-        .flat_map(|row| classifier.classify_row(&row.event_type, &row.raw_payload))
-        .collect();
+    let mut entries = Vec::new();
+    // The read SAYS when it left rows behind, in the error lane and in stream
+    // position, rather than returning a short transcript that reads as a whole
+    // one. It is the same admission `ainb-acp`'s store writer makes when IT
+    // drops rows (`acp.transcript_truncated`), for the same reason, and the
+    // process half of this read is the one that stays silent — it starts
+    // mid-file with nothing to mark the seam.
+    if truncated {
+        entries.push((
+            ainb_hangar_proto::events::MessageKind::Error,
+            "· transcript truncated · older lines not shown".to_string(),
+        ));
+    }
+    entries.extend(
+        rows.iter()
+            .flat_map(|row| classifier.classify_row(&row.event_type, &row.raw_payload)),
+    );
     Some((session.provider, transcript_lines(entries)))
 }
 

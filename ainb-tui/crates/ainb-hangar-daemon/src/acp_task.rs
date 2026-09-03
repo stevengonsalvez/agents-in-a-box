@@ -528,7 +528,9 @@ async fn build_result(pool: &SqlitePool, session_key: &str, message_id: &str) ->
 async fn pr_url_from_transcript(pool: &SqlitePool, session_key: &str) -> Option<String> {
     use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
 
-    let rows = FleetProviderEventRepo::list_by_session_tail(
+    // The truncation flag is for a VIEW, which this is not: a scan either finds
+    // the url in the tail or the run did not open a PR near its end.
+    let (rows, _truncated) = FleetProviderEventRepo::list_by_session_tail(
         pool,
         session_key,
         PR_SCAN_ROWS,
