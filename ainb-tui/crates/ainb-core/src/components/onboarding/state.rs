@@ -433,6 +433,7 @@ pub struct OnboardingState {
 pub enum AuthAgent {
     Claude,
     Codex,
+    Antigravity,
     Gemini,
     Copilot,
 }
@@ -440,13 +441,20 @@ pub enum AuthAgent {
 impl AuthAgent {
     /// The configurable harnesses, in row order.
     pub fn all() -> &'static [AuthAgent] {
-        &[Self::Claude, Self::Codex, Self::Gemini, Self::Copilot]
+        &[
+            Self::Claude,
+            Self::Codex,
+            Self::Antigravity,
+            Self::Gemini,
+            Self::Copilot,
+        ]
     }
 
     pub fn label(&self) -> &'static str {
         match self {
             Self::Claude => "Claude",
             Self::Codex => "Codex",
+            Self::Antigravity => "Antigravity",
             Self::Gemini => "Gemini",
             Self::Copilot => "Copilot",
         }
@@ -459,6 +467,7 @@ impl AuthAgent {
         match self {
             Self::Claude => "System-wide auth",
             Self::Codex => "Sign in with ChatGPT",
+            Self::Antigravity => "Sign in with Google",
             Self::Gemini => "Sign in with Google",
             Self::Copilot => "Sign in with GitHub",
         }
@@ -468,10 +477,13 @@ impl AuthAgent {
     pub fn login_hint(&self) -> &'static str {
         match self {
             Self::Claude => {
-                "Use whatever you set up for Claude at the system level — `claude` /login, a \
+                "Use whatever you set up for Claude at the system level: `claude` /login, a \
                  Pro/Max subscription, or a cloud provider. ainb injects no key."
             }
             Self::Codex => "Run `codex login` and sign in with your ChatGPT account (OAuth).",
+            Self::Antigravity => {
+                "Run `agy` and sign in with Google, or use application-default credentials."
+            }
             Self::Gemini => {
                 "Run `gemini` and sign in with Google, or use application-default credentials."
             }
@@ -486,6 +498,7 @@ impl AuthAgent {
         match self {
             Self::Claude => crate::docs::AUTH_CLAUDE,
             Self::Codex => crate::docs::AUTH_CODEX,
+            Self::Antigravity => crate::docs::AUTH_ANTIGRAVITY,
             Self::Gemini => crate::docs::AUTH_GEMINI,
             Self::Copilot => crate::docs::AUTH_COPILOT,
         }
@@ -497,6 +510,7 @@ impl AuthAgent {
         match self {
             Self::Claude => CredentialKey::AnthropicApiKey,
             Self::Codex => CredentialKey::OpenAiApiKey,
+            Self::Antigravity => CredentialKey::GeminiApiKey,
             Self::Gemini => CredentialKey::GeminiApiKey,
             Self::Copilot => CredentialKey::GithubPat,
         }
@@ -507,6 +521,7 @@ impl AuthAgent {
         match self {
             Self::Claude => "ANTHROPIC_API_KEY",
             Self::Codex => "OPENAI_API_KEY",
+            Self::Antigravity => "GEMINI_API_KEY",
             Self::Gemini => "GEMINI_API_KEY",
             Self::Copilot => "GITHUB_TOKEN",
         }
@@ -518,6 +533,7 @@ impl AuthAgent {
         match self {
             Self::Claude => "sk-ant-",
             Self::Codex => "sk-",
+            Self::Antigravity => "AIza",
             Self::Gemini => "AIza",
             Self::Copilot => "",
         }
@@ -527,6 +543,7 @@ impl AuthAgent {
         match self {
             Self::Claude => "Anthropic API key",
             Self::Codex => "OpenAI API key",
+            Self::Antigravity => "Gemini API key",
             Self::Gemini => "Gemini API key",
             Self::Copilot => "GitHub token (PAT)",
         }
@@ -1114,16 +1131,17 @@ mod tests {
     }
 
     #[test]
-    fn auth_agents_cover_four_harnesses_with_correct_env_vars() {
-        // The env var each harness's stored key is injected as — must match what
+    fn auth_agents_cover_five_harnesses_with_correct_env_vars() {
+        // The env var each harness's stored key is injected as: must match what
         // session_manager::build_env_setup_for_provider actually exports.
         let expected = [
             (AuthAgent::Claude, "ANTHROPIC_API_KEY"),
             (AuthAgent::Codex, "OPENAI_API_KEY"),
+            (AuthAgent::Antigravity, "GEMINI_API_KEY"),
             (AuthAgent::Gemini, "GEMINI_API_KEY"),
             (AuthAgent::Copilot, "GITHUB_TOKEN"),
         ];
-        assert_eq!(AuthAgent::all().len(), 4);
+        assert_eq!(AuthAgent::all().len(), 5);
         for (agent, env) in expected {
             assert_eq!(agent.env_var(), env, "{} env var drift", agent.label());
             assert!(

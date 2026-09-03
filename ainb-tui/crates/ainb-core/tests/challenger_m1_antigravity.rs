@@ -447,7 +447,7 @@ fn test_provider_registry_aliases_and_builtins() {
     let agy_agent = agents.get("antigravity");
     assert!(agy_agent.is_some());
     assert_eq!(agy_agent.as_ref().unwrap().name(), "Google Antigravity");
-    assert_eq!(agy_agent.as_ref().unwrap().icon(), "\u{f1a0}");
+    assert_eq!(agy_agent.as_ref().unwrap().icon(), "▲");
 }
 
 #[test]

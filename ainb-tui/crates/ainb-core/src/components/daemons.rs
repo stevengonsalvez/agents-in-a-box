@@ -20,8 +20,22 @@ use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
 use crate::fleet::atc::SupervisorMode;
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
+use crate::fleet::read::{CurrentStateIndex, EvidenceCensus, EvidenceHealth, ProbeIndex};
 use ainb_plugin_notifyd::install::BinaryIntent;
 use ainb_plugin_notifyd::{HookHealth, Paths};
+
+/// The table's floor, and the height the Hooks box asks for. `render` draws the
+/// Hooks section only when the table chunk can seat both, and the ATC-help
+/// budget has to respect the same number or it evicts the panel silently.
+///
+/// Derived, not hand-synced. These were two literals kept in step by a comment,
+/// and they drifted the moment the box grew a row for the evidence census: the
+/// gate moved to 15 while the budget still said 14, so at some heights the
+/// panel vanished with no notice — exactly what
+/// `the_hooks_panel_never_disappears_without_saying_so` exists to catch.
+const TABLE_MIN: u16 = 7;
+const HOOKS_BOX: u16 = 8;
+const HOOKS_NEEDS: u16 = TABLE_MIN + HOOKS_BOX;
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -42,6 +56,9 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 /// connect and `sysinfo` process lookups — work that must NEVER run on the UI
 /// render thread (H-D2). A few seconds keeps the screen live while staying cheap.
 const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
+/// Evidence needs fresh process checks, unlike daemon rows. Avoid one `ps` per
+/// historical probe on every screen refresh.
+const EVIDENCE_INTERVAL_MS: i64 = 30_000;
 
 /// How long a lifecycle action may run before the row gives up on it. Generous:
 /// a real restart genuinely takes seconds. The point is only that a wedged
@@ -65,6 +82,10 @@ pub struct Snapshot {
     /// Most-recent hook wiring health. Collected beside daemon state, never in
     /// the render path.
     pub hook_health: Option<HookHealth>,
+    /// Hook evidence freshness, collected beside the wiring health.
+    pub evidence_census: Option<EvidenceCensus>,
+    /// Clock of the last process-backed evidence census.
+    evidence_collected_at_ms: i64,
     /// The ATC supervisor's mode + full-mode provider, when a single instance
     /// makes it unambiguous. Read off disk by the collector, never in render.
     ///
@@ -566,6 +587,8 @@ impl DaemonsState {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
+            evidence_census: guard.evidence_census,
+            evidence_collected_at_ms: guard.evidence_collected_at_ms,
             atc: guard.atc.clone(),
         }
     }
@@ -721,12 +744,31 @@ fn collect_into(shared: &Mutex<Snapshot>) {
     // still belongs here, not in render: hooks may live on a slow volume and a
     // stale socket can block briefly while connecting.
     let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
+    let hooks_ready = hook_health.as_ref().is_some_and(|health| {
+        health.script_ready
+            && health.hook_binary_ready
+            && health.agents.iter().any(|agent| agent.agent == "claude" && agent.wiring_ready)
+    });
+    let now = now_ms();
+    let collect_evidence = shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .evidence_collected_at_ms
+        .saturating_add(EVIDENCE_INTERVAL_MS)
+        <= now;
+    let evidence_census = collect_evidence
+        .then(|| CurrentStateIndex::load().evidence_census(&ProbeIndex::load(), hooks_ready, now));
+    if let Some(evidence_census) = evidence_census {
+        let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.evidence_census = Some(evidence_census);
+        guard.evidence_collected_at_ms = now;
+    }
     let atc = collect_atc_mode();
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
-            guard.collected_at_ms = now_ms();
+            guard.collected_at_ms = now;
             guard.hook_health = hook_health;
             guard.atc = atc;
         }
@@ -840,10 +882,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     // the hook-health panel on a mid-size terminal — it vanished when the cursor
     // landed on the ATC row and came back when it left, with nothing to say so.
     //
-    // `render` below draws the Hooks section only when the table chunk still has
-    // 14 rows, so that is the number the help has to respect.
-    const HOOKS_NEEDS: u16 = 14;
-    const TABLE_MIN: u16 = 7;
     const FOOTER: u16 = 1;
     // The first attempt at this budget fixed the silent eviction by making the
     // help almost never appear: it required `inner.height >= wanted + 15`, so on
@@ -901,16 +939,17 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     // lines because they had no DaemonKind, and it sat on "collecting…" when
     // its separate async fetch wedged. Those three are real rows now, so the
     // panel was a second place to look that showed strictly less.
-    if chunks[0].height >= 14 {
+    if chunks[0].height >= HOOKS_NEEDS {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(7), Constraint::Length(7)])
+            .constraints([Constraint::Min(TABLE_MIN), Constraint::Length(HOOKS_BOX)])
             .split(chunks[0]);
         render_table(frame, sections[0], &snapshot, state);
         render_hook_section(
             frame,
             sections[1],
             snapshot.hook_health.as_ref(),
+            snapshot.evidence_census,
             state.live_hooks_status(),
             snapshot.collected_at_ms > 0,
         );
@@ -1070,6 +1109,7 @@ fn render_hook_section(
     frame: &mut Frame,
     area: Rect,
     health: Option<&HookHealth>,
+    evidence: Option<EvidenceCensus>,
     status: Option<&str>,
     collected: bool,
 ) {
@@ -1189,6 +1229,7 @@ fn render_hook_section(
                         GOLD
                     }),
                 )),
+                evidence_line(evidence),
                 Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
                 // notifyd and the approve broker had a line here when they had
                 // no row of their own. They are first-class rows in the table
@@ -1209,6 +1250,29 @@ fn render_hook_section(
         Paragraph::new(lines).style(Style::default().bg(PANEL_BG)),
         inner,
     );
+}
+
+fn evidence_line(evidence: Option<EvidenceCensus>) -> Line<'static> {
+    let Some(evidence) = evidence else {
+        return Line::from(Span::styled(
+            "Claude hook evidence unavailable",
+            Style::default().fg(STOPPED_RED),
+        ));
+    };
+    let style = match evidence.health {
+        EvidenceHealth::Healthy => Style::default().fg(HEALTHY_GREEN),
+        EvidenceHealth::Silent => Style::default().fg(GOLD),
+        EvidenceHealth::Unavailable => Style::default().fg(STOPPED_RED),
+    };
+    Line::from(Span::styled(
+        format!(
+            "Claude hook {}  ·  {} active probe(s), {} fresh state",
+            evidence.health.label(),
+            evidence.active_probes,
+            evidence.fresh_hook_states
+        ),
+        style,
+    ))
 }
 
 fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &DaemonsState) {
@@ -1557,6 +1621,8 @@ mod tests {
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1581,6 +1647,8 @@ mod tests {
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1599,6 +1667,8 @@ mod tests {
             rows,
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health()),
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1756,6 +1826,8 @@ mod tests {
             rows: vec![atc_row()],
             collected_at_ms: now_ms(),
             hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
         };
         assert_eq!(
             atc_help_lines(&snapshot, 0),
@@ -1773,6 +1845,8 @@ mod tests {
             ],
             collected_at_ms: now_ms(),
             hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
         };
         assert!(atc_help_lines(&snapshot, 0).is_empty(), "bridge row");
         assert!(!atc_help_lines(&snapshot, 1).is_empty(), "atc row");
@@ -1957,6 +2031,8 @@ mod tests {
             rows,
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health),
+            evidence_census: Some(EvidenceCensus::from_counts(true, 1, 1)),
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -2146,6 +2222,29 @@ mod tests {
             "repair missing: {out}"
         );
         assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
+        assert!(
+            out.contains("Claude hook Healthy"),
+            "hook evidence health missing: {out}"
+        );
+    }
+
+    #[test]
+    fn renders_silent_and_unavailable_hook_evidence_as_warnings() {
+        let mut state = seeded_state_with_hook(Vec::new(), hook_health());
+        let shared = Arc::clone(state.shared.as_ref().expect("seeded state"));
+        shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(true, 2, 0));
+        let silent = render_to_string(&mut state, 120, 24);
+        assert!(
+            silent.contains("Claude hook Silent"),
+            "silent warning missing: {silent}"
+        );
+
+        shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(false, 2, 2));
+        let unavailable = render_to_string(&mut state, 120, 24);
+        assert!(
+            unavailable.contains("Claude hook Unavailable"),
+            "unavailable warning missing: {unavailable}"
+        );
     }
 
     /// Bug 3: a stopped daemon had no way back up. Every row is now selectable

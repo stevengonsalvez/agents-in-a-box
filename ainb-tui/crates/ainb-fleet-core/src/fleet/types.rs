@@ -17,6 +17,9 @@ pub enum SessionSource {
     Jobs,
     /// Exact pane metadata from `tmux list-panes -a`.
     Tmux,
+    /// `~/.claude/sessions/<pid>.json` — Claude's own per-session probe file.
+    /// The only source that finds a Claude session ainb never launched.
+    Probe,
 }
 
 /// Provider owning a Fleet session.

@@ -547,7 +547,7 @@ impl OnboardingComponent {
         // success) > key hints.
         let instr_span = if state.agent_pick_open {
             Span::styled(
-                "Generate installer for:   [c] Claude    [x] Codex    [p] Copilot       Esc cancel",
+                "Generate installer for:   [c] Claude    [x] Codex    [a] Antigravity    [p] Copilot       Esc cancel",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             )
         } else if let Some(err) = &state.error_message {

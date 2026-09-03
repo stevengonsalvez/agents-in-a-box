@@ -118,17 +118,22 @@ impl AttentionKind {
         matches!(self, Self::Ask)
     }
 
-    /// The fixed-width badge label + its colour.
+    /// The accent this family paints in.
+    ///
+    /// The colour is per WIRE family, finer-grained than the four vocabulary
+    /// words it accompanies: a Codex request-user reads `ASK` like any other
+    /// question but wears its own blue. The WORD comes from
+    /// [`AttentionCard::badge`], never from here — this type used to carry a
+    /// second label table (`PERM` / `CODX` / `ESCL` / `????`) and the two
+    /// surfaces promptly named the same card two different ways.
     #[must_use]
-    const fn badge(self) -> (&'static str, Color) {
+    const fn color(self) -> Color {
         match self {
-            Self::Ask => ("ASK ", GOLD),
-            Self::Approval => ("PERM", GOLD),
-            Self::CodexRequestUser => ("CODX", CORNFLOWER_BLUE),
-            Self::Error => ("ERR ", ALERT_RED),
-            Self::Escalation => ("ESCL", ALERT_RED),
-            Self::Waiting => ("WAIT", WAIT_AMBER),
-            Self::Other => ("????", MUTED_GRAY),
+            Self::Ask | Self::Approval => GOLD,
+            Self::CodexRequestUser => CORNFLOWER_BLUE,
+            Self::Error | Self::Escalation => ALERT_RED,
+            Self::Waiting => WAIT_AMBER,
+            Self::Other => MUTED_GRAY,
         }
     }
 }
@@ -225,10 +230,45 @@ impl AttentionCard {
         }
     }
 
+    /// The fixed-width code + accent this card wears on EVERY surface.
+    ///
+    /// The one badge: this board's card list, its detail header, and the Inbox's
+    /// `needs you` row all read it, so a card cannot be `PERM` on `C` and `ASK`
+    /// on `I`. The word is the vocabulary's ([`Self::vocab_kind`]), the colour
+    /// the wire family's ([`AttentionKind::color`]).
+    #[must_use]
+    pub(crate) fn badge(&self) -> (String, Color) {
+        (
+            format!("{:<4}", self.vocab_kind().code()),
+            self.kind.color(),
+        )
+    }
+
+    /// The vocabulary code this card paints (crisp B2 §2.1): the ONE mapping of
+    /// the attention wire families onto [`crate::vocab::AttentionKind`].
+    ///
+    /// The seven wire families collapse onto four codes. [`AttentionKind::Waiting`]
+    /// splits on the body it parsed: a session parked at its prompt is `IDLE`, an
+    /// explicit `WAITING:` marker is `WAIT`. That body split is why the mapping
+    /// lives here and not on the vocabulary type — the wire token alone cannot
+    /// tell the two apart.
+    #[must_use]
+    pub(crate) fn vocab_kind(&self) -> crate::vocab::AttentionKind {
+        use crate::vocab::AttentionKind as Vocab;
+        match self.kind {
+            AttentionKind::Ask | AttentionKind::Approval | AttentionKind::CodexRequestUser => {
+                Vocab::Ask
+            }
+            AttentionKind::Error | AttentionKind::Escalation => Vocab::Err,
+            AttentionKind::Waiting if matches!(self.body, CardBody::Idle { .. }) => Vocab::Idle,
+            AttentionKind::Waiting | AttentionKind::Other => Vocab::Wait,
+        }
+    }
+
     /// A short human label: the cwd's final path component, else the session id
     /// (truncated). Char-safe throughout.
     #[must_use]
-    fn short_label(&self) -> String {
+    pub(crate) fn short_label(&self) -> String {
         let base = self.cwd.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or("");
         if base.is_empty() {
             truncate_chars(&self.session_id, 12)
@@ -239,7 +279,7 @@ impl AttentionCard {
 
     /// The answer options, when this is an answerable ASK card.
     #[must_use]
-    fn options(&self) -> &[CardOption] {
+    pub(crate) fn options(&self) -> &[CardOption] {
         match &self.body {
             CardBody::Ask { options, .. } => options,
             _ => &[],
@@ -486,6 +526,19 @@ impl ControlCenterState {
         }
     }
 
+    /// How many open cards need a DECISION from the human (the rank-0 kinds:
+    /// ASK, approval, Codex request-user), as opposed to being surfaced for
+    /// visibility.
+    ///
+    /// The one place that count is computed. The Control title's `N need you`
+    /// and the Inbox header's `[N need you]` are both this number over this
+    /// store, so the two attention surfaces cannot disagree about how much is
+    /// waiting (crisp B3 §2.4).
+    #[must_use]
+    pub fn needs_you_count(&self) -> usize {
+        self.cards.iter().filter(|c| c.kind.urgency_rank() == 0).count()
+    }
+
     /// The `(attention_id, answer_label)` the selected ASK's highlighted option
     /// would deliver, if a card + option are selected. `None` for a non-ASK card
     /// or an ASK with no options.
@@ -633,7 +686,7 @@ fn circled_digit(one_based: usize) -> String {
 /// ┌ sessions ─────────────┐ ┌ deploy · ASK ──────────────────────┐
 /// │▶ASK  deploy   waiting… │ │ waiting for your input · 2m · hook  │
 /// │ ERR  api      rate_lim │ │ LAST REPLY                          │
-/// │ WAIT ui       idle 7m  │ │  Ready to ship to which environment │
+/// │ IDLE ui       idle 7m  │ │  Ready to ship to which environment │
 /// │                        │ │ TIMELINE                            │
 /// │                        │ │  · raised 2m ago (ask_user_question)│
 /// │                        │ │ ① staging   safe rollout            │
@@ -695,7 +748,11 @@ pub fn render_control_center(
 /// `visible_rows` cards the list is top-anchored (offset `0`); once the human
 /// scrolls (`j`) past the fold the window follows so the `▶` cursor is always
 /// painted — never walking below the bottom row and vanishing.
-fn first_visible(selected: usize, visible_rows: usize) -> usize {
+///
+/// Shared with the Inbox's `needs you` block, which has the same shape and the
+/// same hazard: a selection that leaves the viewport is still answerable, so
+/// `enter` and `1`-`9` act on a card nobody can see.
+pub(crate) fn first_visible(selected: usize, visible_rows: usize) -> usize {
     selected.saturating_sub(visible_rows.saturating_sub(1))
 }
 
@@ -713,7 +770,7 @@ fn render_divider(buf: &mut WireBuffer, list_w: u16, top: u16, bottom: u16) {
 /// Render the title row: `Control · N sessions · M need you` + the hotkey hint.
 fn render_title(buf: &mut WireBuffer, area_w: u16, row: u16, state: &ControlCenterState) {
     let total = state.cards.len();
-    let need = state.cards.iter().filter(|c| c.kind.urgency_rank() == 0).count();
+    let need = state.needs_you_count();
     let mut x = put_str(buf, 0, row, "Control", GOLD, area_w);
     x = put_str(
         buf,
@@ -758,16 +815,16 @@ fn render_card_list(
     // never overrun the pane and no manual counter is needed.
     for (row, card) in (top..=bottom).zip(state.cards.iter().skip(offset)) {
         let is_sel = Some(card.id.as_str()) == selected;
-        let (badge, badge_color) = card.kind.badge();
+        let (badge, badge_color) = card.badge();
         let marker = if is_sel { "▶" } else { " " };
         let mut x = put_str(buf, 0, row, marker, SELECTION_GREEN, list_w);
-        x = put_str(buf, x, row, badge, badge_color, list_w);
+        x = put_str(buf, x, row, &badge, badge_color, list_w);
         x = put_str(buf, x, row, " ", MUTED_GRAY, list_w);
         let label = truncate_chars(&card.short_label(), 12);
         x = put_str(buf, x, row, &pad_to(&label, 12), SOFT_WHITE, list_w);
         x = put_str(buf, x, row, " ", MUTED_GRAY, list_w);
         // The age is the one live stat the attention feed carries.
-        let age = format_age(now_ms.saturating_sub(card.created_at));
+        let age = crate::vocab::age_word(now_ms.saturating_sub(card.created_at));
         put_str(buf, x, row, &age, MUTED_GRAY, list_w);
     }
 }
@@ -792,7 +849,7 @@ fn render_detail(
     // anchored to the left-list selection (`proj-0 · ASK`), not an orphan pane.
     // Reuses `short_label` (the same label the card list renders) + the kind
     // badge; painted in gold above the status line.
-    let (badge, _) = card.kind.badge();
+    let (badge, _) = card.badge();
     let header = format!("{} · {}", card.short_label(), badge.trim());
     row = put_line(buf, x0, row, bottom, area_w, &header, GOLD);
 
@@ -804,7 +861,7 @@ fn render_detail(
     // token / tool / diff columns have no producer on this row yet (P10 §4.9),
     // and three permanent dash placeholders read as dead data (crisp B1, Q16);
     // they return with the numbers.
-    let age = format_age(now_ms.saturating_sub(card.created_at));
+    let age = crate::vocab::age_word(now_ms.saturating_sub(card.created_at));
     let source = if card.degraded { "~pane" } else { "hook" };
     let scope = card.workspace_id.as_deref().unwrap_or("host");
     let strip = format!("age {age} · {source} · {scope}");
@@ -818,18 +875,54 @@ fn render_detail(
 
     // TIMELINE (the attention timeline; the per-tool JSONL timeline lands in P10).
     row = put_line(buf, x0, row, bottom, area_w, "TIMELINE", GOLD);
-    let ago = format_age(now_ms.saturating_sub(card.created_at));
+    let ago = crate::vocab::age_word(now_ms.saturating_sub(card.created_at));
     let tl = format!("· raised {ago} ago · {}", kind_token(card.kind));
     row = put_line(buf, x0, row, bottom, area_w, &tl, MUTED_GRAY);
     row = row.saturating_add(1);
 
-    // Inline ASK answering — options with ①②③, then the answer hints.
-    render_options(buf, x0, row, bottom, area_w, card, state.option_cursor());
+    // Inline ASK answering — options with ①②③, then the answer hints. Nothing
+    // follows it in this pane, so the height it returns has no caller here.
+    let _ = render_options(buf, x0, row, bottom, area_w, card, state.option_cursor());
+}
+
+/// How many rows [`render_options`] paints for `card`, given room for all of them.
+///
+/// Lives next to the renderer and is the ONLY derivation of that shape. The
+/// Inbox sizes its `needs you` block and starts its next card row from this, so
+/// a row added below (a `(Recommended)` marker, a wrapped label) has to be
+/// counted here or the two paints overlap — and the overlap is silent, since a
+/// clipped renderer never overruns the pane.
+/// `render_options_paints_exactly_options_height_rows` is what makes the miss loud.
+#[must_use]
+pub(crate) fn options_height(card: &AttentionCard) -> u16 {
+    if !card.kind.is_answerable() || card.options().is_empty() {
+        // The single "(no inline options …)" / "(this ASK carries no options)" note.
+        return 1;
+    }
+    // `OPTIONS` header + one row per option (two when it carries a description)
+    // + the answer hint line.
+    let options: u16 = card.options().iter().map(|o| u16::from(o.description.is_some()) + 1).sum();
+    options.saturating_add(2)
 }
 
 /// Render the ASK options with circled-digit glyphs + the answer hint bar, or a
 /// note for a non-answerable card.
-fn render_options(
+///
+/// Shared with the Inbox's `needs you` block (crisp B3 §2.4): the inline answer
+/// there is THIS renderer paired with [`reduce_control_center`], not a second
+/// implementation of the ①②③ affordance that could drift from the one the
+/// `attention/answer` path expects.
+///
+/// RETURNS the rows the block occupies, which the caller must use to place
+/// whatever comes next. That return is the whole point: a row added here shows
+/// up in it whether or not that row paints a glyph, so a blank spacer (an idiom
+/// `render_detail` already uses twice) cannot slip past a guard that counts
+/// painted cells. The count is what [`options_height`] must equal.
+///
+/// It is the FULL height, not the clipped one: `bottom` stops the paint walk,
+/// not the arithmetic, so a caller sizing a block gets the same answer whether
+/// or not the pane happened to be tall enough this frame.
+pub(crate) fn render_options(
     buf: &mut WireBuffer,
     x0: u16,
     top: u16,
@@ -837,7 +930,7 @@ fn render_options(
     area_w: u16,
     card: &AttentionCard,
     option_cursor: usize,
-) {
+) -> u16 {
     if !card.kind.is_answerable() {
         put_line(
             buf,
@@ -848,7 +941,7 @@ fn render_options(
             "(no inline options — surfaced for visibility)",
             MUTED_GRAY,
         );
-        return;
+        return 1;
     }
     let options = card.options();
     if options.is_empty() {
@@ -861,46 +954,50 @@ fn render_options(
             "(this ASK carries no options)",
             MUTED_GRAY,
         );
-        return;
+        return 1;
     }
 
+    // `used` counts every row the block owns; `row` only walks as far as the
+    // pane allows, because `put_str` clips on x and would happily paint below
+    // `bottom` if the walk were unguarded.
+    let mut used: u16 = 0;
     let mut row = top;
     row = put_line(buf, x0, row, bottom, area_w, "OPTIONS", GOLD);
+    used += 1;
     for (i, opt) in options.iter().enumerate() {
-        if row > bottom {
-            break;
+        if row <= bottom {
+            let color = if i == option_cursor {
+                SELECTION_GREEN
+            } else {
+                SOFT_WHITE
+            };
+            let glyph = circled_digit(i + 1);
+            let mut x = put_str(buf, x0, row, &glyph, color, area_w);
+            x = put_str(buf, x, row, " ", color, area_w);
+            put_str(buf, x, row, &opt.label, color, area_w);
+            row += 1;
         }
-        let selected = i == option_cursor;
-        let color = if selected {
-            SELECTION_GREEN
-        } else {
-            SOFT_WHITE
-        };
-        let glyph = circled_digit(i + 1);
-        let mut x = put_str(buf, x0, row, &glyph, color, area_w);
-        x = put_str(buf, x, row, " ", color, area_w);
-        put_str(buf, x, row, &opt.label, color, area_w);
-        row += 1;
+        used = used.saturating_add(1);
         if let Some(desc) = &opt.description {
             if row <= bottom {
                 let dx = put_str(buf, x0, row, "   ", MUTED_GRAY, area_w);
                 put_str(buf, dx, row, &truncate_chars(desc, 48), MUTED_GRAY, area_w);
                 row += 1;
             }
+            used = used.saturating_add(1);
         }
     }
     // Hints next to the control (feedback_keybinding_hints_near_control).
-    if row <= bottom {
-        put_line(
-            buf,
-            x0,
-            row,
-            bottom,
-            area_w,
-            "h/l option · enter/1-9 answer",
-            MUTED_GRAY,
-        );
-    }
+    put_line(
+        buf,
+        x0,
+        row,
+        bottom,
+        area_w,
+        "h/l option · enter/1-9 answer",
+        MUTED_GRAY,
+    );
+    used.saturating_add(1)
 }
 
 /// The status line text + colour for a card.
@@ -930,7 +1027,10 @@ fn status_line(card: &AttentionCard) -> (String, Color) {
 }
 
 /// The LAST REPLY / request-context text a card carries.
-fn last_reply(card: &AttentionCard) -> String {
+///
+/// Also the one line the Inbox's `needs you` row reads (crisp B3 §2.4): the ASK's
+/// question, the error's snippet, the idle session's last words.
+pub(crate) fn last_reply(card: &AttentionCard) -> String {
     match &card.body {
         CardBody::Ask {
             header, question, ..
@@ -968,18 +1068,6 @@ const fn kind_token(kind: AttentionKind) -> &'static str {
         AttentionKind::Escalation => "escalation",
         AttentionKind::Waiting => "waiting",
         AttentionKind::Other => "unknown",
-    }
-}
-
-/// Format an age in ms as a compact `Ns` / `Nm` / `Nh` string.
-fn format_age(ms: i64) -> String {
-    let secs = ms.max(0) / 1000;
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else {
-        format!("{}h", secs / 3600)
     }
 }
 
@@ -1064,18 +1152,13 @@ fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right:
         if cx >= right {
             break;
         }
-        // Harden against terminal escape / control-char injection: this screen
-        // renders fleet-wide, session-originated free text (assistant replies,
-        // error snippets, ASK labels, cwd-derived labels) char-by-char, and each
-        // char becomes a Cell symbol the host paints verbatim. A raw ESC/BEL/C1
-        // byte in a crafted attention payload would reassemble on flush into a
-        // live control sequence (OSC 52 clipboard write, title set, cursor moves)
-        // in the operator's terminal. Replace every control char (C0 + DEL + C1,
-        // all Unicode category Cc) with a visible middot so the text is surfaced,
-        // never executed. Applies to every field since put_str is the one choke
-        // point all rendered strings flow through.
-        let sym = if ch.is_control() { '·' } else { ch };
-        let mut cell = Cell::new(sym.to_string());
+        // Harden against terminal escape injection AND bidi reordering: this
+        // screen renders fleet-wide, session-originated free text (assistant
+        // replies, error snippets, ASK labels, cwd-derived labels) char by char,
+        // and each char becomes a Cell symbol the host paints verbatim. The one
+        // choke point every rendered string flows through, so the rule lives in
+        // `super::display_char` and the Inbox applies the identical one.
+        let mut cell = Cell::new(super::display_char(ch).to_string());
         cell.fg = Some(color);
         buf.push(Coord::new(cx, row), cell);
         cx = cx.saturating_add(1);
@@ -1148,7 +1231,7 @@ mod tests {
         ]);
         let order: Vec<&str> = state.cards().iter().map(|c| c.id.as_str()).collect();
         // ASK (rank 0) first despite being the OLDEST, then ERR (rank 1), then
-        // the idle WAIT (rank 2). Needs-input to the top regardless of age.
+        // the idle row (rank 2). Needs-input to the top regardless of age.
         assert_eq!(order, ["ask", "err", "idle"]);
     }
 
@@ -1383,6 +1466,128 @@ mod tests {
         }
         let junk = parse_body("not json at all");
         assert!(matches!(junk, CardBody::Other { .. }));
+    }
+
+    /// The seven wire families collapse onto the vocabulary's four codes, and
+    /// all four are reachable — the Inbox's `needs you` row and this board read
+    /// the same table, so one card is never named two ways (crisp B3 §2.4).
+    ///
+    /// MUTATION GUARD: the expectation is the SET of families, not a count. A
+    /// family that stopped mapping, or started mapping somewhere else, fails
+    /// here; a guard on "four codes exist" would not notice.
+    #[test]
+    fn every_attention_family_maps_to_a_vocab_code() {
+        use crate::vocab::AttentionKind as Vocab;
+        let wait = r#"{"kind":"WAIT","context":{"marker":"WAITING:"}}"#;
+        for (wire, code) in [
+            ("ask_user_question", Vocab::Ask),
+            ("approval", Vocab::Ask),
+            ("codex_request_user", Vocab::Ask),
+            ("error", Vocab::Err),
+            ("escalation", Vocab::Err),
+            ("waiting", Vocab::Wait),
+            ("a_family_a_newer_daemon_grew", Vocab::Wait),
+        ] {
+            let card = AttentionCard::from_row(&row("c", wire, 1, wait));
+            assert_eq!(card.vocab_kind(), code, "wire kind {wire:?}");
+        }
+        // IDLE is the one code that comes from the BODY, not the wire kind: a
+        // waiting row whose payload parsed as an idle-at-prompt session.
+        let idle = AttentionCard::from_row(&row(
+            "i",
+            "waiting",
+            1,
+            r#"{"kind":"IDLE","context":{"idle_minutes":7}}"#,
+        ));
+        assert_eq!(idle.vocab_kind(), Vocab::Idle);
+    }
+
+    /// The `N need you` count is the rank-0 kinds and nothing else: the number
+    /// the Control title and the Inbox badge both read.
+    #[test]
+    fn needs_you_count_is_the_decisions_not_the_board_size() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[
+            row("ask", "ask_user_question", 1, &ask_payload("q", &["y"])),
+            row("perm", "approval", 2, r#"{"kind":"WAIT","context":{}}"#),
+            row(
+                "err",
+                "error",
+                3,
+                r#"{"kind":"ERR","context":{"pattern":"x"}}"#,
+            ),
+            row("idle", "waiting", 4, r#"{"kind":"IDLE","context":{}}"#),
+        ]);
+        assert_eq!(state.cards().len(), 4);
+        assert_eq!(
+            state.needs_you_count(),
+            2,
+            "the ASK and the approval, not the error or the idle row"
+        );
+    }
+
+    /// `options_height` is exactly the height `render_options` reports, for
+    /// every card shape the board can hold, clipped pane or not.
+    ///
+    /// MUTATION GUARD: this is the binding the Inbox's block sizing rests on.
+    /// Add a row to the renderer without counting it in `options_height` and the
+    /// Inbox paints its next card row over the last option.
+    ///
+    /// Asserts the RETURNED height, not the count of painted rows: a spacer that
+    /// advances `row` without painting a glyph (an idiom `render_detail` uses
+    /// twice) would change the real height and leave a painted-cell count
+    /// unmoved, which is a guard that cannot fail on the thing it is for.
+    #[test]
+    fn render_options_reports_exactly_options_height_rows() {
+        let described = serde_json::json!({
+            "kind": "ASK",
+            "context": { "question": "q", "options": [
+                { "label": "a", "description": "why a" },
+                { "label": "b" },
+            ]}
+        })
+        .to_string();
+        let empty_ask =
+            serde_json::json!({ "kind": "ASK", "context": { "question": "q", "options": [] } })
+                .to_string();
+        for (name, kind, payload) in [
+            (
+                "two plain options",
+                "ask_user_question",
+                ask_payload("q", &["a", "b"]),
+            ),
+            ("one described option", "ask_user_question", described),
+            ("an ASK with no options", "ask_user_question", empty_ask),
+            (
+                "a card that is not answerable",
+                "error",
+                r#"{"kind":"ERR","context":{"pattern":"x"}}"#.to_string(),
+            ),
+        ] {
+            let card = AttentionCard::from_row(&row("c", kind, 1, &payload));
+            let mut buf = WireBuffer::new(120, 40);
+            let used = render_options(&mut buf, 0, 0, 39, 120, &card, 0);
+            assert_eq!(used, options_height(&card), "{name}: reported height");
+
+            // Every reported row is a row the caller must skip, so with room for
+            // all of them none may be left unpainted and none may land below.
+            let painted: std::collections::BTreeSet<u16> =
+                buf.cells.iter().map(|(c, _)| c.y).collect();
+            assert_eq!(
+                painted.iter().copied().max().map_or(0, |y| y + 1),
+                used,
+                "{name}: painted rows {painted:?} do not fill the reported height"
+            );
+
+            // And the height does not shrink when the pane is too short to paint
+            // it: a caller sizing a block gets the same answer either way.
+            let mut cramped = WireBuffer::new(120, 40);
+            assert_eq!(
+                render_options(&mut cramped, 0, 0, 0, 120, &card, 0),
+                used,
+                "{name}: height changed under clipping"
+            );
+        }
     }
 
     #[test]

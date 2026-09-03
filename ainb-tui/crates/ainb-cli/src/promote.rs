@@ -63,6 +63,7 @@ const KNOWN_TOOLS: &[&str] = &[
     "codex",
     "copilot",
     "gemini",
+    "antigravity",
     "cursor",
     "amazonq",
     "claude-desktop",

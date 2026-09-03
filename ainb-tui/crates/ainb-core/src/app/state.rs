@@ -8044,11 +8044,12 @@ impl AppState {
             "codex" => SessionAgentType::Codex,
             "gemini" => SessionAgentType::Gemini,
             "copilot" => SessionAgentType::Copilot,
+            "antigravity" => SessionAgentType::Antigravity,
             _ => SessionAgentType::Claude,
         };
         let model = if matches!(
             agent_type,
-            SessionAgentType::Claude | SessionAgentType::Codex
+            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Antigravity
         ) {
             let model = preset.agent_model.trim();
             (!is_default_model(model)).then(|| model.to_string())
@@ -10102,11 +10103,11 @@ impl AppState {
                         encoded
                     )
                 }
-                // Codex resumes via `codex resume --last`, Copilot via `--continue` —
-                // both continue the most recent session in the worktree cwd.
-                (SessionAgentType::Codex, _) | (SessionAgentType::Copilot, _) => {
-                    "Resuming most recent session".to_string()
-                }
+                // Codex resumes via `codex resume --last`, Copilot and Antigravity via `--continue`:
+                // all continue the most recent session in the worktree cwd.
+                (SessionAgentType::Codex, _)
+                | (SessionAgentType::Copilot, _)
+                | (SessionAgentType::Antigravity, _) => "Resuming most recent session".to_string(),
                 (other, _) => {
                     format!("Started fresh ({} has no resume support)", other.name())
                 }
@@ -11418,6 +11419,7 @@ impl AppState {
             SessionAgentType::Claude => Some("claude"),
             SessionAgentType::Codex => Some("codex"),
             SessionAgentType::Copilot => Some("copilot"),
+            SessionAgentType::Antigravity => Some("antigravity"),
             _ => None,
         }
     }
