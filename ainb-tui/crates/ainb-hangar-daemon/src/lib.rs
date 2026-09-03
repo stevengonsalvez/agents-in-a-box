@@ -24,6 +24,11 @@ pub mod acp_pool;
 /// [`acp_session::enqueue`] puts a prompt on the bus with its PENDING leg.
 /// `fleet/acp_session_create` and a task caller share these two transactions.
 pub mod acp_session;
+/// The ACP task executor (move 1, step A5): the third arm of `execute_claimed`'s
+/// exec-path branch, selected by `HANGAR_TASK_EXECUTOR=acp`. Runs a task's brief
+/// as one ACP turn against a PER-TASK adapter process and maps the delivery leg
+/// onto the same [`runner::RunOutcome`] the process executor returns.
+pub mod acp_task;
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
 /// The answer router (spec P2): deliver one attention answer from any surface,
