@@ -16,8 +16,9 @@ use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
-    ModelSource, SessionMetadata, SessionStore, WorktreeRollback, claim_codex_remote_thread,
-    discard_codex_remote_thread, ensure_codex_remote_thread, rollback_failed_interactive_launch,
+    InteractiveSessionManager, ModelSource, SessionMetadata, SessionStore, WorktreeRollback,
+    claim_codex_remote_thread, discard_codex_remote_thread, ensure_codex_remote_thread,
+    rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -614,22 +615,28 @@ fn remote_codex_command(
 
 /// Shell-ready argv for a Codex session running WITHOUT a shared remote thread.
 ///
-/// The daemon is load-bearing for the shared thread and for nothing else, so a
-/// degraded session drops the remote-specific arguments and keeps everything
-/// whose job is to get the CLI to a prompt.
+/// Delegates to the TUI's launch builder, like [`remote_codex_command`]
+/// delegates to the remote one, so the degraded CLI path and the degraded TUI
+/// path cannot drift. They already had: this path used to fall through to
+/// `build_agent_command`, which is provider-generic and emits neither
+/// `-c check_for_update_on_startup=false` nor `--dangerously-bypass-hook-trust`,
+/// so Codex parked on the update picker or the hooks-need-review modal. A modal
+/// STALLS the pane instead of failing, which is a launch that reports success.
+///
+/// The only Codex arguments this drops are the remote-specific ones
+/// (`--disable apps`, `--remote <endpoint>`, `-C <dir>`, `resume <thread_id>`),
+/// which is exactly what a session with no shared thread does not have.
 fn codex_local_command(model: Option<&str>, skip_permissions: bool) -> String {
-    let provider = CliProvider::Codex;
-    let mut command = vec![
-        provider.command().to_string(),
-        "--dangerously-bypass-hook-trust".to_string(),
-    ];
-    if let Some(model) = model {
-        command.extend(["--model".to_string(), model.to_string()]);
-    }
-    if skip_permissions {
-        command.push(provider.skip_permissions_flag().to_string());
-    }
-    shell_join(&command)
+    shell_join(&InteractiveSessionManager::build_cli_cmd_parts(
+        &CliProvider::Codex,
+        SessionAgentType::Codex,
+        skip_permissions,
+        model,
+        // `ainb run` always starts a fresh session, and `has_history` gates
+        // Claude's `--continue` only.
+        false,
+        false,
+    ))
 }
 
 /// Join argv into the shell-ready string a tmux session is started with.
@@ -1064,12 +1071,15 @@ mod tests {
         let command = codex_local_command(Some("gpt-5.6-luna"), true);
         assert_eq!(
             command,
-            "codex --dangerously-bypass-hook-trust --model gpt-5.6-luna \
-             --dangerously-bypass-approvals-and-sandbox"
+            "codex -c check_for_update_on_startup=false --dangerously-bypass-hook-trust \
+             --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox"
         );
 
         let plain = codex_local_command(None, false);
-        assert_eq!(plain, "codex --dangerously-bypass-hook-trust");
+        assert_eq!(
+            plain,
+            "codex -c check_for_update_on_startup=false --dangerously-bypass-hook-trust"
+        );
         assert!(
             !plain.contains("--remote"),
             "a degraded session has no endpoint to join"

@@ -2349,6 +2349,16 @@ impl InteractiveSessionManager {
             cmd_parts.extend([
                 "-c".to_string(),
                 "check_for_update_on_startup=false".to_string(),
+                // Ainb causes this stall itself: Codex pins each hook by
+                // POSITION and `ainb notifyd install` rewrites
+                // `~/.codex/hooks.json`, so our own installer invalidates those
+                // hashes and parks the launch on a blocking "Hooks need review"
+                // modal. It belongs to EVERY Codex launch, not just the ones
+                // holding a shared remote thread: the arm without one is what a
+                // session runs whenever the daemon is unreachable, and a modal
+                // stalls the pane instead of failing it, so the launch reports
+                // success over a session that never started.
+                "--dangerously-bypass-hook-trust".to_string(),
             ]);
         }
 
@@ -2511,6 +2521,15 @@ impl InteractiveSessionManager {
         // Build the CLI command with appropriate flags. Pure assembly lives in
         // `build_cli_cmd_parts` (unit-tested); `resume_transcript.is_some()` is
         // the "has prior history" guard for Claude's `--continue`.
+        // Codex asks "Do you trust the contents of this directory?" for any
+        // directory it has not seen, whichever way it is launched, and the modal
+        // blocks before a thread exists. Both arms below need it: the arm
+        // without a shared thread is what every session runs while the daemon is
+        // unreachable, and it stalled exactly like the remote one used to.
+        if agent_type == SessionAgentType::Codex {
+            trust_codex_project_dir(working_dir);
+        }
+
         let cmd_parts = if let Some(remote) = codex_remote {
             if agent_type != SessionAgentType::Codex {
                 return Err(InteractiveSessionError::Other(anyhow::anyhow!(
@@ -2533,10 +2552,6 @@ impl InteractiveSessionManager {
             // claim deadline reports "Codex failed to start". Ainb wrote those
             // hooks; re-confirming them from a detached tmux pane is not a
             // decision the user can act on.
-            // Trust the worktree before launching: `-C` into a directory Codex
-            // has not seen shows a blocking modal, and under `--remote` no flag
-            // suppresses it.
-            trust_codex_project_dir(working_dir);
             codex_remote_command(
                 &provider,
                 remote,
@@ -4482,6 +4497,7 @@ trust_level = "trusted"
                 "codex",
                 "-c",
                 "check_for_update_on_startup=false",
+                "--dangerously-bypass-hook-trust",
                 "resume",
                 "--last",
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -4505,6 +4521,7 @@ trust_level = "trusted"
                 "codex",
                 "-c",
                 "check_for_update_on_startup=false",
+                "--dangerously-bypass-hook-trust",
                 "resume",
                 "--last",
                 "--model",
@@ -4514,6 +4531,10 @@ trust_level = "trusted"
         );
     }
 
+    /// Every Codex launch carries the two modal suppressors, with or without a
+    /// shared remote thread. The arm without one is what runs whenever the
+    /// daemon is unreachable, and a modal stalls the pane rather than failing
+    /// it, so a launch missing these reports success over a dead session.
     #[test]
     fn codex_fresh_launch_has_no_resume_subcommand() {
         let p = parts(
@@ -4530,6 +4551,7 @@ trust_level = "trusted"
                 "codex",
                 "-c",
                 "check_for_update_on_startup=false",
+                "--dangerously-bypass-hook-trust",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
         );
