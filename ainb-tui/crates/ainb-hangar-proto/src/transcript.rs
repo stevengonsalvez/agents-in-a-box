@@ -190,7 +190,9 @@ impl StreamJsonClassifier {
     /// A `tool_result` block: emit a slate result line naming its tool (resolved
     /// from the matching tool_use) and, when both carry a timestamp, its duration.
     /// An `is_error` result renders in the red error lane instead. The tool's
-    /// entry is consumed here, so a live classifier does not grow per tool call.
+    /// entry is consumed here, so a live classifier does not grow per tool call;
+    /// a repeated result for an already-consumed id (a re-delivered tail line)
+    /// therefore degrades to the unnamed `tool` form with no duration.
     fn fold_tool_result(
         &mut self,
         block: &Value,
@@ -432,6 +434,14 @@ mod tests {
         assert!(
             c.tool_names.is_empty() && c.tool_starts.is_empty(),
             "resolved id evicted"
+        );
+        // A re-delivered result for the consumed id is the unnamed form.
+        let repeat = c.classify_line(
+            r#"{"type":"user","timestamp":1500,"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#,
+        );
+        assert_eq!(
+            repeat,
+            vec![(MessageKind::ToolResult, "tool  ok".to_string())]
         );
 
         for i in 0..(MAX_PENDING_TOOLS * 2) {
