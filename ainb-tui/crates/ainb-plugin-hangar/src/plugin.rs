@@ -3160,6 +3160,15 @@ impl HangarPlugin {
     ///
     /// Split out of the dispatch below purely so it is reachable from a test: the
     /// dispatch needs a `HostClient`, which has no public constructor.
+    ///
+    /// ponytail: the CALL is still unguarded. This helper is tested, but deleting
+    /// `self.arm_timeline_buffer_for(req_id)` from the dispatch fails no test
+    /// (verified: 0 of 50 plugin suites), and silently reopens the hole where a
+    /// timeline opened mid-run loses every line between the daemon's read and the
+    /// overlay install. Closing it needs either a `HostClient` test seam in
+    /// `ainb-plugin-sdk-rust` or widening all 16 arms of the dispatch match to
+    /// carry a `#[must_use]` buffer beside the request. Both cost more than the
+    /// line is worth today; revisit when A6 reworks this seam.
     fn arm_timeline_buffer_for(&mut self, req_id: i64) {
         if req_id == BOARD_CARD_TIMELINE_REQ_ID {
             self.timeline_fetch_buffer.get_or_insert_with(Default::default);
