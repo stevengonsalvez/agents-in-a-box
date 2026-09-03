@@ -28,7 +28,6 @@ pub mod facet_panel;
 pub mod file_tree;
 pub mod filter_chip;
 pub mod frosted_banner;
-pub mod jsonl_timeline;
 pub mod key_entry;
 pub mod label_chip;
 pub mod offline_empty_state;

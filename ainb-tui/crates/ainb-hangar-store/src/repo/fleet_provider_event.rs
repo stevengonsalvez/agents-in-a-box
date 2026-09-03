@@ -402,6 +402,49 @@ impl FleetProviderEventRepo {
         rows.iter().map(row_from).collect()
     }
 
+    /// The NEWEST rows of one session's transcript, returned oldest first.
+    ///
+    /// The tail read behind `hangar/board_card_timeline`: an execution view
+    /// shows the END of a run, and a whole transcript is unbounded in both rows
+    /// and bytes (a coalesced text chunk is a few KiB, a tool call's verbatim
+    /// update has no ceiling at all). So it is bounded TWICE — `max_rows` in
+    /// SQL, then `max_payload_bytes` walking back from the newest row — and the
+    /// row cap is what keeps the byte walk from having to materialise a whole
+    /// session first.
+    ///
+    /// At least one row always survives the byte budget: a single payload
+    /// larger than the whole budget must still be shown (its own renderer caps
+    /// it), never silently swallowed into an empty transcript.
+    pub async fn list_by_session_tail(
+        pool: &SqlitePool,
+        session_key: &str,
+        max_rows: i64,
+        max_payload_bytes: usize,
+    ) -> Result<Vec<FleetProviderEventRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
+             FROM fleet_provider_event WHERE session_key = ? \
+             ORDER BY ingest_order DESC LIMIT ?",
+        )
+        .bind(session_key)
+        .bind(max_rows.max(1))
+        .fetch_all(pool)
+        .await?;
+        let mut budget = max_payload_bytes;
+        let mut tail: Vec<FleetProviderEventRow> = Vec::new();
+        for row in &rows {
+            let row = row_from(row)?;
+            let cost = row.raw_payload.len();
+            if !tail.is_empty() && cost > budget {
+                break;
+            }
+            budget = budget.saturating_sub(cost);
+            tail.push(row);
+        }
+        tail.reverse();
+        Ok(tail)
+    }
+
     /// One PAGE of the rows [`Self::delete_acp_before`] could remove, oldest
     /// first, starting strictly above `after_ingest_order`.
     ///

@@ -1056,13 +1056,12 @@ async fn card_remove_keeps_issue_and_refuses_active_run() {
     );
 }
 
-/// tcp T3 / F6 (P10 §4.9): `board_card_timeline` returns the RAW provider
-/// stream-json a card's newest run teed to disk, read from the deterministic
-/// per-task logs dir. The plugin parses this text into the prettied timeline; the
-/// e2e proves the daemon serves the right file (the parser's rendering is
-/// unit-tested in the plugin crate).
+/// tcp T3 / F6 (P10 §4.9): `board_card_timeline` returns a card's newest run
+/// transcript, CLASSIFIED (A6), read from the deterministic per-task logs dir.
+/// The e2e proves the daemon resolves the right task and the right file; the
+/// classifier's own rendering is unit-tested in `ainb-hangar-proto`.
 #[tokio::test]
-async fn card_timeline_serves_the_run_transcript_jsonl() {
+async fn card_timeline_serves_the_run_transcript() {
     let dir = tempfile::tempdir().unwrap();
     // The timeline RPC derives the per-task logs dir under $AINB_HANGAR_HOME; point
     // it at this test's tempdir so the seeded transcript resolves. Only this test
@@ -1111,7 +1110,11 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
         empty["error"].is_null(),
         "timeline of an unrun card is not an error: {empty}"
     );
-    assert_eq!(empty["result"]["jsonl"], "", "no run → empty transcript");
+    assert_eq!(
+        empty["result"]["entries"].as_array().map(Vec::len),
+        Some(0),
+        "no run → empty transcript"
+    );
 
     // Enqueue a run, then seed a fixture transcript at that task's deterministic
     // logs path (`workspaces/default/{task_id}/logs/claude.jsonl` — the daemon keys
@@ -1143,10 +1146,13 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
         "the newest task's transcript"
     );
     assert_eq!(tl["result"]["provider"], "claude", "read the claude log");
-    let jsonl = tl["result"]["jsonl"].as_str().unwrap();
+    let entries = tl["result"]["entries"].as_array().expect("entries array");
     assert!(
-        jsonl.contains("cargo test --workspace") && jsonl.contains("tool_use"),
-        "the run's tool call is in the served transcript: {jsonl}"
+        entries.iter().any(|e| e["kind"] == "tool_call"
+            && e["body"]
+                .as_str()
+                .is_some_and(|b| b.contains("Bash") && b.contains("cargo test --workspace"))),
+        "the run's tool call is served already classified: {entries:#?}"
     );
 
     // Crisp B1: the task-detail backfill names NO board. The issue alone resolves
@@ -1164,7 +1170,7 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
     );
     assert_eq!(unboarded["result"]["task_id"], task_id, "same newest task");
     assert_eq!(
-        unboarded["result"]["jsonl"], tl["result"]["jsonl"],
+        unboarded["result"]["entries"], tl["result"]["entries"],
         "same transcript with or without the board"
     );
 

@@ -223,6 +223,34 @@ impl FleetAcpSessionRepo {
         .transpose()
     }
 
+    /// Fetch the scope's NEWEST session whatever its state.
+    ///
+    /// [`Self::get_live_by_scope`] answers "is there a session to talk to";
+    /// this answers "which session did this scope's work", which is a different
+    /// question the moment the work is over. A finished task's session has been
+    /// torn down (`EVICTED` / `DEAD`), so a live-only lookup cannot find the
+    /// transcript the run just wrote, which is exactly what
+    /// `hangar/board_card_timeline` has to read.
+    ///
+    /// Ordered because the live-scope uniqueness index does NOT cover dead
+    /// rows: a scope re-prompted after a teardown accumulates them, and the
+    /// newest is the one that ran.
+    pub async fn latest_by_scope(
+        pool: &SqlitePool,
+        scope_key: &str,
+    ) -> Result<Option<FleetAcpSessionRow>, sqlx::Error> {
+        sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM fleet_acp_session WHERE scope_key = ? \
+             ORDER BY created_at DESC, session_key DESC LIMIT 1"
+        ))
+        .bind(scope_key)
+        .fetch_optional(pool)
+        .await?
+        .as_ref()
+        .map(row_from)
+        .transpose()
+    }
+
     /// Swap the adapter-owned session id (rebuild keeps `session_key` stable).
     pub async fn set_acp_session_id(
         pool: &SqlitePool,

@@ -26,22 +26,24 @@
 //!   consumers (the board timeline overlay, the run banner, task detail) and no
 //!   producer anywhere in `src/`. An empty live sequence fails the emptiness
 //!   assertion, not merely the equality one: two empty vectors are equal.
-//! * **one taxonomy, not two.** The live sequence is compared to the durable
-//!   read put through `transcript::classify_stream_json`, which is exactly what
-//!   the plugin does with the same bytes. A live producer that classified
+//! * **one taxonomy, not two.** The live sequence is compared to what
+//!   `board_card_timeline` RETURNS, byte for byte — since A6 the daemon
+//!   classifies the durable record itself, so this compares two products of the
+//!   same code reached by two different paths, with no client-side
+//!   re-classification standing between them. A live producer that classified
 //!   differently (its own parser, a per-line classifier that loses a
 //!   `tool_result`'s tool name) would diverge here even though both halves
 //!   "work".
 //!
 //! # The equality holds under the read's 512 KiB tail, not beyond it
 //!
-//! `board_card_timeline` returns a bounded TAIL of the provider log, so this
+//! `board_card_timeline` returns a bounded TAIL of the run's transcript, so this
 //! equality is exact only for a run whose whole transcript fits it. Past that the
 //! re-read starts mid-file with a fresh classifier, and a `tool_result` whose
 //! `tool_use` fell outside the window degrades to the unnamed `tool` form while
 //! the live line kept the name. That is a property of the READ, not of the
-//! producer, and A6 (which replaces this read) must not inherit "live always
-//! equals durable" as an unconditional invariant.
+//! producer: "live always equals durable" is NOT an unconditional invariant, and
+//! the ACP half of the read (A6) inherits the same bounded form of it.
 //!
 //! SKIPs cleanly when tmux is unavailable, like every other tripwire.
 
@@ -54,7 +56,6 @@ use std::time::{Duration, Instant};
 
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_proto::events::{EVENT_METHOD, MessageKind};
-use ainb_hangar_proto::transcript::classify_stream_json;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
@@ -141,7 +142,8 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
         Some(TASK_ID),
         "the timeline must resolve the card's run"
     );
-    let re_read = classify_stream_json(&durable.jsonl);
+    let re_read: Vec<(MessageKind, String)> =
+        durable.entries.iter().map(|e| (e.kind, e.body.clone())).collect();
 
     // NEGATIVE, and it must come first: a producer that emits nothing would make
     // the equality below trivially true against an empty re-read.
@@ -149,9 +151,9 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
         !live.is_empty(),
         "a running task must stream TaskMessage events; got none.\n\
          events seen on the connection: {:?}\n\
-         durable jsonl was:\n{}\ndaemon logs:\n{}",
+         the durable re-read was:\n{:#?}\ndaemon logs:\n{}",
         run.seen,
-        durable.jsonl,
+        re_read,
         read_daemon_log(home.path())
     );
     // And it must be a real transcript, not one lane: the fake provider emits
@@ -173,9 +175,7 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
     // it filled live or backfilled from the timeline read.
     assert_eq!(
         live, re_read,
-        "the live TaskMessage sequence must equal the durable re-read\n\
-         durable jsonl was:\n{}",
-        durable.jsonl
+        "the live TaskMessage sequence must equal the durable re-read"
     );
 
     // The one deliberate design decision in this change, pinned: the transcript
