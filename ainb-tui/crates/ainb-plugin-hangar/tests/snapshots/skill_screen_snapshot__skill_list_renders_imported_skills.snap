@@ -1,5 +1,6 @@
 ---
 source: crates/ainb-plugin-hangar/tests/skill_screen_snapshot.rs
+assertion_line: 81
 expression: list_pane(&buf)
 ---
 [All] [Used] [Unused] [Mine]
@@ -9,19 +10,19 @@ expression: list_pane(&buf)
 ┃commit                    ┃
 ┃used                      ┃
 ┃                          ┃
-┃◇ None                    ┃
+┃                          ┃
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 ╭──────────────────────────╮
 │find-missing-tests        │
 │used                      │
 │                          │
-│◇ None                    │
+│                          │
 ╰──────────────────────────╯
 
 ╭──────────────────────────╮
 │brainstorm                │
 │unused                    │
 │                          │
-│◇ None                    │
+│                          │
 ╰──────────────────────────╯

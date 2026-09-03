@@ -1,17 +1,18 @@
 ---
 source: crates/ainb-plugin-hangar/tests/snapshot_boards.rs
+assertion_line: 225
 expression: map
 ---
 Board: Delivery   [1/1]   auto-move ON
-↵:run/rerun  a:attach  X:cancel  t:timeline  e:edit  d:remov
 ○ Backlog ⋯ +│◈ Queued ↦⋯ +│◈ Running ⋯ +│◈ Failed ↦fail⋯ +
 ─────────────│─────────────│─────────────│──────────────────
 ┏━━━━━━━━━━━┓│╭───────────╮│╭───────────╮│╭────────────────╮
 ┃#bk01      ┃││#q002      │││#r003      │││#f004           │
 ┃Write the s┃││Wire the RP│││Build the b│││Flaky migration │
 ┃pec        ┃││C          │││oard       │││                │
-┃◇ None     ┃││◇ None     │││◇ None     │││◇ None          │
+┃           ┃││           │││           │││                │
 ┗━━━━━━━━━━━┛│╰───────────╯│╰───────────╯│╰────────────────╯
+             │             │             │
              │             │             │
              │             │             │
              │             │             │
