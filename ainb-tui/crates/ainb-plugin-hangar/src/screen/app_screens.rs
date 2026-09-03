@@ -1429,17 +1429,15 @@ impl ScreenStates {
     /// durable run log (crisp B1, defect 7), but only when that screen is bound
     /// to `task_id`: the daemon serves an issue's NEWEST run, and a detail opened
     /// on an older attempt must not show another run's transcript. Returns
-    /// whether anything was applied. A no-op on a closed screen.
+    /// whether anything was applied (a screen already backfilled by an earlier
+    /// open's reply refuses a second one). A no-op on a closed screen.
     pub fn backfill_task_detail_transcript(
         &mut self,
         task_id: &str,
         entries: Vec<super::task_detail::TranscriptEntry>,
     ) -> bool {
         match self.task_detail.as_mut() {
-            Some(td) if td.task_id().as_str() == task_id && !entries.is_empty() => {
-                td.backfill_transcript(entries);
-                true
-            }
+            Some(td) if td.task_id().as_str() == task_id => td.backfill_transcript(entries),
             _ => false,
         }
     }

@@ -191,6 +191,29 @@ fn backfill_prepends_history_and_keeps_the_viewport_honest() {
     assert_eq!(s.transcript_len(), 0);
 }
 
+/// Crisp B1 review: the timeline request rides a CONSTANT id, so open / Esc /
+/// open again leaves the FIRST open's reply in flight and it lands on the second
+/// open's screen. The backfill applies once per state or the run's whole history
+/// is prepended twice.
+#[test]
+fn a_second_backfill_reply_does_not_double_the_history() {
+    let history = || {
+        vec![
+            TranscriptEntry::new(MessageKind::ToolCall, "Edit api.ts".into(), false),
+            TranscriptEntry::new(MessageKind::ToolResult, "3 files changed".into(), false),
+        ]
+    };
+
+    let mut s = state_for_task();
+    assert!(s.backfill_transcript(history()), "the first reply applies");
+    assert!(
+        !s.backfill_transcript(history()),
+        "the late duplicate reply is refused"
+    );
+    let lines: Vec<&str> = s.transcript().map(TranscriptEntry::body).collect();
+    assert_eq!(lines, vec!["Edit api.ts", "3 files changed"]);
+}
+
 /// `R` emits a retry intent only after the task reached a terminal state.
 #[test]
 fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {

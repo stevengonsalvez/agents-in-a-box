@@ -286,6 +286,13 @@ pub struct TaskDetailState {
     /// the tasks snapshot has one, so an `already_active` dispatch refusal can
     /// name the row that blocks it (crisp B1, defect 5). `None` otherwise.
     blocking_run: Option<String>,
+    /// Whether [`Self::backfill_transcript`] has already run for this open.
+    ///
+    /// The timeline request rides a CONSTANT id, so a reply is only ever matched
+    /// to the bound task, never to the open that asked for it: open, Esc, open
+    /// again, and a late first reply would prepend the run's whole history a
+    /// second time. One apply per state, and a state is rebuilt on every open.
+    transcript_backfilled: bool,
 }
 
 /// The all-`Unknown` PR status, const-constructible so [`TaskDetailState::new`]
@@ -317,6 +324,7 @@ impl TaskDetailState {
             assignee_name: None,
             agent_name: None,
             blocking_run: None,
+            transcript_backfilled: false,
         }
     }
 
@@ -420,10 +428,15 @@ impl TaskDetailState {
     /// anything already on screen, so a system line pushed since the open (or a
     /// live message that beat the reply) keeps its place after the history.
     /// Sticky-bottom follows the new tail; a released viewport keeps its line.
-    pub fn backfill_transcript(&mut self, entries: Vec<TranscriptEntry>) {
-        if entries.is_empty() {
-            return;
+    ///
+    /// ONCE per open ([`Self::transcript_backfilled`]): a second reply, from an
+    /// earlier open of the same task, is dropped rather than doubling the history.
+    /// Returns whether this call applied the history.
+    pub fn backfill_transcript(&mut self, entries: Vec<TranscriptEntry>) -> bool {
+        if entries.is_empty() || self.transcript_backfilled {
+            return false;
         }
+        self.transcript_backfilled = true;
         let added = entries.len();
         let mut transcript = entries;
         transcript.append(&mut self.transcript);
@@ -433,6 +446,7 @@ impl TaskDetailState {
         } else {
             self.scroll_offset.saturating_add(added)
         };
+        true
     }
 
     /// The current lifecycle.
