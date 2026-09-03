@@ -40,6 +40,23 @@ use crate::events::MessageKind;
 /// Clip a one-line summary / snippet to this many display chars (char-safe).
 const SUMMARY_MAX: usize = 84;
 
+/// Hard ceiling on a single classified body, in display chars.
+///
+/// Generous on purpose: this is a leak backstop, not a display width. A provider
+/// is free to emit a megabyte of prose or a base64 blob in one block, and since
+/// A2 every classified body is also a live `TaskMessage` held in a bounded
+/// broadcast ring and framed to every subscriber, so an uncapped body is an
+/// unbounded allocation on the hot path. No real transcript line comes close.
+const BODY_MAX: usize = 8192;
+
+/// Ceiling on the entries ONE transcript line may classify into.
+///
+/// A single JSON line carrying a multi-line text block yields one entry per
+/// line, so the per-body cap above bounds each entry without bounding their
+/// count. Same backstop reasoning: a megabyte of newlines is a megabyte of
+/// `TaskMessage`s.
+const ENTRIES_PER_LINE_MAX: usize = 512;
+
 /// Most `tool_use` ids remembered while awaiting their `tool_result`. Claude
 /// issues a handful per message; this is a leak backstop, not a working limit.
 const MAX_PENDING_TOOLS: usize = 256;
@@ -95,8 +112,36 @@ impl StreamJsonClassifier {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
+        self.classify_value(&v)
+    }
+
+    /// [`Self::classify_line`] for a line the caller has ALREADY parsed.
+    ///
+    /// The live producer reads each line for two purposes (the transcript and the
+    /// runner's own session/usage/terminal fields), and parsing the same bytes
+    /// twice for that is waste it can hand back.
+    #[must_use]
+    pub fn classify_value(&mut self, line: &Value) -> Vec<(MessageKind, String)> {
         let mut out = Vec::new();
-        self.fold(&v, &mut out);
+        self.fold(line, &mut out);
+        // The ONE place every entry passes through, so the backstops live here
+        // rather than at the six `out.push` sites: a tool `name` and a `subtype`
+        // are provider strings too, and capping only the prose in `push_lines`
+        // left those uncapped. Both live producer and durable re-read classify
+        // through this function, so the two stay byte-identical.
+        if out.len() > ENTRIES_PER_LINE_MAX {
+            // Say so rather than dropping silently, the way BODY_MAX appends its
+            // ellipsis: a 600-line block otherwise loses 88 lines with no sign, in
+            // both halves.
+            let dropped = out.len() - (ENTRIES_PER_LINE_MAX - 1);
+            out.truncate(ENTRIES_PER_LINE_MAX - 1);
+            out.push((MessageKind::ToolResult, format!("… {dropped} more lines")));
+        }
+        for (_, body) in &mut out {
+            if body.chars().count() > BODY_MAX {
+                *body = truncate_chars(body, BODY_MAX);
+            }
+        }
         out
     }
 
@@ -413,6 +458,78 @@ fn short_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A tool NAME is a provider string too, and it does not go through
+    /// `push_lines`. Capping only the prose left this one uncapped.
+    #[test]
+    fn a_huge_tool_name_is_capped_too() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{
+                "type": "tool_use", "id": "t1", "name": "N".repeat(50_000), "input": {},
+            }] },
+        })
+        .to_string();
+        let out = classify_stream_json(&line);
+        assert_eq!(out[0].0, MessageKind::ToolCall);
+        assert_eq!(out[0].1.chars().count(), BODY_MAX);
+    }
+
+    /// One JSON line holding a multi-line block yields one entry per line, so the
+    /// per-body cap bounds each entry without bounding their count.
+    #[test]
+    fn one_line_cannot_classify_into_unbounded_entries() {
+        let block = "line\n".repeat(ENTRIES_PER_LINE_MAX * 3);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": block }] },
+        })
+        .to_string();
+        let out = classify_stream_json(&line);
+        assert_eq!(out.len(), ENTRIES_PER_LINE_MAX);
+        // The COUNT, not just the prefix: an off-by-one here ships silently.
+        let dropped = ENTRIES_PER_LINE_MAX * 3 - (ENTRIES_PER_LINE_MAX - 1);
+        assert_eq!(out.last().unwrap().1, format!("… {dropped} more lines"));
+    }
+
+    /// The cap counts CHARS, not bytes: provider prose carries non-ASCII
+    /// routinely, and a byte-index truncation would panic on a UTF-8 boundary.
+    #[test]
+    fn the_body_cap_never_splits_a_multibyte_char() {
+        // 3 bytes per char, so a byte-index cut at BODY_MAX would land mid-char.
+        let huge = "日".repeat(BODY_MAX * 2);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": huge }] },
+        })
+        .to_string();
+        let out = classify_stream_json(&line);
+        assert_eq!(out[0].1.chars().count(), BODY_MAX, "capped by chars");
+        assert!(
+            out[0].1.ends_with('…'),
+            "the elision marker survives intact"
+        );
+    }
+
+    /// An arbitrarily large provider block is capped, not carried whole: since A2
+    /// every classified body is also a live `TaskMessage` sitting in a bounded
+    /// broadcast ring and framed to every subscriber.
+    #[test]
+    fn a_huge_text_block_is_capped() {
+        let huge = "x".repeat(100_000);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": huge }] },
+        })
+        .to_string();
+        let out = classify_stream_json(&line);
+        assert_eq!(out.len(), 1, "one block, one body");
+        assert_eq!(
+            out[0].1.chars().count(),
+            BODY_MAX,
+            "the body is capped at BODY_MAX display chars"
+        );
+    }
+
     use super::*;
 
     /// A live classifier lives for a whole run, so a resolved tool must leave

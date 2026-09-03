@@ -74,6 +74,24 @@ pub struct ScopedEvent {
 pub struct EventBroker {
     tx: broadcast::Sender<ScopedEvent>,
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
+    /// A running task's TRANSCRIPT (`TaskMessage` / `TaskProgress`, track A step
+    /// A2). Its OWN channel, for the same reason the three below have theirs:
+    /// volume. One chatty run emits a `TaskMessage` per stream-json line, which
+    /// on the shared workspace channel would evict other tasks' and other
+    /// WORKSPACES' `TaskStarted` / `TaskFinished` / `IssueUpdated` from the
+    /// 256-slot ring. Those are the events a lagging plugin cannot recover: a
+    /// transcript line deliberately does NOT arm a snapshot re-pull, so nothing
+    /// polls afterwards and a dropped `TaskFinished` pins a run banner at
+    /// "running" forever. Partitioned, a burst can only evict transcript lines,
+    /// which the `board_card_timeline` re-read backfills.
+    ///
+    /// ponytail: this confines the RING, not the connection's outbound queue.
+    /// Both forwarders clone the same 64-deep `out_tx` and await on it, so a
+    /// transcript flood can still head-of-line-block the lifecycle forwarder and
+    /// stop it draining `tx`. Closing that needs a per-stream outbound queue or a
+    /// lossy transcript send, which is A6-scale work; the ring split is what makes
+    /// the common case (a slow reader, not a stopped one) safe.
+    task_stream_tx: broadcast::Sender<ScopedEvent>,
     /// The FLEET-WIDE attention channel (spec P2). Attention events are NOT
     /// workspace-partitioned — the control centre answers for the whole host, and
     /// a hand-started session has no workspace to scope by — so `AttentionRaised`
@@ -125,6 +143,7 @@ impl EventBroker {
     #[must_use]
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (task_stream_tx, _tsrx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
@@ -132,6 +151,7 @@ impl EventBroker {
         let (notify_tx, _nrx) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             tx,
+            task_stream_tx,
             outbox_tx: None,
             attention_tx,
             fleet_tx,
@@ -152,6 +172,7 @@ impl EventBroker {
     #[must_use]
     pub fn with_outbox() -> (Self, mpsc::UnboundedReceiver<ScopedEvent>) {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (task_stream_tx, _tsrx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
         let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _mrx) = broadcast::channel(CHANNEL_CAPACITY);
@@ -161,6 +182,7 @@ impl EventBroker {
         (
             Self {
                 tx,
+                task_stream_tx,
                 outbox_tx: Some(outbox_tx),
                 attention_tx,
                 fleet_tx,
@@ -177,6 +199,7 @@ impl EventBroker {
     pub fn sink(&self) -> EventSink {
         EventSink {
             tx: self.tx.clone(),
+            task_stream_tx: self.task_stream_tx.clone(),
             outbox_tx: self.outbox_tx.clone(),
             attention_tx: self.attention_tx.clone(),
             fleet_tx: self.fleet_tx.clone(),
@@ -192,6 +215,16 @@ impl EventBroker {
     #[must_use]
     pub fn subscribe(&self) -> broadcast::Receiver<ScopedEvent> {
         self.tx.subscribe()
+    }
+
+    /// A fresh receiver onto the running-task TRANSCRIPT stream (track A step
+    /// A2). The RPC server opens one per `workspace/subscribe` alongside
+    /// [`Self::subscribe`], and filters it by the same workspace: the two are one
+    /// subscription split across two channels so a transcript burst cannot evict
+    /// the lifecycle events beside it.
+    #[must_use]
+    pub fn subscribe_task_stream(&self) -> broadcast::Receiver<ScopedEvent> {
+        self.task_stream_tx.subscribe()
     }
 
     /// A fresh receiver onto the FLEET-WIDE attention stream (spec P2). The RPC
@@ -244,6 +277,7 @@ impl EventBroker {
 #[derive(Debug, Clone)]
 pub struct EventSink {
     tx: broadcast::Sender<ScopedEvent>,
+    task_stream_tx: broadcast::Sender<ScopedEvent>,
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
     attention_tx: broadcast::Sender<HangarEvent>,
     fleet_tx: broadcast::Sender<i64>,
@@ -271,6 +305,33 @@ impl EventSink {
         }
         // Live broadcast (lossy): the per-connection forwarders + inbox aggregator.
         let _ = self.tx.send(scoped);
+    }
+
+    /// Publish `event` to LIVE workspace subscribers only, skipping the durable
+    /// outbox: the channel for a running task's transcript
+    /// ([`HangarEvent::TaskMessage`] / [`HangarEvent::TaskProgress`], track A
+    /// step A2).
+    ///
+    /// [`Self::emit`] appends one `event_log` row per event, and every one of
+    /// those commits takes the single `SQLite` write lock the whole control plane
+    /// shares. A run's transcript is thousands of lines, so logging it there
+    /// would put the transcript through that lock a second time for no gain: it
+    /// is ALREADY durable in the provider's `{logs}/<provider>.jsonl`, and
+    /// `hangar/board_card_timeline` re-reads it from exactly there. A subscriber
+    /// that missed the live lines backfills from that read, not from a replay.
+    ///
+    /// Same shape as [`Self::emit_attention`]: a stream whose durable source is
+    /// somewhere other than the event log stays off the log. Best-effort and
+    /// non-blocking: with no live subscriber the broadcast is dropped.
+    ///
+    /// It rides its OWN broadcast, not [`Self::emit`]'s: see
+    /// [`EventBroker::task_stream_tx`] for why a run's line volume must not share
+    /// a ring with the lifecycle events nothing re-polls.
+    pub fn emit_live(&self, workspace_id: &str, event: HangarEvent) {
+        let _ = self.task_stream_tx.send(ScopedEvent {
+            workspace_id: workspace_id.to_string(),
+            event,
+        });
     }
 
     /// Publish an attention `event` on the FLEET-WIDE attention stream (spec P2).
@@ -363,7 +424,7 @@ pub fn encode_notification_frame(method: &str, params: &serde_json::Value) -> Ve
 mod tests {
     use super::*;
     use ainb_hangar_core::ids::TaskId;
-    use ainb_hangar_proto::events::TaskResult;
+    use ainb_hangar_proto::events::{MessageKind, TaskResult};
 
     fn finished(task: &str) -> HangarEvent {
         HangarEvent::TaskFinished {
@@ -505,6 +566,57 @@ mod tests {
             outbox_rx.recv().await.unwrap().event,
             HangarEvent::TaskFinished { .. }
         ));
+    }
+
+    /// `emit_live` must land on the TRANSCRIPT stream and NOT on the workspace
+    /// broadcast. Reverting it to `self.tx.send(...)` leaves every other test in
+    /// the suite green (both forwarders feed one socket, so the tripwire cannot
+    /// tell, and the `event_log` assertion only catches a revert to `emit`), which
+    /// would silently restore the eviction the split exists to prevent.
+    ///
+    /// `try_recv` rather than `recv`, deliberately: both sends complete before the
+    /// first check, so an empty channel is a decided answer, not a slow one. A
+    /// revert fails on the first line instead of hanging the suite.
+    #[test]
+    fn emit_live_lands_on_the_transcript_stream_and_not_the_workspace_one() {
+        let (broker, mut outbox_rx) = EventBroker::with_outbox();
+        let mut transcript = broker.subscribe_task_stream();
+        let mut workspace = broker.subscribe();
+
+        broker.sink().emit_live(
+            "ws-a",
+            HangarEvent::TaskMessage {
+                task_id: TaskId::from_str("t1".to_string()).unwrap(),
+                kind: MessageKind::Agent,
+                body: "a streamed line".into(),
+            },
+        );
+        // The sentinel proves the other two channels are EMPTY of the line rather
+        // than merely behind it.
+        broker.sink().emit("ws-a", finished("t1"));
+
+        let got = transcript.try_recv().expect("the transcript stream carries the line");
+        assert_eq!(got.workspace_id, "ws-a");
+        assert!(matches!(got.event, HangarEvent::TaskMessage { .. }));
+        assert!(
+            transcript.try_recv().is_err(),
+            "the workspace sentinel must NOT ride the transcript stream"
+        );
+
+        assert!(
+            matches!(
+                workspace.try_recv().unwrap().event,
+                HangarEvent::TaskFinished { .. }
+            ),
+            "the workspace stream's first item is the sentinel, not the transcript line"
+        );
+        assert!(
+            matches!(
+                outbox_rx.try_recv().unwrap().event,
+                HangarEvent::TaskFinished { .. }
+            ),
+            "the durable outbox never carries a transcript line"
+        );
     }
 
     /// A wakeup with no live subscriber is dropped, never an error: the

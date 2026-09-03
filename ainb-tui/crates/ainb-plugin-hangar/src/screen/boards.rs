@@ -99,7 +99,7 @@ impl TimelineView {
     /// Cap on the live-appended transcript entries: a long run streams without
     /// bound, so the tail view keeps only the most recent lines (dropping the
     /// oldest), matching the daemon's 512 KiB tail on the initial fetch.
-    const MAX_ENTRIES: usize = 5000;
+    pub(crate) const MAX_ENTRIES: usize = 5000;
 
     /// Append one live transcript line (from a `TaskMessage` on this task's run),
     /// following the tail: if the view was scrolled to the last entry it advances

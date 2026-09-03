@@ -420,6 +420,10 @@ async fn serve_conn(
     // The connection's event subscription: at most one forwarder; a
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // The TRANSCRIPT half of the same workspace subscription (track A step A2),
+    // on its own broadcast so a run's line volume cannot evict the lifecycle
+    // events `forwarder` carries. Registered and replaced with it.
+    let mut task_stream_forwarder: Option<tokio::task::JoinHandle<()>> = None;
     // The connection's FLEET-WIDE attention subscription (spec P2), independent
     // of the workspace forwarder: a connection may hold both (workspace events +
     // attention nudges) or either. A re-subscribe replaces it.
@@ -457,6 +461,7 @@ async fn serve_conn(
                 h.as_ref().is_some_and(|h| !h.is_finished())
             };
             let subscribed = live(&forwarder)
+                || live(&task_stream_forwarder)
                 || live(&attention_forwarder)
                 || live(&fleet_forwarder)
                 || live(&message_forwarder)
@@ -479,6 +484,10 @@ async fn serve_conn(
             // the snapshot query runs stay buffered in this receiver and are
             // drained after the acknowledgement, closing the snapshot-to-live
             // handoff gap without allowing an event to precede the response.
+            let pending_task_stream_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::WORKSPACE_SUBSCRIBE)
+                    .then(|| broker.subscribe_task_stream())
+            });
             let pending_attention_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::ATTENTION_SUBSCRIBE)
                     .then(|| broker.subscribe_attention())
@@ -536,6 +545,26 @@ async fn serve_conn(
                             ws.clone(),
                             out_tx.clone(),
                         ));
+                        // A2: the same subscription's TRANSCRIPT half, drained
+                        // from its own broadcast so a chatty run cannot evict the
+                        // lifecycle events above it (see `EventBroker`). Two
+                        // forwarders means the two streams are unordered against
+                        // each other in BOTH directions: a `TaskFinished` can
+                        // overtake its run's last `TaskMessage`, and a
+                        // `TaskMessage` can overtake the `TaskStarted` that opens
+                        // the banner. Only `TaskStarted` constructs a banner and
+                        // every consumer guards on the task id, so a late arrival
+                        // is dropped either way and leaves no state behind (pinned
+                        // by `banner_hides_on_task_finished_event`); the visible
+                        // effect is a banner clearing a beat early, or a first
+                        // transcript line missed before it opens.
+                        if let Some(old) = task_stream_forwarder.take() {
+                            old.abort();
+                        }
+                        let rx = pending_task_stream_rx
+                            .unwrap_or_else(|| broker.subscribe_task_stream());
+                        task_stream_forwarder =
+                            Some(spawn_event_forwarder(rx, ws.clone(), out_tx.clone()));
                         // T1 resume: a client that carried a `since_seq` catches
                         // up on every durable event after that cursor before it
                         // goes live. Best-effort (a read fault is logged, the
@@ -1039,10 +1068,13 @@ fn subscribe_after_id(req: &RpcRequest) -> Option<String> {
 /// so a replayed frame is byte-identical to the live one it mirrors — a resuming
 /// subscriber cannot tell catch-up from live.
 ///
-/// The backlog is **paged in-loop**, not read once: the durable log holds one
-/// row per emitted event (including high-frequency `TaskProgress`/`TaskMessage`
-/// heartbeats), so a single active task can exceed [`REPLAY_BATCH`] during a
-/// disconnect. A single capped read delivers the OLDEST `REPLAY_BATCH` events
+/// The backlog is **paged in-loop**, not read once: the durable log holds one row
+/// per emitted event, so a busy workspace (a board advancing a run through its
+/// lifecycle, a squad fanning out) can exceed [`REPLAY_BATCH`] during a
+/// disconnect. Transcript lines are NOT in that backlog since track A step A2
+/// (they ride `emit_live`, off the log), so the volume here is lower than it
+/// once was, but the paging is what makes the read correct rather than merely
+/// sufficient. A single capped read delivers the OLDEST `REPLAY_BATCH` events
 /// and would silently drop the newest `(since_seq + REPLAY_BATCH, head]` window
 /// — the live forwarder (registered before this call) only carries events
 /// emitted after subscribe, and the ack advances the client's cursor to the
