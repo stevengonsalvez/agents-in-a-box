@@ -141,6 +141,35 @@ impl RunStream {
     }
 }
 
+/// A spawned task aborted when dropped, rather than detached.
+///
+/// `tokio::spawn`'s handle detaches on drop, which on the cancel path would
+/// leave the stdout reader alive and still emitting. `tokio_util`'s
+/// `AbortOnDropHandle` is the same thing but gated behind its `rt` feature,
+/// which is not enabled here and is not worth turning on across the workspace
+/// for twelve lines.
+#[derive(Debug)]
+struct AbortOnDrop<T>(Option<tokio::task::JoinHandle<T>>);
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self(Some(handle))
+    }
+
+    /// Take the handle back, disarming the abort (the normal completion path).
+    fn into_inner(mut self) -> tokio::task::JoinHandle<T> {
+        self.0.take().expect("the handle is taken exactly once")
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.0 {
+            handle.abort();
+        }
+    }
+}
+
 /// The env vars a provider subprocess is allowed to inherit.
 ///
 /// Deny-by-default: the child receives *only* these 12 vars (when present in the
@@ -1717,8 +1746,14 @@ impl Runner {
         // never deadlock on a full pipe buffer.
         let tail_lines = self.cfg.tail_lines;
         let stream = self.stream.clone();
-        let stdout_task =
-            tokio::spawn(async move { stream_stdout(stdout, log_file, tail_lines, stream).await });
+        // A2: aborted if this future is DROPPED (the cancel arm in `run_loop`).
+        // A bare `JoinHandle` detaches on drop, so the reader would keep draining
+        // the pipe and emitting `TaskMessage` (plus the closing `TaskProgress`)
+        // after the task had already finalised and pushed `TaskFinished`, painting
+        // transcript onto a run the operator was told was over.
+        let stdout_task = AbortOnDrop::new(tokio::spawn(async move {
+            stream_stdout(stdout, log_file, tail_lines, stream).await
+        }));
         let stderr_task = tokio::spawn(async move { tail_reader(stderr, tail_lines).await });
 
         let timed_out = match tokio::time::timeout(self.cfg.max_runtime, child.wait()).await {
@@ -1744,6 +1779,7 @@ impl Runner {
             terminal,
             stdout_tail,
         } = stdout_task
+            .into_inner()
             .await
             .map_err(|e| std::io::Error::other(format!("stdout task join: {e}")))??;
         let stderr_tail = stderr_task
