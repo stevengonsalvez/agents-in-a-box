@@ -2347,8 +2347,6 @@ impl InteractiveSessionManager {
         let mut cmd_parts = vec![provider.command().to_string()];
         if agent_type == SessionAgentType::Codex {
             cmd_parts.extend([
-                "-c".to_string(),
-                "check_for_update_on_startup=false".to_string(),
                 // Ainb causes this stall itself: Codex pins each hook by
                 // POSITION and `ainb notifyd install` rewrites
                 // `~/.codex/hooks.json`, so our own installer invalidates those
@@ -2358,7 +2356,16 @@ impl InteractiveSessionManager {
                 // session runs whenever the daemon is unreachable, and a modal
                 // stalls the pane instead of failing it, so the launch reports
                 // success over a session that never started.
+                //
+                // It goes FIRST, ahead of the config override, so the override
+                // stays adjacent to the `resume --last` below. Both are global
+                // flags and Codex does not care which order they arrive in, but
+                // `resume_command_tmux::codex_resume_launches_resume_last` pins
+                // that adjacency as its proof that global overrides precede the
+                // subcommand, and there is no reason to weaken it.
                 "--dangerously-bypass-hook-trust".to_string(),
+                "-c".to_string(),
+                "check_for_update_on_startup=false".to_string(),
             ]);
         }
 
@@ -4495,9 +4502,9 @@ trust_level = "trusted"
             p,
             vec![
                 "codex",
+                "--dangerously-bypass-hook-trust",
                 "-c",
                 "check_for_update_on_startup=false",
-                "--dangerously-bypass-hook-trust",
                 "resume",
                 "--last",
                 "--dangerously-bypass-approvals-and-sandbox",
@@ -4519,9 +4526,9 @@ trust_level = "trusted"
             p,
             vec![
                 "codex",
+                "--dangerously-bypass-hook-trust",
                 "-c",
                 "check_for_update_on_startup=false",
-                "--dangerously-bypass-hook-trust",
                 "resume",
                 "--last",
                 "--model",
@@ -4549,9 +4556,9 @@ trust_level = "trusted"
             p,
             vec![
                 "codex",
+                "--dangerously-bypass-hook-trust",
                 "-c",
                 "check_for_update_on_startup=false",
-                "--dangerously-bypass-hook-trust",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
         );

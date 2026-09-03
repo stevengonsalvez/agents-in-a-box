@@ -1071,14 +1071,14 @@ mod tests {
         let command = codex_local_command(Some("gpt-5.6-luna"), true);
         assert_eq!(
             command,
-            "codex -c check_for_update_on_startup=false --dangerously-bypass-hook-trust \
+            "codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false \
              --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox"
         );
 
         let plain = codex_local_command(None, false);
         assert_eq!(
             plain,
-            "codex -c check_for_update_on_startup=false --dangerously-bypass-hook-trust"
+            "codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false"
         );
         assert!(
             !plain.contains("--remote"),
