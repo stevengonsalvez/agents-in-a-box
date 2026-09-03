@@ -599,6 +599,20 @@ fn read_daemon_token() -> Option<String> {
     (!token.is_empty()).then_some(token)
 }
 
+/// Whether `event` can move a name the inbox lookup holds (an agent label, a
+/// parent issue's display id or title) — i.e. whether it must re-project.
+///
+/// Everything can EXCEPT a live transcript line. A streaming run pushes
+/// `TaskMessage` faster than anything else on this path and moves no name at all,
+/// so re-projecting on one would rebuild two maps per line of agent output.
+///
+/// Named rather than inlined so the gate can be pinned: inverting it is silent
+/// (the inbox stays correct, the plugin just does the work per transcript line),
+/// which is exactly the kind of regression nothing notices.
+const fn names_may_move(event: &HangarEvent) -> bool {
+    !matches!(event, HangarEvent::TaskMessage { .. })
+}
+
 /// The current wall-clock time in epoch milliseconds, for the Kanban card-age
 /// derivation when (re)building the hit-map (63l.6). Mirrors the render clock in
 /// [`crate::screen::app_screens`]; a clock skew before the epoch saturates to `0`.
@@ -1286,10 +1300,7 @@ impl HangarPlugin {
             }
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
-        // A transcript line moves no name the inbox lookup holds (agent label,
-        // parent issue, display id, title), and a streaming run pushes them
-        // faster than anything else on this path, so it does not re-project.
-        let names_may_move = !matches!(event, HangarEvent::TaskMessage { .. });
+        let names_may_move = names_may_move(&event);
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
             IssueListEvent::Event(event.clone()),
@@ -5856,6 +5867,11 @@ impl Plugin for HangarPlugin {
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        // The issue board ages its card run chips against this clock (crisp B2
+        // §2.2), and the `f` facet panel buckets due dates against it. Set per
+        // FRAME, not per snapshot, so a running card's `2m` ticks between pulls.
+        // Nothing set it before, so both read an epoch-zero clock.
+        self.screens.issue_list.set_now_ms(now_ms_clock());
         self.drain_pending_refreshes(host);
         if let Some(intent) = self.screens.take_pending_fleet_intent() {
             self.apply_fleet_intent(host, intent).await;
@@ -6623,6 +6639,49 @@ mod tests {
             p.fetch_pending,
             "a non-transcript event must arm the reconciling re-fetch"
         );
+    }
+
+    /// The SECOND gate on the same event: a `TaskMessage` must not re-project the
+    /// inbox name lookup either (crisp B1 review).
+    ///
+    /// The refetch gate above and this one are separate decisions that happen to
+    /// share a condition, and this one is silent when it breaks: inverting it
+    /// leaves the inbox correct and simply rebuilds two maps per line of streamed
+    /// agent output, which no other test notices. Every non-transcript event
+    /// re-projects, because any of them can move an agent label or an issue title.
+    #[test]
+    fn a_transcript_line_does_not_reproject_the_inbox_names() {
+        use ainb_hangar_core::ids::{AgentId, IssueId, TaskId};
+        use ainb_hangar_proto::events::{MessageKind, PresenceState};
+
+        assert!(
+            !names_may_move(&HangarEvent::TaskMessage {
+                task_id: TaskId::from_str("t1").unwrap(),
+                kind: MessageKind::Agent,
+                body: "streaming line".into(),
+            }),
+            "a transcript line moves no name the inbox holds"
+        );
+
+        for event in [
+            HangarEvent::IssueDeleted {
+                issue_id: IssueId::from_str("i1").unwrap(),
+            },
+            HangarEvent::TaskQueued {
+                task_id: TaskId::from_str("t1").unwrap(),
+                issue_id: IssueId::from_str("i1").unwrap(),
+                agent_id: AgentId::from_str("a1").unwrap(),
+            },
+            HangarEvent::AgentPresence {
+                agent_id: AgentId::from_str("a1").unwrap(),
+                state: PresenceState::Online,
+            },
+        ] {
+            assert!(
+                names_may_move(&event),
+                "{event:?} may move a name, so it must re-project"
+            );
+        }
     }
 
     /// An EOF socket event drops a connected link back to Disconnected.
@@ -8492,36 +8551,90 @@ mod tests {
         );
     }
 
-    /// THE GENERAL GUARD: every single-char key the Boards hint band ADVERTISES
-    /// must actually reach the boards screen — pressing it may never switch tabs
-    /// or close the panel.
+    /// THE GENERAL GUARD: every single-char key the Boards screen ADVERTISES must
+    /// actually reach the boards screen — pressing it may never switch tabs or
+    /// close the panel.
     ///
-    /// Fails on `main` for `q` (quit) and `D` (daemon health): the band was
-    /// advertising keys the router ate first.
+    /// Fails on `main` for `q` (quit) and `D` (daemon health): the old top hint
+    /// band was advertising keys the router ate first.
+    ///
+    /// Crisp B2 §2.6 deleted that band, so the guard now reads the two surfaces
+    /// that replaced it — the five-verb footer and the `boards` rows of the help
+    /// overlay — which between them advertise every key the band did.
     #[test]
-    fn every_boards_hint_band_key_is_reachable() {
-        for (key, desc) in crate::screen::boards::BOARDS_HINTS {
-            let mut chars = key.chars();
-            let (Some(ch), None) = (chars.next(), chars.next()) else {
-                continue; // compound / glyph hint (`↵`, `⇧←→`) — not a bare char
-            };
-            if !ch.is_ascii() {
-                continue;
-            }
+    fn every_advertised_boards_key_is_reachable() {
+        for (ch, source) in advertised_boards_keys() {
             let mut p = plugin_on_seeded_board();
             p.on_key(&char_press(ch));
             assert!(
                 matches!(p.app_state().screen, Screen::Boards),
-                "Boards advertises `{ch}:{desc}` but pressing it left the screen \
-                 (went to {:?}) — the router stole it",
+                "Boards advertises `{ch}` in {source} but pressing it left the \
+                 screen (went to {:?}) — the router stole it",
                 p.app_state().screen
             );
             assert!(
                 !p.close_request_pending,
-                "Boards advertises `{ch}:{desc}` but pressing it closed the panel — \
-                 the router stole it as quit"
+                "Boards advertises `{ch}` in {source} but pressing it closed the \
+                 panel — the router stole it as quit"
             );
         }
+    }
+
+    /// Every single ASCII-letter key the Boards screen advertises, tagged with
+    /// where it is advertised. Compound and glyph keys (`↵`, `⇧←→`, `enter`) are
+    /// not bare chars and are skipped.
+    fn advertised_boards_keys() -> Vec<(char, &'static str)> {
+        let mut keys: Vec<(char, &'static str)> = crate::chrome::footer_hints(&Screen::Boards)
+            .into_iter()
+            // The trailing globals (`^P`, `?`, `q`) ARE router keys, advertised by
+            // the layer that owns them.
+            .filter(|(key, _)| !matches!(*key, "^P" | "?" | "q"))
+            .filter_map(|(key, _)| {
+                let mut chars = key.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(ch), None) if ch.is_ascii_alphabetic() => Some((ch, "the footer")),
+                    _ => None,
+                }
+            })
+            .collect();
+        // The `boards` block of the help overlay: its heading line, then every
+        // indented continuation until the next section.
+        let mut in_boards = false;
+        for line in crate::screen::app_screens::HELP_LINES {
+            if !line.starts_with(' ') {
+                in_boards = line.split_whitespace().next() == Some("boards");
+            }
+            if !in_boards {
+                continue;
+            }
+            for token in line.split_whitespace().skip(usize::from(!line.starts_with(' '))) {
+                // `c` and slash groups like `n/r/x` are keys; words are labels.
+                for key in token.split('/') {
+                    let mut chars = key.chars();
+                    if let (Some(ch), None) = (chars.next(), chars.next()) {
+                        if ch.is_ascii_alphabetic() {
+                            keys.push((ch, "the help overlay"));
+                        }
+                    }
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup_by_key(|(ch, _)| *ch);
+        // Every ASCII key the deleted sixteen-pair band advertised must still be
+        // advertised SOMEWHERE. A count floor does not prove that: dropping a
+        // hint and adding another keeps the number and loses the key, which is
+        // how `e` (edit card) shipped undiscoverable in the first place.
+        for key in [
+            'a', 'c', 'd', 'e', 'm', 'n', 'r', 's', 't', 'w', 'x', 'R', 'X',
+        ] {
+            assert!(
+                keys.iter().any(|(ch, _)| *ch == key),
+                "`{key}` was advertised by the old Boards hint band and is now \
+                 advertised nowhere; found {keys:?}"
+            );
+        }
+        keys
     }
 
     /// #450 (Fleet row): `a` on the Fleet pane raises the takeover-attach intent

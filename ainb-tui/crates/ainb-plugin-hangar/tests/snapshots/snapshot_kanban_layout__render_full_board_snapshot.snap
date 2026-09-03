@@ -8,14 +8,14 @@ expression: full
 ┃#EUED01 · test             ┃││#NING03 · test             │││#NE0004 · test             │││#ILED05 · test              │
 ┃claude · 5m · queued       ┃││claude · 1m · running      │││claude · 3d · done         │││gpt · 10m · failed          │
 ┃                           ┃││                           │││                           │││                            │
-┃◇ None             ◔ claude┃││◇ None             ◔ claude│││◇ None             ◔ claude│││◇ None                 ◔ gpt│
+┃                   ◔ claude┃││                   ◔ claude│││                   ◔ claude│││                       ◔ gpt│
 ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│╰───────────────────────────╯│╰───────────────────────────╯│╰────────────────────────────╯
                              │                             │                             │
 ╭───────────────────────────╮│                             │                             │╭────────────────────────────╮
 │#PTCH02 · test             ││                             │                             ││#NCEL06 · test              │
 │gpt · 2h · dispatched      ││                             │                             ││claude · 1h · cancelled     │
 │                           ││                             │                             ││                            │
-│◇ None                ◔ gpt││                             │                             ││◇ None              ◔ claude│
+│                      ◔ gpt││                             │                             ││                    ◔ claude│
 ╰───────────────────────────╯│                             │                             │╰────────────────────────────╯
                              │                             │                             │
                              │                             │                             │

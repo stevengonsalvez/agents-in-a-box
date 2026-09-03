@@ -222,6 +222,10 @@ impl SkillManagerState {
                 assignee: None,
                 linked: false,
                 subtasks: None,
+                // A skill never runs on its own, so it carries no run chip.
+                run: None,
+                pr: None,
+                attention: None,
             })
             .collect::<Vec<_>>();
         vec![BoardColumn {

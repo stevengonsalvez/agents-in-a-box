@@ -152,6 +152,11 @@ impl AutopilotsState {
                     assignee: None,
                     linked: false,
                     subtasks: None,
+                    // An autopilot is a schedule, not a run: its per-fire history
+                    // is the detail pane, so no run/attention chip on the card.
+                    run: None,
+                    pr: None,
+                    attention: None,
                 }
             })
             .collect::<Vec<_>>();

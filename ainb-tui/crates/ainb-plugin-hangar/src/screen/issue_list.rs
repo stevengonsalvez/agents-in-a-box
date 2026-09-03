@@ -157,6 +157,32 @@ const fn column_glyph(column: IssueColumn) -> char {
     }
 }
 
+/// The card's run chip (crisp B2 §2.2): the issue's LATEST run, named and aged,
+/// or `None` when it never ran.
+///
+/// `last_run_status` is the status of that run and `last_run_at` when it was
+/// created, both already on `IssueRow` — this is composition, not a new fetch. A
+/// status OUTSIDE the task FSM (a newer daemon's token) yields no chip at all
+/// rather than a confidently wrong word: the card falls back to its priority
+/// chip, which is stale-looking rather than untrue.
+///
+/// The chip names the assignee ONLY when the issue is assigned to an agent. A
+/// `member:` assignee is a human owner, not the thing executing the run, and
+/// `◔ dana · running 2m` claims dana is running it.
+fn run_chip(
+    row: &IssueRow,
+    agent: Option<String>,
+    now_ms: i64,
+) -> Option<crate::widgets::card_board::RunChip> {
+    let state = crate::vocab::RunState::parse(row.last_run_status.as_deref()?)?;
+    let is_agent = row.assignee.as_deref().is_some_and(|a| a.starts_with("agent:"));
+    Some(crate::widgets::card_board::RunChip {
+        agent: agent.filter(|_| is_agent),
+        state,
+        elapsed_ms: row.last_run_at.map(|at| now_ms.saturating_sub(at)),
+    })
+}
+
 /// The filter chips that narrow which rows are visible (UX §1).
 ///
 /// `Members` / `Agents` filter by assignee actor kind; `Mine` is a placeholder
@@ -1563,6 +1589,21 @@ impl IssueListState {
                         title: r.title.clone(),
                         priority: PriorityChip::from_priority(r.priority),
                         assignee: self.assignee_label(r.assignee.as_deref()),
+                        // Crisp B2 §2.2: the issue's latest run, so a card
+                        // mid-run stops rendering identically to an untouched
+                        // backlog card. The same resolved name the idle footer
+                        // would have shown, so one card never names its agent
+                        // two ways.
+                        run: run_chip(r, self.assignee_label(r.assignee.as_deref()), self.now_ms),
+                        pr: r
+                            .pr_url
+                            .as_deref()
+                            .is_some_and(|u| !u.trim().is_empty())
+                            .then_some(crate::widgets::card_board::PrChip::Unknown),
+                        // The attention feed carries a session id and no issue,
+                        // so nothing can resolve "this card asked you" until B3
+                        // projects it (crisp-ui-track.md §2.4).
+                        attention: None,
                         linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
                         // 0046: the sub-issue roll-up, so a PARENT card shows a
                         // `⊟ done/total` badge that flips to gold `1/1` when its
@@ -3921,6 +3962,130 @@ mod tests {
         assert!(
             painted.contains("Issue i1"),
             "the labelled issue must render as a card on the board: {painted:?}"
+        );
+    }
+
+    /// The card footer NAMES its assignee (crisp B1, defect 8): the roster display
+    /// name resolved through `set_actor_names`, never the `◔0` first char of a
+    /// ULID the board used to paint.
+    ///
+    /// Pinned on the CARD SURFACE — the board had no assignee assertion at all,
+    /// so the resolution could break end-to-end while every mapping unit test
+    /// stayed green (crisp B1 review).
+    #[test]
+    fn a_card_footer_names_its_assignee() {
+        const AGENT: &str = "agent:01M1FHM2YSRSXZQFR29ZAYF56V";
+        let mut s = IssueListState::with_rows(vec![row("i1", "todo", Some(AGENT))]);
+        s.set_actor_names(std::iter::once((AGENT.to_string(), "impl-1".to_string())).collect());
+
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
+
+        // `painted_text` concatenates only the cells that were WRITTEN, and the
+        // assignee glyph sits two cells before the name, so the gap between them
+        // is absent here while it is a space on screen.
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("◔impl-1"),
+            "the card must name its assignee: {painted:?}"
+        );
+        assert!(
+            !painted.contains("AYF56V"),
+            "and never fall back to the raw id beside it: {painted:?}"
+        );
+    }
+
+    /// Crisp B2 §2.2: an issue whose latest run is LIVE wears that run in its card
+    /// footer — `◔ impl-1 · running 2m` — composed from the `last_run_status` /
+    /// `last_run_at` the snapshot already carries.
+    ///
+    /// The same card with no run keeps its priority chip, which is what makes the
+    /// running one distinguishable: before this both painted `◇ None ◔0`.
+    #[test]
+    fn a_running_issue_card_names_its_run() {
+        const AGENT: &str = "agent:01M1FHM2YSRSXZQFR29ZAYF56V";
+        const NOW: i64 = 1_700_000_000_000;
+        let mut running = row("i1", "in_progress", Some(AGENT));
+        running.last_run_status = Some("running".into());
+        running.last_run_at = Some(NOW - 125_000);
+        running.pr_url = Some("https://github.com/o/r/pull/6".into());
+        let idle = row("i2", "todo", Some(AGENT));
+
+        let mut s = IssueListState::with_rows(vec![running, idle]);
+        s.set_actor_names(std::iter::once((AGENT.to_string(), "impl-1".to_string())).collect());
+        s.set_now_ms(NOW);
+
+        let mut buf = WireBuffer::new(168, 16);
+        render_issue_list(&mut buf, 168, 1, 15, &s, 0);
+        let painted = painted_text(&buf);
+
+        assert!(
+            painted.contains("◔impl-1 · running 2m"),
+            "the running card must wear its run: {painted:?}"
+        );
+        // Only ONE of the two cards names a run — that difference is the point:
+        // before this both painted `◇ None ◔0`.
+        assert_eq!(
+            painted.matches("running").count(),
+            1,
+            "only the running card names a run: {painted:?}"
+        );
+        // Seven columns at 168 cells leave a 21-cell card, which the PR chip does
+        // not fit; it is dropped WHOLE rather than clipped to a bare `· PR`.
+        assert!(
+            !painted.contains("PR"),
+            "a chip that does not fit is dropped, not cut: {painted:?}"
+        );
+    }
+
+    /// A run on a MEMBER-assigned issue names no agent: a human owner is not the
+    /// thing executing the run, and `◔ dana · running 2m` says dana is running it.
+    #[test]
+    fn a_run_on_a_member_assigned_issue_names_no_agent() {
+        let mut r = row("i1", "in_progress", Some("member:dana"));
+        r.last_run_status = Some("running".into());
+        r.last_run_at = Some(0);
+        let mut s = IssueListState::with_rows(vec![r]);
+        s.set_actor_names(
+            std::iter::once(("member:dana".to_string(), "dana".to_string())).collect(),
+        );
+        s.set_now_ms(125_000);
+
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
+        let painted = painted_text(&buf);
+
+        assert!(
+            painted.contains("◔running 2m"),
+            "the run still reads: {painted:?}"
+        );
+        assert!(
+            !painted.contains("dana · running"),
+            "the human owner is not the runner: {painted:?}"
+        );
+    }
+
+    /// A run status the task FSM does not define (a newer daemon's token) yields
+    /// NO run chip rather than a confidently wrong word — the card falls back to
+    /// its priority chip.
+    #[test]
+    fn an_unknown_run_status_paints_no_run_chip() {
+        let mut r = row("i1", "in_progress", None);
+        r.last_run_status = Some("hibernating".into());
+        r.priority = 2;
+        let s = IssueListState::with_rows(vec![r]);
+
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
+
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("◆ High"),
+            "the card falls back to its chip: {painted:?}"
+        );
+        assert!(
+            !painted.contains("hibernating") && !painted.contains("queued"),
+            "an unknown status is neither echoed nor guessed: {painted:?}"
         );
     }
 

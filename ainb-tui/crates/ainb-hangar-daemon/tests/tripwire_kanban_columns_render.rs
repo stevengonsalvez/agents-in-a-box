@@ -55,7 +55,13 @@ const COLUMN_HEADERS: [&str; 4] = ["queued (", "running (", "done (", "failed ("
 /// footer hint is rendered by the chrome for exactly one `Screen` variant and can
 /// never appear on another, so it is a strictly stronger proof of the transition,
 /// and the landing assertion below pins it as actually present before the switch.
-const ISSUE_LIST_FOOTER_HINT: &str = "s:sub-issue";
+///
+/// Must stay a hint UNIQUE to the issue list. `chrome.rs` `footer_hints` is the
+/// source of truth and is not reachable from this crate, so this is pinned by
+/// hand: it was `s:sub-issue` until crisp B2 §2.6 cut the issue-list bar to five
+/// verbs. `a:assign` is the replacement — no other screen pairs `a` with
+/// `assign` (the agent picker's is `enter:assign`, which does not contain it).
+const ISSUE_LIST_FOOTER_HINT: &str = "a:assign";
 
 #[test]
 fn kanban_board_renders_four_columns_with_cards() {

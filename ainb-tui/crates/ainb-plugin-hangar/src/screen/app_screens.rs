@@ -818,6 +818,7 @@ impl ScreenStates {
     /// are recomputed at render time, so a placeholder `now` is fine here — the
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
+        self.working_count = working_agent_count(tasks);
         self.kanban = KanbanState::from_tasks(tasks, 0);
         // Resolve each card's agent id to its roster name, and its issue id to
         // that issue's title, against the cached snapshots. All three snapshots
@@ -1319,6 +1320,23 @@ impl ScreenStates {
     }
 }
 
+/// How many DISTINCT agents are running a task right now — the count behind the
+/// issue board's `⬡⬡ 2 working` chip (crisp B2, Q11).
+///
+/// Distinct agents, not running tasks: the chip paints one avatar per agent, so
+/// counting rows would draw two people where one agent runs two tasks. The chip
+/// was dead code before this — declared, read, and never assigned, so it painted
+/// `0` on every real board while its test seeded the count by hand.
+fn working_agent_count(tasks: &[TaskCardRow]) -> usize {
+    use ainb_hangar_core::task_status::TaskStatus;
+    tasks
+        .iter()
+        .filter(|t| TaskStatus::parse(&t.status) == Some(TaskStatus::Running))
+        .map(|t| t.agent_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
 /// The `agent_id -> display_name` roster the Kanban cards label themselves from,
 /// projected out of the cached `hangar/agents_list` actor snapshot.
 ///
@@ -1657,8 +1675,10 @@ pub const HELP_LINES: &[&str] = &[
     "issues    j/k move  enter open  c create  s sub-issue  a assign  d done",
     "          x delete  y timeline  / filter  f facets  tab chips",
     "task      R retry (operator override)  X cancel  c comment  a/t criteria  o open PR",
+    "          x delete",
     "boards    c card  enter run ▾ (headless / interactive)  a attach  X cancel",
     "          b board  n/r/x column  s squad  w depends-on  R auto-run  d remove",
+    "          t timeline  e edit  m auto-move  ⇧↑↓ move card  ⇧←→ reorder column",
     "control   j/k card  h/l option  enter or 1-9 answer",
     "squads    n agent  c squad  a/d member  r role  i instructions  x fan out",
     "agents    n create  x delete",
@@ -2892,6 +2912,10 @@ mod help_overlay_tests {
             tok.chars().count() == 1
                 || tok.split('/').all(|k| k.chars().count() == 1)
                 || matches!(tok, "enter" | "esc" | "tab" | "1-9" | "^P" | "space")
+                // A chord written in glyphs (`⇧↑↓`, `⇧←→`) is a key, not a label:
+                // it carries no letter or digit for a label word to be confused
+                // with. These moved here from the deleted Boards hint band.
+                || tok.chars().all(|c| !c.is_alphanumeric())
         };
         // Section names are the first token of every unindented screen row;
         // one appearing anywhere else is a stranded heading.

@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ainb_plugin_hangar::screen::fleet::FleetFilter;
 use ainb_plugin_notifyd::Paths;
 use ainb_plugin_notifyd::broker::{self, BrokerState};
 
@@ -105,6 +106,16 @@ fn demo_pause_with(variable: &str) {
             thread::sleep(Duration::from_millis(milliseconds));
         }
     }
+}
+
+/// One lens as the Fleet row paints it: `<key> <label> <count>`.
+///
+/// Composed from the renderer's own accessors, not spelled out here: the pane is
+/// drawn by `ainb-plugin-hangar` and its lens words come from that crate's
+/// `vocab.rs`, so a wording change there would otherwise break this tripwire from
+/// a crate it never touched.
+fn lens_text(filter: FleetFilter, count: usize) -> String {
+    format!("{} {} {count}", filter.key(), filter.label())
 }
 
 fn open_fleet_screen(session: &str) -> Option<String> {
@@ -405,13 +416,11 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let opened = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
         c.contains("Fleet")
             && c.contains("Hangar")
-            && c.contains("1 Needs input 2")
-            && c.contains("2 Idle 0")
-            && c.contains("3 Completed 1")
-            && c.contains("4 Running 1")
-            && c.contains("5 All 4")
-            && c.contains("2 INPUT")
-            && c.contains("1 RUN")
+            && c.contains(&lens_text(FleetFilter::NeedsInput, 2))
+            && c.contains(&lens_text(FleetFilter::Idle, 0))
+            && c.contains(&lens_text(FleetFilter::Completed, 1))
+            && c.contains(&lens_text(FleetFilter::Running, 1))
+            && c.contains(&lens_text(FleetFilter::All, 4))
             && c.contains("ACTION QUEUE")
             && c.contains("What release scope should Fleet use?")
             && c.contains("NEEDS YOU")
@@ -424,7 +433,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         );
     };
     assert!(
-        open_cap.contains("1 Needs input") && open_cap.contains("q back"),
+        open_cap.contains(&lens_text(FleetFilter::NeedsInput, 2)) && open_cap.contains("q back"),
         "Fleet help bar missing answer/back controls:\n{open_cap}"
     );
     assert!(
@@ -465,7 +474,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             && c.contains("completed-project")
             && c.contains("fleet-tripwire-project")
             && c.contains("waiting-project")
-            && c.contains("5 All 4")
+            && c.contains(&lens_text(FleetFilter::All, 4))
     });
     assert!(
         all.is_some(),
