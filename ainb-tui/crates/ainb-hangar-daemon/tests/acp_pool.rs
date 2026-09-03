@@ -401,6 +401,45 @@ async fn a_turn_puts_one_message_on_the_timeline_and_every_chunk_in_the_transcri
     }
 }
 
+/// The receipt names WHY the turn stopped whenever that is not the ordinary
+/// finish, in one shape on both sides of `turn_succeeded`.
+///
+/// A turn the agent ended for want of budget is DELIVERED (its reply landed)
+/// carrying `stop=max_tokens`: that is the "finished vs ran out" distinction a
+/// task caller needs without opening the transcript, and the only stop token
+/// the pool writes on a success. A refusal is FAILED with the same `stop=`
+/// token after `turn_failed`, so one parser reads both shapes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receipt_names_the_stop_reason_on_both_sides_of_success() {
+    // `fake-session-2` is the SECOND adapter session this process mints, so it
+    // is the refused one: the budget turn below resolves before it is asked
+    // for.
+    let (_dir, store, pool) = harness(&[
+        ("FAKE_ACP_CHUNKS", "1"),
+        ("FAKE_ACP_STOP_REASON", "max_tokens"),
+        ("FAKE_ACP_FAIL_TURN_SESSIONS", "fake-session-2"),
+    ])
+    .await;
+
+    let budget = seed_session(&store, "acp:budget").await;
+    let message_id = seed_message(&store, &budget.session_key, "go").await;
+    pool.submit_prompt(&budget.session_key, &message_id, "go").await;
+    let (state, detail) = await_terminal(&store, &message_id, &budget.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+    assert_eq!(
+        detail.as_deref(),
+        Some("stop=max_tokens"),
+        "the reply landed, and the receipt says the agent stopped on budget"
+    );
+
+    let refused = seed_session(&store, "acp:refused").await;
+    let message_id = seed_message(&store, &refused.session_key, "go").await;
+    pool.submit_prompt(&refused.session_key, &message_id, "go").await;
+    let (state, detail) = await_terminal(&store, &message_id, &refused.session_key).await;
+    assert_eq!(state, "FAILED", "{detail:?}");
+    assert_eq!(detail.as_deref(), Some("turn_failed; stop=refusal"));
+}
+
 /// Two sessions multiplexed on ONE adapter process keep their transcripts
 /// apart. Cross-attribution would put one tenant's output in another's log.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
