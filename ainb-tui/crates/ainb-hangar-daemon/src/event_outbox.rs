@@ -22,10 +22,17 @@
 //!
 //! ## Which events persist
 //!
-//! ALL of them. Where the inbox is a curated digest, the outbox is the RAW log:
-//! [`outbox_fields`] is total over [`HangarEvent`], so every variant — including
-//! the high-frequency `TaskProgress` / `TaskMessage` heartbeats — lands a row.
-//! A new variant is a compile error to ignore.
+//! Everything emitted through [`EventSink::emit`](crate::events::EventSink::emit).
+//! Where the inbox is a curated digest, the outbox is the RAW log:
+//! [`outbox_fields`] is total over [`HangarEvent`], so a new variant is a compile
+//! error to ignore.
+//!
+//! Two variants never reach it at runtime: a running task's `TaskMessage` /
+//! `TaskProgress` ride
+//! [`emit_live`](crate::events::EventSink::emit_live) instead, whose durable
+//! source is the provider's own `{logs}/<provider>.jsonl` rather than this log
+//! (track A step A2). Their arms below exist for totality only, exactly like the
+//! attention arms.
 //!
 //! ## Delivery semantics
 //!
@@ -66,6 +73,9 @@ pub fn outbox_fields(event: &HangarEvent) -> (&'static str, Option<String>) {
         HangarEvent::TaskStarted { task_id, .. } => {
             ("task_started", Some(task_id.as_str().to_string()))
         }
+        // A2: emitted through `emit_live`, which never reaches the outbox drain.
+        // These arms keep the match total (a new variant is still a compile error
+        // to ignore); the transcript's durable source is the provider's jsonl.
         HangarEvent::TaskProgress { task_id, .. } => {
             ("task_progress", Some(task_id.as_str().to_string()))
         }

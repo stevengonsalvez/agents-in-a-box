@@ -1062,10 +1062,13 @@ fn subscribe_after_id(req: &RpcRequest) -> Option<String> {
 /// so a replayed frame is byte-identical to the live one it mirrors — a resuming
 /// subscriber cannot tell catch-up from live.
 ///
-/// The backlog is **paged in-loop**, not read once: the durable log holds one
-/// row per emitted event (including high-frequency `TaskProgress`/`TaskMessage`
-/// heartbeats), so a single active task can exceed [`REPLAY_BATCH`] during a
-/// disconnect. A single capped read delivers the OLDEST `REPLAY_BATCH` events
+/// The backlog is **paged in-loop**, not read once: the durable log holds one row
+/// per emitted event, so a busy workspace (a board advancing a run through its
+/// lifecycle, a squad fanning out) can exceed [`REPLAY_BATCH`] during a
+/// disconnect. Transcript lines are NOT in that backlog since track A step A2
+/// (they ride `emit_live`, off the log), so the volume here is lower than it
+/// once was, but the paging is what makes the read correct rather than merely
+/// sufficient. A single capped read delivers the OLDEST `REPLAY_BATCH` events
 /// and would silently drop the newest `(since_seq + REPLAY_BATCH, head]` window
 /// — the live forwarder (registered before this call) only carries events
 /// emitted after subscribe, and the ack advances the client's cursor to the
