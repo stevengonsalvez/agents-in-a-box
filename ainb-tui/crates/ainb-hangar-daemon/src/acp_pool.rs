@@ -140,7 +140,8 @@ pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = "provider_at_capacity";
 /// just drives the same session in the wrong permission regime a second time.
 pub const DELIVERY_MODE_UNPROVEN: &str = "mode_unproven";
 /// Prefix of the token a leg carries when the turn stopped for a reason worth
-/// naming: `stop=<StopReason>`.
+/// naming: `stop=<reason>`, in the ACP wire spelling ([`stop_reason_token`]),
+/// so `stop=max_tokens`, `stop=max_turn_requests`, `stop=refusal`.
 ///
 /// ABSENT on a DELIVERED leg means the ordinary `EndTurn`, the same way an
 /// absent [`RESUME_LOADED`] on the same leg means the context never had to be
@@ -2031,15 +2032,21 @@ impl SessionActor {
             Ok(response) if turn_succeeded(response) => (
                 Lifecycle::TurnCompleted,
                 "DELIVERED",
-                (!matches!(response.stop_reason, StopReason::EndTurn))
-                    .then(|| format!("{DELIVERY_STOP_PREFIX}{:?}", response.stop_reason)),
+                (!matches!(response.stop_reason, StopReason::EndTurn)).then(|| {
+                    format!(
+                        "{DELIVERY_STOP_PREFIX}{}",
+                        stop_reason_token(response.stop_reason)
+                    )
+                }),
             ),
+            // The same `stop=` shape as the success arm, so a reader parses ONE
+            // field whichever side of `turn_succeeded` the turn fell on.
             Ok(response) => (
                 Lifecycle::TurnFailed,
                 "FAILED",
                 Some(format!(
-                    "{DELIVERY_TURN_FAILED}; {:?}",
-                    response.stop_reason
+                    "{DELIVERY_TURN_FAILED}; {DELIVERY_STOP_PREFIX}{}",
+                    stop_reason_token(response.stop_reason)
                 )),
             ),
             // The request WAS issued, so the honest answer is UNKNOWN. A resend
@@ -3139,6 +3146,24 @@ fn not_in_registry(provider: &str) -> AcpError {
             std::io::ErrorKind::NotFound,
             "provider is not in the adapter registry",
         ),
+    }
+}
+
+/// The persisted token for a stop reason: the ACP wire name, snake_case like
+/// every other token in this taxonomy.
+///
+/// An explicit match rather than the enum's Debug name, because the upstream
+/// enum is `#[non_exhaustive]` and a token that reaches the store and the
+/// operator's screen must not change spelling when a variant is renamed
+/// upstream or arrive as a name nothing else in the vocabulary looks like.
+const fn stop_reason_token(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::MaxTurnRequests => "max_turn_requests",
+        StopReason::Refusal => "refusal",
+        StopReason::Cancelled => "cancelled",
+        _ => "unknown",
     }
 }
 
