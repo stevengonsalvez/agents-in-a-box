@@ -166,39 +166,50 @@ pub fn render_footer(buf: &mut WireBuffer, area_w: u16, area_h: u16, active: &Sc
 }
 
 /// The contextual + global key hints for `active`, in render order.
-fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
+///
+/// Grammar (crisp B2 §2.6): at most FIVE contextual hints, then exactly the three
+/// globals. One `key:verb` pair per hint, the verb a single lowercase word, and no
+/// two hints on a screen sharing a verb. Everything past five goes to the context
+/// menu and `?` — never to a second hint bar (the Boards screen carried 24 hints
+/// across two bars, which is how the audit found this).
+pub(crate) fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
     let mut hints: Vec<(&str, &str)> = match active {
+        // Nine to five: `y` activity, `s` sub-issue, `d` done and `f` facets keep
+        // their bindings and their `?` lines, but stop competing for the eye with
+        // the four verbs the board is actually for.
         Screen::IssueList => {
             vec![
-                ("a", "assign"),
-                ("y", "activity"),
                 ("c", "create"),
-                ("s", "sub-issue"),
-                ("d", "done"),
-                ("x", "delete"),
-                ("f", "facets"),
+                ("↵", "open"),
+                ("a", "assign"),
                 ("/", "filter"),
-                ("tab", "chip"),
+                ("x", "delete"),
             ]
         }
+        // Five to four: `x` delete moves to `?`. `X` cancel and `x` delete sat
+        // next to each other on one bar, one keystroke apart, one of them
+        // irreversible.
         Screen::TaskDetail(_) => vec![
             ("R", "retry"),
             ("X", "cancel"),
-            ("x", "delete"),
+            ("o", "PR"),
             ("a", "criterion"),
-            ("t", "tick"),
         ],
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::ActivityTimeline(_) => vec![("j/k", "scroll"), ("r", "refresh"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
         Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move"), ("R", "retry")],
+        // The card verbs, and only those. Boards used to paint these five at the
+        // bottom AND a sixteen-hint band at the top: two bars, overlapping
+        // subsets, different keys for the same act. The band is gone (crisp B2
+        // §2.6) and its column verbs live in `?`.
         Screen::Boards => vec![
             ("↵", "run"),
             ("a", "attach"),
-            ("n", "add col"),
-            ("x", "del col"),
-            ("m", "auto-move"),
+            ("t", "timeline"),
+            ("c", "card"),
+            ("X", "cancel"),
         ],
         // Read-only panes with no footer hints: the daemon-health pane, the usage
         // dashboard (e38.35), and the logs pane (its level-filter chips
@@ -367,32 +378,9 @@ mod tests {
     #[test]
     fn footer_hint_keys_never_collide_with_reserved_router_keys() {
         use crate::screen::router::is_reserved_key;
-        let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
-        let task = ainb_hangar_core::ids::TaskId::from_str("01HANGARTASK000000000001").unwrap();
-        let screens = [
-            Screen::IssueList,
-            Screen::TaskDetail(task),
-            Screen::AgentPicker(issue),
-            Screen::SkillManager,
-            Screen::Autopilots,
-            Screen::Kanban,
-            Screen::Boards,
-            Screen::DaemonHealth,
-            Screen::Usage,
-            Screen::Logs,
-            Screen::Inbox,
-            Screen::ControlCenter,
-            Screen::Fleet,
-            Screen::Squads,
-            Screen::Profiles,
-            Screen::Agents,
-            Screen::Settings,
-            Screen::Help,
-            Screen::CommandPalette,
-        ];
         // The globals the footer appends unconditionally — reserved BY DESIGN.
         let global = [("^P", "search"), ("?", "help"), ("q", "quit")];
-        for active in screens {
+        for active in every_screen() {
             for hint in footer_hints(&active) {
                 if global.contains(&hint) {
                     continue;
@@ -426,29 +414,146 @@ mod tests {
         }
     }
 
-    /// The issue-list and task-detail footers both advertise the `x:delete`
-    /// keybinding (63l.5) alongside their other hints.
+    /// The issue-list footer advertises `x:delete` (63l.5); the task-detail
+    /// footer no longer does.
+    ///
+    /// Crisp B2 §2.6 keeps `x` in the issue list's five — deleting an issue is a
+    /// board verb an operator reaches for — and drops it from task detail, where
+    /// it sat one keystroke from `X:cancel` on the same bar. `x` still deletes
+    /// there; it is documented in `?` instead of advertised beside the key that
+    /// looks like it.
     #[test]
-    fn footer_advertises_delete_on_issue_list_and_detail() {
+    fn footer_advertises_delete_on_the_issue_list_only() {
         assert!(
             footer_hints(&Screen::IssueList).contains(&("x", "delete")),
             "issue list footer must show x:delete"
         );
         let task = ainb_hangar_core::ids::TaskId::from_str("t1").unwrap();
+        let detail = footer_hints(&Screen::TaskDetail(task));
         assert!(
-            footer_hints(&Screen::TaskDetail(task)).contains(&("x", "delete")),
-            "task-detail footer must show x:delete"
+            !detail.iter().any(|(key, _)| *key == "x"),
+            "task detail must not advertise `x` beside `X:cancel`, got {detail:?}"
+        );
+        assert!(
+            detail.contains(&("X", "cancel")),
+            "the cancel it sat next to stays: {detail:?}"
         );
     }
 
-    /// The issue-list footer advertises the `f:facets` faceted-filter panel
-    /// keybinding (multica-gap #10) so the panel is discoverable.
+    /// The issue-list footer is the FIVE board verbs (crisp B2 §2.6).
+    ///
+    /// `f:facets` was pinned here before and is deliberately not any more: it is
+    /// the sixth of nine hints on a five-hint bar, it stays bound, and it stays
+    /// documented in `HELP_LINES` (`help_overlay_screen_rows_pair_every_label_with_a_key`
+    /// keeps that honest). The bar is what an operator scans mid-task; the panel
+    /// is discovered once.
     #[test]
-    fn footer_advertises_facets_on_issue_list() {
-        assert!(
-            footer_hints(&Screen::IssueList).contains(&("f", "facets")),
-            "issue list footer must show f:facets"
+    fn issue_list_footer_is_the_five_board_verbs() {
+        assert_eq!(
+            footer_hints(&Screen::IssueList)
+                .into_iter()
+                .take_while(|hint| *hint != ("^P", "search"))
+                .collect::<Vec<_>>(),
+            vec![
+                ("c", "create"),
+                ("↵", "open"),
+                ("a", "assign"),
+                ("/", "filter"),
+                ("x", "delete"),
+            ],
         );
+    }
+
+    /// The hint-bar grammar (crisp B2 §2.6), over EVERY screen: at most five
+    /// contextual hints, then exactly the three globals, and no two hints on one
+    /// screen sharing a verb.
+    ///
+    /// A screen that grows a sixth hint fails here rather than shipping a bar an
+    /// operator reads as noise — the audit counted twenty-four hints on Boards.
+    #[test]
+    fn every_footer_obeys_the_hint_grammar() {
+        for active in every_screen() {
+            let hints = footer_hints(&active);
+            let globals: Vec<(&str, &str)> =
+                hints.iter().copied().filter(|h| matches!(h.0, "^P" | "?" | "q")).collect();
+            let contextual: Vec<(&str, &str)> =
+                hints.iter().copied().filter(|h| !globals.contains(h)).collect();
+            assert!(
+                contextual.len() <= 5,
+                "{active:?} paints {} contextual hints, the bar holds five: {contextual:?}",
+                contextual.len()
+            );
+            // The globals trail, in order, and are the last thing on the bar.
+            assert_eq!(
+                &hints[contextual.len()..],
+                globals.as_slice(),
+                "{active:?} must end with its globals"
+            );
+            let mut verbs: Vec<&str> = contextual.iter().map(|h| h.1).collect();
+            verbs.sort_unstable();
+            let unique = verbs.len();
+            verbs.dedup();
+            assert_eq!(
+                verbs.len(),
+                unique,
+                "{active:?} advertises one verb twice: {contextual:?}"
+            );
+        }
+    }
+
+    /// The three screens crisp B2 §2.6 rewrites hold the FULL grammar: every verb
+    /// is one bare word, lowercase unless it is an acronym (`o:PR`).
+    ///
+    /// Scoped to those three on purpose. Three untouched screens still carry a
+    /// two-word hint (`,` add key, `I` mark read, `P` cycle tier); they are named
+    /// here rather than silently exempted, and sweeping them belongs with the B5
+    /// help/keys pass that touches those screens.
+    #[test]
+    fn rewritten_footers_use_one_bare_word_per_verb() {
+        let task = ainb_hangar_core::ids::TaskId::from_str("t1").unwrap();
+        for active in [Screen::IssueList, Screen::TaskDetail(task), Screen::Boards] {
+            for (key, verb) in footer_hints(&active) {
+                if matches!(key, "^P" | "?" | "q") {
+                    continue;
+                }
+                assert!(
+                    !verb.contains(char::is_whitespace),
+                    "{active:?} hint {key}:{verb} is not one word"
+                );
+                assert!(
+                    verb == verb.to_lowercase() || verb == verb.to_uppercase(),
+                    "{active:?} hint {key}:{verb} is neither lowercase nor an acronym"
+                );
+            }
+        }
+    }
+
+    /// Every `Screen` variant, for the tests that must hold across all of them.
+    fn every_screen() -> Vec<Screen> {
+        let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
+        let task = ainb_hangar_core::ids::TaskId::from_str("01HANGARTASK000000000001").unwrap();
+        vec![
+            Screen::IssueList,
+            Screen::TaskDetail(task),
+            Screen::AgentPicker(issue.clone()),
+            Screen::ActivityTimeline(issue),
+            Screen::SkillManager,
+            Screen::Autopilots,
+            Screen::Kanban,
+            Screen::Boards,
+            Screen::DaemonHealth,
+            Screen::Usage,
+            Screen::Logs,
+            Screen::Inbox,
+            Screen::ControlCenter,
+            Screen::Fleet,
+            Screen::Squads,
+            Screen::Profiles,
+            Screen::Agents,
+            Screen::Settings,
+            Screen::Help,
+            Screen::CommandPalette,
+        ]
     }
 
     /// The right cluster yields to the tabs: when there isn't room after the

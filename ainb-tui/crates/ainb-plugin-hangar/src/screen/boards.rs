@@ -2308,12 +2308,11 @@ pub fn render_boards(
         next_row = next_row.saturating_add(1);
     }
 
-    // Hint band NEXT to the widget (letters next to the controls they affect).
-    let hint_row = next_row;
-    render_hint_band(buf, area_w, hint_row);
-
-    // Card-board body below the hint band.
-    let body_top = hint_row.saturating_add(1);
+    // Card-board body. There is no second hint bar here any more (crisp B2 §2.6):
+    // the sixteen-pair band that used to sit on this row painted a hint set that
+    // overlapped, and disagreed with, the footer three rows down. The card verbs
+    // are on the footer, the column verbs in `?`, and the board gets the row back.
+    let body_top = next_row;
     if body_top >= bottom {
         return;
     }
@@ -2678,53 +2677,6 @@ fn render_no_board(buf: &mut WireBuffer, area_w: u16, top: u16, status: &BoardsS
             put_str(buf, 2, top, "No boards yet — press", MUTED, area_w);
             put_str(buf, 24, top, " b ", GOLD, area_w);
             put_str(buf, 27, top, "to create one.", MUTED, area_w);
-        }
-    }
-}
-
-/// The Boards key-hint band, as `(key, description)` pairs.
-///
-/// Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a runnable
-/// card AND reruns a finished/failed/cancelled one (same launch path), `X`
-/// cancels a running one. `feedback_keybinding_hints_near_control`. The
-/// lifecycle verbs lead so they render even when a narrow pane clips the
-/// trailing column verbs. `⇧↑↓` reorders a card within its column, `d` removes
-/// it.
-///
-/// Crate-visible so the tests can prove every advertised single-char key is
-/// actually reachable — i.e. none of them is a reserved router/host key that
-/// would be eaten before the boards reducer sees it (#450).
-pub(crate) const BOARDS_HINTS: [(&str, &str); 16] = [
-    ("↵", "run/rerun"),
-    ("a", "attach"),
-    ("X", "cancel"),
-    ("t", "timeline"),
-    ("e", "edit"),
-    ("d", "remove"),
-    ("s", "squad"),
-    ("w", "depends-on"),
-    ("R", "auto-run"),
-    ("⇧↑↓", "move card"),
-    ("n", "add col"),
-    ("r", "rename"),
-    ("x", "del col"),
-    ("c", "add card"),
-    ("⇧←→", "reorder col"),
-    ("m", "auto-move"),
-];
-
-/// The key-hint band rendered under the board title — the column/card bindings
-/// next to the widget they drive.
-fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
-    let hints = BOARDS_HINTS;
-    let mut x = 0u16;
-    for (key, desc) in hints {
-        x = put_str(buf, x, row, key, GOLD, area_w);
-        x = put_str(buf, x, row, ":", MUTED, area_w);
-        x = put_str(buf, x, row, desc, MUTED, area_w);
-        x = put_str(buf, x, row, "  ", MUTED, area_w);
-        if x >= area_w {
-            break;
         }
     }
 }
@@ -4532,9 +4484,10 @@ mod tests {
         let mut buf = WireBuffer::new(80, 16);
         render_boards(&mut buf, 80, 0, 16, &state);
 
-        // Title row 0, health strip row 1 (this board IS a pipeline), hint band
-        // row 2, so the card board's header row is row 3.
-        let header_y = 3;
+        // Title row 0, health strip row 1 (this board IS a pipeline), so the card
+        // board's header row is row 2 — the hint band that used to take this row
+        // is gone (crisp B2 §2.6).
+        let header_y = 2;
         let map = painted(&buf);
         assert!(
             map.contains("QA"),

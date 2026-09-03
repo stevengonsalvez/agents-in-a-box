@@ -1677,6 +1677,7 @@ pub const HELP_LINES: &[&str] = &[
     "task      R retry (operator override)  X cancel  c comment  a/t criteria  o open PR",
     "boards    c card  enter run ▾ (headless / interactive)  a attach  X cancel",
     "          b board  n/r/x column  s squad  w depends-on  R auto-run  d remove",
+    "          t timeline  m auto-move  ⇧↑↓ move card  ⇧←→ reorder column",
     "control   j/k card  h/l option  enter or 1-9 answer",
     "squads    n agent  c squad  a/d member  r role  i instructions  x fan out",
     "agents    n create  x delete",
@@ -2910,6 +2911,10 @@ mod help_overlay_tests {
             tok.chars().count() == 1
                 || tok.split('/').all(|k| k.chars().count() == 1)
                 || matches!(tok, "enter" | "esc" | "tab" | "1-9" | "^P" | "space")
+                // A chord written in glyphs (`⇧↑↓`, `⇧←→`) is a key, not a label:
+                // it carries no letter or digit for a label word to be confused
+                // with. These moved here from the deleted Boards hint band.
+                || tok.chars().all(|c| !c.is_alphanumeric())
         };
         // Section names are the first token of every unindented screen row;
         // one appearing anywhere else is a stranded heading.

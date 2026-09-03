@@ -8158,36 +8158,81 @@ mod tests {
         );
     }
 
-    /// THE GENERAL GUARD: every single-char key the Boards hint band ADVERTISES
-    /// must actually reach the boards screen — pressing it may never switch tabs
-    /// or close the panel.
+    /// THE GENERAL GUARD: every single-char key the Boards screen ADVERTISES must
+    /// actually reach the boards screen — pressing it may never switch tabs or
+    /// close the panel.
     ///
-    /// Fails on `main` for `q` (quit) and `D` (daemon health): the band was
-    /// advertising keys the router ate first.
+    /// Fails on `main` for `q` (quit) and `D` (daemon health): the old top hint
+    /// band was advertising keys the router ate first.
+    ///
+    /// Crisp B2 §2.6 deleted that band, so the guard now reads the two surfaces
+    /// that replaced it — the five-verb footer and the `boards` rows of the help
+    /// overlay — which between them advertise every key the band did.
     #[test]
-    fn every_boards_hint_band_key_is_reachable() {
-        for (key, desc) in crate::screen::boards::BOARDS_HINTS {
-            let mut chars = key.chars();
-            let (Some(ch), None) = (chars.next(), chars.next()) else {
-                continue; // compound / glyph hint (`↵`, `⇧←→`) — not a bare char
-            };
-            if !ch.is_ascii() {
-                continue;
-            }
+    fn every_advertised_boards_key_is_reachable() {
+        for (ch, source) in advertised_boards_keys() {
             let mut p = plugin_on_seeded_board();
             p.on_key(&char_press(ch));
             assert!(
                 matches!(p.app_state().screen, Screen::Boards),
-                "Boards advertises `{ch}:{desc}` but pressing it left the screen \
-                 (went to {:?}) — the router stole it",
+                "Boards advertises `{ch}` in {source} but pressing it left the \
+                 screen (went to {:?}) — the router stole it",
                 p.app_state().screen
             );
             assert!(
                 !p.close_request_pending,
-                "Boards advertises `{ch}:{desc}` but pressing it closed the panel — \
-                 the router stole it as quit"
+                "Boards advertises `{ch}` in {source} but pressing it closed the \
+                 panel — the router stole it as quit"
             );
         }
+    }
+
+    /// Every single ASCII-letter key the Boards screen advertises, tagged with
+    /// where it is advertised. Compound and glyph keys (`↵`, `⇧←→`, `enter`) are
+    /// not bare chars and are skipped.
+    fn advertised_boards_keys() -> Vec<(char, &'static str)> {
+        let mut keys: Vec<(char, &'static str)> = crate::chrome::footer_hints(&Screen::Boards)
+            .into_iter()
+            // The trailing globals (`^P`, `?`, `q`) ARE router keys, advertised by
+            // the layer that owns them.
+            .filter(|(key, _)| !matches!(*key, "^P" | "?" | "q"))
+            .filter_map(|(key, _)| {
+                let mut chars = key.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(ch), None) if ch.is_ascii_alphabetic() => Some((ch, "the footer")),
+                    _ => None,
+                }
+            })
+            .collect();
+        // The `boards` block of the help overlay: its heading line, then every
+        // indented continuation until the next section.
+        let mut in_boards = false;
+        for line in crate::screen::app_screens::HELP_LINES {
+            if !line.starts_with(' ') {
+                in_boards = line.split_whitespace().next() == Some("boards");
+            }
+            if !in_boards {
+                continue;
+            }
+            for token in line.split_whitespace().skip(usize::from(!line.starts_with(' '))) {
+                // `c` and slash groups like `n/r/x` are keys; words are labels.
+                for key in token.split('/') {
+                    let mut chars = key.chars();
+                    if let (Some(ch), None) = (chars.next(), chars.next()) {
+                        if ch.is_ascii_alphabetic() {
+                            keys.push((ch, "the help overlay"));
+                        }
+                    }
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup_by_key(|(ch, _)| *ch);
+        assert!(
+            keys.len() >= 10,
+            "the boards key advertisement went missing, found only {keys:?}"
+        );
+        keys
     }
 
     /// #450 (Fleet row): `a` on the Fleet pane raises the takeover-attach intent
