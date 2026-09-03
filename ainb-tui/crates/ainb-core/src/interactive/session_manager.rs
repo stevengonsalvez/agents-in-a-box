@@ -3046,9 +3046,27 @@ mod tests {
             ])
             .output()
             .await;
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
-
-        let captured = super::capture_failed_launch_pane(&target).await;
+        // Poll, do not sleep a guessed interval. `remain-on-exit` keeps the
+        // pane, but the echo and the death are two separate events and a loaded
+        // runner can put the capture between them: the marker is drawn, the
+        // program's line is not readable yet, and the assertion below reports a
+        // pane holding nothing but `Pane is dead (status 1, ...)`. That is a
+        // race in the TEST, not in `capture_failed_launch_pane`, and it went red
+        // once on ubuntu while macOS passed the same commit.
+        //
+        // On timeout, fall through with the last capture so the assertion still
+        // prints what the pane actually held.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let captured = loop {
+            let attempt = super::capture_failed_launch_pane(&target).await;
+            if attempt.as_deref().is_some_and(|text| text.contains("codex-startup-failed")) {
+                break attempt;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break attempt;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
 
         let _ = TokioCommand::new("tmux").args(["kill-session", "-t", &target]).output().await;
 
