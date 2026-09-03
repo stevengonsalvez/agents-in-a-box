@@ -376,7 +376,13 @@ impl FleetFilter {
     /// `Completed` reads `done` and `Running` reads `running` — the same words
     /// the run vocabulary uses, so a run named on one screen is named the same on
     /// this one. Lowercase, like every word that is not an attention code.
-    const fn label(self) -> &'static str {
+    ///
+    /// Public because `ainb-core` renders this pane through
+    /// [`render_fleet`] and asserts on the lens row: its tests compose the
+    /// expected text from here rather than repeating the words, so the two
+    /// crates cannot drift apart the way they did when the vocabulary changed.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::NeedsInput => crate::vocab::FLEET_NEEDS_INPUT,
             Self::Idle => crate::vocab::FLEET_IDLE,
@@ -386,7 +392,10 @@ impl FleetFilter {
         }
     }
 
-    const fn key(self) -> char {
+    /// The digit that selects this lens, painted before its label. Public for
+    /// the same reason as [`Self::label`].
+    #[must_use]
+    pub const fn key(self) -> char {
         match self {
             Self::NeedsInput => '1',
             Self::Idle => '2',

@@ -1102,25 +1102,24 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
     let mut wire = ainb_plugin_protocol::wire_buffer::WireBuffer::new(area.width, area.height);
     let content_top = 1;
     let content_bottom = area.height.saturating_sub(1);
+    // The banner gets its OWN row and the roster starts below it. It used to be
+    // painted over the roster's second row, which was free only because that row
+    // held a duplicate count strip; crisp B2 (Q15) deleted the duplicate, so the
+    // same overlay would now cover the ACTION QUEUE header.
+    let banner_row = (state.daemon_offline() || state.daemon_connecting()).then_some(content_top);
     ainb_plugin_hangar::screen::fleet::render_fleet(
         &mut wire,
         area.width,
-        content_top,
+        banner_row.map_or(content_top, |row| row.saturating_add(1)),
         content_bottom,
         &state.canonical,
     );
-    if state.daemon_offline() {
-        ainb_plugin_hangar::screen::fleet::render_degraded_banner(
-            &mut wire,
-            area.width,
-            content_top.saturating_add(1),
-        );
-    } else if state.daemon_connecting() {
-        ainb_plugin_hangar::screen::fleet::render_connecting_banner(
-            &mut wire,
-            area.width,
-            content_top.saturating_add(1),
-        );
+    if let Some(row) = banner_row {
+        if state.daemon_offline() {
+            ainb_plugin_hangar::screen::fleet::render_degraded_banner(&mut wire, area.width, row);
+        } else {
+            ainb_plugin_hangar::screen::fleet::render_connecting_banner(&mut wire, area.width, row);
+        }
     }
     let buf = frame.buffer_mut();
     for (coord, cell) in wire.cells {
@@ -1184,7 +1183,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
             // The width for it was reclaimed from `1-5 views`, not appended.
             // That entry was the one genuinely redundant thing here: the lens
             // row rendered directly beneath spells out every number WITH its
-            // label, permanently (`1 Needs input 0   2 Idle 0   ...`), so nine
+            // label, permanently (`1 needs input 0   2 idle 0   ...`), so nine
             // characters advertised what the next row already says in full.
             // `q/Esc back` also lost `/Esc`, since `q` and `Esc` do the same
             // thing and naming both spent characters on nothing, but that
@@ -1645,6 +1644,7 @@ fn render_help(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ainb_plugin_hangar::screen::fleet::FleetFilter;
     use ratatui::backend::TestBackend;
 
     fn state_with(rows: Vec<StateRow>) -> FleetPanelState {
@@ -1674,6 +1674,18 @@ mod tests {
             last_event_ts: 100,
             source: source.to_string(),
         }
+    }
+
+    /// One lens as the row paints it: `<key> <label> <count>`.
+    ///
+    /// Composed from the renderer's own accessors rather than spelled out here.
+    /// The pane is drawn by `ainb-plugin-hangar`, whose lens words come from its
+    /// `vocab.rs`; when that vocabulary went lowercase these assertions were the
+    /// only thing still saying `Needs input`, and they broke in a crate the
+    /// change never touched. Deriving them means the next wording change cannot
+    /// desynchronise the two crates.
+    fn lens_text(filter: FleetFilter, count: usize) -> String {
+        format!("{} {} {count}", filter.key(), filter.label())
     }
 
     /// Render the screen against an in-memory TestBackend and return the buffer
@@ -1722,10 +1734,15 @@ mod tests {
             out.contains("2 need attention"),
             "needs counter missing: {out}"
         );
-        assert!(out.contains("1 Needs input 2"), "needs lens missing: {out}");
-        assert!(out.contains("2 Idle 1"), "idle lens missing: {out}");
-        assert!(out.contains("4 Running 1"), "running lens missing: {out}");
-        assert!(out.contains("5 All 4"), "all lens missing: {out}");
+        for (filter, count) in [
+            (FleetFilter::NeedsInput, 2),
+            (FleetFilter::Idle, 1),
+            (FleetFilter::Running, 1),
+            (FleetFilter::All, 4),
+        ] {
+            let lens = lens_text(filter, count);
+            assert!(out.contains(&lens), "{lens} lens missing: {out}");
+        }
         // Default lens shows only actionable rows.
         assert!(out.contains("ACTION QUEUE"), "action queue missing: {out}");
         assert!(out.contains("INPUT"), "operator state missing: {out}");
@@ -1829,7 +1846,8 @@ mod tests {
         // The lens numbers moved OUT of the help bar, so this guards the row
         // that actually renders them. Deleting it instead would have left
         // the lens row with no guard at all.
-        assert!(out.contains("1 Needs input"), "lens row missing: {out}");
+        let lens = lens_text(FleetFilter::NeedsInput, 0);
+        assert!(out.contains(&lens), "lens row missing: {out}");
         assert!(out.contains("q back"), "back help missing: {out}");
         assert!(out.contains("N channel"), "channel help missing: {out}");
     }
