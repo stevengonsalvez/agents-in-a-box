@@ -330,14 +330,14 @@ async fn run_acp_executor() -> Run {
     write_acp_adapter_config(home.path(), &fake_acp_adapter(), "default");
 
     // A fake `claude` that would leave a marker if the process executor ever
-    // ran; the ACP arm must never reach it.
+    // ran; the ACP arm must never reach it. The marker path is bound ONCE here
+    // and reused by the assertion below: deriving it a second time from the run
+    // is how the first version of this test came to probe a path nothing writes.
+    let marker = home.path().join("process-executor-ran");
     let fake_claude = write_executable(
         home.path(),
         "fake-claude-marker.sh",
-        &format!(
-            "#!/bin/sh\ntouch '{}'\n",
-            home.path().join("process-executor-ran").display()
-        ),
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
     );
 
     let home_str = home.path().display().to_string();
@@ -360,13 +360,9 @@ async fn run_acp_executor() -> Run {
     enqueue_for_issue(&pool, &ids, task_id, &agent, &issue_id).await;
     let run = finish(home, pool, session, task_id, &issue_id, "claude.jsonl").await;
     assert!(
-        !run.jsonl_path
-            .parent()
-            .expect("logs dir")
-            .join("..")
-            .join("process-executor-ran")
-            .exists(),
-        "executor=acp must never spawn the provider process"
+        !marker.exists(),
+        "executor=acp must never spawn the provider process; the fake claude left {}",
+        marker.display()
     );
     run
 }
