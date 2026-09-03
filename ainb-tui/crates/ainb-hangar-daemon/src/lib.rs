@@ -108,6 +108,9 @@ pub mod execenv;
 pub mod fleet;
 /// Claude and Codex provider transports for authoritative Fleet control.
 pub mod fleet_provider;
+/// Hourly `fleet_provider_event` retention: raw-payload eviction on rows a
+/// reducer has already consumed.
+pub mod fleet_provider_retention;
 /// Bounded live provider-quota projection for the public Fleet RPC.
 pub mod fleet_quota;
 /// Hourly `fleet_event` retention: payload eviction, row delete, byte ceiling.
@@ -943,15 +946,27 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // the canonical Fleet roster as degraded rows with exact pane identity.
         let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
 
-        // Two slow janitors, each on its OWN clock rather than folded into the 3s
+        // Three slow janitors, each on its OWN clock rather than folded into the 3s
         // reconciler tick above. Measured on a real profile: 1,440 of 1,472 visible
-        // sessions were dead EXITED rows that every snapshot scanned, and
-        // fleet_event had grown to 1.1M rows / 847 MB under no retention at all.
-        // Both are pure cleanup with no deadline, so neither belongs on a hot path.
+        // sessions were dead EXITED rows that every snapshot scanned, fleet_event
+        // had grown to 1.1M rows / 847 MB under no retention at all, and
+        // fleet_provider_event to 372k rows / 2,207 MB under none either — the last
+        // of those saturating the single writer until session spawn failed with
+        // `database is locked`. All three are pure cleanup with no deadline, so none
+        // belongs on a hot path. The two payload sweeps start five and seven
+        // minutes in (fleet_event first, then fleet_provider_event) so their
+        // FIRST passes do not land together. That stagger does not survive a
+        // cold backlog: both re-arm on the 1-minute catch-up period, so their
+        // drains do overlap from about t+7min until the shorter one settles.
+        // Overlap is tolerable rather than prevented -- each pass is bounded,
+        // yields the writer between batches, and checkpoints -- so the writer
+        // is shared politely, not serialised.
         let _fleet_archiver =
             crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
         let _fleet_retention =
             crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
+        let _fleet_provider_retention =
+            crate::fleet_provider_retention::spawn_provider_retention_sweeper(store.pool().clone());
 
         // Managed Codex transport starts independently from daemon readiness. A
         // missing or incompatible Codex binary leaves hook and tmux observation

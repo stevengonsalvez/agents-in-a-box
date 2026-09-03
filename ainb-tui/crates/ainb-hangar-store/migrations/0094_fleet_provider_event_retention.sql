@@ -1,0 +1,54 @@
+-- Hangar v1 schema, migration 0094: fleet_provider_event payload retention.
+--
+-- WHY. fleet_provider_event has had NO automatic retention since 0071. Its
+-- module header budgeted the growth of the projection sources at "~21 rows per
+-- 2 days at a ~344 byte mean payload, ~1.3 MB per YEAR" and concluded they
+-- could be kept forever. Measured on a real profile the table is 372,031 rows /
+-- 2,207 MB — a ~5.9 KB mean payload, roughly 17x the assumed one, and about
+-- three orders of magnitude more bytes than the model predicted per year. That
+-- corpus saturated the single SQLite writer badly enough that session spawn
+-- started failing with `database is locked`, so the "never trim" stance for
+-- ALREADY-PROJECTED rows is withdrawn (see the module header, updated with it).
+--
+-- WHAT THE SWEEP DOES. It blanks `raw_payload` on rows older than 7 days that
+-- have ALREADY been reduced. It never deletes a row, so `event_id`,
+-- `raw_blake3`, `ingest_order` and `projection_revision` all survive: replay
+-- cursors, the ingest idempotency key and the content digest of what was there
+-- are all still readable after the bytes are gone.
+--
+-- WHAT IT NEVER TOUCHES, and why the index predicate says so too:
+--   * `projection_revision IS NULL` — pending recovery work the Codex manager
+--     replays at startup. Blanking those payloads destroys the replay input.
+--   * `source = 'acp'` — ACP transcript rows have their own operator
+--     export-then-delete path (`delete_acp_before`); nothing sweeps them
+--     automatically.
+--
+-- NO TOMBSTONE COLUMN, unlike 0080's `payload_evicted_at` on fleet_event. That
+-- column exists because fleet_event's eviction sentinel is '{}', which cannot
+-- be told apart from an event that genuinely carried no body, and because a row
+-- left unstamped would be re-selected by every later batch. Here the sentinel is
+-- '' — which the CHECK-free `raw_payload TEXT NOT NULL` column allows and which
+-- no real provider envelope can be — so `raw_payload <> ''` is self-converging:
+-- an evicted row stops matching the predicate the moment it is written.
+--
+-- WHY PARTIAL, AND WHY THIS KEY. The predicate is the sweep's predicate,
+-- verbatim, so SQLite can prove the implication and use the index (a partial
+-- index is only usable when the query's WHERE implies the index's WHERE; all
+-- three terms here are literals in the query, not bound parameters, unlike the
+-- `source = ?` case 0079 documents for idx_fleet_provider_event_projection).
+-- Being partial is the point: the index SHRINKS as rows are evicted and never
+-- holds an ACP transcript row at all, so the steady-state cost of an hourly
+-- sweep is O(rows that arrived since the last one), not an hourly walk of a
+-- multi-gigabyte table.
+--
+-- The key is `observed_at` alone, and the sweep's `ORDER BY observed_at ASC`
+-- must stay matched to it. Same trap 0081 documents for fleet_event, confirmed
+-- here with EXPLAIN QUERY PLAN on a 3,000-row fixture: ordering the same query
+-- by `ingest_order` instead turns
+-- `SEARCH fleet_provider_event USING INDEX idx_fleet_provider_event_retention
+--  (observed_at<?)` into a bare `SCAN fleet_provider_event`. The results are
+-- identical either way; only the cost differs, so there is no symptom other
+-- than the plan. `the_sweep_seeks_on_the_retention_index` pins it.
+CREATE INDEX idx_fleet_provider_event_retention
+    ON fleet_provider_event(observed_at)
+    WHERE raw_payload <> '' AND projection_revision IS NOT NULL AND source <> 'acp';
