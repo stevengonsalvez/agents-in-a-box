@@ -131,8 +131,10 @@ impl UsageState {
         self.runs = history.runs;
         // Failed runs first (crisp B1, Q10): the one row an operator opens this
         // screen for was at the bottom of a chronological list. Stable, so each
-        // group keeps the daemon's newest-first order.
-        self.runs.sort_by_key(|r| r.outcome == "success");
+        // group keeps the daemon's newest-first order. The predicate is shared
+        // with the inbox, which floats the same rows: sorting on "not success"
+        // instead floated a user's own cancel up with the real failures.
+        self.runs.sort_by_key(|r| !crate::screen::is_failed_outcome(&r.outcome));
     }
 
     /// The per-agent rows (read accessor for tests / glue).
@@ -607,6 +609,26 @@ mod tests {
         );
         let ids: Vec<&str> = state.runs().iter().map(|r| r.run_id.as_str()).collect();
         assert_eq!(ids, vec!["f2", "f1", "s2", "s1"]);
+    }
+
+    /// Crisp B1 review: "failed first" means FAILED, not "not success". Sorting
+    /// on the negation floated a user's own cancel to the top of the screen, and
+    /// disagreed with the inbox, which floats only real failures.
+    #[test]
+    fn a_cancelled_run_does_not_float_above_a_success() {
+        let mut state = UsageState::default();
+        state.apply_run_history(
+            "ws-a",
+            RunHistoryResult {
+                runs: vec![
+                    run_row("s1", "claude", "success", 1, 1, 0.0, Some(0), 300),
+                    run_row("c1", "claude", "cancelled", 1, 1, 0.0, Some(0), 200),
+                    run_row("f1", "claude", "failed", 1, 1, 0.0, Some(0), 100),
+                ],
+            },
+        );
+        let ids: Vec<&str> = state.runs().iter().map(|r| r.run_id.as_str()).collect();
+        assert_eq!(ids, vec!["f1", "s1", "c1"]);
     }
 
     #[test]

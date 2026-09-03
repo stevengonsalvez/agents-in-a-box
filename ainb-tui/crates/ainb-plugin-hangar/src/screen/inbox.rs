@@ -227,9 +227,12 @@ fn task_verb(entry: &InboxEntryRow) -> &'static str {
     }
 }
 
-/// `true` for a run that ended in failure: the row the list floats first.
+/// `true` for a run that ended in failure: the row the list floats first. The
+/// verb the row already RENDERS is the input, so the sort and the text cannot
+/// disagree, and the failure rule itself is the one shared with the usage
+/// dashboard ([`crate::screen::is_failed_outcome`]).
 fn is_failed(entry: &InboxEntryRow) -> bool {
-    entry.event == "task_finished" && entry.summary.contains("(Failure)")
+    entry.event == "task_finished" && crate::screen::is_failed_outcome(task_verb(entry))
 }
 
 /// The coarse age bucket a row sorts within (crisp B1, Q10): the same unit the

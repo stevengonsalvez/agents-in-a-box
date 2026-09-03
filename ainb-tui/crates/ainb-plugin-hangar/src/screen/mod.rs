@@ -246,6 +246,19 @@ pub enum Intent {
     Quit,
 }
 
+/// Whether a run's terminal `outcome` token is a FAILURE, the one row an
+/// operator opens a list to find. The daemon writes exactly three tokens
+/// (`success` / `failed` / `cancelled`, `run_loop::record_run_history`), so
+/// "not success" is NOT the same rule: it floats a user's own cancel, and a
+/// running row whose outcome has not landed, up with the real failures.
+///
+/// Shared so the inbox and the usage dashboard cannot drift apart on what
+/// "failed" means (crisp B1 review): both float the same rows first.
+#[must_use]
+pub fn is_failed_outcome(outcome: &str) -> bool {
+    outcome == "failed"
+}
+
 /// The result of folding one [`AppEvent`] into an [`AppState`].
 ///
 /// Carries the next state plus an optional [`Intent`] for the IO layer. A
