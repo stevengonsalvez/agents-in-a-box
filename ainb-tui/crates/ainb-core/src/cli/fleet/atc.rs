@@ -1267,7 +1267,8 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
 
     let body = if effective_paused {
         format!(
-            "[HEARTBEAT {now_ms}] fleet idle-paused (quiet ≥ {}m) — standing by, no token spend.",
+            "[HEARTBEAT {}] fleet idle-paused (quiet ≥ {}m) — standing by, no token spend.",
+            crate::fleet::atc::heartbeat::stamp(now_ms),
             meta.idle_pause_min
         )
     } else {
@@ -1299,7 +1300,10 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
             // can sit unsubmitted in a busy composer (see heartbeat.rs).
             let header = plumbing::format_completions(&completions);
             let header = header.split_whitespace().collect::<Vec<_>>().join(" ");
-            b = format!("[HEARTBEAT {now_ms}] event-driven completions: {header} {b}");
+            b = format!(
+                "[HEARTBEAT {}] event-driven completions: {header} {b}",
+                crate::fleet::atc::heartbeat::stamp(now_ms)
+            );
         }
         b
     };
