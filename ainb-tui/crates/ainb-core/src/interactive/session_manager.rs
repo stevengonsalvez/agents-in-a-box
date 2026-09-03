@@ -262,7 +262,9 @@ pub(crate) async fn claim_codex_remote_thread(
     model: Option<&str>,
     skip_permissions: bool,
     headroom_enabled: bool,
+    tmux_session: &str,
 ) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
+    let exact_target = format!("={tmux_session}");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let Some(remote) = ensure_codex_remote_thread(
@@ -283,8 +285,27 @@ pub(crate) async fn claim_codex_remote_thread(
         if remote.thread_id.is_some() {
             return Ok(Some(remote));
         }
+        // Checked BEFORE the deadline, because the common failure is not slow,
+        // it is instant: Codex prints one line and exits inside a second. It
+        // used to leave us polling a corpse for the remaining nine, then
+        // reporting a timeout that named nothing while the pane held the exact
+        // cause (a dead app-server cwd, a trust modal, a bad model id).
+        if let Some(detail) = codex_launch_exit(&exact_target).await {
+            anyhow::bail!(
+                "Codex exited during startup: {detail}{}",
+                codex_exit_hint(&detail)
+            );
+        }
         if tokio::time::Instant::now() >= deadline {
-            anyhow::bail!("Codex started but did not publish a remote thread within 10 seconds");
+            return Err(match capture_failed_launch_pane(&exact_target).await {
+                Some(detail) => anyhow::anyhow!(
+                    "Codex started but did not publish a remote thread within 10 seconds; \
+                     last pane output: {detail}"
+                ),
+                None => anyhow::anyhow!(
+                    "Codex started but did not publish a remote thread within 10 seconds"
+                ),
+            });
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
@@ -357,25 +378,113 @@ pub(crate) fn codex_remote_command(
 /// Best-effort and never fatal: this runs on a path that is already failing,
 /// so a capture error must not mask the original problem.
 async fn log_failed_launch_pane(exact_target: &str) {
-    let Ok(output) = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", exact_target])
+    match capture_failed_launch_pane(exact_target).await {
+        Some(shown) => warn!("Failed launch pane (last lines): {shown}"),
+        None => warn!("Failed launch pane was empty; the CLI produced no output at all"),
+    }
+}
+
+/// The last non-empty lines of a pane, joined for a one-line log or error.
+///
+/// Returns `None` when the pane is unreadable (already destroyed) or produced
+/// nothing at all, so a caller can tell "no output" apart from "output we can
+/// show the user".
+async fn capture_failed_launch_pane(exact_target: &str) -> Option<String> {
+    // `capture-pane` needs a PANE target, and `exact_target` is a SESSION one
+    // (`=name`), which it rejects with "can't find pane". Appending `:` keeps
+    // the exact-match `=` and resolves to the session's current window. Without
+    // it this returns `None` every single time and the pane text -- the entire
+    // point of capturing it -- never reaches the caller.
+    let pane_target = format!("{exact_target}:");
+    // `-S -3000` reaches into HISTORY rather than the visible screen. On a dead
+    // pane tmux paints "Pane is dead (status N, ...)" over the viewport, so a
+    // program that printed one line and exited leaves a screen-only capture
+    // holding just that marker -- the same nameless failure this whole path
+    // exists to end. Verified against tmux 3.6a: without history the error line
+    // is gone, with it the line and the marker both come back.
+    //
+    // Bounded, not `-S -`: the pane's history limit is the user's global (this
+    // repo's own recommended tmux.conf suggests 1,000,000 lines), and a full
+    // capture there measured 6.9 MB to keep the twelve lines below. 3000 lines
+    // yields an identical result for anything this reads.
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-S", "-3000", "-t", &pane_target])
         .output()
         .await
-    else {
-        return;
-    };
+        .ok()?;
     if !output.status.success() {
-        return;
+        return None;
     }
     let pane = String::from_utf8_lossy(&output.stdout);
     // The tail is where a modal or error sits; the head is the banner.
     let tail: Vec<&str> = pane.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     if tail.is_empty() {
-        warn!("Failed launch pane was empty; the CLI produced no output at all");
-        return;
+        return None;
     }
-    let shown = tail.iter().rev().take(12).rev().copied().collect::<Vec<_>>().join(" | ");
-    warn!("Failed launch pane (last lines): {shown}");
+    Some(tail.iter().rev().take(12).rev().copied().collect::<Vec<_>>().join(" | "))
+}
+
+/// The one-line remedy for a Codex startup failure we can name, or "".
+///
+/// Deliberately matched on the pane text rather than in
+/// `format_codex_remote_control_failure`: that maps errors from the daemon RPC,
+/// and in this failure the RPC SUCCEEDS -- it hands back `thread_id: None` --
+/// while the CLI dies on its own. The reason never travels through the RPC at
+/// all, so the pane is the only place it exists.
+///
+/// The app-server resolves `thread/start` config against its OWN cwd. Cold-start
+/// it from a directory that later gets deleted (an Ainb worktree, say) and every
+/// new thread fails forever while resume keeps working, which reads as flaky
+/// rather than broken. Ainb cannot fix this when attached to the Codex-owned
+/// daemon (`[codex] app_server = "desktop"`, the default), so naming the remedy
+/// is all it can do.
+///
+/// String-matching Codex's wording is not a stable contract. A reworded error
+/// loses the hint and falls back to the raw pane text, which is still the real
+/// error -- degraded, not broken.
+fn codex_exit_hint(pane: &str) -> &'static str {
+    if pane.contains("failed to load configuration")
+        || pane.contains("checking remote project trust")
+    {
+        " -- the Codex app-server is running in a deleted directory; \
+         fix with: cd ~ && codex app-server daemon restart"
+    } else {
+        ""
+    }
+}
+
+/// Whether the launched CLI is already gone, and what it left behind.
+///
+/// Codex writes a one-line startup failure and exits in about a second. Polling
+/// the full claim deadline against a pane that died at t+1s turns a
+/// self-explaining error into a bare timeout, so the claim loop checks this
+/// every iteration and stops as soon as the CLI is no longer running.
+///
+/// `Some` means the CLI is gone; the payload is its last pane output, or a
+/// stand-in when the pane could not be read. `None` means it is still alive.
+/// This only sees the pane's text when `remain-on-exit` is on for the window --
+/// without it tmux destroys the session on exit and the reason dies with it.
+async fn codex_launch_exit(exact_target: &str) -> Option<String> {
+    let Ok(output) = Command::new("tmux")
+        .args(["list-panes", "-t", exact_target, "-F", "#{pane_dead}"])
+        .output()
+        .await
+    else {
+        return None;
+    };
+    if !output.status.success() {
+        // The session is gone entirely, which is the pre-`remain-on-exit`
+        // shape: nothing survived to read.
+        return Some("the tmux session exited before Codex reported a thread".to_string());
+    }
+    if !String::from_utf8_lossy(&output.stdout).lines().any(|line| line.trim() == "1") {
+        return None;
+    }
+    Some(
+        capture_failed_launch_pane(exact_target)
+            .await
+            .unwrap_or_else(|| "Codex exited without writing anything to the pane".to_string()),
+    )
 }
 
 /// Record `trust_level = "trusted"` for a worktree Ainb created, in the Codex
@@ -1029,6 +1138,7 @@ impl InteractiveSessionManager {
                 model.as_deref(),
                 skip_permissions,
                 headroom_enabled,
+                &tmux_session_name,
             )
             .await
             {
@@ -1276,6 +1386,7 @@ impl InteractiveSessionManager {
                 model.as_deref(),
                 skip_permissions,
                 headroom_enabled,
+                &tmux_session_name,
             )
             .await
             {
@@ -2745,6 +2856,98 @@ fn wire_rtk_project_hook_with_cmd(worktree: &std::path::Path, cmd: &str) -> anyh
 
 #[cfg(test)]
 mod tests {
+
+    /// `capture_failed_launch_pane` itself must return the program's output.
+    ///
+    /// Deliberately calls the FUNCTION rather than re-issuing its tmux command:
+    /// a test that re-implements the call cannot see the call drift away from
+    /// it, and both halves of this helper's contract were broken at some point
+    /// while the suite stayed green. The window-target suffix and the history
+    /// range are each load-bearing, and reverting either one reds this.
+    ///
+    /// Prints `SKIP:` and returns when tmux is unavailable, matching the
+    /// convention the CI job greps for.
+    #[tokio::test]
+    async fn capture_failed_launch_pane_reads_a_dead_pane() {
+        use tokio::process::Command as TokioCommand;
+
+        if TokioCommand::new("tmux").arg("-V").output().await.is_err() {
+            println!("SKIP: tmux unavailable, cannot exercise pane capture");
+            return;
+        }
+        let session = format!("ainb_captest_{}", std::process::id());
+        let _ = TokioCommand::new("tmux")
+            .args(["kill-session", "-t", &format!("={session}")])
+            .output()
+            .await;
+        let created = TokioCommand::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-c", "/tmp"])
+            .output()
+            .await
+            .expect("spawn tmux");
+        if !created.status.success() {
+            println!("SKIP: tmux could not create a session on this host");
+            return;
+        }
+        let target = format!("={session}");
+        let _ = TokioCommand::new("tmux")
+            .args([
+                "set-option",
+                "-w",
+                "-t",
+                &format!("{target}:"),
+                "remain-on-exit",
+                "on",
+            ])
+            .output()
+            .await;
+        let _ = TokioCommand::new("tmux")
+            .args([
+                "respawn-pane",
+                "-k",
+                "-t",
+                &format!("{target}:"),
+                "sh -c 'echo codex-startup-failed; exit 1'",
+            ])
+            .output()
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let captured = super::capture_failed_launch_pane(&target).await;
+
+        let _ = TokioCommand::new("tmux").args(["kill-session", "-t", &target]).output().await;
+
+        let captured = captured.expect("a dead pane must still be readable");
+        assert!(
+            captured.contains("codex-startup-failed"),
+            "the program's own output must survive the dead-pane marker, got: {captured}"
+        );
+    }
+
+    /// Both wordings Codex uses for a dead app-server cwd earn the remedy, and
+    /// an unrelated failure is passed through untouched rather than given a
+    /// remedy that would send the user off fixing the wrong thing.
+    #[test]
+    fn dead_appserver_cwd_pane_text_earns_the_restart_hint() {
+        use super::codex_exit_hint;
+
+        // Observed verbatim, 2026-08-30: no `-C`, and with `-C` respectively.
+        let no_cd = "thread/start failed: failed to load configuration: \
+                     No such file or directory (os error 2)";
+        let with_cd = "Error: config/read failed while checking remote project trust";
+        for pane in [no_cd, with_cd] {
+            assert!(
+                codex_exit_hint(pane).contains("codex app-server daemon restart"),
+                "expected the restart remedy for: {pane}"
+            );
+        }
+
+        assert_eq!(
+            codex_exit_hint("Error: not logged in. Run `codex login`."),
+            "",
+            "an unrelated failure must not be handed the app-server remedy"
+        );
+    }
 
     /// The managed Codex argv, flag by flag.
     ///

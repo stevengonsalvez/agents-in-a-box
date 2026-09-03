@@ -10061,6 +10061,7 @@ impl AppState {
                     model.as_deref(),
                     skip_permissions,
                     metadata.headroom_enabled,
+                    &metadata.tmux_session_name,
                 )
                 .await?;
             }
@@ -11845,6 +11846,7 @@ impl AppState {
                 model.as_deref(),
                 skip_permissions,
                 headroom_enabled,
+                &tmux_session_name,
             )
             .await?;
         }

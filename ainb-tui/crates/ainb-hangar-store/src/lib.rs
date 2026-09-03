@@ -142,10 +142,13 @@ const FOREIGN_MIGRATION_93_INDEX: &str = "idx_fleet_provider_event_retention";
 /// never starts at all. The guard is right; the version number was wrong.
 ///
 /// Unlike the 0087/0089/0090 reconciliation above, the loser here is not an
-/// inert file this binary can record as applied: it is not embedded in this
-/// binary in any form. So the repair is the other direction. Drop the index it
-/// created and delete its row, leaving the database exactly as if that branch
-/// build had never run, and let SQLx apply main's 93 normally.
+/// inert file this binary can record as applied: nothing is embedded under
+/// version 93 but that text. (Since the branch landed, the same text IS
+/// embedded — as `0094` — but recording 93 from it would still be wrong, and
+/// 94 applies on its own once the row is gone.) So the repair is the other
+/// direction. Drop the index it created and delete its row, leaving the
+/// database exactly as if that branch build had never run, and let SQLx apply
+/// main's 93 — and then 94 — normally.
 ///
 /// Nothing is lost. The index is a pure read optimisation over rows the branch
 /// migration never wrote to, and the branch's sweep code is not in this binary.
@@ -331,13 +334,39 @@ mod migration_tests {
     /// Rewind an up-to-date database to what a machine that booted a build of
     /// the unmerged branch carries: main's 93 never ran, the branch's did, and
     /// 93 is recorded under the branch file's description and checksum.
+    /// Seed the state a machine reached by booting the OLD branch build: the
+    /// retention text recorded at version 93, its index present, and no 94.
+    ///
+    /// Every statement runs on ONE connection inside ONE transaction. The
+    /// earlier version issued them straight at the pool, which hands each
+    /// `execute` whatever connection is free, and the `DROP INDEX` and the
+    /// `CREATE INDEX` that follows it then landed on different connections. It
+    /// passed on an in-memory pool capped at one connection and on Linux, and
+    /// failed on a macOS runner with `index
+    /// idx_fleet_provider_event_retention already exists` — the drop not yet
+    /// visible to the connection doing the create. A fixture that rewrites
+    /// schema and bookkeeping together has no reason to be spread across
+    /// connections at all.
     async fn seed_unmerged_0093(pool: &SqlitePool) {
+        let mut tx = pool.begin().await.unwrap();
         sqlx::query("DROP INDEX IF EXISTS idx_board_card_issue")
-            .execute(pool)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        // The caller migrated first, and this tree carries the renumbered
+        // `0094_fleet_provider_event_retention.sql`, so 94 is already recorded
+        // and its index already exists. The machine being modelled had that
+        // text at 93 and no 94 at all, so unwind both before seeding.
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 94")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        sqlx::query("DROP INDEX IF EXISTS idx_fleet_provider_event_retention")
+            .execute(&mut *tx)
             .await
             .unwrap();
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 93")
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .unwrap();
         sqlx::query(
@@ -346,7 +375,7 @@ mod migration_tests {
              VALUES (93, 'fleet provider event retention', TRUE, ?, -1)",
         )
         .bind(vec![0xde_u8, 0xad, 0xbe, 0xef])
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .unwrap();
         sqlx::query(
@@ -354,9 +383,10 @@ mod migration_tests {
              ON fleet_provider_event(observed_at) \
              WHERE raw_payload <> '' AND projection_revision IS NOT NULL AND source <> 'acp'",
         )
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .unwrap();
+        tx.commit().await.unwrap();
     }
 
     /// The property that matters, and the one a recorded-versions check cannot
@@ -511,16 +541,27 @@ mod migration_tests {
             index_exists(&pool, "idx_board_card_issue").await,
             "main's 0093 never ran"
         );
-        assert!(
-            !index_exists(&pool, "idx_fleet_provider_event_retention").await,
-            "the foreign migration's index must be unwound, or the renumbered file cannot apply"
-        );
         let description: String =
             sqlx::query_scalar("SELECT description FROM _sqlx_migrations WHERE version = 93")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
         assert_eq!(description, "board card issue index");
+
+        // The claim the repair's doc makes, now actually checkable: unwinding
+        // the index is what lets the renumbered file re-land. Its CREATE INDEX
+        // carries no IF NOT EXISTS, so had the orphan survived, 94 would have
+        // died here instead of recording itself and rebuilding the index.
+        let renumbered: String =
+            sqlx::query_scalar("SELECT description FROM _sqlx_migrations WHERE version = 94")
+                .fetch_one(&pool)
+                .await
+                .expect("the renumbered retention migration must apply after the repair");
+        assert_eq!(renumbered, "fleet provider event retention");
+        assert!(
+            index_exists(&pool, "idx_fleet_provider_event_retention").await,
+            "0094 must rebuild the index the repair dropped"
+        );
 
         // Re-running is a no-op: the row now matches, so the repair must not fire.
         apply_migrations(&pool).await.unwrap();
@@ -561,10 +602,20 @@ mod migration_tests {
                 .unwrap();
         assert_eq!(description, "board card issue index");
         assert!(index_exists(store.pool(), "idx_board_card_issue").await);
-        assert!(!index_exists(store.pool(), "idx_fleet_provider_event_retention").await);
+        // Dropped by the repair, then rebuilt by the renumbered 0094 in the
+        // same boot. Its absence would mean 94 never applied.
+        assert!(index_exists(store.pool(), "idx_fleet_provider_event_retention").await);
+        // On main this asserted the ABSENCE of a snapshot: the gate is numeric,
+        // read MAX(version) = 93 against an embedded max of 93, saw nothing
+        // pending and took none — which is what proved the repair cannot depend
+        // on one. This tree carries 0094, so 94 IS genuinely pending and the
+        // gate fires for that ordinary reason, naming the file after the
+        // applied max. The original property is unchanged and still pinned, by
+        // `a_database_that_ran_the_unmerged_0093_still_upgrades`: it drives
+        // `apply_migrations` directly and never reaches the backup path at all.
         assert!(
-            !home.path().join("hangar.db.pre-93.bak").exists(),
-            "the numeric backup gate cannot see this repair, so nothing must depend on a snapshot"
+            home.path().join("hangar.db.pre-93.bak").exists(),
+            "94 is pending, so the ordinary pre-upgrade snapshot must be taken"
         );
     }
 }
