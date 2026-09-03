@@ -112,7 +112,7 @@ use ainb_hangar_store::repo::fleet_acp_session::{
 };
 use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
 use ainb_hangar_store::repo::fleet_provider_event::{
-    FleetProviderEventRepo, NewFleetProviderEvent,
+    FleetProviderEventError, FleetProviderEventRepo, NewFleetProviderEvent,
 };
 use sqlx::SqlitePool;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -1470,13 +1470,13 @@ impl AcpPool {
             scope_key: row.scope_key.clone(),
             provider: row.provider.clone(),
             cwd: row.cwd.clone(),
-            writer: StoreWriter::new(
+            sink: TranscriptSink::new(StoreWriter::new(
                 self.store.clone(),
                 row.provider.clone(),
                 row.session_key.clone(),
                 Box::new(SystemIdGen),
                 self.pool_writer_config(),
-            ),
+            )),
             reducer: TranscriptReducer::new(String::new()),
             acp_session_id: None,
             process: None,
@@ -1489,11 +1489,6 @@ impl AcpPool {
             control: control_rx,
             pending_prelude: None,
             resume_path: None,
-            // Resolved in `run()`: binding it needs the task's workspace, which
-            // is a store read this constructor cannot await.
-            stream: None,
-            classifier: AcpClassifier::default(),
-            tool_calls: 0,
         };
         tokio::spawn(actor.run());
         SessionHandle {
@@ -1781,17 +1776,9 @@ struct SessionActor {
     scope_key: String,
     provider: String,
     cwd: String,
-    /// The durable transcript sink.
-    ///
-    /// ponytail: reach it through [`SessionActor::commit_chunk`], never
-    /// directly. Two entry points into it remain and both publish live first,
-    /// which is what makes "live equals the durable re-read" true by
-    /// construction rather than by remembering. A third that called
-    /// `writer.push` on its own would put a row in the re-read that never
-    /// streamed, and only an equality test whose fixture happened to exercise
-    /// that path would notice. That is not hypothetical: the turn-end flush and
-    /// the adapter-death drain were both written that way.
-    writer: StoreWriter,
+    /// This session's transcript, live and durable. See [`TranscriptSink`] for
+    /// why the store writer is not reachable from here directly.
+    sink: TranscriptSink,
     reducer: TranscriptReducer,
     acp_session_id: Option<String>,
     process: Option<Arc<ProviderProcess>>,
@@ -1810,23 +1797,101 @@ struct SessionActor {
     pending_prelude: Option<String>,
     /// The resume path the next turn's receipt reports.
     resume_path: Option<&'static str>,
-    /// Where this session's transcript goes LIVE, for a TASK session only
-    /// (track A step A5's live half). `None` for every chat session: a chat
-    /// transcript has its own stream (`fleet/transcript_subscribe`) and no task
-    /// for a `TaskMessage` to name. Resolved once in [`SessionActor::run`].
-    stream: Option<RunStream>,
-    /// The live half's classifier, feeding [`Self::stream`].
-    ///
-    /// The SAME [`AcpClassifier`] the durable `board_card_timeline` read builds
-    /// its entries with, so a line published live and its later re-read twin are
-    /// byte-identical rather than merely similar.
-    classifier: AcpClassifier,
-    /// Tool calls this turn has published, for the run banner's tally.
-    tool_calls: u32,
 }
 
 /// What one turn's `session/prompt` came back with.
 type TurnResult = Result<PromptResponse, AcpError>;
+
+/// One session's transcript, live and durable, behind one door.
+///
+/// The [`StoreWriter`] is PRIVATE to this type on purpose. Every durable
+/// transcript row must also be published live, or the durable re-read carries
+/// lines the operator never saw stream — and that omission has now been written
+/// twice, both times by someone adding a perfectly legitimate new flush (the
+/// turn-end one, then the adapter-death drain). A doc comment did not stop the
+/// second. Here the only ways in are [`Self::chunk`] and [`Self::lifecycle`],
+/// both of which publish before they write, so a third flush cannot compile
+/// without going through one of them.
+///
+/// Live is published BEFORE the durable commit, deliberately: the writer
+/// buffers and commits on a cadence, so publishing after would hold the
+/// operator's view back by up to a flush interval. See the module docs for the
+/// one guarantee that costs.
+struct TranscriptSink {
+    writer: StoreWriter,
+    /// Where this session's rows go live, for a TASK session only. `None` for
+    /// every chat session: no task to name, and its own stream elsewhere.
+    stream: Option<RunStream>,
+    /// The SAME classifier the durable `board_card_timeline` read uses, so a
+    /// line published live and its re-read twin are byte-identical.
+    classifier: AcpClassifier,
+    /// Tool calls published this turn, for the run banner's tally.
+    tool_calls: u32,
+}
+
+impl TranscriptSink {
+    fn new(writer: StoreWriter) -> Self {
+        Self {
+            writer,
+            stream: None,
+            classifier: AcpClassifier::default(),
+            tool_calls: 0,
+        }
+    }
+
+    /// Publish a chunk live, then commit it.
+    async fn chunk(
+        &mut self,
+        chunk: &ainb_acp::reducer::TranscriptChunk,
+    ) -> Result<Option<HighWater>, FleetProviderEventError> {
+        self.publish(chunk.kind.event_type(), &chunk.payload);
+        self.writer.push(chunk).await
+    }
+
+    /// Publish a lifecycle marker live, then commit it.
+    async fn lifecycle(
+        &mut self,
+        marker: Lifecycle,
+        payload: serde_json::Value,
+    ) -> Result<Option<HighWater>, FleetProviderEventError> {
+        self.publish(marker.event_type(), &payload);
+        self.writer.lifecycle(marker, payload).await
+    }
+
+    /// Classify one row and stream every line it yields.
+    fn publish(&mut self, event_type: &str, payload: &serde_json::Value) {
+        if self.stream.is_none() {
+            return;
+        }
+        for (kind, body) in self.classifier.classify_value(event_type, payload) {
+            if kind == MessageKind::ToolCall {
+                self.tool_calls = self.tool_calls.saturating_add(1);
+            }
+            if let Some(stream) = &self.stream {
+                stream.line(kind, body);
+            }
+        }
+    }
+
+    /// The run banner's tally + clock. No-op for a chat session.
+    fn progress(&self, elapsed: Duration) {
+        if let Some(stream) = &self.stream {
+            stream.progress(self.tool_calls, elapsed);
+        }
+    }
+
+    async fn tick(&mut self) -> Result<Option<HighWater>, FleetProviderEventError> {
+        self.writer.tick().await
+    }
+
+    fn bytes_written(&self) -> u64 {
+        self.writer.bytes_written()
+    }
+
+    fn set_acp_session_id(&mut self, id: Option<String>) {
+        self.writer.set_acp_session_id(id);
+    }
+}
 
 /// Bind a session's live task stream, or `None` when the scope is not a task's.
 ///
@@ -1859,7 +1924,7 @@ impl SessionActor {
             self.scope_key.clone(),
         )
         .await;
-        self.stream = stream;
+        self.sink.stream = stream;
         let (turn_tx, mut turn_rx) = mpsc::channel::<TurnResult>(1);
         let mut ticker = tokio::time::interval(self.pool.config.writer.flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2006,8 +2071,7 @@ impl SessionActor {
     /// pressure was already published, so live can carry a line durable does
     /// not.
     async fn commit_chunk(&mut self, chunk: &ainb_acp::reducer::TranscriptChunk) {
-        self.publish(chunk.kind.event_type(), &chunk.payload);
-        match self.writer.push(chunk).await {
+        match self.sink.chunk(chunk).await {
             Ok(Some(high_water)) => self.wake(&high_water),
             Ok(None) => {}
             Err(error) => {
@@ -2026,10 +2090,10 @@ impl SessionActor {
         // The run banner's other half, on the cadence the writer already ticks
         // rather than a timer of its own. Only while a turn is open: the tally
         // and the clock are the RUN's, and an idle session has neither.
-        if let (Some(stream), Some(turn)) = (&self.stream, &self.turn) {
-            stream.progress(self.tool_calls, turn.started.elapsed());
+        if let Some(turn) = &self.turn {
+            self.sink.progress(turn.started.elapsed());
         }
-        match self.writer.tick().await {
+        match self.sink.tick().await {
             Ok(Some(high_water)) => self.wake(&high_water),
             Ok(None) => {}
             Err(error) => tracing::error!(
@@ -2048,27 +2112,10 @@ impl SessionActor {
     /// [`Self::finish_turn`] — because a live view missing any of the three
     /// would differ from the durable re-read that has all of them, which is
     /// exactly the equality track A step A5 has to hold.
-    fn publish(&mut self, event_type: &str, payload: &serde_json::Value) {
-        if self.stream.is_none() {
-            return;
-        }
-        let entries = self.classifier.classify_value(event_type, payload);
-        for (kind, body) in entries {
-            if kind == MessageKind::ToolCall {
-                self.tool_calls = self.tool_calls.saturating_add(1);
-            }
-            if let Some(stream) = &self.stream {
-                stream.line(kind, body);
-            }
-        }
-    }
-
     fn wake(&self, high_water: &HighWater) {
         // The demux channels are unbounded on purpose, so committed bytes are
         // the growth signal the health pane carries in their place.
-        self.stats
-            .transcript_bytes
-            .store(self.writer.bytes_written(), Ordering::Relaxed);
+        self.stats.transcript_bytes.store(self.sink.bytes_written(), Ordering::Relaxed);
         self.pool
             .events
             .emit_transcript_order(&high_water.session_key, high_water.ingest_order);
@@ -2173,7 +2220,7 @@ impl SessionActor {
         self.drain_updates().await;
         self.reducer.begin_turn();
 
-        self.tool_calls = 0;
+        self.sink.tool_calls = 0;
         self.turn = Some(OpenTurn {
             message_id: job.message_id.clone(),
             started: Instant::now(),
@@ -2234,7 +2281,7 @@ impl SessionActor {
         .await;
         self.set_state("ACTIVE");
         if let Ok(Some(high_water)) = self
-            .writer
+            .sink
             .lifecycle(
                 Lifecycle::TurnStarted,
                 serde_json::json!({ "turnId": message_id }),
@@ -2342,17 +2389,15 @@ impl SessionActor {
         // The run-status line that closes the transcript. Without it the live
         // view ends one line short of the durable re-read, which is the whole
         // equality T1 asserts.
-        self.publish(marker.event_type(), &marker_payload);
+        if let Ok(Some(high_water)) = self.sink.lifecycle(marker, marker_payload).await {
+            self.wake(&high_water);
+        }
         // One last heartbeat, the same closing tick `stream_stdout` fires at
         // EOF: a turn shorter than the writer's flush interval would otherwise
         // publish no tally at all, or only the one from before its first tool
         // ran, and the run banner would read zero on a run that used tools.
-        if let Some(stream) = &self.stream {
-            stream.progress(self.tool_calls, turn.started.elapsed());
-        }
-        if let Ok(Some(high_water)) = self.writer.lifecycle(marker, marker_payload).await {
-            self.wake(&high_water);
-        }
+        // AFTER the marker, so the tally counts every tool the turn published.
+        self.sink.progress(turn.started.elapsed());
 
         let now = SystemClock.now_ms();
         // I4/I11: the TIMELINE gets exactly the final agent message, in the
@@ -2748,7 +2793,7 @@ impl SessionActor {
         self.updates = Some(update_rx);
         self.permissions = Some(permission_rx);
         self.reducer = TranscriptReducer::new(acp_session_id.to_string());
-        self.writer.set_acp_session_id(Some(acp_session_id.to_string()));
+        self.sink.set_acp_session_id(Some(acp_session_id.to_string()));
         // Set NOW, not at the end of the attach, so `detach` can unwind a
         // half-built attach (a load that failed) instead of leaking the route.
         self.acp_session_id = Some(acp_session_id.to_string());
@@ -2762,7 +2807,7 @@ impl SessionActor {
     /// agent forgot" and "the agent was never told".
     async fn record_context_rebuilt(&mut self, path: &'static str, acp_session_id: &str) {
         match self
-            .writer
+            .sink
             .lifecycle(
                 Lifecycle::ContextRebuilt,
                 serde_json::json!({
