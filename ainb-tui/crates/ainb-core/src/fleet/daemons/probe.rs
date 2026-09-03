@@ -1489,13 +1489,55 @@ pub fn annotate_bridge_config(rows: &mut [DaemonStatus], problem: Option<&str>) 
 /// `now_ms` is the single clock the staleness checks measure against.
 #[must_use]
 pub fn collect_in(ainb_home: &Path, notifyd_base: &Path, now_ms: i64) -> Vec<DaemonStatus> {
-    vec![
+    let mut rows = vec![
         probe_heartbeat_daemon(ainb_home, DaemonKind::Bridge, now_ms),
         probe_notifyd(notifyd_base, now_ms),
         probe_approve_broker(notifyd_base, now_ms),
         probe_atc(ainb_home, now_ms),
-        probe_heartbeat_daemon(ainb_home, DaemonKind::FleetDaemon, now_ms),
-    ]
+    ];
+    // ONE supervisor row, unless there are genuinely two supervisors.
+    //
+    // ATC is the fleet's supervisor and the standalone daemon is the thing it
+    // replaced: `ainb fleet daemon` refuses to start against a fleet ATC owns in
+    // either mode, so on any normal host this row is a permanent "stopped"
+    // occupying a line on the screen whose whole job is to say who is running.
+    // Worse, it presents the two as a CHOICE, which is exactly the competing
+    // control path the supervisor exists to remove.
+    //
+    // It is NOT hidden unconditionally. A daemon that is actually up got there
+    // through `--force-race`, which means two controllers really are sending
+    // into the same panes — the single state an operator most needs to see, and
+    // the one where a tidy screen would be a lie.
+    let mut fleet_daemon = probe_heartbeat_daemon(ainb_home, DaemonKind::FleetDaemon, now_ms);
+    if fleet_daemon_is_visible(&fleet_daemon) {
+        // Say WHY it is on screen. A bare "running" row next to a running ATC
+        // reads as two healthy daemons; it is actually the double-supervision
+        // both of them refuse by default, and it needs to read as a fault.
+        if rows
+            .iter()
+            .any(|r| r.kind == DaemonKind::Atc && r.state != DaemonState::Stopped)
+        {
+            fleet_daemon.state = DaemonState::Degraded;
+            fleet_daemon.reason = format!(
+                "RACING ATC — both are auto-continuing the same panes, and ATC's per-session \
+retry cap cannot hold while this is up. {}",
+                fleet_daemon.reason
+            );
+        }
+        rows.push(fleet_daemon);
+    }
+    rows
+}
+
+/// Does the standalone fleet daemon deserve a row?
+///
+/// Only when it is not stopped. `Stopped` is the state ATC's existence makes
+/// permanent; every other state means something is running, or that we could not
+/// tell — and `Unknown` earns a row for the same reason `Running` does, since
+/// "the probe itself failed" is not evidence that nothing is racing ATC.
+#[must_use]
+fn fleet_daemon_is_visible(row: &DaemonStatus) -> bool {
+    !matches!(row.state, DaemonState::Stopped)
 }
 
 /// The socket-probed daemons, appended after the heartbeat ones.
@@ -2877,7 +2919,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_in_returns_all_heartbeat_daemons_in_stable_order() {
+    fn collect_in_returns_the_heartbeat_daemons_in_stable_order() {
         let home = TempDir::new().unwrap();
         let notifyd = TempDir::new().unwrap();
         let rows = collect_in(
@@ -2885,14 +2927,83 @@ mod tests {
             notifyd.path(),
             super::super::heartbeat::now_ms(),
         );
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].kind, DaemonKind::Bridge);
         assert_eq!(rows[1].kind, DaemonKind::Notifyd);
         assert_eq!(rows[2].kind, DaemonKind::ApproveBroker);
         assert_eq!(rows[3].kind, DaemonKind::Atc);
-        assert_eq!(rows[4].kind, DaemonKind::FleetDaemon);
         // Empty homes → everything stopped, never a false running.
         assert!(rows.iter().all(|r| r.state == DaemonState::Stopped));
+    }
+
+    #[test]
+    fn a_stopped_fleet_daemon_gets_no_row_beside_the_supervisor() {
+        // ATC is the supervisor and the standalone daemon is what it replaced,
+        // so on a normal host that row is a permanent "stopped" presenting the
+        // two as a choice — the competing control path the supervisor exists to
+        // remove, still on the screen an operator reads to see who is running.
+        let home = TempDir::new().unwrap();
+        let notifyd = TempDir::new().unwrap();
+        let rows = collect_in(
+            home.path(),
+            notifyd.path(),
+            super::super::heartbeat::now_ms(),
+        );
+        assert!(
+            !rows.iter().any(|r| r.kind == DaemonKind::FleetDaemon),
+            "a stopped fleet daemon must not take a row: {:?}",
+            rows.iter().map(|r| r.kind).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_running_fleet_daemon_still_gets_a_row_and_is_named_as_racing() {
+        // The one state a tidy screen must NOT hide. A daemon that is up got
+        // there through --force-race, so two controllers really are sending into
+        // the same panes and ATC's retry cap cannot hold.
+        let home = TempDir::new().unwrap();
+        let notifyd = TempDir::new().unwrap();
+        let now = super::super::heartbeat::now_ms();
+
+        // A live fleet-daemon heartbeat: this process, so the pid checks pass.
+        let daemons = home.path().join("daemons");
+        std::fs::create_dir_all(&daemons).unwrap();
+        let hb = super::super::heartbeat::DaemonHeartbeat::starting();
+        hb.write_in(home.path(), DaemonKind::FleetDaemon.id()).unwrap();
+
+        // And a beating ATC, so the two genuinely overlap.
+        let atc = home.path().join("atc").join("tower");
+        std::fs::create_dir_all(&atc).unwrap();
+        std::fs::write(
+            atc.join("meta.json"),
+            r#"{"name":"tower","heartbeat_enabled":true,"heartbeat_interval_min":15,"idle_pause_min":60}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            atc.join("heartbeat-state.json"),
+            format!(
+                r#"{{"last_heartbeat_ms":{},"last_active_ms":{},"continue_counts":{{}}}}"#,
+                now - 1000,
+                now - 1000
+            ),
+        )
+        .unwrap();
+
+        let rows = collect_in(home.path(), notifyd.path(), now);
+        let fleet = rows
+            .iter()
+            .find(|r| r.kind == DaemonKind::FleetDaemon)
+            .expect("a live fleet daemon must keep its row");
+        assert_eq!(
+            fleet.state,
+            DaemonState::Degraded,
+            "racing ATC is a fault, not a healthy second daemon"
+        );
+        assert!(
+            fleet.reason.contains("RACING ATC"),
+            "the row must say why it is here: {}",
+            fleet.reason
+        );
     }
 
     /// The Daemons view is meant to be the ONE place every managed process

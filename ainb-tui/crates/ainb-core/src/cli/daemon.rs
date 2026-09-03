@@ -978,7 +978,23 @@ mod tests {
                 .map(|r| r.kind)
                 .collect();
         view.extend(crate::fleet::daemons::probe::collect_socket_daemons().iter().map(|r| r.kind));
-        assert_eq!(view, CONTROLLABLE.to_vec());
+
+        // SUBSET, not equality. The view is now conditional: the fleet daemon
+        // takes a row only when it is actually running, because ATC is the
+        // supervisor and a permanently-stopped row presented the two as a
+        // choice. So the invariant is the one that matters — every row the view
+        // can show is controllable, so no row ever offers actions the CLI would
+        // reject — rather than "every controllable kind is always on screen".
+        for kind in &view {
+            assert!(
+                CONTROLLABLE.contains(kind),
+                "{} has a row but no lifecycle verbs",
+                kind.id()
+            );
+        }
+        // And the conditional row is still controllable, because hiding a row is
+        // a display decision: `ainb daemon fleet-daemon stop` must keep working.
+        assert!(CONTROLLABLE.contains(&DaemonKind::FleetDaemon));
     }
 
     /// Every argv this module delegates to must actually parse against the real
