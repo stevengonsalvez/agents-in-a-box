@@ -157,6 +157,27 @@ const fn column_glyph(column: IssueColumn) -> char {
     }
 }
 
+/// The card's run chip (crisp B2 §2.2): the issue's LATEST run, named and aged,
+/// or `None` when it never ran.
+///
+/// `last_run_status` is the status of that run and `last_run_at` when it started,
+/// both already on `IssueRow` — this is composition, not a new fetch. A status
+/// OUTSIDE the task FSM (a newer daemon's token) yields no chip at all rather
+/// than a confidently wrong word: the card falls back to its priority chip, which
+/// is stale-looking rather than untrue.
+fn run_chip(
+    row: &IssueRow,
+    agent: Option<String>,
+    now_ms: i64,
+) -> Option<crate::widgets::card_board::RunChip> {
+    let state = crate::vocab::RunState::parse(row.last_run_status.as_deref()?)?;
+    Some(crate::widgets::card_board::RunChip {
+        agent,
+        state,
+        elapsed_ms: row.last_run_at.map(|at| now_ms.saturating_sub(at)),
+    })
+}
+
 /// The filter chips that narrow which rows are visible (UX §1).
 ///
 /// `Members` / `Agents` filter by assignee actor kind; `Mine` is a placeholder
@@ -1563,6 +1584,21 @@ impl IssueListState {
                         title: r.title.clone(),
                         priority: PriorityChip::from_priority(r.priority),
                         assignee: self.assignee_label(r.assignee.as_deref()),
+                        // Crisp B2 §2.2: the issue's latest run, so a card
+                        // mid-run stops rendering identically to an untouched
+                        // backlog card. The same resolved name the idle footer
+                        // would have shown, so one card never names its agent
+                        // two ways.
+                        run: run_chip(r, self.assignee_label(r.assignee.as_deref()), self.now_ms),
+                        pr: r
+                            .pr_url
+                            .as_deref()
+                            .is_some_and(|u| !u.trim().is_empty())
+                            .then_some(crate::widgets::card_board::PrChip::Unknown),
+                        // The attention feed carries a session id and no issue,
+                        // so nothing can resolve "this card asked you" until B3
+                        // projects it (crisp-ui-track.md §2.4).
+                        attention: None,
                         linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
                         // 0046: the sub-issue roll-up, so a PARENT card shows a
                         // `⊟ done/total` badge that flips to gold `1/1` when its

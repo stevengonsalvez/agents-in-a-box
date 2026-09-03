@@ -2972,10 +2972,17 @@ fn card_view_to_board_card(c: &CardView) -> BoardCard {
         priority: PriorityChip::from_priority(0),
         // The Boards wire card carries no agent id to name (only the provider
         // token + squad chips), so it wears no assignee glyph rather than the
-        // title's first char it used to (crisp B1); B2's run chip replaces it.
+        // title's first char it used to (crisp B1).
         assignee: None,
         linked: false,
         subtasks: None,
+        // `CardView` carries a card STATE (`is_succeeded` / `is_blocked`), which
+        // the id-line marker already paints, and no task status, agent name or
+        // start stamp — the three things a run chip is. Wiring one here needs the
+        // board card's task, which is the spine's state collapse, not track B.
+        run: None,
+        pr: None,
+        attention: None,
     }
 }
 

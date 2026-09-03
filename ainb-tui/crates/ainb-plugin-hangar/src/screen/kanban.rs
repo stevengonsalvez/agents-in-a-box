@@ -355,6 +355,12 @@ impl KanbanState {
                         assignee: Some(c.agent_label.clone()),
                         linked: false,
                         subtasks: None,
+                        // The Kanban tile already spends its TITLE on the run
+                        // (`agent · age · status · branch · PR`), so a footer run
+                        // chip would print the same facts twice on one card.
+                        run: None,
+                        pr: None,
+                        attention: None,
                     })
                     .collect::<Vec<_>>();
                 card_board::BoardColumn {
