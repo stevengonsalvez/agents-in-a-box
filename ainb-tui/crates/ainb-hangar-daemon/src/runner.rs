@@ -87,11 +87,18 @@ impl RunLocation {
     }
 }
 
-/// How often a running task publishes a [`HangarEvent::TaskProgress`] heartbeat.
+/// Floor on how often a running task republishes its
+/// [`HangarEvent::TaskProgress`] tally.
 ///
 /// The transcript itself is unthrottled (one event per classified line) because
-/// a transcript line is the thing the operator is watching; the tool count and
-/// elapsed clock beside it only need to look live.
+/// a transcript line is the thing the operator is watching; the tool COUNT beside
+/// it changes far less often and does not need a repaint per line.
+///
+/// Not a timer: the tick is driven by stdout, so a silent provider publishes
+/// nothing until it speaks again (or until the closing tick at EOF). The elapsed
+/// clock rides along because the event carries the field, but no consumer reads
+/// it today, and a consumer that wanted a ticking clock would have to run its own
+/// rather than wait on this.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The live half of one run's transcript: every stdout line the provider writes,
@@ -2034,9 +2041,10 @@ async fn stream_stdout(
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
     // A2 live transcript. ONE classifier for the whole run, never one per line:
     // a `tool_result` takes its tool name and duration from the `tool_use` line
-    // that came before it, so the state has to span lines. `started` clocks the
-    // first byte of stdout, not the spawn, which is the closest the reader can
-    // get to when the agent actually began talking.
+    // that came before it, so the state has to span lines. `started` clocks from
+    // just before the first read, so the elapsed it reports excludes the spawn and
+    // sandbox setup: this reader's own view of how long the agent has been
+    // talking, not the task's wall clock (the FSM owns that).
     let mut classifier = StreamJsonClassifier::default();
     let started = Instant::now();
     let mut tool_calls: u32 = 0;
@@ -2044,16 +2052,22 @@ async fn stream_stdout(
 
     while let Some(line) = reader.next_line().await? {
         writeln!(log_file, "{line}")?;
-        if let Some(stream) = &stream {
-            for (kind, body) in classifier.classify_line(&line) {
+        // Parsed ONCE and read twice: the transcript classifier and the runner's
+        // own session / usage / terminal fields want the same bytes, and
+        // `StreamLine` deserialises from a borrowed `&Value` so neither pass costs
+        // a re-parse or a clone. A line that is not valid JSON is skipped by both,
+        // exactly as it was when each parsed for itself.
+        let parsed_line = serde_json::from_str::<serde_json::Value>(line.trim()).ok();
+        if let (Some(stream), Some(value)) = (&stream, &parsed_line) {
+            for (kind, body) in classifier.classify_value(value) {
                 if kind == MessageKind::ToolCall {
                     tool_calls = tool_calls.saturating_add(1);
                 }
                 stream.line(kind, body);
             }
-            // Heartbeat on a coarse tick so a chatty provider does not turn the
-            // run banner into a per-line repaint. Checked after the lines so the
-            // first tick (which fires immediately) already carries the first
+            // Republish the tally on a coarse tick so a chatty provider does not
+            // turn the run banner into a per-line repaint. Checked after the lines
+            // so the first tick (which fires immediately) already carries the first
             // tool count.
             let now = Instant::now();
             if now >= next_progress {
@@ -2061,7 +2075,7 @@ async fn stream_stdout(
                 stream.progress(tool_calls, now.duration_since(started));
             }
         }
-        if let Ok(parsed) = serde_json::from_str::<StreamLine>(&line) {
+        if let Some(parsed) = parsed_line.as_ref().and_then(|v| StreamLine::deserialize(v).ok()) {
             match parsed.kind.as_str() {
                 // claude session handle — first wins.
                 "system" => {

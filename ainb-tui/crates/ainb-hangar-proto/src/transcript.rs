@@ -95,8 +95,18 @@ impl StreamJsonClassifier {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
+        self.classify_value(&v)
+    }
+
+    /// [`Self::classify_line`] for a line the caller has ALREADY parsed.
+    ///
+    /// The live producer reads each line for two purposes (the transcript and the
+    /// runner's own session/usage/terminal fields), and parsing the same bytes
+    /// twice for that is waste it can hand back.
+    #[must_use]
+    pub fn classify_value(&mut self, line: &Value) -> Vec<(MessageKind, String)> {
         let mut out = Vec::new();
-        self.fold(&v, &mut out);
+        self.fold(line, &mut out);
         out
     }
 
