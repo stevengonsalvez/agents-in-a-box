@@ -732,3 +732,135 @@ async fn fetch_row(pool: &SqlitePool, task_id: &str) -> Option<SqliteRow> {
         .await
         .expect("query task row")
 }
+
+// ----------------------------------------------------------------- ACP (A5)
+
+/// The fixture ACP adapter binary, rebuilt on demand.
+///
+/// `CARGO_BIN_EXE_*` only exists inside the crate that DECLARES the binary, so
+/// this crate resolves it by target-directory convention and builds it. The
+/// build runs UNCONDITIONALLY (a no-op when the fixture is fresh): `cargo test
+/// -p ainb-hangar-daemon` never rebuilds another crate's binary, so building
+/// only when ABSENT leaves a stale executable on disk and every new scripting
+/// knob reads as "the pool ignored it". Same shape as `tests/acp_pool.rs`.
+pub fn fake_acp_adapter() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let mut dir = std::env::current_exe().expect("test binary path");
+            dir.pop();
+            if dir.ends_with("deps") {
+                dir.pop();
+            }
+            let status = Command::new(env!("CARGO"))
+                .args(["build", "-p", "ainb-acp", "--bin", "fake_acp_adapter"])
+                .status()
+                .expect("build the fixture adapter");
+            assert!(status.success(), "fixture adapter build failed");
+            let binary = dir.join("fake_acp_adapter");
+            assert!(
+                binary.exists(),
+                "fixture adapter missing at {}",
+                binary.display()
+            );
+            binary
+        })
+        .clone()
+}
+
+/// Point the daemon's `claude-agent-acp` adapter at `command`, through the same
+/// `[acp.adapters]` table an operator edits.
+///
+/// Read from `$HOME`, so the caller must export `HOME` into the daemon's
+/// environment alongside `AINB_HANGAR_HOME`.
+pub fn write_acp_adapter_config(home: &Path, command: &Path, permission_mode: &str) {
+    let dir = home.join(".agents-in-a-box").join("config");
+    std::fs::create_dir_all(&dir).expect("create config dir");
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "[acp.adapters.claude-agent-acp]\ncommand = \"{}\"\npermission_mode = \"{permission_mode}\"\n",
+            command.display()
+        ),
+    )
+    .expect("write config.toml");
+}
+
+/// Seed one more `claude` agent on the ALREADY-SEEDED runtime, carrying
+/// `agent_env` as its per-agent environment.
+///
+/// `agent_env` is the one permitted plaintext escape into the child, so it is
+/// also how a tripwire scripts a per-task ACP adapter: the fake adapter's
+/// `FAKE_ACP_*` knobs ride it, which proves the escape works and configures the
+/// fixture in one move.
+pub async fn seed_agent_with_env(
+    pool: &SqlitePool,
+    ids: &SeededIds,
+    agent_id: &str,
+    agent_env: &serde_json::Value,
+) -> String {
+    sqlx::query(
+        "INSERT INTO agent \
+         (id, workspace_id, name, runtime_id, visibility, owner_id, max_concurrent_tasks, \
+          agent_env, instructions) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(agent_id)
+    .bind(&ids.workspace_id)
+    .bind(agent_id)
+    .bind(&ids.runtime_id)
+    .bind("workspace")
+    .bind("user-trip")
+    .bind(5_i64)
+    .bind(agent_env.to_string())
+    .bind(format!("do the {agent_id} work"))
+    .execute(pool)
+    .await
+    .expect("insert acp agent");
+    agent_id.to_string()
+}
+
+/// Enqueue one task row for `agent_id` on the seeded runtime.
+///
+/// `mode` is the column's own vocabulary (`headless` / `interactive`); the
+/// CHECK constraint rejects anything else, so there is no "unset" spelling to
+/// pass through.
+pub async fn enqueue_task(
+    pool: &SqlitePool,
+    ids: &SeededIds,
+    task_id: &str,
+    agent_id: &str,
+    mode: &str,
+) {
+    sqlx::query(
+        "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, mode, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(task_id)
+    .bind(&ids.workspace_id)
+    .bind(&ids.runtime_id)
+    .bind(agent_id)
+    .bind(mode)
+    .bind(now_ms())
+    .execute(pool)
+    .await
+    .expect("enqueue task");
+}
+
+/// Poll `path` until it exists and its contents satisfy `pred`, or fail.
+pub fn wait_for_file(path: &Path, budget: Duration, pred: impl Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + budget;
+    let mut last = String::new();
+    loop {
+        last = std::fs::read_to_string(path).unwrap_or(last);
+        if pred(&last) {
+            return last;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} did not satisfy the predicate within {budget:?}; contents={last:?}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
