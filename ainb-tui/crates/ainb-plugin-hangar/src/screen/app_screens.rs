@@ -2740,11 +2740,14 @@ fn route_profiles(states: &mut ScreenStates, key: &KeyEvent) {
 /// reducer-closed state) raises [`NavIntent::CloseModal`] with no assign, popping
 /// the modal back to its prior screen.
 fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
-    let picker = states.agent_picker.take()?;
+    // The event is built BEFORE the take: an unmodelled key returns here, and
+    // returning between a take and its write-back DROPS the whole modal off the
+    // screen (crisp B1 round-2 review).
     let ev = match key.code {
         KeyCode::Esc => AgentPickerEvent::Esc,
         _ => AgentPickerEvent::Key(key_char(key)?),
     };
+    let picker = states.agent_picker.take()?;
     let out = reduce_agent_picker(&picker, ev);
 
     // Enter on a picked actor: queue the assign RPC and dismiss the modal.
@@ -2809,13 +2812,16 @@ fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent
 /// [`PaletteAction::Search`] the `render` pass drains + fires (the sync key router
 /// can't `await`).
 fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
-    let palette = states.command_palette.take()?;
+    // The event is built BEFORE the take: an unmodelled key returns here, and
+    // returning between a take and its write-back DROPS the whole modal off the
+    // screen (crisp B1 round-2 review).
     let ev = match key.code {
         KeyCode::Esc => CommandPaletteEvent::Esc,
         KeyCode::Down => CommandPaletteEvent::SelectDown,
         KeyCode::Up => CommandPaletteEvent::SelectUp,
         _ => CommandPaletteEvent::Key(key_char(key)?),
     };
+    let palette = states.command_palette.take()?;
     let out = reduce_command_palette(&palette, ev);
 
     match out.intent {
@@ -3756,6 +3762,41 @@ mod ctrl_chord_tests {
         // this path too, and the reducers model them.
         assert_eq!(key_char(&press('\r')), Some('\r'));
         assert_eq!(key_char(&press('\u{8}')), Some('\u{8}'));
+    }
+
+    /// A modal that does NOT model the chord keeps both its query and its own
+    /// existence. The routers took the modal out of the state before translating
+    /// the key, so an unmodelled key returned between the take and the write-back
+    /// and the modal vanished off the screen (found by driving Ctrl+U into the
+    /// palette in a real terminal, crisp B1 round-2 review).
+    #[test]
+    fn an_unmodelled_key_leaves_a_modal_open_and_unchanged() {
+        let mut app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        app.screen = Screen::CommandPalette;
+        let mut states = ScreenStates::default();
+        states.command_palette =
+            Some(super::super::command_palette::CommandPaletteState::default());
+        for ch in "note".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(
+            states
+                .command_palette
+                .as_ref()
+                .map(super::super::command_palette::CommandPaletteState::query),
+            Some("note")
+        );
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(
+            states
+                .command_palette
+                .as_ref()
+                .map(super::super::command_palette::CommandPaletteState::query),
+            Some("note"),
+            "the palette is still open and its query untouched"
+        );
     }
 
     /// End to end on the surface that would have SENT the control char: the
