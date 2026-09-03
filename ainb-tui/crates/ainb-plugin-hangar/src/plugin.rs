@@ -3843,6 +3843,13 @@ impl HangarPlugin {
     /// overlay), and an error leaves the modal in its loading state rather than
     /// showing a fabricated empty narrative.
     fn apply_issue_timeline(&mut self, resp: &ainb_hangar_proto::RpcResponse) {
+        // Claim FIRST, above every early return. The ledger counts replies, not
+        // usable ones: an error reply (the daemon answers `invalid_params` for
+        // an unresolvable issue and `store_err` on a DB failure) and an
+        // undecodable one both consume the fetch they answer. Claiming after
+        // the returns leaked one per error, and a single leak parks the counter
+        // at 1 forever, which silently stops the pane ever being written again.
+        let claimed = self.screens.claim_activity_reply().map(ToString::to_string);
         let Some(result) = resp.result.as_ref() else {
             return;
         };
@@ -3851,10 +3858,10 @@ impl HangarPlugin {
         ) else {
             return;
         };
-        // The pane folds in only the narrative of the issue the fetch was armed
+        // The pane folds in only the narrative of the issue the fetch was sent
         // for: the reply frame names no issue, and the detail screen may have
         // moved on to another one since.
-        if let Some(issue_id) = self.screens.claim_activity_reply().map(ToString::to_string) {
+        if let Some(issue_id) = claimed {
             self.screens.set_task_detail_activity(&issue_id, &parsed.entries);
         }
         if let Some(activity) = self.screens.activity.as_mut() {
@@ -3882,7 +3889,13 @@ impl HangarPlugin {
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: issue timeline send failed: {e}")).await;
+            return;
         }
+        // Only a request that actually went out is owed a reply. The three
+        // early returns above (no stream, encode failure, send failure) all log
+        // and continue, so counting the ARM instead would owe a reply that can
+        // never arrive.
+        self.screens.note_activity_fetch_sent(issue_id);
     }
 
     /// Fire the deferred `hangar/pr_status_refresh` for the just-opened
@@ -7194,6 +7207,9 @@ mod tests {
             Some("issue-1"),
             "opening the detail arms the activity fetch for its issue"
         );
+        // `render` is what sends it and records that it went out; there is no
+        // host here, so stand in for that leg explicitly.
+        p.screens.note_activity_fetch_sent("issue-1".into());
 
         let entries = vec![TimelineEntryRow {
             id: "tl-1".into(),
@@ -7224,7 +7240,7 @@ mod tests {
         // A reply for ANOTHER issue never replaces it: the fetch is attributed
         // to issue-other, the open detail is issue-1, so the pane keeps what it
         // had rather than captioning one issue's narrative with another's title.
-        p.screens.arm_activity_fetch("issue-other".into());
+        p.screens.note_activity_fetch_sent("issue-other".into());
         p.on_daemon_response(&reply(Vec::new()));
         assert_eq!(
             p.screens.task_detail.as_ref().unwrap().activity(),
@@ -7234,9 +7250,9 @@ mod tests {
 
         // TWO fetches in flight share one JSON-RPC id, so the first reply back
         // cannot be told from the second. The pane skips the ambiguous one and
-        // takes the last, which is the one its own arm is for.
-        p.screens.arm_activity_fetch("issue-other".into());
-        p.screens.arm_activity_fetch("issue-1".into());
+        // takes the last, which is the one its own send was for.
+        p.screens.note_activity_fetch_sent("issue-other".into());
+        p.screens.note_activity_fetch_sent("issue-1".into());
         p.on_daemon_response(&reply(Vec::new()));
         assert_eq!(
             p.screens.task_detail.as_ref().unwrap().activity(),
@@ -7254,6 +7270,68 @@ mod tests {
         assert!(
             text.contains(&pane[0].text),
             "the composed line renders:\n{text}"
+        );
+    }
+
+    /// An ERROR timeline reply must not wedge the activity pane.
+    ///
+    /// The ledger counts replies owed, so a reply that returns early without
+    /// claiming leaks one — and a single leak parks the counter at 1 forever:
+    /// every later fetch arms it to 2, the claim refuses as ambiguous and puts
+    /// it back to 1, and the pane is never written again for the life of the
+    /// process. The daemon answers `invalid_params` for an unresolvable issue
+    /// and `store_err` on a DB failure, so this needs no exotic conditions.
+    #[test]
+    fn an_error_timeline_reply_does_not_wedge_the_activity_pane() {
+        use ainb_hangar_proto::snapshots::{IssueTimelineResult, TimelineEntryRow};
+
+        let mut p = connected_plugin_with_issue();
+        p.on_key(&enter_press());
+        let _ = p.screens.take_pending_activity_fetch();
+        p.screens.note_activity_fetch_sent("issue-1".into());
+
+        // The daemon rejects it. Nothing renders, and nothing is owed after.
+        p.on_daemon_response(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_TIMELINE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32602,
+                message: "issue not found".into(),
+                data: None,
+            }),
+        });
+        assert!(
+            p.screens.task_detail.as_ref().unwrap().activity().is_empty(),
+            "an error reply paints nothing"
+        );
+
+        // The NEXT fetch still works. Without the claim above the early return,
+        // this reply reads as the second of two in flight and is dropped.
+        p.screens.note_activity_fetch_sent("issue-1".into());
+        p.on_daemon_response(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(IssueTimelineResult {
+                    entries: vec![TimelineEntryRow {
+                        id: "tl-1".into(),
+                        kind: "activity".into(),
+                        created_at: 0,
+                        actor_type: Some("agent".into()),
+                        actor_id: Some("agent-1".into()),
+                        action: Some("task_started".into()),
+                        ..TimelineEntryRow::default()
+                    }],
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().activity().len(),
+            1,
+            "the pane recovers: one error reply must not disable it forever"
         );
     }
 

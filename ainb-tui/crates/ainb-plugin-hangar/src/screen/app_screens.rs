@@ -1493,9 +1493,7 @@ impl ScreenStates {
     /// next reply is for it. The ONE way to ask for a timeline — enforced by the
     /// field being private, not by this sentence.
     pub fn arm_activity_fetch(&mut self, issue_id: String) {
-        self.activity_fetch_issue = Some(issue_id.clone());
         self.pending_activity_fetch = Some(issue_id);
-        self.activity_fetches_outstanding = self.activity_fetches_outstanding.saturating_add(1);
     }
 
     /// Take the armed fetch to fire it, if any. The ONE drain.
@@ -1503,13 +1501,30 @@ impl ScreenStates {
         self.pending_activity_fetch.take()
     }
 
+    /// Record that a `hangar/issue_timeline` request for `issue_id` actually
+    /// went out. Called ONLY after a successful send.
+    ///
+    /// Counting sends rather than arms is what keeps the ledger honest: an arm
+    /// that never reaches the socket (no stream yet, an encode failure, a send
+    /// failure — all three log and continue) would otherwise leave a reply owed
+    /// forever, and one such leak wedges the pane for the life of the process.
+    /// It also makes the batching case correct for free, since two arms with no
+    /// render between them coalesce into the one `Option` and so into one send.
+    pub fn note_activity_fetch_sent(&mut self, issue_id: String) {
+        self.activity_fetch_issue = Some(issue_id);
+        self.activity_fetches_outstanding = self.activity_fetches_outstanding.saturating_add(1);
+    }
+
     /// The issue a just-arrived `hangar/issue_timeline` reply belongs to, or
     /// `None` when it cannot be attributed.
     ///
-    /// Consumes one outstanding fetch. While two or more were in flight the
-    /// answer is `None`: they share one JSON-RPC id, so the second reply cannot
-    /// be told from the first, and a wrong narrative under the right title is
-    /// worse than a pane that stays as it was for one more round trip.
+    /// Consumes one outstanding fetch, and MUST be called for every reply
+    /// including an error or an undecodable one — the ledger counts replies, not
+    /// usable ones, so a caller that claims only on the happy path leaks.
+    /// While two or more were in flight the answer is `None`: they share one
+    /// JSON-RPC id, so the second reply cannot be told from the first, and a
+    /// wrong narrative under the right title is worse than a pane that stays as
+    /// it was for one more round trip.
     ///
     /// ponytail: counter, not a per-request id. Give the fetch its own id if a
     /// second surface ever needs to read a timeline concurrently.
