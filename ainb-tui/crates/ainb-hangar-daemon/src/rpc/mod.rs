@@ -548,10 +548,16 @@ async fn serve_conn(
                         // A2: the same subscription's TRANSCRIPT half, drained
                         // from its own broadcast so a chatty run cannot evict the
                         // lifecycle events above it (see `EventBroker`). Two
-                        // forwarders means a `TaskFinished` can overtake the last
-                        // `TaskMessage` of its run; both consumers key on the task
-                        // id and neither orders across the two, so the only effect
-                        // is a banner clearing a beat early.
+                        // forwarders means the two streams are unordered against
+                        // each other in BOTH directions: a `TaskFinished` can
+                        // overtake its run's last `TaskMessage`, and a
+                        // `TaskMessage` can overtake the `TaskStarted` that opens
+                        // the banner. Every consumer guards on the task id and on
+                        // the banner already existing, so the late arrival is
+                        // dropped either way (pinned by
+                        // `banner_hides_on_task_finished_event`); the visible
+                        // effect is a banner clearing a beat early, or a first
+                        // transcript line missed before it opens.
                         if let Some(old) = task_stream_forwarder.take() {
                             old.abort();
                         }

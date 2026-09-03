@@ -56,7 +56,14 @@ fn banner_elapsed_increments_on_tick() {
     assert_eq!(s.banner().unwrap().elapsed_secs, e0 + 2);
 }
 
-/// `TaskFinished` hides the banner.
+/// `TaskFinished` hides the banner, and a LATE transcript event for the same
+/// task does not resurrect it.
+///
+/// The daemon splits the transcript onto its own broadcast (track A step A2), so
+/// a `TaskMessage` / `TaskProgress` can arrive after its run's `TaskFinished`.
+/// Both arms guard on a banner that exists AND matches, which is the only reason
+/// that reordering is harmless; without the guards a late event would leave a
+/// zombie banner pinned across every screen.
 #[test]
 fn banner_hides_on_task_finished_event() {
     let mut s = BannerState::default();
@@ -73,6 +80,25 @@ fn banner_hides_on_task_finished_event() {
     )
     .state;
     assert!(s.banner().is_none());
+
+    for late in [
+        HangarEvent::TaskMessage {
+            task_id: task(),
+            kind: MessageKind::Agent,
+            body: "a line that lost the race".into(),
+        },
+        HangarEvent::TaskProgress {
+            task_id: task(),
+            tool_calls: 7,
+            elapsed_ms: 1_000,
+        },
+    ] {
+        s = reduce_banner(&s, BannerEvent::Event(late)).state;
+        assert!(
+            s.banner().is_none(),
+            "a late transcript event must not revive the banner"
+        );
+    }
 }
 
 /// A capital-`X` keystroke emits a cancel intent regardless of the originating
