@@ -1781,6 +1781,16 @@ struct SessionActor {
     scope_key: String,
     provider: String,
     cwd: String,
+    /// The durable transcript sink.
+    ///
+    /// ponytail: reach it through [`SessionActor::commit_chunk`], never
+    /// directly. Two entry points into it remain and both publish live first,
+    /// which is what makes "live equals the durable re-read" true by
+    /// construction rather than by remembering. A third that called
+    /// `writer.push` on its own would put a row in the re-read that never
+    /// streamed, and only an equality test whose fixture happened to exercise
+    /// that path would notice. That is not hypothetical: the turn-end flush and
+    /// the adapter-death drain were both written that way.
     writer: StoreWriter,
     reducer: TranscriptReducer,
     acp_session_id: Option<String>,
@@ -2815,15 +2825,7 @@ impl SessionActor {
             self.ingest(&notification).await;
         }
         if let Some(chunk) = self.reducer.flush() {
-            match self.writer.push(&chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => tracing::error!(
-                    session_key = %self.session_key,
-                    %error,
-                    "the adapter's last transcript chunk failed to commit"
-                ),
-            }
+            self.commit_chunk(&chunk).await;
         }
         self.pump().await;
     }
