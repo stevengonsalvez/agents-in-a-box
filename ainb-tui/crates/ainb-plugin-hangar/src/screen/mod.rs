@@ -314,6 +314,40 @@ pub fn is_failed_outcome(outcome: &str) -> bool {
     outcome == "failed"
 }
 
+/// `ch` as it is safe to hand a terminal, or `·` when it is not.
+///
+/// Every rendered char becomes a `Cell` symbol the host paints verbatim, so a
+/// screen that shows session-originated free text (assistant replies, error
+/// snippets, ASK option labels, issue titles) must strip anything that acts on
+/// the terminal or on the reader rather than printing:
+///
+/// - **C0 / DEL / C1** (`char::is_control`): a raw ESC or BEL reassembles on
+///   flush into a live control sequence — an OSC 52 clipboard write, a title
+///   set, a cursor jump — in the operator's own terminal.
+/// - **Bidi overrides and isolates** (`U+202A`-`U+202E`, `U+2066`-`U+2069`) and
+///   the invisible formatters around them (`U+200B`-`U+200F`, `U+2060`-`U+2064`,
+///   `U+FEFF`): these do not execute, they REORDER. On the one surface whose job
+///   is "pick the option you read", a crafted ASK label can render as a
+///   different string than the bytes that get delivered as the answer.
+///
+/// Surfaced as a visible middot, never dropped: a label that silently loses
+/// characters is its own kind of lie.
+#[must_use]
+pub fn display_char(ch: char) -> char {
+    if ch.is_control()
+        || matches!(ch,
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}')
+    {
+        '·'
+    } else {
+        ch
+    }
+}
+
 /// The result of folding one [`AppEvent`] into an [`AppState`].
 ///
 /// Carries the next state plus an optional [`Intent`] for the IO layer. A
