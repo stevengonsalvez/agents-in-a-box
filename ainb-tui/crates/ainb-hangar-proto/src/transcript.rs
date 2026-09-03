@@ -486,11 +486,9 @@ mod tests {
         .to_string();
         let out = classify_stream_json(&line);
         assert_eq!(out.len(), ENTRIES_PER_LINE_MAX);
-        assert!(
-            out.last().unwrap().1.starts_with("… "),
-            "the drop is marked, not silent: {:?}",
-            out.last()
-        );
+        // The COUNT, not just the prefix: an off-by-one here ships silently.
+        let dropped = ENTRIES_PER_LINE_MAX * 3 - (ENTRIES_PER_LINE_MAX - 1);
+        assert_eq!(out.last().unwrap().1, format!("… {dropped} more lines"));
     }
 
     /// The cap counts CHARS, not bytes: provider prose carries non-ASCII

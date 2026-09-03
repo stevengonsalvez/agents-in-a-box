@@ -750,15 +750,16 @@ fn answer_verdict_note(
 /// The timeline snapshot and the live buffer overlap by construction: the buffer
 /// arms when the request is written, the snapshot covers the log up to the
 /// daemon's read, and the runner writes each line to the JSONL before emitting
-/// it. Both halves are the same `(kind, body)` from the same classifier, so the
-/// overlap is an exact prefix/suffix match. Returns 0 when they do not overlap.
+/// it. Both halves are the same `(kind, body)` from the same classifier, so an
+/// overlap shows up as a matching prefix/suffix. Returns 0 when none matches.
 ///
 /// Both sides are scoped to ONE task before this runs, so a concurrent run's
 /// lines cannot break the match.
 ///
 /// ponytail: the seam is GUESSED from content, not identified. Longest match
 /// wins, so a repeated `(kind, body)` at the seam (snapshot tail `[X, X]`,
-/// buffer `[X, Y]`) reads as overlap 2 and drops a genuine `X`. Losing a
+/// buffer `[X, Y]`) matches at length 1 and replays `[Y]`, dropping the second
+/// genuine `X` if there was one. Losing a
 /// duplicate line beats printing one twice, which is why the bias is this way
 /// round; carrying the daemon's line ordinal on `TaskMessage` would identify the
 /// seam instead of guessing it, and that is the fix if it ever matters.
@@ -3164,29 +3165,23 @@ impl HangarPlugin {
         }
     }
 
-    /// Arm the live-line buffer when `req_id` is the timeline fetch, so lines
-    /// streaming in during the round trip are replayed onto the fresh overlay
-    /// (see [`Self::timeline_fetch_buffer`]).
+    /// Arm the live-line buffer and return the timeline fetch's request id, so
+    /// lines streaming in during the round trip are replayed onto the fresh
+    /// overlay (see [`Self::timeline_fetch_buffer`]).
+    ///
+    /// Returns the id rather than taking one: called from inside the
+    /// `CardTimeline` arm that BUILDS the request, so the arming and the fetch are
+    /// one expression and cannot be separated. Deleting the arming deletes the
+    /// fetch, which fails loudly instead of silently reopening the hole where a
+    /// timeline opened mid-run loses every line between the daemon's read and the
+    /// overlay install.
     ///
     /// Arms only when UNARMED: both replies carry the same req id, so overwriting
     /// on a second open would hand reply 1 fetch 2's buffer and leave reply 2
-    /// nothing to replay, reopening the hole this closes.
-    ///
-    /// Split out of the dispatch below purely so it is reachable from a test: the
-    /// dispatch needs a `HostClient`, which has no public constructor.
-    ///
-    /// ponytail: the CALL is still unguarded. This helper is tested, but deleting
-    /// `self.arm_timeline_buffer_for(req_id)` from the dispatch fails no test
-    /// (verified: 0 of 50 plugin suites), and silently reopens the hole where a
-    /// timeline opened mid-run loses every line between the daemon's read and the
-    /// overlay install. Closing it needs either a `HostClient` test seam in
-    /// `ainb-plugin-sdk-rust` or widening all 16 arms of the dispatch match to
-    /// carry a `#[must_use]` buffer beside the request. Both cost more than the
-    /// line is worth today; revisit when A6 reworks this seam.
-    fn arm_timeline_buffer_for(&mut self, req_id: i64) {
-        if req_id == BOARD_CARD_TIMELINE_REQ_ID {
-            self.timeline_fetch_buffer.get_or_insert_with(Default::default);
-        }
+    /// nothing to replay.
+    fn arm_timeline_buffer(&mut self) -> i64 {
+        self.timeline_fetch_buffer.get_or_insert_with(Default::default);
+        BOARD_CARD_TIMELINE_REQ_ID
     }
 
     /// Fire a deferred board mutation RPC raised by the Boards screen (P4 / D8,
@@ -3340,7 +3335,9 @@ impl HangarPlugin {
             // Timeline fetch answers under its own req id with the raw transcript;
             // the reply handler parses it into the overlay.
             BoardsAction::CardTimeline { board_id, issue_id } => (
-                BOARD_CARD_TIMELINE_REQ_ID,
+                // Armed HERE, in the arm that builds the request, so the buffer and
+                // the fetch cannot be separated. See `arm_timeline_buffer`.
+                self.arm_timeline_buffer(),
                 daemon_methods::HANGAR_BOARD_CARD_TIMELINE,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id }),
             ),
@@ -3386,7 +3383,6 @@ impl HangarPlugin {
             // Handled above as a local note; never reached here.
             BoardsAction::CardAttach { .. } => return,
         };
-        self.arm_timeline_buffer_for(req_id);
         let Ok(body) = encode_request(req_id, method, params) else {
             return;
         };
@@ -6480,6 +6476,64 @@ mod tests {
         );
     }
 
+    /// The buffer holds EVERY task's lines, so a concurrent run's line must not
+    /// reach the overlay OR shift the overlap. Deleting the `retain` leaves the
+    /// whole crate green, because every other fixture uses one task id.
+    #[test]
+    fn a_concurrent_runs_line_neither_shifts_the_overlap_nor_lands() {
+        use ainb_hangar_proto::events::MessageKind;
+
+        let mut p = HangarPlugin::new();
+        let mut armed = std::collections::VecDeque::new();
+        // A FOREIGN line first: without the retain it breaks the prefix match, so
+        // the overlap collapses to 0 and "second" is replayed on top of itself.
+        armed.push_back((
+            "t2".to_string(),
+            MessageKind::Agent,
+            "other run".to_string(),
+        ));
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "second".to_string()));
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "third".to_string()));
+        p.timeline_fetch_buffer = Some(armed);
+
+        let jsonl = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#,
+        ]
+        .join("\n");
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some("t1".into()),
+                    provider: Some("claude".into()),
+                    jsonl,
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+
+        let bodies: Vec<&str> = p
+            .screens
+            .boards
+            .timeline()
+            .expect("overlay opens")
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                crate::screen::task_detail::ViewEntry::Line(l) => Some(l.body()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second", "third"],
+            "the foreign line neither lands nor breaks the dedupe"
+        );
+    }
+
     /// A second open while one fetch is in flight must NOT overwrite the buffer:
     /// both replies carry the same req id, so reply 1 would drain fetch 2's buffer
     /// and reply 2 would find nothing.
@@ -6494,7 +6548,7 @@ mod tests {
             "already here".to_string(),
         ));
         p.timeline_fetch_buffer = Some(armed);
-        p.arm_timeline_buffer_for(BOARD_CARD_TIMELINE_REQ_ID);
+        p.arm_timeline_buffer();
         assert_eq!(
             p.timeline_fetch_buffer.as_ref().map(std::collections::VecDeque::len),
             Some(1),
@@ -6502,22 +6556,17 @@ mod tests {
         );
     }
 
-    /// The timeline fetch arms the buffer; no other board RPC does. Pins the
-    /// condition itself, which the two drain tests cannot: they set the buffer by
-    /// hand, so both stay green if the arming is deleted.
+    /// Arming installs the buffer AND yields the fetch's request id, so the
+    /// dispatch cannot obtain one without the other.
     #[test]
-    fn only_the_timeline_fetch_arms_the_buffer() {
+    fn arming_the_buffer_yields_the_timeline_request_id() {
         let mut p = HangarPlugin::new();
-        p.arm_timeline_buffer_for(BOARDS_REQ_ID);
         assert!(
             p.timeline_fetch_buffer.is_none(),
-            "a board list fetch must not arm it"
+            "unarmed before the fetch"
         );
-        p.arm_timeline_buffer_for(BOARD_CARD_TIMELINE_REQ_ID);
-        assert!(
-            p.timeline_fetch_buffer.is_some(),
-            "the timeline fetch must arm it"
-        );
+        assert_eq!(p.arm_timeline_buffer(), BOARD_CARD_TIMELINE_REQ_ID);
+        assert!(p.timeline_fetch_buffer.is_some(), "the fetch arms it");
     }
 
     /// A failed timeline fetch must DISARM the buffer, not leave it armed. The

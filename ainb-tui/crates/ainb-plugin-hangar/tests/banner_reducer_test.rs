@@ -61,9 +61,10 @@ fn banner_elapsed_increments_on_tick() {
 ///
 /// The daemon splits the transcript onto its own broadcast (track A step A2), so
 /// a `TaskMessage` / `TaskProgress` can arrive after its run's `TaskFinished`.
-/// Both arms guard on a banner that exists AND matches, which is the only reason
-/// that reordering is harmless; without the guards a late event would leave a
-/// zombie banner pinned across every screen.
+/// Only `TaskStarted` constructs a banner, so a late event cannot resurrect one;
+/// what the guards prevent is the leftover state a hidden banner would otherwise
+/// keep accumulating, which is why the message text is asserted and not just the
+/// banner's absence.
 #[test]
 fn banner_hides_on_task_finished_event() {
     let mut s = BannerState::default();
@@ -103,6 +104,32 @@ fn banner_hides_on_task_finished_event() {
             "and must not write through to the hidden banner's message"
         );
     }
+}
+
+/// A FOREIGN task's progress must not write into this banner. Nothing exercised
+/// the task-id filter, so deleting it shipped a banner showing another run's
+/// tool count.
+#[test]
+fn a_foreign_tasks_progress_does_not_touch_the_banner() {
+    let mut s = BannerState::default();
+    s = reduce_banner(&s, BannerEvent::Event(queued())).state;
+    s = reduce_banner(&s, BannerEvent::Event(started())).state;
+    assert_eq!(s.banner().unwrap().tool_calls, 0);
+
+    s = reduce_banner(
+        &s,
+        BannerEvent::Event(HangarEvent::TaskProgress {
+            task_id: TaskId::from_str("t2").unwrap(),
+            tool_calls: 99,
+            elapsed_ms: 1_000,
+        }),
+    )
+    .state;
+    assert_eq!(
+        s.banner().unwrap().tool_calls,
+        0,
+        "another run's tool count must not land on this banner"
+    );
 }
 
 /// A capital-`X` keystroke emits a cancel intent regardless of the originating
