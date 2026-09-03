@@ -927,10 +927,27 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // would cancel every task past half an hour while the same task on the
         // process executor gets 2.5 h. Raise the pool's floor to the task budget
         // rather than leave a 5x cut invisible from the flag.
+        let configured_deadline = acp_config.turn_deadline;
         acp_config.turn_deadline = crate::run_loop::reconcile_turn_deadline(
-            acp_config.turn_deadline,
+            configured_deadline,
             crate::run_loop::acp_turn_budget(),
         );
+        // Say so when it actually moved. An invisible timeout change triggered
+        // by a flag is the defect class this fix exists to close, and raising
+        // the floor points it the safer way for tasks while opening a smaller
+        // one for CHAT: a wedged chat turn now squats its session slot for the
+        // longer window before the sweep reaps it. Whoever flips the flag
+        // should read that here, not discover it during an incident.
+        if acp_config.turn_deadline > configured_deadline {
+            tracing::warn!(
+                effective_secs = acp_config.turn_deadline.as_secs(),
+                configured_secs = configured_deadline.as_secs(),
+                "HANGAR_TASK_EXECUTOR=acp raised the acp turn deadline to the task runtime \
+                 budget (HANGAR_PROVIDER_MAX_RUNTIME_MS); a wedged CHAT turn on this daemon \
+                 now converges on the longer deadline too. Set AINB_ACP_TURN_DEADLINE_MS at \
+                 or above the task budget to pin it."
+            );
+        }
         let acp_pool = crate::acp_pool::AcpPool::new(store.clone(), broker.sink(), acp_config);
         let _acp_sweeper = acp_pool.spawn_sweeper();
         crate::acp_pool::install(acp_pool).await;
