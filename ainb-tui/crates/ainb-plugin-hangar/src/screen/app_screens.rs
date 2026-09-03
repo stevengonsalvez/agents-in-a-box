@@ -615,9 +615,11 @@ pub struct ScreenStates {
     /// the cached tasks + issues snapshots.
     ///
     /// Rebuilt by [`Self::refresh_inbox_names`] when either snapshot moves, NOT
-    /// per paint: the projection is two maps with a `String` clone per row and it
-    /// only changes when a snapshot lands, while the Inbox repaints on every
-    /// frame of a streaming run.
+    /// per paint: the projection is two maps with a `String` clone per row, it
+    /// only changes when a snapshot lands, and the Inbox repaints on every frame.
+    /// It rides the SNAPSHOT path instead, which is quieter by construction: the
+    /// one high-rate event, a streaming run's transcript line, moves no name in
+    /// here and is skipped (`plugin::apply_hangar_event`).
     inbox_names: super::inbox::InboxLookup,
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.

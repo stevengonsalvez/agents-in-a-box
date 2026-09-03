@@ -1221,16 +1221,21 @@ impl HangarPlugin {
         {
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
+        // A transcript line moves no name the inbox lookup holds (agent label,
+        // parent issue, display id, title), and a streaming run pushes them
+        // faster than anything else on this path, so it does not re-project.
+        let names_may_move = !matches!(event, HangarEvent::TaskMessage { .. });
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
             IssueListEvent::Event(event.clone()),
         )
         .state;
         self.screens.kanban = reduce_kanban(&self.screens.kanban, KanbanEvent::Event(event)).state;
-        // The inbox resolves its rows through a projection of those two caches,
-        // held off the paint path (crisp B1 review), so it is re-projected with
-        // them rather than rebuilt per frame.
-        self.screens.refresh_inbox_names();
+        // The inbox resolves its rows through a projection of those two caches, so
+        // it is re-projected WITH them (crisp B1 review) rather than per frame.
+        if names_may_move {
+            self.screens.refresh_inbox_names();
+        }
     }
 
     /// React to one fully-decoded daemon response.
