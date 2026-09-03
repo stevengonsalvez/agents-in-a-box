@@ -273,6 +273,29 @@ impl EventSink {
         let _ = self.tx.send(scoped);
     }
 
+    /// Publish `event` to LIVE workspace subscribers only, skipping the durable
+    /// outbox: the channel for a running task's transcript
+    /// ([`HangarEvent::TaskMessage`] / [`HangarEvent::TaskProgress`], track A
+    /// step A2).
+    ///
+    /// [`Self::emit`] appends one `event_log` row per event, and every one of
+    /// those commits takes the single `SQLite` write lock the whole control plane
+    /// shares. A run's transcript is thousands of lines, so logging it there
+    /// would put the transcript through that lock a second time for no gain: it
+    /// is ALREADY durable in the provider's `{logs}/<provider>.jsonl`, and
+    /// `hangar/board_card_timeline` re-reads it from exactly there. A subscriber
+    /// that missed the live lines backfills from that read, not from a replay.
+    ///
+    /// Same shape as [`Self::emit_attention`]: a stream whose durable source is
+    /// somewhere other than the event log stays off the log. Best-effort and
+    /// non-blocking: with no live subscriber the broadcast is dropped.
+    pub fn emit_live(&self, workspace_id: &str, event: HangarEvent) {
+        let _ = self.tx.send(ScopedEvent {
+            workspace_id: workspace_id.to_string(),
+            event,
+        });
+    }
+
     /// Publish an attention `event` on the FLEET-WIDE attention stream (spec P2).
     ///
     /// Only `HangarEvent::AttentionRaised` / `AttentionAnswered` belong here. This
