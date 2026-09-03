@@ -104,6 +104,14 @@ pub(crate) async fn bind_task_stream(
 /// A fresh classifier is correct here and not a shortcut: a lifecycle marker
 /// carries everything it renders, unlike a `tool_call_update` that needs the
 /// call before it.
+/// # Live AFTER durable here, inverting [`TranscriptSink`]'s rule
+///
+/// The sink publishes first because `StoreWriter` BUFFERS: waiting for it would
+/// hold the operator's view back by up to a flush interval. This append is
+/// immediate, so that ordering buys nothing — and publishing only on
+/// `Ok(stored)` means a failed insert never streams a line the durable re-read
+/// will not have. Matching the sink's order here would reintroduce divergence
+/// in the other direction.
 pub(crate) async fn append_and_publish(
     pool: &SqlitePool,
     events: &EventSink,
