@@ -274,30 +274,35 @@ struct AcpOption {
 }
 
 impl AcpPermission {
-    /// The id of the option `answer` names: an option id verbatim, else the
-    /// label verbatim, case-insensitively, or a 1-based digit (the rules of
-    /// [`picker_position`]). Anything else is refused by the caller, and so is
-    /// a label two options share: the tmux path reads the pane echo to catch
-    /// a wrong pick, nothing here can, and an adapter offering "Allow" for
-    /// both `allow_once` and `allow_always` must not hand out the broader
-    /// grant by list order.
+    /// The id of the option `answer` names: an option id, a label (verbatim
+    /// or case-insensitively) or, naming none of those, a 1-based digit (the
+    /// rules of [`picker_position`]). Anything else is refused by the caller,
+    /// and so is an answer that names MORE THAN ONE option across those rules
+    /// (a label two options share, or one option's id that is another's
+    /// label): the tmux path reads the pane echo to catch a wrong pick,
+    /// nothing here can, and an adapter offering "Allow" for both `allow_once`
+    /// and `allow_always` must not hand out the broader grant by list order.
     fn option_id(&self, answer: &str) -> Option<String> {
         let wanted = answer.trim();
         if wanted.is_empty() {
             return None;
         }
-        let rules: [&dyn Fn(&AcpOption) -> bool; 3] = [
-            &|o| o.option_id == wanted,
-            &|o| o.name.trim() == wanted,
-            &|o| o.name.trim().eq_ignore_ascii_case(wanted),
-        ];
-        for rule in rules {
-            let mut hits = self.options.iter().filter(|o| rule(o));
-            match (hits.next(), hits.next()) {
-                (Some(only), None) => return Some(only.option_id.clone()),
-                (Some(_), Some(_)) => return None,
-                (None, _) => {}
-            }
+        let mut named: Vec<&str> = self
+            .options
+            .iter()
+            .filter(|o| {
+                o.option_id == wanted
+                    || o.name.trim() == wanted
+                    || o.name.trim().eq_ignore_ascii_case(wanted)
+            })
+            .map(|o| o.option_id.as_str())
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        match named.as_slice() {
+            [only] => return Some((*only).to_string()),
+            [_, _, ..] => return None,
+            [] => {}
         }
         match wanted.parse::<usize>() {
             Ok(n) if (1..=self.options.len()).contains(&n) => {
@@ -1110,9 +1115,11 @@ mod tests {
         assert_eq!(p.option_id("yes"), None);
     }
 
-    /// A label two options share is refused by label (no pane echo can catch
-    /// a wrong pick here); the same options stay answerable by id or digit.
-    /// A blank answer never selects an option, even one whose id is blank.
+    /// An answer naming more than one option is refused (no pane echo can
+    /// catch a wrong pick here): a label two options share, the same label in
+    /// two cases, or one option's id that is another option's label. The same
+    /// options stay answerable by an unshared id or by digit. A blank answer
+    /// never selects an option, even one whose id is blank.
     #[test]
     fn acp_option_id_refuses_shared_labels_and_blank_answers() {
         let shared = acp_permission_from_payload(
@@ -1120,9 +1127,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            shared.option_id("Allow").as_deref(),
-            Some("allow-once"),
-            "one exact hit wins"
+            shared.option_id("Allow"),
+            None,
+            "an exact hit plus a case-insensitive hit name two options: refused"
         );
         assert_eq!(
             shared.option_id("ALLOW"),
@@ -1143,6 +1150,18 @@ mod tests {
         assert_eq!(twins.option_id("Allow"), None, "two exact hits: refused");
         assert_eq!(twins.option_id("b").as_deref(), Some("b"));
         assert_eq!(twins.option_id("1").as_deref(), Some("a"));
+
+        let crossed = acp_permission_from_payload(
+            r#"{"kind":"acp_permission","sessionKey":"k","requestFingerprint":"f","options":[{"optionId":"Reject","name":"Allow","kind":"allow_once"},{"optionId":"y","name":"Reject","kind":"reject_once"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            crossed.option_id("Reject"),
+            None,
+            "one option's id is another's label: refused, never the id by rule order"
+        );
+        assert_eq!(crossed.option_id("y").as_deref(), Some("y"));
+        assert_eq!(crossed.option_id("2").as_deref(), Some("y"));
 
         let blank_id = acp_permission_from_payload(
             r#"{"kind":"acp_permission","sessionKey":"k","requestFingerprint":"f","options":[{"optionId":"","name":"","kind":"allow_once"}]}"#,
