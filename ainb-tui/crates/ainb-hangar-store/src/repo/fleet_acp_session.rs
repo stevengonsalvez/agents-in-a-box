@@ -235,6 +235,13 @@ impl FleetAcpSessionRepo {
     /// Ordered because the live-scope uniqueness index does NOT cover dead
     /// rows: a scope re-prompted after a teardown accumulates them, and the
     /// newest is the one that ran.
+    ///
+    /// ponytail: for the same reason this is a table SCAN, since
+    /// `idx_fleet_acp_session_scope_active` is partial to `ACTIVE`/`IDLE` and a
+    /// finished task's row is neither. One row per session ever opened is a few
+    /// thousand on a busy fleet, and the only caller is a human opening a card's
+    /// timeline, so this is sub-millisecond and not on any hot path. Add a plain
+    /// `scope_key` index if a caller ever needs it per-frame.
     pub async fn latest_by_scope(
         pool: &SqlitePool,
         scope_key: &str,
