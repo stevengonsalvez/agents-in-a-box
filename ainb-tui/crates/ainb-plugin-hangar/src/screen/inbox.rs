@@ -28,6 +28,13 @@
 //! deliberately different numbers — one is "what is open", the other "what is
 //! blocking an agent".
 //!
+//! A consequence of §2.1's four-code collapse: an `approval` or a
+//! `codex_request_user` row reads `ASK` and counts toward the badge, but only a
+//! structured `ask_user_question` carries options, so selecting one of the other
+//! two shows `(no inline options — surfaced for visibility)` rather than ①②③.
+//! `ASK` is the vocabulary's word for "a question is waiting", not a promise
+//! that this pane can answer it; free-text answering is ACP work, not B3.
+//!
 //! The rows are the SAME [`ControlCenterState`] the Control Center paints,
 //! handed in at render time rather than copied, so the two surfaces cannot
 //! disagree about what is waiting. The inline answer is
@@ -606,7 +613,9 @@ fn render_needs_you(
             // The inline answer, byte for byte the Control Center's: the same
             // ①②③ renderer, driven by the same reducer, raising the same
             // `attention/answer` RPC (crisp B3 §2.4, "moved not rewritten").
-            control_center::render_options(
+            // The next card starts after the rows the renderer says it took, not
+            // after a second guess at them: a row added there moves this one.
+            let used = control_center::render_options(
                 buf,
                 3,
                 row,
@@ -615,7 +624,7 @@ fn render_needs_you(
                 card,
                 attention.option_cursor(),
             );
-            row = row.saturating_add(answer_block_height(attention));
+            row = row.saturating_add(used);
         }
     }
 }

@@ -880,8 +880,9 @@ fn render_detail(
     row = put_line(buf, x0, row, bottom, area_w, &tl, MUTED_GRAY);
     row = row.saturating_add(1);
 
-    // Inline ASK answering — options with ①②③, then the answer hints.
-    render_options(buf, x0, row, bottom, area_w, card, state.option_cursor());
+    // Inline ASK answering — options with ①②③, then the answer hints. Nothing
+    // follows it in this pane, so the height it returns has no caller here.
+    let _ = render_options(buf, x0, row, bottom, area_w, card, state.option_cursor());
 }
 
 /// How many rows [`render_options`] paints for `card`, given room for all of them.
@@ -910,7 +911,17 @@ pub(crate) fn options_height(card: &AttentionCard) -> u16 {
 /// Shared with the Inbox's `needs you` block (crisp B3 §2.4): the inline answer
 /// there is THIS renderer paired with [`reduce_control_center`], not a second
 /// implementation of the ①②③ affordance that could drift from the one the
-/// `attention/answer` path expects. Its row count is [`options_height`].
+/// `attention/answer` path expects.
+///
+/// RETURNS the rows the block occupies, which the caller must use to place
+/// whatever comes next. That return is the whole point: a row added here shows
+/// up in it whether or not that row paints a glyph, so a blank spacer (an idiom
+/// `render_detail` already uses twice) cannot slip past a guard that counts
+/// painted cells. The count is what [`options_height`] must equal.
+///
+/// It is the FULL height, not the clipped one: `bottom` stops the paint walk,
+/// not the arithmetic, so a caller sizing a block gets the same answer whether
+/// or not the pane happened to be tall enough this frame.
 pub(crate) fn render_options(
     buf: &mut WireBuffer,
     x0: u16,
@@ -919,7 +930,7 @@ pub(crate) fn render_options(
     area_w: u16,
     card: &AttentionCard,
     option_cursor: usize,
-) {
+) -> u16 {
     if !card.kind.is_answerable() {
         put_line(
             buf,
@@ -930,7 +941,7 @@ pub(crate) fn render_options(
             "(no inline options — surfaced for visibility)",
             MUTED_GRAY,
         );
-        return;
+        return 1;
     }
     let options = card.options();
     if options.is_empty() {
@@ -943,46 +954,50 @@ pub(crate) fn render_options(
             "(this ASK carries no options)",
             MUTED_GRAY,
         );
-        return;
+        return 1;
     }
 
+    // `used` counts every row the block owns; `row` only walks as far as the
+    // pane allows, because `put_str` clips on x and would happily paint below
+    // `bottom` if the walk were unguarded.
+    let mut used: u16 = 0;
     let mut row = top;
     row = put_line(buf, x0, row, bottom, area_w, "OPTIONS", GOLD);
+    used += 1;
     for (i, opt) in options.iter().enumerate() {
-        if row > bottom {
-            break;
+        if row <= bottom {
+            let color = if i == option_cursor {
+                SELECTION_GREEN
+            } else {
+                SOFT_WHITE
+            };
+            let glyph = circled_digit(i + 1);
+            let mut x = put_str(buf, x0, row, &glyph, color, area_w);
+            x = put_str(buf, x, row, " ", color, area_w);
+            put_str(buf, x, row, &opt.label, color, area_w);
+            row += 1;
         }
-        let selected = i == option_cursor;
-        let color = if selected {
-            SELECTION_GREEN
-        } else {
-            SOFT_WHITE
-        };
-        let glyph = circled_digit(i + 1);
-        let mut x = put_str(buf, x0, row, &glyph, color, area_w);
-        x = put_str(buf, x, row, " ", color, area_w);
-        put_str(buf, x, row, &opt.label, color, area_w);
-        row += 1;
+        used = used.saturating_add(1);
         if let Some(desc) = &opt.description {
             if row <= bottom {
                 let dx = put_str(buf, x0, row, "   ", MUTED_GRAY, area_w);
                 put_str(buf, dx, row, &truncate_chars(desc, 48), MUTED_GRAY, area_w);
                 row += 1;
             }
+            used = used.saturating_add(1);
         }
     }
     // Hints next to the control (feedback_keybinding_hints_near_control).
-    if row <= bottom {
-        put_line(
-            buf,
-            x0,
-            row,
-            bottom,
-            area_w,
-            "h/l option · enter/1-9 answer",
-            MUTED_GRAY,
-        );
-    }
+    put_line(
+        buf,
+        x0,
+        row,
+        bottom,
+        area_w,
+        "h/l option · enter/1-9 answer",
+        MUTED_GRAY,
+    );
+    used.saturating_add(1)
 }
 
 /// The status line text + colour for a card.
@@ -1511,15 +1526,19 @@ mod tests {
         );
     }
 
-    /// `options_height` is exactly what `render_options` paints, for every card
-    /// shape the board can hold.
+    /// `options_height` is exactly the height `render_options` reports, for
+    /// every card shape the board can hold, clipped pane or not.
     ///
     /// MUTATION GUARD: this is the binding the Inbox's block sizing rests on.
-    /// Add a row to the renderer without counting it here and the Inbox paints
-    /// its next card row over the last option — silently, because a clipped
-    /// renderer never overruns the pane, which is all a pane-floor test checks.
+    /// Add a row to the renderer without counting it in `options_height` and the
+    /// Inbox paints its next card row over the last option.
+    ///
+    /// Asserts the RETURNED height, not the count of painted rows: a spacer that
+    /// advances `row` without painting a glyph (an idiom `render_detail` uses
+    /// twice) would change the real height and leave a painted-cell count
+    /// unmoved, which is a guard that cannot fail on the thing it is for.
     #[test]
-    fn render_options_paints_exactly_options_height_rows() {
+    fn render_options_reports_exactly_options_height_rows() {
         let described = serde_json::json!({
             "kind": "ASK",
             "context": { "question": "q", "options": [
@@ -1547,13 +1566,26 @@ mod tests {
         ] {
             let card = AttentionCard::from_row(&row("c", kind, 1, &payload));
             let mut buf = WireBuffer::new(120, 40);
-            render_options(&mut buf, 0, 0, 39, 120, &card, 0);
+            let used = render_options(&mut buf, 0, 0, 39, 120, &card, 0);
+            assert_eq!(used, options_height(&card), "{name}: reported height");
+
+            // Every reported row is a row the caller must skip, so with room for
+            // all of them none may be left unpainted and none may land below.
             let painted: std::collections::BTreeSet<u16> =
                 buf.cells.iter().map(|(c, _)| c.y).collect();
             assert_eq!(
-                u16::try_from(painted.len()).unwrap_or(u16::MAX),
-                options_height(&card),
-                "{name}: painted rows {painted:?}"
+                painted.iter().copied().max().map_or(0, |y| y + 1),
+                used,
+                "{name}: painted rows {painted:?} do not fill the reported height"
+            );
+
+            // And the height does not shrink when the pane is too short to paint
+            // it: a caller sizing a block gets the same answer either way.
+            let mut cramped = WireBuffer::new(120, 40);
+            assert_eq!(
+                render_options(&mut cramped, 0, 0, 0, 120, &card, 0),
+                used,
+                "{name}: height changed under clipping"
             );
         }
     }
