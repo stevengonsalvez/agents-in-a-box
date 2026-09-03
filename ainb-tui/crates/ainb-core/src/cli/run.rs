@@ -140,23 +140,30 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         None
     };
 
-    let claude_cmd = codex_remote
-        .as_ref()
-        .map(|remote| {
-            // Pre-launch, at the launch site rather than inside the builder:
-            // `-C` into a directory Codex has not seen shows a blocking trust
-            // modal, and under `--remote` no flag suppresses it. Kept out of
-            // `remote_codex_command` so that stays pure and its tests never
-            // write to the user's Codex config.
-            crate::interactive::session_manager::trust_codex_project_dir(&work_dir);
-            remote_codex_command(
+    let claude_cmd = if provider == CliProvider::Codex {
+        // Pre-launch, at the launch site rather than inside the builders: a
+        // directory Codex has not seen shows a blocking trust modal, and no CLI
+        // flag suppresses it. Kept out of the builders so they stay pure and
+        // their tests never write to the user's Codex config.
+        crate::interactive::session_manager::trust_codex_project_dir(&work_dir);
+        match codex_remote.as_ref() {
+            Some(remote) => remote_codex_command(
                 remote,
                 &work_dir,
                 model.as_deref(),
                 args.dangerously_skip_permissions,
-            )
-        })
-        .unwrap_or_else(|| build_agent_command(&args));
+            ),
+            // No shared thread (no daemon, or an ephemeral home). Everything
+            // that keeps the CLI off a blocking modal still applies, so this
+            // does NOT fall through to `build_agent_command`: that builder is
+            // provider-generic and emits neither the trust write above nor the
+            // hook-trust flag, and a modal STALLS the pane instead of failing,
+            // so the run reports success over a session that never started.
+            None => codex_local_command(model.as_deref(), args.dangerously_skip_permissions),
+        }
+    } else {
+        build_agent_command(&args)
+    };
 
     // Step 6b: Parent linkage (event-driven plumbing). When spawned with
     // `--parent <id>`, this session is a child of an orchestrator (e.g. ATC).
@@ -605,6 +612,37 @@ fn remote_codex_command(
     .join(" ")
 }
 
+/// Shell-ready argv for a Codex session running WITHOUT a shared remote thread.
+///
+/// The daemon is load-bearing for the shared thread and for nothing else, so a
+/// degraded session drops exactly the two remote-specific arguments
+/// (`--remote <endpoint>` and `resume <thread_id>`) and keeps everything whose
+/// job is to get the CLI to a prompt. `--dangerously-bypass-hook-trust` is one
+/// of those: Ainb's own `notifyd install` rewrites `~/.codex/hooks.json`,
+/// invalidating Codex's positional hook hashes, and the resulting "Hooks need
+/// review" modal parks the launch forever rather than failing it.
+///
+/// `model` is already the launch model (`launch_model` resolved any retiring id
+/// to its replacement), so it is emitted as given.
+fn codex_local_command(model: Option<&str>, skip_permissions: bool) -> String {
+    let provider = CliProvider::Codex;
+    let mut command = vec![
+        provider.command().to_string(),
+        "--dangerously-bypass-hook-trust".to_string(),
+    ];
+    if let Some(model) = model {
+        command.extend(["--model".to_string(), model.to_string()]);
+    }
+    if skip_permissions {
+        command.push(provider.skip_permissions_flag().to_string());
+    }
+    command
+        .iter()
+        .map(|part| shell_escape::escape(part.into()).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
 /// Best-effort: on timeout we send anyway rather than drop the prompt.
 async fn wait_for_prompt_ready(session_name: &str, timeout: Duration) {
@@ -1012,6 +1050,34 @@ mod tests {
             "codex -c check_for_update_on_startup=false --disable apps \
              --dangerously-bypass-hook-trust --remote \
              'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
+        );
+    }
+
+    /// The degraded launch (no daemon, so no shared thread) keeps every flag
+    /// whose job is to reach a prompt, and drops only the remote ones.
+    ///
+    /// `build_agent_command` is what this path used to fall through to, and it
+    /// emits neither `--dangerously-bypass-hook-trust` nor the trust write its
+    /// caller does, so the pane parked on a modal while `ainb run` reported a
+    /// session created.
+    #[test]
+    fn codex_local_command_keeps_the_flags_that_reach_a_prompt() {
+        let command = codex_local_command(Some("gpt-5.6-luna"), true);
+        assert_eq!(
+            command,
+            "codex --dangerously-bypass-hook-trust --model gpt-5.6-luna \
+             --dangerously-bypass-approvals-and-sandbox"
+        );
+
+        let plain = codex_local_command(None, false);
+        assert_eq!(plain, "codex --dangerously-bypass-hook-trust");
+        assert!(
+            !plain.contains("--remote"),
+            "a degraded session has no endpoint to join"
+        );
+        assert!(
+            !plain.contains("resume"),
+            "a degraded session has no thread to resume"
         );
     }
 

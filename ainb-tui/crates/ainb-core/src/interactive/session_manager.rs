@@ -167,6 +167,33 @@ fn resolved_hangar_home() -> String {
     )
 }
 
+/// Whether a daemon error means there is no daemon to talk to at all, as
+/// opposed to a daemon that answered and the exchange then went wrong.
+///
+/// Only the first class may degrade. `NoHome` and `Token` are what
+/// [`crate::fleet::bridge::daemon::DaemonClient::from_env`] reports when the
+/// home is unresolvable or the token file is absent, which is what a home no
+/// daemon has ever booted on looks like; `Connect` is the dial itself finding
+/// nothing listening. Everything else (`Rpc`, `Decode`, `Io`, `Timeout`) means
+/// the daemon IS there, so it stays a hard failure the user is told to act on.
+fn daemon_unreachable(error: &crate::fleet::bridge::daemon::DaemonError) -> bool {
+    use crate::fleet::bridge::daemon::DaemonError;
+    matches!(
+        error,
+        DaemonError::NoHome | DaemonError::Token(_) | DaemonError::Connect { .. }
+    )
+}
+
+/// What the user is told when no daemon answers, built here rather than inline
+/// in the `warn!` so the sentence naming what the session loses is a value a
+/// test can read.
+fn unreachable_daemon_warning(error: &crate::fleet::bridge::daemon::DaemonError) -> String {
+    format!(
+        "no Hangar daemon answered ({error}); launching this Codex session without shared \
+         remote control - the phone and any other app-server client cannot join its conversation"
+    )
+}
+
 /// Create or resume one exact shared Codex app-server thread for Interactive.
 ///
 /// `Ok(None)` is a successful launch WITHOUT shared remote control: the reason
@@ -187,6 +214,13 @@ pub(crate) async fn ensure_codex_remote_thread(
             "Codex Headroom is unavailable with shared remote control; disable Headroom for this session"
         );
     }
+    let params = ainb_hangar_proto::fleet::CodexSessionEnsureParams {
+        session_id: session_id.to_string(),
+        cwd: cwd.display().to_string(),
+        model: model.map(str::to_owned),
+        thread_id: existing_thread_id,
+        skip_permissions,
+    };
     ensure_codex_remote_thread_with(
         // Ephemeral: `ainb run` prints its summary and exits, while the daemon
         // has to keep serving the tmux session it just created.
@@ -196,40 +230,61 @@ pub(crate) async fn ensure_codex_remote_thread(
             )
         },
         resolved_hangar_home,
-        ainb_hangar_proto::fleet::CodexSessionEnsureParams {
-            session_id: session_id.to_string(),
-            cwd: cwd.display().to_string(),
-            model: model.map(str::to_owned),
-            thread_id: existing_thread_id,
-            skip_permissions,
+        || async move {
+            let client = crate::fleet::bridge::daemon::DaemonClient::from_env()?;
+            client.codex_session_ensure(params).await
         },
     )
     .await
 }
 
-/// [`ensure_codex_remote_thread`] with its two impure inputs passed in: the
-/// autostart outcome and the home to name when that outcome is a skip.
+/// [`ensure_codex_remote_thread`] with its three impure inputs passed in: the
+/// autostart outcome, the home to name when that outcome is a skip, and the
+/// daemon exchange itself.
 ///
 /// The seam is what makes the degrade testable at all. The ephemeral branch
 /// returns BEFORE the daemon connect, and that ordering is the whole claim:
 /// checking [`shared_remote_control_available`] on its own would leave "and
 /// then the launch still succeeds" untested, which is how a degrade that is
-/// computed and then ignored still passes its suite.
-async fn ensure_codex_remote_thread_with(
+/// computed and then ignored still passes its suite. The same applies to the
+/// exchange: an unreachable daemon has to be shown yielding a LAUNCH, not just
+/// a classification.
+async fn ensure_codex_remote_thread_with<Ensure, Exchange>(
     autostart: impl FnOnce() -> crate::cli::hangar::DaemonAutostart,
     home: impl FnOnce() -> String,
-    params: ainb_hangar_proto::fleet::CodexSessionEnsureParams,
-) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>> {
+    ensure: Ensure,
+) -> anyhow::Result<Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult>>
+where
+    Ensure: FnOnce() -> Exchange,
+    Exchange: std::future::Future<
+            Output = Result<
+                ainb_hangar_proto::fleet::CodexSessionEnsureResult,
+                crate::fleet::bridge::daemon::DaemonError,
+            >,
+        >,
+{
     if !shared_remote_control_available(autostart(), home) {
         return Ok(None);
     }
-    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-        .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
-    client.codex_session_ensure(params).await.map(Some).map_err(|error| {
-        let message = format_codex_remote_control_failure(&error.to_string());
-        warn!(error = %error, "{message}");
-        anyhow::Error::msg(error.to_string()).context(message)
-    })
+    match ensure().await {
+        Ok(remote) => Ok(Some(remote)),
+        // No daemon answered: an unresolvable home, no token file, or nothing
+        // listening on the socket. The daemon is load-bearing for the SHARED
+        // thread and nothing else, so this costs the session exactly the same
+        // one feature an ephemeral home does and degrades the same way.
+        // Failing instead is how a stopped daemon turned `ainb run --tool
+        // codex` into a hard error whose cleanup deleted the worktree the run
+        // had just created.
+        Err(error) if daemon_unreachable(&error) => {
+            warn!("{}", unreachable_daemon_warning(&error));
+            Ok(None)
+        }
+        Err(error) => {
+            let message = format_codex_remote_control_failure(&error.to_string());
+            warn!(error = %error, "{message}");
+            Err(anyhow::Error::msg(error.to_string()).context(message))
+        }
+    }
 }
 
 /// Short actionable TUI message for a shared Codex bridge failure.
@@ -4438,13 +4493,7 @@ trust_level = "trusted"
         let remote = super::ensure_codex_remote_thread_with(
             || DaemonAutostart::SkippedEphemeralHome,
             || "/tmp/bj.Q9x7fk/.agents-in-a-box".to_string(),
-            ainb_hangar_proto::fleet::CodexSessionEnsureParams {
-                session_id: uuid::Uuid::new_v4().to_string(),
-                cwd: "/worktree".to_string(),
-                model: None,
-                thread_id: None,
-                skip_permissions: false,
-            },
+            must_not_dial,
         )
         .await
         .expect("an ephemeral home must not fail the launch");
@@ -4453,6 +4502,89 @@ trust_level = "trusted"
             remote.is_none(),
             "the session must launch with no shared remote thread, exactly as one with the \
              feature disabled does"
+        );
+    }
+
+    /// The exchange an ephemeral home must never reach.
+    async fn must_not_dial() -> Result<
+        ainb_hangar_proto::fleet::CodexSessionEnsureResult,
+        crate::fleet::bridge::daemon::DaemonError,
+    > {
+        panic!("an ephemeral home must return before the daemon is dialled")
+    }
+
+    /// A daemon that is not there costs the session its shared thread and
+    /// nothing else, so the launch continues.
+    ///
+    /// This is the failure that hit a real machine: the daemon was stopped, the
+    /// dial was refused, and the connect error became "Codex remote control
+    /// unavailable", whose cleanup deleted the worktree. The degrade for an
+    /// ephemeral home could never fire here, because `~/.agents-in-a-box` is a
+    /// perfectly durable home; the only thing missing was a listener.
+    #[tokio::test]
+    async fn an_unreachable_daemon_launches_codex_without_a_remote_thread() {
+        use crate::cli::hangar::DaemonAutostart;
+        use crate::fleet::bridge::daemon::DaemonError;
+
+        for error in [
+            DaemonError::Connect {
+                path: "/Users/x/.agents-in-a-box/hangar.sock".to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "Connection refused (os error 61)",
+                ),
+            },
+            DaemonError::NoHome,
+            DaemonError::Token("No such file or directory (os error 2)".to_string()),
+        ] {
+            let warning = super::unreachable_daemon_warning(&error);
+            let remote = super::ensure_codex_remote_thread_with(
+                // A durable home, so the ephemeral degrade cannot be what
+                // rescues this launch.
+                || DaemonAutostart::Failed,
+                || panic!("a durable home must not be reported as ephemeral"),
+                || async { Err(error) },
+            )
+            .await
+            .unwrap_or_else(|failure| panic!("{warning} must not fail the launch: {failure:#}"));
+
+            assert!(
+                remote.is_none(),
+                "the session must launch with no shared remote thread: {warning}"
+            );
+            assert!(
+                warning.contains("shared remote control"),
+                "the warning must name what the session loses: {warning}"
+            );
+        }
+    }
+
+    /// A daemon that ANSWERS and refuses is a real failure, not a degrade.
+    ///
+    /// The guard on the guard: widening the degrade to every daemon error would
+    /// launch a session whose shared thread silently never appears, which is
+    /// the bug the connect degrade is not allowed to become.
+    #[tokio::test]
+    async fn a_daemon_that_answers_with_an_error_still_fails_the_launch() {
+        use crate::cli::hangar::DaemonAutostart;
+        use crate::fleet::bridge::daemon::DaemonError;
+
+        let failure = super::ensure_codex_remote_thread_with(
+            || DaemonAutostart::Started,
+            || panic!("a durable home must not be reported as ephemeral"),
+            || async {
+                Err(DaemonError::Rpc {
+                    code: -32001,
+                    message: "cannot generate app-server schema".to_string(),
+                })
+            },
+        )
+        .await
+        .expect_err("a daemon that answers and refuses must fail the launch");
+
+        assert!(
+            failure.to_string().contains("Codex unavailable"),
+            "the user must get the short next action: {failure:#}"
         );
     }
 }
