@@ -427,6 +427,47 @@ fn spawn_error() -> RunOutcome {
     }
 }
 
+/// The outcome ONE enumerated delivery token names, whichever terminal state
+/// carries it.
+///
+/// The token is the whole answer, and the state is not part of the key. The
+/// pool writes the SAME converge cause under two different states depending on
+/// where the prompt was standing when the session converged — `drain_queue`
+/// resolves a still-queued prompt `FAILED`, `converge_dirty_session` resolves
+/// an issued one `UNKNOWN` — and `attach_with_one_requeue` writes
+/// `adapter_exit` on a `FAILED` leg while the exit watcher writes it on an
+/// `UNKNOWN` one. Neither difference changes how the task should be retried, so
+/// keying on the pair meant four reachable combinations (`FAILED`+`adapter_exit`,
+/// `FAILED`+`turn_deadline`, `FAILED`+`daemon_restart`, `UNKNOWN`+`operator_stop`)
+/// answered `ProviderContractDrift`/NoRetry — burning the retry chain on
+/// exactly the transient faults that should resume.
+fn outcome_for_token(token: &str, result: &RunnerResult) -> Option<RunOutcome> {
+    use crate::acp_pool as tokens;
+
+    let failed = |reason| {
+        Some(RunOutcome::Failed {
+            reason,
+            result: result.clone(),
+        })
+    };
+    match token {
+        tokens::DELIVERY_OPERATOR_STOP => Some(RunOutcome::Cancelled(result.clone())),
+        // Infrastructure, not the work: resume the same conversation.
+        tokens::DELIVERY_ADAPTER_EXIT
+        | tokens::DELIVERY_BREAKER_OPEN
+        | tokens::DELIVERY_PROVIDER_AT_CAPACITY
+        | tokens::DELIVERY_QUEUE_FULL => failed(FailureReason::RuntimeOffline),
+        tokens::DELIVERY_TURN_DEADLINE => failed(FailureReason::Timeout),
+        tokens::DELIVERY_DAEMON_RESTART => failed(FailureReason::RuntimeRecovery),
+        // A misconfigured adapter will not self-heal on a re-dispatch.
+        tokens::DELIVERY_SPAWN_FAILED
+        | tokens::DELIVERY_MODE_UNPROVEN
+        | tokens::DELIVERY_TURN_UNRECORDED => failed(FailureReason::SpawnError),
+        tokens::DELIVERY_SESSION_GONE => failed(FailureReason::ProvisionError),
+        _ => None,
+    }
+}
+
 /// Map a resolved delivery leg onto the outcome the task FSM finalizes.
 ///
 /// The detail is read as a `; `-joined TOKEN SET, never by equality: a plain
@@ -435,6 +476,14 @@ fn spawn_error() -> RunOutcome {
 /// token. An unmapped detail is
 /// [`FailureReason::ProviderContractDrift`] on purpose — an unknown token means
 /// the pool's taxonomy grew, not that the agent succeeded.
+///
+/// Only two shapes read the STATE: a `DELIVERED` leg, where the stop reason
+/// separates a finished turn from an exhausted budget, and a `turn_failed` leg,
+/// where it separates a refusal from a cancellation. Everything else is decided
+/// by [`outcome_for_token`], which is why `REJECTED` no longer flattens a
+/// transient `breaker_open` refusal into a terminal `SpawnError` while the
+/// identical token on a `FAILED` leg resumed (a deliberate deviation from the
+/// plan's 2f row, which said "REJECTED | any").
 #[must_use]
 pub fn outcome_for(state: &str, detail: Option<&str>, result: RunnerResult) -> RunOutcome {
     use crate::acp_pool as tokens;
@@ -445,11 +494,10 @@ pub fn outcome_for(state: &str, detail: Option<&str>, result: RunnerResult) -> R
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .collect();
-    let has = |token: &str| set.contains(&token);
     let stop = set.iter().find_map(|token| token.strip_prefix(tokens::DELIVERY_STOP_PREFIX));
 
-    let failed = |reason: FailureReason| RunOutcome::Failed {
-        reason,
+    let drift = || RunOutcome::Failed {
+        reason: FailureReason::ProviderContractDrift,
         result: result.clone(),
     };
     match state {
@@ -457,37 +505,26 @@ pub fn outcome_for(state: &str, detail: Option<&str>, result: RunnerResult) -> R
         // pool writes the token only when the reason is worth naming.
         "DELIVERED" => match stop {
             None => RunOutcome::Success(result),
-            Some("max_tokens" | "max_turn_requests") => failed(FailureReason::IterationLimit),
-            Some(_) => failed(FailureReason::ProviderContractDrift),
+            Some("max_tokens" | "max_turn_requests") => RunOutcome::Failed {
+                reason: FailureReason::IterationLimit,
+                result,
+            },
+            Some(_) => drift(),
         },
-        "FAILED" if has(tokens::DELIVERY_TURN_FAILED) => match stop {
-            Some("refusal") => failed(FailureReason::AgentError),
+        // The agent ended the turn itself; only the stop reason says how.
+        _ if set.contains(&tokens::DELIVERY_TURN_FAILED) => match stop {
+            Some("refusal") => RunOutcome::Failed {
+                reason: FailureReason::AgentError,
+                result,
+            },
             Some("cancelled") => RunOutcome::Cancelled(result),
-            _ => failed(FailureReason::ProviderContractDrift),
+            _ => drift(),
         },
-        "FAILED" if has(tokens::DELIVERY_OPERATOR_STOP) => RunOutcome::Cancelled(result),
-        "FAILED"
-            if has(tokens::DELIVERY_SPAWN_FAILED)
-                || has(tokens::DELIVERY_MODE_UNPROVEN)
-                || has(tokens::DELIVERY_TURN_UNRECORDED) =>
-        {
-            failed(FailureReason::SpawnError)
-        }
-        "FAILED" if has(tokens::DELIVERY_SESSION_GONE) => failed(FailureReason::ProvisionError),
-        "FAILED"
-            if has(tokens::DELIVERY_BREAKER_OPEN)
-                || has(tokens::DELIVERY_PROVIDER_AT_CAPACITY)
-                || has(tokens::DELIVERY_QUEUE_FULL) =>
-        {
-            failed(FailureReason::RuntimeOffline)
-        }
-        "UNKNOWN" if has(tokens::DELIVERY_ADAPTER_EXIT) => failed(FailureReason::RuntimeOffline),
-        "UNKNOWN" if has(tokens::DELIVERY_TURN_DEADLINE) => failed(FailureReason::Timeout),
-        "UNKNOWN" if has(tokens::DELIVERY_DAEMON_RESTART) => failed(FailureReason::RuntimeRecovery),
-        // Refused at the door: nothing reached the adapter, and the refusal
-        // reason is a standing condition a re-dispatch will meet again.
-        "REJECTED" => failed(FailureReason::SpawnError),
-        _ => failed(FailureReason::ProviderContractDrift),
+        "FAILED" | "UNKNOWN" | "REJECTED" => set
+            .iter()
+            .find_map(|token| outcome_for_token(token, &result))
+            .unwrap_or_else(drift),
+        _ => drift(),
     }
 }
 

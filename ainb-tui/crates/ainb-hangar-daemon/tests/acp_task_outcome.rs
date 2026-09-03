@@ -43,10 +43,75 @@ const fn classify(outcome: &RunOutcome) -> Want {
     }
 }
 
+/// EVERY enumerated delivery token, under EVERY terminal state that can carry
+/// it, resolves to something other than contract drift.
+///
+/// The hand-written table below cannot do this job: it lists the pairs someone
+/// thought of, and the four it originally missed (`FAILED`+`adapter_exit`,
+/// `FAILED`+`turn_deadline`, `FAILED`+`daemon_restart`,
+/// `UNKNOWN`+`operator_stop`) were all reachable and all answered
+/// `ProviderContractDrift`/NoRetry. This one enumerates the vocabulary from the
+/// pool's own constants, so a token the pool grows without a mapping here fails
+/// the build rather than silently burning a retry chain.
+#[test]
+fn no_state_and_token_the_pool_can_write_falls_through_to_drift() {
+    use ainb_hangar_daemon::acp_pool::{self, ConvergeCause};
+
+    // The enumerated taxonomy at `acp_pool.rs`'s "detail taxonomy" block, plus
+    // every `ConvergeCause::detail()` (which is a subset, listed so a new cause
+    // is caught even if its token is not added to the block above).
+    let tokens: Vec<&str> = [
+        acp_pool::DELIVERY_QUEUE_FULL,
+        acp_pool::DELIVERY_BREAKER_OPEN,
+        acp_pool::DELIVERY_ADAPTER_EXIT,
+        acp_pool::DELIVERY_OPERATOR_STOP,
+        acp_pool::DELIVERY_TURN_DEADLINE,
+        acp_pool::DELIVERY_DAEMON_RESTART,
+        acp_pool::DELIVERY_SPAWN_FAILED,
+        acp_pool::DELIVERY_TURN_UNRECORDED,
+        acp_pool::DELIVERY_SESSION_GONE,
+        acp_pool::DELIVERY_PROVIDER_AT_CAPACITY,
+        acp_pool::DELIVERY_MODE_UNPROVEN,
+    ]
+    .into_iter()
+    .chain(
+        [
+            ConvergeCause::DaemonRestart,
+            ConvergeCause::AdapterExit,
+            ConvergeCause::TurnDeadline,
+            ConvergeCause::OperatorStop,
+        ]
+        .into_iter()
+        .map(ConvergeCause::detail),
+    )
+    .collect();
+
+    // `drain_queue` resolves FAILED, `converge_dirty_session` UNKNOWN, and
+    // `submit_prompt` REJECTED — all three from the same vocabulary.
+    for state in ["FAILED", "UNKNOWN", "REJECTED"] {
+        for token in &tokens {
+            for detail in [(*token).to_string(), format!("{token}; resume=loaded")] {
+                let got = outcome_for(state, Some(&detail), RunnerResult::default());
+                assert_ne!(
+                    classify(&got),
+                    Want::Failed(FailureReason::ProviderContractDrift),
+                    "state={state:?} detail={detail:?} has no mapping"
+                );
+                assert_ne!(
+                    classify(&got),
+                    Want::Success,
+                    "state={state:?} detail={detail:?} must never read as success"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn every_leg_the_pool_can_write_maps_to_a_named_outcome() {
     // (state, detail, expected). Mirrors the table in
-    // `docs/hangar/renovation/move1-acp-tasks.md` section 2f.
+    // `docs/hangar/renovation/move1-acp-tasks.md` section 2f, plus the four
+    // pairs 2f's own table omitted (marked below).
     let table: &[(&str, Option<&str>, Want)] = &[
         // DELIVERED: no `stop=` token IS the ordinary EndTurn. The pool writes
         // the token only when the reason is worth naming.
@@ -138,13 +203,50 @@ fn every_leg_the_pool_can_write_maps_to_a_named_outcome() {
             Some("daemon_restart"),
             Want::Failed(FailureReason::RuntimeRecovery),
         ),
-        // Refused at the door: nothing reached the adapter.
+        // The four 2f's table omitted, all reachable, all previously drift.
+        // `attach_with_one_requeue` writes adapter_exit on a FAILED leg when the
+        // adapter cannot be spawned or the transport dies — the single most
+        // likely ACP failure, and NoRetry would have burned the chain on it.
+        (
+            "FAILED",
+            Some("adapter_exit; spawn refused"),
+            Want::Failed(FailureReason::RuntimeOffline),
+        ),
+        // `drain_queue` resolves a still-QUEUED prompt FAILED with the converge
+        // cause, so these two arrive under FAILED as well as UNKNOWN.
+        (
+            "FAILED",
+            Some("turn_deadline"),
+            Want::Failed(FailureReason::Timeout),
+        ),
+        (
+            "FAILED",
+            Some("daemon_restart"),
+            Want::Failed(FailureReason::RuntimeRecovery),
+        ),
+        // An operator stopping the session while `await_leg` still polls: the
+        // run is cancelled, not failed, so it neither retries nor moves the card
+        // to a failed column.
+        ("UNKNOWN", Some("operator_stop"), Want::Cancelled),
+        // Refused at the door. The refusal token decides, exactly as it does on
+        // a FAILED leg: a `breaker_open` door refusal is the same transient
+        // condition whichever side of the queue it was seen from. Deliberate
+        // deviation from 2f's "REJECTED | any | SpawnError".
         (
             "REJECTED",
             Some("queue_full"),
-            Want::Failed(FailureReason::SpawnError),
+            Want::Failed(FailureReason::RuntimeOffline),
         ),
-        ("REJECTED", None, Want::Failed(FailureReason::SpawnError)),
+        (
+            "REJECTED",
+            Some("breaker_open"),
+            Want::Failed(FailureReason::RuntimeOffline),
+        ),
+        (
+            "REJECTED",
+            Some("session_gone"),
+            Want::Failed(FailureReason::ProvisionError),
+        ),
     ];
 
     for (state, detail, want) in table {
@@ -172,6 +274,9 @@ fn an_unmapped_detail_is_contract_drift_and_never_success() {
         ("FAILED", Some("something_new")),
         ("FAILED", Some("turn_failed")),
         ("UNKNOWN", Some("something_new")),
+        // Refused at the door with no reason: `submit_prompt` always names one,
+        // so an empty refusal is the pool's contract changing.
+        ("REJECTED", None),
         // A state the delivery CHECK constraint does not even allow.
         ("PENDING", None),
         ("MISSING", None),
@@ -221,6 +326,20 @@ fn the_retry_disposition_of_each_outcome_is_the_one_the_plan_promised() {
         (
             "UNKNOWN",
             Some("daemon_restart"),
+            RetryDisposition::ResumeRetry,
+        ),
+        // The adapter would not start. THE most likely ACP failure, and the one
+        // NoRetry would have burned the retry chain on.
+        (
+            "FAILED",
+            Some("adapter_exit; spawn refused"),
+            RetryDisposition::ResumeRetry,
+        ),
+        // Refused at the door for a transient reason: the door is not what
+        // makes it terminal.
+        (
+            "REJECTED",
+            Some("breaker_open"),
             RetryDisposition::ResumeRetry,
         ),
         // A misconfigured adapter will not self-heal on a re-dispatch.
