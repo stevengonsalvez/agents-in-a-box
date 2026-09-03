@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 use super::RunArgs;
 use crate::config::CliProvider;
-use crate::git::worktree_manager::{WorktreeInfo, WorktreeManager};
+use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
-    CreatedWorktree, ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
+    ModelSource, SessionMetadata, SessionStore, WorktreeRollback, claim_codex_remote_thread,
     discard_codex_remote_thread, ensure_codex_remote_thread, rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
@@ -41,11 +41,9 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let work_dir: PathBuf;
     let branch_name: String;
+    // `Some` only when this run created a worktree, which is what makes it the
+    // tree a failed launch may delete.
     let worktree_manager: Option<WorktreeManager>;
-    // The receipt for the tree THIS run created, and so the only tree its
-    // rollback may delete. `None` when the session runs in the checkout the
-    // user pointed at, which the rollback must leave alone.
-    let created_worktree: Option<WorktreeInfo>;
     let session_id = Uuid::new_v4();
     // Set when the session ends up running directly in the user's checkout.
     // Kept so the warning can be REPEATED in the post-creation summary: with
@@ -69,15 +67,13 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             .create_worktree(session_id, &repo_path, &branch, None)
             .context("Failed to create worktree")?;
 
-        work_dir = worktree_info.path.clone();
+        work_dir = worktree_info.path;
         branch_name = branch;
         worktree_manager = Some(manager);
-        created_worktree = Some(worktree_info);
 
         println!("Created worktree at: {}", work_dir.display());
     } else {
         worktree_manager = None;
-        created_worktree = None;
         work_dir = repo_path.clone();
         branch_name =
             crate::git::current_branch_at(&repo_path).unwrap_or_else(|| "main".to_string());
@@ -95,13 +91,12 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         }
     }
 
-    // Both halves are set together above, so a rollback either names the tree
-    // this run created or removes no directory at all.
-    let rollback_worktree = || {
-        worktree_manager
-            .as_ref()
-            .zip(created_worktree.as_ref())
-            .map(|(manager, created)| CreatedWorktree::new(manager, created))
+    // `--worktree` created the tree above and nothing else did, so a failed
+    // launch either removes the tree this run made or removes nothing: the
+    // no-worktree path runs in the checkout the user pointed at.
+    let rollback_worktree = || match worktree_manager.as_ref() {
+        Some(manager) => WorktreeRollback::CreatedTree(manager),
+        None => WorktreeRollback::Nothing,
     };
 
     // Step 4: Generate session name
@@ -608,31 +603,20 @@ fn remote_codex_command(
     model: Option<&str>,
     skip_permissions: bool,
 ) -> String {
-    crate::interactive::session_manager::codex_remote_command(
+    shell_join(&crate::interactive::session_manager::codex_remote_command(
         &crate::config::CliProvider::Codex,
         remote,
         cwd,
         model,
         skip_permissions,
-    )
-    .iter()
-    .map(|part| shell_escape::escape(part.into()).into_owned())
-    .collect::<Vec<_>>()
-    .join(" ")
+    ))
 }
 
 /// Shell-ready argv for a Codex session running WITHOUT a shared remote thread.
 ///
 /// The daemon is load-bearing for the shared thread and for nothing else, so a
-/// degraded session drops exactly the two remote-specific arguments
-/// (`--remote <endpoint>` and `resume <thread_id>`) and keeps everything whose
-/// job is to get the CLI to a prompt. `--dangerously-bypass-hook-trust` is one
-/// of those: Ainb's own `notifyd install` rewrites `~/.codex/hooks.json`,
-/// invalidating Codex's positional hook hashes, and the resulting "Hooks need
-/// review" modal parks the launch forever rather than failing it.
-///
-/// `model` is already the launch model (`launch_model` resolved any retiring id
-/// to its replacement), so it is emitted as given.
+/// degraded session drops the remote-specific arguments and keeps everything
+/// whose job is to get the CLI to a prompt.
 fn codex_local_command(model: Option<&str>, skip_permissions: bool) -> String {
     let provider = CliProvider::Codex;
     let mut command = vec![
@@ -645,7 +629,12 @@ fn codex_local_command(model: Option<&str>, skip_permissions: bool) -> String {
     if skip_permissions {
         command.push(provider.skip_permissions_flag().to_string());
     }
-    command
+    shell_join(&command)
+}
+
+/// Join argv into the shell-ready string a tmux session is started with.
+fn shell_join(parts: &[String]) -> String {
+    parts
         .iter()
         .map(|part| shell_escape::escape(part.into()).into_owned())
         .collect::<Vec<_>>()
@@ -1066,9 +1055,10 @@ mod tests {
     /// whose job is to reach a prompt, and drops only the remote ones.
     ///
     /// `build_agent_command` is what this path used to fall through to, and it
-    /// emits neither `--dangerously-bypass-hook-trust` nor the trust write its
-    /// caller does, so the pane parked on a modal while `ainb run` reported a
-    /// session created.
+    /// is provider-generic: it emits neither modal suppressor, nor the trust
+    /// write its caller does, so the pane parked on the update picker or the
+    /// hooks-need-review modal while `ainb run` reported a session created.
+    /// Sharing the TUI's builder is what keeps the two degraded paths equal.
     #[test]
     fn codex_local_command_keeps_the_flags_that_reach_a_prompt() {
         let command = codex_local_command(Some("gpt-5.6-luna"), true);
