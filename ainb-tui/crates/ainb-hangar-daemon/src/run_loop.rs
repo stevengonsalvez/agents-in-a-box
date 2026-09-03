@@ -1376,6 +1376,16 @@ async fn execute_claimed(
     // spawns a retry child). `provider` was captured up front (before the setup
     // umbrella) so both the timeout terminalise and this run attribute the same
     // backend.
+
+    // A2: bind this run's live transcript stream before the spawn, so every
+    // stream-json line the headless provider writes reaches subscribed plugins
+    // as a `TaskMessage` while the run is still in flight. It is the first
+    // producer for an event the board timeline overlay, the run banner and task
+    // detail have all been able to consume since P3. Bound per RUN (it carries
+    // this task's id + workspace) on the runner the claim loop already clones
+    // per run, NOT on the daemon-wide `RunnerConfig`. The interactive arm below
+    // takes the same value and ignores it: that path captures no stdout.
+    let runner = &runner.with_task_stream(&task.workspace_id, &task.id, events);
     let provider_run = async {
         if mode == Mode::Interactive {
             // The interactive path is DELIBERATELY unsandboxed (see
