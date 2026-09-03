@@ -1,54 +1,70 @@
 #!/usr/bin/env bash
-# disk-space-cleaner: reclaim disk by deleting regenerable build/dependency dirs.
+# disk-space-cleaner: reclaim disk by deleting regenerable build and dependency
+# directories, biggest first, skipping anything a live process is using.
+#
 # Deletes NOTHING by default (dry-run). Pass --apply to actually remove.
-# No hardcoded paths, no secrets. Everything is passed in or defaulted safely.
-set -euo pipefail
+#
+# Two rules this script exists to enforce:
+#   1. Only ever delete a build/dependency directory. Never the directory that
+#      contains it. A worktree is never removed, only its target/ or
+#      node_modules/ is.
+#   2. Decide by LIVENESS, not by age. A target rebuilt an hour ago by a session
+#      that has since finished is safe to clear; one untouched for a month can
+#      belong to a session that is running right now. mtime cannot tell those
+#      apart, so it is not used as a safety signal.
+set -uo pipefail
 
 # ---- defaults ----
 ROOTS=()
-NAMES=(node_modules target .next dist build .gradle .turbo)
-OLDER_THAN=14          # days; only touch dirs whose mtime is older than this
+NAMES=(target node_modules .next dist build .gradle .turbo .venv)
+MIN_SIZE_MB=500        # ignore anything smaller; the long tail is not worth the risk
 MAXDEPTH=8
 APPLY=0
-CARGO_CLEAN=0          # opt-in: run `cargo clean` in the newest rust project per root
-PROTECT_LOCKED=1       # skip anything under a `locked` git worktree
+IGNORE_LIVE=0          # escape hatch, documented as dangerous
+TOP=0                  # 0 = no limit
 
 usage() {
   cat <<'EOF'
 Usage: clean.sh [ROOT ...] [options]
 
-Finds regenerable build/dependency directories and lists them (dry-run).
-Add --apply to delete. Recently-touched and git-locked-worktree dirs are
-always protected, so active work is never clobbered.
+Finds regenerable build and dependency directories, sorts them biggest first,
+and skips any whose owning directory shows signs of active use. Prints what it
+would delete (dry-run). Add --apply to delete.
 
 Positional:
-  ROOT ...            One or more directories to scan (default: current dir).
+  ROOT ...            Directories to scan (default: current dir).
 
 Options:
-  --older-than N      Only consider dirs untouched for N+ days (default: 14).
-  --names a,b,c       Comma-separated dir names to target
-                      (default: node_modules,target,.next,dist,build,.gradle,.turbo).
+  --min-size MB       Ignore directories smaller than this (default: 500).
+  --names a,b,c       Directory names to target
+                      (default: target,node_modules,.next,dist,build,.gradle,.turbo,.venv).
   --max-depth N       How deep to search (default: 8).
-  --cargo-clean       Also run `cargo clean` in the newest Cargo project per root.
-  --no-protect-locked Do NOT skip git worktrees marked `locked` (not recommended).
-  --apply             Actually delete. Without this, only prints what it would do.
+  --top N             Only act on the N largest candidates.
+  --apply             Actually delete. Without this, only prints.
+  --ignore-live       Delete even where a live process was detected. Dangerous:
+                      this is the check that stops a running build losing its
+                      artifacts mid-compile. Do not use casually.
   -h, --help          Show this help.
 
-Only these dir NAMES are ever removed. Source files are never touched.
-A named `build/` dir can occasionally be source-controlled output — review the
-dry-run list before running --apply.
+A directory is treated as IN USE, and skipped, if any of these hold:
+  - a `cargo` or `rustc` process has its path in the command line
+  - a tmux session name contains the owning directory's name
+  - any process has its cwd inside the owning directory
+
+Only the named build directories are ever removed. The directory containing
+them is never touched, so a git worktree survives having its target/ cleared.
 EOF
 }
 
 # ---- parse args ----
 while [ $# -gt 0 ]; do
   case "$1" in
-    --older-than) OLDER_THAN="$2"; shift 2 ;;
+    --min-size) MIN_SIZE_MB="$2"; shift 2 ;;
     --names) IFS=',' read -r -a NAMES <<< "$2"; shift 2 ;;
     --max-depth) MAXDEPTH="$2"; shift 2 ;;
-    --cargo-clean) CARGO_CLEAN=1; shift ;;
-    --no-protect-locked) PROTECT_LOCKED=0; shift ;;
+    --top) TOP="$2"; shift 2 ;;
     --apply) APPLY=1; shift ;;
+    --ignore-live) IGNORE_LIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage; exit 2 ;;
     *) ROOTS+=("$1"); shift ;;
@@ -56,82 +72,128 @@ while [ $# -gt 0 ]; do
 done
 [ ${#ROOTS[@]} -eq 0 ] && ROOTS=(".")
 
-# ---- collect locked git worktree paths to protect ----
-# Ask git itself (--porcelain) for worktrees marked `locked`, per root that is
-# a repo. This covers the "active agent session on a locked worktree" case when
-# you point the sweep at a repo. Active work inside *nested* repos (roots like
-# $HOME) is instead covered by the age gate below — recent = active = skipped.
-LOCKED=()
-if [ "$PROTECT_LOCKED" -eq 1 ]; then
-  for r in "${ROOTS[@]}"; do
-    while IFS= read -r wt; do
-      [ -n "$wt" ] && LOCKED+=("$wt")
-    done < <(git -C "$r" worktree list --porcelain 2>/dev/null \
-               | awk '/^worktree /{p=$2} /^locked/{print p}' || true)
-  done
+# ---- liveness signals ----
+# Collected once up front: walking every candidate would re-run ps and lsof per
+# directory, and lsof in particular is slow on a near-full disk.
+
+# Exclude grep/ripgrep lines and this script's own process. `ps` shows the
+# command line of whatever is doing the checking, and a probe that mentions both
+# "cargo" and a worktree path will match itself, reporting a live build that does
+# not exist. That false positive protects directories forever.
+PS_SNAPSHOT="$(ps -Awwo pid,command 2>/dev/null \
+  | grep -v -E '(^| )[0-9]+ +(grep|rg|egrep|fgrep) ' \
+  | grep -v -E "^ *$$ " \
+  | grep -vF "clean.sh" || true)"
+TMUX_SNAPSHOT="$(tmux ls 2>/dev/null || true)"
+# `lsof -d cwd` is the expensive one. Skipped entirely when nothing will be
+# deleted, since a dry-run does not need it to be authoritative.
+if [ "$APPLY" -eq 1 ] && [ "$IGNORE_LIVE" -eq 0 ]; then
+  LSOF_SNAPSHOT="$(lsof -d cwd 2>/dev/null || true)"
+else
+  LSOF_SNAPSHOT=""
 fi
 
-is_protected() {
-  local path="$1"
-  for l in "${LOCKED[@]:-}"; do
-    [ -n "$l" ] && case "$path" in "$l"/*|"$l") return 0 ;; esac
-  done
-  return 1
+# Why is this directory in use? Echoes a reason, or nothing if it looks idle.
+# $1 = the directory that OWNS the build dir (the worktree, not the target).
+live_reason() {
+  local owner="$1"
+
+  # A rust build names paths under the project in nearly every rustc argv, so a
+  # fixed-string match of the owning directory anywhere in a cargo/rustc command
+  # line is the reliable signal. Matching the path, not a basename: basenames
+  # like "ainb-tui" repeat across every worktree and would be useless here.
+  # NOTE: `grep -q` must not be used in these pipelines. It exits on the first
+  # match, the upstream grep takes SIGPIPE, and with `pipefail` set the whole
+  # pipeline then reports failure, so the check silently never fires. Counting
+  # greps read all input and cannot lose that way.
+  if [ "$(printf '%s\n' "$PS_SNAPSHOT" | grep -E 'cargo |rustc ' | grep -cF -- "$owner")" -gt 0 ]; then
+    echo "live cargo/rustc"; return
+  fi
+
+  # tmux names sessions after the worktree, not after the crate subdirectory, so
+  # test path components rather than just the immediate parent. Only components
+  # BELOW the scan root are considered: everything at or above it (a username, a
+  # "worktrees" directory, the repo name shared by every worktree) appears in
+  # unrelated session names and would mark every candidate as in use.
+  if [ -n "$TMUX_SNAPSHOT" ]; then
+    local rel part
+    rel="${owner#"$2"}"
+    while IFS= read -r part; do
+      [ ${#part} -lt 8 ] && continue
+      if [ "$(printf '%s\n' "$TMUX_SNAPSHOT" | grep -cF -- "$part")" -gt 0 ]; then
+        echo "live tmux session"; return
+      fi
+    done < <(printf '%s\n' "$rel" | tr '/' '\n')
+  fi
+
+  if [ -n "$LSOF_SNAPSHOT" ] && [ "$(printf '%s\n' "$LSOF_SNAPSHOT" | grep -cF -- "$owner")" -gt 0 ]; then
+    echo "process cwd inside"; return
+  fi
+  echo ""
 }
 
-# ---- build the find name filter ----
+# ---- find candidates ----
 NAME_ARGS=()
 for i in "${!NAMES[@]}"; do
   [ "$i" -gt 0 ] && NAME_ARGS+=(-o)
   NAME_ARGS+=(-name "${NAMES[$i]}")
 done
 
-human() { du -sh "$1" 2>/dev/null | cut -f1; }
-
-TOTAL_KB=0
-COUNT=0
-echo "== disk-space-cleaner =="
-echo "roots: ${ROOTS[*]}"
-echo "targets: ${NAMES[*]} | older-than: ${OLDER_THAN}d | apply: $([ "$APPLY" -eq 1 ] && echo yes || echo NO/dry-run)"
-[ "${#LOCKED[@]}" -gt 0 ] && echo "protected (locked worktrees): ${#LOCKED[@]}"
-echo
+CANDIDATES="$(mktemp)"
+trap 'rm -f "$CANDIDATES"' EXIT
 
 for r in "${ROOTS[@]}"; do
   while IFS= read -r -d '' d; do
-    is_protected "$d" && { echo "skip (locked)  $(human "$d")  $d"; continue; }
-    sz_kb=$(du -sk "$d" 2>/dev/null | cut -f1 || echo 0)
-    TOTAL_KB=$((TOTAL_KB + sz_kb))
-    COUNT=$((COUNT + 1))
-    if [ "$APPLY" -eq 1 ]; then
-      echo "rm  $(human "$d")  $d"
-      rm -rf "$d"
-    else
-      echo "would rm  $(human "$d")  $d"
-    fi
-  done < <(find "$r" -maxdepth "$MAXDEPTH" \( -type d \( "${NAME_ARGS[@]}" \) \) \
-             -prune -mtime "+${OLDER_THAN}" -print0 2>/dev/null || true)
+    kb=$(du -sk "$d" 2>/dev/null | cut -f1)
+    [ -z "$kb" ] && continue
+    [ "$kb" -lt $((MIN_SIZE_MB * 1024)) ] && continue
+    printf '%s\t%s\t%s\n' "$kb" "$d" "$r" >> "$CANDIDATES"
+  done < <(find "$r" -maxdepth "$MAXDEPTH" \( -type d \( "${NAME_ARGS[@]}" \) \) -prune -print0 2>/dev/null)
 done
 
-# ---- optional cargo clean on the root-most cargo project per root ----
-# Shortest Cargo.toml path == the top-level workspace, whose target/ is the big
-# one; a `cargo clean` there wipes the whole workspace's build output.
-if [ "$CARGO_CLEAN" -eq 1 ] && command -v cargo >/dev/null 2>&1; then
-  for r in "${ROOTS[@]}"; do
-    proj="$(find "$r" -maxdepth "$MAXDEPTH" -name Cargo.toml -type f \
-              -exec dirname {} \; 2>/dev/null \
-              | awk '{print length, $0}' | sort -n | head -1 | cut -d' ' -f2- || true)"
-    if [ -n "$proj" ]; then
-      if [ "$APPLY" -eq 1 ]; then
-        echo "cargo clean in $proj"
-        ( cd "$proj" && cargo clean 2>&1 | tail -1 ) || true
-      else
-        echo "would cargo clean in $proj"
-      fi
+human_gb() { awk -v k="$1" 'BEGIN{printf "%.1fG", k/1024/1024}'; }
+
+echo "== disk-space-cleaner =="
+echo "roots:   ${ROOTS[*]}"
+echo "targets: ${NAMES[*]}"
+echo "min-size: ${MIN_SIZE_MB}MB | apply: $([ "$APPLY" -eq 1 ] && echo yes || echo 'NO (dry-run)')"
+[ "$IGNORE_LIVE" -eq 1 ] && echo "WARNING: --ignore-live set, liveness checks disabled"
+echo
+
+TOTAL_KB=0; COUNT=0; SKIPPED=0; N=0
+while IFS=$'\t' read -r kb dir SCAN_ROOT; do
+  [ -z "$dir" ] && continue
+  N=$((N + 1))
+  [ "$TOP" -gt 0 ] && [ "$N" -gt "$TOP" ] && break
+
+  owner="$(dirname "$dir")"
+  reason=""
+  [ "$IGNORE_LIVE" -eq 0 ] && reason="$(live_reason "$owner" "$SCAN_ROOT")"
+
+  if [ -n "$reason" ]; then
+    printf 'skip  %8s  %s\n         (%s)\n' "$(human_gb "$kb")" "$dir" "$reason"
+    SKIPPED=$((SKIPPED + 1))
+    continue
+  fi
+
+  if [ "$APPLY" -eq 1 ]; then
+    if rm -rf "$dir"; then
+      printf 'rm    %8s  %s\n' "$(human_gb "$kb")" "$dir"
+      # Rule 1, verified rather than assumed: the owning directory must survive.
+      [ -d "$owner" ] || echo "         ERROR: owning directory disappeared: $owner" >&2
+      TOTAL_KB=$((TOTAL_KB + kb)); COUNT=$((COUNT + 1))
+    else
+      echo "         FAILED to remove $dir" >&2
     fi
-  done
-fi
+  else
+    printf 'would rm %6s  %s\n' "$(human_gb "$kb")" "$dir"
+    TOTAL_KB=$((TOTAL_KB + kb)); COUNT=$((COUNT + 1))
+  fi
+done < <(sort -rn "$CANDIDATES")
 
 echo
-printf 'summary: %d dirs, ~%s\n' "$COUNT" \
-  "$(awk -v k="$TOTAL_KB" 'BEGIN{printf "%.1f GB", k/1024/1024}')"
-[ "$APPLY" -eq 0 ] && echo "(dry-run — re-run with --apply to delete)"
+printf 'summary: %d dirs %s %s, %d skipped as in use\n' \
+  "$COUNT" "$([ "$APPLY" -eq 1 ] && echo removed || echo 'would free')" \
+  "$(human_gb "$TOTAL_KB")" "$SKIPPED"
+[ "$APPLY" -eq 0 ] && echo "(dry-run, re-run with --apply to delete)"
+exit 0
