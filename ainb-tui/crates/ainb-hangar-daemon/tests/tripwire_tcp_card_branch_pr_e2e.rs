@@ -16,7 +16,7 @@
 //!  finalize records the branch + captures result.pr_url ─▶ done
 //!         │      TaskFinished ─▶ plugin re-pulls tasks_list
 //!         ▼      (tasks_list fetches PR status via the STUB gh under HANGAR_GH_PATH)
-//!  the card shows  ·ainb/<slug>·  and  ·PR ✓·   (branch + PR chip + CI status)
+//!  the card shows  ·ainb/…<last 6>·  and  ·PR ✓·  (branch + PR chip + CI status)
 //! ```
 //!
 //! The PR association is seeded through the REAL plumbing, never real GitHub: the
@@ -192,17 +192,21 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
     // (`K`) renders them on the finished task's tile in the `done` column.
     //
     // The run branch is `ainb/<task-id>` keyed on the FULL task ULID (tcp vpm made
-    // it collision-safe), which is wider than the compact Kanban tile — so the card
-    // SOFT-WRAPS the branch mid-string and the full value is never contiguous in the
-    // tmux capture (the adjacent column also interleaves the wrapped halves). The
-    // EXACT branch is already pinned above (recorded on the task row + present in
-    // git), so the tile check proves the card SURFACES the run's artifacts: the
-    // `PR ✓` chip plus the branch's leading `ainb/<ulid-head>`, a deterministic
-    // prefix guaranteed to fit the first tile line before the wrap.
-    let branch_head = &branch[..branch.len().min(15)];
+    // it collision-safe), far wider than the compact Kanban tile, so the card paints
+    // the ELIDED form `ainb/…<last 6>` (crisp B1, Q14) rather than soft-wrapping the
+    // branch mid-ULID across two tile lines (where it was never contiguous in the
+    // tmux capture, the adjacent column interleaving the halves).
+    //
+    // The TAIL is the half worth asserting: it is the SAME last-6 token the tile's
+    // own `#<short id>` title carries, so `ainb/…5VNDGR` on a `#5VNDGR` card reads
+    // as this run's branch at a glance, where the head `ainb/01M1K7…` is the ULID's
+    // timestamp prefix, near-identical across every card minted the same second.
+    // The EXACT branch is already pinned above (recorded on the task row + present
+    // in git); this tile check proves the card SURFACES the run's artifacts.
+    let branch_tail = format!("ainb/…{}", &slug[slug.len().saturating_sub(6)..]);
     let surface_deadline = Instant::now() + Duration::from_secs(30 * scale);
     let surfaced = sess.switch_tab_until("K", surface_deadline, |c| {
-        c.contains("done (") && c.contains(branch_head) && c.contains("PR ✓")
+        c.contains("done (") && c.contains(&branch_tail) && c.contains("PR ✓")
     });
 
     // Kill the TUI tmux session by exact name before the final assertions.
@@ -212,7 +216,7 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
     assert!(
         surfaced.is_some(),
         "the Kanban task card must surface its branch `{branch}` (matched on the \
-         pre-wrap head `{branch_head}`) AND a passing `PR ✓` chip\npane:\n{pane}"
+         elided render `{branch_tail}`) AND a passing `PR ✓` chip\npane:\n{pane}"
     );
     // NEGATIVE cross-check: the card is in Done (the run finished), so the branch +
     // PR read on a finished card, not a phantom render.
