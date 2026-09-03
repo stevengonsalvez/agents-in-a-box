@@ -129,7 +129,14 @@ impl StreamJsonClassifier {
         // are provider strings too, and capping only the prose in `push_lines`
         // left those uncapped. Both live producer and durable re-read classify
         // through this function, so the two stay byte-identical.
-        out.truncate(ENTRIES_PER_LINE_MAX);
+        if out.len() > ENTRIES_PER_LINE_MAX {
+            // Say so rather than dropping silently, the way BODY_MAX appends its
+            // ellipsis: a 600-line block otherwise loses 88 lines with no sign, in
+            // both halves.
+            let dropped = out.len() - (ENTRIES_PER_LINE_MAX - 1);
+            out.truncate(ENTRIES_PER_LINE_MAX - 1);
+            out.push((MessageKind::ToolResult, format!("… {dropped} more lines")));
+        }
         for (_, body) in &mut out {
             if body.chars().count() > BODY_MAX {
                 *body = truncate_chars(body, BODY_MAX);
@@ -477,7 +484,13 @@ mod tests {
             "message": { "content": [{ "type": "text", "text": block }] },
         })
         .to_string();
-        assert_eq!(classify_stream_json(&line).len(), ENTRIES_PER_LINE_MAX);
+        let out = classify_stream_json(&line);
+        assert_eq!(out.len(), ENTRIES_PER_LINE_MAX);
+        assert!(
+            out.last().unwrap().1.starts_with("… "),
+            "the drop is marked, not silent: {:?}",
+            out.last()
+        );
     }
 
     /// The cap counts CHARS, not bytes: provider prose carries non-ASCII
