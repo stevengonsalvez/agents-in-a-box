@@ -108,7 +108,7 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
     enqueue_task(&pool, &ids).await;
 
     let scale = u64::from(tripwire_support::budget_scale());
-    let run = sub.collect_run(Duration::from_secs(30 * scale)).await;
+    let run = sub.collect_run(TASK_ID, Duration::from_secs(30 * scale)).await;
     let live = run.transcript.clone();
 
     // The FSM terminal is the signal the provider's stdout is closed and its log
@@ -204,6 +204,191 @@ async fn a_process_run_streams_the_same_transcript_it_later_re_reads() {
     );
 }
 
+/// Track A test T1, the ACP half: the same equality, under the other executor.
+///
+/// This is the half that was missing when A6 landed the durable read: an ACP
+/// run's expanded view could only backfill, never fill live, so the exit
+/// criterion's part (A) held for one executor of two. The assertion is
+/// deliberately the SAME one the process arm makes, against the same RPC, so a
+/// producer that emitted a different taxonomy than the re-read would fail here
+/// exactly as it would there.
+///
+/// The equality is exact only while the store writer's buffer does not
+/// overflow. Live is published BEFORE the durable commit, so a row the writer
+/// later drops under memory pressure was already streamed, and live would carry
+/// a line durable does not — an asymmetry the process side has no equivalent
+/// for, since its tee to disk is unconditional. This fixture's transcript is
+/// four small rows against a 1 MiB buffer, so it is nowhere near that boundary.
+#[tokio::test]
+async fn an_acp_run_streams_the_same_transcript_it_later_re_reads() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping the acp live-stream tripwire");
+        return;
+    }
+
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+    seed_card(&pool, &ids).await;
+
+    // The adapter's turn, in `session/update` shape: prose, a thought, a tool
+    // call and its completion — the same four lanes the process fixture emits,
+    // so the two arms of T1 are comparable rather than merely both green.
+    let script = home.path().join("turn.ndjson");
+    std::fs::write(
+        &script,
+        [
+            serde_json::json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Reading the routes file."},
+            }),
+            serde_json::json!({
+                "sessionUpdate": "agent_thought_chunk",
+                "content": {"type": "text", "text": "The handler is probably unregistered."},
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "Edit",
+                "kind": "edit",
+                "status": "pending",
+                "rawInput": {"file_path": "api/src/routes.ts"},
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call-1",
+                "status": "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": "1 file changed"}}],
+            }),
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("\n"),
+    )
+    .expect("write the adapter script");
+
+    let agent = tripwire_support::seed_agent_with_env(
+        &pool,
+        &ids,
+        "agent-live-acp",
+        &serde_json::json!({ "FAKE_ACP_SCRIPT": script.display().to_string() }),
+    )
+    .await;
+    tripwire_support::write_acp_adapter_config(
+        home.path(),
+        &tripwire_support::fake_acp_adapter(),
+        "default",
+    );
+
+    let home_str = home.path().display().to_string();
+    let session = DaemonSession::spawn(
+        &daemon_bin(),
+        home.path(),
+        &[
+            ("AINB_HANGAR_HOME", &home_str),
+            // The `[acp.adapters]` table is read from $HOME, not the hangar home.
+            ("HOME", &home_str),
+            ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
+            ("HANGAR_TASK_EXECUTOR", "acp"),
+            ("HANGAR_DAEMON_POLL_MS", "200"),
+            ("HANGAR_DAEMON_DISABLE_SANDBOX", "1"),
+        ],
+    );
+
+    // Subscribe BEFORE enqueueing, for the reason the process arm gives: the
+    // transcript stream has no replay behind it.
+    let mut sub = Client::connect(&rpc_socket(home.path())).await;
+    sub.auth_from_file(home.path()).await;
+    sub.subscribe(&ids.workspace_id).await;
+
+    let task_id = "task-live-acp";
+    enqueue_task_for(&pool, &ids, task_id, &agent).await;
+
+    let scale = u64::from(tripwire_support::budget_scale());
+    let run = sub.collect_run(task_id, Duration::from_secs(60 * scale)).await;
+    let live = run.transcript.clone();
+    let _ = wait_for_db(&pool, task_id, "done", Duration::from_secs(60 * scale)).await;
+
+    let timeline = sub
+        .call(
+            methods::HANGAR_BOARD_CARD_TIMELINE,
+            serde_json::json!({
+                "workspace_id": ids.workspace_id,
+                "board_id": BOARD_ID,
+                "issue_id": ISSUE_ID,
+            }),
+        )
+        .await;
+    let pane = session.capture_pane();
+    drop(session);
+
+    assert!(
+        timeline["error"].is_null(),
+        "board_card_timeline must answer: {timeline}\ndaemon:\n{pane}"
+    );
+    let durable: ainb_hangar_proto::snapshots::BoardCardTimelineResult =
+        serde_json::from_value(timeline["result"].clone()).expect("decode timeline result");
+    assert_eq!(
+        durable.task_id.as_deref(),
+        Some(task_id),
+        "the timeline must resolve the card's run"
+    );
+    let re_read: Vec<(MessageKind, String)> =
+        durable.entries.iter().map(|e| (e.kind, e.body.clone())).collect();
+
+    // NEGATIVE first, for the same reason: two empty vectors are equal.
+    assert!(
+        !live.is_empty(),
+        "an ACP run must stream TaskMessage events; got none.\n\
+         events seen on the connection: {:?}\n\
+         the durable re-read was:\n{:#?}\ndaemon logs:\n{}",
+        run.seen,
+        re_read,
+        read_daemon_log(home.path())
+    );
+    for want in [
+        MessageKind::Agent,
+        MessageKind::Thinking,
+        MessageKind::ToolCall,
+        MessageKind::ToolResult,
+    ] {
+        assert!(
+            live.iter().any(|(kind, _)| *kind == want),
+            "the live ACP stream must carry a {want:?} line; got {live:#?}"
+        );
+    }
+
+    // THE ASSERTION, identical to the process arm's.
+    assert_eq!(
+        live, re_read,
+        "the live TaskMessage sequence must equal the durable re-read"
+    );
+
+    // Same design decision, same pin: the ACP producer publishes through the
+    // same `emit_live` and must not land an `event_log` row either.
+    let logged: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM event_log WHERE event_type IN ('task_message', 'task_progress')",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count transcript rows in the durable event log");
+    assert_eq!(
+        logged, 0,
+        "a transcript line must never reach the durable event log"
+    );
+
+    // The closing tally counts the one tool the scripted turn called. The ACP
+    // actor's heartbeat rides the writer's flush cadence, so without the closing
+    // tick at turn end a turn this short would report nothing at all.
+    assert_eq!(
+        run.last_tool_calls,
+        Some(1),
+        "the closing TaskProgress must report the run's one tool call"
+    );
+}
+
 /// A fake `claude` emitting a stream-json transcript that exercises every lane
 /// the classifier has: the `system` handle, assistant prose, a thinking block, a
 /// `tool_use` and its matching `tool_result` (which resolves its tool NAME only
@@ -285,15 +470,26 @@ async fn seed_card(pool: &SqlitePool, ids: &tripwire_support::SeededIds) {
 
 /// Enqueue the card's run.
 async fn enqueue_task(pool: &SqlitePool, ids: &tripwire_support::SeededIds) {
+    enqueue_task_for(pool, ids, TASK_ID, &ids.agent_id).await;
+}
+
+/// Enqueue a headless run of [`ISSUE_ID`] under a named task + agent.
+async fn enqueue_task_for(
+    pool: &SqlitePool,
+    ids: &tripwire_support::SeededIds,
+    task_id: &str,
+    agent_id: &str,
+) {
     sqlx::query(
-        "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, issue_id, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, issue_id, mode, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(TASK_ID)
+    .bind(task_id)
     .bind(&ids.workspace_id)
     .bind(&ids.runtime_id)
-    .bind(&ids.agent_id)
+    .bind(agent_id)
     .bind(ISSUE_ID)
+    .bind("headless")
     .bind(tripwire_support::now_ms())
     .execute(pool)
     .await
@@ -464,7 +660,7 @@ impl Client {
     /// this honest against the durable read: it is the same boundary the durable
     /// file has, so a producer that kept emitting past the terminal would be
     /// caught by the equality assertion rather than hidden by a short timeout.
-    async fn collect_run(&mut self, budget: Duration) -> LiveRun {
+    async fn collect_run(&mut self, task_id: &str, budget: Duration) -> LiveRun {
         let deadline = Instant::now() + budget;
         let mut run = LiveRun::default();
         loop {
@@ -484,7 +680,7 @@ impl Client {
                 event["event"].as_str().unwrap_or("?"),
                 event["task_id"].as_str().unwrap_or("-")
             ));
-            if event["task_id"] != TASK_ID {
+            if event["task_id"] != task_id {
                 continue;
             }
             match event["event"].as_str() {

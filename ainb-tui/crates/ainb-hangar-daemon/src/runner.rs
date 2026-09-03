@@ -123,8 +123,22 @@ pub struct RunStream {
 }
 
 impl RunStream {
+    /// Bind a live stream to one run, or `None` when `task_id` is not a task id.
+    ///
+    /// `pub(crate)` because the ACP executor publishes through this same type
+    /// (track A step A5's live half): one emitter, one event shape, one place
+    /// where a transcript line becomes a `TaskMessage`, so the two executors
+    /// cannot drift into emitting differently-shaped events for the same thing.
+    pub(crate) fn bind(events: &EventSink, workspace_id: &str, task_id: &str) -> Option<Self> {
+        TaskId::from_str(task_id.to_string()).ok().map(|task_id| Self {
+            events: events.clone(),
+            workspace_id: workspace_id.to_string(),
+            task_id,
+        })
+    }
+
     /// Publish one classified transcript line.
-    fn line(&self, kind: MessageKind, body: String) {
+    pub(crate) fn line(&self, kind: MessageKind, body: String) {
         self.events.emit_live(
             &self.workspace_id,
             HangarEvent::TaskMessage {
@@ -136,7 +150,7 @@ impl RunStream {
     }
 
     /// Publish the run's cumulative tool count + elapsed clock.
-    fn progress(&self, tool_calls: u32, elapsed: Duration) {
+    pub(crate) fn progress(&self, tool_calls: u32, elapsed: Duration) {
         self.events.emit_live(
             &self.workspace_id,
             HangarEvent::TaskProgress {
@@ -902,11 +916,7 @@ impl Runner {
     pub fn with_task_stream(&self, workspace_id: &str, task_id: &str, events: &EventSink) -> Self {
         Self {
             cfg: self.cfg.clone(),
-            stream: TaskId::from_str(task_id.to_string()).ok().map(|task_id| RunStream {
-                events: events.clone(),
-                workspace_id: workspace_id.to_string(),
-                task_id,
-            }),
+            stream: RunStream::bind(events, workspace_id, task_id),
         }
     }
 

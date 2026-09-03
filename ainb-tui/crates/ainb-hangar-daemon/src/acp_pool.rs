@@ -64,6 +64,27 @@
 //!   parallel tool calls blocks on several at once, and `parked` (not
 //!   `fleet_session.current_request_fingerprint`, which has room for one) is
 //!   what says which are live.
+//!
+//! # A TASK session also streams live (track A step A5's live half)
+//!
+//! A session whose scope is `task:<id>` publishes every transcript row it
+//! commits as a `HangarEvent::TaskMessage` as well, through the same
+//! [`crate::runner::RunStream`] the process executor publishes with and the same
+//! [`AcpClassifier`] the durable `board_card_timeline` read classifies with. A
+//! chat session publishes nothing: it has no task to name, and its transcript
+//! has its own stream. [`bind_task_stream`] is the whole discriminator.
+//!
+//! **Live is published BEFORE the durable commit, and that is a real
+//! asymmetry, not a detail.** The writer buffers and commits on a cadence, so
+//! publishing after it would hold the operator's view back by up to a flush
+//! interval. The cost is that [`StoreWriter`] may later DROP a buffered row
+//! under memory pressure (minting an `acp.transcript_truncated` marker in its
+//! place), and that row was already streamed: in that window the live view
+//! carries a line the durable re-read does not. The process executor has no
+//! equivalent, because its tee to disk is unconditional and happens first. So
+//! "live equals durable" holds for any run whose transcript buffer does not
+//! overflow, which is the same shape as the qualification the 512 KiB tail
+//! already puts on the other end of that equality.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -78,7 +99,9 @@ use ainb_acp::reducer::TranscriptReducer;
 use ainb_acp::store_writer::{HighWater, Lifecycle, StoreWriter, WriterConfig};
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+use ainb_hangar_proto::events::MessageKind;
 use ainb_hangar_proto::settings::{AcpPoolHealth, AcpProcessHealth, AcpSessionHealth};
+use ainb_hangar_proto::transcript::AcpClassifier;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::fleet::{
@@ -93,6 +116,9 @@ use ainb_hangar_store::repo::fleet_provider_event::{
 };
 use sqlx::SqlitePool;
 use tokio::sync::{Semaphore, mpsc, oneshot};
+
+use crate::events::EventSink;
+use crate::runner::RunStream;
 use tracing::Instrument as _;
 
 // ------------------------------------------------------------ detail taxonomy
@@ -1463,6 +1489,11 @@ impl AcpPool {
             control: control_rx,
             pending_prelude: None,
             resume_path: None,
+            // Resolved in `run()`: binding it needs the task's workspace, which
+            // is a store read this constructor cannot await.
+            stream: None,
+            classifier: AcpClassifier::default(),
+            tool_calls: 0,
         };
         tokio::spawn(actor.run());
         SessionHandle {
@@ -1769,13 +1800,56 @@ struct SessionActor {
     pending_prelude: Option<String>,
     /// The resume path the next turn's receipt reports.
     resume_path: Option<&'static str>,
+    /// Where this session's transcript goes LIVE, for a TASK session only
+    /// (track A step A5's live half). `None` for every chat session: a chat
+    /// transcript has its own stream (`fleet/transcript_subscribe`) and no task
+    /// for a `TaskMessage` to name. Resolved once in [`SessionActor::run`].
+    stream: Option<RunStream>,
+    /// The live half's classifier, feeding [`Self::stream`].
+    ///
+    /// The SAME [`AcpClassifier`] the durable `board_card_timeline` read builds
+    /// its entries with, so a line published live and its later re-read twin are
+    /// byte-identical rather than merely similar.
+    classifier: AcpClassifier,
+    /// Tool calls this turn has published, for the run banner's tally.
+    tool_calls: u32,
 }
 
 /// What one turn's `session/prompt` came back with.
 type TurnResult = Result<PromptResponse, AcpError>;
 
+/// Bind a session's live task stream, or `None` when the scope is not a task's.
+///
+/// The scope convention is the whole discriminator: `acp_task` mints
+/// `task:<id>` and nothing else may (`fleet/acp_session_create` refuses the
+/// prefix), so `strip_prefix` is an exact test rather than a heuristic. The
+/// workspace comes from the same `workspace_for_scope` lookup
+/// `SessionActor::raise_permission` already uses to scope a task's approvals.
+///
+/// Free, and taking owned arguments, so the actor's `run` can await it without
+/// holding a borrow of an actor that is `Send` but not `Sync`.
+async fn bind_task_stream(
+    pool: SqlitePool,
+    events: EventSink,
+    scope_key: String,
+) -> Option<RunStream> {
+    let task_id = scope_key.strip_prefix(crate::acp_task::TASK_SCOPE_PREFIX)?;
+    let workspace_id = crate::acp_task::workspace_for_scope(&pool, &scope_key).await?;
+    RunStream::bind(&events, &workspace_id, task_id)
+}
+
 impl SessionActor {
     async fn run(mut self) {
+        // Resolved off CLONES, not `&self`: the actor holds a parked-permission
+        // responder that is `Send` but not `Sync`, so a future that borrowed
+        // `self` across this await would not be spawnable.
+        let stream = bind_task_stream(
+            self.pool.store.pool().clone(),
+            self.pool.events.clone(),
+            self.scope_key.clone(),
+        )
+        .await;
+        self.stream = stream;
         let (turn_tx, mut turn_rx) = mpsc::channel::<TurnResult>(1);
         let mut ticker = tokio::time::interval(self.pool.config.writer.flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1902,16 +1976,36 @@ impl SessionActor {
     async fn ingest(&mut self, notification: &SessionNotification) {
         let chunks = self.reducer.push(&notification.update);
         for chunk in &chunks {
-            match self.writer.push(chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::error!(
-                        session_key = %self.session_key,
-                        %error,
-                        "acp transcript commit failed"
-                    );
-                }
+            self.commit_chunk(chunk).await;
+        }
+    }
+
+    /// The ONE path a transcript chunk takes: published live, then committed
+    /// durably.
+    ///
+    /// Both halves in one place because they must not diverge, and three call
+    /// sites had already grown (stream chunks, the parked approval, the turn's
+    /// closing flush). A fourth that pushed straight to the writer would leave
+    /// the live view one line short of the durable re-read, silently, and the
+    /// closing flush is exactly where that first happened.
+    ///
+    /// Live BEFORE durable, deliberately: `writer.push` buffers and commits on a
+    /// cadence, so publishing after it would hold the operator's transcript back
+    /// by up to a flush interval for no gain. The ordering costs one guarantee,
+    /// named in the module docs: a row the writer later DROPS under buffer
+    /// pressure was already published, so live can carry a line durable does
+    /// not.
+    async fn commit_chunk(&mut self, chunk: &ainb_acp::reducer::TranscriptChunk) {
+        self.publish(chunk.kind.event_type(), &chunk.payload);
+        match self.writer.push(chunk).await {
+            Ok(Some(high_water)) => self.wake(&high_water),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    session_key = %self.session_key,
+                    %error,
+                    "acp transcript commit failed"
+                );
             }
         }
     }
@@ -1919,6 +2013,12 @@ impl SessionActor {
     /// The cadence leg: commit whatever is buffered so a slow turn still
     /// streams (I12), then wake subscribers with the committed high-water mark.
     async fn pump(&mut self) {
+        // The run banner's other half, on the cadence the writer already ticks
+        // rather than a timer of its own. Only while a turn is open: the tally
+        // and the clock are the RUN's, and an idle session has neither.
+        if let (Some(stream), Some(turn)) = (&self.stream, &self.turn) {
+            stream.progress(self.tool_calls, turn.started.elapsed());
+        }
         match self.writer.tick().await {
             Ok(Some(high_water)) => self.wake(&high_water),
             Ok(None) => {}
@@ -1927,6 +2027,29 @@ impl SessionActor {
                 %error,
                 "acp transcript cadence commit failed"
             ),
+        }
+    }
+
+    /// Publish one durable transcript row to the LIVE stream too.
+    ///
+    /// The ONE place a row becomes a `TaskMessage`, called beside every write
+    /// that reaches the store writer — chunks from [`Self::ingest`], the parked
+    /// approval from [`Self::raise_permission`], and the closing marker from
+    /// [`Self::finish_turn`] — because a live view missing any of the three
+    /// would differ from the durable re-read that has all of them, which is
+    /// exactly the equality track A step A5 has to hold.
+    fn publish(&mut self, event_type: &str, payload: &serde_json::Value) {
+        if self.stream.is_none() {
+            return;
+        }
+        let entries = self.classifier.classify_value(event_type, payload);
+        for (kind, body) in entries {
+            if kind == MessageKind::ToolCall {
+                self.tool_calls = self.tool_calls.saturating_add(1);
+            }
+            if let Some(stream) = &self.stream {
+                stream.line(kind, body);
+            }
         }
     }
 
@@ -2040,6 +2163,7 @@ impl SessionActor {
         self.drain_updates().await;
         self.reducer.begin_turn();
 
+        self.tool_calls = 0;
         self.turn = Some(OpenTurn {
             message_id: job.message_id.clone(),
             started: Instant::now(),
@@ -2147,13 +2271,12 @@ impl SessionActor {
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = None;
         }
-        // Everything the reducer still holds belongs to THIS turn.
+        // Everything the reducer still holds belongs to THIS turn. Through the
+        // same commit path as every other chunk: this flush carries the turn's
+        // FINAL agent message, so a live view that skipped it would end without
+        // the one line the operator was waiting for.
         if let Some(chunk) = self.reducer.flush() {
-            match self.writer.push(&chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => tracing::error!(%error, "final transcript chunk failed to commit"),
-            }
+            self.commit_chunk(&chunk).await;
         }
         self.pump().await;
 
@@ -2202,17 +2325,22 @@ impl SessionActor {
             (None, detail) => detail,
         };
         turn.span.record("outcome", state);
-        if let Ok(Some(high_water)) = self
-            .writer
-            .lifecycle(
-                marker,
-                serde_json::json!({
-                    "turnId": turn.message_id,
-                    "durationMs": turn.started.elapsed().as_millis(),
-                }),
-            )
-            .await
-        {
+        let marker_payload = serde_json::json!({
+            "turnId": turn.message_id,
+            "durationMs": turn.started.elapsed().as_millis(),
+        });
+        // The run-status line that closes the transcript. Without it the live
+        // view ends one line short of the durable re-read, which is the whole
+        // equality T1 asserts.
+        self.publish(marker.event_type(), &marker_payload);
+        // One last heartbeat, the same closing tick `stream_stdout` fires at
+        // EOF: a turn shorter than the writer's flush interval would otherwise
+        // publish no tally at all, or only the one from before its first tool
+        // ran, and the run banner would read zero on a run that used tools.
+        if let Some(stream) = &self.stream {
+            stream.progress(self.tool_calls, turn.started.elapsed());
+        }
+        if let Ok(Some(high_water)) = self.writer.lifecycle(marker, marker_payload).await {
             self.wake(&high_water);
         }
 
@@ -2772,11 +2900,7 @@ impl SessionActor {
             "toolCall": permission.request.tool_call,
         });
         let chunk = self.reducer.permission_chunk(payload.clone());
-        match self.writer.push(&chunk).await {
-            Ok(Some(high_water)) => self.wake(&high_water),
-            Ok(None) => {}
-            Err(error) => tracing::error!(%error, "permission transcript row failed to commit"),
-        }
+        self.commit_chunk(&chunk).await;
         self.pump().await;
 
         let now = SystemClock.now_ms();
