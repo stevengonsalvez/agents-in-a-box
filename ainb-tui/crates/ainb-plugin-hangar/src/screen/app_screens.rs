@@ -3204,18 +3204,7 @@ mod task_detail_open_tests {
         assert!(states.take_pending_task_retry_action().is_none());
     }
 
-    /// The painted buffer, row-major, so an assertion can search the header text.
-    fn painted_text(buf: &WireBuffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.height {
-            for (coord, cell) in &buf.cells {
-                if coord.y == y {
-                    out.push_str(&cell.symbol);
-                }
-            }
-        }
-        out
-    }
+    use crate::test_support::painted_text;
 
     fn agent(id: &str, name: &str) -> ActorRow {
         ActorRow {

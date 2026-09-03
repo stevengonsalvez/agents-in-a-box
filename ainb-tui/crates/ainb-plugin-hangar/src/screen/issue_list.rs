@@ -4529,19 +4529,7 @@ mod tests {
         })
     }
 
-    /// Reconstruct the full painted text of a rendered buffer (every cell, in
-    /// row-major order) so a render assertion can search for headers / glyphs.
-    fn painted_text(buf: &WireBuffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.height {
-            for (coord, cell) in &buf.cells {
-                if coord.y == y {
-                    out.push_str(&cell.symbol);
-                }
-            }
-        }
-        out
-    }
+    use crate::test_support::painted_text;
 
     /// The Issues screen renders through the seven-column card-board (63l.4):
     /// every canonical lifecycle column appears with its live count header, and a

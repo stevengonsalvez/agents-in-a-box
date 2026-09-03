@@ -1158,8 +1158,11 @@ mod tests {
         out.into_iter().collect()
     }
 
-    /// The full painted text (row-major) for substring assertions.
-    fn painted_text(buf: &WireBuffer) -> String {
+    /// The board's painted GRID as text, blank columns included, one line per
+    /// row. NOT [`crate::test_support::painted_text`], which concatenates only
+    /// the painted cells: these assertions pin LAYOUT (`◔ alice`, the glyph and
+    /// the name a blank column apart), which needs the gaps.
+    fn grid_text(buf: &WireBuffer) -> String {
         let mut out = String::new();
         for y in 0..buf.height {
             out.push_str(&row_text(buf, y, buf.width));
@@ -1174,7 +1177,7 @@ mod tests {
     fn renders_five_column_headers_with_counts() {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         for header in [
             "Backlog (1)",
             "Todo (1)",
@@ -1197,7 +1200,7 @@ mod tests {
     fn card_shows_id_title_and_priority_chip() {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         assert!(painted.contains("HGR-3"), "card id: {painted}");
         // The long title wraps — its leading chars appear.
         assert!(painted.contains("Refactor"), "card title: {painted}");
@@ -1222,7 +1225,7 @@ mod tests {
     fn card_footer_names_the_assignee_beside_the_priority_chip() {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         assert!(painted.contains("◔ alice"), "named assignee: {painted}");
         assert!(
             painted.contains("◆ Urgent"),
@@ -1273,7 +1276,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &cols, None);
         assert!(
-            painted_text(&buf).contains('⚠'),
+            grid_text(&buf).contains('⚠'),
             "a declined card shows the ⚠ glyph"
         );
         assert!(
@@ -1285,7 +1288,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
         assert!(
-            !painted_text(&buf).contains('⚠'),
+            !grid_text(&buf).contains('⚠'),
             "healthy cards show no warning glyph"
         );
     }
@@ -1300,7 +1303,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &cols, None);
         assert!(
-            painted_text(&buf).contains('⧉'),
+            grid_text(&buf).contains('⧉'),
             "linked card shows the ⧉ glyph"
         );
 
@@ -1308,7 +1311,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
         assert!(
-            !painted_text(&buf).contains('⧉'),
+            !grid_text(&buf).contains('⧉'),
             "unlinked cards show no link glyph"
         );
     }
@@ -1320,7 +1323,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         // Select the single card in column 2 (In Progress).
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), Some((2, 0)));
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         // Heavy top-left corner present (the rounded `╭` is the unselected look).
         assert!(painted.contains('┏'), "heavy border corner: {painted}");
         // And painted in clay.
@@ -1339,7 +1342,7 @@ mod tests {
     fn empty_column_shows_dashed_placeholder() {
         let mut buf = WireBuffer::new(120, 24);
         let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
         // The dashed edge glyph + caption mark the empty Done column.
         assert!(painted.contains('╌'), "dashed placeholder edge: {painted}");
         assert!(painted.contains("empty"), "placeholder caption: {painted}");
@@ -1461,7 +1464,7 @@ mod tests {
 
         let mut buf = WireBuffer::new(40, 24);
         let layout = render_card_board(&mut buf, 40, 0, 23, &columns, None);
-        let painted = painted_text(&buf);
+        let painted = grid_text(&buf);
 
         // The scrolled-off cards never paint.
         assert!(

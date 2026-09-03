@@ -1747,19 +1747,7 @@ mod card_tests {
     use ainb_hangar_core::ids::{IssueId, TaskId};
     use ainb_plugin_sdk::WireBuffer;
 
-    /// Reconstruct the full painted text of a rendered buffer (row-major) so a
-    /// render assertion can search for the card's labels / values.
-    fn painted_text(buf: &WireBuffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.height {
-            for (coord, cell) in &buf.cells {
-                if coord.y == y {
-                    out.push_str(&cell.symbol);
-                }
-            }
-        }
-        out
-    }
+    use crate::test_support::painted_text;
 
     /// The painted buffer as one string PER ROW, so an assertion can pin a glyph
     /// to the same line as its criterion instead of anywhere on the screen.
