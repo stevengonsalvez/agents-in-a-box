@@ -89,7 +89,15 @@ pub async fn answer(
 
     // An ACP permission has no pane: it is routed by the row's OWN session key
     // to the responder the pool parked, so neither the C1 guard nor tmux applies.
-    if let Some(permission) = acp_permission_from_payload(&row.payload) {
+    // Branch on the KIND, not on a successful parse: an ACP row carries the
+    // actor's cwd, so one this arm cannot read must never fall through to the
+    // cwd correlation and be typed into a same-cwd pane that never asked.
+    if is_acp_permission_payload(&row.payload) {
+        let Some(permission) = acp_permission_from_payload(&row.payload) else {
+            return Ok(AnswerResult::NoTarget {
+                reason: "malformed ACP permission row; nothing can route it".to_string(),
+            });
+        };
         return answer_acp(pool, events, params, now_ms, &row, &permission).await;
     }
 
@@ -315,11 +323,21 @@ impl AcpPermission {
     }
 }
 
+/// Does this payload claim to be an ACP permission? Decides the ARM, so a row
+/// of this kind the parser rejects still never reaches tmux resolution.
+fn is_acp_permission_payload(payload: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("kind").and_then(|k| k.as_str()).map(|k| k == "acp_permission"))
+        .unwrap_or(false)
+}
+
 /// The ACP permission a row's payload carries, or `None` for any other payload
 /// (a hook ASK, an ERR, an escalation). A payload claiming the kind without a
-/// session key, a fingerprint or any option is not routable and is `None` too,
-/// and so is one with a malformed option: dropping just that option would
-/// shift the 1-based digits against the full list a surface renders.
+/// session key, a fingerprint or any option is `None` too, and so is one with
+/// a malformed option: dropping just that option would shift the 1-based
+/// digits against the full list a surface renders. The caller answers such a
+/// row `NoTarget` (see [`is_acp_permission_payload`]).
 fn acp_permission_from_payload(payload: &str) -> Option<AcpPermission> {
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     if v.get("kind").and_then(|k| k.as_str()) != Some("acp_permission") {
@@ -1795,6 +1813,10 @@ mod tests {
     /// The row `SessionActor::raise_permission` inserts: an Approval with no
     /// workspace, its payload the ACP permission.
     async fn seed_acp_row(pool: &SqlitePool, id: &str) {
+        seed_acp_row_with(pool, id, ACP_PAYLOAD).await;
+    }
+
+    async fn seed_acp_row_with(pool: &SqlitePool, id: &str, payload: &str) {
         AttentionRepo::insert(
             pool,
             &NewAttention {
@@ -1803,7 +1825,7 @@ mod tests {
                 cwd: "/work/x".to_string(),
                 workspace_id: None,
                 kind: AttentionKind::Approval,
-                payload: ACP_PAYLOAD.to_string(),
+                payload: payload.to_string(),
                 degraded: false,
                 created_at: 1_000,
                 raise_transcript: None,
@@ -1844,6 +1866,36 @@ mod tests {
     /// With no pool installed in this process there is nothing to hand the
     /// option to: `NoTarget`, and the row is NOT claimed (it is answerable once
     /// a daemon with a pool is up, or convergence closes it).
+    /// A row that CLAIMS to be an ACP permission but cannot be read never
+    /// falls through to tmux resolution: it carries the actor's cwd, and the
+    /// cwd correlation would type the answer into a same-cwd pane that never
+    /// asked. It is `NoTarget` by kind, with the row left open.
+    #[tokio::test]
+    async fn a_malformed_acp_row_is_no_target_and_never_reaches_tmux() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let malformed = ACP_PAYLOAD.replace(r#""optionId":"allow-once","#, "");
+        assert!(is_acp_permission_payload(&malformed));
+        assert_eq!(acp_permission_from_payload(&malformed), None);
+        seed_acp_row_with(store.pool(), "p1", &malformed).await;
+        let (_b, sink) = broker_sink();
+        let params = AnswerParams {
+            attention_id: "p1".into(),
+            answer: "Reject".into(),
+            answered_by: "tui".into(),
+            is_answer: true,
+        };
+        let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
+        match res {
+            AnswerResult::NoTarget { reason } => {
+                assert!(reason.contains("malformed ACP permission"), "{reason}");
+            }
+            other => panic!("expected NoTarget, got {other:?}"),
+        }
+        let row = AttentionRepo::get(store.pool(), "p1").await.unwrap().unwrap();
+        assert_eq!(row.state, "open");
+    }
+
     #[tokio::test]
     async fn an_acp_row_without_a_pool_is_no_target_and_stays_open() {
         let dir = tempfile::tempdir().unwrap();
