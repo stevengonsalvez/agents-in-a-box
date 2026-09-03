@@ -469,6 +469,13 @@ pub struct HangarPlugin {
     /// and backfill the transcript from the run's on-disk stream-json. `None`
     /// when nothing is armed; consumed (taken) once fired.
     pending_task_timeline_fetch: Option<String>,
+    /// Log lines raised from the SYNCHRONOUS daemon-response path, drained by
+    /// `render`, which owns the [`HostClient`].
+    ///
+    /// A response handler has no host to log through, so a reply it cannot act on
+    /// used to vanish: a new plugin against a pre-#831 daemon showed an empty
+    /// task-detail transcript with nothing anywhere to say why (crisp B1 review).
+    pending_logs: Vec<String>,
     /// The card-board mouse drag FSM (63l.2). `handle_mouse` folds each forwarded
     /// pointer event against the [`hit_map`](Self::hit_map) into this, producing a
     /// [`MouseIntent`](crate::mouse::MouseIntent).
@@ -678,6 +685,7 @@ impl Default for HangarPlugin {
             daemon_start_verdict: None,
             pending_pr_status_refresh: None,
             pending_task_timeline_fetch: None,
+            pending_logs: Vec::new(),
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
             pending_mouse_intents: Vec::new(),
@@ -3802,13 +3810,24 @@ impl HangarPlugin {
     /// screen is bound to (the daemon serves the issue's NEWEST run, the screen
     /// may show an older attempt); an error, a malformed reply, a never-run
     /// issue, or a closed screen leaves the transcript as it was.
+    ///
+    /// A reply that carries no usable transcript is LOGGED, never silent: a new
+    /// plugin against a pre-#831 daemon is rejected outright (`board_id` used to
+    /// be required), and the operator otherwise sees an empty transcript with
+    /// nothing anywhere to explain it (crisp B1 review).
     fn apply_task_detail_timeline(&mut self, resp: &RpcResponse) {
         let Some(result) = &resp.result else {
+            let why = resp.error.as_ref().map_or_else(
+                || "no result and no error".to_string(),
+                |e| format!("{} ({})", e.message, e.code),
+            );
+            self.pending_logs.push(format!("hangar: task timeline failed: {why}"));
             return;
         };
         let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::BoardCardTimelineResult>(
             result.clone(),
         ) else {
+            self.pending_logs.push("hangar: task timeline reply did not decode".to_string());
             return;
         };
         let Some(task_id) = r.task_id else {
@@ -5875,6 +5894,11 @@ impl Plugin for HangarPlugin {
         if let Some(issue_id) = self.pending_task_timeline_fetch.take() {
             self.fire_task_detail_timeline(host, issue_id).await;
         }
+        // Drain whatever the SYNCHRONOUS response path wanted to say: it holds no
+        // host of its own, so a reply it could not act on queues its reason here.
+        for line in std::mem::take(&mut self.pending_logs) {
+            let _ = host.log_info(line).await;
+        }
         // multica parity #13: drain a deferred activity-timeline fetch (armed by
         // `y` opening the modal, or `r` inside it) and fire
         // `hangar/issue_timeline`. The reply folds the merged narrative in.
@@ -6738,6 +6762,32 @@ mod tests {
         assert!(
             text.contains("cargo test"),
             "the backfilled tool call renders on the detail screen:\n{text}"
+        );
+    }
+
+    /// Crisp B1 review: a REJECTED timeline reply (a new plugin against a daemon
+    /// that still demands `board_id`) leaves the transcript empty, so it must at
+    /// least say why. The reason is queued for `render` to log, since the
+    /// response path holds no host of its own.
+    #[test]
+    fn a_rejected_timeline_reply_queues_the_reason_for_the_log() {
+        let mut p = connected_plugin_with_issue();
+
+        p.on_daemon_response(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(TASK_DETAIL_TIMELINE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32602,
+                message: "missing field `board_id`".into(),
+                data: None,
+            }),
+        });
+
+        assert_eq!(
+            p.pending_logs,
+            vec!["hangar: task timeline failed: missing field `board_id` (-32602)".to_string()],
+            "the rejection is explained, not swallowed"
         );
     }
 
