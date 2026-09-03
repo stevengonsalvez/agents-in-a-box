@@ -444,6 +444,22 @@ pub fn install_default_presets(file: &Path) -> Result<()> {
     if !file.exists() {
         fs::write(file, BUNDLED_PRESETS_TOML)
             .with_context(|| format!("Failed to write default presets to {}", file.display()))?;
+    } else {
+        // Backfill any newly bundled default presets (e.g. antigravity-interactive-yolo)
+        // missing from an existing presets.toml, without overwriting existing user presets.
+        if let Ok(mut manager) = PresetManager::with_file(file.to_path_buf()) {
+            if let Ok(parsed) = toml::from_str::<PresetsFile>(BUNDLED_PRESETS_TOML) {
+                for preset in parsed.preset {
+                    if manager.get(&preset.name).is_none() {
+                        tracing::info!(
+                            preset = %preset.name,
+                            "Backfilling newly bundled preset into existing presets.toml",
+                        );
+                        let _ = manager.save_preset(&preset);
+                    }
+                }
+            }
+        }
     }
 
     // Merge any salvaged user-customised legacy presets into the new file.
@@ -790,6 +806,31 @@ mod tests {
         assert!(
             content.contains("my-only"),
             "user preset disappeared on install"
+        );
+        // Missing bundled defaults are backfilled alongside the user preset
+        assert!(
+            content.contains("antigravity-interactive-yolo"),
+            "antigravity preset missing after backfill"
+        );
+    }
+
+    #[test]
+    fn missing_bundled_presets_backfilled_into_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("presets.toml");
+        // Existing user file with only claude preset
+        std::fs::write(
+            &file,
+            "[[preset]]\nname = \"claude-interactive-yolo\"\nagent_provider = \"claude\"\nmode = \"interactive\"\n",
+        )
+        .unwrap();
+        install_default_presets(&file).unwrap();
+        let mgr = PresetManager::with_file(file).unwrap();
+        assert!(mgr.get("claude-interactive-yolo").is_some());
+        assert!(mgr.get("antigravity-interactive-yolo").is_some());
+        assert_eq!(
+            mgr.get("antigravity-interactive-yolo").unwrap().agent_provider,
+            "antigravity"
         );
     }
 
