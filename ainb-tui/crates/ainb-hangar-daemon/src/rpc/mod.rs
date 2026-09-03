@@ -484,6 +484,9 @@ async fn serve_conn(
             // the snapshot query runs stay buffered in this receiver and are
             // drained after the acknowledgement, closing the snapshot-to-live
             // handoff gap without allowing an event to precede the response.
+            let pending_workspace_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::WORKSPACE_SUBSCRIBE).then(|| broker.subscribe())
+            });
             let pending_task_stream_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::WORKSPACE_SUBSCRIBE)
                     .then(|| broker.subscribe_task_stream())
@@ -540,11 +543,17 @@ async fn serve_conn(
                         // This ordering guarantees no gap — at worst a boundary
                         // event delivered twice (live + replayed), which the
                         // plugin reconciles via the next snapshot pull.
-                        forwarder = Some(spawn_event_forwarder(
-                            broker.subscribe(),
-                            ws.clone(),
-                            out_tx.clone(),
-                        ));
+                        //
+                        // The receiver was taken BEFORE dispatch (#835), so the
+                        // window this arm used to leave — the snapshot query,
+                        // the ack write and the `resolve` above, all before
+                        // `subscribe()` — buffers rather than drops. It matters
+                        // more since A2: a transcript line rides `emit_live`
+                        // with no durable replay behind it, so one missed in
+                        // that window is gone, not merely late.
+                        let ws_rx = pending_workspace_rx.unwrap_or_else(|| broker.subscribe());
+                        forwarder =
+                            Some(spawn_event_forwarder(ws_rx, ws.clone(), out_tx.clone()));
                         // A2: the same subscription's TRANSCRIPT half, drained
                         // from its own broadcast so a chatty run cannot evict the
                         // lifecycle events above it (see `EventBroker`). Two
