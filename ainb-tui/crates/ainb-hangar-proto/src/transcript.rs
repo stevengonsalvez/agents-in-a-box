@@ -434,6 +434,25 @@ fn short_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The cap counts CHARS, not bytes: provider prose carries non-ASCII
+    /// routinely, and a byte-index truncation would panic on a UTF-8 boundary.
+    #[test]
+    fn the_body_cap_never_splits_a_multibyte_char() {
+        // 3 bytes per char, so a byte-index cut at BODY_MAX would land mid-char.
+        let huge = "日".repeat(BODY_MAX * 2);
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": huge }] },
+        })
+        .to_string();
+        let out = classify_stream_json(&line);
+        assert_eq!(out[0].1.chars().count(), BODY_MAX, "capped by chars");
+        assert!(
+            out[0].1.ends_with('…'),
+            "the elision marker survives intact"
+        );
+    }
+
     /// An arbitrarily large provider block is capped, not carried whole: since A2
     /// every classified body is also a live `TaskMessage` sitting in a bounded
     /// broadcast ring and framed to every subscriber.
