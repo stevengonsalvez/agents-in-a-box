@@ -26,6 +26,10 @@ use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "palette_nav_common.rs"]
+mod palette_nav;
+use palette_nav::nav_drain_rounds;
+
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// Read one Content-Length frame body, decoding the JSON. `None` on EOF.
@@ -375,15 +379,6 @@ async fn go_to_screen<W, R, DR, DW>(
     }
 }
 
-/// Relay rounds a [`go_to_screen`] walk needs to clear: one per key delivery
-/// (`^P` + the word + Enter) plus one per `hangar/search` the query edits arm,
-/// with two spare. Not an early-exit loop: a round that relays nothing is one
-/// render on a duplex pipe, and stopping at the first idle round would return
-/// before the plugin had queued the next search.
-fn nav_drain_rounds(word: &str) -> usize {
-    2 * word.chars().count() + 4
-}
-
 /// Write the `first_run` ack into `home` and THEN publish it as
 /// `AINB_HANGAR_HOME`, so no window exists where the env names a home whose
 /// `state.toml` is not there yet.
@@ -590,11 +585,19 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            sent,
-            "pressing `s` on the skill screen must issue a `hangar/skills_sync` RPC; saw: {:?}",
-            seen.lock().unwrap()
-        );
+        // On failure, print the PANE as well as the RPC list. Two different
+        // causes produce an identical RPC list here — a drained-too-late budget,
+        // and the danger-full-access modal swallowing every key before the walk
+        // is delivered — and only the pane tells them apart. Distinguishing them
+        // cost a whole extra diagnosis round.
+        if !sent {
+            let (_, pane) = poll_render_for(&mut host_write, &mut host_read, "\u{0}").await;
+            panic!(
+                "pressing `s` on the skill screen must issue a `hangar/skills_sync` RPC;\n\
+                 saw: {:?}\n--- pane ---\n{pane}",
+                seen.lock().unwrap()
+            );
+        }
 
         drop(host_write);
         server.abort();

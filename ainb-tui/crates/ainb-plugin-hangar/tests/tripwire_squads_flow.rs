@@ -36,6 +36,10 @@ use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "palette_nav_common.rs"]
+mod palette_nav;
+use palette_nav::nav_drain_rounds;
+
 const BUDGET: Duration = Duration::from_secs(30);
 
 /// A recorded daemon call: method + params.
@@ -419,7 +423,7 @@ async fn go_to_screen<W, R, DR, DW>(
         send_char(host_write, ch).await;
     }
     send_char(host_write, '\n').await;
-    for _ in 0..(2 * word.chars().count() + 4) {
+    for _ in 0..nav_drain_rounds(word) {
         let _ = render_capture(
             host_write,
             host_read,

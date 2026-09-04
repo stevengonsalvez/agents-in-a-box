@@ -25,6 +25,10 @@ use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "palette_nav_common.rs"]
+mod palette_nav;
+use palette_nav::nav_drain_rounds;
+
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// A recorded daemon call: method + params.
@@ -353,7 +357,7 @@ async fn pressing_one_answers_the_selected_ask() {
         // Drain the walk's own traffic (a key delivery per char plus one
         // `hangar/search` per query edit) so it does not come out of the
         // attention/answer budget below.
-        for _ in 0..18 {
+        for _ in 0..nav_drain_rounds("control") {
             relay_once(
                 &mut host_write,
                 &mut host_read,
