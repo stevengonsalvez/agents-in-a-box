@@ -141,10 +141,32 @@ impl AttentionKind {
 /// One answer option on an ASK card (a label + an optional one-line description).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardOption {
-    /// The option label — the exact text delivered as the answer.
+    /// The option label, rendered beside the glyph.
     pub label: String,
     /// An optional descriptive sub-line.
     pub description: Option<String>,
+    /// What `attention/answer` carries when this option is picked, when that is
+    /// NOT the label: an ACP adapter's stable `optionId`.
+    ///
+    /// The label is display text and two options may share one. The daemon
+    /// refuses an ambiguous answer rather than guessing, so delivering a shared
+    /// label would leave the permission permanently unanswerable from here
+    /// while still answerable by id elsewhere. Delivering the id cannot be
+    /// ambiguous. `None` for a classifier ASK, whose options have no id and
+    /// whose label IS the answer.
+    pub answer: Option<String>,
+}
+
+impl CardOption {
+    /// What `attention/answer` carries when this option is picked: the id when
+    /// the option has one, else the label.
+    ///
+    /// Only a classifier ASK reaches the fallback; every ACP option carries an
+    /// id ([`parse_acp_options`] voids the list otherwise).
+    #[must_use]
+    pub fn delivered(&self) -> String {
+        self.answer.clone().unwrap_or_else(|| self.label.clone())
+    }
 }
 
 /// The rendered body of a card, parsed from the attention row's payload
@@ -277,6 +299,18 @@ impl AttentionCard {
         }
     }
 
+    /// `true` when this card answers inline (renders ①②③ and takes a digit).
+    ///
+    /// The WIRE family decides it for the classifier's kinds, and the parsed
+    /// BODY decides it for a row whose kind is coarser than its payload: an ACP
+    /// permission arrives as `approval`, a family that carries no options in
+    /// general, while its payload carries the adapter's own option list. The
+    /// union, so no `ask_user_question` row's behaviour moves.
+    #[must_use]
+    pub(crate) fn is_answerable(&self) -> bool {
+        self.kind.is_answerable() || matches!(self.body, CardBody::Ask { .. })
+    }
+
     /// The answer options, when this is an answerable ASK card.
     #[must_use]
     pub(crate) fn options(&self) -> &[CardOption] {
@@ -292,6 +326,14 @@ impl AttentionCard {
 /// The classifier serialises `NeedsContext` as `{"kind": <TAG>, "context": {…}}`
 /// (tag = `ASK`/`ERR`/`IDLE`/`WAIT`). An unparseable / unknown payload falls back
 /// to [`CardBody::Other`] so the card always renders something.
+///
+/// One payload does NOT come from the classifier: an ACP adapter's parked
+/// permission (`kind = "acp_permission"`, written by the daemon's
+/// `acp_pool::raise_permission`) carries the adapter's OWN options and is
+/// answered through the same `attention/answer` RPC. It reads as an ASK here so
+/// the one inline-answer affordance serves it too: without this arm the row
+/// renders as unparseable and no key can answer it, which is the whole
+/// human-in-the-loop for a task running on the ACP executor.
 fn parse_body(payload: &str) -> CardBody {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
         return CardBody::Other {
@@ -301,6 +343,20 @@ fn parse_body(payload: &str) -> CardBody {
     let tag = v.get("kind").and_then(serde_json::Value::as_str).unwrap_or("");
     let ctx = v.get("context").unwrap_or(&serde_json::Value::Null);
     match tag {
+        "acp_permission" => CardBody::Ask {
+            header: v
+                .get("toolCall")
+                .and_then(|t| t.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                .map(|kind| format!("permission · {kind}")),
+            question: v
+                .get("toolCall")
+                .and_then(|t| t.get("title"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("(the agent asked to run a tool)")
+                .to_string(),
+            options: parse_acp_options(v.get("options")),
+        },
         "ASK" => CardBody::Ask {
             header: ctx.get("header").and_then(serde_json::Value::as_str).map(str::to_string),
             question: ctx
@@ -359,9 +415,56 @@ fn parse_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
                             .get("description")
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_string),
+                        // The classifier's options have no id; the label is the answer.
+                        answer: None,
                     })
                 })
                 .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse an ACP permission's `options` array into [`CardOption`]s.
+///
+/// The adapter's wire shape is `{optionId, name, kind}` (ACP `options_wire`),
+/// not the classifier's `{label, description}`: `name` renders, `optionId` is
+/// what gets delivered.
+///
+/// BOTH fields are required here, and one malformed entry voids the whole list
+/// rather than dropping a row. Dropping one would renumber every glyph below
+/// it, and the daemon reads a bare digit as a 1-based index into the options it
+/// holds, so the operator would press ③ and answer something else. An empty
+/// list renders "this ASK carries no options" instead.
+///
+/// The daemon is STRICTER on `optionId` (a missing one voids its whole row too)
+/// and LOOSER on `name` (missing defaults to `""` and still routes), and it
+/// also requires `sessionKey` and `requestFingerprint`, which this parser does
+/// not read. So the two are not parity, they only agree on the case that
+/// matters: neither will act on a payload whose options lack ids. Both are
+/// unreachable against `acp_pool::raise_permission`, which always writes all
+/// three fields.
+fn parse_acp_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
+    v.and_then(serde_json::Value::as_array)
+        .and_then(|arr| {
+            arr.iter()
+                .map(|o| {
+                    Some(CardOption {
+                        label: o.get("name").and_then(serde_json::Value::as_str)?.to_string(),
+                        description: None,
+                        answer: Some(
+                            o.get("optionId").and_then(serde_json::Value::as_str)?.to_string(),
+                        ),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+        })
+        .map(|options| {
+            // The invariant `delivered()`'s fallback relies on: every option
+            // this parser yields carries an id, so an ACP card never answers
+            // with a display name. Asserted rather than argued, because the
+            // fallback is two functions away from the construction site.
+            debug_assert!(options.iter().all(|o| o.answer.is_some()));
+            options
         })
         .unwrap_or_default()
 }
@@ -539,25 +642,26 @@ impl ControlCenterState {
         self.cards.iter().filter(|c| c.kind.urgency_rank() == 0).count()
     }
 
-    /// The `(attention_id, answer_label)` the selected ASK's highlighted option
-    /// would deliver, if a card + option are selected. `None` for a non-ASK card
-    /// or an ASK with no options.
+    /// The `(attention_id, answer)` the selected ASK's highlighted option would
+    /// deliver, if a card + option are selected. `None` for a non-ASK card or an
+    /// ASK with no options.
     #[must_use]
     pub fn pending_answer(&self) -> Option<(String, String)> {
         let card = self.selected_card()?;
-        let label = card.options().get(self.option_cursor)?.label.clone();
-        Some((card.id.clone(), label))
+        Some((
+            card.id.clone(),
+            card.options().get(self.option_cursor)?.delivered(),
+        ))
     }
 
-    /// The `(attention_id, answer_label)` for a direct 1-based option pick on the
+    /// The `(attention_id, answer)` for a direct 1-based option pick on the
     /// selected ASK (the ①..⑨ number keys). `None` when the pick is out of range
     /// or the card is not an answerable ASK.
     #[must_use]
     pub fn answer_at(&self, one_based: usize) -> Option<(String, String)> {
         let card = self.selected_card()?;
         let idx = one_based.checked_sub(1)?;
-        let label = card.options().get(idx)?.label.clone();
-        Some((card.id.clone(), label))
+        Some((card.id.clone(), card.options().get(idx)?.delivered()))
     }
 }
 
@@ -895,7 +999,7 @@ fn render_detail(
 /// `render_options_paints_exactly_options_height_rows` is what makes the miss loud.
 #[must_use]
 pub(crate) fn options_height(card: &AttentionCard) -> u16 {
-    if !card.kind.is_answerable() || card.options().is_empty() {
+    if !card.is_answerable() || card.options().is_empty() {
         // The single "(no inline options …)" / "(this ASK carries no options)" note.
         return 1;
     }
@@ -931,7 +1035,7 @@ pub(crate) fn render_options(
     card: &AttentionCard,
     option_cursor: usize,
 ) -> u16 {
-    if !card.kind.is_answerable() {
+    if !card.is_answerable() {
         put_line(
             buf,
             x0,
@@ -1393,6 +1497,110 @@ mod tests {
                 answer: "three".into(),
             })
         );
+    }
+
+    /// An ACP adapter's parked permission is answerable inline, and delivers
+    /// the adapter's own option id.
+    ///
+    /// The payload is `acp_pool::raise_permission`'s, verbatim in shape: an
+    /// `approval` row whose options are `{optionId, name, kind}`. Pressing `3`
+    /// must deliver the id `reject`, not the display name: two options may
+    /// share a name and the daemon refuses an ambiguous answer, which would
+    /// leave the row unanswerable from here. The wrong option here is the
+    /// defect-26 class (the store recording one pick while the agent acts on
+    /// another), and before this the row carried no options at all and the
+    /// digit fell through to the tab router.
+    #[test]
+    fn acp_permission_answers_by_the_adapters_own_option() {
+        let payload = serde_json::json!({
+            "kind": "acp_permission",
+            "sessionKey": "acp:claude:01J",
+            "requestFingerprint": "f00d",
+            "rpcId": 9000,
+            "options": [
+                { "optionId": "allow_always", "name": "Always Allow", "kind": "allow_always" },
+                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+            ],
+            "toolCall": { "toolCallId": "tool-1", "title": "printf 'api/app.db' > DBPATH.txt", "kind": "execute" },
+        })
+        .to_string();
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row("perm", "approval", 1, &payload)]);
+
+        let card = state.selected_card().expect("the permission card");
+        assert!(card.is_answerable(), "an acp permission answers inline");
+        assert_eq!(
+            card.options().iter().map(|o| o.label.as_str()).collect::<Vec<_>>(),
+            ["Always Allow", "Allow", "Reject"],
+            "the adapter's own labels, in the adapter's own order"
+        );
+        assert_eq!(
+            card.body,
+            CardBody::Ask {
+                header: Some("permission · execute".into()),
+                question: "printf 'api/app.db' > DBPATH.txt".into(),
+                options: card.options().to_vec(),
+            }
+        );
+
+        let out = reduce_control_center(&state, ControlCenterEvent::Key('3'));
+        assert_eq!(
+            out.intent,
+            Some(ControlCenterIntent::Answer {
+                attention_id: "perm".into(),
+                answer: "reject".into(),
+            }),
+            "the id is delivered, never the display name"
+        );
+    }
+
+    /// Two options sharing a display name still answer, because the id is what
+    /// travels: on the name the daemon would refuse as ambiguous and the row
+    /// would reopen unanswerable.
+    #[test]
+    fn acp_permission_with_twin_labels_still_delivers_a_distinct_id() {
+        let payload = serde_json::json!({
+            "kind": "acp_permission",
+            "sessionKey": "k",
+            "requestFingerprint": "f",
+            "options": [
+                { "optionId": "allow_always", "name": "Allow", "kind": "allow_always" },
+                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+            ],
+        })
+        .to_string();
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row("perm", "approval", 1, &payload)]);
+        let out = reduce_control_center(&state, ControlCenterEvent::Key('2'));
+        assert_eq!(
+            out.intent,
+            Some(ControlCenterIntent::Answer {
+                attention_id: "perm".into(),
+                answer: "allow".into(),
+            })
+        );
+    }
+
+    /// An option missing either field voids the WHOLE list rather than dropping
+    /// a row: dropping one renumbers every glyph below it, and the daemon reads
+    /// a bare digit as an index into the options IT holds.
+    #[test]
+    fn acp_permission_with_a_malformed_option_offers_none() {
+        let payload = serde_json::json!({
+            "kind": "acp_permission",
+            "sessionKey": "k",
+            "requestFingerprint": "f",
+            "options": [
+                { "name": "Always Allow", "kind": "allow_always" },
+                { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+            ],
+        })
+        .to_string();
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row("perm", "approval", 1, &payload)]);
+        assert!(state.selected_card().expect("card").options().is_empty());
+        assert_eq!(state.answer_at(1), None, "no glyph answers a voided list");
     }
 
     #[test]

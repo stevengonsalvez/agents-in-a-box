@@ -29,11 +29,16 @@
 //! blocking an agent".
 //!
 //! A consequence of §2.1's four-code collapse: an `approval` or a
-//! `codex_request_user` row reads `ASK` and counts toward the badge, but only a
-//! structured `ask_user_question` carries options, so selecting one of the other
-//! two shows `(no inline options — surfaced for visibility)` rather than ①②③.
-//! `ASK` is the vocabulary's word for "a question is waiting", not a promise
-//! that this pane can answer it; free-text answering is ACP work, not B3.
+//! `codex_request_user` row reads `ASK` and counts toward the badge, but the
+//! options come from the PAYLOAD, so what a row renders depends on what it
+//! carries. A structured `ask_user_question` and an ACP adapter's parked
+//! permission (`acp_permission`, an `approval` row) both paint ①②③ and answer
+//! inline; a payload carrying no options shows the "surfaced for visibility"
+//! note instead. That note was written for `codex_request_user`, which no
+//! producer in the tree constructs today, so it is reached only by a payload
+//! neither surface can parse. `ASK` is the vocabulary's word for "a question is
+//! waiting", not a promise that this pane can answer it; free-text answering is
+//! still not B3's work.
 //!
 //! The rows are the SAME [`ControlCenterState`] the Control Center paints,
 //! handed in at render time rather than copied, so the two surfaces cannot
