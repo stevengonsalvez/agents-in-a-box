@@ -33,6 +33,7 @@ pub mod mcp_overlay;
 pub mod new_session;
 pub mod onboarding;
 pub mod session_list;
+pub mod session_tabs;
 pub mod session_recovery;
 pub mod setup_menu;
 pub mod sidebar;
