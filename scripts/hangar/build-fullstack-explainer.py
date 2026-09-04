@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 REPORT = ROOT / "docs/hangar/proofs/fullstack/REPORT.md"
 TEMPLATE = Path.home() / ".claude/skills/explain-to-me/assets/templates/11-status-report.html"
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "explainers/prove-hangar-fullstack.html"
-BRANCH = "f/prove-hangar"
+BRANCH = "main"
 RAW = f"https://raw.githubusercontent.com/stevengonsalvez/agents-in-a-box/{BRANCH}/docs/hangar/proofs/fullstack"
 PR = "https://github.com/stevengonsalvez/agents-in-a-box/pull/815"
 COMMIT = "https://github.com/stevengonsalvez/agents-in-a-box/commit"
@@ -98,14 +98,17 @@ def main() -> None:
         ("p2-pipeline", "P2 · role-gated pipeline, Triage → Done", range(1, 10)),
         ("p3-human-loop", "P3 · live AskUserQuestion answered from Control Center", range(1, 8)),
         ("p4-levers", "P4 · levers + observability after real runs", range(1, 13)),
+        ("p3-acp-human-loop", "P3-ACP · the same loop with zero tmux, answered from the Inbox", range(1, 9)),
     ):
         gif = ROOT / f"docs/hangar/proofs/fullstack/{slug}.gif"
         if not gif.exists():
             continue
-        prefix = slug.split("-")[0]
+        # rsplit, not split: the ACP leg's prefix is "p3-acp", and a bare
+        # split would hand it "p3" and glob the tmux leg's stills instead.
+        prefix = slug.rsplit("-", 2)[0]
         pngs = sorted(
             (ROOT / "docs/hangar/proofs/fullstack").glob(f"{prefix}-[0-9]*-*.png"),
-            key=lambda q: int(q.name.split("-")[1]),
+            key=lambda q: int(q.name[len(prefix) + 1:].split("-")[0]),
         )
         recordings.append((slug, title, pngs))
 
