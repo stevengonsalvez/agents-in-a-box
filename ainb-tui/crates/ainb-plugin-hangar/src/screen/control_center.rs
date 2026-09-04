@@ -281,8 +281,8 @@ impl AttentionCard {
     ///
     /// The WIRE family decides it for the classifier's kinds, and the parsed
     /// BODY decides it for a row whose kind is coarser than its payload: an ACP
-    /// permission arrives as `approval` — a family that carries no options in
-    /// general — while its payload carries the adapter's own option list. The
+    /// permission arrives as `approval`, a family that carries no options in
+    /// general, while its payload carries the adapter's own option list. The
     /// union, so no `ask_user_question` row's behaviour moves.
     #[must_use]
     pub(crate) fn is_answerable(&self) -> bool {
@@ -309,7 +309,7 @@ impl AttentionCard {
 /// permission (`kind = "acp_permission"`, written by the daemon's
 /// `acp_pool::raise_permission`) carries the adapter's OWN options and is
 /// answered through the same `attention/answer` RPC. It reads as an ASK here so
-/// the one inline-answer affordance serves it too — without this arm the row
+/// the one inline-answer affordance serves it too: without this arm the row
 /// renders as unparseable and no key can answer it, which is the whole
 /// human-in-the-loop for a task running on the ACP executor.
 fn parse_body(payload: &str) -> CardBody {
@@ -1456,7 +1456,7 @@ mod tests {
     ///
     /// The payload is `acp_pool::raise_permission`'s, verbatim in shape: an
     /// `approval` row whose options are `{optionId, name, kind}`. Pressing `3`
-    /// must deliver `Reject`, the option in the third glyph — the wrong option
+    /// must deliver `Reject`, the option in the third glyph. The wrong option
     /// here is the defect-26 class (the store recording one pick while the
     /// agent acts on another), and before this the row carried no options at
     /// all and the digit fell through to the tab router.
