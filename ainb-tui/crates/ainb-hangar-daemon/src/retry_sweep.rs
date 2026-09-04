@@ -88,12 +88,27 @@ const RECENT_EVENT_SCAN: i64 = 20;
 /// every one of the patterns, so an agent opening the file that defines them
 /// would qualify itself.
 ///
-/// These three are the types that can carry a PROVIDER failure rather than
-/// content the agent chose to print. `StopFailure` and the `*error*`/`*failed*`
-/// wire methods are what set `attention_state = 'ERROR'` in the first place
-/// (`fleet.rs`), so bounding the scan to them asks the events that produced the
-/// state rather than whatever else the session happened to do.
-const ERROR_BEARING_EVENTS: &[&str] = &["StopFailure", "Notification", "acp_error"];
+/// These are the types that can carry a PROVIDER failure rather than content
+/// the agent chose to print. `StopFailure` is the ONLY hook that sets
+/// `attention_state = 'ERROR'`; `Notification` earns its place as a
+/// corroborating neighbour inside the transition window, nothing more.
+///
+/// Bounding the types was necessary and is NOT what closes the hole — the
+/// envelope carries the session's own `cwd` and `project` into every allowed
+/// payload, so a worktree named after the bug matched on its path alone. That
+/// is closed by reading a named field; see [`failure_text`].
+///
+/// SCOPE, stated because the list understates it: this makes the sweep
+/// Claude-hook-only. A wire session's ERROR comes from `fleet.rs` matching any
+/// method containing `error` or `failed`, and it stores that raw method as the
+/// event type (`turn/failed`, `thread/error`, ...), none of which is named
+/// here — so Codex and ACP sessions never qualify and always land in
+/// `skipped_opaque`. That fails CLOSED, which is the right direction for a
+/// gate that types at an unattended agent, and widening it is a deliberate
+/// change that needs its own verification rather than a longer list. An
+/// `acp_error` entry used to sit here suggesting otherwise; nothing in the
+/// workspace emits that string, so it was doing nothing but implying coverage.
+const ERROR_BEARING_EVENTS: &[&str] = &["StopFailure", "Notification"];
 
 /// How far before the ERROR transition the scan may look, in milliseconds.
 ///
@@ -350,11 +365,43 @@ async fn transient_pattern(pool: &SqlitePool, session: &FleetSessionRow) -> Opti
         Vec::new()
     });
     payloads.iter().find_map(|payload| {
-        detect_error_signals(payload, 0).into_iter().find_map(|signal| match signal {
+        let reported = failure_text(payload)?;
+        detect_error_signals(&reported, 0).into_iter().find_map(|signal| match signal {
             Signal::ApiError { pattern, .. } => Some(pattern),
             _ => None,
         })
     })
+}
+
+/// What the event says FAILED, from a named field, never the whole record.
+///
+/// The stored payload is `notify.sh`'s envelope, and the envelope carries the
+/// session's own `cwd` and `project` alongside the hook body. The patterns are
+/// case-insensitive word-boundary matches and both `-` and `/` are non-word
+/// characters, so a worktree called `econnreset-repro` matched
+/// `\bECONNRESET\b` on a path — and every `StopFailure` on that session then
+/// qualified as transient no matter what had actually failed. Anyone debugging
+/// this class of failure names a branch exactly that way.
+///
+/// Bounding the event TYPES was necessary and is not sufficient: the path rides
+/// inside the very event that reported the error, so no time window can exclude
+/// it. Reading one named field is what actually closes it, and it holds against
+/// a prompt and a tool result for the same reason.
+fn failure_text(payload: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    // The hook's own body when this is an envelope; the record itself when a
+    // producer stored the body directly.
+    let body = value.get("payload").unwrap_or(&value);
+    [
+        "/error_type",
+        "/error",
+        "/error/message",
+        "/message",
+        "/reason",
+    ]
+    .iter()
+    .find_map(|path| body.pointer(path).and_then(serde_json::Value::as_str))
+    .map(str::to_string)
 }
 
 /// Whether `ainb fleet daemon`, the legacy uncapped watcher, is running.
@@ -994,6 +1041,45 @@ mod tests {
                 .is_none(),
             "no budget may be spent on a session the gate did not qualify"
         );
+    }
+
+    /// The session's own PATH must not qualify it.
+    ///
+    /// `notify.sh` stores its envelope, and the envelope carries `cwd` and
+    /// `project` alongside the hook body. The patterns are word-boundary
+    /// matches and `-` and `/` are non-word characters, so a worktree called
+    /// `econnreset-repro` matched on the path alone — and every failure on that
+    /// session then read as transient regardless of what broke. The name is not
+    /// contrived: it is what someone debugging this exact class of failure
+    /// calls a branch.
+    ///
+    /// No time window can exclude this, because the path rides inside the very
+    /// event that reported the error.
+    #[tokio::test]
+    async fn a_transient_word_in_the_sessions_own_path_never_qualifies_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        ensure_instance(store.pool()).await.unwrap();
+        let (_broker, events) = broker();
+
+        // The envelope shape `notify.sh` actually writes: the hook body under
+        // `payload`, with the session's own location beside it.
+        seed_err(
+            &store,
+            "claude:repro",
+            "/work/econnreset-repro",
+            r#"{"cwd":"/work/econnreset-repro","project":"econnreset-repro",
+                "payload":{"error_type":"the project's own test suite is red"}}"#,
+        )
+        .await;
+
+        let report = sweep_once(store.pool(), &events, NOW).await;
+        assert_eq!(report.scanned, 1);
+        assert_eq!(
+            report.skipped_opaque, 1,
+            "a transient word in the PATH must not qualify the session"
+        );
+        assert_eq!(report.continued, 0, "and nothing may be typed at it");
     }
 
     /// An incident the session already recovered from must not arm the NEXT,
