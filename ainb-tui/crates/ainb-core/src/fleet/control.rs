@@ -921,6 +921,24 @@ pub fn dispatch_new_atc(
 ///      than guess — sending an interview answer (or even a ping) to the wrong
 ///      agent is the bug we're closing.
 async fn resolve_and_send(session_id: &str, cwd: &str, text: &str, is_answer: bool) -> String {
+    match resolve_and_send_typed(session_id, cwd, text, is_answer).await {
+        Ok(via) => via,
+        Err(reason) => reason,
+    }
+}
+
+/// [`resolve_and_send`], with success and failure told apart.
+///
+/// The string form is what a status line wants; a surface that has to decide
+/// whether a chip CLEARS or reverts to ASK needs the verdict, and inferring it
+/// by matching on prose is how the two drift. `Ok` carries the delivery
+/// description, `Err` the reason nothing was delivered.
+async fn resolve_and_send_typed(
+    session_id: &str,
+    cwd: &str,
+    text: &str,
+    is_answer: bool,
+) -> Result<String, String> {
     use crate::fleet::discover::{discover_from_ainb, discover_from_peers, merge_sessions};
     use crate::fleet::send::send;
     use crate::fleet::types::Session;
@@ -948,12 +966,12 @@ async fn resolve_and_send(session_id: &str, cwd: &str, text: &str, is_answer: bo
 
     // 1. Exact session-id match is always unambiguous — send it.
     if let Some(session) = merged.iter().find(|s| s.id == session_id) {
-        return outcome_string(send(session, text).await);
+        return outcome_result(send(session, text).await);
     }
 
     // 2. No exact match → cwd correlation, guarded by ambiguity.
     let Some(by_cwd) = merged.iter().find(|s| !cwd.is_empty() && s.cwd == cwd) else {
-        return "no live session matched (target may have exited)".to_string();
+        return Err("no live session matched (target may have exited)".to_string());
     };
 
     // Ambiguous when >1 raw session shared the cwd, OR the merged session for
@@ -965,24 +983,109 @@ async fn resolve_and_send(session_id: &str, cwd: &str, text: &str, is_answer: bo
         } else {
             "refusing to send"
         };
-        return format!(
+        return Err(format!(
             "ambiguous target — {label} ({} sessions in this cwd)",
             raw_cwd_count.max(by_cwd.sources.len())
-        );
+        ));
     }
 
-    outcome_string(send(by_cwd, text).await)
+    outcome_result(send(by_cwd, text).await)
 }
 
-/// Map a `send()` result to the human-readable feedback string.
-fn outcome_string(result: anyhow::Result<crate::fleet::types::SendOutcome>) -> String {
+/// Map a `send()` result to a verdict plus its description.
+fn outcome_result(
+    result: anyhow::Result<crate::fleet::types::SendOutcome>,
+) -> Result<String, String> {
     use crate::fleet::types::SendOutcome;
     match result {
-        Ok(SendOutcome::Tmux { tmux_session }) => format!("sent via tmux ({tmux_session})"),
-        Ok(SendOutcome::Broker { peer_id }) => format!("sent via broker ({peer_id})"),
-        Ok(SendOutcome::Failed { reason }) => format!("not delivered: {reason}"),
-        Err(e) => format!("send error: {e}"),
+        Ok(SendOutcome::Tmux { tmux_session }) => Ok(format!("sent via tmux ({tmux_session})")),
+        Ok(SendOutcome::Broker { peer_id }) => Ok(format!("sent via broker ({peer_id})")),
+        // `Failed` is the send path reporting a dead pane or a stale tmux
+        // identity: an ERROR, not a delivery. Folding it in with the successes
+        // is how a chip clears on an answer that never arrived.
+        Ok(SendOutcome::Failed { reason }) => Err(format!("not delivered: {reason}")),
+        Err(e) => Err(format!("send error: {e}")),
     }
+}
+
+/// Deliver one answer into a session's own pane, blocking, with the C1
+/// ambiguity guard.
+///
+/// The verified last-mile send for a row the daemon knows nothing about. This
+/// is what keeps the sessions screen answerable with the hangar daemon stopped.
+///
+/// # Errors
+///
+/// Returns the reason nothing was delivered.
+pub fn answer_via_tmux_blocking(
+    session_id: &str,
+    cwd: &str,
+    text: &str,
+) -> Result<String, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    // `is_answer` is always true here: this path exists only for answers, and
+    // an answer routed to the wrong agent by a cwd guess is the failure the
+    // guard exists to prevent.
+    runtime.block_on(resolve_and_send_typed(session_id, cwd, text, true))
+}
+
+/// Answer one open attention row through the daemon, blocking.
+///
+/// The daemon runs first-answer-wins and performs its own verified last-mile
+/// send, so this reports what it decided rather than deciding anything.
+///
+/// # Errors
+///
+/// Returns the reason the answer was not delivered.
+pub fn answer_via_daemon_blocking(
+    attention_id: String,
+    answer: String,
+) -> Result<String, String> {
+    use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| format!("attention/answer unavailable: {error}"))?;
+        let socket = client.socket().display().to_string();
+        let result = client
+            .answer(AnswerParams {
+                attention_id,
+                answer,
+                answered_by: "tui".to_string(),
+                is_answer: true,
+            })
+            .await
+            .map_err(|error| format!("attention/answer via {socket}: {error}"))?;
+        match result {
+            AnswerResult::Delivered { via } => Ok(via),
+            // Not a failure of THIS answer: another surface got there first and
+            // the session already has its reply. The chip clears either way,
+            // which is why it reads as delivered with a note rather than an
+            // error the operator would retry.
+            AnswerResult::AlreadyAnswered { by } => Ok(format!("already answered by {by}")),
+            // Every remaining variant means the session did NOT get the answer,
+            // so each carries its own reason and the chip must go back to ASK.
+            // Matched exhaustively rather than debug-formatted: `{other:?}`
+            // would put a Rust struct literal in front of the operator.
+            AnswerResult::Ambiguous { reason } => {
+                Err(format!("ambiguous target, refused rather than mis-routed: {reason}"))
+            }
+            AnswerResult::NoTarget { reason } => Err(format!("no live target: {reason}")),
+            // The row IS answered (the race winner is recorded) but nothing
+            // reached the agent. Reported as a failure because the agent is
+            // still waiting, which is the fact the operator has to act on.
+            AnswerResult::DeliveryFailed { reason } => {
+                Err(format!("recorded, but the send did not land: {reason}"))
+            }
+        }
+    })
 }
 
 fn publish(feedback: &Mutex<ActionFeedback>, message: String) {
