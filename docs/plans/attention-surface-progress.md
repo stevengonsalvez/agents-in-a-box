@@ -307,7 +307,30 @@ this run.
 
 ## Published pages
 
-_(none yet)_
+| Page | Where | Lock |
+|---|---|---|
+| The attention surface | <https://explainers.stevengonsalvez.com/attention-surface/> (also <https://fancy-temple-hw39.here.now/>) | open |
+
+Open because the config's `protect_rule` says so in as many words: "Own
+open-source tooling explainers (ainb, reflect, hangar, popajob, career-ops,
+cerebro) stay public." Nothing on the page is not already in this public repo's
+commits. Source committed at `docs/explainers/attention-surface.html`.
+
+The recording it refers to is `docs/assets/screenshots/attention-surface.gif`,
+driven by `scripts/attention-surface-demo.sh` through
+`docs/assets/screenshots/attention-surface.tape`. FIVE takes were made and four
+were discarded rather than published, per the contract:
+
+| Take | Discarded because |
+|---|---|
+| 1 | The seeded onboarding version was a hardcoded `0.0.0`, so the TUI ran its setup wizard and the tape drove that instead of the sessions screen |
+| 2 | Two Tabs from `preview` lands on `thread`, so the answer was typed into the thread composer rather than the ask pane |
+| 3 | `Down` never moved the session: `thread` and `copilot` own composers that swallow the arrows |
+| 4 | The walk moved ONE row, which is the other session on the same worktree — the same question, so correctly the same outcome, but not the point being shown |
+
+Take 5 is the published one: the ask pane answers, the send refuses as an
+ambiguous target with the operator's text kept, the other question's pane
+reports nothing, and the failure is still there on return.
 
 ## Blockers
 
