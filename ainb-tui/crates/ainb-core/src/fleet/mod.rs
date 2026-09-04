@@ -21,6 +21,7 @@
 pub mod atc;
 pub mod attention;
 pub mod attention_poll;
+pub mod chat_host;
 pub mod bridge;
 pub mod control;
 pub mod daemons;
