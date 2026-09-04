@@ -3479,8 +3479,6 @@ Commands:
   stop           Take it down
   provision      Provision the instance and bring it up, creating it if absent
   remove-orphan  Remove a heartbeat timer whose instance does not exist
-  mode-lite      Switch the supervisor to lite mode (no LLM, deterministic scan)
-  mode-full      Switch the supervisor to full mode (scheduled LLM heartbeat)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3557,36 +3555,6 @@ $ ainb daemon atc remove-orphan --help
 Remove a heartbeat timer whose instance does not exist
 
 Usage: ainb daemon atc remove-orphan [OPTIONS]
-
-Options:
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -h, --help             Print help
-```
-
-#### `ainb daemon atc mode-lite`
-
-Switch the supervisor to lite mode (no LLM, deterministic scan)
-
-```console
-$ ainb daemon atc mode-lite --help
-Switch the supervisor to lite mode (no LLM, deterministic scan)
-
-Usage: ainb daemon atc mode-lite [OPTIONS]
-
-Options:
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -h, --help             Print help
-```
-
-#### `ainb daemon atc mode-full`
-
-Switch the supervisor to full mode (scheduled LLM heartbeat)
-
-```console
-$ ainb daemon atc mode-full --help
-Switch the supervisor to full mode (scheduled LLM heartbeat)
-
-Usage: ainb daemon atc mode-full [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
