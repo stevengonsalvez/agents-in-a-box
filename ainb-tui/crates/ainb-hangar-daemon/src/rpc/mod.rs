@@ -1434,6 +1434,7 @@ async fn handle(
         methods::ATTENTION_ANSWER => handle_attention_answer(pool, req, events).await,
         methods::ATC_REGISTER => handle_atc_register(pool, req).await,
         methods::ATC_LIST => handle_atc_list(pool).await,
+        methods::ATC_RETRY_LIST => handle_atc_retry_list(pool, req).await,
         methods::ATC_ESCALATE => handle_atc_escalate(pool, req, events).await,
         methods::ATC_UNREGISTER => handle_atc_unregister(pool, req).await,
         methods::PROFILE_LIST => handle_profile_list(pool).await,
@@ -12462,6 +12463,53 @@ async fn handle_atc_register(
 /// Dispatch `atc/list` (spec P9, D12): list every registered ATC instance,
 /// name-ordered. A read (ATC is host-wide, not workspace-partitioned). Split out
 /// of [`handle`] to keep that dispatcher within the line cap.
+/// One instance's retry ledger, defaulting to the daemon's own sweep.
+///
+/// The sweep is the reason this method exists. It auto-continues transient API
+/// errors with no ATC instance behind it, so an operator has no `atc status` to
+/// ask and, before this, no way at all to see which sessions it had continued
+/// or escalated. ATC lite mode had `supervise --once --dry-run` for exactly
+/// that; deleting lite without replacing the view would have traded a visible
+/// loop for an invisible one.
+async fn handle_atc_retry_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::snapshots::{AtcRetryListParams, AtcRetryListResult, AtcRetryWire};
+    use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
+
+    let params: AtcRetryListParams = parse_params(req, "{ instance? }")?;
+    let instance = params
+        .instance
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| crate::retry_sweep::SWEEP_INSTANCE.to_string());
+    // The cap comes from the instance ROW, not the constant: an operator can
+    // tune a real ATC's cap, and reporting the default beside a ledger spending
+    // a different one would misread every row.
+    let row = AtcInstanceRepo::get(pool, &instance)
+        .await
+        .map_err(|error| store_err(&error))?
+        .ok_or_else(|| invalid_params(&format!("no ATC instance named {instance:?}")))?;
+    let retries = AtcInstanceRepo::retry_list(pool, &instance)
+        .await
+        .map_err(|error| store_err(&error))?
+        .into_iter()
+        .map(|retry| AtcRetryWire {
+            session_id: retry.session_id,
+            continue_count: retry.continue_count,
+            escalated: retry.escalated,
+            note: retry.note,
+            updated_at: retry.updated_at,
+        })
+        .collect();
+    to_value(&AtcRetryListResult {
+        instance,
+        err_retry_cap: row.err_retry_cap,
+        retries,
+    })
+}
+
 async fn handle_atc_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
 

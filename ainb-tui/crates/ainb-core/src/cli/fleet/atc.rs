@@ -39,6 +39,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("status", sub)) => status(sub, format).await,
         Some(("repair", sub)) => repair(sub, format).await,
         Some(("list", _)) => list(format).await,
+        Some(("retries", sub)) => retries(sub, format).await,
         Some(("heartbeat", sub)) => heartbeat(sub, format).await,
         Some(("hook", sub)) => hook(sub).await,
         Some(("inbox", sub)) => inbox(sub, format).await,
@@ -983,6 +984,57 @@ fn print_repair_text(
 }
 
 // --- list -------------------------------------------------------------------
+
+/// The retry ledger: what has spent budget, and what was escalated.
+///
+/// Defaults to the daemon's own sweep rather than requiring an instance name,
+/// because the sweep is the case with nothing else to ask. ATC lite mode used
+/// to answer this with `supervise --once --dry-run`; deleting lite without
+/// replacing the view would have traded a visible loop for an invisible one.
+async fn retries(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
+    use crate::fleet::bridge::daemon::DaemonClient;
+    use ainb_hangar_proto::snapshots::AtcRetryListParams;
+
+    let client = DaemonClient::from_env().map_err(|e| {
+        anyhow::anyhow!("the hangar daemon owns this ledger and is not reachable: {e}")
+    })?;
+    let result = client
+        .atc_retry_list(AtcRetryListParams {
+            instance: matches.get_one::<String>("instance").cloned(),
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("atc/retry_list: {e}"))?;
+
+    if matches!(format, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!(
+        "{} — cap {} per session",
+        result.instance, result.err_retry_cap
+    );
+    if result.retries.is_empty() {
+        // An empty ledger is a FACT worth stating: nothing is currently
+        // erroring, or nothing that errored matched a transient API pattern.
+        // Printing nothing at all reads as a broken command.
+        println!("  no session has spent retry budget");
+        return Ok(());
+    }
+    for row in &result.retries {
+        println!(
+            "  {:<34} {}/{}{}",
+            super::msg::escape_control(&row.session_id),
+            row.continue_count,
+            result.err_retry_cap,
+            if row.escalated {
+                "  ESCALATED — a human was pulled in; not retrying"
+            } else {
+                ""
+            }
+        );
+    }
+    Ok(())
+}
 
 async fn list(format: OutputFormat) -> Result<()> {
     let names = crate::fleet::atc::paths::list_instance_names()?;

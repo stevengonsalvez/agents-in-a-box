@@ -1547,6 +1547,16 @@ pub const ATC_REGISTER: &str = "atc/register";
 /// Result: [`crate::snapshots::AtcListResult`]. A read (host-wide, since ATC is
 /// not workspace-partitioned).
 pub const ATC_LIST: &str = "atc/list";
+/// Read one instance's retry ledger: continue budget spent per session, and
+/// which sessions were escalated at the cap.
+///
+/// Params: [`crate::snapshots::AtcRetryListParams`]; result:
+/// [`crate::snapshots::AtcRetryListResult`].
+///
+/// Exists for the DAEMON'S OWN retry sweep above all. The sweep auto-continues
+/// transient API errors with no ATC instance behind it, so there is no
+/// `atc status` to ask and nothing else that can answer "what did it do".
+pub const ATC_RETRY_LIST: &str = "atc/retry_list";
 
 /// `atc/escalate` — raise an ATC escalation as an `escalation` attention row
 /// (spec P9, D12). Params: [`crate::snapshots::AtcEscalateParams`]. Result:
@@ -1863,6 +1873,7 @@ pub const ALL_METHODS: &[&str] = &[
     // The adapter registry is appended for the same reason: the catalogue is
     // ordered and append-only, so a new method goes at the tail.
     FLEET_ADAPTER_LIST,
+    ATC_RETRY_LIST,
 ];
 
 #[cfg(test)]
@@ -2179,6 +2190,7 @@ mod tests {
             FLEET_COPILOT_GATE,
             CODEX_SESSION_DISCARD,
             FLEET_ADAPTER_LIST,
+            ATC_RETRY_LIST,
         ];
         for m in declared {
             assert!(
