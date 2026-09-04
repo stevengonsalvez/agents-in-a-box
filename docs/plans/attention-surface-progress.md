@@ -122,7 +122,7 @@ recreate the duplication this epic is deleting.
 | 6 | Delete the host Inbox | done |
 | 7 | Copilot registry + mode dial | done |
 | 8 | Broadcast + rehoming, delete `t` start form | done |
-| 9 | ATC lite audit + daemon retry sweep | pending |
+| 9 | ATC lite deletion + daemon retry sweep | done |
 | 10 | ACP chat repair | pending |
 
 ## Deviations from the spec, with reasons
