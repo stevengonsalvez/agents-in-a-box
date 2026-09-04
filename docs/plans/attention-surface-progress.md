@@ -12,8 +12,8 @@ The goal doc was grounded against a different tree. Verified 2026-09-04 on
 |---|---|
 | `fleet_panel.rs` is 2177 lines | 2159 lines, 9 `ainb_plugin_hangar` references — claim holds in substance |
 | hangar `screen/inbox.rs` is 1652 lines, "the ONE attention surface" | 324 lines, a read-only `hangar/inbox_list` renderer. It is the daemon's issue/comment inbox, not the notification attention queue |
-| `SupervisorMode::Lite` / `Controller::LiteScanner` appear 16x in `fleet/atc/supervisor.rs` | **Neither symbol nor that file exists anywhere in the workspace.** ATC lite mode was already removed. Criterion 1's `rg`-zero gate for these two is already satisfied |
-| `ainb fleet atc supervise`, `--set lite` | do not exist |
+| `SupervisorMode::Lite` / `Controller::LiteScanner` appear 16x in `fleet/atc/supervisor.rs` | **THE GOAL WAS RIGHT AND THIS ROW WAS WRONG.** Both symbols exist, in that exact file. The original entry here claimed neither existed and that criterion 1's `rg`-zero gate was already satisfied; it was written from a search run in the wrong working directory (`crates/` resolves under `ainb-tui/`, not the repo root, and the miss read as an absence). Corrected in phase 9, where the deletion is real work rather than an audit |
+| `ainb fleet atc supervise`, `--set lite` | **Also wrong for the same reason.** Both exist |
 | `heartbeat-state.json` `continue_counts` | exists (`fleet/atc/heartbeat.rs`), still the JSON ledger |
 | `screen/fleet.rs:1354` `FleetMode::Start` (`t`) | exists, now at `fleet.rs:1340` |
 | host `t` key | `GoToAbtop` on HomeScreen — NOT the Codex start form, and NOT deleted |
