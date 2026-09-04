@@ -161,10 +161,28 @@ fn push_attention_chips(
         if index > 0 {
             spans.push(Span::raw(" ".repeat(CHIP_GAP)));
         }
-        let color = chip_color(chip.kind);
+        // A chip nothing can answer renders DIMMED, never hidden. Hidden is
+        // the silent no-op: the operator would have no idea a session was
+        // blocked. Dimmed says "this needs you and this surface currently
+        // cannot take your answer", and the `ask` tab carries the reason.
+        //
+        // ERR and DONE are never dimmed on this account: they are not
+        // questions, so "cannot be answered" is their normal state, and greying
+        // every one of them would make the dimming meaningless where it matters.
+        let unroutable = chip.kind.blocks() && !chip.answerable.is_answerable();
+        let color = if unroutable {
+            MUTED_GRAY
+        } else {
+            chip_color(chip.kind)
+        };
+        let weight = if unroutable {
+            Modifier::empty()
+        } else {
+            Modifier::BOLD
+        };
         spans.push(Span::styled(
             chip.kind.label(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
+            Style::default().fg(color).add_modifier(weight),
         ));
         spans.push(Span::styled(
             format!(" {}", format_age(now_ms, chip.since_ms)),
@@ -265,12 +283,10 @@ impl SessionListComponent {
                     .map(|s| s.live_attention.as_slice())
             }),
         );
-        let needs_you_label = if needs_you == 0 {
-            String::new()
-        } else if needs_you == 1 {
-            " · 1 needs you".to_string()
-        } else {
-            format!(" · {needs_you} need you")
+        let needs_you_label = match needs_you {
+            0 => String::new(),
+            1 => " · 1 needs you".to_string(),
+            n => format!(" · {n} need you"),
         };
 
         let mut title_spans = vec![
@@ -504,6 +520,7 @@ impl SessionListComponent {
         row_width: usize,
         now_ms: i64,
     ) -> Vec<ListItem<'static>> {
+        let elsewhere = state.attention_elsewhere;
         let mut items = Vec::new();
 
         // Favorite status is precomputed off the render path into
@@ -1040,6 +1057,26 @@ impl SessionListComponent {
             items.push(ListItem::new(empty_line));
         }
 
+        // Daemon rows whose cwd matched no row above. Counted, never dropped:
+        // the sessions screen is the ONE attention surface, so a request it
+        // cannot place is still a request, and an operator who saw no chip
+        // anywhere would conclude the fleet is quiet.
+        //
+        // Its own row rather than a second badge in the title: the title
+        // already carries the workspace count, the needs-you badge, the filter
+        // control and the collapse glyph, and at the default sidebar width a
+        // fourth item truncated mid-word to `1 el`. A row is full width and
+        // cannot be clipped by a title that is competing for the same cells.
+        if elsewhere > 0 {
+            items.push(ListItem::new(Line::from(vec![
+                empty_badge(),
+                Span::styled(
+                    format!("  \u{f0e0} {elsewhere} waiting elsewhere"),
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                ),
+            ])));
+        }
+
         items
     }
 
@@ -1386,6 +1423,54 @@ mod tests {
             rendered.contains('\u{2026}'),
             "the session name is what truncates instead: {rendered}"
         );
+    }
+
+    #[test]
+    fn a_request_the_screen_cannot_place_gets_its_own_row_not_a_truncated_badge() {
+        let mut state = chip_state();
+        state.attention_elsewhere = 1;
+        let rendered = render_panel(&mut state, 42, 11);
+        assert!(
+            rendered.contains("1 waiting elsewhere"),
+            "the whole phrase must survive the narrow sidebar that clipped the \
+             title badge to `1 el`: {rendered}"
+        );
+        // And it stays out of the blocking badge, which counts rows on screen.
+        assert!(rendered.contains("2 need you"), "{rendered}");
+    }
+
+    #[test]
+    fn no_elsewhere_row_when_every_request_found_its_session() {
+        let mut state = chip_state();
+        state.attention_elsewhere = 0;
+        let rendered = render_panel(&mut state, 42, 11);
+        assert!(
+            !rendered.contains("elsewhere"),
+            "the row must be absent, not zero: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_elsewhere_row_takes_no_attach_digit() {
+        // It is not attachable, and a digit spent on it would shift every real
+        // session's shortcut by one — the exact lockstep
+        // `attachable_items_in_order` exists to hold.
+        let mut with_row = chip_state();
+        with_row.attention_elsewhere = 3;
+        let mut without = chip_state();
+        without.attention_elsewhere = 0;
+        let digits = |state: &mut AppState| -> Vec<String> {
+            render_panel(state, 100, 12)
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim_start_matches(['│', '▶', ' ']);
+                    trimmed.chars().next().filter(char::is_ascii_digit).map(|d| {
+                        format!("{d}{}", trimmed.split_whitespace().nth(2).unwrap_or_default())
+                    })
+                })
+                .collect()
+        };
+        assert_eq!(digits(&mut with_row), digits(&mut without));
     }
 
     #[test]
