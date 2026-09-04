@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Record the P3 human loop again with ZERO tmux: the card runs on the ACP task
 # executor (`HANGAR_TASK_EXECUTOR=acp`), the agent's Write lands as a
-# `session/request_permission` attention row, Control Center renders the
-# ADAPTER's own options (① Always Allow ② Allow ③ Reject), the operator rejects
-# the primary path by digit, the agent falls back to the alternate path, the
-# operator allows that one, and the transcript proves which path was written.
+# `session/request_permission` attention row, the Inbox's `needs you` block
+# renders the ADAPTER's own options (① Always Allow ② Allow ③ Reject), the
+# operator rejects the primary path by digit, the agent falls back to the
+# alternate path, the operator allows that one, and the transcript proves which
+# path was written.
+#
+# `I`, not `C`: since the seven-tab strip landed, Control Center is behind the
+# palette and the Inbox is the attention surface. Same rows, same renderer, same
+# `attention/answer` RPC.
 #
 # Move 1 exit criterion (B), `docs/hangar/renovation/PLAN.md`. AskUserQuestion is
 # not reachable under ACP (`claude-agent-acp` 0.23.1 passes
@@ -77,25 +82,38 @@ Screenshot p3-acp-2-run-menu.png
 Enter
 Sleep 3s
 Screenshot p3-acp-3-launched.png
-Type "C"
+Type "I"
+Wait+Screen@300s /OPTIONS/
 Sleep 2s
-Screenshot p3-acp-4-control-center-waiting.png
-Wait+Screen@300s /Reject/
-Sleep 2s
-Screenshot p3-acp-5-ask-raised.png
+Screenshot p3-acp-4-ask-raised.png
+# The digit is a 1-based index into the adapter's option list, so this tape
+# pins TODAY's order (allow_always, allow, reject): `3` is Reject and `2` is
+# Allow. vhs cannot assert the glyph, its Screen matcher never matches the
+# circled digits (measured), so the positional check lives in the proof script
+# below, which fails unless the store recorded `reject` then `allow`.
 Type "3"
-Sleep 30s
-Screenshot p3-acp-6-fallback-ask.png
-Type "2"
-Wait+Screen@180s /0 need you/
+Sleep 25s
+Type "B"
+Sleep 3s
+Type "t"
+Wait+Screen@60s /refused permission/
 Sleep 2s
-Screenshot p3-acp-7-answered-flip.png
+Screenshot p3-acp-5-refusal-in-transcript.png
+Escape
+Sleep 1s
+Type "I"
+Sleep 3s
+Wait+Screen@120s /OPTIONS/
+Type "2"
+Wait+Screen@180s /nothing needs you/
+Sleep 2s
+Screenshot p3-acp-6-answered-flip.png
 Type "B"
 Sleep 3s
 Type "t"
 Wait+Screen@60s /turn_completed/
 Sleep 2s
-Screenshot p3-acp-8-transcript-proof.png
+Screenshot p3-acp-7-transcript-proof.png
 Escape
 Sleep 1s
 Type "q"
@@ -106,7 +124,7 @@ Type "HOME='$ISO' bash $PROOF"
 Enter
 Wait+Screen@30s /final message/
 Sleep 3s
-Screenshot p3-acp-9-ground-truth.png
+Screenshot p3-acp-8-ground-truth.png
 EOF
 
 cd "$OUT"
@@ -126,9 +144,11 @@ if ! gif_complete p3-acp-human-loop.gif && [ -s p3-acp-human-loop.mp4 ]; then
     p3-acp-human-loop.gif
   command -v gifsicle >/dev/null && gifsicle -O3 --lossy=60 -o p3-acp-human-loop.gif p3-acp-human-loop.gif
 fi
+# ENFORCE, not just detect: ffmpeg or gifsicle can truncate too, and both exit 0.
+gif_complete p3-acp-human-loop.gif || { echo "regenerated gif still truncated" >&2; exit 1; }
 
-for f in p3-acp-human-loop.mp4 p3-acp-5-ask-raised.png p3-acp-7-answered-flip.png \
-         p3-acp-8-transcript-proof.png p3-acp-9-ground-truth.png; do
+for f in p3-acp-human-loop.mp4 p3-acp-4-ask-raised.png p3-acp-5-refusal-in-transcript.png \
+         p3-acp-7-transcript-proof.png p3-acp-8-ground-truth.png; do
   [ -s "$f" ] || { echo "artifact missing or empty: $f" >&2; exit 1; }
 done
 ls -la p3-acp-human-loop.gif p3-acp-human-loop.mp4 p3-acp-[0-9]-*.png
