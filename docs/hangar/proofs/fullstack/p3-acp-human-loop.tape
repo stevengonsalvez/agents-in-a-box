@@ -28,6 +28,10 @@ Down
 Sleep 400ms
 Down
 Sleep 400ms
+Down
+Sleep 400ms
+Down
+Sleep 400ms
 
 Sleep 2s
 Screenshot p3-acp-1-board-card.png
@@ -37,25 +41,38 @@ Screenshot p3-acp-2-run-menu.png
 Enter
 Sleep 3s
 Screenshot p3-acp-3-launched.png
-Type "C"
+Type "I"
+Wait+Screen@300s /OPTIONS/
 Sleep 2s
-Screenshot p3-acp-4-control-center-waiting.png
-Wait+Screen@300s /Reject/
-Sleep 2s
-Screenshot p3-acp-5-ask-raised.png
+Screenshot p3-acp-4-ask-raised.png
+# The digit is a 1-based index into the adapter's option list, so this tape
+# pins TODAY's order (allow_always, allow, reject):  is Reject and  is
+# Allow. vhs cannot assert the glyph, its Screen matcher never matches the
+# circled digits (measured), so the positional check lives in the proof script
+# below, which fails unless the store recorded  then .
 Type "3"
-Sleep 30s
-Screenshot p3-acp-6-fallback-ask.png
-Type "2"
-Wait+Screen@180s /0 need you/
+Sleep 25s
+Type "B"
+Sleep 3s
+Type "t"
+Wait+Screen@60s /refused permission/
 Sleep 2s
-Screenshot p3-acp-7-answered-flip.png
+Screenshot p3-acp-5-refusal-in-transcript.png
+Escape
+Sleep 1s
+Type "I"
+Sleep 3s
+Wait+Screen@120s /OPTIONS/
+Type "2"
+Wait+Screen@180s /nothing needs you/
+Sleep 2s
+Screenshot p3-acp-6-answered-flip.png
 Type "B"
 Sleep 3s
 Type "t"
 Wait+Screen@60s /turn_completed/
 Sleep 2s
-Screenshot p3-acp-8-transcript-proof.png
+Screenshot p3-acp-7-transcript-proof.png
 Escape
 Sleep 1s
 Type "q"
@@ -66,4 +83,4 @@ Type "HOME='/home/claude/ainb-e2e-home' bash /home/claude/ainb-e2e-home/acp-proo
 Enter
 Wait+Screen@30s /final message/
 Sleep 3s
-Screenshot p3-acp-9-ground-truth.png
+Screenshot p3-acp-8-ground-truth.png
