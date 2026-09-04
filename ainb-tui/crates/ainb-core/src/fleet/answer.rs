@@ -260,14 +260,6 @@ impl AskState {
         matches!(self.phase(), Some(AnswerPhase::InFlight { .. }))
     }
 
-    /// Whether ANY send is outstanding, whichever question it belongs to.
-    #[must_use]
-    pub fn any_in_flight(&self) -> bool {
-        self.phases
-            .iter()
-            .any(|(_, phase)| matches!(phase, AnswerPhase::InFlight { .. }))
-    }
-
     /// Move the option cursor, wrapping. A free-text row sits after the last
     /// option, which is how the operator reaches the composer with the arrows
     /// alone.
@@ -739,8 +731,8 @@ mod tests {
             "B has no answer out, so B may be answered"
         );
         assert!(
-            state.any_in_flight(),
-            "but A's send is still outstanding somewhere"
+            state.is_sending(&a),
+            "but A's send is still outstanding, on A"
         );
 
         state.retarget(&a);
@@ -783,7 +775,7 @@ mod tests {
             matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason, .. }) if reason == "target_not_running"),
             "the failure must be shown against the question it belongs to"
         );
-        assert!(!state.any_in_flight(), "and the latch is released");
+        assert!(!state.is_sending(&a), "and the latch is released");
     }
 
     /// An outcome belongs to the QUESTION it answers, never to whatever the
