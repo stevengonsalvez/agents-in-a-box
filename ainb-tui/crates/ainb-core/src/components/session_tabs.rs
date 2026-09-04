@@ -166,6 +166,21 @@ const GOLD: Color = Color::Rgb(255, 215, 0);
 const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
+const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
+const ALERT_RED: Color = Color::Rgb(220, 90, 90);
+const ALERT_AMBER: Color = Color::Rgb(230, 180, 80);
+
+/// The colour a chip and its age share, mirrored from the session list so the
+/// row and the pane never disagree about what an ASK looks like.
+const fn chip_color(kind: crate::fleet::attention::AttentionKind) -> Color {
+    use crate::fleet::attention::AttentionKind;
+    match kind {
+        AttentionKind::Ask => ALERT_AMBER,
+        AttentionKind::Approve => ALERT_RED,
+        AttentionKind::Err => Color::Rgb(230, 100, 100),
+        AttentionKind::Done => SELECTION_GREEN,
+    }
+}
 
 /// The tab strip, as the right pane's title line.
 ///
@@ -249,6 +264,7 @@ pub fn footer(state: &AppState, active: SessionTab, capturing: bool) -> Line<'st
 /// path. What it must already do is never render a blank box: every state here
 /// says what it is, including the ones that cannot take an answer.
 pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
+    use crate::fleet::answer::{AnswerPhase, AskFocus};
     use ratatui::widgets::{Paragraph, Wrap};
 
     let Some(chip) = selected_blocking(state) else {
@@ -262,17 +278,13 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
         );
         return;
     };
+    let ask = &state.ask_state;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled(
             chip.kind.label(),
-            Style::default()
-                .fg(match chip.kind {
-                    crate::fleet::attention::AttentionKind::Approve => Color::Rgb(220, 90, 90),
-                    _ => Color::Rgb(230, 180, 80),
-                })
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(chip_color(chip.kind)).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
@@ -291,7 +303,7 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
     match chip.detail.as_deref() {
         Some(question) => lines.push(Line::styled(
             question.to_string(),
-            Style::default().fg(Color::Rgb(220, 220, 230)).add_modifier(Modifier::BOLD),
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
         )),
         None => lines.push(Line::styled(
             "the request carried no question text",
@@ -300,30 +312,96 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
     }
     lines.push(Line::raw(""));
 
-    if chip.options.is_empty() {
-        lines.push(Line::styled(
-            "free text answer",
-            Style::default().fg(MUTED_GRAY),
-        ));
-    } else {
-        for (index, option) in chip.options.iter().enumerate() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" {} ", circled(index)),
-                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    option.label.clone(),
-                    Style::default().fg(Color::Rgb(220, 220, 230)),
-                ),
-            ]));
-            if !option.description.is_empty() {
-                lines.push(Line::styled(
-                    format!("    {}", option.description),
-                    Style::default().fg(MUTED_GRAY),
-                ));
-            }
+    let on_free_text = ask.focus() == AskFocus::FreeText;
+    for (index, option) in chip.options.iter().enumerate() {
+        let selected = !on_free_text && ask.cursor() == index;
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { "\u{25b8}" } else { " " },
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} ", circled(index)),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                option.label.clone(),
+                Style::default().fg(if selected { SELECTION_GREEN } else { SOFT_WHITE }),
+            ),
+        ]));
+        if !option.description.is_empty() {
+            lines.push(Line::styled(
+                format!("    {}", option.description),
+                Style::default().fg(MUTED_GRAY),
+            ));
         }
+    }
+
+    // The free-text row is always present, even on a structured request: an
+    // agent's question is not always answerable with one of its own options,
+    // and a surface that only offers them forces the operator back to the pane.
+    lines.push(Line::from(vec![
+        Span::styled(
+            if on_free_text { "\u{25b8}" } else { " " },
+            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} ", circled(chip.options.len())),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if chip.options.is_empty() {
+                "answer".to_string()
+            } else {
+                "other (type it)".to_string()
+            },
+            Style::default().fg(if on_free_text { SELECTION_GREEN } else { MUTED_GRAY }),
+        ),
+    ]));
+    if on_free_text {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                ask.free_text().to_string(),
+                Style::default().fg(SOFT_WHITE),
+            ),
+            // A visible caret, so an empty composer reads as "type here" rather
+            // than as a pane that is doing nothing.
+            Span::styled("\u{2588}", Style::default().fg(SELECTION_GREEN)),
+        ]));
+    }
+
+    // What the last send did. Every one of the three states is VISIBLE: an
+    // answer that vanished into a worker with no feedback is the failure this
+    // pane exists to remove.
+    match ask.phase_for(chip) {
+        Some(AnswerPhase::InFlight { .. }) => {
+            let secs = ask.elapsed().map_or(0, |elapsed| elapsed.as_secs());
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!("\u{283b} sending\u{2026} {secs}s"),
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ));
+        }
+        Some(AnswerPhase::Delivered { via }) => {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!("\u{2713} {via}"),
+                Style::default().fg(SELECTION_GREEN),
+            ));
+        }
+        Some(AnswerPhase::Failed { reason }) => {
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                format!("\u{2717} not answered: {reason}"),
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::styled(
+                "the chip is back to ASK; Enter retries",
+                Style::default().fg(MUTED_GRAY),
+            ));
+        }
+        None => {}
     }
 
     // The refusal, when there is one. This is the line that stops a greyed chip
@@ -332,7 +410,7 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
             format!("\u{26a0} {refusal}"),
-            Style::default().fg(Color::Rgb(220, 90, 90)),
+            Style::default().fg(ALERT_RED),
         ));
     }
 

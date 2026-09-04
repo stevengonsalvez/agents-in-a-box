@@ -1788,6 +1788,26 @@ mod tests {
     }
 
     #[test]
+    fn a_local_chip_carries_the_hooks_own_message() {
+        // Without this the `ask` pane opens on a locally-produced row saying
+        // "the request carried no question text" while the producer plainly had
+        // one — which is the daemon-down journey's whole opening line.
+        let mut record = rec("claude", CWD, "Notification:idle_prompt", NOW - 1000);
+        record.payload_json = r#"{"message":"Which sqlite path?"}"#.to_string();
+        let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[record])
+            .expect("the notification marks the row");
+        assert_eq!(chip.detail.as_deref(), Some("Which sqlite path?"));
+    }
+
+    #[test]
+    fn a_payload_with_no_message_invents_nothing() {
+        let record = rec("claude", CWD, "Notification:idle_prompt", NOW - 1000);
+        let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[record])
+            .expect("the notification marks the row");
+        assert_eq!(chip.detail, None, "a manufactured question reads as the agent's own");
+    }
+
+    #[test]
     fn a_chip_ages_from_the_hooks_instant_not_from_now() {
         // The whole point of carrying `rec.ts`: restarting the TUI must not
         // reset a nine-minute-old question back to `0s`.

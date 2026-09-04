@@ -127,7 +127,17 @@ impl LayoutComponent {
         match active {
             // Handled by the caller, which keeps the tmux mirror it always had.
             SessionTab::Preview => {}
-            SessionTab::Ask => session_tabs::render_ask(frame, inner, state),
+            SessionTab::Ask => {
+                // Point the pane at the request it is showing BEFORE painting.
+                // Without this the focus is only initialised by the first key
+                // press, so a request with no options opens with the composer
+                // unfocused — no cursor, no caret, and the operator's first
+                // characters fall through to the session shortcuts.
+                if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
+                    state.ask_state.retarget(&chip);
+                }
+                session_tabs::render_ask(frame, inner, state);
+            }
             SessionTab::Log => {
                 let rows = state.get_selected_session().map_or_else(Vec::new, |session| {
                     session_tabs::read_log(
@@ -258,6 +268,14 @@ impl LayoutComponent {
         // they can no longer act on.
         let active_tab = crate::components::session_tabs::resolve(state, state.session_tab);
         state.session_tab = active_tab;
+
+        // Fold in whatever the answer worker reported. EVERY frame, not only on
+        // the `ask` tab: the row's `SENT` chip is painted by the session list,
+        // so an operator who sends and then switches tabs would otherwise watch
+        // that chip stay SENT forever.
+        if state.ask_state.tick() {
+            state.ui_needs_refresh = true;
+        }
 
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to

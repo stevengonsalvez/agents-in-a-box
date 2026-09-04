@@ -1340,6 +1340,41 @@ impl EventHandler {
         Self::is_text_input_context(state)
     }
 
+    /// Fold one key into the `ask` pane.
+    ///
+    /// Returns `None` for keys the pane does not claim, so `Tab` still walks
+    /// the strip and `q`/`Esc` still leave — an answer pane the operator cannot
+    /// escape is worse than one they cannot type into.
+    fn route_session_ask_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
+        state.ask_state.retarget(&chip);
+        match key_event.code {
+            KeyCode::Up => state.ask_state.move_cursor(&chip, -1),
+            KeyCode::Down => state.ask_state.move_cursor(&chip, 1),
+            KeyCode::Enter => return Some(AppEvent::SessionAskSend),
+            KeyCode::Backspace => state.ask_state.backspace(),
+            // Left to the strip and the screen: an answer pane the operator
+            // cannot leave is a trap.
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc => return None,
+            // Printable keys type into the free-text answer. `j`/`k` are NOT
+            // stolen for navigation here: they are letters, and an answer that
+            // cannot contain the word "just" is not an answer field.
+            KeyCode::Char(c) => {
+                // Only once the composer row is selected, so the option list
+                // still answers plain typing with nothing rather than silently
+                // filling a buffer the operator cannot see.
+                if state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText {
+                    state.ask_state.push_char(c);
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        state.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
     /// Fold one key into the active composer tab's chat surface.
     ///
     /// Returns `None` for a key the chat does not claim, so it falls through to
@@ -2169,6 +2204,18 @@ impl EventHandler {
             && state.session_composer_captures_text()
         {
             if let Some(event) = Self::route_session_composer_key(key_event, state) {
+                return Some(event);
+            }
+        }
+
+        // The `ask` pane owns the arrows, the printable keys and Enter while it
+        // is open, for the same reason: an answer typed into it must not fire
+        // session shortcuts a character at a time.
+        if state.current_screen == screen_ids::SESSION_LIST
+            && crate::components::session_tabs::resolve(state, state.session_tab)
+                == crate::components::session_tabs::SessionTab::Ask
+        {
+            if let Some(event) = Self::route_session_ask_key(key_event, state) {
                 return Some(event);
             }
         }
@@ -4787,13 +4834,41 @@ impl EventHandler {
                 };
                 state.ui_needs_refresh = true;
             }
-            // Wired by the answering phase; declared here so the key that fires
-            // them is scoped from the moment the strip exists rather than
-            // silently falling through to attach.
-            AppEvent::SessionAskSend | AppEvent::SessionTabComposerSend => {
-                state.add_info_notification(
-                    "not wired yet: the composer lands with the answering path".to_string(),
+            AppEvent::SessionAskSend => {
+                let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
+                else {
+                    state.add_info_notification(
+                        "nothing is waiting on an answer here".to_string(),
+                    );
+                    return;
+                };
+                // The row's own identity for the verified send: the provider
+                // session id is not knowable here, so the tmux name is the
+                // identity the send path correlates on, with the worktree as
+                // the cwd its ambiguity guard checks.
+                let (session_id, cwd) = state.get_selected_session().map_or_else(
+                    || (String::new(), String::new()),
+                    |session| {
+                        (
+                            session.tmux_session_name.clone().unwrap_or_default(),
+                            session.workspace_path.clone(),
+                        )
+                    },
                 );
+                state.ask_state.retarget(&chip);
+                if let Err(refusal) = state.ask_state.send(&chip, &session_id, &cwd) {
+                    // Refusals are shown, never swallowed: a send that silently
+                    // does nothing is the failure mode this screen exists to
+                    // remove.
+                    state.add_info_notification(refusal);
+                }
+                state.ui_needs_refresh = true;
+            }
+            // The composer tabs fire their own send through the chat reducer,
+            // which is reached by the key routing above. Reaching here means
+            // Enter was pressed with no composer open.
+            AppEvent::SessionTabComposerSend => {
+                state.add_info_notification("open a conversation first".to_string());
             }
             AppEvent::SwitchPaneFocus => {
                 use crate::app::state::FocusedPane;
@@ -10876,5 +10951,119 @@ mod session_composer_key_tests {
         let mut state = composing();
         press(&mut state, KeyCode::Esc);
         assert_eq!(state.session_tab, SessionTab::Preview);
+    }
+}
+
+#[cfg(test)]
+mod session_ask_key_tests {
+    use super::*;
+    use crate::app::screens::ids;
+    use crate::components::session_tabs::SessionTab;
+    use crate::fleet::answer::AskFocus;
+    use crate::fleet::attention::{AttentionKind, AttentionOption, SessionAttention};
+    use crate::models::{Session, SessionStatus, Workspace};
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn press(state: &mut AppState, code: KeyCode) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), state)
+    }
+
+    /// The sessions screen on the `ask` tab, with a structured ASK selected.
+    fn asking() -> AppState {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state.workspaces.clear();
+        let mut workspace = Workspace::new("proj".to_string(), "/work/proj".into());
+        let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
+        session.status = SessionStatus::Idle;
+        session.tmux_session_name = Some("tmux_proj".to_string());
+        session.live_attention = vec![
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into())
+                .with_detail("Decide the sqlite path")
+                .with_options(vec![
+                    AttentionOption {
+                        label: "data/box.db".to_string(),
+                        description: String::new(),
+                    },
+                    AttentionOption {
+                        label: "api/src/db.sqlite".to_string(),
+                        description: String::new(),
+                    },
+                ])
+                .over_tmux("tmux_proj"),
+        ];
+        workspace.add_session(session);
+        state.workspaces.push(workspace);
+        state.selected_workspace_index = Some(0);
+        state.selected_session_index = Some(0);
+        state.session_tab = SessionTab::Ask;
+        assert!(SessionTab::Ask.enabled(&state), "the fixture must open the ask tab");
+        state
+    }
+
+    /// THE safety test for this pane. Typing a free-text answer must not fire
+    /// the session shortcuts the same letters are bound to.
+    #[test]
+    fn typing_an_answer_never_fires_a_session_shortcut() {
+        let mut state = asking();
+        // Reach the composer row.
+        press(&mut state, KeyCode::Down);
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+        for c in ['d', 'D', 'x', 'e', 'n', 'q'] {
+            let event = press(&mut state, KeyCode::Char(c));
+            assert!(
+                matches!(event, Some(AppEvent::Consumed)),
+                "`{c}` in the answer composer produced {event:?}"
+            );
+        }
+        assert_eq!(state.ask_state.free_text(), "dDxenq");
+    }
+
+    /// On the OPTION rows a bare letter is not swallowed: the operator has not
+    /// chosen to type, and a buffer they cannot see filling up is worse than a
+    /// shortcut firing.
+    #[test]
+    fn a_letter_on_the_option_list_falls_through_to_the_screen() {
+        let mut state = asking();
+        assert_eq!(state.ask_state.focus(), AskFocus::Options);
+        assert!(matches!(
+            press(&mut state, KeyCode::Char('d')),
+            Some(AppEvent::DeleteSession)
+        ));
+    }
+
+    #[test]
+    fn the_arrows_walk_the_options_and_reach_the_composer() {
+        let mut state = asking();
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.ask_state.cursor(), 1);
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+    }
+
+    #[test]
+    fn enter_sends_rather_than_attaching() {
+        let mut state = asking();
+        assert!(matches!(
+            press(&mut state, KeyCode::Enter),
+            Some(AppEvent::SessionAskSend)
+        ));
+    }
+
+    /// Tab and Esc are left to the strip and the screen. An answer pane the
+    /// operator cannot leave is worse than one they cannot type into.
+    #[test]
+    fn the_ask_pane_can_always_be_left() {
+        let mut state = asking();
+        assert!(matches!(
+            press(&mut state, KeyCode::Tab),
+            Some(AppEvent::SessionTabNext)
+        ));
+        let mut state = asking();
+        assert!(
+            press(&mut state, KeyCode::Esc).is_some(),
+            "Esc must still do something"
+        );
     }
 }

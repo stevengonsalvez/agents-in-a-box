@@ -101,14 +101,38 @@ const fn chip_color(kind: AttentionKind) -> Color {
     }
 }
 
+/// The word a chip renders as: its kind, or `SENT` while an answer to it is
+/// still in flight.
+///
+/// In-flight is a state of the ANSWER, not of the request, so it lives beside
+/// the chip rather than in it: the producers keep reporting the row as open
+/// until the agent moves on, and rewriting their row would make the surface
+/// disagree with what it just read.
+fn chip_label(chip: &SessionAttention, sending: Option<&SessionAttention>) -> &'static str {
+    if sending.is_some_and(|target| std::ptr::eq(target, chip)) {
+        "SENT"
+    } else {
+        chip.kind.label()
+    }
+}
+
 /// Cell width of the chip strip for `chips`, including the leading gap.
-fn chip_strip_width(chips: &[SessionAttention], now_ms: i64) -> usize {
+fn chip_strip_width(
+    chips: &[SessionAttention],
+    now_ms: i64,
+    sending: Option<&SessionAttention>,
+) -> usize {
     if chips.is_empty() {
         return 0;
     }
     chips
         .iter()
-        .map(|chip| CHIP_GAP + chip.kind.label().len() + 1 + format_age(now_ms, chip.since_ms).len())
+        .map(|chip| {
+            CHIP_GAP
+                + chip_label(chip, sending).len()
+                + 1
+                + format_age(now_ms, chip.since_ms).len()
+        })
         .sum()
 }
 
@@ -133,11 +157,12 @@ fn push_attention_chips(
     now_ms: i64,
     row_width: usize,
     name_index: usize,
+    sending: Option<&SessionAttention>,
 ) {
     if chips.is_empty() {
         return;
     }
-    let strip = chip_strip_width(chips, now_ms);
+    let strip = chip_strip_width(chips, now_ms, sending);
     let mut used: usize = spans.iter().map(Span::width).sum();
     // The gap belongs in the BUDGET, not in the padding: applied afterwards as
     // a floor it pushes the strip past the row's right edge on exactly the
@@ -170,18 +195,22 @@ fn push_attention_chips(
         // questions, so "cannot be answered" is their normal state, and greying
         // every one of them would make the dimming meaningless where it matters.
         let unroutable = chip.kind.blocks() && !chip.answerable.is_answerable();
-        let color = if unroutable {
+        let label = chip_label(chip, sending);
+        let in_flight = label == "SENT";
+        let color = if in_flight {
+            GOLD
+        } else if unroutable {
             MUTED_GRAY
         } else {
             chip_color(chip.kind)
         };
-        let weight = if unroutable {
+        let weight = if unroutable && !in_flight {
             Modifier::empty()
         } else {
             Modifier::BOLD
         };
         spans.push(Span::styled(
-            chip.kind.label(),
+            label,
             Style::default().fg(color).add_modifier(weight),
         ));
         spans.push(Span::styled(
@@ -743,12 +772,26 @@ impl SessionListComponent {
                         session_list_name(session),
                         "NAME_SPAN_INDEX must track the session-name span"
                     );
+                    // The chip whose answer is still in flight, if it is on
+                    // THIS row. Identity is checked against the ask pane's own
+                    // request, so an answer sent on one session cannot render
+                    // every other session's chip as SENT.
+                    let sending = state
+                        .ask_state
+                        .in_flight()
+                        .then(|| {
+                            session_alert
+                                .iter()
+                                .find(|chip| state.ask_state.phase_for(chip).is_some())
+                        })
+                        .flatten();
                     push_attention_chips(
                         &mut session_spans,
                         session_alert,
                         now_ms,
                         row_width,
                         NAME_SPAN_INDEX,
+                        sending,
                     );
                     let session_line = Line::from(session_spans);
 

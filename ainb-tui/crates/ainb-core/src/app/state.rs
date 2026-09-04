@@ -3566,6 +3566,10 @@ pub struct AppState {
     /// activity that arrives after they look away.
     pub attention_baseline: HashMap<Uuid, i64>,
 
+    /// The `ask` pane's own state: which option is selected, what has been
+    /// typed, and what the last send did.
+    pub ask_state: crate::fleet::answer::AskState,
+
     /// The copilot conversation, opened lazily the first time the tab is.
     ///
     /// Lazy because opening it dials the daemon to resolve the minted channel
@@ -4083,6 +4087,7 @@ impl Default for AppState {
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             attention_elsewhere: 0,
             session_tab: crate::components::session_tabs::SessionTab::default(),
+            ask_state: crate::fleet::answer::AskState::default(),
             copilot_chat: None,
             session_chat: None,
         }
@@ -11556,6 +11561,20 @@ impl AppState {
     /// match is a `Finished` turn past its short TTL. Returns `None`
     /// (blank — no marker) when nothing qualifies, which is the common
     /// case for an idle session with no pending hook event.
+    /// The one-line message a hook payload carried, if it carried one.
+    ///
+    /// Best-effort and never invented: a payload with nothing to say produces
+    /// `None`, and the pane says so. A manufactured "waiting for input" would
+    /// read as something the agent actually said.
+    fn hook_message(record: &ainb_plugin_notifyd::NotificationRecord) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(&record.payload_json)
+            .ok()?
+            .get("message")?
+            .as_str()
+            .map(|message| message.trim().to_string())
+            .filter(|message| !message.is_empty())
+    }
+
     /// Map a notifyd alert class to its chip.
     ///
     /// One function so the OS notification and the row chip can never disagree
@@ -11608,7 +11627,15 @@ impl AppState {
             // `rec.ts` — the hook's own instant — is the chip's age, not "when
             // this process first noticed". Restarting the TUI must not reset a
             // question that has been waiting nine minutes back to zero.
-            return Some(SessionAttention::local(Self::chip_for_alert(kind), rec.ts));
+            //
+            // The hook's own `message` becomes the chip's detail, so the `ask`
+            // pane leads with what the agent actually said rather than "the
+            // request carried no question text" on a row where the producer
+            // plainly had one.
+            return Some(
+                SessionAttention::local(Self::chip_for_alert(kind), rec.ts)
+                    .with_detail(Self::hook_message(rec).unwrap_or_default()),
+            );
         }
         None
     }
