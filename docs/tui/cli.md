@@ -2055,6 +2055,7 @@ Commands:
   transcript     Page or follow one session's full execution transcript
   channel        Chat channels: a named scope with a recipient set
   copilot        The fleet copilot session's per-session adapter config
+  adapter        The ACP adapters this daemon's registry can spawn
   confirm        Guardrail confirm cards: copilot tool calls held for a human
   activity       The append-only copilot activity feed
   sequence       Ordered prompts with ack between steps
@@ -2528,7 +2529,9 @@ Options:
       --format <format>
           Output format [default: text] [possible values: text, json, csv, markdown]
       --provider <provider>
-          Adapter family [possible values: claude, codex]
+          Adapter name from `ainb fleet adapter list`
+      --copilot-mode <copilot-mode>
+          The channel's guardrail dial: which of the copilot's OWN fleet tools fire, take a confirm card, or are not offered [possible values: help, guarded, yolo]
       --model <model>
           Adapter model id
       --reasoning-effort <reasoning-effort>
@@ -2539,6 +2542,40 @@ Options:
           Print help
 
 There is no permission-mode flag. The mode is daemon config, pinned at session/new and re-asserted after load; a per-session override would be a remote off-switch for the whole permission surface.
+```
+
+### `ainb fleet adapter`
+
+The ACP adapters this daemon's registry can spawn
+
+```console
+$ ainb fleet adapter --help
+The ACP adapters this daemon's registry can spawn
+
+Usage: ainb fleet adapter [OPTIONS] <COMMAND>
+
+Commands:
+  list  List the adapters, their commands and pinned modes
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet adapter list`
+
+List the adapters, their commands and pinned modes
+
+```console
+$ ainb fleet adapter list --help
+List the adapters, their commands and pinned modes
+
+Usage: ainb fleet adapter list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
 ```
 
 ### `ainb fleet confirm`
