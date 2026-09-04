@@ -890,16 +890,38 @@ impl FleetRepo {
     pub async fn recent_event_payloads(
         pool: &SqlitePool,
         session_key: &str,
+        event_types: &[&str],
+        since_ms: i64,
         limit: i64,
     ) -> Result<Vec<String>, sqlx::Error> {
-        sqlx::query_scalar(
-            "SELECT payload FROM fleet_event WHERE session_key = ? \
-             ORDER BY revision DESC LIMIT ?",
-        )
-        .bind(session_key)
-        .bind(limit.max(0))
-        .fetch_all(pool)
-        .await
+        // Two bounds, and both are load-bearing rather than tuning.
+        //
+        // A `fleet_event` payload is the WHOLE hook envelope: `notify.sh` builds
+        // it as `payload: .` over the hook's stdin, and `UserPromptSubmit`,
+        // `PreToolUse` and `PostToolUse` are all registered. So an operator's
+        // prompt, a tool's input and a tool's output all land in this column
+        // verbatim. Anything scanning it for an error signature is scanning
+        // agent- and user-authored text, and a caller that reads every recent
+        // event is asking whatever the agent last printed to decide.
+        //
+        // `event_types` keeps the scan to the events that can actually carry a
+        // provider failure, and `since_ms` keeps it to the ones that produced
+        // the CURRENT state rather than a resolved incident still sitting in
+        // the window.
+        if event_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let slots = std::iter::repeat_n("?", event_types.len()).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT payload FROM fleet_event \
+             WHERE session_key = ? AND observed_at >= ? AND event_type IN ({slots}) \
+             ORDER BY revision DESC LIMIT ?"
+        );
+        let mut query = sqlx::query_scalar(&sql).bind(session_key).bind(since_ms);
+        for event_type in event_types {
+            query = query.bind(*event_type);
+        }
+        query.bind(limit.max(0)).fetch_all(pool).await
     }
 
     /// Fetch one canonical session by stable key.

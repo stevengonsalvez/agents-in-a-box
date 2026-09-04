@@ -74,6 +74,36 @@ const SWEEP_INTERVAL_ENV: &str = "AINB_RETRY_SWEEP_INTERVAL_MS";
 /// `Notification`, a tmux observation) that can land behind it.
 const RECENT_EVENT_SCAN: i64 = 20;
 
+/// The only event types whose payload may decide that an ERROR is transient.
+///
+/// A `fleet_event` payload is the WHOLE hook envelope, and `UserPromptSubmit`,
+/// `PreToolUse` and `PostToolUse` are registered hooks, so an operator's prompt,
+/// a tool's arguments and a tool's OUTPUT all land in that column verbatim. The
+/// transient patterns are word-boundary substrings (`ECONNRESET`,
+/// `rate_limited`, `API Error`, ...), so an agent that merely reads or greps a
+/// file containing one of them would otherwise arm its own auto-`continue`:
+/// the file's contents come back as a `PostToolUse` payload and match.
+///
+/// That is not a hypothetical. `ainb-fleet-core`'s own `errors.rs` contains
+/// every one of the patterns, so an agent opening the file that defines them
+/// would qualify itself.
+///
+/// These three are the types that can carry a PROVIDER failure rather than
+/// content the agent chose to print. `StopFailure` and the `*error*`/`*failed*`
+/// wire methods are what set `attention_state = 'ERROR'` in the first place
+/// (`fleet.rs`), so bounding the scan to them asks the events that produced the
+/// state rather than whatever else the session happened to do.
+const ERROR_BEARING_EVENTS: &[&str] = &["StopFailure", "Notification", "acp_error"];
+
+/// How far before the ERROR transition the scan may look, in milliseconds.
+///
+/// Small on purpose. Without it, a 429 the session already recovered from stays
+/// in the window and arms the NEXT, unrelated failure: the pattern search has no
+/// idea the incident it matched was resolved two hours ago. One minute is wide
+/// enough to catch the events that landed around the transition and narrow
+/// enough that a stale incident cannot vote.
+const TRANSITION_LOOKBACK_MS: i64 = 60_000;
+
 /// The prompt the sweep types. Lower case and bare, because it is read by the
 /// agent as its next user turn, not by a parser.
 const CONTINUE_TEXT: &str = "continue";
@@ -207,7 +237,7 @@ pub async fn sweep_once(pool: &SqlitePool, events: &EventSink, now_ms: i64) -> S
             report.skipped_atc_owned += 1;
             continue;
         }
-        let Some(pattern) = transient_pattern(pool, &session.session_key).await else {
+        let Some(pattern) = transient_pattern(pool, session).await else {
             report.skipped_opaque += 1;
             tracing::debug!(
                 session = %session.session_key,
@@ -283,13 +313,24 @@ fn owned_by_atc(atc: &[AtcInstanceRow], session: &FleetSessionRow) -> bool {
 /// of WHY. Payloads are hook envelopes and wire notifications (a transcript
 /// PATH, never an inlined transcript), so scanning the newest handful is
 /// kilobytes of regex work, not megabytes.
-async fn transient_pattern(pool: &SqlitePool, session_key: &str) -> Option<String> {
-    let payloads = FleetRepo::recent_event_payloads(pool, session_key, RECENT_EVENT_SCAN)
-        .await
-        .unwrap_or_else(|error| {
-            tracing::warn!(session = %session_key, %error, "retry sweep: event read failed");
-            Vec::new()
-        });
+async fn transient_pattern(pool: &SqlitePool, session: &FleetSessionRow) -> Option<String> {
+    let session_key = session.session_key.as_str();
+    // Anchored on the transition, not on "recently". `attention_updated_at` is
+    // when this session became ERROR, so the events either side of it are the
+    // ones that explain it; anything older belongs to an incident that is over.
+    let since = session.attention_updated_at.saturating_sub(TRANSITION_LOOKBACK_MS);
+    let payloads = FleetRepo::recent_event_payloads(
+        pool,
+        session_key,
+        ERROR_BEARING_EVENTS,
+        since,
+        RECENT_EVENT_SCAN,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(session = %session_key, %error, "retry sweep: event read failed");
+        Vec::new()
+    });
     payloads.iter().find_map(|payload| {
         detect_error_signals(payload, 0).into_iter().find_map(|signal| match signal {
             Signal::ApiError { pattern, .. } => Some(pattern),
@@ -510,6 +551,32 @@ mod tests {
                     attention_state: Some("ERROR".to_string()),
                     ..FleetSessionPatch::default()
                 },
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Seed one extra event on an existing session, with an arbitrary type and
+    /// observation time. The transient gate reads only some of these.
+    async fn seed_event(
+        store: &Store,
+        key: &str,
+        event_id: &str,
+        event_type: &str,
+        payload: &str,
+        observed_at: i64,
+    ) {
+        FleetRepo::apply_event(
+            store.pool(),
+            &NewFleetEvent {
+                event_id: event_id.to_string(),
+                session_key: key.to_string(),
+                observed_at,
+                authority: ObservationAuthority::Authoritative,
+                event_type: event_type.to_string(),
+                payload: payload.to_string(),
+                patch: FleetSessionPatch::default(),
             },
         )
         .await
@@ -808,5 +875,132 @@ mod tests {
             "a zero period panics the ticker"
         );
         assert_eq!(parse("soon"), SWEEP_INTERVAL);
+    }
+    /// THE injection case. A `fleet_event` payload is the whole hook envelope,
+    /// and `PostToolUse` carries a tool's OUTPUT, so an agent that merely reads
+    /// or greps a file containing a transient signature would otherwise arm its
+    /// own auto-`continue`. `ainb-fleet-core`'s `errors.rs` contains every one
+    /// of the patterns, so opening the file that DEFINES them would qualify.
+    ///
+    /// The session's own ERROR here is opaque; only the tool output looks
+    /// transient. Nothing may be sent.
+    #[tokio::test]
+    async fn a_transient_string_in_a_tool_result_never_arms_the_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        ensure_instance(store.pool()).await.unwrap();
+        let (_broker, events) = broker();
+
+        seed_err(
+            &store,
+            "claude:reader",
+            "/work/reader",
+            r#"{"error":"the build is broken"}"#,
+        )
+        .await;
+        // What an agent gets back from `grep ECONNRESET src/`.
+        seed_event(
+            &store,
+            "claude:reader",
+            "tool-output",
+            "PostToolUse",
+            r#"{"tool_response":"errors.rs:44: ECONNRESET|connection reset"}"#,
+            NOW,
+        )
+        .await;
+
+        let report = sweep_once(store.pool(), &events, NOW).await;
+        assert_eq!(report.scanned, 1);
+        assert_eq!(
+            report.skipped_opaque, 1,
+            "a transient signature in a TOOL RESULT must not qualify the session"
+        );
+        assert_eq!(report.transient, 0);
+        assert_eq!(report.continued, 0);
+        assert!(
+            AtcInstanceRepo::retry_get(store.pool(), SWEEP_INSTANCE, "claude:reader")
+                .await
+                .unwrap()
+                .is_none(),
+            "no budget may be spent on a session the gate did not qualify"
+        );
+    }
+
+    /// An incident the session already recovered from must not arm the NEXT,
+    /// unrelated failure. Without a bound on how far back the scan may look, a
+    /// 429 from hours ago still matches, and the pattern search has no idea it
+    /// was resolved.
+    ///
+    /// Asserts on the GATE rather than through `sweep_once`: the whole sweep
+    /// has several other reasons to skip a session, so a pass there would not
+    /// prove the time bound is what did it.
+    #[tokio::test]
+    async fn the_gate_ignores_an_incident_older_than_the_lookback() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        // The OLD, resolved 429, outside the lookback.
+        seed_event(
+            &store,
+            "claude:stale",
+            "old-429",
+            "StopFailure",
+            r#"{"error":"rate_limited"}"#,
+            NOW - TRANSITION_LOOKBACK_MS - 60_000,
+        )
+        .await;
+        // Today's failure, which is not transient at all.
+        seed_err(
+            &store,
+            "claude:stale",
+            "/work/stale",
+            r#"{"error":"tests failed"}"#,
+        )
+        .await;
+
+        let session = FleetRepo::list_attention_error(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.session_key == "claude:stale")
+            .expect("the seeded session must be on the ERR roster");
+        assert_eq!(
+            session.attention_updated_at, NOW,
+            "the transition time is what the lookback is measured from"
+        );
+        assert_eq!(
+            transient_pattern(store.pool(), &session).await,
+            None,
+            "a 429 older than the lookback must not qualify today's unrelated failure"
+        );
+
+        // ...and the same 429 INSIDE the window does qualify, so the assertion
+        // above is the bound talking and not a gate that never matches.
+        seed_event(
+            &store,
+            "claude:fresh",
+            "fresh-429",
+            "StopFailure",
+            r#"{"error":"rate_limited"}"#,
+            NOW - 1_000,
+        )
+        .await;
+        seed_err(
+            &store,
+            "claude:fresh",
+            "/work/fresh",
+            r#"{"error":"tests failed"}"#,
+        )
+        .await;
+        let fresh = FleetRepo::list_attention_error(store.pool())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|row| row.session_key == "claude:fresh")
+            .expect("fresh session on the roster");
+        assert_eq!(
+            transient_pattern(store.pool(), &fresh).await,
+            Some("rate_limited".to_string())
+        );
     }
 }
