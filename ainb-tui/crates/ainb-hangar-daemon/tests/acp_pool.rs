@@ -2000,17 +2000,19 @@ async fn ensure_refuses_a_blank_cwd_or_scope_before_writing_anything() {
 async fn a_chat_prompt_is_refused_for_a_task_scope_and_the_task_run_is_not() {
     use ainb_hangar_daemon::acp_pool::DELIVERY_TASK_SCOPE_REFUSED;
     use ainb_hangar_daemon::acp_session::ensure;
+    use ainb_hangar_daemon::acp_task::scope_key;
 
     let (_dir, store, pool) = harness(&[("FAKE_ACP_CHUNKS", "1")]).await;
     let events = EventBroker::new().sink();
-    // Minted the way `acp_task` mints it, through the same reserved prefix the
-    // create door refuses to hand out.
+    // `scope_key`, never a hand-spelled `task:…`: the guard matches on the
+    // production convention, so a test that re-spells it would keep passing if
+    // the convention moved and the guard stopped matching real sessions.
     let task = ensure(
         store.pool(),
         &events,
         ainb_acp::config::CLAUDE_ADAPTER,
         "/tmp/acp",
-        Some("task:t-guard"),
+        Some(&scope_key("t-guard")),
     )
     .await
     .expect("mint the task session");
