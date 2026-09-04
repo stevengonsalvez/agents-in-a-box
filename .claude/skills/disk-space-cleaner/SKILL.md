@@ -40,7 +40,12 @@ use.
 **3. Fail closed.** A signal that could not be collected is not the same as a
 signal that came back empty. If `ps`, `tmux`, `lsof` or `git` is missing or
 unreadable, `--apply` refuses and reports `held (liveness incomplete)` rather
-than deleting blind. `--ignore-live` overrides, deliberately and loudly.
+than deleting blind. This is re-evaluated after every re-read, not decided once
+at startup: a `ps` that succeeds before the sizing pass and fails during it must
+stop the run, not ride the verdict it had before. An installed tool that exits
+with an error counts as unreadable; only the exit status that genuinely means
+"nothing found" is treated as an empty answer. `--ignore-live` overrides,
+deliberately and loudly.
 
 ## Step 1: see where the space went
 
@@ -70,13 +75,25 @@ Flags: `--min-size MB` (default 500), `--names a,b,c`, `--max-depth N`,
 `--top N`, `--apply`, `--no-protect-locked`, `--ignore-live`.
 
 Output marks each candidate `would rm` / `rm`, `skip` with the reason it is
-considered in use, `hold` when liveness could not be established, or `REFUSED`
-when the pre-flight assertion rejected the path.
+considered in use, `hold` when liveness could not be established, `gone` when
+the directory disappeared before the delete, or `REFUSED` when the pre-flight
+assertion rejected the path.
 
-Exit status is `1` if any deletion failed or any candidate was held, `0`
-otherwise. A partially-deleted tree counts as a failure: `rm -rf` can remove
-part of a directory and then error, and a caller checking `$?` must not read
-that as a clean run.
+Exit status is `1` if any deletion failed, any candidate was refused, or any
+candidate was held; `2` for a bad argument; `0` otherwise. A partially-deleted
+tree counts as a failure: `rm -rf` can remove part of a directory and then
+error, and a caller checking `$?` must not read that as a clean run. A directory
+that simply vanished is *not* a failure — another cleaner or a `cargo clean`
+got there first, and the outcome is the one that was wanted.
+
+The pre-flight refuses a path that is not under its scan root, whose basename
+does not match the target names, or that is a **mountpoint** — another
+filesystem borrowing the path, whose contents `rm -rf` would happily descend
+into and destroy.
+
+Counts are validated: `--top one` used to make the cap test print "integer
+expression expected", evaluate false, and delete everything. Bad numbers now
+exit 2.
 
 ## How "in use" is decided
 
@@ -84,10 +101,22 @@ A candidate is skipped if any of these hold for its owning directory:
 
 | signal | why it matters |
 |---|---|
-| the owner sits under a git worktree marked `locked` | an explicit human "do not touch" that outlives the session which set it |
+| the owner is, or sits under, a git worktree marked `locked` | an explicit human "do not touch" that outlives the session which set it |
 | a build process has the owner's path, or the candidate's own path, in its command line | a build is running; clearing `target/` breaks it mid-compile |
-| a tmux session name contains a path component of the owner | an agent session is live in that worktree |
+| a tmux **session name** contains a path component of the owner | an agent session is live in that worktree |
 | any process has its cwd inside the owner | something is working there |
+
+The lock is asked of the **candidate's own directory**, by looking for a
+`locked` file in its gitdir. Enumerating from the scan roots instead meant
+`git -C <worktrees parent> worktree list` exited 128 with "not a git
+repository" for the canonical sweep-the-parent invocation, and the protection
+was silently off in exactly the case it exists for. Reading the gitdir also
+avoids parsing `worktree list --porcelain`, whose path field is
+whitespace-delimited and truncated any locked worktree whose path contained a
+space.
+
+A lock is a human decision, not a liveness signal, so **`--ignore-live` does not
+lift it**. Only `--no-protect-locked` does.
 
 Build processes matched: `cargo`, `rustc`, `node`, `npm`, `pnpm`, `yarn`,
 `next`, `vite`, `webpack`, `tsc`, `esbuild`, `turbo`, `gradle`, `java`,
@@ -111,17 +140,29 @@ Components shorter than **3 characters** are ignored, since one or two
 characters match almost any session name by accident. Real worktree names like
 `api`, `web`, `ainb` and `hangar` are therefore covered.
 
-Every check runs in dry-run and under `--apply` alike, `lsof` included. A
-preview produced with one of the guards switched off is not a preview of
-anything.
+Every check runs in dry-run and under `--apply` alike, `lsof` and the rule-1
+pre-flight included. A preview produced with one of the guards switched off is
+not a preview of anything, and a preview that lists a path the apply will refuse
+is worse than none.
+
+Paths are matched in several spellings, because the processes being searched for
+do not use ours. The canonical physical path, the logical path (macOS `/tmp` is a
+symlink to `/private/tmp`, so a live `node /tmp/wt/server.js` contains no
+`/private/tmp/wt`), and the spelling the operator typed on the command line are
+all tested.
 
 Under `--apply` the `ps` and `tmux` pictures are re-read immediately before each
 deletion. Sizing dozens of multi-GB trees takes minutes, and a build started
-inside that window is invisible to a snapshot taken before it. `lsof` is not
-re-read: it is the slow one, and per-candidate reruns would cost more than the
-sweep saves.
+inside that window is invisible to a snapshot taken before it.
 
-## Three traps this script had to be fixed for
+**Known limit:** `lsof` is *not* re-read per candidate. It is the slow one, and
+per-candidate reruns would cost more than the sweep saves, so a shell that `cd`s
+into a worktree during the sizing pass is not detected unless it also shows up
+in `ps` or tmux. **Known limit:** the mountpoint check compares device ids, so
+it catches a genuinely separate volume but not an APFS firmlink, which shares
+one.
+
+## Traps this script had to be fixed for
 
 Keep them in mind if you edit the liveness logic.
 
@@ -143,6 +184,20 @@ containing a TAB or a newline field-split on the way back in, `dir` became a
 truncated prefix, and the `rm -rf` ran against the source directory while the
 real build directory survived. Reproduced, confirmed. Paths now live in bash
 arrays and only the sort keys, two integers, ever round-trip through text.
+
+The same class bit twice more, so treat any path-carrying text channel as
+hostile. `git worktree list --porcelain` is whitespace-delimited, so an awk
+field-split truncated locked worktrees whose path contained a space; the lock is
+now read from the gitdir with nothing to parse. And `du -sk` echoes the path it
+sized, so a path with a newline made its output span lines and `cut -f1`
+returned a multi-line "size" that then rode the integer-only sort channel and
+could order a 1 KiB candidate ahead of a 10 GiB one. Sizes are validated as
+plain integers before they are trusted.
+
+**A fixed-string exclusion is a fail-open filter.** The process snapshot drops
+this script's own subshells, and matching the bare string `clean.sh` also
+dropped any unrelated live build whose command line happened to contain it, on
+the one signal that matters most. It matches the script's absolute path now.
 
 ## Step 3: extras, ask first
 
