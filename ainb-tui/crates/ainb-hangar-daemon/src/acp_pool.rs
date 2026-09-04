@@ -155,6 +155,8 @@ pub enum DeliveryToken {
     ProviderAtCapacity,
     /// See [`DELIVERY_MODE_UNPROVEN`].
     ModeUnproven,
+    /// See [`DELIVERY_TASK_SCOPE_REFUSED`].
+    TaskScopeRefused,
 }
 
 impl DeliveryToken {
@@ -178,6 +180,7 @@ impl DeliveryToken {
         Self::SessionGone,
         Self::ProviderAtCapacity,
         Self::ModeUnproven,
+        Self::TaskScopeRefused,
     ];
 
     /// The wire spelling persisted in `fleet_message_delivery.detail`.
@@ -196,6 +199,7 @@ impl DeliveryToken {
             Self::SessionGone => "session_gone",
             Self::ProviderAtCapacity => "provider_at_capacity",
             Self::ModeUnproven => "mode_unproven",
+            Self::TaskScopeRefused => "task_scope_refused",
         }
     }
 
@@ -249,6 +253,12 @@ pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = DeliveryToken::ProviderAtCapacit
 /// Terminal, never requeued: retrying an adapter that will not hold the mode
 /// just drives the same session in the wrong permission regime a second time.
 pub const DELIVERY_MODE_UNPROVEN: &str = DeliveryToken::ModeUnproven.as_str();
+/// A CHAT prompt targeted a TASK's session ([`AcpPool::submit_prompt`]).
+///
+/// Terminal: the session belongs to a run, and there is no version of the
+/// request that becomes valid later. See `submit_prompt` for why the refusal
+/// lives at the pool rather than at each RPC door.
+pub const DELIVERY_TASK_SCOPE_REFUSED: &str = DeliveryToken::TaskScopeRefused.as_str();
 /// Prefix of the token a leg carries when the turn stopped for a reason worth
 /// naming: `stop=<reason>`, in the ACP wire spelling ([`stop_reason_token`]),
 /// so `stop=max_tokens`, `stop=max_turn_requests`, `stop=refusal`.
@@ -842,14 +852,57 @@ impl AcpPool {
         }
     }
 
-    /// Hand one prompt to the recipient's OWN session (never a broadcast
+    /// Hand one CHAT prompt to the recipient's OWN session (never a broadcast
     /// scope's, which owns no session). The delivery stays PENDING; the actor
     /// resolves it at turn end.
+    ///
+    /// REFUSES a session whose scope is a task run's
+    /// ([`crate::acp_task::TASK_SCOPE_PREFIX`]), because a task's session is not
+    /// a chat surface: its turns are the run, and a prompt injected into one is
+    /// bounded by nothing an operator can see — `acp_task`'s own poll only
+    /// watches the leg IT submitted, and the pool's deadline sweep deliberately
+    /// exempts task scopes.
+    ///
+    /// The refusal lives HERE, not at each RPC door, for two reasons. This
+    /// function already reads the session row, so the scope costs no extra
+    /// query; and it is the single choke point every prompt to an existing
+    /// session passes through, so a door added later is refused by default
+    /// rather than by remembering. `fleet/acp_session_create` guards the
+    /// creation door with the same constant; `fleet/message_send` and
+    /// `fleet/action` are guarded by this one.
+    ///
+    /// The task executor prompts its own session through
+    /// [`Self::submit_task_prompt`].
     pub async fn submit_prompt(
         self: &Arc<Self>,
         session_key: &str,
         message_id: &str,
         text: &str,
+    ) -> SubmitOutcome {
+        self.submit(session_key, message_id, text, false).await
+    }
+
+    /// [`Self::submit_prompt`] for the run that OWNS a `task:` session.
+    ///
+    /// The one caller is [`crate::acp_task::run_acp`], which submits the brief
+    /// of the task whose scope it is. Named apart from `submit_prompt` so the
+    /// exemption is a deliberate act at one call site instead of a flag every
+    /// chat door could pass by accident.
+    pub async fn submit_task_prompt(
+        self: &Arc<Self>,
+        session_key: &str,
+        message_id: &str,
+        text: &str,
+    ) -> SubmitOutcome {
+        self.submit(session_key, message_id, text, true).await
+    }
+
+    async fn submit(
+        self: &Arc<Self>,
+        session_key: &str,
+        message_id: &str,
+        text: &str,
+        task_run: bool,
     ) -> SubmitOutcome {
         let row = match FleetAcpSessionRepo::get(self.store.pool(), session_key).await {
             Ok(Some(row)) if row.state != "DEAD" => row,
@@ -859,6 +912,16 @@ impl AcpPool {
                 return SubmitOutcome::Rejected(DELIVERY_SESSION_GONE);
             }
         };
+        // `trim_start`, the same shape the create door uses: the two doors read
+        // the scope identically, so neither can be the lenient one.
+        if !task_run && row.scope_key.trim_start().starts_with(crate::acp_task::TASK_SCOPE_PREFIX) {
+            tracing::warn!(
+                %session_key,
+                scope_key = %row.scope_key,
+                "refused a chat prompt aimed at a task's acp session"
+            );
+            return SubmitOutcome::Rejected(DELIVERY_TASK_SCOPE_REFUSED);
+        }
         // The breaker is consulted BEFORE the queue: a provider that is
         // crash-looping must fail every scope routed to it fast, not fill 32
         // queue slots per scope with prompts that will fail anyway.

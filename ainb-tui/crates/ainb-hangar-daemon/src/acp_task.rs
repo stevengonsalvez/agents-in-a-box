@@ -11,7 +11,7 @@
 //!            ▼
 //!   acp_session::ensure(scope_key = "task:<id>")  ── no spawn, one txn
 //!            ▼
-//!   acp_session::enqueue  ─▶  pool.submit_prompt  ─▶  the adapter's turn
+//!   acp_session::enqueue  ─▶  pool.submit_task_prompt  ─▶  the adapter's turn
 //!            ▼
 //!   POLL the delivery leg (the pool resolves it on EVERY path)
 //!            ▼
@@ -291,8 +291,9 @@ pub async fn run_acp(
     let message_id =
         crate::acp_session::enqueue(pool, &session_key, &scope, &dispatch.invocation.prompt)
             .await?;
-    if let SubmitOutcome::Rejected(detail) =
-        acp.submit_prompt(&session_key, &message_id, &dispatch.invocation.prompt).await
+    if let SubmitOutcome::Rejected(detail) = acp
+        .submit_task_prompt(&session_key, &message_id, &dispatch.invocation.prompt)
+        .await
     {
         tracing::warn!(task_id = %task.id, detail, "the acp pool refused the task's prompt");
         return Ok(outcome_for(
@@ -598,7 +599,14 @@ fn outcome_for_token(token: DeliveryToken, result: &RunnerResult) -> RunOutcome 
         DeliveryToken::SpawnFailed
         | DeliveryToken::ModeUnproven
         | DeliveryToken::TurnUnrecorded => failed(FailureReason::SpawnError),
-        DeliveryToken::SessionGone => failed(FailureReason::ProvisionError),
+        // Unreachable on this path by construction — a task prompts through
+        // `submit_task_prompt`, which is exempt — so reaching it means a task's
+        // leg was resolved by somebody else's refused chat prompt. Terminal for
+        // the same reason `SessionGone` is: the session is not usable for this
+        // prompt and a re-dispatch does not change that.
+        DeliveryToken::SessionGone | DeliveryToken::TaskScopeRefused => {
+            failed(FailureReason::ProvisionError)
+        }
         // Handled by the caller's stop-reason arm, which reads this token
         // POSITIONALLY. Reaching it here means it was not first, which the pool
         // never writes.

@@ -1909,6 +1909,59 @@ async fn ensure_refuses_a_blank_cwd_or_scope_before_writing_anything() {
     );
 }
 
+/// A CHAT prompt aimed at a TASK's session is refused, and the task's own
+/// prompt to the same session is not.
+///
+/// `fleet/message_send` and `fleet/action` can both name any live session by
+/// key, and a task's key is deliberately discoverable (`TaskRepo::set_session_id`
+/// records it for transcript viewing). Neither door checks the scope, so the
+/// refusal has to live at the one function both reach — which is also the one
+/// that already read the row the scope is on.
+///
+/// The teeth are the two negatives: the refused prompt must reach NO adapter
+/// process, and the exempt one must still be delivered, so a guard that simply
+/// refused everything would fail the second half.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chat_prompt_is_refused_for_a_task_scope_and_the_task_run_is_not() {
+    use ainb_hangar_daemon::acp_pool::DELIVERY_TASK_SCOPE_REFUSED;
+    use ainb_hangar_daemon::acp_session::ensure;
+
+    let (_dir, store, pool) = harness(&[("FAKE_ACP_CHUNKS", "1")]).await;
+    let events = EventBroker::new().sink();
+    // Minted the way `acp_task` mints it, through the same reserved prefix the
+    // create door refuses to hand out.
+    let task = ensure(
+        store.pool(),
+        &events,
+        ainb_acp::config::CLAUDE_ADAPTER,
+        "/tmp/acp",
+        Some("task:t-guard"),
+    )
+    .await
+    .expect("mint the task session");
+
+    let chat = seed_message(&store, &task.session_key, "inject").await;
+    assert_eq!(
+        pool.submit_prompt(&task.session_key, &chat, "inject").await,
+        SubmitOutcome::Rejected(DELIVERY_TASK_SCOPE_REFUSED),
+        "a chat door must not prompt a task's session"
+    );
+    assert!(
+        pool.health().await.processes.is_empty(),
+        "the refused prompt must not have started an adapter"
+    );
+
+    // The run that OWNS the scope still gets its turn.
+    let brief = seed_message(&store, &task.session_key, "the brief").await;
+    assert_eq!(
+        pool.submit_task_prompt(&task.session_key, &brief, "the brief").await,
+        SubmitOutcome::Queued,
+        "the task executor is exempt from its own scope's guard"
+    );
+    let (state, detail) = await_terminal(&store, &brief, &task.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+}
+
 /// A cancel is per SESSION: convergence is idempotent and leaves the scope
 /// reusable without a restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

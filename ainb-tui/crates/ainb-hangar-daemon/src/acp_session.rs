@@ -184,7 +184,8 @@ pub async fn ensure(
 ///
 /// One `user` message row in the session's own scope plus its PENDING delivery
 /// leg, in one transaction. Returns the message id the caller hands to
-/// `AcpPool::submit_prompt`.
+/// `AcpPool::submit_prompt` (or, for the run that owns a `task:` scope,
+/// `AcpPool::submit_task_prompt`).
 ///
 /// The leg is what the pool resolves at turn end, so a prompt that skipped
 /// this would have no receipt for anyone to read. `sender` names the door
