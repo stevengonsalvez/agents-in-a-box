@@ -2788,15 +2788,6 @@ fn build_atc_command() -> Command {
                         ),
                 )
                 .arg(
-                    clap::Arg::new("mode")
-                        .long("mode")
-                        .value_parser(["lite", "full"])
-                        .help(
-                            "Supervisor mode (default: keep an existing instance's mode, else full). \
-                             lite runs no LLM; full schedules a heartbeat into a brain session",
-                        ),
-                )
-                .arg(
                     clap::Arg::new("provider")
                         .long("provider")
                         .help("Full-mode brain (claude | codex; default claude)"),
@@ -2861,67 +2852,26 @@ fn build_atc_command() -> Command {
                         .help("Report what repair would do without writing anything"),
                 ),
         )
-        .subcommand(
-            Command::new("mode")
-                .about("Report or switch the supervisor mode (lite | full) — exactly one owner per fleet")
-                .long_about(
-                    "One ATC supervisor owns a fleet, in exactly one mode.\n\n\
-                     lite — no LLM. A deterministic scan of the same LLM-free `fleet needs` \
-                     read, auto-continuing only known transient errors, inside the same \
-                     per-session retry cap. It never answers an ASK and never resolves an \
-                     ambiguous session: those are reported, not decided.\n\n\
-                     full — the scheduled heartbeat wakes an LLM session that triages the \
-                     ambiguous work and coordinates the fleet. It spends tokens every beat and \
-                     needs a provider ainb can actually drive.\n\n\
-                     Both modes share ONE safety ledger, so switching never hands a \
-                     permanently-broken session a fresh set of retries. Without --set this \
-                     verb only reports; switching a fleet's controller is not something to do \
-                     by accident while looking.",
-                )
-                .arg(clap::Arg::new("name").required(true).help("Instance name"))
-                .arg(
-                    clap::Arg::new("set")
-                        .long("set")
-                        .value_parser(["lite", "full"])
-                        .help("Switch the mode. Stops the outgoing controller before starting the incoming one"),
-                )
-                .arg(
-                    clap::Arg::new("provider")
-                        .long("provider")
-                        .help(
-                            "Full-mode brain (claude | codex). Remembered across a switch to lite, \
-                             which runs no brain. A provider ainb cannot drive is refused, not faked",
-                        ),
-                )
-                .arg(
-                    clap::Arg::new("no-reconcile")
-                        .long("no-reconcile")
-                        .action(clap::ArgAction::SetTrue)
-                        .help(
-                            "Persist the mode without starting or stopping either controller. The \
-                             old one still stands down on its next action",
-                        ),
-                ),
-        )
-        .subcommand(
-            Command::new("supervise")
-                .hide(true)
-                .about("Internal: run the LITE controller — the LLM-free scan loop")
-                .arg(clap::Arg::new("name").required(true))
-                .arg(
-                    clap::Arg::new("once")
-                        .long("once")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Run a single scan and exit (diagnostics)"),
-                )
-                .arg(
-                    clap::Arg::new("dry-run")
-                        .long("dry-run")
-                        .action(clap::ArgAction::SetTrue)
-                        .help("Report what the scan would do; send nothing and spend no retry budget"),
-                ),
-        )
         .subcommand(Command::new("list").about("List all provisioned ATC instances"))
+        .subcommand(
+            Command::new("retries")
+                .about("Retry budget spent per session, and which sessions were escalated")
+                .long_about(concat!(
+                    "Reads the durable `atc_retry` ledger.\n\n",
+                    "With no --instance this reports the HANGAR DAEMON'S OWN retry sweep, ",
+                    "which auto-continues transient API errors on every session with no ATC ",
+                    "instance behind it. That sweep has no `atc status` to ask, so this is ",
+                    "the only way to see what it has done.\n\n",
+                    "A row at the cap has been escalated to you as an attention row; it is ",
+                    "not being retried any more. A session that recovers and stays recovered ",
+                    "ages out of the ledger and gets its budget back.",
+                ))
+                .arg(
+                    clap::Arg::new("instance")
+                        .long("instance")
+                        .help("Read a named ATC instance's ledger instead of the sweep's"),
+                ),
+        )
         .subcommand(
             Command::new("heartbeat")
                 .hide(true)
