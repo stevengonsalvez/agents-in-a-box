@@ -2761,6 +2761,13 @@ impl TuiSession {
     ///
     /// Esc first, so a repeat starts from a closed palette rather than typing a
     /// second copy of the word into the query left over from the last attempt.
+    ///
+    /// The word is typed ONLY once the palette's ` Search: ` title is on the
+    /// pane. A dropped `C-p` is the exact failure the resend loop exists for, and
+    /// without the gate the word lands on the live screen instead: on the
+    /// issue-list landing, `c` in `control` / `skills` opens the create-issue
+    /// wizard and the trailing Enter advances it, so every later iteration fights
+    /// an overlay this helper never opened.
     pub fn go_to_screen_until(
         &self,
         word: &str,
@@ -2770,11 +2777,19 @@ impl TuiSession {
         loop {
             self.send_key("Escape");
             self.send_key("C-p");
-            self.type_literal(word);
-            self.send_enter();
-            if let Some(c) = self.poll_capture(Instant::now() + Duration::from_millis(1500), &pred)
+            if self
+                .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                    c.contains(" Search: ")
+                })
+                .is_some()
             {
-                return Some(c);
+                self.type_literal(word);
+                self.send_enter();
+                if let Some(c) =
+                    self.poll_capture(Instant::now() + Duration::from_millis(1500), &pred)
+                {
+                    return Some(c);
+                }
             }
             if Instant::now() >= deadline {
                 return None;
