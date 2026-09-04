@@ -38,8 +38,12 @@ pub enum AnswerPhase {
     InFlight {
         /// When it was fired, so the pane can show how long it has been going.
         since: Instant,
-        /// The text that was sent, kept so a failure can put it back.
-        text: String,
+        /// The text that was sent, kept so a failure can put a TYPED answer
+        /// back. `None` when the answer was a picked option: that option is
+        /// still highlighted, and writing its label into the composer would
+        /// move the operator to a different row carrying an answer they never
+        /// typed.
+        draft: Option<String>,
     },
     /// The transport reported delivery. The chip clears on the next refresh,
     /// when the producer stops reporting the row.
@@ -223,10 +227,16 @@ impl AskState {
             .unwrap_or_else(|poisoned| poisoned.into_inner().drain(..).collect());
         let changed = !landed.is_empty();
         for phase in landed {
-            // A failure puts the operator's text BACK, so they are not retyping
-            // an answer the transport lost.
-            if let (AnswerPhase::Failed { .. }, Some(AnswerPhase::InFlight { text, .. })) =
-                (&phase, &self.phase)
+            // A failure puts a TYPED answer back, so nobody retypes what the
+            // transport lost. A picked option is deliberately not restored: it
+            // is still highlighted where the operator left it, and its label in
+            // the composer would read as an answer they wrote.
+            if let (
+                AnswerPhase::Failed { .. },
+                Some(AnswerPhase::InFlight {
+                    draft: Some(text), ..
+                }),
+            ) = (&phase, &self.phase)
             {
                 self.free_text.clone_from(text);
                 self.focus = AskFocus::FreeText;
@@ -258,6 +268,8 @@ impl AskState {
             return Err(refusal.to_string());
         }
         let text = self.answer_text(chip)?;
+        // Only a typed answer is a draft worth restoring.
+        let draft = (self.focus == AskFocus::FreeText).then(|| self.free_text.clone());
         let inbox = Arc::clone(&self.inbox);
         let route = chip.answerable.clone();
         let session_id = session_id.to_string();
@@ -286,7 +298,7 @@ impl AskState {
             Ok(_) => {
                 self.phase = Some(AnswerPhase::InFlight {
                     since: Instant::now(),
-                    text,
+                    draft,
                 });
                 Ok(())
             }
@@ -438,7 +450,7 @@ mod tests {
         let mut state = AskState::default();
         state.phase = Some(AnswerPhase::InFlight {
             since: Instant::now(),
-            text: "Focused".to_string(),
+            draft: None,
         });
         let chip = ask_with_options(&["Focused"]);
         assert_eq!(
@@ -452,7 +464,7 @@ mod tests {
         let mut state = AskState::default();
         state.phase = Some(AnswerPhase::InFlight {
             since: Instant::now(),
-            text: "the long answer they typed".to_string(),
+            draft: Some("the long answer they typed".to_string()),
         });
         state.inbox.lock().unwrap().push(AnswerPhase::Failed {
             reason: "target_not_running".to_string(),
@@ -469,11 +481,38 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_option_pick_does_not_write_its_label_into_the_composer() {
+        // The option is still highlighted where the operator left it. Its label
+        // in the composer would move them to a different row carrying an answer
+        // they never typed — and a retry would then send that text instead of
+        // the option.
+        let chip = ask_with_options(&["data/box.db", "api/src/db.sqlite"]);
+        let mut state = AskState::default();
+        state.retarget(&chip);
+        state.move_cursor(&chip, 1);
+        state.phase = Some(AnswerPhase::InFlight {
+            since: Instant::now(),
+            draft: None,
+        });
+        state.inbox.lock().unwrap().push(AnswerPhase::Failed {
+            reason: "no live target".to_string(),
+        });
+        state.tick();
+        assert_eq!(state.free_text(), "");
+        assert_eq!(state.focus(), AskFocus::Options);
+        assert_eq!(
+            state.answer_text(&chip),
+            Ok("api/src/db.sqlite".to_string()),
+            "a retry must send the option that is still highlighted"
+        );
+    }
+
+    #[test]
     fn a_delivered_send_leaves_the_draft_alone() {
         let mut state = AskState::default();
         state.phase = Some(AnswerPhase::InFlight {
             since: Instant::now(),
-            text: "Focused".to_string(),
+            draft: None,
         });
         state.inbox.lock().unwrap().push(AnswerPhase::Delivered {
             via: "tmux (tmux_proj)".to_string(),
@@ -489,7 +528,7 @@ mod tests {
         assert!(state.elapsed().is_none());
         state.phase = Some(AnswerPhase::InFlight {
             since: Instant::now(),
-            text: String::new(),
+            draft: None,
         });
         assert!(state.elapsed().is_some(), "a spinner with no elapsed time says nothing");
     }
@@ -504,7 +543,7 @@ mod tests {
         state.retarget(&mine);
         state.phase = Some(AnswerPhase::InFlight {
             since: Instant::now(),
-            text: "a".to_string(),
+            draft: None,
         });
         assert!(state.phase_for(&mine).is_some());
         assert!(state.phase_for(&theirs).is_none());
