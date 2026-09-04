@@ -829,8 +829,17 @@ async fn the_deadline_sweep_expires_a_chat_turn_and_exempts_a_task_turn() {
 
     let chat_message = seed_message(&store, &chat.session_key, "a").await;
     let task_message = seed_message(&store, &task.session_key, "bb").await;
-    pool.submit_prompt(&chat.session_key, &chat_message, "a").await;
-    pool.submit_task_prompt(&task.session_key, &task_message, "bb").await;
+    // Asserted, not discarded: a refused submit would otherwise surface 20 s
+    // later as an `await_open_turn` timeout blaming the turn that never opened
+    // rather than the prompt that was never accepted.
+    assert!(matches!(
+        pool.submit_prompt(&chat.session_key, &chat_message, "a").await,
+        SubmitOutcome::Queued
+    ));
+    assert!(matches!(
+        pool.submit_task_prompt(&task.session_key, &task_message, "bb").await,
+        SubmitOutcome::Queued
+    ));
     // Both turns are OPEN and both are past the 1 ms deadline, so the only
     // thing that can separate them is the scope.
     await_open_turn(&store, &chat.session_key).await;
