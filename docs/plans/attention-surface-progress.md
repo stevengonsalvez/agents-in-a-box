@@ -119,7 +119,7 @@ recreate the duplication this epic is deleting.
 | 3 | Right-pane tab strip | done |
 | 4 | Answering from the `ask` tab | done |
 | 5 | Delete the host Fleet panel | done |
-| 6 | Delete the host Inbox | pending |
+| 6 | Delete the host Inbox | done |
 | 7 | Copilot registry + mode dial | pending |
 | 8 | Broadcast + rehoming, delete `t` start form | pending |
 | 9 | ATC lite audit + daemon retry sweep | pending |
@@ -195,6 +195,16 @@ or **explicitly deleted**. Nothing is left implicit.
 | create a named channel | `N` | **rehomed in phase 8** — the channels list inside the `copilot` tab | as above |
 | new-ATC name prompt | `n` | **rehomed in phase 8** — the Daemons screen | as above |
 | managed-Codex start form | `t` | **deleted in phase 8.** Codex remote control is already the default (`[codex] app_server = desktop`) | — |
+
+## Parity: the deleted host Inbox
+
+| Inbox verb | Key | Outcome | Exercised by |
+|---|---|---|---|
+| this session's notification history | — | rehomed: the `log` tab | `tripwire_sessions_tab_strip` reads a real hook row back |
+| the fleet-wide notification list | `b` | **not rehomed** — the hangar plugin's `I` tab, untouched. Rebuilding it here recreates the duplication the epic deletes | plugin's own tests |
+| unread badge on the menu bar | — | **deleted.** The needs-you badge on the sessions header is the count that matters: what is BLOCKING an agent, not what is unread | `tripwire_sessions_attention_chips` |
+| dismiss / archive / agent filter | `d` `C` `a` `p` | **deleted** with the screen | — |
+| jump to the row's tmux session | `Enter` | rehomed: the attach digits, which work from every tab | `tripwire_sessions_tab_strip` footer assertion |
 
 ## Suite status
 
