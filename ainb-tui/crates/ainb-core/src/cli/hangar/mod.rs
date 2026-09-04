@@ -919,6 +919,9 @@ pub struct AgentCreateArgs {
     /// Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`.
     #[arg(long)]
     pub provider: Option<String>,
+    /// Task executor to record (`process`/`acp`); omitted inherits the daemon's `HANGAR_TASK_EXECUTOR`.
+    #[arg(long)]
+    pub executor: Option<String>,
     /// Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`).
     #[arg(long)]
     pub model: Option<String>,
@@ -4091,6 +4094,9 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
     }
     let provider = ainb_hangar_store::bootstrap::normalize_provider(args.provider.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
+    let task_executor =
+        ainb_hangar_store::bootstrap::normalize_task_executor(args.executor.as_deref())
+            .map_err(|e| anyhow::anyhow!(e))?;
     let description = validated_description(args.description.as_deref())?.unwrap_or_default();
     // An explicit --workspace must exist; the default is ensured (created if absent).
     let workspace_id = match args.workspace.as_deref() {
@@ -4110,6 +4116,7 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
         ainb_hangar_store::bootstrap::AgentDraft {
             name: name.to_string(),
             provider,
+            task_executor,
             instructions: args.instructions,
             description,
             avatar_url: args.avatar,
