@@ -65,8 +65,16 @@ pub fn spawn(shared: &Shared, running: &Arc<AtomicBool>) {
                 return;
             };
             runtime.block_on(async move {
+                // The last rows the daemon actually reported. Carried across a
+                // failed poll so a transient socket error greys the chips
+                // rather than making them disappear — a request that vanishes
+                // because one read timed out is a request nobody answers.
+                let mut last_good: HashMap<String, Vec<SessionAttention>> = HashMap::new();
                 loop {
-                    let next = poll_once().await;
+                    let next = poll_once(&last_good).await;
+                    if next.reachable {
+                        last_good.clone_from(&next.by_cwd);
+                    }
                     if let Ok(mut cell) = shared.lock() {
                         *cell = next;
                     }
@@ -81,19 +89,27 @@ pub fn spawn(shared: &Shared, running: &Arc<AtomicBool>) {
 }
 
 /// One poll. Never panics; every failure becomes a named, reportable reason.
-async fn poll_once() -> DaemonAttention {
+///
+/// `last_good` is what the daemon reported when it last answered, handed back
+/// on a failure so the surface greys its chips instead of losing them.
+async fn poll_once(
+    last_good: &HashMap<String, Vec<SessionAttention>>,
+) -> DaemonAttention {
     let client = match crate::fleet::bridge::daemon::DaemonClient::from_env() {
         Ok(client) => client,
         // Not an error worth a banner: no hangar home configured is the normal
         // state of a host that never ran the daemon.
-        Err(error) => return DaemonAttention::down(error.to_string()),
+        Err(error) => return DaemonAttention::down(last_good.clone(), error.to_string()),
     };
     let socket = client.socket().display().to_string();
     match client.attention_list_fleet().await {
         Ok(rows) => DaemonAttention::up(group_by_cwd(&rows)),
         // Name the socket. "attention/list failed" without it leaves the
         // operator guessing which daemon, which home, which socket.
-        Err(error) => DaemonAttention::down(format!("attention/list via {socket}: {error}")),
+        Err(error) => DaemonAttention::down(
+            last_good.clone(),
+            format!("attention/list via {socket}: {error}"),
+        ),
     }
 }
 
@@ -304,14 +320,36 @@ mod tests {
     }
 
     #[test]
-    fn a_down_daemon_drops_its_rows_and_says_why() {
-        let down = DaemonAttention::down("attention/list via /x/hangar.sock: refused".into());
+    fn a_down_daemon_keeps_its_last_rows_and_says_why() {
+        // The chip is what tells the operator something needs them. Losing it
+        // because one socket read timed out is the silent no-op the spec
+        // forbids; greying it and naming the failed call is not.
+        let previous = group_by_cwd(&[wire(
+            "att-1",
+            "approval",
+            "/work/proj",
+            serde_json::json!({}),
+        )]);
+        let down = DaemonAttention::down(
+            previous,
+            "attention/list via /x/hangar.sock: refused".into(),
+        );
         assert!(!down.reachable);
-        assert!(down.rows_for("/work/proj").is_empty());
+        assert_eq!(
+            down.rows_for("/work/proj").len(),
+            1,
+            "a transient failure must not make a live request disappear"
+        );
         assert!(
             down.error.as_deref().is_some_and(|e| e.contains("/x/hangar.sock")),
             "the reason must name the socket"
         );
+    }
+
+    #[test]
+    fn a_daemon_that_never_answered_has_nothing_to_carry_forward() {
+        let down = DaemonAttention::down(HashMap::new(), "no hangar home".into());
+        assert!(down.rows_for("/work/proj").is_empty());
     }
 
     #[test]

@@ -357,15 +357,27 @@ impl DaemonAttention {
         }
     }
 
-    /// The daemon did not answer.
+    /// The daemon did not answer, carrying the last rows it DID report.
     ///
-    /// Rows are DROPPED, not retained: a stale row rendered as live is a chip
-    /// that invites an answer no transport can deliver. The local producer
-    /// carries the surface until the daemon comes back.
+    /// Retained, not dropped. Dropping them looks like the right call — a stale
+    /// row invites an answer no transport can deliver — but the chip is what
+    /// tells the operator something needs them, and a chip that VANISHES on a
+    /// transient poll failure is the silent no-op the spec forbids. Retaining
+    /// it and flagging the daemon unreachable produces the shape the spec
+    /// actually asks for: the chip greys out and the `ask` pane names the call
+    /// that is unavailable.
+    ///
+    /// A row answered while the daemon was down lingers greyed until the next
+    /// successful poll drops it. That is the safe direction: it is unanswerable
+    /// from here for as long as it lingers, and the alternative is a live
+    /// request disappearing because one socket read timed out.
     #[must_use]
-    pub fn down(error: String) -> Self {
+    pub fn down(
+        previous: std::collections::HashMap<String, Vec<SessionAttention>>,
+        error: String,
+    ) -> Self {
         Self {
-            by_cwd: std::collections::HashMap::new(),
+            by_cwd: previous,
             reachable: false,
             error: Some(error),
         }
@@ -542,17 +554,37 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_daemon_lets_the_local_row_resume() {
-        // A down daemon reports no rows at all, so the next merge sees only the
-        // local one and the surface keeps working. This is the third leg of the
-        // precedence sequence: local, then daemon wins, then local resumes.
-        let down = DaemonAttention::down("refused".into());
+    fn a_daemon_that_never_answered_lets_the_local_row_carry_the_surface() {
+        // Third leg of the precedence sequence: local, then the daemon wins,
+        // then the daemon is gone. With nothing to carry forward the merge sees
+        // only the local row and the surface keeps working — which is the whole
+        // point of reading notifyd off disk.
+        let down = DaemonAttention::down(std::collections::HashMap::new(), "refused".into());
         assert!(down.rows_for("/work/proj").is_empty());
         let mut chips = vec![SessionAttention::local(AttentionKind::Ask, 1_000)];
         chips.extend(down.rows_for("/work/proj").iter().cloned());
         let merged = normalise(chips);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].source, AttentionSource::Local);
+    }
+
+    #[test]
+    fn a_daemon_row_outlives_a_transient_poll_failure() {
+        // And when the daemon HAS answered before, its row is carried across
+        // the blip and greys instead of vanishing. A chip that disappears
+        // because one socket read timed out is a request nobody answers.
+        let mut by_cwd = std::collections::HashMap::new();
+        by_cwd.insert(
+            "/work/proj".to_string(),
+            vec![SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into())],
+        );
+        let down = DaemonAttention::down(by_cwd, "refused".into());
+        let chips = normalise(down.rows_for("/work/proj").to_vec());
+        assert_eq!(chips.len(), 1);
+        assert!(
+            !route_answer(&chips[0], Some("tmux_proj"), down.reachable).is_answerable(),
+            "carried forward, but NOT answerable while the daemon is gone"
+        );
     }
 
     #[test]
