@@ -216,21 +216,35 @@ pub fn chat_page_blocking(
         // Dropping it leaves the screen saying "no copilot session yet" forever
         // with the explanation discarded.
         progress(ChatOpenStep::CreatingSession);
-        let (target_session_key, session_detail, turn_deadline_ms) = match client
-            .acp_session_create(ainb_hangar_proto::fleet::FleetAcpSessionCreateParams {
-                // Deliberately unnamed: this call wants THE copilot session,
-                // not a particular engine. Naming one reverted an adapter the
-                // operator had swapped, and once the scope was held by that
-                // other adapter the mint was refused outright, so opening the
-                // chat page after a swap failed instead of attaching.
-                provider: None,
-                cwd: std::env::current_dir()
-                    .map(|cwd| cwd.display().to_string())
-                    .unwrap_or_else(|_| ".".to_string()),
+        let cwd = std::env::current_dir()
+            .map(|cwd| cwd.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        let mint = |provider: Option<String>| {
+            client.acp_session_create(ainb_hangar_proto::fleet::FleetAcpSessionCreateParams {
+                provider,
+                cwd: cwd.clone(),
                 scope_key: Some(scope.clone()),
             })
-            .await
-        {
+        };
+        // Deliberately unnamed: this call wants THE copilot session, not a
+        // particular engine. Naming one reverted an adapter the operator had
+        // swapped, and once the scope was held by that other adapter the mint
+        // was refused outright, so opening the chat page after a swap failed
+        // instead of attaching.
+        let created = match mint(None).await {
+            // A daemon older than this binary still REQUIRES `provider`, and an
+            // absent one is a missing field it refuses. That is the ordinary
+            // upgrade-the-binary-keep-the-daemon window, and leaving it would
+            // make the copilot page unopenable across it. Retried once naming
+            // the built-in adapter, which is exactly what this call sent before
+            // the parameter became optional: no worse than it was, against a
+            // daemon that cannot do better.
+            Err(error) if names_the_provider_field(&error.to_string()) => {
+                mint(Some(LEGACY_DAEMON_ADAPTER.to_string())).await
+            }
+            other => other,
+        };
+        let (target_session_key, session_detail, turn_deadline_ms) = match created {
             // The pool's turn ceiling rides back on the mint and is the only
             // door it has onto a client, so it is carried through to the pane
             // that has to bound a PENDING leg's wait.
@@ -695,10 +709,56 @@ pub fn copilot_configure_blocking(
     })
 }
 
+/// The adapter named when, and ONLY when, the daemon is too old to accept an
+/// absent one.
+///
+/// `ainb_acp::config::CLAUDE_ADAPTER` by value, because `ainb-core` does not
+/// depend on `ainb-acp` and one string is not worth a crate edge. It is a
+/// built-in the pool always seeds, and the daemon re-validates the name
+/// regardless, so a drift here fails closed rather than spawning something
+/// arbitrary.
+const LEGACY_DAEMON_ADAPTER: &str = "claude-agent-acp";
+
+/// Whether a daemon refusal is the older daemon rejecting an ABSENT `provider`.
+///
+/// Matched on the wording because that is all a JSON-RPC `invalid_params`
+/// carries. Deliberately narrow: it gates one retry that is harmless when the
+/// guess is wrong, and a new daemon never produces this message at all, having
+/// made the field optional.
+fn names_the_provider_field(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("provider") && (error.contains("missing") || error.contains("invalid type"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fleet::types::{Session, SessionSource};
+
+    /// The retry fires for an older daemon's refusal of an absent `provider`,
+    /// and for nothing else — an unknown-adapter refusal names the provider too
+    /// and must NOT be retried with a different one.
+    #[test]
+    fn only_a_missing_provider_field_triggers_the_legacy_retry() {
+        assert!(names_the_provider_field(
+            "invalid params: missing field `provider`"
+        ));
+        assert!(names_the_provider_field(
+            "invalid params: invalid type: null, expected a string at provider"
+        ));
+        assert!(
+            !names_the_provider_field(
+                "unknown adapter \"gemini-acp\"; fleet/adapter_list names the ones this daemon can spawn"
+            ),
+            "an adapter the daemon does not know is a real refusal, not a skew"
+        );
+        assert!(
+            !names_the_provider_field(
+                "scope_key \"channel:c1\" is already held by a session whose provider is codex-acp"
+            ),
+            "a held scope must not be retried with the built-in adapter"
+        );
+    }
 
     fn seed_git_repository(path: &Path) -> (git2::Repository, git2::Oid) {
         std::fs::create_dir_all(path).expect("create repository directory");
