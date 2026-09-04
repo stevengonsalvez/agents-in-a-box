@@ -183,6 +183,10 @@ Fixed with an RAII guard covering `AINB_BRIDGED_VARS` and releasing on unwind
 | CI invoked two deleted tripwires by NAME and had been failing on a missing test binary ever since phases 5 and 6 | The first CI run that actually dispatched after the merge | `cafc4378` — replaced by the sessions tab strip and the copilot picker, the surfaces that took the work over |
 | `acp_session::ensure` validated a provider against the two-name built-in floor while `fleet/adapter_list` read the config registry: the picker OFFERED an operator's configured adapter and the mint behind it refused the same name | The copilot tripwire on CI, not locally — the local green run predated the merge that put `ensure` in this path, and only the lib suite was re-run after the rewire | `908b5500` — one resolution beside the pool that owns the registry, used by the list and by every write |
 
+| The `ask` pane held ONE outcome field for every question. It was cleared on retarget and written by whichever send worker landed last, so answering A and moving to B painted **A's failure under B's question**, and returning to A showed nothing at all. My own fix `e0684d6b` for the double-send moved this defect rather than closing it: before, the outcome vanished into an orphaned inbox; after, the surface actively attributed one question's failure to another | Adversarial re-review of my own fix, opus. Not a green-suite failure: every unit passed, because none of them navigated between two questions | `ba0c863b` — the outcome is keyed by request. The `InFlight` entry doubles as the double-send latch, so the view and the fact cannot disagree, and `in_flight_request` is deleted. Proved by falsification: re-filing the landed outcome under `self.request` turns the new test red |
+| `fleet/copilot_configure` retires the old ACP session before minting its replacement, so a mint that failed left the copilot channel with **no live session and no way back** — the engine picker was the one control that could end the conversation | Same review. The ordering cannot be swapped: a live session holds the scope the replacement needs, so `ensure` would return the old row instead of minting | `e54149fc` — the row is restored to its captured pre-swap state on the `Err` path. The test injects the failure by blanking `cwd` in the store, and goes red when the restore writes the wrong state |
+| The chat page opened the copilot with a get-or-create that had to NAME an adapter, so it named a constant. After an operator swapped engines, `acp_session::ensure` refused the mismatched name with `ScopeHeld` — opening the chat page was refused outright, not silently reverted as first reported | Same review, symptom traced further than the report claimed | `b7a88989` — `provider` is optional and omitting it means "the adapter this scope already runs", which only the daemon can answer. `COPILOT_DEFAULT_PROVIDER` deleted |
+
 ## Phase 8: where each rehomed verb went
 
 | Verb | Old home | New home | Exercised by |
@@ -232,23 +236,74 @@ or **explicitly deleted**. Nothing is left implicit.
 | dismiss / archive / agent filter | `d` `C` `a` `p` | **deleted** with the screen | — |
 | jump to the row's tmux session | `Enter` | rehomed: the attach digits, which work from every tab | `tripwire_sessions_tab_strip` footer assertion |
 
+| Keying the outcome by request threw the operator's TYPED answer away whenever the failure landed while they were looking at a different question: the draft lived on the in-flight entry, and settling that entry replaced it. The restore then fired only for a failure they happened to be watching — and a send slow enough to fail is one they are likely to have walked away from | Second adversarial pass on `ba0c863b`, opus. My fix for the misattribution introduced it | `1d7b7039` — the draft rides on `Failed` itself, and one `restore_failed_draft` serves both the outcome landing in view and the operator returning to it. Red when the `retarget` call is removed |
+
+| A failed engine swap left the guardrail where the swap had put it. The client only adopts a mode from an `Applied` outcome, so a configure that loosened to `yolo` and then failed armed it underneath a header still reading `guarded`: `spawn_session`, `interrupt` and `archive` reached `Auto` and fired with no confirm card, for an operator who believed they took one. `kill` was never at risk, being unoverridable | Adversarial review, opus, part 2 of 5. The comment justifying mode-before-swap was right about tightening and inverted about loosening | `17ee6a6b` — a failed configure now changes nothing in either direction, and the failure path also converges the restored session, because teardown only signals the actor and does nothing at all when there was no live handle |
+| The retry sweep's transient gate was still fooled, by the envelope's own `cwd` and `project`: patterns are word-boundary matches and `-` and `/` are non-word characters, so a worktree named `econnreset-repro` matched on its path and every failure on that session read as transient. Bounding the event TYPES could not close this, because the path rides inside the very event that reports the error | Same review, part 3. My earlier fix `19771d3d` narrowed the aperture and I recorded it as closed | `d5735835` — the gate reads one named field instead of the record. `acp_error` deleted with it: nothing emits that string, so it was implying wire-session coverage the sweep does not have |
+| `⌥c` offered a cancel for a turn that had long ended. A delivery leg leaves PENDING daemon-side and nothing the page reads brings that back, so the key stayed armed for the life of the pane — the whole TUI session, for the singleton copilot — and aimed an interrupt at whatever was running by then; on a fan-out, at every recipient | Same review, part 5. The verb is this branch's own, from `58508afd` | `dd9a5139` bounds it to one turn deadline and stops a second press minting another cancel; `66b692dc` names the rest. NOT closed: see the open item below |
+
+## What is proved by tmux, and what is not
+
+The contract is that every acceptance check drives the real TUI. It holds for
+all ten phases. Three review-found fixes landed after those checks, and the
+evidence behind them is uneven enough to name:
+
+| Fix | tmux | Unit | Note |
+|---|---|---|---|
+| `ba0c863b` outcome per question | `tripwire_sessions_answer_outcome_per_question` | 3 tests, one falsified | The tripwire pins the half that is deterministic |
+| `b7a88989` unnamed provider | no | daemon test, falsified | |
+| `e54149fc` restore on failed mint | no | daemon test, falsified | |
+
+The new tripwire seeds two waiting sessions and gives only the second a real
+tmux pane, so the first session's answer fails for real. It then walks to the
+second session and asserts its pane reports NOTHING, and walks back and asserts
+the failure is still on the question it belongs to.
+
+It does **not** pin the misattribution itself, and this is a limit rather than
+an omission: reproducing that needs the outcome to land while the pane is on
+the other question, and a tmux send to an absent pane fails in milliseconds —
+far faster than an operator can navigate. There is no deterministic way to
+drive that window from tmux with the fixtures this branch has. The unit test
+covers it instead, and was proved by re-introducing the defect and watching it
+go red. Recorded here rather than left as an implied claim that tmux covers
+everything.
+
+## Open, and deliberately not fixed here
+
+| Item | Why it is left | What closing it needs |
+|---|---|---|
+| `chat_cancel_turns_blocking`'s version check is vacuous — it re-reads `fleet/snapshot` immediately before the write, which removes the staleness property optimistic concurrency exists for | Closing it means a new field on `FleetMessageDelivery` that the daemon populates when it builds the leg. That is a wire change on the message path at the end of the epic, and the exposure is now bounded to one turn deadline rather than the life of the pane | Carry the version the leg was CREATED at from the send through `ChatIntent::CancelTurn`, and pass that as `expected_version` instead of re-reading it |
+| The retry sweep is Claude-hook-only: a wire session's ERROR event type is the raw method (`turn/failed`, `thread/error`), none of which is in the allowlist, so Codex and ACP sessions always land in `skipped_opaque` | It fails CLOSED, which is the right direction for a gate that types at an unattended agent. Widening what auto-`continue` reaches is a deliberate behaviour change and needs its own verification, not a longer list | A predicate mirroring the state machine that set ERROR, landed with tests that prove which sessions newly qualify |
+| A tmux answer has no timeout of its own, so a wedged tmux server leaves a permanently `InFlight` entry that is un-evictable and refuses re-answering that question until the TUI restarts | Narrow, and it is the one state the per-request design cannot leave. The daemon route is bounded at 5s and the broker route by its own read timeout | A deadline on the tmux send, or an operator-visible way to clear a stuck entry |
+| A create with no `provider` racing a swap can read the pre-swap adapter and then be refused `ScopeHeld` | Self-clearing: the next page open succeeds, and the window is the swap itself | Resolving the adapter and minting under one transaction |
+
 ## Suite status
 
-`cargo test --workspace`: **465 test binaries, 464 pass.**
+`cargo test --workspace`: **104 test binaries, 103 pass.**
 
-The one failure is `ainb-plugin-cts-v2::real_plugin_axes`, and it is not a
-code failure — it is that test's own safety guard:
+The one failure is `tripwire_new_session_agent_pills_visible`, and it is
+environmental rather than a code failure. The pane it captures shows the
+new-session dialog stuck on:
 
 ```
-scratch hangar home .../ainb-tui/target/tmp/real-plugin-axes-hangar-home
-must not be inside the live hangar home /Users/stevengonsalvez/.agents-in-a-box
+✖ Authentication failed - check your git credentials
+Launch is disabled — Esc to pick another repository
 ```
 
-This worktree was created by `ainb run`, so it lives under
-`~/.agents-in-a-box`, and so does its `target/`. Verified by re-running with
-`CARGO_TARGET_DIR=/tmp/ainb-cts-target`: **passes, 74.66s**. A CI checkout is
-not under that path, so it is green there. Nothing in this branch touches that
-crate.
+so the Agent row it asserts on is never reached. That message comes from
+`git/remote_repo_manager.rs`, which this branch does not touch; the test file
+is byte-identical to `origin/main`; and this branch changes no file under
+`crates/ainb-core/src/git/` or `components/new_session.rs`. No CI job runs the
+binary either — the `Test` job filters `not binary(/^tripwire_/)` and the
+named-tripwire steps do not include it — which is why it went unseen.
+
+Two OTHER tripwires in that same CI-ungated position were red for the same
+reason and are fixed here (`b4d9d7f2`): both demanded a `fleet daemon` row
+that `probe.rs` deliberately withholds while that daemon is stopped, a rule
+main pins in its own unit test. They now assert the contract that holds.
+
+The `ainb-plugin-cts-v2::real_plugin_axes` guard noted earlier did not trip on
+this run.
 
 ## Published pages
 
