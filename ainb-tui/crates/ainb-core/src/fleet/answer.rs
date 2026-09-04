@@ -72,6 +72,23 @@ pub struct AskState {
     cursor: usize,
     free_text: String,
     phase: Option<AnswerPhase>,
+    /// The request the outstanding send belongs to, which is NOT always the one
+    /// on screen.
+    ///
+    /// `retarget` runs on every render of the `ask` tab, so navigating away
+    /// from a question and back used to reset the whole struct and clear the
+    /// double-send latch with it: answer A, tab to preview, move the cursor,
+    /// tab back, press Enter, and the same answer goes into the agent's picker
+    /// a second time. The daemon route survives that on first-answer-wins; the
+    /// tmux route has no dedupe and types the text straight in.
+    ///
+    /// Keeping the id here means the latch belongs to the QUESTION rather than
+    /// to whatever the pane happens to be showing.
+    in_flight_request: Option<String>,
+    /// Shared with every send worker, and deliberately NOT replaced on
+    /// retarget: a worker holding an `Arc` to a discarded inbox publishes its
+    /// outcome into nothing, so a failed send would report as neither sent nor
+    /// failed.
     inbox: Arc<Mutex<Vec<AnswerPhase>>>,
 }
 
@@ -83,6 +100,7 @@ impl Default for AskState {
             cursor: 0,
             free_text: String::new(),
             phase: None,
+            in_flight_request: None,
             inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -109,20 +127,25 @@ impl AskState {
             return;
         }
         // A cursor or a half-typed answer left over from the previous question
-        // would pre-load a reply to a question nobody has read.
-        *self = Self {
-            request: Some(id),
-            // A request with no structured options has only one place an answer
-            // can come from, so start there. Defaulting to the option list
-            // leaves the operator on an empty list, typing into a composer that
-            // is not focused and shows neither their text nor a caret.
-            focus: if chip.options.is_empty() {
-                AskFocus::FreeText
-            } else {
-                AskFocus::Options
-            },
-            ..Self::default()
+        // would pre-load a reply to a question nobody has read, so the per-view
+        // fields reset.
+        self.request = Some(id);
+        // A request with no structured options has only one place an answer can
+        // come from, so start there. Defaulting to the option list leaves the
+        // operator on an empty list, typing into a composer that is not focused
+        // and shows neither their text nor a caret.
+        self.focus = if chip.options.is_empty() {
+            AskFocus::FreeText
+        } else {
+            AskFocus::Options
         };
+        self.cursor = 0;
+        self.free_text.clear();
+        // `phase` is per-VIEW and clears with the rest, but the latch and the
+        // inbox behind it are per-REQUEST and deliberately survive. This method
+        // runs on every render, so resetting them here is what let the operator
+        // navigate away from an in-flight answer and send it a second time.
+        self.phase = None;
     }
 
     /// Which half of the pane the keyboard is driving.
@@ -161,10 +184,20 @@ impl AskState {
         self.phase.as_ref()
     }
 
-    /// Whether a send is still outstanding.
+    /// Whether a send is still outstanding for the request now on screen.
+    ///
+    /// Asked of the LATCH rather than the displayed phase: the phase is reset
+    /// every time the pane retargets, and a question the operator navigated
+    /// away from and back to still has its answer in flight.
     #[must_use]
-    pub const fn in_flight(&self) -> bool {
-        matches!(self.phase, Some(AnswerPhase::InFlight { .. }))
+    pub fn in_flight(&self) -> bool {
+        self.in_flight_request.is_some() && self.in_flight_request == self.request
+    }
+
+    /// Whether ANY send is outstanding, whichever question it belongs to.
+    #[must_use]
+    pub const fn any_in_flight(&self) -> bool {
+        self.in_flight_request.is_some()
     }
 
     /// Move the option cursor, wrapping. A free-text row sits after the last
@@ -226,6 +259,12 @@ impl AskState {
             .map(|mut inbox| inbox.drain(..).collect())
             .unwrap_or_else(|poisoned| poisoned.into_inner().drain(..).collect());
         let changed = !landed.is_empty();
+        if changed {
+            // Whatever landed, the send is over. Cleared here rather than in
+            // each arm so a variant added later cannot leave the latch stuck,
+            // which would refuse every future answer to that question.
+            self.in_flight_request = None;
+        }
         for phase in landed {
             // A failure puts a TYPED answer back, so nobody retypes what the
             // transport lost. A picked option is deliberately not restored: it
@@ -318,6 +357,10 @@ impl AskState {
         });
         match spawned {
             Ok(_) => {
+                // The latch is stamped with WHICH request is in flight, so it
+                // still refuses a second send after the operator navigates away
+                // and back. `phase` is the view; this is the fact.
+                self.in_flight_request.clone_from(&self.request);
                 self.phase = Some(AnswerPhase::InFlight {
                     since: Instant::now(),
                     draft,
@@ -479,12 +522,16 @@ mod tests {
     fn a_second_enter_cannot_double_send() {
         // Key-repeat would otherwise deliver the same answer N times into an
         // agent's open picker, and the picker consumes each as a keystroke.
+        let chip = ask_with_options(&["Focused"]);
         let mut state = AskState::default();
+        state.retarget(&chip);
+        // The LATCH is what a send stamps, and what refuses the next one. It
+        // outlives `phase`, which the pane resets on every retarget.
+        state.in_flight_request.clone_from(&state.request);
         state.phase = Some(AnswerPhase::InFlight {
             since: Instant::now(),
             draft: None,
         });
-        let chip = ask_with_options(&["Focused"]);
         assert_eq!(
             state.send(&chip, "s", "/w"),
             Err("an answer is already in flight".to_string())
@@ -592,5 +639,71 @@ mod tests {
         // to tell one question from the next.
         let local = SessionAttention::local(AttentionKind::Approve, 42);
         assert_eq!(request_id(&local), "APPROVE:42");
+    }
+    /// THE double-send. `retarget` runs on every render of the `ask` tab, so it
+    /// used to reset the in-flight latch each time the operator navigated away
+    /// from a question and back, and the second Enter typed the same answer
+    /// into the agent's picker again. The daemon route survives that on
+    /// first-answer-wins; the tmux route has no dedupe at all.
+    #[test]
+    fn navigating_away_and_back_does_not_release_the_double_send_guard() {
+        let a = ask_with_options(&["yes", "no"]);
+        let b = SessionAttention::daemon(AttentionKind::Ask, 2_000, "att-2".into());
+        let mut state = AskState::default();
+
+        state.retarget(&a);
+        // Stand in for a landed send: this is what `send` stamps on success,
+        // without spawning a worker at a daemon the test does not have.
+        state.in_flight_request.clone_from(&state.request);
+        assert!(state.in_flight(), "the answer to A is out");
+
+        // Away to another question, then back. Both are ordinary renders.
+        state.retarget(&b);
+        assert!(
+            !state.in_flight(),
+            "B has no answer out, so B may be answered"
+        );
+        assert!(
+            state.any_in_flight(),
+            "but A's send is still outstanding somewhere"
+        );
+
+        state.retarget(&a);
+        assert!(
+            state.in_flight(),
+            "returning to A must still refuse a second send"
+        );
+        assert_eq!(
+            state.send(&a, "sid", "/work").unwrap_err(),
+            "an answer is already in flight"
+        );
+    }
+
+    /// The worker's outcome must reach the pane even if the operator navigated
+    /// away while it was in flight. A retarget that minted a fresh inbox left
+    /// the worker publishing into a discarded one, so a failed send reported as
+    /// neither sent nor failed.
+    #[test]
+    fn an_outcome_still_lands_after_the_pane_moved_and_came_back() {
+        let a = ask_with_options(&["yes"]);
+        let b = SessionAttention::daemon(AttentionKind::Ask, 3_000, "att-3".into());
+        let mut state = AskState::default();
+        state.retarget(&a);
+        state.in_flight_request.clone_from(&state.request);
+        // The worker's handle, taken before the operator navigates.
+        let worker_inbox = Arc::clone(&state.inbox);
+
+        state.retarget(&b);
+        state.retarget(&a);
+
+        worker_inbox.lock().unwrap().push(AnswerPhase::Failed {
+            reason: "target_not_running".to_string(),
+        });
+        assert!(state.tick(), "the outcome must be observed");
+        assert!(
+            matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason }) if reason == "target_not_running"),
+            "the failure must be shown against the question it belongs to"
+        );
+        assert!(!state.any_in_flight(), "and the latch is released");
     }
 }
