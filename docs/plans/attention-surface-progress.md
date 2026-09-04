@@ -118,7 +118,7 @@ recreate the duplication this epic is deleting.
 | 2 | Attention merge (`AttentionRow` view model) | done |
 | 3 | Right-pane tab strip | done |
 | 4 | Answering from the `ask` tab | done |
-| 5 | Delete the host Fleet panel | pending |
+| 5 | Delete the host Fleet panel | done |
 | 6 | Delete the host Inbox | pending |
 | 7 | Copilot registry + mode dial | pending |
 | 8 | Broadcast + rehoming, delete `t` start form | pending |
@@ -168,6 +168,33 @@ Fixed with an RAII guard covering `AINB_BRIDGED_VARS` and releasing on unwind
 | A failed `attention/list` poll emptied the row map, so one socket timeout made every live ASK vanish for five seconds | Tab-strip tripwire failed one run in seven, the `ask` tab dimmed because its chip had briefly gone | `f40e09f7` — rows carry across a failed poll and grey out instead, which is the shape the spec asked for all along |
 | `tmux_sessions_at` interpolated a cwd into a tmux FORMAT string, where `#(...)` runs a shell command | Background security review of `c577cbb0` | `391f0607` — deleted; it had no callers and the `N waiting elsewhere` row already serves the case |
 | The elsewhere count truncated to `1 el` in the panel title | Phase-2 tripwire assertion on a real 38-column capture | Moved to its own full-width row |
+
+## Parity: every verb the deleted Fleet panel had
+
+The spec makes this a must-pass gate — each verb is **rehomed and exercised**,
+or **explicitly deleted**. Nothing is left implicit.
+
+| Panel verb | Key | Outcome | Exercised by |
+|---|---|---|---|
+| move row selection | `↑ ↓ k j` | rehomed: the sessions list's own selection | every sessions tripwire |
+| move the ASK option cursor | `Tab` `⇧Tab` | rehomed: `↑ ↓` in the `ask` pane | `tripwire_sessions_answer_daemon_up` (picks the SECOND option) |
+| answer the selected ASK | `Enter` `a` | rehomed: `Enter` on the `ask` pane | `..._answer_daemon_up`, `..._answer_daemon_down` |
+| approve / deny a permission request | `y` `n` | rehomed: `approve`/`deny` options in the `ask` pane, delivered through notifyd's broker | `tripwire_sessions_approve_unblocks_hook` |
+| open the copilot conversation | `m` | rehomed: the `copilot` tab | `tripwire_fleet_chat_screen` |
+| open the selected session's thread | `M` | rehomed: the `thread` tab | `tripwire_fleet_session_thread` |
+| answer a guardrail confirm card | `⇥` then `y` | rehomed: `⇧⇥` then `y` in the `copilot` tab | `tripwire_fleet_chat_screen` |
+| force-refresh from the daemon | `F5` | rehomed as automatic: the attention poller's 5s cadence, with rows carried across a failed poll | `tripwire_sessions_daemon_attention` |
+| back to the previous screen | `q` `Esc` | unchanged | `tripwire_fleet_chat_screen` (Esc leaves the conversation) |
+| restart the selected session | `R` | already on the sessions screen (`E` restart) | pre-existing |
+| roster lenses 1-5 | `1`-`5` | rehomed in spirit: the sessions list's own `F` filter. The fleet-wide lens view itself is the hangar plugin's `F` tab | pre-existing |
+| reconcile a Claude interview | `r` | **not rehomed** — hangar plugin `F` tab, untouched | plugin's own tests |
+| the multi-question vertical-card interview | `Enter` on a multi-ASK | **not rehomed** — hangar plugin `F` tab, untouched. The sessions screen answers one question at a time from the daemon's payload | plugin's own tests |
+| ACP session visible in a roster | — | **not rehomed** — an ACP session has no host session row; it is counted by the `N waiting elsewhere` row, and the roster is the plugin's `F` tab | `tripwire_sessions_daemon_attention` (the elsewhere count) |
+| attach to an EXACT `session:window.pane` | `→` | **deleted.** The sessions screen attaches by session, which is the same thing for an ainb session (one pane) | — |
+| broadcast to the current lens | `B` | **rehomed in phase 8** — the sessions list's existing checkboxes | phase 8 restores `tripwire_fleet_broadcast_channel` against the copilot tab |
+| create a named channel | `N` | **rehomed in phase 8** — the channels list inside the `copilot` tab | as above |
+| new-ATC name prompt | `n` | **rehomed in phase 8** — the Daemons screen | as above |
+| managed-Codex start form | `t` | **deleted in phase 8.** Codex remote control is already the default (`[codex] app_server = desktop`) | — |
 
 ## Suite status
 
