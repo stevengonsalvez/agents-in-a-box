@@ -1,12 +1,12 @@
 // ABOUTME: Host Fleet subscription, daemon health, and detached control RPCs.
 //
-// The TUI fleet panel (`components/fleet_panel.rs`) browses the event-sourced
-// `current_state` and lets the human ACT: answer an interview (ASK) or
-// broadcast a prompt. The send itself is async (`fleet::send::send`, the same
-// tmux send-keys path `fleet broadcast` uses) and the TUI key path is sync, so
-// this module owns the bridge: a detached worker thread builds a current-thread
-// tokio runtime, discovers the live session matching the row, sends the text,
-// and publishes a human-readable outcome into a shared cell the panel renders.
+// The sessions screen lets the human ACT on what a session needs: answer an
+// interview (ASK), decide a permission request, or send a message. The send
+// itself is async (`fleet::send::send`, the same tmux send-keys path `fleet
+// broadcast` uses) and the TUI key path is sync, so this module owns the
+// bridge: a detached worker thread builds a current-thread tokio runtime,
+// discovers the live session matching the row, sends the text, and publishes a
+// human-readable outcome into a shared cell the surface renders.
 //
 // Living outside `src/components/` keeps the (legitimately async) send logic
 // clear of the render-thread `.await` lint — the worker thread is NOT the
@@ -1017,11 +1017,7 @@ fn outcome_result(
 /// # Errors
 ///
 /// Returns the reason nothing was delivered.
-pub fn answer_via_tmux_blocking(
-    session_id: &str,
-    cwd: &str,
-    text: &str,
-) -> Result<String, String> {
+pub fn answer_via_tmux_blocking(session_id: &str, cwd: &str, text: &str) -> Result<String, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1032,6 +1028,44 @@ pub fn answer_via_tmux_blocking(
     runtime.block_on(resolve_and_send_typed(session_id, cwd, text, true))
 }
 
+/// Answer one parked permission request through notifyd's approve broker.
+///
+/// The blocked hook is sitting in `client_await` on the approve socket; this
+/// hands it the human's verdict, which flows back to the agent as its
+/// permission decision. Local and independent of the hangar daemon, so it is
+/// the route that keeps an APPROVE answerable with the daemon stopped.
+///
+/// # Errors
+///
+/// Returns the reason the decision was not delivered.
+pub fn answer_via_broker_blocking(
+    session_id: &str,
+    approve: bool,
+    reason: &str,
+) -> Result<String, String> {
+    use ainb_plugin_notifyd::broker::{DecisionKind, client_decide};
+
+    let socket = ainb_plugin_notifyd::paths::Paths::from_home()
+        .map_err(|error| format!("approve socket unavailable: {error}"))?
+        .approve_socket;
+    let kind = if approve {
+        DecisionKind::Approve
+    } else {
+        DecisionKind::Deny
+    };
+    // Blocking `std::os::unix` I/O, no runtime needed.
+    match client_decide(&socket, session_id, kind, reason) {
+        Ok(true) => Ok(format!(
+            "{} the waiting hook",
+            if approve { "approved" } else { "denied" }
+        )),
+        // NOT an error: the request resolved some other way, or timed out. The
+        // agent is no longer waiting, so the chip should clear.
+        Ok(false) => Ok("no waiter left (already resolved or timed out)".to_string()),
+        Err(error) => Err(format!("approve broker unreachable: {error}")),
+    }
+}
+
 /// Answer one open attention row through the daemon, blocking.
 ///
 /// The daemon runs first-answer-wins and performs its own verified last-mile
@@ -1040,10 +1074,7 @@ pub fn answer_via_tmux_blocking(
 /// # Errors
 ///
 /// Returns the reason the answer was not delivered.
-pub fn answer_via_daemon_blocking(
-    attention_id: String,
-    answer: String,
-) -> Result<String, String> {
+pub fn answer_via_daemon_blocking(attention_id: String, answer: String) -> Result<String, String> {
     use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1074,9 +1105,9 @@ pub fn answer_via_daemon_blocking(
             // so each carries its own reason and the chip must go back to ASK.
             // Matched exhaustively rather than debug-formatted: `{other:?}`
             // would put a Rust struct literal in front of the operator.
-            AnswerResult::Ambiguous { reason } => {
-                Err(format!("ambiguous target, refused rather than mis-routed: {reason}"))
-            }
+            AnswerResult::Ambiguous { reason } => Err(format!(
+                "ambiguous target, refused rather than mis-routed: {reason}"
+            )),
             AnswerResult::NoTarget { reason } => Err(format!("no live target: {reason}")),
             // The row IS answered (the race winner is recorded) but nothing
             // reached the agent. Reported as a failure because the agent is

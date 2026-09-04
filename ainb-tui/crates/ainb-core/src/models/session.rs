@@ -663,6 +663,19 @@ pub struct Session {
     /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
     #[serde(skip)]
     pub live_attention: Vec<crate::fleet::attention::SessionAttention>,
+
+    /// The agent's OWN session id, as its hooks report it.
+    ///
+    /// Not ainb's `id` and not the tmux name: this is the identity the daemon
+    /// and the approve broker file everything under, so it is what a
+    /// `session:<key>` chat scope and a parked permission waiter are addressed
+    /// by. Learned from the notifyd hook rows (agent + cwd), which is the only
+    /// place the host sees it — a session that has never fired a hook has none,
+    /// and the surfaces that need it say so rather than guessing.
+    ///
+    /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
+    #[serde(skip)]
+    pub provider_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -889,6 +902,7 @@ impl Session {
             preview_content: None,
             is_attached: false,
             live_attention: Vec::new(),
+            provider_session_id: None,
         }
     }
 
@@ -918,6 +932,7 @@ impl Session {
             preview_content: None,
             is_attached: false,
             live_attention: Vec::new(),
+            provider_session_id: None,
         }
     }
 

@@ -3392,7 +3392,6 @@ pub struct AppState {
 
     /// Fleet control-panel state (cached `current_state` rows + selection +
     /// shared action-feedback cell).
-    pub fleet_panel_state: crate::components::fleet_panel::FleetPanelState,
 
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
@@ -4032,8 +4031,6 @@ impl Default for AppState {
             daemons_state: crate::components::daemons::DaemonsState::default(),
 
             // Fleet control panel (reads current_state on entry/tick)
-            fleet_panel_state: crate::components::fleet_panel::FleetPanelState::default(),
-
             pending_plugin_renders: std::collections::HashMap::new(),
             favorite_workspace_paths: HashSet::new(),
             plugin_render_areas: std::collections::HashMap::new(),
@@ -11684,6 +11681,40 @@ impl AppState {
         }
     }
 
+    /// Whether a conversation pane is open and therefore polling the daemon.
+    ///
+    /// Drives the render loop's dirty gate: without it an open conversation
+    /// fetches once, at open, and then sits still while the copilot answers
+    /// into a socket nobody reads.
+    #[must_use]
+    pub fn session_chat_open(&self) -> bool {
+        use crate::components::session_tabs::SessionTab;
+        self.current_screen == crate::app::screens::ids::SESSION_LIST
+            && matches!(self.session_tab, SessionTab::Thread | SessionTab::Copilot)
+    }
+
+    /// Whether a conversation pane currently owns the keyboard.
+    ///
+    /// Broader than [`Self::session_composer_captures_text`] on purpose. That
+    /// one answers "is text being typed", which is what suppresses the global
+    /// `?` / `:` shortcuts. This one answers "does the chat get this key at
+    /// all", and the chat needs keys on BOTH its halves: the composer types,
+    /// and the card list navigates and answers confirm cards with `y`/`n`.
+    /// Gating routing on text capture alone let `y` fall through to the session
+    /// screen while a guardrail card was waiting for it.
+    #[must_use]
+    pub fn session_tab_owns_keys(&self) -> bool {
+        use crate::components::session_tabs::SessionTab;
+        if self.current_screen != crate::app::screens::ids::SESSION_LIST {
+            return false;
+        }
+        match self.session_tab {
+            SessionTab::Copilot => self.copilot_chat.is_some(),
+            SessionTab::Thread => self.session_chat.is_some(),
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Log => false,
+        }
+    }
+
     /// Whether a composer tab on the sessions screen is currently swallowing
     /// printable keys.
     ///
@@ -11730,10 +11761,7 @@ impl AppState {
                 // Re-target when the cursor moves to a different session. The
                 // old conversation is dropped rather than cached: nobody is
                 // reading it, and a cached host keeps polling the daemon for it.
-                let stale = self
-                    .session_chat
-                    .as_ref()
-                    .is_none_or(|(existing, _)| *existing != key);
+                let stale = self.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
                 if stale {
                     self.session_chat = Some((key.clone(), ChatHost::thread(key)));
                 }
@@ -11748,12 +11776,18 @@ impl AppState {
         }
     }
 
-    /// The selected session's Fleet key (`<provider>:<session id>`), which is
-    /// what a `session:` chat scope is addressed by.
+    /// The selected session's Fleet key (`<provider>:<agent session id>`),
+    /// which is what a `session:` chat scope is addressed by.
     ///
-    /// Derived from the tmux session name because that is the identity the host
-    /// tree actually carries; the provider's own session id lives on the daemon
-    /// side and is never learned here.
+    /// Built from the AGENT's own session id, never from the tmux name. The
+    /// daemon files every message under the key its hook ingest minted, so a
+    /// key composed from the tmux name would address a scope the daemon has
+    /// never heard of — an empty timeline forever against a real daemon, with
+    /// every unit test still green. That is the same shape as the ACP provider
+    /// label that shipped as `UNKNOWN`.
+    ///
+    /// `None` when the session has never fired a hook, so the `thread` tab dims
+    /// with a reason instead of opening a conversation that can never load.
     #[must_use]
     pub fn selected_session_chat_key(&self) -> Option<String> {
         let session = self.get_selected_session()?;
@@ -11765,9 +11799,9 @@ impl AppState {
             _ => "claude",
         };
         session
-            .tmux_session_name
+            .provider_session_id
             .as_ref()
-            .map(|tmux| format!("{provider}:{tmux}"))
+            .map(|agent_session| format!("{provider}:{agent_session}"))
     }
 
     /// Recompute every session's attention marker (`[!]`/`[?]`/`[✓]`)
@@ -11869,9 +11903,42 @@ impl AppState {
             // there is a pane to type into — and only now is it settled which
             // producer's row won.
             let tmux = self.find_session(id).and_then(|s| s.tmux_session_name.clone());
+            // The provider session id the approve broker parks a waiter under.
+            // Taken from the hook rows this refresh just read, because that is
+            // the only place the host learns it — the session tree carries
+            // ainb's own UUID, which the hook never sees.
+            let hook_session = self.find_session(id).and_then(|session| {
+                let cwd = session.workspace_path.trim_end_matches('/');
+                let agent = Self::agent_hook_name(session.agent_type)?;
+                recent
+                    .iter()
+                    .find(|row| row.agent == agent && row.cwd.trim_end_matches('/') == cwd)
+                    .map(|row| row.session_id.clone())
+            });
+            // Remembered on the row, because the chat scope needs the same
+            // identity and re-deriving it there would be the same lookup in two
+            // places. Only overwritten when this refresh actually found one: a
+            // quiet refresh must not forget an id an earlier one learned.
+            if let (Some(found), Some(session)) = (hook_session.clone(), self.find_session_mut(id))
+            {
+                if session.provider_session_id.as_deref() != Some(found.as_str()) {
+                    session.provider_session_id = Some(found);
+                    changed = true;
+                }
+            }
             for chip in &mut chips {
-                chip.answerable =
-                    crate::fleet::attention::route_answer(chip, tmux.as_deref(), reachable);
+                // A bare permission request takes exactly two answers, and an
+                // empty option list would leave the operator typing free text
+                // at a hook that reads none.
+                if chip.kind == AttentionKind::Approve && chip.options.is_empty() {
+                    chip.options = crate::fleet::attention::approval_options();
+                }
+                chip.answerable = crate::fleet::attention::route_answer(
+                    chip,
+                    tmux.as_deref(),
+                    hook_session.as_deref(),
+                    reachable,
+                );
             }
             if let Some(s) = self.find_session_mut(id) {
                 if s.live_attention != chips {
@@ -12037,10 +12104,7 @@ impl AppState {
         // is the first point at which the sessions surface is actually being
         // rendered, so a `ainb` invocation that never opens the TUI never dials
         // the socket. `spawn` is idempotent.
-        crate::fleet::attention_poll::spawn(
-            &self.daemon_attention,
-            &self.attention_poll_running,
-        );
+        crate::fleet::attention_poll::spawn(&self.daemon_attention, &self.attention_poll_running);
         self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)

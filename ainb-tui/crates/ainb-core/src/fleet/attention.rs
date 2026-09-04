@@ -123,6 +123,17 @@ pub enum Answerable {
         /// The pane to send into.
         tmux_session: String,
     },
+    /// Through notifyd's approve broker, which is where a `PermissionRequest`
+    /// hook is parked.
+    ///
+    /// A permission request is NOT answerable by typing: the hook is blocked in
+    /// `client_await` and nothing it reads comes from the pane. The broker is
+    /// local and independent of the hangar daemon, so this route survives the
+    /// daemon being down — which is the case it exists for.
+    Broker {
+        /// The provider session id the waiter is parked under.
+        session_id: String,
+    },
     /// Not from here, and this is why.
     No(Unanswerable),
 }
@@ -143,6 +154,32 @@ impl Answerable {
         }
     }
 }
+
+/// The two answers a bare permission request takes.
+///
+/// Synthesised for an APPROVE that arrived with no structured options, because
+/// those ARE its only two answers and an empty option list would leave the
+/// operator typing free text at a hook that reads none.
+#[must_use]
+pub fn approval_options() -> Vec<AttentionOption> {
+    vec![
+        AttentionOption {
+            label: APPROVE_LABEL.to_string(),
+            description: "let the tool call proceed".to_string(),
+        },
+        AttentionOption {
+            label: DENY_LABEL.to_string(),
+            description: "block it".to_string(),
+        },
+    ]
+}
+
+/// The label that means "allow". Matched on the way back out, so the word the
+/// operator picked and the decision the broker receives cannot drift.
+pub const APPROVE_LABEL: &str = "approve";
+
+/// The label that means "block".
+pub const DENY_LABEL: &str = "deny";
 
 /// One structured option an ASK offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,7 +340,9 @@ pub fn needs_you_count<'a, I>(rows: I) -> usize
 where
     I: IntoIterator<Item = &'a [SessionAttention]>,
 {
-    rows.into_iter().filter(|chips| chips.iter().any(|chip| chip.kind.blocks())).count()
+    rows.into_iter()
+        .filter(|chips| chips.iter().any(|chip| chip.kind.blocks()))
+        .count()
 }
 
 /// Render an age as the shortest unambiguous form: `40s`, `9m`, `3h`, `2d`.
@@ -413,12 +452,15 @@ impl DaemonAttention {
 /// * a DONE or an ERR is not a question, so nothing is answerable;
 /// * a daemon row keeps its attention id while the daemon is up;
 /// * a daemon row whose daemon has gone says exactly which call is unavailable;
-/// * a local row rides the session's own pane, which is what keeps the surface
-///   working with the daemon down — and says so when there is no pane either.
+/// * a local APPROVE goes to notifyd's approve broker, because the hook is
+///   parked there and reads nothing typed at the terminal;
+/// * any other local row rides the session's own pane, which is what keeps the
+///   surface working with the daemon down — and says so when there is neither.
 #[must_use]
 pub fn route_answer(
     chip: &SessionAttention,
     tmux_session: Option<&str>,
+    session_id: Option<&str>,
     daemon_reachable: bool,
 ) -> Answerable {
     if !chip.kind.blocks() {
@@ -433,12 +475,22 @@ pub fn route_answer(
             Answerable::No(Unanswerable::DaemonGone)
         };
     }
-    tmux_session.map_or(
-        Answerable::No(Unanswerable::NoTransport),
-        |name| Answerable::Tmux {
+    // A local permission request goes to the broker, never to the pane: the
+    // hook is blocked in `client_await` and reads nothing typed at the
+    // terminal. The broker is notifyd's and local, so this is the route that
+    // keeps an APPROVE answerable with the hangar daemon stopped.
+    if chip.kind == AttentionKind::Approve {
+        return session_id.map_or(Answerable::No(Unanswerable::NoTransport), |session_id| {
+            Answerable::Broker {
+                session_id: session_id.to_string(),
+            }
+        });
+    }
+    tmux_session.map_or(Answerable::No(Unanswerable::NoTransport), |name| {
+        Answerable::Tmux {
             tmux_session: name.to_string(),
-        },
-    )
+        }
+    })
 }
 
 #[cfg(test)]
@@ -576,13 +628,18 @@ mod tests {
         let mut by_cwd = std::collections::HashMap::new();
         by_cwd.insert(
             "/work/proj".to_string(),
-            vec![SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into())],
+            vec![SessionAttention::daemon(
+                AttentionKind::Ask,
+                1_000,
+                "att-1".into(),
+            )],
         );
         let down = DaemonAttention::down(by_cwd, "refused".into());
         let chips = normalise(down.rows_for("/work/proj").to_vec());
         assert_eq!(chips.len(), 1);
         assert!(
-            !route_answer(&chips[0], Some("tmux_proj"), down.reachable).is_answerable(),
+            !route_answer(&chips[0], Some("tmux_proj"), Some("sess"), down.reachable)
+                .is_answerable(),
             "carried forward, but NOT answerable while the daemon is gone"
         );
     }
@@ -615,7 +672,7 @@ mod tests {
     fn a_local_ask_rides_the_sessions_own_pane() {
         let chip = SessionAttention::local(AttentionKind::Ask, 0);
         assert_eq!(
-            route_answer(&chip, Some("tmux_proj"), false),
+            route_answer(&chip, Some("tmux_proj"), Some("sess"), false),
             Answerable::Tmux {
                 tmux_session: "tmux_proj".into()
             },
@@ -626,7 +683,7 @@ mod tests {
     #[test]
     fn a_daemon_ask_loses_its_route_when_the_daemon_goes_and_says_so() {
         let chip = SessionAttention::daemon(AttentionKind::Ask, 0, "att-1".into());
-        let routed = route_answer(&chip, Some("tmux_proj"), false);
+        let routed = route_answer(&chip, Some("tmux_proj"), Some("sess"), false);
         assert!(!routed.is_answerable());
         let refusal = routed.refusal().expect("a refusal always carries a reason");
         assert!(
@@ -638,7 +695,7 @@ mod tests {
     #[test]
     fn a_session_with_no_pane_and_no_daemon_row_says_it_has_no_transport() {
         let chip = SessionAttention::local(AttentionKind::Approve, 0);
-        let routed = route_answer(&chip, None, false);
+        let routed = route_answer(&chip, None, None, false);
         assert!(!routed.is_answerable());
         assert!(routed.refusal().is_some_and(|r| r.contains("no live pane")));
     }
@@ -647,10 +704,60 @@ mod tests {
     fn an_err_or_a_done_is_never_answerable_because_it_is_not_a_question() {
         for kind in [AttentionKind::Err, AttentionKind::Done] {
             let chip = SessionAttention::local(kind, 0);
-            let routed = route_answer(&chip, Some("tmux_proj"), true);
+            let routed = route_answer(&chip, Some("tmux_proj"), Some("sess"), true);
             assert!(!routed.is_answerable(), "{kind} must not offer a composer");
             assert!(routed.refusal().is_some_and(|r| r.contains("nothing is waiting")));
         }
+    }
+
+    #[test]
+    fn a_local_permission_request_goes_to_the_broker_not_the_pane() {
+        // The hook is blocked in `client_await` and reads nothing typed at the
+        // terminal, so routing an APPROVE to the pane is a send that lands
+        // nowhere the agent is looking.
+        let chip = SessionAttention::local(AttentionKind::Approve, 0);
+        assert_eq!(
+            route_answer(&chip, Some("tmux_proj"), Some("claude-sess-1"), false),
+            Answerable::Broker {
+                session_id: "claude-sess-1".into()
+            },
+            "and it must survive the hangar daemon being down"
+        );
+    }
+
+    #[test]
+    fn a_permission_request_with_no_waiter_identity_says_it_has_no_transport() {
+        let chip = SessionAttention::local(AttentionKind::Approve, 0);
+        let routed = route_answer(&chip, Some("tmux_proj"), None, false);
+        assert!(!routed.is_answerable());
+        assert!(routed.refusal().is_some());
+    }
+
+    #[test]
+    fn a_daemon_approval_still_goes_through_the_daemon() {
+        // The daemon runs its own first-answer-wins and its own last-mile send;
+        // reaching around it to the broker would race its winner.
+        let chip = SessionAttention::daemon(AttentionKind::Approve, 0, "att-1".into());
+        assert_eq!(
+            route_answer(&chip, Some("tmux_proj"), Some("claude-sess-1"), true),
+            Answerable::Daemon {
+                attention_id: "att-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_bare_permission_request_offers_exactly_approve_and_deny() {
+        let options = approval_options();
+        assert_eq!(
+            options.iter().map(|o| o.label.as_str()).collect::<Vec<_>>(),
+            vec![APPROVE_LABEL, DENY_LABEL],
+            "these are the only two answers a permission request takes"
+        );
+        assert!(
+            options.iter().all(|o| !o.description.is_empty()),
+            "each has to say what it does — `deny` alone is not obviously `block it`"
+        );
     }
 
     #[test]

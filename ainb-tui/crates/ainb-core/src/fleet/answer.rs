@@ -283,6 +283,28 @@ impl AskState {
                 Answerable::Tmux { .. } => {
                     crate::fleet::control::answer_via_tmux_blocking(&session_id, &cwd, &sent)
                 }
+                Answerable::Broker {
+                    session_id: waiter, ..
+                } => {
+                    // The label the operator picked IS the decision. Matched
+                    // against the same constants the options were built from,
+                    // so the word on screen and the verdict the hook receives
+                    // cannot drift; anything else is refused rather than
+                    // guessed, because guessing here approves a tool call.
+                    match sent.as_str() {
+                        crate::fleet::attention::APPROVE_LABEL => {
+                            crate::fleet::control::answer_via_broker_blocking(&waiter, true, "")
+                        }
+                        crate::fleet::attention::DENY_LABEL => {
+                            crate::fleet::control::answer_via_broker_blocking(&waiter, false, &sent)
+                        }
+                        other => Err(format!(
+                            "a permission request takes `{}` or `{}`, not `{other}`",
+                            crate::fleet::attention::APPROVE_LABEL,
+                            crate::fleet::attention::DENY_LABEL,
+                        )),
+                    }
+                }
                 // Refused above; unreachable, and a panic here would take the
                 // whole TUI down for a state that simply cannot arrive.
                 Answerable::No(why) => Err(why.reason().to_string()),
@@ -388,7 +410,10 @@ mod tests {
             Err("type an answer first".to_string())
         );
         state.push_char(' ');
-        assert!(state.answer_text(&chip).is_err(), "whitespace is not an answer");
+        assert!(
+            state.answer_text(&chip).is_err(),
+            "whitespace is not an answer"
+        );
         state.push_char('y');
         assert_eq!(state.answer_text(&chip), Ok("y".to_string()));
     }
@@ -412,7 +437,11 @@ mod tests {
         let second = SessionAttention::daemon(AttentionKind::Ask, 2_000, "att-2".into())
             .with_options(first.options.clone());
         state.retarget(&second);
-        assert_eq!(state.cursor(), 0, "a cursor from the previous question would pre-load a reply");
+        assert_eq!(
+            state.cursor(),
+            0,
+            "a cursor from the previous question would pre-load a reply"
+        );
         assert_eq!(state.free_text(), "");
     }
 
@@ -430,8 +459,8 @@ mod tests {
 
     #[test]
     fn a_row_with_no_transport_refuses_with_its_own_reason() {
-        let chip = SessionAttention::local(AttentionKind::Ask, 0)
-            .unanswerable(Unanswerable::DaemonGone);
+        let chip =
+            SessionAttention::local(AttentionKind::Ask, 0).unanswerable(Unanswerable::DaemonGone);
         let mut state = AskState::default();
         state.push_char('y');
         state.focus = AskFocus::FreeText;
@@ -440,7 +469,10 @@ mod tests {
             refused.contains("attention/answer"),
             "and name the call that is unavailable: {refused}"
         );
-        assert!(!state.in_flight(), "nothing may be latched for a refused send");
+        assert!(
+            !state.in_flight(),
+            "nothing may be latched for a refused send"
+        );
     }
 
     #[test]
@@ -530,7 +562,10 @@ mod tests {
             since: Instant::now(),
             draft: None,
         });
-        assert!(state.elapsed().is_some(), "a spinner with no elapsed time says nothing");
+        assert!(
+            state.elapsed().is_some(),
+            "a spinner with no elapsed time says nothing"
+        );
     }
 
     #[test]
