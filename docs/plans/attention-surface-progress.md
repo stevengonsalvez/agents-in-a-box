@@ -120,7 +120,7 @@ recreate the duplication this epic is deleting.
 | 4 | Answering from the `ask` tab | done |
 | 5 | Delete the host Fleet panel | done |
 | 6 | Delete the host Inbox | done |
-| 7 | Copilot registry + mode dial | pending |
+| 7 | Copilot registry + mode dial | done |
 | 8 | Broadcast + rehoming, delete `t` start form | pending |
 | 9 | ATC lite audit + daemon retry sweep | pending |
 | 10 | ACP chat repair | pending |
@@ -139,6 +139,9 @@ express. None is a shortcut around work.
 | `Tab` cycles the strip | `Tab` cycles it, `Shift+Tab` walks back, and `SwitchPaneFocus` is gone | `Tab` was pane focus. Focus now FOLLOWS the tab (composer tabs take input, `preview`/`log` do not), so the one thing that key bought is a consequence of this one. Two keys for one concept is the ambiguity the strip removes |
 | Footer: "1-9 attach from every tab" | True except inside a live composer, where the footer says so | A `3` typed into a message has to be a `3`. Advertising attach there advertises a key that types a character |
 | ERR chip from a local producer | Wired and unit-tested; reachable from the daemon (`error` / `escalation`) and from `SessionStatus::Error` | No local hook event classifies as an error — `classify_attention` has three outcomes and none of them is one. Inventing a fourth would be a producer the spec did not ask for |
+| Copilot header: `◀ e cycle`, `◀ o`, `◀ g` on bare letters | `⌥e` / `⌥o` / `⌥g`, rendered that way | The copilot composer takes focus the moment the conversation opens, so a bare `e` is an `e` in a half-typed message. The tripwire proved the dials were unreachable in the state an operator is usually in. Alt never types, so one binding works in both halves of the pane; a bare key advertised on the header that silently does nothing most of the time is worse than a modified one |
+| `mode help` → "no write tools in the table" | Refused at the classifier; the advertised MCP tool table is unchanged | The tool table is announced once at `initialize`, and the dial can move mid-session. A table pinned at spawn goes stale the instant an operator turns the dial, and a stale PERMISSIVE table is worse than an accurate refusal. `CopilotMode::tools()` exists and is tested as the projection; the enforcement point is the live daemon-side classifier, which reads the channel row on every call |
+| Model picker from the adapter's `config_options` | From a declared `[acp.adapters.<name>].models` list | ACP has no model-discovery call, so an adapter cannot be ASKED what it runs. `config_options` are values already set, not choices. A declared list is the only honest source; empty means the header says "adapter default" rather than offering a guess that would fail at `session/set_config_option` |
 
 ## Pre-existing breakage fixed on the way
 
@@ -168,6 +171,9 @@ Fixed with an RAII guard covering `AINB_BRIDGED_VARS` and releasing on unwind
 | A failed `attention/list` poll emptied the row map, so one socket timeout made every live ASK vanish for five seconds | Tab-strip tripwire failed one run in seven, the `ask` tab dimmed because its chip had briefly gone | `f40e09f7` — rows carry across a failed poll and grey out instead, which is the shape the spec asked for all along |
 | `tmux_sessions_at` interpolated a cwd into a tmux FORMAT string, where `#(...)` runs a shell command | Background security review of `c577cbb0` | `391f0607` — deleted; it had no callers and the `N waiting elsewhere` row already serves the case |
 | The elsewhere count truncated to `1 el` in the panel title | Phase-2 tripwire assertion on a real 38-column capture | Moved to its own full-width row |
+| The copilot dials were unreachable: bare `e` / `o` / `g` went into the chat composer, which holds focus from the moment the conversation opens | Phase-7 tripwire pressed `e` and watched the engine not move, with no failure line either | Moved to `⌥`, which never types, and the header renders the modifier |
+| `fleet/adapter_list` read the config registry while `copilot_configure` and `acp_session_create` fell back to the hardcoded two-name floor: the picker OFFERED an operator's configured adapter and the write then refused it as `unknown adapter` | Phase-7 tripwire cycled to an adapter that exists only in `[acp.adapters]` and got the refusal rendered on the pane | One `adapter_registry()` resolution now serves the list and both writes |
+| The help overlay and the panel legend still documented `b Inbox` and `f Fleet control panel`, both deleted in phases 5 and 6 | Full `--tests` sweep; earlier passes had filtered tripwires out the way CI's Test job does | `065d5a2b` — entries replaced by the pane that took over from both, and both tripwires now assert their ABSENCE |
 
 ## Parity: every verb the deleted Fleet panel had
 
