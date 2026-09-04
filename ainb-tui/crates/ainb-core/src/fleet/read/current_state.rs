@@ -401,10 +401,8 @@ mod tests {
 
     impl TunablesTestEnv {
         fn isolated(vars: &[&str]) -> Self {
-            let mut saved: Vec<(String, Option<std::ffi::OsString>)> = vars
-                .iter()
-                .map(|name| ((*name).to_string(), std::env::var_os(name)))
-                .collect();
+            let mut saved: Vec<(String, Option<std::ffi::OsString>)> =
+                vars.iter().map(|name| ((*name).to_string(), std::env::var_os(name))).collect();
             saved.push((
                 crate::config::tunables::INHERITED_MARKER.to_string(),
                 std::env::var_os(crate::config::tunables::INHERITED_MARKER),

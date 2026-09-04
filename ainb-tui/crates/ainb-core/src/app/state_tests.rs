@@ -1804,7 +1804,10 @@ mod tests {
         let record = rec("claude", CWD, "Notification:idle_prompt", NOW - 1000);
         let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[record])
             .expect("the notification marks the row");
-        assert_eq!(chip.detail, None, "a manufactured question reads as the agent's own");
+        assert_eq!(
+            chip.detail, None,
+            "a manufactured question reads as the agent's own"
+        );
     }
 
     #[test]
@@ -1815,7 +1818,10 @@ mod tests {
         let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent)
             .expect("permission event marks the row");
         assert_eq!(chip.since_ms, NOW - 9 * 60 * 1000);
-        assert_eq!(crate::fleet::attention::format_age(NOW, chip.since_ms), "9m");
+        assert_eq!(
+            crate::fleet::attention::format_age(NOW, chip.since_ms),
+            "9m"
+        );
     }
 
     #[test]
