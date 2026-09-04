@@ -318,10 +318,21 @@ pub fn chat_page_blocking(
 /// each.
 ///
 /// `fleet/action` is versioned, so this reads `fleet/snapshot` ONCE and takes
-/// each target's current version from it rather than guessing: a wrong
-/// `expected_version` is refused as stale, which would read on the pane as a
-/// cancel that silently did nothing. One snapshot serves every leg because a
-/// fan-out's legs are cancelled in the same breath.
+/// each target's current version from it rather than guessing. One snapshot
+/// serves every leg because a fan-out's legs are cancelled in the same breath.
+///
+/// KNOWN GAP, and it is the reason the sentence above is weaker than it looks:
+/// reading the version immediately before the write makes the version check
+/// vacuous. Optimistic concurrency exists so an action computed against state X
+/// fails once state has moved, and re-reading X here removes exactly that. So
+/// nothing in this path can notice "the turn you were waiting on ended; this is
+/// a different one", and the cancel lands on whatever the session is doing now.
+///
+/// The page bounds the exposure by retiring a leg past the turn deadline
+/// (`ChatState::unresolved_legs`), so this is one deadline rather than the life
+/// of the pane. Closing it needs the version the leg was CREATED at, carried
+/// from the send and passed here instead of re-read — which means a field on
+/// `FleetMessageDelivery` the daemon populates when it builds the leg.
 ///
 /// Returns the sentence the pane prints. Partial success is reported as such:
 /// cancelling three of four turns and saying "cancelled" is the same class of
