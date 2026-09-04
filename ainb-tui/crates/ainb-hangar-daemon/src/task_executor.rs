@@ -139,8 +139,18 @@ mod tests {
     /// both fail here. A count would have caught neither.
     #[test]
     fn the_token_vocabulary_and_the_executor_set_cover_each_other() {
-        let from_tokens: Vec<TaskExecutor> =
-            SUPPORTED_TASK_EXECUTORS.iter().filter_map(|t| parse(t)).collect();
+        // `map` + panic, never `filter_map`: a token that resolves to NO
+        // executor is the whole failure this direction exists to catch, and
+        // filtering it out is how the guard silently passed with a bogus
+        // `"tmux"` in the vocabulary.
+        let from_tokens: Vec<TaskExecutor> = SUPPORTED_TASK_EXECUTORS
+            .iter()
+            .map(|token| {
+                parse(token).unwrap_or_else(|| {
+                    panic!("`{token}` is offered to operators but resolves to no executor")
+                })
+            })
+            .collect();
         assert_eq!(
             from_tokens,
             TaskExecutor::ALL.to_vec(),
