@@ -300,6 +300,47 @@ const EXIT_QUIESCE: Duration = Duration::from_millis(50);
 /// config names one.
 const DEFAULT_PERMISSION_MODE: &str = "default";
 
+/// The chat engines this daemon would spawn from RIGHT NOW, sorted by name.
+///
+/// The pool's LIVE registry when there is a pool, and the config file's seed
+/// when there is not — never the two-name built-in floor. That floor was the
+/// fallback on every validation path and it disagreed with what the engine
+/// picker was offered: `fleet/adapter_list` already read config, so an
+/// operator's configured adapter appeared in the picker and was then refused as
+/// unknown by the call that would have spawned it.
+///
+/// ONE resolution, so a name the list offers is a name every write accepts.
+pub async fn chat_adapters() -> Vec<(String, AdapterConfig)> {
+    match active_handle().await {
+        Some(pool) => pool.chat_adapters(),
+        None => {
+            let mut seed: Vec<(String, AdapterConfig)> =
+                PoolConfig::from_config().adapters.into_iter().collect();
+            seed.sort_by(|left, right| left.0.cmp(&right.0));
+            seed
+        }
+    }
+}
+
+/// Whether the registry can spawn `provider` as a chat engine.
+///
+/// Reads the same list the picker is offered, per-task keys and all excluded: a
+/// caller must not be able to point a chat session at a task's confined adapter
+/// by naming its synthetic key.
+pub async fn adapter_is_known(provider: &str) -> bool {
+    let wanted = provider.trim();
+    chat_adapters().await.iter().any(|(name, _)| name == wanted)
+}
+
+/// The permission mode pinned for `provider`, from that same registry.
+pub async fn adapter_permission_mode(provider: &str) -> String {
+    let wanted = provider.trim();
+    chat_adapters().await.into_iter().find(|(name, _)| name == wanted).map_or_else(
+        || DEFAULT_PERMISSION_MODE.to_string(),
+        |(_, config)| config.permission_mode,
+    )
+}
+
 /// One `[acp.adapters.<name>]` table, as written.
 ///
 /// Both fields are `Option` so an absent key means "leave the built-in alone"

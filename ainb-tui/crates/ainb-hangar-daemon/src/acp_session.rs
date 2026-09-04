@@ -94,20 +94,18 @@ pub async fn ensure(
     if scope_key.is_some_and(|scope| scope.trim().is_empty()) {
         return Err(EnsureError::EmptyScopeKey);
     }
-    let acp = crate::acp_pool::active_handle().await;
-    let known = acp.as_ref().map_or_else(
-        || ainb_acp::config::AdapterConfig::is_known_adapter(provider),
-        |pool| pool.knows(provider),
-    );
-    if !known {
+    // The registry the engine picker is offered, not the two-name built-in
+    // floor: an operator's configured adapter appeared in the picker and was
+    // then refused here as unknown, which is a picker that offers what the mint
+    // will not accept.
+    if !crate::acp_pool::adapter_is_known(provider).await {
         return Err(EnsureError::UnknownProvider {
             provider: provider.to_string(),
         });
     }
-    let permission_mode = acp.as_ref().map_or_else(
-        || "default".to_string(),
-        |pool| pool.permission_mode(provider),
-    );
+    // From the SAME registry the name was validated against, so a config-only
+    // adapter gets its configured pin rather than the bare default.
+    let permission_mode = crate::acp_pool::adapter_permission_mode(provider).await;
 
     let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
     // THE ONLY PRODUCTION WRITER of `fleet_acp_session.scope_key`. Nothing

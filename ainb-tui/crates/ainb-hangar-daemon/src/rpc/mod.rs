@@ -2898,7 +2898,7 @@ async fn handle_fleet_copilot_configure(
     // attempt on an arbitrary program.
     let acp = crate::acp_pool::active_handle().await;
     let adapter = params.provider.trim();
-    if !adapter_is_known(adapter).await {
+    if !crate::acp_pool::adapter_is_known(adapter).await {
         return Err(invalid_params(&format!(
             "unknown adapter {adapter:?}; fleet/adapter_list names the ones this daemon can spawn"
         )));
@@ -3033,37 +3033,6 @@ async fn handle_fleet_copilot_configure(
     })
 }
 
-/// The chat engines the daemon would spawn from RIGHT NOW, sorted by name.
-///
-/// The pool's LIVE registry when there is a pool, and the config file's seed
-/// when there is not — never the two-name built-in floor. That floor was the
-/// fallback on both validation paths and it disagreed with
-/// `fleet/adapter_list`, which already read config: the picker offered an
-/// operator's configured adapter and the configure call then refused it as
-/// unknown. One resolution, so a name the list offers is a name the write
-/// accepts.
-async fn chat_adapters() -> Vec<(String, ainb_acp::config::AdapterConfig)> {
-    match crate::acp_pool::active_handle().await {
-        Some(pool) => pool.chat_adapters(),
-        None => {
-            let mut seed: Vec<(String, ainb_acp::config::AdapterConfig)> =
-                crate::acp_pool::PoolConfig::from_config().adapters.into_iter().collect();
-            seed.sort_by(|left, right| left.0.cmp(&right.0));
-            seed
-        }
-    }
-}
-
-/// Whether the registry can spawn `provider` as a chat engine.
-///
-/// Reads the same list the picker is offered, per-task keys and all excluded:
-/// a caller must not be able to point a chat session at a task's confined
-/// adapter by naming its synthetic key.
-async fn adapter_is_known(provider: &str) -> bool {
-    let wanted = provider.trim();
-    chat_adapters().await.iter().any(|(name, _)| name == wanted)
-}
-
 /// Every adapter this daemon's registry can spawn, in name order.
 ///
 /// The engine picker reads THIS rather than a list compiled into the client,
@@ -3076,7 +3045,7 @@ async fn handle_fleet_adapter_list(req: &RpcRequest) -> Result<serde_json::Value
 
     require_fleet_capability(FLEET_CAPABILITY_CHAT_READ)?;
     let _params: FleetAdapterListParams = parse_params(req, "{}")?;
-    let adapters: Vec<FleetAdapter> = chat_adapters()
+    let adapters: Vec<FleetAdapter> = crate::acp_pool::chat_adapters()
         .await
         .into_iter()
         .map(|(name, adapter)| FleetAdapter {
