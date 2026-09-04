@@ -340,11 +340,11 @@ async fn cancelling_an_acp_task_cancels_the_adapter_turn() {
 /// A turn that outlives `HANGAR_PROVIDER_MAX_RUNTIME_MS` is cancelled by the
 /// EXECUTOR's own deadline and finalized `timeout`, and the adapter is told.
 ///
-/// The task budget is the one the flag does not mention: the pool applies its
-/// own turn deadline to every scope, so without the boot-time reconciliation an
-/// ACP task would instead die on the pool's 30-minute default while the same
-/// task on the process executor ran for 2.5 h. This pins the executor end of
-/// that contract: its poll bound is `max_runtime`, not the pool's.
+/// The task budget is the one the flag does not mention: the pool's own turn
+/// deadline is the CHAT deadline (30 minutes by default), and an ACP task that
+/// obeyed it would die at half an hour while the same task on the process
+/// executor ran for 2.5 h. The pool's sweep therefore exempts task scopes, and
+/// this pins the bound that remains: the executor's own poll, `max_runtime`.
 #[tokio::test]
 async fn an_acp_turn_past_the_task_budget_times_out_and_tells_the_adapter() {
     if !tripwire_support::tmux_available() {
@@ -409,16 +409,15 @@ async fn an_acp_turn_past_the_task_budget_times_out_and_tells_the_adapter() {
     assert_no_process_executor_trace(&row, &marker, task_id);
 }
 
-/// The pool's own turn deadline does NOT cap a task, because boot raises it to
-/// the task budget.
+/// The pool's own turn deadline does NOT cap a task, because `sweep_once`
+/// exempts task scopes.
 ///
-/// The 4-second case above proves the executor's poll bound, but the raise is a
-/// no-op there (30 min vs 4 s), so it exercises no reconciliation wiring at all;
-/// the unit test pins the `max()` while touching neither `boot` nor
-/// `sweep_once`. This is the case that fails on the unfixed code: the pool
-/// deadline is 2 s and its sweep runs every 1 s, the task budget is 30 s, and
-/// the turn is paced to about 4 s. Without the raise the sweep cancels the turn
-/// at 2 s and the task finalizes `failed`/`timeout`; with it the turn finishes.
+/// The 4-second case above proves the executor's poll bound, but it exercises
+/// the sweep not at all (30 min vs 4 s). This is the case that fails without the
+/// exemption: the pool deadline is 2 s and its sweep runs every 1 s, the task
+/// budget is 30 s, and the turn is paced to about 4 s, so the sweep gets two
+/// clean passes at a turn it must not touch. Unexempted it cancels the turn at
+/// 2 s and the task finalizes `failed`/`timeout`; exempted, the turn finishes.
 #[tokio::test]
 async fn the_pool_deadline_does_not_cap_a_task_that_outlives_it() {
     if !tripwire_support::tmux_available() {
@@ -471,8 +470,8 @@ async fn the_pool_deadline_does_not_cap_a_task_that_outlives_it() {
     enqueue_task(&pool, &ids, task_id, &agent, "headless").await;
 
     let row = wait_for_terminal(&pool, task_id, Duration::from_mins(1)).await;
-    // History, not the visible pane: the boot warn asserted below has scrolled
-    // off by the time the run finishes.
+    // History, not the visible pane: a failure here is diagnosed from the whole
+    // boot log, which has scrolled off by the time the run finishes.
     let pane = session.capture_pane_history();
     drop(session);
 
@@ -488,13 +487,13 @@ async fn the_pool_deadline_does_not_cap_a_task_that_outlives_it() {
         row.get::<Option<String>, _>("failure_reason").is_none(),
         "and record no failure reason"
     );
-    // The raise is not silent. This daemon's chat sessions now share the longer
-    // deadline, so boot says so where whoever flipped the flag will read it.
+    // And the exemption is scoped: the sweep is still ARMED on this daemon (a
+    // 2 s deadline with a 1 s cadence), it simply passed over a `task:` scope.
     // Newlines stripped first: tmux hard-wraps the pane at its width, which
-    // splits the message mid-word.
+    // splits a message mid-word.
     assert!(
-        pane.replace('\n', "").contains("raised the acp turn deadline"),
-        "boot must warn that it raised the deadline:\n{pane}"
+        !pane.replace('\n', "").contains("outlived its deadline"),
+        "the sweep must not have cancelled the task's turn:\n{pane}"
     );
     assert_no_process_executor_trace(&row, &marker, task_id);
 }

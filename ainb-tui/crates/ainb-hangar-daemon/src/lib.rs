@@ -309,6 +309,15 @@ pub mod standup;
 /// The daemon's tokio runtime registers these as periodic tasks; they are also
 /// callable directly (with an injected clock) for deterministic testing.
 pub mod sweeper;
+/// Which executor a claimed task runs on, and the precedence that picks it
+/// (spine A5's flag, A8's per-agent override).
+///
+/// [`task_executor::TaskExecutor`] is the axis (`process` spawns the provider
+/// CLI, `acp` prompts an adapter); [`task_executor::DaemonDefaultExecutor`] is
+/// the daemon-wide `HANGAR_TASK_EXECUTOR` floor, wrapped so it cannot be
+/// mistaken for the executor a TASK was assigned. Pure — the precedence is
+/// testable without mutating process env.
+pub mod task_executor;
 /// `ainb hangar templates use <name>` transactional materialisation (P6.3).
 ///
 /// Turns an embedded curated [`ainb_hangar_core::template::AgentTemplate`] into a
@@ -929,38 +938,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // The ACP agent pool. Installed BEFORE the socket accepts a connection so
         // `fleet/acp_session_create` can never answer "no pool" on a daemon that
         // has one; nothing is spawned until the first prompt reaches it.
-        let mut acp_config = crate::acp_pool::PoolConfig::from_env();
-        // Under `HANGAR_TASK_EXECUTOR=acp` a TASK turn is a pool turn, and the
-        // pool's deadline sweep exempts no scope, so its 30-minute default
-        // would cancel every task past half an hour while the same task on the
-        // process executor gets 2.5 h. Raise the pool's floor to the task budget
-        // rather than leave a 5x cut invisible from the flag.
-        //
-        // Through `set_turn_deadline`, which recouples the sweep cadence: the
-        // raise lands after `from_env` may already have shortened it, and the
-        // two together used to leave a raised deadline with a cadence pinned to
-        // the value it replaced (A5 review N3).
-        let configured_deadline = acp_config.turn_deadline;
-        acp_config.set_turn_deadline(crate::run_loop::reconcile_turn_deadline(
-            configured_deadline,
-            crate::run_loop::acp_turn_budget(),
-        ));
-        // Say so when it actually moved. An invisible timeout change triggered
-        // by a flag is the defect class this fix exists to close, and raising
-        // the floor points it the safer way for tasks while opening a smaller
-        // one for CHAT: a wedged chat turn now squats its session slot for the
-        // longer window before the sweep reaps it. Whoever flips the flag
-        // should read that here, not discover it during an incident.
-        if acp_config.turn_deadline > configured_deadline {
-            tracing::warn!(
-                effective_secs = acp_config.turn_deadline.as_secs(),
-                configured_secs = configured_deadline.as_secs(),
-                "HANGAR_TASK_EXECUTOR=acp raised the acp turn deadline to the task runtime \
-                 budget (HANGAR_PROVIDER_MAX_RUNTIME_MS); a wedged CHAT turn on this daemon \
-                 now converges on the longer deadline too. Set AINB_ACP_TURN_DEADLINE_MS at \
-                 or above the task budget to pin it."
-            );
-        }
+        // The pool's turn deadline is the CHAT deadline, and stays exactly what
+        // the operator configured. A task's ACP turn is bounded by the task
+        // budget instead (`HANGAR_PROVIDER_MAX_RUNTIME_MS`, enforced by
+        // `acp_task`'s own poll), and `AcpPool::sweep_once` exempts task scopes
+        // so the two bounds cannot fight. Boot used to raise this whole pool's
+        // deadline to the task budget under `HANGAR_TASK_EXECUTOR=acp`; A8 makes
+        // that trigger meaningless (the executor is chosen per agent, so the
+        // flag no longer predicts whether task turns ride this pool) and the
+        // raise charged every chat turn for a task-path problem.
+        let acp_config = crate::acp_pool::PoolConfig::from_env();
         let acp_pool = crate::acp_pool::AcpPool::new(store.clone(), broker.sink(), acp_config);
         let _acp_sweeper = acp_pool.spawn_sweeper();
         crate::acp_pool::install(acp_pool).await;

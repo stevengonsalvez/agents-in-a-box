@@ -1122,6 +1122,19 @@ impl AcpPool {
     }
 
     /// One sweep pass: expire overdue turns, then stop idle processes.
+    ///
+    /// TASK-scoped sessions are exempt. A task turn already carries its own
+    /// bound — [`crate::acp_task`]'s poll gives up at
+    /// `HANGAR_PROVIDER_MAX_RUNTIME_MS`, cancels the turn and writes the SAME
+    /// `(UNKNOWN, turn_deadline)` pair this sweep would have — so applying the
+    /// pool's chat-shaped deadline on top can only ever CUT a run short, by
+    /// default 5x (30 min against a 2.5 h budget). That cut used to be papered
+    /// over at boot by raising the whole pool's deadline whenever
+    /// `HANGAR_TASK_EXECUTOR=acp`, which A8 makes unworkable (an agent selects
+    /// the executor per task, so the flag no longer says whether task turns ride
+    /// this pool) and which charged every CHAT turn on the daemon for it.
+    /// Exempting the scope that owns its own deadline is the same fix without
+    /// the collateral.
     pub async fn sweep_once(&self) {
         let deadline_ms = i64::try_from(self.config.turn_deadline.as_millis()).unwrap_or(i64::MAX);
         let cutoff = SystemClock.now_ms().saturating_sub(deadline_ms);
@@ -1129,6 +1142,9 @@ impl AcpPool {
             .await
             .unwrap_or_default();
         for row in overdue {
+            if row.scope_key.starts_with(crate::acp_task::TASK_SCOPE_PREFIX) {
+                continue;
+            }
             tracing::warn!(
                 session_key = %row.session_key,
                 turn_id = ?row.open_turn_id,

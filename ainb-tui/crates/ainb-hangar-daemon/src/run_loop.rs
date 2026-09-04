@@ -199,48 +199,13 @@ pub use crate::task_executor::{DaemonDefaultExecutor, TaskExecutor};
 
 /// The wall-clock ceiling on one provider run (`HANGAR_PROVIDER_MAX_RUNTIME_MS`).
 ///
-/// Read through one function because two callers need it: [`DaemonConfig`],
-/// and [`acp_turn_budget`], which is consulted where no `DaemonConfig` exists
-/// yet. Two reads would be two places for the default to drift.
+/// The bound an ACP task's turn is held to as well: [`crate::acp_task`] polls
+/// the delivery leg against this same value, which is why the pool's own
+/// deadline sweep exempts task scopes rather than applying a second, tighter
+/// one.
 fn provider_max_runtime_from_env() -> Duration {
     env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
         .map_or(PROVIDER_MAX_RUNTIME, Duration::from_millis)
-}
-
-/// How long ONE ACP turn must be allowed to run on this daemon's pool, or
-/// `None` when tasks do not run on it.
-///
-/// Under `HANGAR_TASK_EXECUTOR=acp` a task turn IS a pool turn, and the pool
-/// applies its own [`PoolConfig::turn_deadline`](crate::acp_pool::PoolConfig)
-/// to every scope with no exemption. Its 30-minute default would therefore
-/// cancel every task past half an hour while the identical task on the process
-/// executor gets `HANGAR_PROVIDER_MAX_RUNTIME_MS` (2.5 h by default): a 5x
-/// budget cut that is invisible from the flag that caused it.
-///
-/// Read from the environment rather than a [`DaemonConfig`] because the pool is
-/// built before one exists ([`crate::boot`]); the executor comes through the
-/// same pure resolver the daemon config uses, so the two cannot disagree.
-#[must_use]
-pub fn acp_turn_budget() -> Option<Duration> {
-    let executor =
-        DaemonConfig::resolve_task_executor(std::env::var_os("HANGAR_TASK_EXECUTOR").as_deref());
-    (executor == TaskExecutor::Acp).then(provider_max_runtime_from_env)
-}
-
-/// The turn deadline a pool needs given the task budget riding on it.
-///
-/// Raise only: a deadline an operator lengthened deliberately
-/// (`AINB_ACP_TURN_DEADLINE_MS`) is never shortened, and a daemon whose tasks
-/// run on the process executor keeps the pool's own default untouched. The cost
-/// of raising it is that a wedged CHAT turn on the same daemon converges on the
-/// longer backstop; an operator can still stop one from the fleet surface at
-/// any time, and the alternative is tasks dying silently at 30 minutes.
-#[must_use]
-pub fn reconcile_turn_deadline(pool_deadline: Duration, task_budget: Option<Duration>) -> Duration {
-    match task_budget {
-        Some(budget) => pool_deadline.max(budget),
-        None => pool_deadline,
-    }
 }
 
 impl DaemonConfig {
@@ -3226,33 +3191,6 @@ mod tests {
         assert!(
             detail.contains("claude"),
             "the synthesized diagnostic must name the provider: {detail}"
-        );
-    }
-
-    /// A5: the pool's turn deadline never cuts a task's runtime budget, and
-    /// never shortens a deadline an operator set deliberately.
-    #[test]
-    fn the_pool_deadline_is_raised_to_the_task_budget_and_never_lowered() {
-        let pool_default = Duration::from_secs(30 * 60);
-        // No tasks on this pool: its own default stands.
-        assert_eq!(
-            reconcile_turn_deadline(pool_default, None),
-            pool_default,
-            "the process executor must not touch the pool's deadline"
-        );
-        // The 5x cut this exists to close: a 2.5h task on a 30min pool.
-        assert_eq!(
-            reconcile_turn_deadline(pool_default, Some(PROVIDER_MAX_RUNTIME)),
-            PROVIDER_MAX_RUNTIME,
-            "an acp task must get its full HANGAR_PROVIDER_MAX_RUNTIME_MS"
-        );
-        // Raise only: an operator who lengthened AINB_ACP_TURN_DEADLINE_MS past
-        // the task budget keeps it.
-        let operator_set = PROVIDER_MAX_RUNTIME * 2;
-        assert_eq!(
-            reconcile_turn_deadline(operator_set, Some(PROVIDER_MAX_RUNTIME)),
-            operator_set,
-            "a longer configured deadline must never be shortened"
         );
     }
 
