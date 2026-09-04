@@ -24,16 +24,19 @@ use super::{AppEvent, AppState, Intent, Reduction, Screen};
 /// Chars the ROUTING layer claims on EVERY hangar screen (tab switches, help,
 /// settings, quit) before the active screen's reducer is consulted.
 ///
-/// Kept in lock-step with [`reduce_key`]: a char listed here MUST have a
-/// `reduce_key` arm, and every `reduce_key` arm MUST be listed here
-/// (`router_keys_all_have_a_reduce_key_arm`).
+/// Kept in lock-step with [`reduce_key`]: every char listed here MUST have a
+/// `reduce_key` arm, pinned by `router_keys_all_have_a_reduce_key_arm`. The
+/// reverse needs no test: [`is_router_key`] reads THIS array, so a `reduce_key`
+/// arm for a char that is not listed is unreachable rather than wrong.
 ///
 /// Nine of eighteen went out with the crisp B5 tab shrink (`3` `4` `D` `U` `L`
 /// `C` `F` `S` `P`). Their screens did not: they are reached with `^P` and the
 /// screen's word, and every one of them is pinned reachable by
 /// `palette_reaches_every_demoted_screen`. A char dropped here also stops being
-/// reserved, so a screen-local binding on it comes ALIVE — `3`/`4` on the fleet
-/// filter row had been dead since the router claimed them.
+/// reserved, so a screen-local binding on it now REACHES the screen reducer
+/// instead of being eaten first. (No screen has claimed one yet: the fleet lens
+/// row paints `1`..`5` but `reduce_browse_key` has no digit arm, so those stay
+/// inert either way.)
 pub const ROUTER_KEYS: [char; 9] = ['1', '2', 'B', 'K', 'I', 'A', ',', '?', 'q'];
 
 /// Chars the HOST swallows before the plugin ever sees them.

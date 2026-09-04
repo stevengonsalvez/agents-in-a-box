@@ -44,12 +44,12 @@ fn issue_list_renders_seeded_issues() {
 
     // Return navigation: leave to settings (`,`) then back to issue list (`1`).
     //
-    // Detect the Settings *body*, not the tab strip. P8.5 (`d0a81fa`) added a
-    // `[D]Daemon` entry to the persistent tab strip rendered on EVERY screen, so
-    // a bare `contains("Daemon")` now matches the issue-list landing screen too —
-    // it would fire before `,` took effect and capture the issue list. Gate on a
-    // Settings-body-only section header (`Providers`, which is not a tab) AND the
-    // section word so we only proceed once the body actually switched.
+    // Detect the Settings *body*, not the tab strip. Gate on a Settings-only
+    // section header (`Providers`) AND the section word, so the poll can only
+    // fire once the body has actually switched rather than on chrome that is
+    // painted over the landing screen too. (The original reason was a `[D]Daemon`
+    // tab on the strip; crisp B5 §2.5 demoted `D`, so the strip no longer carries
+    // the word, but pinning a body-only header is still the right shape.)
     // Re-send the nav key until the screen switches: a lone keypress can be
     // dropped on a loaded CI runner.
     let settings = sess
