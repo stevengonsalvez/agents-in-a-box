@@ -82,6 +82,21 @@ impl RunState {
         }
     }
 
+    /// The SENTENCE form the task-detail run card paints (crisp B4 §2.3):
+    /// `◔ impl-1 is working · 7m 17s`, `● impl-1 done · 2m09s`.
+    ///
+    /// The same table as [`word`](Self::word) — a running run is the only state
+    /// whose card line reads as a clause, because it is the only one still
+    /// happening. Here rather than at the call site so the card can never grow a
+    /// fifth vocabulary for the state it already has a word for.
+    #[must_use]
+    pub const fn phrase(self) -> &'static str {
+        match self {
+            Self::Running => "is working",
+            other => other.word(),
+        }
+    }
+
     /// The glyph shared by every surface that paints this state.
     #[must_use]
     pub const fn glyph(self) -> char {
@@ -196,6 +211,41 @@ pub fn age_word(ms: i64) -> String {
     }
 }
 
+/// How long a run HAS BEEN going, as a ticking duration: `17s` · `7m 17s` ·
+/// `1h 07m` · `2d 3h`.
+///
+/// Deliberately NOT [`age_word`], and the live run card is the reason: an age
+/// answers "when", so a minute's resolution is the whole answer, but the run
+/// card's job is to show the operator the run is still moving. Under `age_word`
+/// a working card would read `7m` for fifty-nine seconds at a time and look
+/// frozen. Same rounding-down rule, one more unit of resolution.
+#[must_use]
+pub fn elapsed_word(ms: i64) -> String {
+    let secs = ms.max(0) / 1000;
+    let mins = secs / 60;
+    let hours = mins / 60;
+    let days = hours / 24;
+    if mins == 0 {
+        format!("{secs}s")
+    } else if hours == 0 {
+        format!("{mins}m {:02}s", secs % 60)
+    } else if days == 0 {
+        format!("{hours}h {:02}m", mins % 60)
+    } else {
+        format!("{days}d {}h", hours % 24)
+    }
+}
+
+/// A run's cost as the card paints it: `$0.42`, from whole cents.
+///
+/// Cents, not the wire's `f64`, so the render state stays `Eq` and the rounding
+/// happens ONCE at the snapshot boundary rather than differently on every paint.
+#[must_use]
+pub fn cost_word(cents: i64) -> String {
+    let cents = cents.max(0);
+    format!("${}.{:02}", cents / 100, cents % 100)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +358,67 @@ mod tests {
             (3 * day, "3d"),
         ] {
             assert_eq!(age_word(ms), word, "{ms}ms");
+        }
+    }
+
+    /// The run card's ticking duration: seconds under a minute, `m ss` under an
+    /// hour, `h mm` under a day, `d h` beyond. Rounds down at every step, like
+    /// [`age_word`], and keeps a SECOND-level tick under an hour so a live card
+    /// visibly moves.
+    #[test]
+    fn elapsed_word_ticks_in_seconds_under_an_hour() {
+        let sec = 1_000;
+        let min = 60 * sec;
+        let hour = 60 * min;
+        let day = 24 * hour;
+        for (ms, word) in [
+            (-5 * sec, "0s"),
+            (0, "0s"),
+            (17 * sec, "17s"),
+            (59 * sec + 999, "59s"),
+            (min, "1m 00s"),
+            (7 * min + 17 * sec, "7m 17s"),
+            (59 * min + 59 * sec, "59m 59s"),
+            (hour, "1h 00m"),
+            (hour + 7 * min, "1h 07m"),
+            (23 * hour + 59 * min, "23h 59m"),
+            (day, "1d 0h"),
+            (2 * day + 3 * hour, "2d 3h"),
+        ] {
+            assert_eq!(elapsed_word(ms), word, "{ms}ms");
+        }
+    }
+
+    /// Every state has a card phrase, and only the running one reads as a clause
+    /// — the other four reuse their word, so the card can never say `Success`.
+    #[test]
+    fn only_the_running_phrase_differs_from_the_word() {
+        for status in TaskStatus::ALL {
+            let state = RunState::of(status);
+            if state == RunState::Running {
+                assert_eq!(state.phrase(), "is working", "{status:?}");
+            } else {
+                assert_eq!(state.phrase(), state.word(), "{status:?}");
+            }
+            let phrase = state.phrase();
+            assert_eq!(phrase, phrase.to_lowercase(), "phrase {phrase:?}");
+        }
+    }
+
+    /// Cents render as dollars with two places, and a negative (impossible, but
+    /// the wire is not ours) clamps to zero rather than printing `$-1.-2`.
+    #[test]
+    fn cost_word_renders_cents_as_dollars() {
+        for (cents, word) in [
+            (0, "$0.00"),
+            (5, "$0.05"),
+            (42, "$0.42"),
+            (58, "$0.58"),
+            (100, "$1.00"),
+            (12_345, "$123.45"),
+            (-7, "$0.00"),
+        ] {
+            assert_eq!(cost_word(cents), word, "{cents} cents");
         }
     }
 

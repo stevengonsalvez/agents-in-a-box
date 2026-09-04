@@ -7,6 +7,223 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-09-03
+### Added
+- **acp**: confine an adapter child to an OS sandbox policy
+- **atc**: add the lite controller and the mode switch that owns it
+- **atc**: gate the heartbeat on the mode and honour the chosen provider
+- **atc**: give the lite scanner a dry run
+- **atc**: make one controller per fleet a rule, not a start-time hope
+- **atc**: make the lite scan report its evidence and the hook pipeline's health
+- **atc**: persist the supervisor mode and its provider on the instance
+- **atc**: say so when a switch to full leaves no brain to beat into
+- **atc**: stamp the heartbeat with wall-clock, not raw epoch
+- **atc**: stamp the idle-pause and completions bodies too
+- **atc**: tell the brain it can have the fleet taken off it
+- **cli**: document both mode verbs under ainb daemon atc
+- **cli**: expose atc mode and the internal supervise verb
+- **daemon**: make the ATC lifecycle verbs follow the supervisor mode
+- **daemons**: probe a lite ATC by its scanner, not by a timer it does not have
+- **daemons**: put the supervisor mode toggle and its help on the screen
+- **daemons**: surface Claude hook evidence
+- **fleet**: add Probe as a session source
+- **fleet**: export the claude probe tier from the read module
+- **fleet**: export the probe index and discovery
+- **fleet**: index, discover and age Claude probes
+- **fleet**: report what each evidence tier actually saw
+- **fleet**: resolve needs through the probe tier first
+- **fleet**: tier-A Claude probe reader
+- **hangar**: add the shared status vocabulary
+- **hangar**: count the agents actually working
+- **hangar**: evict aged fleet_provider_event payloads
+- **hangar**: swap the board card footer by run and attention state
+- **hangar-daemon**: a live-only event channel, off the durable outbox
+- **hangar-daemon**: carry the stop reason on a delivered ACP leg
+- **hangar-daemon**: let adapters be registered on a running ACP pool
+- **hangar-daemon**: let attention/answer decline an ACP permission
+- **hangar-daemon**: let board_card_timeline resolve an issue without a board
+- **hangar-daemon**: run a task over ACP behind HANGAR_TASK_EXECUTOR
+- **hangar-daemon**: stream a process run's transcript live
+- **hangar-proto**: add the stream-json transcript classifier
+- **hangar-store**: record a task's session id mid-run
+- **hangar-tui**: backfill the task-detail transcript on open
+- **hangar-tui**: compose inbox rows from the cached snapshots
+- **hangar-tui**: expose the attention board's answer surface
+- **hangar-tui**: make the inbox the one attention surface
+- **onboarding**: add Antigravity to setup catalog, wizard, and script generator
+- **providers**: declare what each provider can drive as an ATC brain
+- fix(hangar-daemon): abort a cancelled run's stdout reader
+
+### Fixed
+- **acp**: mask adapter extra_env values in Debug
+- **atc**: arm the ledger handover before anything is torn down
+- **atc**: arm the ledger handover instead of sealing it mid-switch
+- **atc**: close the second-scanner race with a lock, not a narrower window
+- **atc**: decide ledger ownership from evidence, not from reachability
+- **atc**: end the mode switch with the transition, not eight lines of help
+- **atc**: fail the mode switch when the ledger handover cannot be armed
+- **atc**: hand the retry ledger over fail-closed when the daemon owned it
+- **atc**: hold the handover on an empty roster, and wrap the hooks notice
+- **atc**: make a provider change land, and admit what it cannot change
+- **atc**: make setup --mode lite tear down the schedulers, like the mode switch does
+- **atc**: make the lite scanner's own guards hold
+- **atc**: make the lock and the restart honest about what is still alive
+- **atc**: report the lite scanner stop once, not twice
+- **atc**: resolve the merge with main's ATC menu rework
+- **atc**: stop keying the ledger handover on a flag the daemon never reads
+- **atc**: stop the mode tests detaching real scanners at the developer's fleet
+- **atc**: use flock for the scanner lock, and arm the handover only where it applies
+- **codex**: actually read the failed launch pane
+- **codex**: degrade instead of failing when no daemon answers
+- **codex**: fail a stalled claim fast with the pane output
+- **codex**: give every launch the flags that keep it off a modal
+- **codex**: keep the config override next to the resume subcommand
+- **codex**: pin app-server cwd to the scoped home
+- **daemon**: never start a replacement over a stop that could not be proven
+- **daemon**: stop signalling a recycled pid, and share the safe detach
+- **daemons**: drop the unreachable band in the help height budget
+- **daemons**: keep lite instances out of the full-mode selection entirely
+- **daemons**: keep mission control off a row lite never gives a session
+- **daemons**: keep the leading indent when the help wraps
+- **daemons**: name the instance on a lite ATC row, so its menu offers real verbs
+- **daemons**: name the orphan heartbeat timer on a lite ATC row too
+- **daemons**: one supervisor row, unless two supervisors are really running
+- **daemons**: show the mode help at 80x24, and say when it costs the hooks panel
+- **daemons**: stamp started_at from the process, not from the call
+- **daemons**: stop a dead lite instance hiding a healthy full one
+- **daemons**: stop the mode help lying, clipping, and eating the hooks panel
+- **disk-cleaner**: decide by liveness instead of file age
+- **fleet**: bound probe freshness and stop losing shared-cwd sessions
+- **fleet**: compare WAIT markers over chars, not bytes
+- **fleet**: correct tier evidence accounting
+- **fleet**: gate probe liveness on the epoch start instant
+- **fleet**: keep ainb-core in step with the lens vocabulary
+- **fleet**: match both documented WAIT markers
+- **fleet**: name the instance in the lite refusal, not a category
+- **fleet**: preserve hook evidence semantics
+- **fleet**: stop the standalone daemon racing a lite fleet that has not started
+- **fleet**: stop tier A silencing the tiers that can see errors
+- **hangar**: absorb a replay of an evicted envelope
+- **hangar**: keep every deleted hint's key discoverable
+- **hangar**: name only an agent as the thing running a card
+- **hangar-daemon**: a malformed ACP option makes the row unroutable
+- **hangar-daemon**: a malformed ACP row never falls through to tmux
+- **hangar-daemon**: abort a cancelled run's stdout reader
+- **hangar-daemon**: answer ACP permissions from attention/answer
+- **hangar-daemon**: close four acp lifecycle and isolation gaps
+- **hangar-daemon**: close the adapter unregister/spawn race
+- **hangar-daemon**: drop the registry entry before taking its gate
+- **hangar-daemon**: give a run's transcript its own broadcast
+- **hangar-daemon**: guard cwd and scope inside acp_session::ensure
+- **hangar-daemon**: keep an ordinary finish off the delivered leg
+- **hangar-daemon**: keep the ACP claim when the responder is gone
+- **hangar-daemon**: key the acp outcome on the token, not the state pair
+- **hangar-daemon**: let knows() panic on a poisoned adapter registry
+- **hangar-daemon**: make the delivery taxonomy a type, not a token list
+- **hangar-daemon**: persist stop reasons as their ACP wire names
+- **hangar-daemon**: refuse an ACP answer that names two options across rules
+- **hangar-daemon**: refuse shared labels and blank answers for ACP options
+- **hangar-daemon**: reserve the task: acp scope namespace at the door
+- **hangar-daemon**: say so when the acp turn deadline is raised
+- **hangar-daemon**: scope a task-raised acp approval to its workspace
+- **hangar-daemon**: stop the pool deadline cutting an acp task's budget
+- **hangar-daemon**: tear the acp session actor down from the lease
+- **hangar-proto**: cap a classified transcript body
+- **hangar-proto**: cap every classified entry, not just prose
+- **hangar-proto**: classifier forgets a tool once its result lands
+- **hangar-proto**: mark a truncated block instead of dropping it silently
+- **hangar-store**: unwind the foreign migration 93
+- **hangar-tui**: Ctrl+U clears a Boards text input instead of typing u
+- **hangar-tui**: an unmodelled key must not close a modal
+- **hangar-tui**: apply the transcript backfill once per open
+- **hangar-tui**: close the two operator-visible holes in the inbox answer loop
+- **hangar-tui**: degrade every assignee slot to a short id
+- **hangar-tui**: drop a Ctrl chord for the screens that do not model it
+- **hangar-tui**: drop the placeholder columns from the Control Center strip
+- **hangar-tui**: elide a ULID branch slug on Kanban cards
+- **hangar-tui**: elide a branch on ULID shape, not on length
+- **hangar-tui**: filter scratch like any other repo in the @ dropdown
+- **hangar-tui**: float the same failed runs on usage and inbox
+- **hangar-tui**: have render_options report the rows it owns
+- **hangar-tui**: label usage per-agent rows with roster names
+- **hangar-tui**: let an out-of-range digit navigate instead of vanishing
+- **hangar-tui**: let the assignee helper own the kind-stripping rule
+- **hangar-tui**: list failed runs first on the usage dashboard
+- **hangar-tui**: log a rejected task-detail timeline reply
+- **hangar-tui**: name the assignee on board cards instead of a ULID initial
+- **hangar-tui**: neutralise the twelfth bidi control character
+- **hangar-tui**: re-pull the repo roster when the create wizard opens
+- **hangar-tui**: read the chord in both spellings a terminal sends
+- **hangar-tui**: resolve task-detail names from the agents and tasks snapshots
+- **hangar-tui**: say R is refused once, not once per press
+- **hangar-tui**: say why R does nothing on a finished run
+- **hangar-tui**: translate a Ctrl chord in one shared key helper
+- **interactive**: let the caller state who owns the worktree
+- **interactive**: never roll back a worktree the launch did not create
+- **models**: standardize Antigravity icon to ▲
+- **plugin-hangar**: couple the timeline buffer arm to its request
+- **plugin-hangar**: dedupe the snapshot and buffer overlap
+- **plugin-hangar**: disarm and bound the timeline fetch buffer
+- **plugin-hangar**: keep lines streamed during a timeline fetch
+- **plugin-hangar**: scope the dedupe to the reply's own task
+- **presets**: backfill newly bundled default presets into existing presets.toml
+- **run**: hold the pane before the CLI can exit, codex only
+- **run**: keep a failed launch pane readable
+- **session**: wire Antigravity in new session launch, resume banner, and hooks
+- **tmux**: target the window, not the session, for remain-on-exit
+- **tripwire**: stop asserting the deleted fleet count row
+- **tripwire**: stop asserting the deleted fleet count row in the approval flow
+- **tripwires**: follow the fleet lens and issue-list hints to their new text
+- test(hangar-daemon): report what the live stream actually carried on failure
+
+### Documentation
+- **atc**: document the two supervisor modes and the provider gate
+- **cli**: regenerate the reference for --no-reconcile
+- **cli**: regenerate the reference for the atc mode verbs
+- **daemon**: point the deprecation at lite mode, which is this loop with a cap
+- **daemons**: record how a lite ATC is probed and switched from the row
+- **daemons**: record when the fleet-daemon row appears, and why
+- **disk-cleaner**: document the liveness rules and the two traps
+- **hangar**: classifier sharing is what A2 delivers, not a fact yet
+- **hangar**: correct the 2f outcome tokens A5 maps from
+- **hangar**: correct the card row count in the crisp track
+- **hangar**: correct the sweeper stagger claim
+- **hangar**: crisp-UI track in full, five plugin-only steps with mocks
+- **hangar**: execution map, how a task runs today and where ACP is
+- **hangar**: move 1 in full, two executors and one live run-event stream
+- **hangar**: name the execution view as the requirement both tracks serve
+- **hangar**: record the inbox attention keys
+- **hangar**: renovation plan, spine first with a parallel crisp-UI track
+- **hangar-daemon**: correct three claims the review caught
+- **hangar-daemon**: note the sweep interval left behind by the raise
+- **hangar-daemon**: the ACP arm answers only the installed pool
+- **hangar-daemon**: the outbox no longer holds transcript lines
+- **hangar-proto**: a repeated tool_result degrades to the unnamed form
+- **hangar-store**: correct the renumbered migration's own header
+- **plugin-hangar**: record that the timeline arm has no regression guard
+- add OTEL integration research and implementation plan
+
+### Other
+- **deps**: bump postcss-selector-parser in /website/site
+- **hangar-daemon**: parse each transcript line once, not twice
+- **hangar-tui**: do not re-project inbox names on a transcript line
+- **hangar-tui**: project the inbox name lookup off the paint path
+- **atc**: move the lite controller's identity next to the mode rule
+- **daemons**: ask for the ATC mode verb instead of re-deriving it
+- **fleet**: expose the idle-threshold resolver
+- **fleet**: one voice for the empty states
+- **hangar**: one fleet count row in the shared vocabulary
+- **hangar**: one hint bar per screen, five verbs and three globals
+- **hangar-daemon**: extract acp_session::enqueue from SendPrompt
+- **hangar-daemon**: extract acp_session::ensure from the create RPC
+- **hangar-daemon**: let the leg poll answer its own deadline pair
+- **hangar-proto**: classifier output is a local, not struct state
+- **hangar-tui**: one age ladder, one attention mapping, one display rule
+- **hangar-tui**: share one painted_text across the render tests
+- **plugin-hangar**: make the timeline buffer arm testable
+- **plugin-hangar**: parse_timeline wraps the proto classifier
+
+
 ## [1.23.2] - 2026-09-02
 ### Added
 - **atc**: enumerate installed heartbeat units

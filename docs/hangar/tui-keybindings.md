@@ -96,14 +96,23 @@ and re-run.
 
 ## Task detail (`2` / Enter on an issue)
 
-The screen opens on the issue's **detail card**: title (with display id),
-Status / Priority / Created, Assignee / Agent, Repo / Source → Target branches,
-Labels, a `Linked: ⧉ <ref>` line when an upstream issue is linked, the wrapped
-description, and a run-history line — with the live transcript below.
+The screen is the **execution view**. Top to bottom: a sticky run card for the
+EXPANDED run (`◔ impl-1 is working · 7m 17s · 10 tools · $0.42`) with its branch
+and PR beneath it; the issue's **detail card** — title (with display id), one
+meta line (status · priority · assignee · created · `@repo` · source → target),
+Labels/Due when set, a `Linked: ⧉ <ref>` line when an upstream issue is linked,
+acceptance criteria, properties and the wrapped description; then the
+**execution log** of every run of this issue (running on top, then failed,
+newest first inside each bucket); then that run's **transcript**; with the
+issue's **activity** narrative in a right-hand column.
+
+The transcript is the issue's NEWEST run: expanding an older attempt says it has
+no readable transcript rather than showing another run's lines.
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Scroll |
+| `j` / `k` | Scroll the transcript |
+| `Enter` | Expand the next run in the execution log (wraps; a no-op with fewer than two runs) |
 | `c` | Compose a comment (Enter submits, Esc cancels) |
 | `R` | Retry the task (only once terminal). This is the OPERATOR override: it force-requeues a `failed` or `cancelled` task whatever its `failure_reason` (an `agent_error` that the automatic chain would never retry included), as a child attempt chained by `parent_task_id`. On a `done` task it does nothing. The reason still decides whether the child RESUMES the parent's provider session or starts FRESH — see [Task failures](#task-failures). |
 | `X` | Cancel the running task (confirm overlay). The process group is killed (an interactive run's tmux session by exact name); a dirty worktree is kept. |
