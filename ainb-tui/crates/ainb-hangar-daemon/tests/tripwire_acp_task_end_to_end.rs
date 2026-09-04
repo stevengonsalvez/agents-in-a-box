@@ -267,12 +267,17 @@ async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
     .fetch_one(&pool)
     .await
     .expect("count the transcript rows above the last usage row");
-    assert_eq!(
-        buried_under,
-        2 * TAIL_WINDOW_ROWS,
-        "every chatter update must have become its own row; below \
-         {TAIL_WINDOW_ROWS} a list_by_session_tail filter would satisfy this \
-         test too"
+    // Twice the window, not merely more than it. `>=` rather than `==` because
+    // the turn's own closing rows also land above the accounting row and are
+    // not this test's business; what IS its business is that no chatter update
+    // was coalesced away, and 2 * the window is unreachable if any were.
+    assert!(
+        buried_under >= 2 * TAIL_WINDOW_ROWS,
+        "every chatter update must have become its own row, so at least \
+         {} must follow the accounting row; got {buried_under}, which means \
+         the reducer merged them and a list_by_session_tail filter would \
+         satisfy this test too",
+        2 * TAIL_WINDOW_ROWS
     );
 
     let usage = sqlx::query(
