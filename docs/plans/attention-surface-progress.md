@@ -121,7 +121,7 @@ recreate the duplication this epic is deleting.
 | 5 | Delete the host Fleet panel | done |
 | 6 | Delete the host Inbox | done |
 | 7 | Copilot registry + mode dial | done |
-| 8 | Broadcast + rehoming, delete `t` start form | pending |
+| 8 | Broadcast + rehoming, delete `t` start form | done |
 | 9 | ATC lite audit + daemon retry sweep | pending |
 | 10 | ACP chat repair | pending |
 
@@ -141,6 +141,9 @@ express. None is a shortcut around work.
 | ERR chip from a local producer | Wired and unit-tested; reachable from the daemon (`error` / `escalation`) and from `SessionStatus::Error` | No local hook event classifies as an error — `classify_attention` has three outcomes and none of them is one. Inventing a fourth would be a producer the spec did not ask for |
 | Copilot header: `◀ e cycle`, `◀ o`, `◀ g` on bare letters | `⌥e` / `⌥o` / `⌥g`, rendered that way | The copilot composer takes focus the moment the conversation opens, so a bare `e` is an `e` in a half-typed message. The tripwire proved the dials were unreachable in the state an operator is usually in. Alt never types, so one binding works in both halves of the pane; a bare key advertised on the header that silently does nothing most of the time is worse than a modified one |
 | `mode help` → "no write tools in the table" | Refused at the classifier; the advertised MCP tool table is unchanged | The tool table is announced once at `initialize`, and the dial can move mid-session. A table pinned at spawn goes stale the instant an operator turns the dial, and a stale PERMISSIVE table is worse than an accurate refusal. `CopilotMode::tools()` exists and is tested as the projection; the enforcement point is the live daemon-side classifier, which reads the channel row on every call |
+| Broadcast as its own strip tab | `thread` becomes `broadcast (N)` while rows are checked | The spec's strip is five tabs and a sixth would not be one. The codebase already has the rule this needs — "checked rows win over the cursor", which `Enter` and `r` follow on this screen — so the checkbox means one thing everywhere rather than one thing per verb. The label and the Enter hint both carry the count, because "send message" is a dangerous thing for a footer to say when the message is going to four sessions |
+| Broadcast through the chat surface | Its own small pane, not a `ChatHost` | A thread and the copilot are CONVERSATIONS: durable scope, timeline, a page that reloads it. `fleet/broadcast` fans one text out and answers with N receipts and there is nothing to page afterwards. Modelling it as a conversation means inventing a scope for it, which is exactly the named channel the copilot tab already offers |
+| Channels as a picker inside the copilot tab | A `channels` row on the header | What the spec's own header mock draws. A picker implies switching the pane's conversation, which is the `Channel` topic the chat surface already has and the F tab already drives; the name is the way back to one, and listing them is what the copilot pane owes |
 | Model picker from the adapter's `config_options` | From a declared `[acp.adapters.<name>].models` list | ACP has no model-discovery call, so an adapter cannot be ASKED what it runs. `config_options` are values already set, not choices. A declared list is the only honest source; empty means the header says "adapter default" rather than offering a guess that would fail at `session/set_config_option` |
 
 ## Pre-existing breakage fixed on the way
@@ -174,6 +177,20 @@ Fixed with an RAII guard covering `AINB_BRIDGED_VARS` and releasing on unwind
 | The copilot dials were unreachable: bare `e` / `o` / `g` went into the chat composer, which holds focus from the moment the conversation opens | Phase-7 tripwire pressed `e` and watched the engine not move, with no failure line either | Moved to `⌥`, which never types, and the header renders the modifier |
 | `fleet/adapter_list` read the config registry while `copilot_configure` and `acp_session_create` fell back to the hardcoded two-name floor: the picker OFFERED an operator's configured adapter and the write then refused it as `unknown adapter` | Phase-7 tripwire cycled to an adapter that exists only in `[acp.adapters]` and got the refusal rendered on the pane | One `adapter_registry()` resolution now serves the list and both writes |
 | The help overlay and the panel legend still documented `b Inbox` and `f Fleet control panel`, both deleted in phases 5 and 6 | Full `--tests` sweep; earlier passes had filtered tripwires out the way CI's Test job does | `065d5a2b` — entries replaced by the pane that took over from both, and both tripwires now assert their ABSENCE |
+| CI invoked two deleted tripwires by NAME and had been failing on a missing test binary ever since phases 5 and 6 | The first CI run that actually dispatched after the merge | `cafc4378` — replaced by the sessions tab strip and the copilot picker, the surfaces that took the work over |
+| `acp_session::ensure` validated a provider against the two-name built-in floor while `fleet/adapter_list` read the config registry: the picker OFFERED an operator's configured adapter and the mint behind it refused the same name | The copilot tripwire on CI, not locally — the local green run predated the merge that put `ensure` in this path, and only the lib suite was re-run after the rewire | `908b5500` — one resolution beside the pool that owns the registry, used by the list and by every write |
+
+## Phase 8: where each rehomed verb went
+
+| Verb | Old home | New home | Exercised by |
+|---|---|---|---|
+| broadcast compose + send | panel `b`, with its own recipient picker | `thread` tab while rows are checked; recipients ARE the checkboxes | `tripwire_sessions_broadcast` (two checked rows, both legs rendered) |
+| broadcast recipient picker | panel modal, second roster | DELETED. The sessions list's checkboxes are the only selection model | same |
+| named channels list | panel `N` create form | `channels` row on the copilot header | `an_unanswered_channel_list_is_not_an_empty_one` |
+| new-ATC name prompt | panel `FleetPanelNewAtc*` events | Daemons screen `Provision`, which already provisioned an instance and brought it up without one existing | pre-existing Daemons menu tests; `rg FleetPanelNewAtc` is ZERO |
+| managed-Codex start (`t`) | hangar plugin `FleetMode::Start` | DELETED outright. `ainb run` and the new-session flow are the spawn paths, and they know about worktrees, hooks and the session registry, which this form did not | `the_retired_start_key_opens_nothing` |
+| Codex remote-control | — | already the default (`[codex] app_server = desktop`), no UI | n/a |
+| roster, fleet-wide operator views | — | hangar plugin `F` tab, untouched | its own reducer tests |
 
 ## Parity: every verb the deleted Fleet panel had
 
