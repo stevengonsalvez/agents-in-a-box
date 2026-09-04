@@ -357,18 +357,21 @@ mod tests {
     #[test]
     fn the_legacy_stale_env_var_still_disables_the_healthy_floor() {
         let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_legacy = std::env::var_os("AINB_FLEET_STATE_STALE_MS");
-        let prior_new = std::env::var_os("AINB_FLEET_HEALTHY_STATE_STALE_MS");
+        // Undone on EVERY exit path, panic included. Before this guard the
+        // assertion below could fail with the process-global snapshot and the
+        // BRIDGED set still installed, which took out eight unrelated tests
+        // that never touch this window — they read a self-planted variable as
+        // unset, or died on the poisoned lock of the first victim.
+        let _env = TunablesTestEnv::isolated(&[
+            "AINB_FLEET_STATE_STALE_MS",
+            "AINB_FLEET_HEALTHY_STATE_STALE_MS",
+        ]);
         std::env::set_var("AINB_FLEET_STATE_STALE_MS", "0");
         std::env::remove_var("AINB_FLEET_HEALTHY_STATE_STALE_MS");
 
         // Startup: the bridge publishes the config default for the NEW variable
         // (300000) because nothing had set it, and leaves the legacy one alone.
         let config = crate::config::AppConfig::default();
-        // Restored below: the snapshot is process-global, so leaving this
-        // installed makes every later test in the binary read it instead of
-        // its own config.
-        let previous = crate::config::tunables::snapshot();
         crate::config::tunables::install_snapshot(config.clone());
         crate::config::tunables::export_env_bridge(&config);
 
@@ -377,17 +380,55 @@ mod tests {
             0,
             "the legacy override must still win over a value the bridge planted"
         );
+    }
 
-        crate::config::tunables::clear_bridged_for_test();
-        std::env::remove_var("AINB_FLEET_HEALTHY_STATE_STALE_MS");
-        match prior_legacy {
-            Some(v) => std::env::set_var("AINB_FLEET_STATE_STALE_MS", v),
-            None => std::env::remove_var("AINB_FLEET_STATE_STALE_MS"),
+    /// Save/restore for everything `export_env_bridge` touches, released on
+    /// unwind as well as on success.
+    ///
+    /// `AINB_BRIDGED_VARS` is the one that is easy to miss and the one that
+    /// actually bit: it is a PARENT's list of what it planted, and
+    /// `export_env_bridge` clears any variable still carrying the parent's
+    /// exact value before publishing its own. Running the suite from a pane
+    /// `ainb` itself spawned therefore inherits `AINB_FLEET_STATE_STALE_MS=0`
+    /// as a parent plant, so the "user override" this test sets is stripped and
+    /// re-planted as the bridge's own — and the legacy rung it is asserting on
+    /// becomes unreachable. Green on a clean CI runner, red on the developer's
+    /// machine, which is the worst way round.
+    struct TunablesTestEnv {
+        vars: Vec<(String, Option<std::ffi::OsString>)>,
+        snapshot: std::sync::Arc<crate::config::AppConfig>,
+    }
+
+    impl TunablesTestEnv {
+        fn isolated(vars: &[&str]) -> Self {
+            let mut saved: Vec<(String, Option<std::ffi::OsString>)> = vars
+                .iter()
+                .map(|name| ((*name).to_string(), std::env::var_os(name)))
+                .collect();
+            saved.push((
+                crate::config::tunables::INHERITED_MARKER.to_string(),
+                std::env::var_os(crate::config::tunables::INHERITED_MARKER),
+            ));
+            let this = Self {
+                vars: saved,
+                snapshot: crate::config::tunables::snapshot(),
+            };
+            std::env::remove_var(crate::config::tunables::INHERITED_MARKER);
+            this
         }
-        if let Some(v) = prior_new {
-            std::env::set_var("AINB_FLEET_HEALTHY_STATE_STALE_MS", v);
+    }
+
+    impl Drop for TunablesTestEnv {
+        fn drop(&mut self) {
+            crate::config::tunables::clear_bridged_for_test();
+            for (name, prior) in &self.vars {
+                match prior {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            crate::config::tunables::install_snapshot((*self.snapshot).clone());
         }
-        crate::config::tunables::install_snapshot((*previous).clone());
     }
 
     /// The two windows are separate knobs with separate defaults, which is the
