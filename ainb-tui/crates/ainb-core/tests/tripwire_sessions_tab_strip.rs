@@ -394,8 +394,13 @@ fn the_tab_strip_opens_every_pane_and_enter_stops_meaning_attach() {
 
     // Tab walks to `ask`, which renders the question and both options straight
     // out of the daemon's payload.
+    // BOTH halves in the predicate, not just the pane. `capture-pane` can catch
+    // a frame mid-flush: the right pane has repainted and the footer has not, so
+    // a capture that matched on the question alone could carry the PREVIOUS
+    // tab's footer and fail the `send answer` assertion below on a screen that
+    // was correct a frame later.
     let ask_pane = press_until(&tui_tmux, "Tab", 8, |c| {
-        c.contains("Decide the sqlite path")
+        c.contains("Decide the sqlite path") && c.contains("send answer")
     })
     .unwrap_or_else(|seen| {
         panic!(
