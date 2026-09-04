@@ -1012,6 +1012,11 @@ impl ChatState {
     /// number an operator scans for. A partial failure is the normal case for a
     /// fan-out and it must never read as success.
     pub fn apply_receipts(&mut self, deliveries: Vec<FleetMessageDelivery>) {
+        // The send's request has come back, which is the end of it — the same
+        // thing `apply_send_failure` records for the other outcome. Only the
+        // failure path cleared this, so a SUCCESSFUL send left the surface
+        // marked busy until the next poll happened to clear it.
+        self.in_flight = false;
         let total = deliveries.len();
         let delivered = deliveries
             .iter()
@@ -1059,11 +1064,30 @@ impl ChatState {
     /// a send that never happened. FAILED and REJECTED are answers, however
     /// unwelcome, and DELIVERED is an answer; none of them is still waiting.
     pub fn unresolved_legs(&self) -> impl Iterator<Item = &FleetMessageDelivery> {
-        self.receipts.iter().filter(|leg| {
-            matches!(
-                leg.state,
-                ActionReceiptStatus::Pending | ActionReceiptStatus::Unknown
-            )
+        // A leg leaves PENDING daemon-side, at turn end, and NOTHING the page
+        // reads brings that back: `receipts` is written only by a send, and a
+        // snapshot carries no deliveries. So a leg that is never retired keeps
+        // advertising `⌥c` for the rest of the pane's life — and on the
+        // copilot, a singleton, that is the whole TUI session — aiming an
+        // interrupt at whatever the session happens to be running hours later.
+        //
+        // Past the pool's own ceiling on a turn, the turn this leg belonged to
+        // is over by construction, so the leg is retired rather than offered.
+        // This BOUNDS the window; it does not close it. Closing it needs the
+        // version the leg was created at, so a turn that has since moved on is
+        // refused as stale instead of interrupted (see
+        // `chat_cancel_turns_blocking`, which re-reads the version it is
+        // supposed to be checking against).
+        let expired = match (self.receipts_elapsed_ms(), self.turn_deadline_ms) {
+            (Some(elapsed), Some(deadline)) => elapsed > deadline,
+            _ => false,
+        };
+        self.receipts.iter().filter(move |leg| {
+            !expired
+                && matches!(
+                    leg.state,
+                    ActionReceiptStatus::Pending | ActionReceiptStatus::Unknown
+                )
         })
     }
 
@@ -1323,6 +1347,13 @@ fn retry_open(state: &mut ChatState) -> ChatKeyOutcome {
 /// arrived would otherwise do nothing at all and read as a cancel that failed
 /// silently.
 fn cancel_open_turns(state: &mut ChatState) -> ChatKeyOutcome {
+    // `Cancel` is dispatched ahead of the focus routing, so key-repeat would
+    // otherwise fire a second `CancelTurn` with a fresh uuid while the first is
+    // still out. Gated the way the composer gates a send.
+    if state.in_flight {
+        state.feedback = Some("a cancel is already in flight".into());
+        return ChatKeyOutcome::Handled;
+    }
     let session_keys: Vec<String> =
         state.unresolved_legs().map(|leg| leg.session_key.clone()).collect();
     if session_keys.is_empty() {
@@ -3688,6 +3719,65 @@ mod tests {
         assert!(
             !text.contains("DELIVERY RECEIPTS"),
             "a resolved single leg painted a receipts block:\n{text}"
+        );
+    }
+
+    /// A leg past the pool's turn ceiling stops advertising a cancel.
+    ///
+    /// Nothing the page reads retires a PENDING leg: `receipts` is written only
+    /// by a send, and a snapshot carries no deliveries. So an unretired leg
+    /// kept offering `⌥c` for the life of the pane — and on the copilot, a
+    /// singleton, that is the whole TUI session — aiming an interrupt at
+    /// whatever that session was running hours later.
+    #[test]
+    fn a_leg_past_the_turn_deadline_no_longer_offers_a_cancel() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        state.turn_deadline_ms = Some(30_000);
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![leg("claude:two", ActionReceiptStatus::Pending, None)]);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            1,
+            "inside the deadline the leg is still live"
+        );
+
+        // Past the ceiling the turn this leg belonged to is over.
+        chat_tick(&mut state, 1_000 + 30_001);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            0,
+            "a leg older than the turn deadline must not be cancellable"
+        );
+        assert_eq!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Handled,
+            "and the key must report there is nothing to cancel"
+        );
+    }
+
+    /// Key-repeat on the cancel key fires one request, not one per press.
+    #[test]
+    fn a_second_cancel_does_not_fire_while_the_first_is_out() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![leg("claude:two", ActionReceiptStatus::Pending, None)]);
+
+        assert!(matches!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Intent(ChatIntent::CancelTurn { .. })
+        ));
+        assert_eq!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Handled,
+            "a second press while the first is out must not mint another cancel"
         );
     }
 
