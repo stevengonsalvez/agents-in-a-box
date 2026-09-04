@@ -2386,6 +2386,13 @@ impl CliCommand for FleetCommand {
                          deliveries[].detail for the per-member outcome.",
                     ),
             );
+        let adapter = Command::new("adapter")
+            .about("The ACP adapters this daemon's registry can spawn")
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .subcommand(
+                Command::new("list").about("List the adapters, their commands and pinned modes"),
+            );
         let copilot = Command::new("copilot")
             .about("The fleet copilot session's per-session adapter config")
             .subcommand_required(true)
@@ -2397,8 +2404,21 @@ impl CliCommand for FleetCommand {
                         clap::Arg::new("provider")
                             .long("provider")
                             .required(true)
-                            .value_parser(["claude", "codex"])
-                            .help("Adapter family"),
+                            // NOT a fixed `value_parser` list: the adapter
+                            // registry is `[acp.adapters.*]` plus the built-in
+                            // floor, so a closed list here would refuse an
+                            // adapter the daemon can already spawn. The DAEMON
+                            // validates it against the live registry.
+                            .help("Adapter name from `ainb fleet adapter list`"),
+                    )
+                    .arg(
+                        clap::Arg::new("copilot-mode")
+                            .long("copilot-mode")
+                            .value_parser(["help", "guarded", "yolo"])
+                            .help(
+                                "The channel's guardrail dial: which of the copilot's OWN fleet \
+                                 tools fire, take a confirm card, or are not offered",
+                            ),
                     )
                     .arg(clap::Arg::new("model").long("model").help("Adapter model id"))
                     .arg(
@@ -2686,6 +2706,7 @@ impl CliCommand for FleetCommand {
                 .subcommand(transcript)
                 .subcommand(channel)
                 .subcommand(copilot)
+                .subcommand(adapter)
                 .subcommand(confirm)
                 .subcommand(activity)
                 .subcommand(sequence)
@@ -3285,7 +3306,7 @@ mod tests {
     }
 
     #[test]
-    fn fleet_exposes_twenty_three_subcommands_including_the_interview_levers() {
+    fn fleet_exposes_twenty_four_subcommands_including_the_interview_levers() {
         // The `fleet` namespace surface. Adding/removing a fleet subcommand MUST
         // update this count + list — it is the registry guard the daemons-
         // observability feature wired through. `daemon` (the watcher) and
@@ -3304,6 +3325,7 @@ mod tests {
             [
                 "acp",
                 "activity",
+                "adapter",
                 "approve",
                 "archived",
                 "atc",
@@ -3330,8 +3352,8 @@ mod tests {
         );
         assert_eq!(
             names.len(),
-            23,
-            "expected 23 fleet subcommands, got {names:?}"
+            24,
+            "expected 24 fleet subcommands, got {names:?}"
         );
     }
 

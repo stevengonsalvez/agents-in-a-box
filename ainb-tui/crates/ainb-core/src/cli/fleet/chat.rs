@@ -13,7 +13,7 @@ use ainb_hangar_proto::fleet::{
     FleetChannelCreateParams, FleetChannelCreateResult, FleetChannelKind, FleetChannelListResult,
     FleetConfirm, FleetConfirmAnswer, FleetConfirmAnswerParams, FleetConfirmAnswerResult,
     FleetConfirmListParams, FleetConfirmListResult, FleetCopilotConfigureParams,
-    FleetCopilotConfigureResult, FleetCopilotProvider,
+    FleetCopilotConfigureResult, FleetCopilotMode,
 };
 use ainb_hangar_proto::methods;
 use anyhow::Result;
@@ -219,10 +219,18 @@ pub async fn execute_copilot(matches: &clap::ArgMatches, format: OutputFormat) -
 }
 
 async fn copilot_configure(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
-    let provider = match matches.get_one::<String>("provider").map(String::as_str) {
-        Some("codex") => FleetCopilotProvider::Codex,
-        _ => FleetCopilotProvider::Claude,
+    // Passed through UNVALIDATED on purpose: the adapter registry lives in the
+    // daemon's config, so a list baked in here would refuse an adapter the
+    // daemon can already spawn, and would go stale the moment one is added.
+    // `required(true)` in the registry, so the fallback is unreachable; spelled
+    // out rather than unwrapped so a future `required(false)` cannot panic here.
+    let Some(provider) = matches.get_one::<String>("provider").cloned() else {
+        CliFailure::bad_input("--provider is required; `ainb fleet adapter list` names them")
+            .exit();
     };
+    let copilot_mode = matches
+        .get_one::<String>("copilot-mode")
+        .and_then(|raw| FleetCopilotMode::parse(raw));
     // The persona is a FILE, never an inline flag: it is a system prompt for an
     // agent holding destructive tools, and a multi-line one on a command line
     // ends up in shell history verbatim.
@@ -239,6 +247,7 @@ async fn copilot_configure(matches: &clap::ArgMatches, format: OutputFormat) -> 
         methods::FLEET_COPILOT_CONFIGURE,
         &FleetCopilotConfigureParams {
             provider,
+            copilot_mode,
             model: matches.get_one::<String>("model").cloned(),
             reasoning_effort: matches.get_one::<String>("reasoning-effort").cloned(),
             persona,
@@ -249,12 +258,57 @@ async fn copilot_configure(matches: &clap::ArgMatches, format: OutputFormat) -> 
         println!("{}", serde_json::to_string(&result)?);
     } else {
         println!(
-            "{} model={} reasoning={} persona={}",
+            "{} provider={} mode={} model={} reasoning={} persona={}{}",
             escape_control(&result.session_key),
+            escape_control(&result.provider),
+            result.copilot_mode.as_str(),
             result.model.as_deref().unwrap_or("-"),
             result.reasoning_effort.as_deref().unwrap_or("-"),
-            if result.persona_set { "set" } else { "-" }
+            if result.persona_set { "set" } else { "-" },
+            // The session key CHANGED, and a caller holding the old one is
+            // holding a dead session. Saying so is cheaper than letting the
+            // next command fail with "no live session".
+            if result.session_replaced {
+                " (engine swapped; new session)"
+            } else {
+                ""
+            }
         );
+    }
+    Ok(())
+}
+
+// -------------------------------------------------------------- fleet adapter
+
+pub async fn execute_adapter(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
+    reject_tabular(format, "adapter");
+    match matches.subcommand() {
+        Some(("list", _)) => adapter_list(format).await,
+        _ => CliFailure::bad_input("unknown `ainb fleet adapter` verb: try --help").exit(),
+    }
+}
+
+async fn adapter_list(format: OutputFormat) -> Result<()> {
+    use ainb_hangar_proto::fleet::FleetAdapterListResult;
+
+    let result: FleetAdapterListResult =
+        call(methods::FLEET_ADAPTER_LIST, &serde_json::json!({})).await;
+    if format == OutputFormat::Json {
+        println!("{}", serde_json::to_string(&result)?);
+    } else {
+        for adapter in &result.adapters {
+            println!(
+                "{}\t{}\tpermission_mode={}\t{}",
+                escape_control(&adapter.name),
+                escape_control(&adapter.command),
+                escape_control(&adapter.permission_mode),
+                if adapter.built_in {
+                    "built-in"
+                } else {
+                    "config"
+                }
+            );
+        }
     }
     Ok(())
 }

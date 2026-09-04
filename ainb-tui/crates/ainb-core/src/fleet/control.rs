@@ -1131,6 +1131,45 @@ fn publish(feedback: &Mutex<ActionFeedback>, message: String) {
 /// read an absent feed as an empty one.
 const RPC_METHOD_NOT_FOUND: i32 = -32601;
 
+/// The ACP adapters the daemon's registry can spawn, in name order.
+///
+/// The engine picker's only source: a list compiled into the TUI would refuse
+/// an adapter an operator has already put in `[acp.adapters]`.
+pub fn adapter_list_blocking() -> Result<Vec<ainb_hangar_proto::fleet::FleetAdapter>, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client
+            .adapter_list()
+            .await
+            .map(|result| result.adapters)
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Write the copilot's engine, guardrail dial, model and reasoning.
+///
+/// A changed provider retires the running session and mints a new one on the
+/// same channel, so the RESULT is what the header must believe, not the params:
+/// the daemon may answer with a different session key than the caller held.
+pub fn copilot_configure_blocking(
+    params: ainb_hangar_proto::fleet::FleetCopilotConfigureParams,
+) -> Result<ainb_hangar_proto::fleet::FleetCopilotConfigureResult, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client.copilot_configure(params).await.map_err(|error| error.to_string())
+    })
+}
+
 /// The adapter the copilot channel's ACP session is minted with when nothing
 /// has configured one yet.
 ///
