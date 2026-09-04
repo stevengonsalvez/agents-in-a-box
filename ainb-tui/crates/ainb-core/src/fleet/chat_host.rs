@@ -14,16 +14,25 @@
 use std::sync::{Arc, Mutex};
 
 use ainb_plugin_hangar::screen::fleet_chat::{
-    ChatIntent, ChatSnapshot, ChatState, ChatTopic, chat_tick,
+    ChatIntent, ChatOpenStep, ChatSnapshot, ChatState, ChatTopic, chat_tick,
 };
 
 /// What one dispatched effect produced.
 #[derive(Debug, Clone)]
 pub enum ChatOutcome {
+    /// The worker reached this step of the open sequence.
+    ///
+    /// Published from INSIDE the page rather than around it, because the thing
+    /// worth reporting is the time spent in a call, not the fact that a worker
+    /// started. A fresh install sits in `fleet/channel_create` and
+    /// `fleet/acp_session_create` for long enough to matter, and until this
+    /// existed the pane drew an ordinary composer throughout.
+    Step(ChatOpenStep),
     /// A page landed. Replaces what the surface is showing.
     Paged(Box<ChatSnapshot>),
-    /// A page failed. The surface keeps what it has and says why.
-    PageFailed(String),
+    /// A page failed. The surface keeps what it has, says why, and names the
+    /// call that failed.
+    PageFailed(ChatOpenStep, String),
     /// A send failed. Reported separately from a page failure because the
     /// surface has to put the operator's text BACK in the composer rather than
     /// leave them retyping it.
@@ -100,8 +109,11 @@ impl ChatHost {
         let changed = !landed.is_empty();
         for outcome in landed {
             match outcome {
+                ChatOutcome::Step(step) => self.state.apply_step(step),
                 ChatOutcome::Paged(snapshot) => self.state.apply_snapshot(*snapshot),
-                ChatOutcome::PageFailed(detail) => self.state.apply_failure(detail),
+                ChatOutcome::PageFailed(step, detail) => {
+                    self.state.apply_failure(Some(step), detail);
+                }
                 ChatOutcome::SendFailed(detail) => self.state.apply_send_failure(detail),
                 ChatOutcome::Receipts(receipts) => self.state.apply_receipts(receipts),
             }
@@ -162,6 +174,20 @@ impl ChatHost {
                         Err(detail) => (Some(detail), None, None),
                     }
                 }
+                // Cancelling is a WRITE like a send, so it ends by paging for
+                // the same reason: the legs the pane then renders are the ones
+                // the daemon actually holds, not an optimistic local guess that
+                // the turn stopped.
+                ChatIntent::CancelTurn { session_keys } => {
+                    match crate::fleet::control::chat_cancel_turns_blocking(session_keys) {
+                        // Reported through the send-failure channel because
+                        // that is what puts a sentence on the pane's feedback
+                        // row; a cancel that lands silently is as unreadable as
+                        // a send that does.
+                        Ok(summary) => (Some(summary), None, None),
+                        Err(detail) => (Some(detail), None, None),
+                    }
+                }
                 // Neither belongs to a conversation: a create mints the scope a
                 // conversation would be opened ON, and a list is the picker's
                 // read. Both are the channel surface's, which arrives with
@@ -183,21 +209,29 @@ impl ChatHost {
             // is what clears the surface's in-flight latch, and a failed send
             // still has to show the operator the conversation as it now stands.
             let paged = match &topic {
-                ChatTopic::Copilot => crate::fleet::control::chat_page_blocking(scope_key),
+                ChatTopic::Copilot => {
+                    crate::fleet::control::chat_page_blocking(scope_key, &|step| {
+                        publish(ChatOutcome::Step(step));
+                    })
+                }
                 ChatTopic::Session { .. } | ChatTopic::Channel { .. } => {
                     crate::fleet::control::chat_thread_page_blocking(&topic)
                 }
             };
             publish(match paged {
                 Ok(snapshot) => ChatOutcome::Paged(Box::new(snapshot)),
-                Err(detail) => ChatOutcome::PageFailed(detail),
+                Err(failure) => ChatOutcome::PageFailed(failure.step, failure.detail),
             });
         });
         if let Err(error) = spawned {
             if let Ok(mut inbox) = self.inbox.lock() {
-                inbox.push(ChatOutcome::PageFailed(format!(
-                    "chat worker did not start: {error}"
-                )));
+                // Blamed on the dial step: no RPC was reached, and pinning it on
+                // one of the four calls would send an operator to read a daemon
+                // log that has nothing in it.
+                inbox.push(ChatOutcome::PageFailed(
+                    ChatOpenStep::Connecting,
+                    format!("chat worker did not start: {error}"),
+                ));
             }
         }
     }
@@ -243,6 +277,7 @@ mod tests {
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            turn_deadline_ms: None,
         })));
         assert!(host.tick(0), "a landed outcome makes the frame dirty");
         assert_eq!(host.state().scope_key(), Some("session:claude:abc"));
@@ -266,12 +301,13 @@ mod tests {
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            turn_deadline_ms: None,
         })));
         host.tick(0);
-        host.inbox
-            .lock()
-            .unwrap()
-            .push(ChatOutcome::PageFailed("socket refused".to_string()));
+        host.inbox.lock().unwrap().push(ChatOutcome::PageFailed(
+            ChatOpenStep::LoadingMessages,
+            "socket refused".to_string(),
+        ));
         host.tick(0);
         assert_eq!(
             host.state().scope_key(),
@@ -281,11 +317,69 @@ mod tests {
         assert!(
             matches!(
                 host.state().status(),
-                ainb_plugin_hangar::screen::fleet_chat::ChatStatus::Unavailable(detail)
+                ainb_plugin_hangar::screen::fleet_chat::ChatStatus::Unavailable { detail, .. }
                     if detail.contains("socket refused")
             ),
             "and say why: {:?}",
             host.state().status()
+        );
+    }
+
+    /// A failed page names the CALL, not just the error.
+    ///
+    /// "connection refused" is four different bugs depending on which of the
+    /// open sequence's calls raised it, and only one of them is fixed by
+    /// changing directory. The step is what tells them apart, and it has to
+    /// survive the trip from the worker through the inbox to the surface.
+    #[test]
+    fn a_failed_page_names_the_call_that_failed_on_the_surface() {
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatOpenStep, ChatStatus};
+
+        let mut host = ChatHost::copilot();
+        host.inbox.lock().unwrap().push(ChatOutcome::PageFailed(
+            ChatOpenStep::CreatingSession,
+            "scope_key is already held by a session whose cwd is /elsewhere".to_string(),
+        ));
+        host.tick(0);
+        let ChatStatus::Unavailable {
+            step: Some(step),
+            detail,
+        } = host.state().status()
+        else {
+            panic!("the failure lost its call: {:?}", host.state().status());
+        };
+        assert_eq!(*step, ChatOpenStep::CreatingSession);
+        assert_eq!(step.call(), "fleet/acp_session_create");
+        assert!(
+            detail.contains("already held by a session"),
+            "the daemon's own words were swallowed: {detail}"
+        );
+    }
+
+    /// A step published mid-page reaches the surface on the next frame.
+    ///
+    /// This is what makes the cold open legible: the worker is still inside
+    /// `fleet/channel_create` when the frame that renders "creating the copilot
+    /// channel" is drawn. A step that only landed with the finished page would
+    /// report progress that had already finished.
+    #[test]
+    fn a_step_published_mid_page_reaches_the_surface_before_the_page_does() {
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatOpenStep, ChatStatus};
+
+        let mut host = ChatHost::copilot();
+        host.inbox
+            .lock()
+            .unwrap()
+            .push(ChatOutcome::Step(ChatOpenStep::CreatingChannel));
+        assert!(host.tick(0), "a landed step makes the frame dirty");
+        assert_eq!(
+            host.state().status(),
+            &ChatStatus::Opening(ChatOpenStep::CreatingChannel)
+        );
+        assert_eq!(
+            host.state().send_block().as_deref(),
+            Some("creating the copilot channel (fleet/channel_create)"),
+            "the composer does not say the create is why it cannot send yet"
         );
     }
 }

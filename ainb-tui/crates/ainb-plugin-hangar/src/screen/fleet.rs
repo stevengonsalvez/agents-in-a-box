@@ -1167,7 +1167,10 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         }
         FleetEvent::ChatFailed { detail } => {
             if let FleetMode::Chat(chat) = &mut next.mode {
-                chat.apply_failure(detail);
+                // No step to name: this plugin screen issues none of the open
+                // sequence's calls (it says so and points at the host panel),
+                // so it has no RPC to blame and must not invent one.
+                chat.apply_failure(None, detail);
             }
             None
         }
