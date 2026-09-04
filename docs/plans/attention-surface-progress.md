@@ -116,7 +116,7 @@ recreate the duplication this epic is deleting.
 | 0 | Baseline, log, decisions | done |
 | 1 | Chips on session rows | done |
 | 2 | Attention merge (`AttentionRow` view model) | done |
-| 3 | Right-pane tab strip | pending |
+| 3 | Right-pane tab strip | done |
 | 4 | Answering from the `ask` tab | pending |
 | 5 | Delete the host Fleet panel | pending |
 | 6 | Delete the host Inbox | pending |
@@ -136,6 +136,8 @@ express. None is a shortcut around work.
 | Left-pane mock titled `Sessions · 2 need you` | `Workspaces (4) · 2 need you` | `(4)` is the workspace count and the filter's feedback loop; calling the panel "Sessions" while showing a workspace count is worse than keeping the noun. The badge — the part the spec is actually specifying — is verbatim |
 | Header carries the elsewhere count | Own trailing row, `N waiting elsewhere` | At the default 38-column sidebar a fourth title item truncated mid-word to `1 el`. Proven in a real tmux capture, then moved |
 | "Hangar daemon down → one banner line on the sessions header, not two" | Deferred to phase 5 | "Not two" is only meaningful once the host Fleet panel (the second banner) is deleted. Until then the daemon-down state is carried by the dimmed chip and its reason, which is the part that is not deferrable |
+| `Tab` cycles the strip | `Tab` cycles it, `Shift+Tab` walks back, and `SwitchPaneFocus` is gone | `Tab` was pane focus. Focus now FOLLOWS the tab (composer tabs take input, `preview`/`log` do not), so the one thing that key bought is a consequence of this one. Two keys for one concept is the ambiguity the strip removes |
+| Footer: "1-9 attach from every tab" | True except inside a live composer, where the footer says so | A `3` typed into a message has to be a `3`. Advertising attach there advertises a key that types a character |
 | ERR chip from a local producer | Wired and unit-tested; reachable from the daemon (`error` / `escalation`) and from `SessionStatus::Error` | No local hook event classifies as an error — `classify_attention` has three outcomes and none of them is one. Inventing a fourth would be a producer the spec did not ask for |
 
 ## Pre-existing breakage fixed on the way
@@ -156,6 +158,14 @@ poisoned it for six more.
 
 Fixed with an RAII guard covering `AINB_BRIDGED_VARS` and releasing on unwind
 (`43561551`). 2150/2150 lib tests now pass, parallel and single-threaded.
+
+## Bugs found by the tripwires, not by the tests
+
+| Bug | How it surfaced | Fix |
+|---|---|---|
+| A failed `attention/list` poll emptied the row map, so one socket timeout made every live ASK vanish for five seconds | Tab-strip tripwire failed one run in seven, the `ask` tab dimmed because its chip had briefly gone | `f40e09f7` — rows carry across a failed poll and grey out instead, which is the shape the spec asked for all along |
+| `tmux_sessions_at` interpolated a cwd into a tmux FORMAT string, where `#(...)` runs a shell command | Background security review of `c577cbb0` | `391f0607` — deleted; it had no callers and the `N waiting elsewhere` row already serves the case |
+| The elsewhere count truncated to `1 el` in the panel title | Phase-2 tripwire assertion on a real 38-column capture | Moved to its own full-width row |
 
 ## Published pages
 
