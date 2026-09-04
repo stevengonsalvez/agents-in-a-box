@@ -2936,17 +2936,31 @@ async fn handle_fleet_copilot_configure(
                 channel.scope_key, channel.scope_key
             ))
         })?;
-    // The dial FIRST, and independently of the swap below: an operator turning
-    // the guardrail down to `help` while the engine picker is mid-swap must get
-    // the restriction applied even if the swap then fails.
+    // The dial goes in first so a tightening lands even if the swap then fails.
+    // It is ROLLED BACK on that failure, and the direction is why: `help`
+    // surviving a failed swap is the safe outcome, `yolo` surviving one is not.
+    // A configure that returns an error must leave the guardrail where the
+    // operator can see it — the client only adopts a mode from an `Applied`
+    // outcome, so a mode that survived a failure armed `yolo` underneath a
+    // header still reading `guarded`, and `spawn_session`, `interrupt` and
+    // `archive` then fired with no confirm card.
+    let previous_mode = FleetCopilotMode::parse(&channel.copilot_mode).unwrap_or_default();
     let mode = match params.copilot_mode {
         Some(mode) => {
-            FleetChannelRepo::set_mode(pool, &channel.scope_key, mode.as_str())
+            // The miss is not discarded: a dial turned against a channel that
+            // has since been deleted must read as a miss, not a silent success.
+            let hit = FleetChannelRepo::set_mode(pool, &channel.scope_key, mode.as_str())
                 .await
                 .map_err(|error| store_err(&error))?;
+            if !hit {
+                return Err(invalid_params(&format!(
+                    "copilot channel {:?} no longer exists",
+                    channel.scope_key
+                )));
+            }
             mode
         }
-        None => FleetCopilotMode::parse(&channel.copilot_mode).unwrap_or_default(),
+        None => previous_mode,
     };
 
     // A provider swap is a DIFFERENT adapter process and a different agent, so
@@ -2994,17 +3008,60 @@ async fn handle_fleet_copilot_configure(
                 // the scope the replacement needs. So a mint that fails leaves
                 // the channel with NO live session and no way back: the engine
                 // picker, whose whole job is swapping adapters, would be the
-                // thing that ends the conversation. Putting the row back live
-                // leaves the channel exactly where it started; the adapter was
-                // torn down, and the pool re-dials it on next use.
-                if let Err(restore) =
-                    FleetAcpSessionRepo::set_state(pool, &retiring, RESTORED_STATE, SystemClock.now_ms())
-                        .await
+                // thing that ends the conversation. A failed configure changes
+                // nothing — the session goes back, and so does the dial.
+                if let Err(restore) = FleetAcpSessionRepo::set_state(
+                    pool,
+                    &retiring,
+                    RESTORED_STATE,
+                    SystemClock.now_ms(),
+                )
+                .await
                 {
                     tracing::error!(
                         %retiring, %restore,
                         "the retired copilot session could not be restored; \
                          the channel is left with no live session"
+                    );
+                }
+                // The teardown above only SIGNALS, and does not even do that
+                // when the session had no live handle in the pool — which is
+                // the ordinary state for a copilot nobody has prompted lately.
+                // Nothing has resolved the turn or the delivery legs behind it.
+                // Convergence is the shared routine that does, it is
+                // idempotent, and it runs AFTER the restore because its own
+                // ACTIVE-to-IDLE flip is guarded on a state this has already
+                // written.
+                if let Err(converge) = crate::acp_pool::converge_dirty_session(
+                    pool,
+                    events,
+                    &retiring,
+                    crate::acp_pool::ConvergeCause::OperatorStop,
+                )
+                .await
+                {
+                    tracing::error!(
+                        %retiring, %converge,
+                        "the restored copilot session could not be converged"
+                    );
+                }
+                // The dial goes back too. Leaving a loosened guardrail behind a
+                // failed configure arms `yolo` under a header the client never
+                // updated, because it only adopts a mode from an `Applied`
+                // outcome.
+                let rolled_back = match params.copilot_mode {
+                    Some(_) => {
+                        FleetChannelRepo::set_mode(pool, &channel.scope_key, previous_mode.as_str())
+                            .await
+                            .err()
+                    }
+                    None => None,
+                };
+                if let Some(rollback) = rolled_back {
+                    tracing::error!(
+                        scope_key = %channel.scope_key, %rollback,
+                        "the copilot guardrail could not be rolled back after a failed swap; \
+                         it may be looser than the operator's screen reports"
                     );
                 }
                 tracing::error!(

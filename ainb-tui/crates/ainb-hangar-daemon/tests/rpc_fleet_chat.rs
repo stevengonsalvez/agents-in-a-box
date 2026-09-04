@@ -1251,10 +1251,12 @@ async fn a_swap_that_cannot_mint_its_replacement_leaves_the_session_live() {
     .await
     .unwrap();
 
+    // The swap ALSO loosens the guardrail, which is the direction that must not
+    // survive a failure.
     let swapped = client
         .call(
             methods::FLEET_COPILOT_CONFIGURE,
-            json!({ "provider": "codex-acp" }),
+            json!({ "provider": "codex-acp", "copilot_mode": "yolo" }),
         )
         .await;
     assert!(
@@ -1276,6 +1278,36 @@ async fn a_swap_that_cannot_mint_its_replacement_leaves_the_session_live() {
         state, "IDLE",
         "and IDLE rather than ACTIVE: nothing can be in flight on an adapter \
          that has been torn down"
+    );
+
+    // THE guardrail assertion. The client only adopts a mode from an `Applied`
+    // outcome, so a `yolo` that survived this failure would be armed underneath
+    // a header still reading `guarded` — and `spawn_session`, `interrupt` and
+    // `archive` would then fire with no confirm card in front of an operator
+    // who believes they take one.
+    let mode: String =
+        sqlx::query_scalar("SELECT copilot_mode FROM fleet_channel WHERE scope_key = ?")
+            .bind(&scope)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        mode, "guarded",
+        "a configure that failed must leave the guardrail where the operator \
+         can still see it"
+    );
+
+    // Nothing is left claiming a turn on the adapter that was torn down.
+    let open_turn: Option<String> =
+        sqlx::query_scalar("SELECT open_turn_id FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        open_turn, None,
+        "the restored session must not keep an open turn: teardown only signals, \
+         and does nothing at all when the session had no live handle"
     );
 
     // Which is the same thing the channel asks: is there anyone to talk to.
