@@ -355,10 +355,29 @@ async fn enforce_cap(
     now_ms: i64,
     report: &mut SweepReport,
 ) {
-    let ledger = AtcInstanceRepo::retry_get(pool, SWEEP_INSTANCE, &session.session_key)
-        .await
-        .ok()
-        .flatten();
+    // A read FAILURE is not an empty ledger. `.ok().flatten()` collapsed the two
+    // into `None`, which `map_or(0, ...)` then read as zero budget spent, and
+    // `err_action(0, cap)` answers Continue. `retry_get` and `record_continue`
+    // are independent statements against the same pool, so under intermittent
+    // contention the write lands while the read fails: the ledger grows, every
+    // read says zero, and the session is continued forever without the cap ever
+    // being observed to be reached. `hangar.db` has a documented lock-storm
+    // profile, so this is a real shape rather than a theoretical one.
+    //
+    // Every other fault in this module degrades to "do nothing". This one
+    // degraded to "do it again", which is the opposite direction.
+    let ledger = match AtcInstanceRepo::retry_get(pool, SWEEP_INSTANCE, &session.session_key).await
+    {
+        Ok(row) => row,
+        Err(error) => {
+            tracing::warn!(
+                session = %session.session_key,
+                %error,
+                "retry sweep: ledger unreadable; not spending a budget it cannot count"
+            );
+            return;
+        }
+    };
     if ledger.as_ref().is_some_and(|row| row.escalated) {
         return;
     }
