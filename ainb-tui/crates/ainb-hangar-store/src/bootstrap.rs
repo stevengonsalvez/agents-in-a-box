@@ -63,6 +63,20 @@ pub const DEFAULT_PROVIDER: &str = "claude";
 /// codex, a `copilot` agent runs copilot.
 pub const SUPPORTED_PROVIDERS: [&str; 3] = ["claude", "codex", "copilot"];
 
+/// The `agent.task_executor` value that spawns the provider CLI (spine A5's
+/// `HANGAR_TASK_EXECUTOR=process`).
+pub const TASK_EXECUTOR_PROCESS: &str = "process";
+/// The `agent.task_executor` value that prompts an ACP adapter (spine A5's
+/// `HANGAR_TASK_EXECUTOR=acp`).
+pub const TASK_EXECUTOR_ACP: &str = "acp";
+
+/// The task executors a per-agent override may name (migration 0095).
+///
+/// The SAME two tokens `HANGAR_TASK_EXECUTOR` accepts, defined once here so the
+/// daemon's env resolver, the daemon's per-agent resolver and the create paths
+/// that validate an operator's spelling cannot drift apart.
+pub const SUPPORTED_TASK_EXECUTORS: [&str; 2] = [TASK_EXECUTOR_PROCESS, TASK_EXECUTOR_ACP];
+
 /// `daemon_id` recorded for the self-registered host runtime. Keyed with
 /// `(workspace_id, daemon_id, provider)` for the runtime's unique index.
 const SELF_DAEMON_ID: &str = "ainb-hangar-daemon";
@@ -104,6 +118,36 @@ pub fn normalize_provider(provider: Option<&str>) -> Result<String, String> {
         Err(format!(
             "unsupported provider `{raw}` (expected one of {})",
             SUPPORTED_PROVIDERS.join(", ")
+        ))
+    }
+}
+
+/// Normalise + validate a caller-supplied task executor: trim, lower-case, and
+/// map an absent/empty value to `None` ("no override — inherit the daemon's
+/// `HANGAR_TASK_EXECUTOR`").
+///
+/// Unlike [`normalize_provider`] there is no default to substitute: the absence
+/// of an override is itself the meaning of a NULL column, and defaulting it to
+/// `process` here would pin every newly created agent to the process executor
+/// even on a daemon started with `HANGAR_TASK_EXECUTOR=acp`.
+///
+/// # Errors
+///
+/// Returns the offending value in an error message when it is not one of
+/// [`SUPPORTED_TASK_EXECUTORS`]. Rejected rather than ignored: a misspelled
+/// opt-in that silently records nothing is the failure mode the daemon's
+/// `HANGAR_TASK_EXECUTOR` warning exists to make diagnosable.
+pub fn normalize_task_executor(executor: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = executor.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let lowered = raw.to_ascii_lowercase();
+    if SUPPORTED_TASK_EXECUTORS.contains(&lowered.as_str()) {
+        Ok(Some(lowered))
+    } else {
+        Err(format!(
+            "unsupported task executor `{raw}` (expected one of {})",
+            SUPPORTED_TASK_EXECUTORS.join(", ")
         ))
     }
 }
@@ -459,6 +503,10 @@ pub struct AgentDraft {
     /// Provider token, already through [`normalize_provider`]. Empty = the
     /// [`DEFAULT_PROVIDER`].
     pub provider: String,
+    /// Task executor token, already through [`normalize_task_executor`]
+    /// (migration 0095). `None` = no per-agent override, so the agent's tasks
+    /// take the daemon's `HANGAR_TASK_EXECUTOR`.
+    pub task_executor: Option<String>,
     /// Free-form system prompt / instructions.
     pub instructions: Option<String>,
     /// Short blurb (multica 060). Trimmed here; the ≤255-char cap is validated by
@@ -563,6 +611,7 @@ pub async fn create_agent_from(
         thinking: None,
         agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         provider: Some(provider),
+        task_executor: draft.task_executor,
         token_budget: None,
         description: draft.description.trim().to_string(),
         avatar_url: Some(avatar_url),
