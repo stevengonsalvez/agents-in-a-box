@@ -55,6 +55,16 @@ pub enum AnswerPhase {
     Failed {
         /// The reason, verbatim from the transport.
         reason: String,
+        /// What the operator had TYPED when this went out, so the pane can put
+        /// it back. Carried on the outcome rather than restored the moment it
+        /// lands, because a send is often still on the wire when the operator
+        /// moves on: restoring only at landing put the text back exactly when
+        /// they were watching, and dropped it whenever they were not.
+        ///
+        /// `None` for an answer that was PICKED. The option is still
+        /// highlighted where they left it, and its label in the composer would
+        /// read as an answer they wrote.
+        draft: Option<String>,
     },
 }
 
@@ -148,6 +158,25 @@ impl AskState {
         // question being shown selects its own outcome. This method runs on
         // every render, and clearing here is what let the operator navigate
         // away from an in-flight answer and send it a second time.
+        //
+        // Coming BACK to a question whose send failed puts the operator's text
+        // back in front of them. Without this the restore only ever fired for
+        // a failure they happened to be watching, so walking away from a slow
+        // send — the very sends that fail — lost what they had typed.
+        self.restore_failed_draft();
+    }
+
+    /// Put back what the operator typed, if the question now on screen failed
+    /// with a draft.
+    fn restore_failed_draft(&mut self) {
+        let Some(AnswerPhase::Failed {
+            draft: Some(text), ..
+        }) = self.request.as_deref().and_then(|id| self.phase_of(id))
+        else {
+            return;
+        };
+        self.free_text = text.clone();
+        self.focus = AskFocus::FreeText;
     }
 
     /// The outcome recorded for `request`, if one is.
@@ -298,27 +327,24 @@ impl AskState {
             .map(|mut inbox| inbox.drain(..).collect())
             .unwrap_or_else(|poisoned| poisoned.into_inner().drain(..).collect());
         let changed = !landed.is_empty();
-        for (request, phase) in landed {
+        for (request, mut phase) in landed {
+            // The worker reports the outcome; it knows nothing about what was
+            // typed. The draft rides across from the send it settles, so the
+            // text survives on the OUTCOME rather than only in this instant.
+            if let AnswerPhase::Failed { draft, .. } = &mut phase {
+                if let Some(AnswerPhase::InFlight { draft: typed, .. }) = self.phase_of(&request) {
+                    draft.clone_from(typed);
+                }
+            }
             // Recorded against the request it answers, never against whatever
             // the pane is showing. Overwriting the shown phase is how one
             // question's failure came to be painted under another question.
-            let failed = matches!(phase, AnswerPhase::Failed { .. });
-            let previous = self.set_phase(&request, phase);
-            // A failure puts a TYPED answer back, so nobody retypes what the
-            // transport lost. A picked option is deliberately not restored: it
-            // is still highlighted where the operator left it, and its label in
-            // the composer would read as an answer they wrote. Only for the
-            // request on screen: text belonging to another question would
-            // appear in this one's composer as something the operator typed.
-            if !failed || self.request.as_deref() != Some(request.as_str()) {
-                continue;
-            }
-            if let Some(AnswerPhase::InFlight {
-                draft: Some(text), ..
-            }) = previous
-            {
-                self.free_text = text;
-                self.focus = AskFocus::FreeText;
+            self.set_phase(&request, phase);
+            // Landing on the question the operator is looking at is the one
+            // case `retarget` cannot cover, because the request has not
+            // changed. Same restore, so the two cannot drift.
+            if self.request.as_deref() == Some(request.as_str()) {
+                self.restore_failed_draft();
             }
         }
         changed
@@ -397,7 +423,11 @@ impl AskState {
                     reply_to,
                     match outcome {
                         Ok(via) => AnswerPhase::Delivered { via },
-                        Err(reason) => AnswerPhase::Failed { reason },
+                        // The draft is attached where it is known, in `tick`.
+                        Err(reason) => AnswerPhase::Failed {
+                            reason,
+                            draft: None,
+                        },
                     },
                 ));
             }
@@ -602,6 +632,7 @@ mod tests {
             &chip,
             AnswerPhase::Failed {
                 reason: "target_not_running".to_string(),
+                draft: None,
             },
         );
         assert!(state.tick());
@@ -631,6 +662,7 @@ mod tests {
             &chip,
             AnswerPhase::Failed {
                 reason: "no live target".to_string(),
+                draft: None,
             },
         );
         state.tick();
@@ -743,11 +775,12 @@ mod tests {
             request_id(&a),
             AnswerPhase::Failed {
                 reason: "target_not_running".to_string(),
+                draft: None,
             },
         ));
         assert!(state.tick(), "the outcome must be observed");
         assert!(
-            matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason }) if reason == "target_not_running"),
+            matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason, .. }) if reason == "target_not_running"),
             "the failure must be shown against the question it belongs to"
         );
         assert!(!state.any_in_flight(), "and the latch is released");
@@ -777,6 +810,7 @@ mod tests {
             &a,
             AnswerPhase::Failed {
                 reason: "target_not_running".to_string(),
+                draft: None,
             },
         );
         assert!(state.tick(), "the outcome must be observed");
@@ -799,9 +833,50 @@ mod tests {
         // belongs to. Clearing on retarget lost it entirely.
         state.retarget(&a);
         assert!(
-            matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason }) if reason == "target_not_running"),
+            matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason, .. }) if reason == "target_not_running"),
             "A's failure survives the round trip and is shown on A"
         );
+    }
+
+    /// A failure that lands while the operator is looking at a DIFFERENT
+    /// question must still give them their text back when they return.
+    ///
+    /// This is the common shape, not the exotic one: a send slow enough to fail
+    /// is a send the operator is likely to have walked away from. Restoring
+    /// only at the instant the outcome landed put the text back exactly when
+    /// they were watching, and dropped it whenever they were not.
+    #[test]
+    fn a_draft_survives_a_failure_that_lands_while_the_operator_is_elsewhere() {
+        let a = ask_with_options(&[]);
+        let b = SessionAttention::daemon(AttentionKind::Ask, 6_000, "att-6".into());
+        let mut state = AskState::default();
+        state.retarget(&a);
+        latch(&mut state, &a, Some("the long answer they typed"));
+
+        // Away to B before the worker reports.
+        state.retarget(&b);
+        publish(
+            &state,
+            &a,
+            AnswerPhase::Failed {
+                reason: "target_not_running".to_string(),
+                draft: None,
+            },
+        );
+        assert!(state.tick());
+        assert_eq!(
+            state.free_text(),
+            "",
+            "A's text must not appear in B's composer"
+        );
+
+        state.retarget(&a);
+        assert_eq!(
+            state.free_text(),
+            "the long answer they typed",
+            "and must be back in front of them on the question that failed"
+        );
+        assert_eq!(state.focus(), AskFocus::FreeText);
     }
 
     /// The chip strip paints every row, so `SENT` has to follow the question

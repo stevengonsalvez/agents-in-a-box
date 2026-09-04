@@ -472,7 +472,7 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
                 Style::default().fg(SELECTION_GREEN),
             ));
         }
-        Some(AnswerPhase::Failed { reason }) => {
+        Some(AnswerPhase::Failed { reason, .. }) => {
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 format!("\u{2717} not answered: {reason}"),
