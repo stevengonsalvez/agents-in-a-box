@@ -25,6 +25,10 @@ use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "palette_nav_common.rs"]
+mod palette_nav;
+use palette_nav::nav_drain_rounds;
+
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// A recorded daemon call: method + params.
@@ -308,6 +312,43 @@ async fn send_key<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: char
         .unwrap();
 }
 
+/// Walk the command palette to a screen crisp B5 §2.5 took off the tab strip:
+/// `^P`, the screen's word, Enter. `\u{10}` is the bare-DLE spelling of Ctrl+P
+/// the plugin accepts alongside the modifier flag (`plugin::is_ctrl_p`).
+///
+/// DRAINS its own traffic before returning: the walk costs one key delivery per
+/// character plus one `hangar/search` per query edit, and left in the pipe those
+/// come out of the caller's bounded relay budget rather than the nav's.
+async fn go_to_screen<W, R, DR, DW>(
+    host_write: &mut W,
+    host_read: &mut R,
+    daemon_reader: &mut DR,
+    daemon_write: &mut DW,
+    stream_id: &str,
+    word: &str,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
+    DR: tokio::io::AsyncBufRead + Unpin,
+    DW: tokio::io::AsyncWrite + Unpin,
+{
+    send_key(host_write, '\u{10}').await;
+    for ch in word.chars() {
+        send_key(host_write, ch).await;
+    }
+    send_key(host_write, '\n').await;
+    for _ in 0..nav_drain_rounds(word) {
+        relay_one_send_or_render(
+            host_write,
+            host_read,
+            daemon_reader,
+            daemon_write,
+            stream_id,
+        )
+        .await;
+    }
+}
+
 /// Boot the plugin + mock daemon, run subscribe + snapshot pump, and return the
 /// live host/daemon handles plus the shared `seen` recorder.
 async fn boot(
@@ -322,9 +363,16 @@ async fn boot(
     tokio::net::unix::OwnedWriteHalf,
     tokio::task::JoinHandle<Result<(), ainb_plugin_sdk::SdkError>>,
 ) {
+    // Seed the `first_run` ack, THEN publish the home. `AINB_HANGAR_HOME` is
+    // process-global and this binary holds two tests, so a sibling's `set_var`
+    // can land between ours and this write; `on_init` reading in that window
+    // finds no acks and paints the danger-full-access modal over the board,
+    // where it swallows every key the test sends. Publishing here rather than at
+    // the call site keeps the two in one place, in this order.
     let state = home.join("hangar").join("state.toml");
     std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
     std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+    std::env::set_var("AINB_HANGAR_HOME", home);
 
     let socket_path = home.join("hangar.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind daemon");
@@ -359,16 +407,23 @@ async fn boot(
 async fn key_r_fires_now() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
-        std::env::set_var("AINB_HANGAR_HOME", home.path());
         let stream_id = format!("sock-fire-{}", std::process::id());
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let enabled = Arc::new(Mutex::new(true));
         let (mut host_write, mut host_read, mut daemon_reader, mut daemon_write, server) =
             boot(home.path(), &stream_id, seen.clone(), enabled).await;
 
-        // Tab to the autopilot screen (`4`), then press `r` (run now). (e38.38:
-        // Autopilots renumbered 5→4 to close the `[3]Agents` gap.)
-        send_key(&mut host_write, '4').await;
+        // `^P autopilots` to the autopilot screen, then press `r` (run now). Was
+        // the `4` tab key until crisp B5 §2.5 demoted it.
+        go_to_screen(
+            &mut host_write,
+            &mut host_read,
+            &mut daemon_reader,
+            &mut daemon_write,
+            &stream_id,
+            "autopilots",
+        )
+        .await;
         send_key(&mut host_write, 'r').await;
 
         let mut sent = false;
@@ -408,17 +463,24 @@ async fn key_r_fires_now() {
 async fn key_d_toggles_enabled() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
-        std::env::set_var("AINB_HANGAR_HOME", home.path());
         let stream_id = format!("sock-toggle-{}", std::process::id());
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let enabled = Arc::new(Mutex::new(true));
         let (mut host_write, mut host_read, mut daemon_reader, mut daemon_write, server) =
             boot(home.path(), &stream_id, seen.clone(), enabled).await;
 
-        // Tab to the autopilot screen (`4`), then press `d` (disable; the seeded
-        // row is enabled → set_enabled(false)). (e38.38: Autopilots renumbered 5→4
-        // to close the `[3]Agents` gap.)
-        send_key(&mut host_write, '4').await;
+        // `^P autopilots` to the autopilot screen, then press `d` (disable; the
+        // seeded row is enabled → set_enabled(false)). Was the `4` tab key until
+        // crisp B5 §2.5 demoted it.
+        go_to_screen(
+            &mut host_write,
+            &mut host_read,
+            &mut daemon_reader,
+            &mut daemon_write,
+            &stream_id,
+            "autopilots",
+        )
+        .await;
         send_key(&mut host_write, 'd').await;
 
         // Pump until the daemon records set_enabled(false). The daemon flips its

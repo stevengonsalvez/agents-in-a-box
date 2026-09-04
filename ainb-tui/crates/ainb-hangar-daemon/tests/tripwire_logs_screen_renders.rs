@@ -70,12 +70,12 @@ fn logs_screen_renders_seeded_daemon_log_lines() {
         "the issue list must not already show the seeded log marker:\n{landing}"
     );
 
-    // Press `L` (single-char nav, no Enter) until the Logs pane shows the seeded
-    // marker line AND its INFO level token. 45s budget covers the first render's
-    // file read.
+    // `^P logs` until the Logs pane shows the seeded marker line AND its INFO
+    // level token. Was the `L` tab key until crisp B5 §2.5 demoted it. 45s budget
+    // covers the first render's file read.
     let deadline = Instant::now() + Duration::from_secs(45);
     let pane = session
-        .switch_tab_until("L", deadline, |c| {
+        .go_to_screen_until("logs", deadline, |c| {
             hangar_chrome_visible(c) && c.contains(LOGS_TRIPWIRE_MARKER) && c.contains("INFO")
         })
         .unwrap_or_else(|| {

@@ -1692,6 +1692,10 @@ pub enum NavIntent {
         /// The selected entity's kind tag (e.g. `"issue"`).
         kind: String,
     },
+    /// Switch to a screen the palette's `Go:` family named (crisp B5 §2.5). The
+    /// replacement for the nine tab hotkeys the strip shrink took away, so it
+    /// behaves like one: switch and clear the modal-restore bookkeeping.
+    GoToScreen(Screen),
 }
 
 /// Render the active screen's body between the chrome top bar (row 0) and footer
@@ -1844,12 +1848,20 @@ fn render_prior(buf: &mut WireBuffer, w: u16, h: u16, prior: &Screen, states: &S
 /// The help overlay's lines: every screen the router reaches plus the keys an
 /// operator reaches for most on each. Kept as data so a test can pin it against
 /// the router's key set, and so a new screen shows up here or fails the build.
+///
+/// TWO screen blocks since crisp B5 §2.5. `screens` is the seven-tab strip, one
+/// `<key> <label>` pair each (`help_overlay_names_every_router_key` pins that
+/// every surviving router key appears). `more` is the nine demoted screens, which
+/// have no key at all: they are the words to type after `^P`, and both blocks are
+/// exempt from `help_overlay_screen_keys_are_not_router_keys` because their
+/// tokens are destinations, not screen-local bindings.
 pub const HELP_LINES: &[&str] = &[
     "Hangar — keys",
     "",
-    "screens   1 issues  2 task  3 skills  4 autopilots  K kanban  B boards",
-    "          C control  F fleet  S squads  P profiles  A agents  D daemon",
-    "          U usage  L logs  I inbox  , settings  ^P search",
+    "screens   1 issues  2 task  K runs  B boards  I inbox  A agents  , settings",
+    "          ^P search  q back to ainb home",
+    "more      ^P then the word:  skills  autopilots  daemon  usage  logs",
+    "                            control  fleet  squads  profiles",
     "",
     "issues    j/k move  enter open  c create  s sub-issue  a assign  d done",
     "          x delete  y timeline  / filter  f facets  tab chips",
@@ -1872,13 +1884,20 @@ fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     use ainb_plugin_sdk::{Cell, Color, Coord};
     const GOLD: Color = Color::rgb(255, 215, 0);
     let lines = HELP_LINES;
-    let y0 = h.saturating_sub(u16::try_from(lines.len()).unwrap_or(0)) / 2;
+    // The table centres inside the BODY band (row 0 is the tab strip, the last
+    // row is the footer) and never above it. Centring over the whole area was
+    // fine while the table was a row shorter than the band: crisp B5 added a
+    // `more` block, `y0` went to 0, and the title painted THROUGH the tab strip
+    // (`[BHangar — keysnbox`). Clamped rather than re-tuned, so the next line
+    // added clips the tail instead of eating the chrome.
+    let band = h.saturating_sub(2);
+    let y0 = 1 + band.saturating_sub(u16::try_from(lines.len()).unwrap_or(0)) / 2;
     for (i, line) in lines.iter().enumerate() {
         let y = y0 + u16::try_from(i).unwrap_or(0);
         // A short pane shows the head of the table and drops the tail; the
         // host clamps off-viewport cells silently, so without this the top
         // rows are the only ones lost.
-        if y >= h {
+        if y >= h.saturating_sub(1) {
             break;
         }
         let line_w = u16::try_from(line.chars().count()).unwrap_or(u16::MAX);
@@ -3039,6 +3058,11 @@ fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<Na
             states.command_palette = None;
             return Some(NavIntent::NavigateToEntity { screen, id, kind });
         }
+        // Enter on a `Go:` row: switch screen and dismiss the modal.
+        Some(CommandPaletteIntent::GoToScreen(screen)) => {
+            states.command_palette = None;
+            return Some(NavIntent::GoToScreen(screen));
+        }
         // A query edit: queue the search RPC, keep the modal open.
         Some(CommandPaletteIntent::Search(query)) => {
             states.pending_palette_action = Some(PaletteAction::Search(query));
@@ -3117,7 +3141,10 @@ mod help_overlay_tests {
         for line in HELP_LINES {
             let first = line.split_whitespace().next().unwrap_or_default();
             if !line.starts_with(' ') {
-                in_screens = first == "screens";
+                // `more` (crisp B5) is a screen block like `screens`: its tokens
+                // are destinations to type after `^P`, not `<key> <label>` pairs,
+                // and its words collide with the section names by design.
+                in_screens = matches!(first, "screens" | "more");
             }
             if in_screens || first.is_empty() || first == "Hangar" || line.starts_with("esc") {
                 continue;
@@ -3161,7 +3188,9 @@ mod help_overlay_tests {
         for line in HELP_LINES {
             let mut tokens = line.split_whitespace().peekable();
             if let Some(first) = tokens.peek() {
-                if *first == "screens" {
+                // `more` joins `screens` as a destination block (crisp B5 §2.5):
+                // its words are what you type after `^P`, not keys a screen binds.
+                if matches!(*first, "screens" | "more") {
                     in_screens = true;
                 } else if !line.starts_with(' ') && !first.is_empty() {
                     in_screens = false;
@@ -3189,7 +3218,7 @@ mod help_overlay_tests {
     }
 
     /// A pane shorter than the table paints its first rows (the title and the
-    /// global keys) inside the viewport and nothing below it, instead of
+    /// global keys) inside the BODY BAND and nothing below it, instead of
     /// centring the block so the rows that survive are the middle ones.
     #[test]
     fn help_overlay_clips_to_a_short_pane_from_the_top() {
@@ -3201,25 +3230,83 @@ mod help_overlay_tests {
             rows.iter().all(|&y| y < h),
             "painted below the viewport: {rows:?}"
         );
-        // Blank separator lines paint no cells, so count the non-blank head.
-        let painted_head =
-            HELP_LINES[..usize::from(h)].iter().filter(|l| !l.trim().is_empty()).count();
+        // The band is rows `1..h-1`; blank separators paint no cells, so count
+        // the non-blank head of what fits in it.
+        let band = usize::from(h) - 2;
+        let painted_head = HELP_LINES[..band].iter().filter(|l| !l.trim().is_empty()).count();
         assert_eq!(
             rows.len(),
             painted_head,
-            "the first {h} lines land, one per row"
+            "the first {band} lines land, one per row"
         );
         let first: String = buf
             .cells
             .iter()
-            .filter(|(c, _)| c.y == 0)
+            .filter(|(c, _)| c.y == 1)
             .map(|(_, cell)| cell.symbol.clone())
             .collect();
         assert_eq!(
             first.trim(),
             HELP_LINES[0].trim(),
-            "row 0 is the table's first line"
+            "row 1 (the top of the band) is the table's first line"
         );
+    }
+
+    /// COVERAGE: the `more` block names every screen in `GO_SCREENS`.
+    ///
+    /// It is the third copy of the demoted set and the only hand-written one —
+    /// Settings renders straight off `GO_SCREENS` and the palette rows ARE
+    /// `GO_SCREENS`. Both structural help guards deliberately SKIP this block
+    /// (its tokens are destinations, not screen-local keys), which left it the
+    /// one copy nothing checked: demote a tenth screen and the help would simply
+    /// not mention it.
+    #[test]
+    fn the_help_more_block_names_every_demoted_screen() {
+        use crate::screen::command_palette::GO_SCREENS;
+        let tokens: Vec<&str> = HELP_LINES.iter().flat_map(|l| l.split_whitespace()).collect();
+        for (word, screen) in GO_SCREENS {
+            assert!(
+                tokens.contains(&word),
+                "help `more` block omits `{word}` ({screen:?})"
+            );
+        }
+    }
+
+    /// The overlay never paints on the chrome: row 0 is the tab strip and the
+    /// last row is the footer, and both stay legible under `?`.
+    ///
+    /// Found by looking at an 80×24 pane, not by an assertion: crisp B5 grew the
+    /// table by a `more` block, the whole-area centring put `y0` at 0, and the
+    /// title rendered THROUGH the strip as `[BHangar — keysnbox`. Checked at the
+    /// floor and one row either side of it, where the arithmetic turns over.
+    #[test]
+    fn help_overlay_never_paints_over_the_tab_strip_or_the_footer() {
+        for h in [10, 23, 24, 25, 40] {
+            let w = 80;
+            let mut buf = ainb_plugin_sdk::WireBuffer::new(w, h);
+            super::render_help(&mut buf, w, h);
+            for (coord, cell) in &buf.cells {
+                assert!(
+                    coord.y > 0 && coord.y < h - 1,
+                    "at {w}x{h} the overlay painted {:?} on chrome row {}",
+                    cell.symbol,
+                    coord.y
+                );
+            }
+        }
+    }
+
+    /// The whole table fits the body band at the 80×24 floor, so no row of it is
+    /// clipped on the smallest supported terminal.
+    #[test]
+    fn help_overlay_fits_the_eighty_by_twenty_four_floor() {
+        assert!(
+            HELP_LINES.len() <= 22,
+            "the help table is {} lines; the 80x24 body band holds 22",
+            HELP_LINES.len()
+        );
+        let longest = HELP_LINES.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert!(longest <= 80, "the widest help line is {longest} columns");
     }
 }
 

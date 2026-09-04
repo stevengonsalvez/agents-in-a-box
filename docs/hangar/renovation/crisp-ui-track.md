@@ -274,7 +274,9 @@ before (16 tabs, 138 cols, wraps under 138, never fits 80):
 [1]Issues [2]Task [3]Skills [4]Autopilots [K]Kanban [B]Boards [D]Daemon [U]Usage
 [L]Logs [I]Inbox [C]Control [F]Fleet [S]Squads [P]Profiles [A]Agents [,]Settings
 
-after (7 tabs, 74 cols, fits the 80x24 floor with the right cluster intact):
+after (7 tabs, 72 cols of ink / cursor at 74; every label fits the 80x24 floor,
+the right cluster yields until 93 - measured on the shipped strip, and pinned by
+`the_seven_tab_strip_fits_the_eighty_column_floor`):
 [1]Issues  [2]Task  [K]Runs  [B]Boards  [I]Inbox  [A]Agents  [,]Settings   ⬡⬡ 2 working  default ● online
 ```
 

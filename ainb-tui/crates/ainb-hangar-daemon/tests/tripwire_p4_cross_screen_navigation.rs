@@ -1,4 +1,5 @@
-//! P4.9 — cross-screen navigation tripwire: `1` → `4` → `,` → `1` walks the tabs.
+//! P4.9 — cross-screen navigation tripwire: `1` → `^P skills` → `,` → `1` walks
+//! the surviving tabs AND the palette route that replaced a demoted one.
 //!
 //! The flakiest of the six (per the P4.9 risk register), so each hop polls the
 //! pane with a deadline. Each step pairs a POSITIVE marker for the destination
@@ -20,9 +21,9 @@ use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 /// A single lone keypress can be dropped on a loaded CI runner (the first frames
 /// after a switch race the snapshot fetch), so — like the issue-list and
 /// autopilots tripwires' [`switch_tab_until`] — the key is RE-SENT every ~1.5s
-/// until the marker appears or the deadline passes. The nav keys here (`1`/`3`/
-/// `,`) are idempotent tab switches, so re-pressing on the destination is a
-/// harmless no-op. This replaces a brittle send-once + 12s-poll that flaked on
+/// until the marker appears or the deadline passes. The nav keys here (`1`/`,`)
+/// are idempotent tab switches, so re-pressing on the destination is a harmless
+/// no-op. This replaces a brittle send-once + 12s-poll that flaked on
 /// the loaded `hangar-e2e (ubuntu-latest)` leg once the board redesign made the
 /// per-screen render heavier.
 fn walk_to_screen(sess: &TuiSession, key: &str, positive: &str, forbidden: &str) -> String {
@@ -61,8 +62,21 @@ fn cross_screen_navigation_walks_tabs() {
         "issue counts missing:\n{issues}"
     );
 
-    // 3 → skills (positive: seeded skill; forbidden: issue count).
-    let skills = walk_to_screen(&sess, "3", "commit", "Todo (3)");
+    // ^P skills → skills (positive: seeded skill; forbidden: issue count). The
+    // `3` tab key was the hop here until crisp B5 §2.5 demoted it, which makes
+    // this walk the one tripwire that crosses BOTH nav routes in one run.
+    let skills = sess
+        .go_to_screen_until(
+            "skills",
+            Instant::now() + Duration::from_secs(30 * common::budget_scale()),
+            |c| c.contains("commit") && !c.contains("Todo (3)"),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "`^P skills` never rendered the skill manager:\n{}",
+                sess.capture()
+            )
+        });
     assert!(skills.contains("Used"), "skills chip missing:\n{skills}");
 
     // , → settings (positive: Daemon; forbidden: skills chip `Unused`).

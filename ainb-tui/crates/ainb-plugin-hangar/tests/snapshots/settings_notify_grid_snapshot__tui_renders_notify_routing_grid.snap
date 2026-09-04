@@ -1,5 +1,6 @@
 ---
 source: crates/ainb-plugin-hangar/tests/settings_notify_grid_snapshot.rs
+assertion_line: 89
 expression: map
 ---
   Daemon
@@ -16,3 +17,9 @@ expression: map
      error         ○       ○       ●       ○
      waiting       ○       ○       ○       ○
     ] [ kind · h/l channel · space toggle
+  More screens
+    off the tab strip, reach with ^P
+    ^P skills     Skills
+    ^P autopilots Autopilots
+    ^P daemon     Daemon
+    ^P usage      Usage
