@@ -146,6 +146,15 @@ async fn an_acp_task_runs_to_done_with_no_process_and_no_tmux() {
     assert_no_process_executor_trace(&row, &marker, task_id);
 }
 
+/// Rows in the windowed tail read the usage row must stay OUT of.
+///
+/// A duplicate of `acp_task::PR_SCAN_ROWS` by necessity: it is private, and an
+/// integration test is a separate crate that cannot see it. Duplicated as a
+/// named constant rather than a bare `64` so the two are greppable together,
+/// and the chatter below is sized at twice it so a widened window does not
+/// silently stop this test from falsifying anything.
+const TAIL_WINDOW_ROWS: i64 = 64;
+
 /// Spine A7: the `acp.usage` rows a run writes reach `task_usage`, the ledger
 /// the usage dashboard rolls up.
 ///
@@ -154,11 +163,11 @@ async fn an_acp_task_runs_to_done_with_no_process_and_no_tmux() {
 /// as `acp.usage` rows, and the finalize reads the LAST one back. Before A7 the
 /// run finished with `usage: None` and this table stayed empty.
 ///
-/// The script puts 70 rows of agent chatter after the final report on purpose,
-/// and the test COUNTS them: that is what buries the accounting row past the
-/// 64-row tail window, and it is what makes "the read cannot be a windowed tail
-/// scan" a claim this test would catch rather than one only the store test
-/// falsifies.
+/// The script puts twice [`TAIL_WINDOW_ROWS`] of agent chatter after the final
+/// report on purpose, and the test COUNTS the rows it actually became: that is
+/// what buries the accounting row past the tail window, and it is what makes
+/// "the read cannot be a windowed tail scan" a claim this test would catch
+/// rather than one only the store test falsifies.
 #[tokio::test]
 async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
     if !tripwire_support::tmux_available() {
@@ -174,16 +183,21 @@ async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
     // occupancy (not a delta) and `cost` is cumulative, so a reader that summed
     // the rows would bill 5 400 tokens and $0.05 for this turn.
     //
-    // Then 70 chatter updates AFTER the last report, ALTERNATING message and
-    // thought. The alternation is load-bearing, not decoration: the reducer
-    // coalesces contiguous same-kind text, so 70 `agent_message_chunk` lines
-    // would persist as ONE row and bury nothing. A kind switch flushes the
-    // pending chunk, so this is 70 rows, and the accounting row ends up out of
-    // reach of the 64-row tail window. That is what makes the daemon's indexed
-    // read falsifiable end to end: swap it for a filter over
-    // `list_by_session_tail` and the usage assertion below must go red.
+    // Then chatter AFTER the last report, ALTERNATING message and thought. The
+    // alternation is load-bearing, not decoration: the reducer coalesces
+    // contiguous same-kind text and only flushes on a kind change or at 4 KiB,
+    // so N `agent_message_chunk` lines of a few bytes each would persist as ONE
+    // row and bury nothing. A kind switch flushes the pending chunk, so this is
+    // one row per line, and the accounting row ends up out of reach of the tail
+    // window. That is what makes the daemon's indexed read falsifiable end to
+    // end: swap it for a filter over `list_by_session_tail` and the usage
+    // assertion below must go red.
+    //
+    // TWICE the window, not a handful over it, so widening `PR_SCAN_ROWS` does
+    // not quietly bring the row back into reach and leave this test green on a
+    // read it no longer falsifies.
     let script = home.path().join("turn.ndjson");
-    let chatter = (0..70).map(|index| {
+    let chatter = (0..2 * TAIL_WINDOW_ROWS).map(|index| {
         let kind = if index % 2 == 0 {
             "agent_message_chunk"
         } else {
@@ -238,21 +252,27 @@ async fn an_acp_run_records_its_tokens_and_cost_in_the_usage_ledger() {
             .fetch_one(&pool)
             .await
             .expect("a session under the task scope");
+    // The event type is asked of the enum that MINTS it, the same call the
+    // production read makes, so a rename cannot leave this counting nothing and
+    // reporting a burial that is not there.
+    let usage_type = ainb_acp::reducer::ChunkKind::Usage.event_type();
     let buried_under: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM fleet_provider_event WHERE session_key = ? \
            AND ingest_order > (SELECT MAX(ingest_order) FROM fleet_provider_event \
-                               WHERE session_key = ? AND event_type = 'acp.usage')",
+                               WHERE session_key = ? AND event_type = ?)",
     )
     .bind(&session_key)
     .bind(&session_key)
+    .bind(usage_type)
     .fetch_one(&pool)
     .await
     .expect("count the transcript rows above the last usage row");
-    assert!(
-        buried_under >= 64,
-        "the accounting row must sit past the 64-row tail window, or a \
-         list_by_session_tail filter would satisfy this test too; only \
-         {buried_under} rows follow it"
+    assert_eq!(
+        buried_under,
+        2 * TAIL_WINDOW_ROWS,
+        "every chatter update must have become its own row; below \
+         {TAIL_WINDOW_ROWS} a list_by_session_tail filter would satisfy this \
+         test too"
     );
 
     let usage = sqlx::query(
