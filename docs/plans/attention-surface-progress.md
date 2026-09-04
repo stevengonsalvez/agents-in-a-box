@@ -114,8 +114,8 @@ recreate the duplication this epic is deleting.
 | # | Phase | State |
 |---|---|---|
 | 0 | Baseline, log, decisions | done |
-| 1 | Chips on session rows | pending |
-| 2 | Attention merge (`AttentionRow` view model) | pending |
+| 1 | Chips on session rows | done |
+| 2 | Attention merge (`AttentionRow` view model) | done |
 | 3 | Right-pane tab strip | pending |
 | 4 | Answering from the `ask` tab | pending |
 | 5 | Delete the host Fleet panel | pending |
@@ -124,6 +124,38 @@ recreate the duplication this epic is deleting.
 | 8 | Broadcast + rehoming, delete `t` start form | pending |
 | 9 | ATC lite audit + daemon retry sweep | pending |
 | 10 | ACP chat repair | pending |
+
+## Deviations from the spec, with reasons
+
+Each is a place the spec asked for something the tree cannot currently
+express. None is a shortcut around work.
+
+| Spec line | What shipped | Why |
+|---|---|---|
+| Insta: chip strip "at 80 and 100 columns, both themes" | 80, 100 and 42 columns; one palette | `ui_preferences.theme` is persisted config that **no component reads** — the palette is hardcoded consts in every renderer. There is one rendered theme to snapshot. 42 is added because it is the real default sidebar width and the only one that exercises the name-truncation path |
+| Left-pane mock titled `Sessions · 2 need you` | `Workspaces (4) · 2 need you` | `(4)` is the workspace count and the filter's feedback loop; calling the panel "Sessions" while showing a workspace count is worse than keeping the noun. The badge — the part the spec is actually specifying — is verbatim |
+| Header carries the elsewhere count | Own trailing row, `N waiting elsewhere` | At the default 38-column sidebar a fourth title item truncated mid-word to `1 el`. Proven in a real tmux capture, then moved |
+| "Hangar daemon down → one banner line on the sessions header, not two" | Deferred to phase 5 | "Not two" is only meaningful once the host Fleet panel (the second banner) is deleted. Until then the daemon-down state is carried by the dimmed chip and its reason, which is the part that is not deferrable |
+| ERR chip from a local producer | Wired and unit-tested; reachable from the daemon (`error` / `escalation`) and from `SessionStatus::Error` | No local hook event classifies as an error — `classify_attention` has three outcomes and none of them is one. Inventing a fourth would be a producer the spec did not ask for |
+
+## Pre-existing breakage fixed on the way
+
+`cargo test -p ainb --lib` failed **9 tests on `main` (296065a3)** whenever run
+from a pane `ainb` itself had spawned; green on a clean CI runner. Verified by
+running the baseline in a throwaway worktree: identical 9 failures.
+
+One root, eight cascades. `export_env_bridge` clears any variable still holding
+the parent's exact planted value before publishing its own, and
+`AINB_BRIDGED_VARS` is how it recognises one. A pane spawned by the TUI inherits
+`AINB_FLEET_STATE_STALE_MS=0` as a parent plant, so the "user override" the test
+sets is stripped and re-planted as the bridge's own — the legacy rung it asserts
+on becomes unreachable. It then panicked before its cleanup, leaving the
+process-global snapshot and the `BRIDGED` set installed; the next test read a
+self-planted `AINB_HEADROOM_PORT` as unset, panicked holding `ENV_LOCK`, and
+poisoned it for six more.
+
+Fixed with an RAII guard covering `AINB_BRIDGED_VARS` and releasing on unwind
+(`43561551`). 2150/2150 lib tests now pass, parallel and single-threaded.
 
 ## Published pages
 
