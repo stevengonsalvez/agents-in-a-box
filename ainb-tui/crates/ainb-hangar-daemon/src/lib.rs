@@ -217,6 +217,10 @@ pub mod profile;
 /// transcript buffer. Scoped to tasks bound to an issue (a `NULL`-issue chat task
 /// is skipped); best-effort (a write fault is logged, never blocks the task FSM).
 pub mod progress_comment;
+/// The daemon-wide retry sweep: LLM-free auto-`continue` of transient API
+/// errors, capped and escalated through the same ledger and attention pipeline
+/// ATC uses, but needing no ATC instance to run.
+pub mod retry_sweep;
 /// The daemon's `UnixListener` JSON-RPC server (P4.10).
 ///
 /// Binds `{hangar_home}/hangar.sock`, serves `workspace/subscribe`, `ping`, and
@@ -947,6 +951,20 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             Err(error) => tracing::error!(%error, "could not reset the copilot guardrail at boot"),
         }
 
+        // The retry sweep's reserved `atc_instance`, registered before anything
+        // can write its ledger. `atc_retry.instance_name` is a foreign key onto
+        // `atc_instance(name)`, so without this row every continue the sweep
+        // records would be rejected by SQLite, and the sweep would send
+        // `continue` it could not count. Idempotent per boot; a failure here
+        // disables the sweep for this run rather than the daemon.
+        let retry_sweep_ready = match crate::retry_sweep::ensure_instance(store.pool()).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(%error, "could not register the retry sweep instance; sweep disabled");
+                false
+            }
+        };
+
         // The ACP agent pool. Installed BEFORE the socket accepts a connection so
         // `fleet/acp_session_create` can never answer "no pool" on a daemon that
         // has one; nothing is spawned until the first prompt reaches it.
@@ -1181,6 +1199,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         let _atc_heartbeat =
             crate::atc::AtcHeartbeatScheduler::spawn(store.pool().clone(), broker.sink());
         tracing::info!("ATC heartbeat cron spawned");
+
+        // The retry sweep: the same ERR cap and the same escalation path as the
+        // heartbeat above, minus the ATC. Most hosts run no ATC instance at all,
+        // so until now a session that hit a 429 sat on an ERR chip until a human
+        // typed `continue` at it. The sweep stands down for its whole pass while
+        // an enabled ATC instance exists, so the two never type into one pane.
+        // Non-fatal like the scheduler; the handle is dropped (process exit
+        // tears the task down).
+        let _retry_sweep = retry_sweep_ready
+            .then(|| crate::retry_sweep::spawn(store.pool().clone(), broker.sink()));
+        tracing::info!(enabled = retry_sweep_ready, "retry sweep spawned");
 
         // e38.18: the webhook ingress. OPT-IN — it only binds when
         // `$AINB_HANGAR_WEBHOOK_PORT` is set (an untrusted HTTP surface must not come

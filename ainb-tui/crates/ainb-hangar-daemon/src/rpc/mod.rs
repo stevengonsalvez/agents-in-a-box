@@ -4008,7 +4008,14 @@ async fn rejected_broadcast_receipt(
     Ok(action_receipt_wire(&row))
 }
 
-async fn execute_fleet_action(
+/// Execute one Fleet action end to end: idempotency claim, optimistic-version
+/// and request-fingerprint validation, capability gate, provider delivery, and
+/// the durable receipt.
+///
+/// `pub(crate)` for the daemon's own senders (the message bus legs, the retry
+/// sweep). Every guard above lives here, so a second send path inside the
+/// daemon is a second, weaker set of guards.
+pub(crate) async fn execute_fleet_action(
     pool: &SqlitePool,
     params: ainb_hangar_proto::fleet::FleetActionParams,
     idempotency_key: Option<String>,
@@ -12462,6 +12469,12 @@ async fn handle_atc_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcErro
         .await
         .map_err(|e| store_err(&e))?
         .into_iter()
+        // The retry sweep books its ledger against a reserved row in this same
+        // table (`atc_retry` has a foreign key onto it). It is not an ATC an
+        // operator set up, has no instance directory on disk, and every `atc`
+        // verb aimed at it would fail on the missing `meta.json`, so the
+        // registry an operator reads must not offer it as one.
+        .filter(|r| r.name != crate::retry_sweep::SWEEP_INSTANCE)
         .map(|r| ainb_hangar_proto::snapshots::AtcInstanceWire {
             name: r.name,
             cwd: r.cwd,

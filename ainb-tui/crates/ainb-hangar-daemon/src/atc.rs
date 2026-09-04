@@ -39,8 +39,9 @@ const NO_WORK_REPOLL: Duration = Duration::from_secs(60);
 /// cleared. Long enough to outlive the ordinary err → continue → working → err
 /// cycle (so a session failing repeatedly still accumulates toward its cap),
 /// short enough that a genuinely recovered session is not carrying a stale budget
-/// hours later.
-const RETRY_RESET_GRACE_MS: i64 = 30 * 60 * 1000;
+/// hours later. Shared with the daemon-wide retry sweep, which applies the same
+/// recovery rule to its own ledger namespace.
+pub(crate) const RETRY_RESET_GRACE_MS: i64 = 30 * 60 * 1000;
 
 /// Wall-clock ceiling on one delegated beat. The beat shells `fleet needs` and
 /// drives tmux, so a wedged tmux server would otherwise park this future forever
