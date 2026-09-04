@@ -326,8 +326,14 @@ pub fn render_command_palette(
     // pane under 40x8 makes it so. Pre-existing, but the palette went from an
     // optional extra to the only route to nine screens, so a panic here is a
     // navigation dead end rather than a missing convenience.
-    let modal_w = (area_w * 7 / 10).max(40).min(area_w);
-    let modal_h = (area_h * 6 / 10).max(8).min(area_h);
+    //
+    // The intermediate is `u32` for the same reason: `area_w * 7` overflows a
+    // `u16` above 9362 columns. Unreachable on a real terminal, but "this
+    // function does not panic" is worth being total rather than nearly so.
+    let scaled =
+        |v: u16, num: u32, den: u32| u16::try_from(u32::from(v) * num / den).unwrap_or(u16::MAX);
+    let modal_w = scaled(area_w, 7, 10).max(40).min(area_w);
+    let modal_h = scaled(area_h, 6, 10).max(8).min(area_h);
     let x0 = (area_w.saturating_sub(modal_w)) / 2;
     let y0 = (area_h.saturating_sub(modal_h)) / 2;
 
@@ -720,7 +726,19 @@ mod tests {
     #[test]
     fn a_pane_below_the_modal_minimum_renders_instead_of_panicking() {
         let s = CommandPaletteState::new();
-        for (w, h) in [(1, 1), (20, 4), (39, 7), (40, 8), (80, 24)] {
+        // Both ends: under the modal's own 40x8 minimum, where `clamp` panicked,
+        // and past 9362 columns / 10922 rows, where the `u16` scale multiply
+        // overflowed. One axis at a time — a pane huge on both would paint tens
+        // of millions of cells and the test would OOM rather than assert.
+        for (w, h) in [
+            (1, 1),
+            (20, 4),
+            (39, 7),
+            (40, 8),
+            (80, 24),
+            (9400, 24),
+            (80, 11000),
+        ] {
             let mut buf = WireBuffer::new(w, h);
             render_command_palette(&mut buf, w, h, &s);
             for (coord, _) in &buf.cells {
