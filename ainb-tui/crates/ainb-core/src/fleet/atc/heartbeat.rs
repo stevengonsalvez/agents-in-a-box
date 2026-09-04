@@ -452,7 +452,7 @@ mod tests {
         // counter must be cleared so a fresh error gets a fresh budget.
         let err = vec![err_row("s1", "tmux_a", "overloaded")];
         let mut state = HeartbeatState::default();
-        build_heartbeat_enforcing_cap(&err, 1, 1, &mut state);
+        let _ = build_heartbeat_enforcing_cap(&err, 1, 1, &mut state);
         assert!(state.continue_counts.contains_key("s1"));
 
         // Quiet fleet → counter cleared.

@@ -10,7 +10,6 @@ use crate::app::{
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
-use ainb_plugin_hangar::screen::fleet::selected_approval_action;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 use tracing::info;
