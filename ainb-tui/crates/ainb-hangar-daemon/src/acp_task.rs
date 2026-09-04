@@ -1023,10 +1023,12 @@ mod tests {
              take the tokens down with it"
         );
 
-        // Unreachable: an overflowing literal fails the NUMBER parse, which
-        // `Cost`'s `DefaultOnError` does not recover from, so the whole update
-        // is rejected and no infinity (and hence no NaN) can be built from a
-        // payload.
+        // Unreachable, and NOT because of `Cost`'s `DefaultOnError`.
+        // `SessionUpdate` is internally tagged, so serde buffers the whole map
+        // before it can dispatch on `sessionUpdate`, and an overflowing literal
+        // fails the NUMBER parse during that buffering: the update is rejected
+        // whole, upstream of any field-level recovery. So no infinity (and
+        // hence no NaN) can be built from a payload.
         for overflow in ["1e999", "-1e999"] {
             let error = serde_json::from_str::<SessionUpdate>(&payload(overflow))
                 .expect_err("serde_json must still reject an overflowing amount");
