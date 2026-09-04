@@ -17,7 +17,6 @@ use ratatui::{
 
 use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
-use crate::fleet::atc::SupervisorMode;
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
 use crate::fleet::read::{CurrentStateIndex, EvidenceCensus, EvidenceHealth, ProbeIndex};
@@ -96,19 +95,18 @@ pub struct Snapshot {
 }
 
 /// What the Daemons screen needs to know about the ATC supervisor beyond its
-/// runtime row: which mode owns the fleet, and which brain full mode would use.
+/// runtime row: which brain its heartbeat would use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtcModeView {
     pub name: String,
-    pub mode: SupervisorMode,
     pub provider: String,
-    /// The mode help, rendered once by the collector.
+    /// The help, rendered once by the collector.
     ///
     /// `mode_help` rebuilds the whole provider registry (five `Arc`s, a HashMap,
-    /// a Vec) and allocates seven `String`s. Calling it from `render` ran that
+    /// a Vec) and allocates several `String`s. Calling it from `render` ran that
     /// every frame while the ATC row was selected, in the file whose entire
     /// design is about keeping work off the UI thread. It is a pure function of
-    /// (mode, provider), so it belongs on the snapshot with everything else.
+    /// the provider, so it belongs on the snapshot with everything else.
     pub help: Vec<String>,
 }
 
@@ -194,10 +192,6 @@ struct RowFacts {
     instance: Option<String>,
     /// ATC has an OS timer installed for an instance that does not exist.
     orphan: bool,
-    /// Which supervisor mode owns the fleet, when it is unambiguous. Captured
-    /// with the rest of the row so the mode entry cannot change under the
-    /// cursor mid-keystroke either.
-    mode: Option<SupervisorMode>,
 }
 
 impl RowFacts {
@@ -205,9 +199,6 @@ impl RowFacts {
         Self {
             instance: status.atc_instance.clone(),
             orphan: status.scheduler_orphan.is_some(),
-            // Filled in by `open_menu`, which has the snapshot; a status row
-            // alone does not carry the supervisor mode.
-            mode: None,
         }
     }
 
@@ -240,7 +231,7 @@ impl ActionMenu {
         // documents, and a second copy here is a rule that can drift on one
         // surface while the other keeps the old answer. `offers` still gates
         // every verb it returns, so an unprovisioned row is filtered as before.
-        let mut entries: Vec<MenuEntry> = Action::for_kind_in_mode(self.kind, self.row.mode)
+        let mut entries: Vec<MenuEntry> = Action::for_kind(self.kind)
             .into_iter()
             .filter(|action| self.offers(*action))
             .map(MenuEntry::Act)
@@ -248,19 +239,7 @@ impl ActionMenu {
         // Same rule as `offers`: with nothing provisioned there is no tmux
         // session, so attaching could only fail. `provision` is the entry that
         // gets you one.
-        //
-        // LITE has no session either, and that is by design, not a fault to
-        // repair: `fleet atc setup --mode lite` spawns no brain at all, because
-        // a session nothing ever nudges would burn a slot and lie to every
-        // liveness surface. So the entry could only ever attach a session that
-        // was never created, which is the failure this whole method exists to
-        // keep off the menu. An UNKNOWN mode still offers it: `None` means the
-        // meta would not parse or several instances made it ambiguous, and
-        // hiding a working attach on a guess is the worse error.
-        if self.kind == DaemonKind::Atc
-            && !self.row.unprovisioned()
-            && self.row.mode != Some(SupervisorMode::Lite)
-        {
+        if self.kind == DaemonKind::Atc && !self.row.unprovisioned() {
             entries.push(MenuEntry::OpenMissionControl);
         }
         if has_error {
@@ -376,24 +355,13 @@ impl DaemonsState {
     /// Open the action menu on the selected row. No-op before the first
     /// snapshot lands — a menu over an empty table has nothing to act on.
     pub fn open_menu(&mut self) {
-        let atc_mode = self.atc_mode();
         if let Some(status) = self.selected_status() {
             self.menu = Some(ActionMenu {
                 kind: status.kind,
                 cursor: 0,
-                row: RowFacts {
-                    mode: atc_mode,
-                    ..RowFacts::of(&status)
-                },
+                row: RowFacts::of(&status),
             });
         }
-    }
-
-    /// The ATC supervisor mode from the latest snapshot, when unambiguous.
-    fn atc_mode(&mut self) -> Option<SupervisorMode> {
-        let shared = self.shared();
-        let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
-        guard.atc.as_ref().map(|a| a.mode)
     }
 
     /// Close every overlay at once — for a key that leaves the screen outright.
@@ -791,10 +759,9 @@ fn collect_atc_mode() -> Option<AtcModeView> {
     };
     let paths = AtcPaths::under_root(&root, name);
     let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta).ok()?).ok()?;
-    let help = crate::fleet::atc::mode_help(meta.mode, &meta.provider);
+    let help = crate::fleet::atc::mode_help(&meta.provider);
     Some(AtcModeView {
         name: meta.name,
-        mode: meta.mode,
         provider: meta.provider,
         help,
     })
@@ -1520,13 +1487,7 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState, atc: Optio
             Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         ]
     } else {
-        let enter_hint = match atc {
-            Some(a) => format!(
-                " start / restart / stop / switch to {} mode  ",
-                a.mode.other().id()
-            ),
-            None => " start / restart / stop  ".to_string(),
-        };
+        let enter_hint = " start / restart / stop  ".to_string();
         vec![
             Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
@@ -1630,20 +1591,19 @@ mod tests {
         }
     }
 
-    fn atc_view(mode: SupervisorMode, provider: &str) -> AtcModeView {
+    fn atc_view(provider: &str) -> AtcModeView {
         AtcModeView {
             name: "tower".to_string(),
-            mode,
             provider: provider.to_string(),
-            help: crate::fleet::atc::mode_help(mode, provider),
+            help: crate::fleet::atc::mode_help(provider),
         }
     }
 
     /// A seeded state whose ATC supervisor mode is known — the shape the mode
     /// toggle and the inline help both read.
-    fn seeded_state_with_atc(rows: Vec<DaemonStatus>, mode: SupervisorMode) -> DaemonsState {
+    fn seeded_state_with_atc(rows: Vec<DaemonStatus>) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
-            atc: Some(atc_view(mode, "claude")),
+            atc: Some(atc_view("claude")),
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
@@ -1658,12 +1618,9 @@ mod tests {
 
     /// A seeded state carrying BOTH the ATC mode and hook health, for the
     /// layout-budget tests.
-    fn seeded_state_with_atc_and_hooks(
-        rows: Vec<DaemonStatus>,
-        mode: SupervisorMode,
-    ) -> DaemonsState {
+    fn seeded_state_with_atc_and_hooks(rows: Vec<DaemonStatus>) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
-            atc: Some(atc_view(mode, "claude")),
+            atc: Some(atc_view("claude")),
             rows,
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health()),
@@ -1683,104 +1640,11 @@ mod tests {
     // ── Supervisor mode toggle ──────────────────────────────────────────────
 
     #[test]
-    fn the_atc_menu_offers_only_the_mode_the_fleet_is_not_in() {
-        // Offering both would put "switch to the mode you are already in" on
-        // screen, which reads as a state the fleet might not be in.
-        for (mode, expected, forbidden) in [
-            (SupervisorMode::Full, Action::ModeLite, Action::ModeFull),
-            (SupervisorMode::Lite, Action::ModeFull, Action::ModeLite),
-        ] {
-            let mut state = seeded_state_with_atc(vec![atc_row()], mode);
-            state.open_menu();
-            let menu = state.menu.as_ref().expect("menu opens on the ATC row");
-            let entries = menu.entries(false);
-            assert!(
-                entries.contains(&MenuEntry::Act(expected)),
-                "{} mode must offer {expected:?}: {entries:?}",
-                mode.id()
-            );
-            assert!(
-                !entries.contains(&MenuEntry::Act(forbidden)),
-                "{} mode must not offer {forbidden:?}",
-                mode.id()
-            );
-        }
-    }
-
-    /// The defect the probe fix exists to clear, asserted where it was actually
-    /// visible: the MENU, not the status field the menu reads.
-    ///
-    /// A probe-level assertion on `atc_instance` pins the input; it says nothing
-    /// about the row being usable, which is the thing that was broken. Both
-    /// halves are needed, because either one can be right while the other is not
-    /// (and was: `atc_instance` alone still leaves mission control offered).
-    #[test]
-    fn a_lite_atc_row_offers_the_lifecycle_verbs_but_not_a_session_lite_never_creates() {
-        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Lite);
-        state.open_menu();
-        let entries = state.menu.as_ref().expect("menu opens on the ATC row").entries(false);
-
-        for verb in [Action::Start, Action::Restart, Action::Stop] {
-            assert!(
-                entries.contains(&MenuEntry::Act(verb)),
-                "a provisioned lite row must offer {}: {entries:?}",
-                verb.id()
-            );
-        }
-        assert!(
-            entries.contains(&MenuEntry::Act(Action::ModeFull)),
-            "a lite row must offer the switch out of lite: {entries:?}"
-        );
-        assert!(
-            !entries.contains(&MenuEntry::Act(Action::Provision)),
-            "the instance IS provisioned, and provision refuses: {entries:?}"
-        );
-        // `setup --mode lite` spawns no brain session, so this could only ever
-        // attach one that was never created.
-        assert!(
-            !entries.contains(&MenuEntry::OpenMissionControl),
-            "lite has no mission control to open: {entries:?}"
-        );
-    }
-
-    #[test]
-    fn a_non_atc_row_never_offers_a_mode_switch() {
-        // Mode is an ATC supervisor concept; a bridge has no modes to switch.
-        let mut state = seeded_state_with_atc(
-            vec![status(DaemonKind::Bridge, DaemonState::Running, true, None)],
-            SupervisorMode::Full,
-        );
-        state.open_menu();
-        let menu = state.menu.as_ref().unwrap();
-        for entry in menu.entries(false) {
-            assert!(
-                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
-                "bridge offered a mode switch: {entry:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn no_mode_switch_is_offered_when_the_mode_is_unknown() {
-        // Several instances, or an unreadable meta: nothing here could say WHICH
-        // fleet a switch would act on, and a guessed one is worse than none.
-        let mut state = seeded_state(vec![atc_row()]);
-        state.open_menu();
-        let menu = state.menu.as_ref().unwrap();
-        for entry in menu.entries(false) {
-            assert!(
-                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
-                "offered a switch with no known mode: {entry:?}"
-            );
-        }
-    }
-
-    #[test]
     fn the_open_menu_does_not_reshuffle_when_the_collector_republishes() {
         // The entry list is captured at open. If it re-read the mode per frame,
         // a collect landing mid-keystroke would move the cursor's meaning — you
         // press "switch to lite" and get "stop".
-        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let mut state = seeded_state_with_atc(vec![atc_row()]);
         state.open_menu();
         let before = state.menu.as_ref().unwrap().entries(false);
 
@@ -1788,33 +1652,32 @@ mod tests {
         {
             let shared = state.shared();
             let mut guard = shared.lock().unwrap();
-            guard.atc = Some(atc_view(SupervisorMode::Lite, "claude"));
+            guard.atc = Some(atc_view("claude"));
         }
         let after = state.menu.as_ref().unwrap().entries(false);
         assert_eq!(before, after, "the open menu must not reshuffle");
     }
 
-    #[test]
-    fn the_menu_labels_say_which_mode_they_switch_to() {
-        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
-        state.open_menu();
-        let text = render_to_string(&mut state, 100, 24);
-        assert!(
-            text.contains("switch to lite mode"),
-            "a bare verb id would not say what it does: {text}"
-        );
-    }
+    // ── Inline ATC help ─────────────────────────────────────────────────────
 
-    // ── Inline mode help ────────────────────────────────────────────────────
-
+    /// The help answers the question an operator opens this row with: what does
+    /// this instance do, what does it cost, and do I need one at all.
     #[test]
-    fn selecting_the_atc_row_explains_both_modes_and_names_the_owner() {
-        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+    fn selecting_the_atc_row_says_what_the_instance_does_and_what_it_costs() {
+        let mut state = seeded_state_with_atc(vec![atc_row()]);
         let text = render_to_string(&mut state, 120, 30);
-        assert!(text.contains("full heartbeat"), "current owner: {text}");
-        assert!(text.contains("no LLM"), "lite behaviour: {text}");
-        assert!(text.contains("never answers an ASK"), "lite limits: {text}");
-        assert!(text.contains("spends tokens"), "full limits: {text}");
+        assert!(text.contains("brain: claude"), "the provider: {text}");
+        assert!(
+            text.contains("coordinates the fleet"),
+            "what it does: {text}"
+        );
+        assert!(text.contains("spends tokens"), "what it costs: {text}");
+        // The reason an operator might want NO instance: transient-error
+        // auto-continue is the daemon's now and needs neither one nor an LLM.
+        assert!(
+            text.contains("retry sweep"),
+            "what no longer needs an instance: {text}"
+        );
     }
 
     #[test]
@@ -1822,7 +1685,7 @@ mod tests {
         // One source for both surfaces: a screen and a CLI that describe the
         // modes differently is how an operator switches the wrong way.
         let snapshot = Snapshot {
-            atc: Some(atc_view(SupervisorMode::Lite, "codex")),
+            atc: Some(atc_view("codex")),
             rows: vec![atc_row()],
             collected_at_ms: now_ms(),
             hook_health: None,
@@ -1831,14 +1694,14 @@ mod tests {
         };
         assert_eq!(
             atc_help_lines(&snapshot, 0),
-            crate::fleet::atc::mode_help(SupervisorMode::Lite, "codex")
+            crate::fleet::atc::mode_help("codex")
         );
     }
 
     #[test]
     fn the_help_is_absent_on_every_other_row() {
         let snapshot = Snapshot {
-            atc: Some(atc_view(SupervisorMode::Full, "claude")),
+            atc: Some(atc_view("claude")),
             rows: vec![
                 status(DaemonKind::Bridge, DaemonState::Running, true, None),
                 atc_row(),
@@ -1852,27 +1715,29 @@ mod tests {
         assert!(!atc_help_lines(&snapshot, 1).is_empty(), "atc row");
     }
 
+    /// The ATC-only verbs stay ATC-only. `provision` and `remove-orphan` are
+    /// meaningless on a daemon that has no instance to provision, and offering
+    /// one there is a menu entry that could only ever fail.
     #[test]
-    fn the_mode_switch_is_offered_only_on_a_provisioned_atc_row() {
-        // The footer no longer names individual verbs (it says "actions", since
-        // the entries a row offers depend on its state), so the property lives
-        // in the MENU: the switch appears on a provisioned ATC row and nowhere
-        // else — never on another daemon, never on an unprovisioned ATC.
+    fn the_atc_only_verbs_are_offered_on_no_other_daemon() {
         let bridge = status(DaemonKind::Bridge, DaemonState::Running, true, None);
-        let mut state = seeded_state_with_atc(vec![atc_row(), bridge], SupervisorMode::Full);
+        let mut state = seeded_state_with_atc(vec![atc_row(), bridge]);
 
+        // A PROVISIONED row offers neither: `provision` refuses when one already
+        // exists and `remove-orphan` when there is no orphan. That is `offers`
+        // doing its job, and it is why the property below is about the bridge.
         state.open_menu();
         let on_atc = state.menu.as_ref().unwrap().entries(false);
         assert!(
-            on_atc.contains(&MenuEntry::Act(Action::ModeLite)),
-            "a provisioned full ATC row must offer the lite switch: {on_atc:?}"
+            on_atc.contains(&MenuEntry::Act(Action::Start)),
+            "the ATC row must still offer its lifecycle verbs: {on_atc:?}"
         );
 
         state.close_all_overlays();
         state.move_selection(1);
         state.open_menu();
         let on_bridge = state.menu.as_ref().unwrap().entries(false);
-        for verb in [Action::ModeLite, Action::ModeFull] {
+        for verb in [Action::Provision, Action::RemoveOrphan] {
             assert!(
                 !on_bridge.contains(&MenuEntry::Act(verb)),
                 "the bridge row must not offer {verb:?}: {on_bridge:?}"
@@ -1883,8 +1748,8 @@ mod tests {
     #[test]
     fn the_help_wraps_instead_of_clipping_the_limits_it_exists_to_state() {
         // On 80 columns the longest help line was cut at "…ambiguo", losing the
-        // limit on the screen whose purpose is to inform a switch.
-        let lines = crate::fleet::atc::mode_help(SupervisorMode::Full, "claude");
+        // limit on the screen whose purpose is to inform a decision.
+        let lines = crate::fleet::atc::mode_help("claude");
         let wrapped = wrap_help(&lines, 78);
         assert!(
             wrapped.iter().all(|l| l.chars().count() <= 78),
@@ -1894,9 +1759,11 @@ mod tests {
         // whitespace — the phrase surviving across a line break is the point.
         let joined = wrapped.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
         for phrase in [
-            "never answers an ASK",
-            "no fleet coordination",
+            "coordinates the fleet",
             "spends tokens",
+            // The line an operator deciding whether they need an instance at
+            // all has to see: transient-error auto-continue no longer needs one.
+            "retry sweep, with no instance and no LLM",
         ] {
             assert!(
                 joined.contains(phrase),
@@ -1913,14 +1780,14 @@ mod tests {
     fn the_help_renders_on_a_standard_eighty_by_twentyfour_terminal() {
         // The regression an over-cautious budget introduced: suppressing the
         // help whenever it would cost the hooks panel meant it needed a 29-row
-        // terminal, so the screen whose purpose is to inform a mode switch
-        // showed nothing at the commonest size. Hiding the thing is not a fix
-        // for hiding the wrong thing.
-        let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+        // terminal, so the screen whose purpose is to inform a decision showed
+        // nothing at the commonest size. Hiding the thing is not a fix for
+        // hiding the wrong thing.
+        let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()]);
         let text = render_to_string(&mut state, 80, 24);
         assert!(
-            text.contains("never answers an ASK"),
-            "the mode help must render at 80x24: {text}"
+            text.contains("spends tokens"),
+            "the ATC help must render at 80x24: {text}"
         );
     }
 
@@ -1929,7 +1796,7 @@ mod tests {
         // The one thing that outranks both help and hooks: the rows ARE the
         // screen.
         for height in 8..40_u16 {
-            let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()]);
             let text = render_to_string(&mut state, 100, height);
             assert!(
                 text.contains("ATC"),
@@ -1943,18 +1810,15 @@ mod tests {
         // A sweep rather than one band: the budget is a size calculation, so the
         // property is the invariant, not any single terminal size.
         for height in 8..40_u16 {
-            let mut bare = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            let mut bare = seeded_state_with_atc_and_hooks(vec![atc_row()]);
             // Selection defaults to the ATC row (index 0) in both, so the only
             // difference is whether the help is eligible at this height.
             let with_atc_selected = render_to_string(&mut bare, 100, height);
 
-            let mut other = seeded_state_with_atc_and_hooks(
-                vec![
-                    atc_row(),
-                    status(DaemonKind::Bridge, DaemonState::Running, true, None),
-                ],
-                SupervisorMode::Full,
-            );
+            let mut other = seeded_state_with_atc_and_hooks(vec![
+                atc_row(),
+                status(DaemonKind::Bridge, DaemonState::Running, true, None),
+            ]);
             other.move_selection(1); // off the ATC row: no help
             let without_help = render_to_string(&mut other, 100, height);
 
@@ -1973,7 +1837,7 @@ mod tests {
     fn a_short_terminal_drops_the_help_rather_than_the_table() {
         // The rows are the point of the screen; the help is context. On a
         // terminal too short for both, the help goes.
-        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let mut state = seeded_state_with_atc(vec![atc_row()]);
         let text = render_to_string(&mut state, 100, 10);
         assert!(text.contains("ATC"), "the row must survive: {text}");
         assert!(

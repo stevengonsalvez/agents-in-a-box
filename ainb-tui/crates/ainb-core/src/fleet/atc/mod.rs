@@ -29,6 +29,5 @@ pub use meta::AtcMeta;
 pub use paths::{AtcPaths, instance_name_for_cwd_in, sanitize_instance_name};
 pub use render::render_claude_md;
 pub use supervisor::{
-    Controller, DEFAULT_PROVIDER, SupervisorMode, lite_heartbeat_id, may_act, mode_help,
-    provider_control, resolve_full_provider, stand_down_reason, supported_full_providers,
+    DEFAULT_PROVIDER, mode_help, provider_control, resolve_full_provider, supported_full_providers,
 };

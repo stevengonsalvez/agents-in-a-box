@@ -12,7 +12,6 @@ pub mod acp;
 pub mod approve;
 pub mod archived;
 pub mod atc;
-pub mod atc_supervisor;
 pub mod bridge;
 pub mod broadcast;
 pub mod budget_alert;

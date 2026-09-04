@@ -3106,7 +3106,7 @@ impl CliCommand for DaemonCommand {
                 .subcommand_required(true)
                 .arg_required_else_help(true);
             // `cli_verbs`, not `ALL`: pairing exists only on the daemon that
-            // owns the Codex transport, and the mode switches only on ATC, so
+            // owns the Codex transport, and provisioning only on ATC, so
             // neither may appear under every one.
             for action in crate::cli::daemon::Action::cli_verbs(kind) {
                 sub = sub.subcommand(Command::new(action.id()).about(match action {
@@ -3115,12 +3115,6 @@ impl CliCommand for DaemonCommand {
                     crate::cli::daemon::Action::Restart => "Take it down and bring it back up",
                     crate::cli::daemon::Action::Pair => {
                         "Print a Codex remote-control pairing code for the phone app"
-                    }
-                    crate::cli::daemon::Action::ModeLite => {
-                        "Switch the supervisor to lite mode (no LLM, deterministic scan)"
-                    }
-                    crate::cli::daemon::Action::ModeFull => {
-                        "Switch the supervisor to full mode (scheduled LLM heartbeat)"
                     }
                     crate::cli::daemon::Action::Provision => {
                         "Provision the instance and bring it up, creating it if absent"

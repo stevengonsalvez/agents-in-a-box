@@ -23,9 +23,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::json;
 
 use crate::cli::OutputFormat;
-use crate::fleet::atc::supervisor::{
-    Controller, SupervisorMode, may_act, mode_help, resolve_full_provider, stand_down_reason,
-};
+use crate::fleet::atc::supervisor::{mode_help, resolve_full_provider};
 use crate::fleet::atc::{
     AtcMeta, AtcPaths, DEFAULT_ERR_RETRY_CAP, HeartbeatState, build_heartbeat_enforcing_cap,
     render_claude_md, should_pause_for_idle, timer,
@@ -40,8 +38,6 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("teardown", sub)) => teardown(sub, format).await,
         Some(("status", sub)) => status(sub, format).await,
         Some(("repair", sub)) => repair(sub, format).await,
-        Some(("mode", sub)) => super::atc_supervisor::mode(sub, format).await,
-        Some(("supervise", sub)) => super::atc_supervisor::supervise(sub, format).await,
         Some(("list", _)) => list(format).await,
         Some(("heartbeat", sub)) => heartbeat(sub, format).await,
         Some(("hook", sub)) => hook(sub).await,
@@ -61,32 +57,25 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
 
     let paths = AtcPaths::resolve(&name)?;
 
-    // Carry the supervisor mode + provider of an EXISTING instance forward.
-    // `setup` is idempotent and is what `daemon atc start` re-runs to respawn a
-    // dead session; rebuilding meta from `AtcMeta::new` would silently flip a
-    // deliberately-lite fleet back to a token-spending full brain.
+    // Carry the provider of an EXISTING instance forward. `setup` is idempotent
+    // and is what `daemon atc start` re-runs to respawn a dead session;
+    // rebuilding meta from `AtcMeta::new` would silently reset a deliberately
+    // chosen provider back to the default.
     let existing = std::fs::read_to_string(&paths.meta)
         .ok()
         .and_then(|s| AtcMeta::from_json(&s).ok());
 
     let mut meta = AtcMeta::new(&name);
     if let Some(prior) = &existing {
-        meta.mode = prior.mode;
         meta.provider.clone_from(&prior.provider);
-    }
-    if let Some(raw) = matches.get_one::<String>("mode") {
-        meta.mode = SupervisorMode::from_id(raw)
-            .with_context(|| format!("unknown mode '{raw}' — expected `lite` or `full`"))?;
     }
     if let Some(p) = matches.get_one::<String>("provider") {
         meta.provider.clone_from(p);
     }
-    // Refuse BEFORE writing anything: a full-mode instance on a provider ainb
-    // cannot nudge provisions cleanly and is then never woken, which looks
-    // healthy on every surface. Lite mode runs no brain, so it is unconstrained.
-    if meta.mode == SupervisorMode::Full {
-        resolve_full_provider(&meta.provider)?;
-    }
+    // Refuse BEFORE writing anything: an instance on a provider ainb cannot
+    // nudge provisions cleanly and is then never woken, which looks healthy on
+    // every surface.
+    resolve_full_provider(&meta.provider)?;
 
     if let Some(i) = interval {
         meta.heartbeat_interval_min = i;
@@ -138,9 +127,7 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     // daemon cron's `atc_retry` cap) — the exact one-send-path / daemon-owns-state
     // violation. Best-effort: a down daemon warns and returns false (external-dep
     // rule — never hard-fail on a missing daemon). The UX is unchanged.
-    // A LITE fleet has no LLM heartbeat to schedule, and registering one would
-    // put a second controller on the fleet the moment the daemon came up.
-    let schedules_heartbeat = meta.heartbeat_enabled && meta.mode == SupervisorMode::Full;
+    let schedules_heartbeat = meta.heartbeat_enabled;
     let daemon_registered = if schedules_heartbeat {
         register_heartbeat_with_daemon(&meta, &paths).await
     } else {
@@ -152,24 +139,6 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
     // tear down any timer a prior daemon-down `setup` left behind) so exactly one
     // mechanism fires. When the daemon is unreachable the local timer keeps the
     // heartbeat alive. `timer::install` is idempotent.
-    // A LITE instance must not leave a full-mode scheduler behind. Skipping the
-    // INSTALL is not enough when the instance was previously full: both
-    // schedulers stay registered and keep firing `atc heartbeat` every interval
-    // forever. Each beat now stands down, so nothing is sent — but it also
-    // reports `ledger_owner: "none"`, which trips the daemon's handoff gate and
-    // logs a warning on every beat, indefinitely. `mode --set lite` tears both
-    // down; this path has to agree with it.
-    if meta.mode == SupervisorMode::Lite {
-        if let Err(e) = timer::teardown(&meta.name) {
-            eprintln!("warning: lite mode but the local heartbeat timer was not removed: {e}");
-        }
-        if !unregister_heartbeat_with_daemon(&meta.name).await {
-            tracing::debug!(
-                "lite mode: no daemon heartbeat cron to unregister (or the daemon is down)"
-            );
-        }
-    }
-
     let mut timer_paths = Vec::new();
     if schedules_heartbeat {
         if daemon_registered {
@@ -222,19 +191,9 @@ be removed ({e}); `ainb fleet atc repair {}` re-asserts a single scheduler",
         }
     }
 
-    // Start the controller the mode names — never both. In full mode that is the
-    // brain session; in lite mode it is the LLM-free scanner, and no brain is
-    // spawned at all (spawning one that is never nudged would burn a session
-    // slot and mislead every liveness surface).
     let mut spawned = false;
-    let mut lite_started = false;
     if !no_spawn {
-        match meta.mode {
-            SupervisorMode::Full => spawned = spawn_session(&meta, &paths).await?,
-            SupervisorMode::Lite => {
-                lite_started = super::atc_supervisor::ensure_lite_running(&meta.name).is_ok();
-            }
-        }
+        spawned = spawn_session(&meta, &paths).await?;
     }
 
     let summary = json!({
@@ -249,30 +208,15 @@ be removed ({e}); `ainb fleet atc repair {}` re-asserts a single scheduler",
         "session_spawned": spawned,
         "lifecycle_hooks_installed": hooks_installed,
         "daemon_registered": daemon_registered,
-        "mode": meta.mode.id(),
         "provider": meta.provider,
-        "owner": meta.mode.owner().label(),
-        "lite_supervisor_started": lite_started,
     });
 
     if matches!(format, OutputFormat::Text) {
         println!("ATC '{name}' provisioned.");
         println!("  dir:       {}", paths.dir.display());
         println!("  policy:    {}", paths.dir.join(policy_file).display());
-        println!(
-            "  mode:      {} — owned by the {}",
-            meta.mode.id(),
-            meta.mode.owner().label()
-        );
-        match meta.mode {
-            SupervisorMode::Full => {
-                println!("  session:   {} (spawned: {spawned})", meta.tmux_session());
-                println!("  brain:     {}", meta.provider);
-            }
-            SupervisorMode::Lite => {
-                println!("  scanner:   lite (started: {lite_started}) — no LLM, no token spend");
-            }
-        }
+        println!("  session:   {} (spawned: {spawned})", meta.tmux_session());
+        println!("  brain:     {}", meta.provider);
         println!("  hooks:     lifecycle hooks installed: {hooks_installed}");
         if schedules_heartbeat {
             let via = if daemon_registered {
@@ -284,8 +228,6 @@ be removed ({e}); `ainb fleet atc repair {}` re-asserts a single scheduler",
                 "  heartbeat: every {}m via {via}",
                 meta.heartbeat_interval_min
             );
-        } else if meta.mode == SupervisorMode::Lite {
-            println!("  heartbeat: n/a in lite mode (the scanner is the controller)");
         } else {
             println!("  heartbeat: disabled");
         }
@@ -582,15 +524,13 @@ async fn status(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
         "last_heartbeat_ms": last_heartbeat_ms,
         "heartbeat_age_ms": heartbeat_age_ms,
         "heartbeat_stale": heartbeat_stale,
-        "mode": meta.mode.id(),
         "provider": meta.provider,
-        "owner": meta.mode.owner().label(),
     });
 
     if matches!(format, OutputFormat::Text) {
         println!("ATC '{}' status", meta.name);
         println!("  dir:       {}", paths.dir.display());
-        for line in mode_help(meta.mode, &meta.provider) {
+        for line in mode_help(&meta.provider) {
             println!("  {line}");
         }
         println!(
@@ -1118,44 +1058,6 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
         bail!("no ATC instance named '{name}' — cannot fire heartbeat");
     }
     let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta)?)?;
-
-    // THE EXCLUSIVITY GATE. Both schedulers — the local launchd/systemd timer
-    // and the daemon cron — reach the full controller through this one verb, so
-    // gating here gates every full-mode action path. A timer left behind by a
-    // switch to lite therefore fires into a refusal instead of sending a second
-    // stream of nudges alongside the lite scanner.
-    //
-    // Reports `roster_valid: false` and `delivered: false`, which are the
-    // daemon's own fail-closed gates: it leaves the retry ledger untouched
-    // rather than reading a stood-down beat as "the whole fleet recovered".
-    if !may_act(meta.mode, Controller::FullHeartbeat) {
-        let reason = stand_down_reason(meta.mode, Controller::FullHeartbeat);
-        if matches!(format, OutputFormat::Text) {
-            println!("[atc/{name}] {reason}");
-        } else {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "action": "heartbeat",
-                    "name": name,
-                    "stood_down": true,
-                    "mode": meta.mode.id(),
-                    "owner": meta.mode.owner().label(),
-                    "reason": reason,
-                    "needs_count": 0,
-                    "err_sessions": [],
-                    "roster_valid": false,
-                    "ledger_owner": "none",
-                    "completions": 0,
-                    "session_live": false,
-                    "idle_paused": false,
-                    "delivered": false,
-                    "skipped_pending": false,
-                }))?
-            );
-        }
-        return Ok(());
-    }
 
     let tmux = meta.tmux_session();
 

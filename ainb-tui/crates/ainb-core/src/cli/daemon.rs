@@ -32,15 +32,9 @@ pub enum Action {
     /// screen is where a user already goes to reason about it. Offered only for
     /// [`DaemonKind::HangarDaemon`]; see `Action::for_kind`.
     Pair,
-    /// Switch the ATC supervisor to LITE mode (no LLM).
-    ///
-    /// Also not a lifecycle verb: it neither starts nor stops the daemon, it
-    /// changes which controller *is* the daemon. Offered only on
-    /// [`DaemonKind::Atc`], and only the mode the fleet is not already in —
-    /// see `Action::for_atc_mode`.
-    ModeLite,
-    /// Switch the ATC supervisor to FULL mode (scheduled LLM heartbeat).
-    ModeFull,
+    // `ModeLite` and `ModeFull` stood here. They switched which controller owned
+    // a fleet, and with lite deleted there is one controller: a switch with a
+    // single destination is a verb that cannot do anything.
     /// Provision an ATC instance and bring it up, without requiring one to
     /// already exist.
     ///
@@ -61,8 +55,6 @@ impl Action {
             Self::Stop => "stop",
             Self::Restart => "restart",
             Self::Pair => "pair",
-            Self::ModeLite => "mode-lite",
-            Self::ModeFull => "mode-full",
             Self::Provision => "provision",
             Self::RemoveOrphan => "remove-orphan",
         }
@@ -76,20 +68,8 @@ impl Action {
             "stop" => Some(Self::Stop),
             "restart" => Some(Self::Restart),
             "pair" => Some(Self::Pair),
-            "mode-lite" => Some(Self::ModeLite),
-            "mode-full" => Some(Self::ModeFull),
             "provision" => Some(Self::Provision),
             "remove-orphan" => Some(Self::RemoveOrphan),
-            _ => None,
-        }
-    }
-
-    /// The supervisor mode this action switches to, if it is a mode switch.
-    #[must_use]
-    pub const fn target_mode(self) -> Option<crate::fleet::atc::SupervisorMode> {
-        match self {
-            Self::ModeLite => Some(crate::fleet::atc::SupervisorMode::Lite),
-            Self::ModeFull => Some(crate::fleet::atc::SupervisorMode::Full),
             _ => None,
         }
     }
@@ -104,52 +84,26 @@ impl Action {
     /// an action that cannot mean anything there.
     #[must_use]
     pub fn for_kind(kind: DaemonKind) -> Vec<Self> {
-        Self::for_kind_in_mode(kind, None)
-    }
-
-    /// The verbs a daemon offers, given the ATC supervisor mode when known.
-    ///
-    /// ATC gets exactly ONE mode entry: the mode it is not in. Offering both
-    /// would put "switch to the mode you are already in" on the menu, which is
-    /// either a no-op or, worse, reads as a state the fleet might not be in.
-    /// `None` means the mode could not be read (no instance, unreadable meta),
-    /// and then no mode verb is offered at all rather than a guessed one.
-    #[must_use]
-    pub fn for_kind_in_mode(
-        kind: DaemonKind,
-        atc_mode: Option<crate::fleet::atc::SupervisorMode>,
-    ) -> Vec<Self> {
         let mut verbs = Self::ALL.to_vec();
         if matches!(kind, DaemonKind::HangarDaemon) {
             verbs.push(Self::Pair);
         }
         if matches!(kind, DaemonKind::Atc) {
-            if let Some(mode) = atc_mode {
-                verbs.push(match mode.other() {
-                    crate::fleet::atc::SupervisorMode::Lite => Self::ModeLite,
-                    crate::fleet::atc::SupervisorMode::Full => Self::ModeFull,
-                });
-            }
             verbs.push(Self::Provision);
             verbs.push(Self::RemoveOrphan);
         }
         verbs
     }
 
-    /// Every verb a daemon accepts on the COMMAND LINE.
+    /// Every verb a daemon accepts, menu and command line alike.
     ///
-    /// Differs from the TUI menu ([`Self::for_kind_in_mode`]) on purpose: the
-    /// menu hides the mode you are already in, but `--help` must document both
-    /// mode verbs, and a script must be able to assert a mode without first
-    /// reading which one is current.
+    /// These were two lists while ATC had a mode to switch: the menu hid the
+    /// mode you were already in and `--help` documented both. With one
+    /// controller there is nothing to hide, so one list serves both surfaces
+    /// and cannot drift from the other.
     #[must_use]
     pub fn cli_verbs(kind: DaemonKind) -> Vec<Self> {
-        let mut verbs = Self::for_kind(kind);
-        if matches!(kind, DaemonKind::Atc) {
-            verbs.push(Self::ModeLite);
-            verbs.push(Self::ModeFull);
-        }
-        verbs
+        Self::for_kind(kind)
     }
 
     /// Menu label. Mode switches say what they switch TO, not a bare verb.
@@ -160,8 +114,6 @@ impl Action {
             Self::Stop => "stop",
             Self::Restart => "restart",
             Self::Pair => "pair",
-            Self::ModeLite => "switch to lite mode",
-            Self::ModeFull => "switch to full mode",
             Self::Provision => "provision",
             Self::RemoveOrphan => "remove-orphan",
         }
@@ -215,16 +167,6 @@ pub async fn execute(matches: &ArgMatches, _format: crate::cli::OutputFormat) ->
 pub async fn control(kind: DaemonKind, action: Action) -> Result<String> {
     // Pairing is not a lifecycle verb and only the Codex transport has one, so
     // it never reaches the per-daemon handlers below.
-    if let Some(mode) = action.target_mode() {
-        return if matches!(kind, DaemonKind::Atc) {
-            atc_set_mode(mode)
-        } else {
-            bail!(
-                "mode switching is an ATC supervisor concept; `{}` has no modes",
-                kind.display_name()
-            )
-        };
-    }
     if action == Action::Pair {
         return if matches!(kind, DaemonKind::HangarDaemon) {
             codex_pair()
@@ -254,11 +196,7 @@ fn release_checker(action: Action) -> Result<String> {
             crate::cli::update::disable_schedule().context("disable daily release checker")?;
             Ok("daily release checker disabled".to_string())
         }
-        Action::Pair
-        | Action::Provision
-        | Action::RemoveOrphan
-        | Action::ModeLite
-        | Action::ModeFull => {
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
@@ -313,11 +251,7 @@ fn mcp_pool(action: Action) -> Result<String> {
         // Unreachable: `control` intercepts Pair before any handler.
         // Provision / remove-orphan are ATC-only for the same reason: they are
         // offered by `Action::for_kind` only there.
-        Action::Pair
-        | Action::Provision
-        | Action::RemoveOrphan
-        | Action::ModeLite
-        | Action::ModeFull => {
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
@@ -350,11 +284,7 @@ async fn headroom(action: Action) -> Result<String> {
         // Unreachable: `control` intercepts Pair before any handler.
         // Provision / remove-orphan are ATC-only for the same reason: they are
         // offered by `Action::for_kind` only there.
-        Action::Pair
-        | Action::Provision
-        | Action::RemoveOrphan
-        | Action::ModeLite
-        | Action::ModeFull => {
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
@@ -378,11 +308,7 @@ fn notifyd(kind: DaemonKind, action: Action) -> Result<String> {
         // Unreachable: `control` intercepts Pair before any handler.
         // Provision / remove-orphan are ATC-only for the same reason: they are
         // offered by `Action::for_kind` only there.
-        Action::Pair
-        | Action::Provision
-        | Action::RemoveOrphan
-        | Action::ModeLite
-        | Action::ModeFull => {
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     };
@@ -445,37 +371,6 @@ fn respawn_atc_session(name: &str) -> Result<String> {
         argv.push("--no-heartbeat");
     }
     delegate(&argv)
-}
-
-/// Read the supervisor mode of the single provisioned instance, when there is
-/// exactly one and its meta parses. `None` everywhere else — a guessed mode
-/// would put the wrong switch on the Daemons menu.
-#[must_use]
-pub fn atc_mode() -> Option<crate::fleet::atc::SupervisorMode> {
-    atc_named_mode().map(|(_, mode)| mode)
-}
-
-/// The single provisioned instance's name AND mode, when both are unambiguous.
-///
-/// Callers that report a refusal need the NAME: "ATC 'tower (lite)' is
-/// supervising this fleet" is actionable on a host running many things, and
-/// "ATC 'lite supervisor'" is not.
-#[must_use]
-pub fn atc_named_mode() -> Option<(String, crate::fleet::atc::SupervisorMode)> {
-    let name = atc_instance().ok()?;
-    let root = crate::fleet::plumbing::paths::ainb_home().ok()?.join("atc");
-    let paths = crate::fleet::atc::paths::AtcPaths::under_root(&root, &name);
-    let raw = std::fs::read_to_string(&paths.meta).ok()?;
-    let mode = crate::fleet::atc::meta::AtcMeta::from_json(&raw).ok()?.mode;
-    Some((name, mode))
-}
-
-/// Switch the supervisor mode by delegating to the verb that owns the
-/// transition. Reimplementing the stop-then-start ordering here is how a fleet
-/// ends up briefly owned by two controllers.
-fn atc_set_mode(mode: crate::fleet::atc::SupervisorMode) -> Result<String> {
-    let name = atc_instance()?;
-    delegate(&["fleet", "atc", "mode", &name, "--set", mode.id()])
 }
 
 /// The ATC instance the screen and the provisioning verbs act on.
@@ -573,62 +468,6 @@ fn atc(action: Action) -> Result<String> {
         _ => {}
     }
     let name = atc_instance()?;
-    // In LITE mode the controller is the scanner process, not the timer and not
-    // the brain session. Routing Start/Stop at the full-mode machinery would
-    // "start" an ATC by re-asserting a scheduler the mode has no use for, and
-    // "stop" one by tearing down an instance whose scanner kept running.
-    if atc_mode() == Some(crate::fleet::atc::SupervisorMode::Lite) {
-        return match action {
-            Action::Start => {
-                crate::cli::fleet::atc_supervisor::ensure_lite_running(&name)?;
-                Ok(format!("ATC '{name}' lite scanner running"))
-            }
-            Action::Restart => {
-                // Same rule as the fleet daemon: an unverified stop must never be
-                // followed by a start, or the restart button becomes the way two
-                // scanners end up owning one fleet.
-                match crate::cli::fleet::atc_supervisor::stop_lite_checked(&name) {
-                    StopOutcome::Unverified(pid) => {
-                        bail!(unverified_stop_message("lite scanner", pid))
-                    }
-                    stopped => {
-                        // `restart_lite`, not `ensure_lite_running`: the signalled
-                        // process is still alive for a moment, and starting into
-                        // that window early-returns "already running" and then
-                        // leaves the fleet with nothing.
-                        let signalled = match stopped {
-                            StopOutcome::Signalled(pid) => Some(pid),
-                            _ => None,
-                        };
-                        crate::cli::fleet::atc_supervisor::restart_lite(&name, signalled)?;
-                        Ok(signalled.map_or_else(
-                            || format!("ATC '{name}' lite scanner started"),
-                            |pid| {
-                                format!("ATC '{name}' lite scanner restarted (replaced pid {pid})")
-                            },
-                        ))
-                    }
-                }
-            }
-            Action::Stop => match crate::cli::fleet::atc_supervisor::stop_lite_checked(&name) {
-                StopOutcome::Signalled(pid) => {
-                    Ok(format!("ATC '{name}' lite scanner stopped (pid {pid})"))
-                }
-                StopOutcome::NotRunning => Ok(format!("ATC '{name}' lite scanner was not running")),
-                StopOutcome::Unverified(pid) => bail!(unverified_stop_message("lite scanner", pid)),
-            },
-            // Unreachable here: provision / remove-orphan are matched ABOVE
-            // this branch, because they must work with no instance at all —
-            // and `control` intercepts pair and the mode switches.
-            Action::Provision
-            | Action::RemoveOrphan
-            | Action::Pair
-            | Action::ModeLite
-            | Action::ModeFull => {
-                bail!("`{}` is not a lifecycle verb for this daemon", action.id())
-            }
-        };
-    }
     match action {
         // ATC has two halves and they fail independently. `repair` re-asserts
         // the SCHEDULER (OS timer + daemon registration); it does nothing about
@@ -658,11 +497,7 @@ fn atc(action: Action) -> Result<String> {
         // Unreachable: `control` intercepts Pair before any handler.
         // Provision / remove-orphan are ATC-only for the same reason: they are
         // offered by `Action::for_kind` only there.
-        Action::Pair
-        | Action::Provision
-        | Action::RemoveOrphan
-        | Action::ModeLite
-        | Action::ModeFull => {
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
@@ -683,11 +518,7 @@ fn bridge(action: Action) -> Result<String> {
         // Unreachable: `control` intercepts Pair before any handler.
         // Provision / remove-orphan are ATC-only for the same reason: they are
         // offered by `Action::for_kind` only there.
-        Action::Pair
-        | Action::Provision
-        | Action::RemoveOrphan
-        | Action::ModeLite
-        | Action::ModeFull => {
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
@@ -737,11 +568,7 @@ fn fleet_daemon(action: Action) -> Result<String> {
         // Unreachable: `control` intercepts pair and the mode switches before
         // any handler, and provision / remove-orphan are offered by
         // `Action::for_kind` on ATC only.
-        Action::Pair
-        | Action::Provision
-        | Action::RemoveOrphan
-        | Action::ModeLite
-        | Action::ModeFull => {
+        Action::Pair | Action::Provision | Action::RemoveOrphan => {
             bail!("`{}` is not a lifecycle verb for this daemon", action.id())
         }
     }
