@@ -31,6 +31,8 @@ pub enum DialStatus {
 pub enum DialOutcome {
     /// The registry answered.
     Adapters(Vec<FleetAdapter>),
+    /// The channel list answered, broadcast channels only.
+    Channels(Vec<String>),
     /// A configure landed; the settings are now these.
     Applied {
         provider: String,
@@ -46,6 +48,10 @@ pub enum DialOutcome {
 #[derive(Debug)]
 pub struct CopilotDial {
     adapters: Vec<FleetAdapter>,
+    /// The named broadcast channels, by name. A durable conversation an
+    /// operator can come back to, which is the thing the checkbox broadcast is
+    /// deliberately not.
+    channels: Vec<String>,
     engine: Option<String>,
     model: Option<String>,
     mode: FleetCopilotMode,
@@ -55,6 +61,8 @@ pub struct CopilotDial {
     asked: bool,
     /// Set by the swap, cleared by the next render pass that has shown it.
     replaced_notice: bool,
+    /// Whether `fleet/channel_list` has answered at least once.
+    channels_listed: bool,
     inbox: Arc<Mutex<Vec<DialOutcome>>>,
 }
 
@@ -70,12 +78,14 @@ impl CopilotDial {
     pub fn new() -> Self {
         Self {
             adapters: Vec::new(),
+            channels: Vec::new(),
             engine: None,
             model: None,
             mode: FleetCopilotMode::default(),
             status: DialStatus::Idle,
             asked: false,
             replaced_notice: false,
+            channels_listed: false,
             inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -108,6 +118,22 @@ impl CopilotDial {
     #[must_use]
     pub fn adapters(&self) -> &[FleetAdapter] {
         &self.adapters
+    }
+
+    /// The named broadcast channels, in creation order.
+    #[must_use]
+    pub fn channels(&self) -> &[String] {
+        &self.channels
+    }
+
+    /// Whether the channel list has come back yet.
+    ///
+    /// Distinguishes "no channels exist" from "not asked yet", which render
+    /// differently: the first is a fact, the second is a pending read that
+    /// would otherwise look like the first.
+    #[must_use]
+    pub const fn channels_listed(&self) -> bool {
+        self.channels_listed
     }
 
     /// Whether the last swap replaced the session, for the header's notice.
@@ -160,6 +186,10 @@ impl CopilotDial {
                     self.replaced_notice = replaced;
                     self.status = DialStatus::Idle;
                 }
+                DialOutcome::Channels(channels) => {
+                    self.channels = channels;
+                    self.channels_listed = true;
+                }
                 DialOutcome::Failed { call, detail } => {
                     self.status = DialStatus::Failed { call, detail };
                 }
@@ -169,6 +199,7 @@ impl CopilotDial {
             self.asked = true;
             self.status = DialStatus::Working("reading the adapter registry".to_string());
             self.load_adapters();
+            self.load_channels();
             changed = true;
         }
         changed
@@ -193,6 +224,7 @@ impl CopilotDial {
     pub fn retry(&mut self) {
         self.status = DialStatus::Working("reading the adapter registry".to_string());
         self.load_adapters();
+        self.load_channels();
     }
 
     /// Move to the next engine in the registry and apply it.
@@ -312,6 +344,20 @@ impl CopilotDial {
                 }),
             },
         );
+    }
+
+    /// Page the named broadcast channels.
+    ///
+    /// A FAILURE here does not take the header's status: the engine dial still
+    /// works without a channel list, and hijacking the one status line would
+    /// hide an engine failure behind a channel one.
+    fn load_channels(&self) {
+        let inbox = Arc::clone(&self.inbox);
+        Self::spawn(inbox, |publish| {
+            if let Ok(channels) = crate::fleet::control::broadcast_channels_blocking() {
+                publish(DialOutcome::Channels(channels));
+            }
+        });
     }
 
     /// Run `work` on a detached worker, guaranteeing the inbox gets SOMETHING.
@@ -480,6 +526,27 @@ mod tests {
     }
 
     /// The failure names the CALL. "which call failed" is the actionable half.
+    /// "no channels exist" and "the list has not come back" are different
+    /// facts and must not render the same: the second one resolving into the
+    /// first is how an operator concludes their channels were deleted.
+    #[test]
+    fn an_unanswered_channel_list_is_not_an_empty_one() {
+        let mut dial = dial_with(vec![]);
+        assert!(!dial.channels_listed());
+        assert!(dial.channels().is_empty());
+
+        dial.inbox.lock().unwrap().push(DialOutcome::Channels(vec![]));
+        dial.tick();
+        assert!(dial.channels_listed(), "an empty answer is still an answer");
+
+        dial.inbox
+            .lock()
+            .unwrap()
+            .push(DialOutcome::Channels(vec!["release".into(), "qa".into()]));
+        dial.tick();
+        assert_eq!(dial.channels(), ["release", "qa"]);
+    }
+
     #[test]
     fn a_failure_names_the_method_that_failed() {
         let mut dial = dial_with(vec![]);
