@@ -926,16 +926,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     if help_height > 0 {
         render_atc_help(frame, chunks[1], &atc_help);
     }
-    // The hint follows the SELECTION, not merely "an ATC exists somewhere":
-    // advertising a mode switch while the cursor sits on the bridge promises a
-    // menu entry that `Action::for_kind_in_mode` will not offer.
-    let atc_selected = snapshot.rows.get(state.selected).map(|r| r.kind) == Some(DaemonKind::Atc);
-    render_footer(
-        frame,
-        chunks[2],
-        state,
-        snapshot.atc.as_ref().filter(|_| atc_selected),
-    );
+    render_footer(frame, chunks[2], state);
     // Overlays paint last so they float above the table.
     if state.error_open.is_some() {
         render_error_view(frame, inner, state);
@@ -1469,7 +1460,7 @@ fn render_atc_help(frame: &mut Frame, area: Rect, lines: &[String]) {
     );
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState, atc: Option<&AtcModeView>) {
+fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     // Hints name the keys that work RIGHT NOW: an overlay owns Enter and Esc,
     // so advertising the table's keys underneath it would be a lie.
     let spans = if state.error_open.is_some() {
@@ -1487,7 +1478,6 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState, atc: Optio
             Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         ]
     } else {
-        let enter_hint = " start / restart / stop  ".to_string();
         vec![
             Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
