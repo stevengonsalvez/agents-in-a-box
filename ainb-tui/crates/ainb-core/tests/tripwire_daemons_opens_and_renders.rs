@@ -191,13 +191,21 @@ fn daemons_opens_and_renders_four_rows() {
         "notifyd",
         "approve broker",
         "ATC",
-        "fleet daemon",
         "mcp pool",
         "hangar daemon",
         "headroom proxy",
     ] {
         assert!(post.contains(row), "daemon row missing: {row}\n{post}");
     }
+    // The legacy fleet daemon is the ONE exception, and this asserted the
+    // opposite. ATC replaced it, so while it is stopped a row would present
+    // the two as a choice — the competing control path ATC exists to remove.
+    // `probe.rs` gates it on `fleet_daemon_is_visible` and pins the rule in a
+    // unit test; only a fleet daemon genuinely up earns a row, and as a fault.
+    assert!(
+        !post.contains("fleet daemon"),
+        "a stopped fleet daemon must not take a row:\n{post}"
+    );
 
     // The Hooks panel names BOTH executables. A pointer left aimed at a deleted
     // worktree while a perfectly good ainb is running was invisible until this

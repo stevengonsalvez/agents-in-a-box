@@ -171,13 +171,23 @@ fn daemons_screen_lists_every_daemon_and_offers_per_row_actions() {
         "notifyd",
         "approve broker",
         "ATC",
-        "fleet daemon",
         "mcp pool",
         "hangar daemon",
         "headroom proxy",
     ] {
         assert!(post.contains(row), "daemon row missing: {row}\n{post}");
     }
+    // The legacy fleet daemon is the ONE that must not be listed while it is
+    // stopped, and this asserted the opposite. ATC replaced it, so on an
+    // ordinary host its row would be a permanent "stopped" presenting the two
+    // as a choice — the competing control path ATC exists to remove, still on
+    // the screen an operator reads to see who is running. `probe.rs` gates it
+    // on `fleet_daemon_is_visible` and pins the same rule in a unit test; only
+    // a fleet daemon that is genuinely up earns a row, and then as a fault.
+    assert!(
+        !post.contains("fleet daemon"),
+        "a stopped fleet daemon must not take a row:\n{post}"
+    );
 
     // (2) Nothing sits on a collecting placeholder. This is the whole of bug 2:
     // the panel that showed it is gone, and the probes behind the table are
