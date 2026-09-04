@@ -9895,7 +9895,20 @@ impl AppState {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     // tmux returns non-zero when the session is already gone, which
                     // is the post-condition we want, so treat it as success.
-                    if stderr.contains("can't find session") || stderr.contains("no server running")
+                    //
+                    // THREE spellings, because tmux has three ways of saying the
+                    // same thing and only two were recognised. With no server at
+                    // all it says neither of the first two: it fails to connect
+                    // to the socket, and that is the strongest possible evidence
+                    // the session is not running — there is no server to run it.
+                    // Reporting that as a failed stop left the row Running,
+                    // which invites a resume that would tear down and replace an
+                    // agent that does not exist.
+                    let server_absent = stderr.contains("error connecting to")
+                        && stderr.contains("No such file or directory");
+                    if stderr.contains("can't find session")
+                        || stderr.contains("no server running")
+                        || server_absent
                     {
                         info!("tmux session '{name}' already gone, proceeding");
                         Ok(())

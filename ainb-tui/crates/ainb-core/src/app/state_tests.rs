@@ -3139,7 +3139,16 @@ mod tests {
             }
             for id in &ids {
                 let session = state.find_session(*id).expect("session still registered");
-                assert!(matches!(session.status, SessionStatus::Stopped));
+                // The notification carries WHY when a stop failed. Without it
+                // this assertion says only "not Stopped", which on a machine
+                // whose tmux answers differently than the developer's is a
+                // failure with nothing to act on.
+                assert!(
+                    matches!(session.status, SessionStatus::Stopped),
+                    "session {id} is {:?}, not Stopped. Notifications: {:?}",
+                    session.status,
+                    state.notifications.iter().map(|n| &n.message).collect::<Vec<_>>()
+                );
             }
         })
         .await;
