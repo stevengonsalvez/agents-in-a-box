@@ -137,12 +137,12 @@ where
     }
 }
 
-/// Open the Fleet panel and then the chat, pressing each key exactly ONCE.
+/// Open the sessions screen and walk the tab strip to `copilot`.
 ///
-/// Pressing on a loop until something happens would be the wrong test: a modal
-/// that swallows the first press is precisely the failure this is here to
-/// catch, and a retry loop makes it invisible. The spacing in the home banner
-/// is load-bearing too, the setup wizard's splash also says "Agents in a Box".
+/// The Fleet panel this used to open is deleted; the conversation it hosted is
+/// now a tab on the sessions screen. `s` opens the screen, then `Tab` walks the
+/// strip — re-checking between presses, because the copilot pane dials the
+/// daemon when it opens and pressing again inside that window walks past it.
 fn open_chat_surface(session: &str) -> bool {
     if !wait_for(session, "Enter select | Tab content", 60) {
         return false;
@@ -150,23 +150,23 @@ fn open_chat_surface(session: &str) -> bool {
     thread::sleep(Duration::from_millis(500));
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        send_key(session, "f");
-        if wait_for(session, "Fleet ·", 2) {
+        send_key(session, "s");
+        if wait_for(session, "Workspaces (", 2) {
             break;
         }
         thread::sleep(Duration::from_millis(500));
     }
-    if !wait_for(session, "Fleet ·", 5) {
+    if !wait_for(session, "Workspaces (", 5) {
         return false;
     }
-    thread::sleep(Duration::from_millis(500));
-    let deadline_m = Instant::now() + Duration::from_secs(30);
+    let deadline_m = Instant::now() + Duration::from_secs(45);
     while Instant::now() < deadline_m {
-        send_key(session, "m");
-        if wait_for(session, "Fleet chat · #copilot", 2) {
-            return true;
+        send_key(session, "Tab");
+        for _ in 0..4 {
+            if wait_for(session, "Fleet chat · #copilot", 1) {
+                return true;
+            }
         }
-        thread::sleep(Duration::from_millis(500));
     }
     wait_for(session, "Fleet chat · #copilot", 5)
 }
@@ -353,7 +353,10 @@ fn the_copilot_chat_opens_attributes_and_answers_a_confirm_card() {
     // `y` over a destructive call the operator had not read. Removing it means
     // approving takes two keys, and this test presses both rather than
     // asserting the pre-armed behaviour it was written against.
-    send_key(session, "Tab");
+    // `Shift+Tab` focuses the card block. `Tab` belongs to the sessions
+    // screen's tab strip now, so the conversation's own focus toggle moved to
+    // the reverse key — the strip wraps, so nothing is lost.
+    send_key(session, "BTab");
     send_key(session, "Down");
     send_key(session, "y");
     let resolved = {
@@ -397,9 +400,17 @@ fn the_copilot_chat_opens_attributes_and_answers_a_confirm_card() {
     );
     eprintln!("--- the chat surface, live ---\n{}", capture_pane(session));
     send_key(session, "Escape");
+    // The second Esc leaves the conversation for `preview`, the one tab that is
+    // never disabled. It used to return to the Fleet panel; the panel is gone
+    // and the conversation is a tab on the sessions screen now.
     assert!(
-        wait_for(session, "ACTION QUEUE", 20),
-        "the second Esc did not return the chat to the Fleet panel:\n{}",
+        wait_for(session, "Workspaces (", 20),
+        "the second Esc did not leave the conversation for the sessions screen:\n{}",
+        capture_pane(session)
+    );
+    assert!(
+        !capture_pane(session).contains("Fleet chat \u{b7} #copilot"),
+        "and the conversation must actually be closed:\n{}",
         capture_pane(session)
     );
 }

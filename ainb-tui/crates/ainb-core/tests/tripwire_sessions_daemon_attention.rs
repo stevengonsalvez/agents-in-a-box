@@ -36,7 +36,11 @@ fn ainb_bin() -> PathBuf {
 }
 
 fn tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// A tmux session killed by EXACT name on drop.
@@ -50,7 +54,8 @@ struct ExactTmuxSession {
 
 impl ExactTmuxSession {
     fn create(name: String, command: &[&str]) -> Self {
-        let mut args: Vec<String> = ["new-session", "-d", "-s"].iter().map(|a| (*a).to_string()).collect();
+        let mut args: Vec<String> =
+            ["new-session", "-d", "-s"].iter().map(|a| (*a).to_string()).collect();
         args.push(name.clone());
         args.extend(["-x", "200", "-y", "50"].iter().map(|a| (*a).to_string()));
         args.extend(command.iter().map(|part| (*part).to_string()));
@@ -191,7 +196,13 @@ fn seed_session_registry(home: &Path, tmux_name: &str, worktree: &Path) {
 }
 
 /// Insert one OPEN attention row the way the daemon's ingest does.
-fn seed_attention(hangar: &FleetHangar, id: &str, kind: AttentionKind, cwd: &Path, payload: serde_json::Value) {
+fn seed_attention(
+    hangar: &FleetHangar,
+    id: &str,
+    kind: AttentionKind,
+    cwd: &Path,
+    payload: serde_json::Value,
+) {
     hangar.block_on(async {
         AttentionRepo::insert(
             hangar.pool(),

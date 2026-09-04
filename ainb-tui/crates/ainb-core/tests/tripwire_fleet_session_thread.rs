@@ -206,6 +206,82 @@ fn seed_message(hangar: &FleetHangar, id: &str, sender: &str, body: &str, origin
     });
 }
 
+/// A real repo, so the session row resolves to a name and a branch rather than
+/// `(broken)` / `unknown`.
+fn init_git_repo(dir: &Path) {
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "tripwire")
+            .env("GIT_AUTHOR_EMAIL", "tripwire@example.invalid")
+            .env("GIT_COMMITTER_NAME", "tripwire")
+            .env("GIT_COMMITTER_EMAIL", "tripwire@example.invalid")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "--initial-branch=main"]);
+    fs::write(dir.join("README.md"), "thread fixture\n").expect("seed a file");
+    git(&["add", "README.md"]);
+    git(&["-c", "commit.gpgsign=false", "commit", "-m", "seed"]);
+}
+
+/// Register the agent's tmux session so the sessions screen has a row to open
+/// the thread from.
+fn seed_session_registry(home: &Path, tmux_name: &str, worktree: &Path) {
+    let entry = serde_json::json!({
+        "sessions": {
+            tmux_name: {
+                "session_id": "6f1f5f7e-0000-4000-8000-0000000000d1",
+                "tmux_session_name": tmux_name,
+                "worktree_path": worktree,
+                "workspace_name": "thread-demo",
+                "created_at": "2026-09-04T00:00:00Z",
+                "agent_type": "Claude",
+                "skip_permissions": true,
+            }
+        }
+    });
+    fs::write(
+        home.join(".agents-in-a-box").join("sessions.json"),
+        serde_json::to_vec_pretty(&entry).expect("encode sessions.json"),
+    )
+    .expect("seed sessions.json");
+}
+
+/// One notifyd row carrying the AGENT's own session id.
+///
+/// This is the only place the host learns it, and the thread's scope is built
+/// from it — `session:claude:demo` here. Without this row the `thread` tab dims
+/// with "this session has not fired a hook yet", which is the honest thing to
+/// do rather than paging a scope the daemon never had.
+fn seed_hook_identity(hangar_home: &Path, cwd: &Path, agent_session_id: &str) {
+    let paths = ainb_plugin_notifyd::Paths::under(hangar_home);
+    fs::create_dir_all(&paths.base).expect("create notifyd base");
+    let store = ainb_plugin_notifyd::Store::open(&paths.db).expect("open notifications.db");
+    store
+        .insert_and_prune(
+            &ainb_plugin_notifyd::Envelope {
+                protocol_version: 1,
+                agent: "claude".into(),
+                raw_event: "Stop".into(),
+                session_id: agent_session_id.to_string(),
+                cwd: cwd.to_string_lossy().into_owned(),
+                project: "thread-demo".into(),
+                ts: chrono::Utc::now().timestamp_millis() - 30_000,
+                payload: serde_json::json!({}),
+            },
+            &ainb_plugin_notifyd::RetentionPolicy {
+                retention_days: 0,
+                max_rows: 0,
+            },
+        )
+        .expect("seed the hook row that carries the agent session id");
+}
+
 #[test]
 fn a_session_thread_opens_orders_its_replies_and_takes_a_message() {
     if !tmux_available() {
@@ -227,7 +303,19 @@ fn a_session_thread_opens_orders_its_replies_and_takes_a_message() {
     // fixture now sets up what it always claimed to.
     let cwd = home_tmp.path().join("thread-demo");
     fs::create_dir_all(&cwd).expect("create the session's working directory");
+    init_git_repo(&cwd);
     seed_fleet_session(&hangar, &cwd);
+
+    // The host half: a registered tmux session at that cwd, and the hook row
+    // carrying the agent session id the thread's scope is built from.
+    let agent_tmux = format!("tmux_thread_{}", std::process::id());
+    seed_session_registry(home_tmp.path(), &agent_tmux, &cwd);
+    seed_hook_identity(
+        &hangar_home,
+        &cwd,
+        SESSION_KEY.split_once(':').expect("session key is provider:id").1,
+    );
+    let _agent_pane = ExactTmuxSession::create(agent_tmux, "80", "24");
 
     // History the thread already has when the operator opens it: a prompt and
     // the reply threaded to it. Inserted with DESCENDING ids so ordering can
@@ -245,9 +333,14 @@ fn a_session_thread_opens_orders_its_replies_and_takes_a_message() {
     let name = format!("ainb-thread-{}", std::process::id());
     let tmux = ExactTmuxSession::create(name, "180", "50");
     let session = tmux.name();
+    // No `AINB_HOME`: the sessions screen reads `sessions.json` under `$HOME`,
+    // and notifyd resolves under `AINB_HANGAR_HOME`. Setting `AINB_HOME` sends
+    // one of them somewhere the other is not.
+    //
+    // Tmux discovery stays ON — the session row the thread is opened from comes
+    // from it.
     let command = format!(
-        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} \
-         AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 \
+        "HOME={home} AINB_HANGAR_HOME={hangar} AINB_DISABLE_PLUGINS=1 \
          CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
         home = home_tmp.path().display(),
         hangar = hangar_home.display(),
@@ -267,21 +360,35 @@ fn a_session_thread_opens_orders_its_replies_and_takes_a_message() {
         "the home screen never painted:\n{}",
         capture_pane(session)
     );
-    send_key(session, "f");
+    // `s` opens the sessions screen, where the session the thread belongs to is
+    // a row. The Fleet panel this used to open is deleted.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        send_key(session, "s");
+        if wait_for(session, "Workspaces (", 2) {
+            break;
+        }
+    }
     assert!(
-        wait_for(session, "Fleet ·", 30),
-        "the Fleet panel did not open on the first `f`:\n{}",
+        wait_for(session, "Workspaces (", 5),
+        "the sessions screen did not open:\n{}",
         capture_pane(session)
     );
-    // The panel lands on the action queue, which shows only what needs the
-    // operator; an IDLE session is not on it. `5` is the All view.
-    send_key(session, "5");
-    assert!(
-        wait_for(session, "thread-demo", 30),
-        "the seeded session never reached the roster:\n{}",
-        capture_pane(session)
-    );
-    send_key(session, "M");
+    // Walk the strip to `thread`. Re-checked between presses: the pane dials
+    // the daemon when it opens, and pressing again inside that window walks
+    // past it.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline {
+        if capture_pane(session).contains("Fleet thread ·") {
+            break;
+        }
+        send_key(session, "Tab");
+        for _ in 0..4 {
+            if wait_for(session, "Fleet thread ·", 1) {
+                break;
+            }
+        }
+    }
 
     // THE SCREEN FIRST. Everything below reads message rows, and reading them
     // off the wrong screen is how an assertion about a thread passes against
@@ -293,7 +400,9 @@ fn a_session_thread_opens_orders_its_replies_and_takes_a_message() {
     );
     assert!(
         header.is_some(),
-        "`M` did not open the selected session's thread:\n{}",
+        "the `thread` tab did not open the selected session's own conversation. \
+         Its scope is the AGENT's session id, learned from the hook rows — a \
+         scope built from the tmux name addresses one the daemon never had:\n{}",
         capture_pane(session)
     );
     assert!(
@@ -388,12 +497,13 @@ fn a_session_thread_opens_orders_its_replies_and_takes_a_message() {
     );
     eprintln!("--- the session thread, live ---\n{pane}");
 
-    // And the thread is a chat surface, not a modal trap: one Esc returns to
-    // the panel, because a thread has no card focus to step back through.
+    // And the thread is a chat surface, not a modal trap: one Esc leaves it,
+    // because a thread has no card focus to step back through. It lands on
+    // `preview`, the one tab that is never disabled.
     send_key(session, "Escape");
     assert!(
-        wait_for(session, "ACTION QUEUE", 20),
-        "Esc did not return the thread to the Fleet panel:\n{}",
+        wait_for(session, "Workspaces (", 20),
+        "Esc did not leave the thread for the sessions screen:\n{}",
         capture_pane(session)
     );
 }

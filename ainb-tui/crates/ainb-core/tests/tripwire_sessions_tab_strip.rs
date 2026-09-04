@@ -37,7 +37,11 @@ fn ainb_bin() -> PathBuf {
 }
 
 fn tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// A tmux session killed by EXACT name on drop. `=name` is the SESSION form;

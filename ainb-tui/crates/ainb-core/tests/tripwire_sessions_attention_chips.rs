@@ -39,7 +39,11 @@ fn ainb_bin() -> PathBuf {
 }
 
 fn tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// A tmux session killed by EXACT name on drop, success or panic.
@@ -220,8 +224,7 @@ fn seed_session_registry(home: &Path, rows: &[Fixture]) {
         .collect();
     fs::write(
         home.join(".agents-in-a-box").join("sessions.json"),
-        serde_json::to_vec_pretty(&json!({ "sessions": sessions }))
-            .expect("encode sessions.json"),
+        serde_json::to_vec_pretty(&json!({ "sessions": sessions })).expect("encode sessions.json"),
     )
     .expect("seed sessions.json");
 }
@@ -300,8 +303,10 @@ fn waiting_sessions_wear_their_chips_and_the_badge_counts_only_the_blocking_ones
         return;
     }
 
-    let home_tmp =
-        tempfile::Builder::new().prefix("ainb-chip-").tempdir_in("/tmp").expect("home tempdir");
+    let home_tmp = tempfile::Builder::new()
+        .prefix("ainb-chip-")
+        .tempdir_in("/tmp")
+        .expect("home tempdir");
     let home = home_tmp.path();
     seed_isolated_home(home);
 

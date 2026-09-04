@@ -25,7 +25,11 @@ fn ainb_bin() -> PathBuf {
 }
 
 fn tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// A tmux session killed by EXACT name on drop.
@@ -304,17 +308,17 @@ fn an_answer_reaches_the_agents_pane_with_the_hangar_daemon_stopped() {
     let ask_pane = press_until(&tui_tmux, "Tab", 8, |c| {
         c.contains("\u{2460} answer") && c.contains("Which sqlite path?")
     })
-        .unwrap_or_else(|seen| {
-            panic!(
-                "Tab never reached the ask pane. Panes visited:\n  {}\n---\n{}\n---",
-                seen.iter()
-                    .filter_map(|cap| cap.lines().nth(4))
-                    .map(str::trim)
-                    .collect::<Vec<_>>()
-                    .join("\n  "),
-                capture_pane(&tui_tmux)
-            )
-        });
+    .unwrap_or_else(|seen| {
+        panic!(
+            "Tab never reached the ask pane. Panes visited:\n  {}\n---\n{}\n---",
+            seen.iter()
+                .filter_map(|cap| cap.lines().nth(4))
+                .map(str::trim)
+                .collect::<Vec<_>>()
+                .join("\n  "),
+            capture_pane(&tui_tmux)
+        )
+    });
     assert!(
         ask_pane.contains("Which sqlite path?"),
         "the ask pane must lead with what the agent said, even for a row the \

@@ -33,9 +33,12 @@ fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
 
-
 fn tmux_available() -> bool {
-    Command::new("tmux").arg("-V").output().map(|o| o.status.success()).unwrap_or(false)
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// A tmux session killed by EXACT name on drop.
@@ -386,7 +389,8 @@ fn picking_the_second_option_answers_the_daemons_row_with_the_second_option() {
     // and sends its neighbour is exactly what this checks.
     send_key(&tui_tmux, "Down");
     let moved = poll(&tui_tmux, Instant::now() + Duration::from_secs(10), |c| {
-        c.lines().any(|line| line.contains("api/src/db.sqlite") && line.contains('\u{25b8}'))
+        c.lines()
+            .any(|line| line.contains("api/src/db.sqlite") && line.contains('\u{25b8}'))
     });
     assert!(
         moved.is_some(),
