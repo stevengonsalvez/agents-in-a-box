@@ -13,10 +13,12 @@ use crate::screen::Screen;
 /// the footer-hint grammar, the reserved-key hygiene, and the crisp B5 promise
 /// that a screen off the tab strip is still reachable.
 ///
-/// Exhaustive BY THE MATCH BELOW, which has no wildcard arm: adding a variant to
-/// `Screen` fails to compile here, next to the list to add it to. (That forces an
-/// author to look; it does not by itself prove the list holds every variant, so
-/// keep the two together.)
+/// Both halves are forced. [`variant_tag`] has no wildcard arm, so a new `Screen`
+/// variant does not compile until it is tagged; and the count of DISTINCT tags in
+/// the list below must equal the number of arms, so tagging a variant and
+/// forgetting to build one here fails too. Without the second half a forgotten
+/// entry is silently skipped by every guard that walks this — a screen with no
+/// tab and no `Go:` row would read as covered.
 pub fn every_screen() -> Vec<Screen> {
     use ainb_hangar_core::ids::{IssueId, TaskId};
     let issue = IssueId::from_str("i1").expect("valid issue id");
@@ -43,31 +45,45 @@ pub fn every_screen() -> Vec<Screen> {
         Screen::Help,
         Screen::CommandPalette,
     ];
-    for screen in &all {
-        match screen {
-            Screen::IssueList
-            | Screen::TaskDetail(_)
-            | Screen::AgentPicker(_)
-            | Screen::ActivityTimeline(_)
-            | Screen::SkillManager
-            | Screen::Autopilots
-            | Screen::Kanban
-            | Screen::Boards
-            | Screen::DaemonHealth
-            | Screen::Usage
-            | Screen::Logs
-            | Screen::Inbox
-            | Screen::ControlCenter
-            | Screen::Fleet
-            | Screen::Squads
-            | Screen::Profiles
-            | Screen::Agents
-            | Screen::Settings
-            | Screen::Help
-            | Screen::CommandPalette => {}
-        }
-    }
+    let tags: std::collections::BTreeSet<u8> = all.iter().map(variant_tag).collect();
+    assert_eq!(
+        tags.len(),
+        SCREEN_VARIANTS,
+        "every_screen() builds {} of the {SCREEN_VARIANTS} Screen variants",
+        tags.len()
+    );
     all
+}
+
+/// The number of arms in [`variant_tag`], and so of `Screen` variants.
+const SCREEN_VARIANTS: usize = 20;
+
+/// A distinct tag per `Screen` variant. No wildcard arm: a new variant fails to
+/// compile here, and bumping [`SCREEN_VARIANTS`] to match then fails
+/// [`every_screen`] until the variant is built there too.
+fn variant_tag(screen: &Screen) -> u8 {
+    match screen {
+        Screen::IssueList => 0,
+        Screen::TaskDetail(_) => 1,
+        Screen::AgentPicker(_) => 2,
+        Screen::ActivityTimeline(_) => 3,
+        Screen::SkillManager => 4,
+        Screen::Autopilots => 5,
+        Screen::Kanban => 6,
+        Screen::Boards => 7,
+        Screen::DaemonHealth => 8,
+        Screen::Usage => 9,
+        Screen::Logs => 10,
+        Screen::Inbox => 11,
+        Screen::ControlCenter => 12,
+        Screen::Fleet => 13,
+        Screen::Squads => 14,
+        Screen::Profiles => 15,
+        Screen::Agents => 16,
+        Screen::Settings => 17,
+        Screen::Help => 18,
+        Screen::CommandPalette => 19,
+    }
 }
 
 /// The full painted text of `buf` in ROW-MAJOR order, so an assertion can search

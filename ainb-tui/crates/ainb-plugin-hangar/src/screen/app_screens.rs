@@ -3252,6 +3252,26 @@ mod help_overlay_tests {
         );
     }
 
+    /// COVERAGE: the `more` block names every screen in `GO_SCREENS`.
+    ///
+    /// It is the third copy of the demoted set and the only hand-written one —
+    /// Settings renders straight off `GO_SCREENS` and the palette rows ARE
+    /// `GO_SCREENS`. Both structural help guards deliberately SKIP this block
+    /// (its tokens are destinations, not screen-local keys), which left it the
+    /// one copy nothing checked: demote a tenth screen and the help would simply
+    /// not mention it.
+    #[test]
+    fn the_help_more_block_names_every_demoted_screen() {
+        use crate::screen::command_palette::GO_SCREENS;
+        let tokens: Vec<&str> = HELP_LINES.iter().flat_map(|l| l.split_whitespace()).collect();
+        for (word, screen) in GO_SCREENS {
+            assert!(
+                tokens.contains(&word),
+                "help `more` block omits `{word}` ({screen:?})"
+            );
+        }
+    }
+
     /// The overlay never paints on the chrome: row 0 is the tab strip and the
     /// last row is the footer, and both stay legible under `?`.
     ///

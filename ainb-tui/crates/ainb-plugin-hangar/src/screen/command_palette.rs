@@ -322,8 +322,12 @@ pub fn render_command_palette(
     area_h: u16,
     state: &CommandPaletteState,
 ) {
-    let modal_w = (area_w * 7 / 10).clamp(40, area_w);
-    let modal_h = (area_h * 6 / 10).clamp(8, area_h);
+    // `.max().min()`, not `.clamp()`: `u16::clamp` PANICS when min > max, and a
+    // pane under 40x8 makes it so. Pre-existing, but the palette went from an
+    // optional extra to the only route to nine screens, so a panic here is a
+    // navigation dead end rather than a missing convenience.
+    let modal_w = (area_w * 7 / 10).max(40).min(area_w);
+    let modal_h = (area_h * 6 / 10).max(8).min(area_h);
     let x0 = (area_w.saturating_sub(modal_w)) / 2;
     let y0 = (area_h.saturating_sub(modal_h)) / 2;
 
@@ -332,13 +336,14 @@ pub fn render_command_palette(
     // `[go] Go: logs│             │` reads as one string of nonsense on an 80×24
     // pane. Harmless while the palette was empty until you typed; crisp B5 made
     // it the only route to nine screens, and it opens with nine rows.
-    for y in y0..y0.saturating_add(modal_h) {
-        for x in x0..x0.saturating_add(modal_w) {
-            let mut cell = Cell::new(" ");
-            cell.bg = Some(PANEL_BG);
-            buf.push(Coord::new(x, y), cell);
-        }
-    }
+    super::fleet::fill_background(
+        buf,
+        x0,
+        y0,
+        x0.saturating_add(modal_w),
+        y0.saturating_add(modal_h),
+        PANEL_BG,
+    );
     draw_border(buf, x0, y0, modal_w, modal_h);
     // Title carries the live query so the user sees what they typed.
     let title = format!(" Search: {}_ ", state.query());
@@ -615,6 +620,15 @@ mod tests {
                     panic!("{screen:?} has no tab and no `Go:` row — it is stranded")
                 })
                 .0;
+            // The word must NAME the screen, not merely exist. The lookup above
+            // finds the row BY SCREEN, so swapping `("usage", Screen::Logs)` and
+            // `("logs", Screen::Usage)` satisfies everything below while `^P usage`
+            // opens Logs. The tab label is the name the rest of the UI already uses.
+            assert_eq!(
+                word,
+                screen.tab_label().to_lowercase(),
+                "the `Go:` word for {screen:?} does not name it"
+            );
             // Type the word, then Enter, exactly as an operator would.
             let mut s = CommandPaletteState::new();
             for ch in word.chars() {
@@ -695,6 +709,24 @@ mod tests {
             reduce_command_palette(&s, CommandPaletteEvent::Key('\n')).intent,
             Some(CommandPaletteIntent::GoToScreen(GO_SCREENS[0].1.clone()))
         );
+    }
+
+    /// A pane below the modal's own minimum renders instead of panicking.
+    ///
+    /// `u16::clamp` panics when min > max, so `(w * 7 / 10).clamp(40, w)` blew up
+    /// on anything under 40 columns. Below the 80×24 floor, but the palette is
+    /// the only route to nine screens now, so it must degrade rather than take
+    /// the process with it.
+    #[test]
+    fn a_pane_below_the_modal_minimum_renders_instead_of_panicking() {
+        let s = CommandPaletteState::new();
+        for (w, h) in [(1, 1), (20, 4), (39, 7), (40, 8), (80, 24)] {
+            let mut buf = WireBuffer::new(w, h);
+            render_command_palette(&mut buf, w, h, &s);
+            for (coord, _) in &buf.cells {
+                assert!(coord.x < w && coord.y < h, "{w}x{h} painted out of bounds");
+            }
+        }
     }
 
     /// Narrowing the query past the selected row pulls the cursor back onto a
