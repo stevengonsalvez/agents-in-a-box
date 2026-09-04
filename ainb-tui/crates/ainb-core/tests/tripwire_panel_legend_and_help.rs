@@ -6,9 +6,11 @@
 //! the 80-col layout math; this proves the tokens actually paint in a
 //! live 200-col pane):
 //!
-//! 1. The session-list menu legend's panel line — `b inbox  i stats
-//!    w witr  k skills  m memory` — so every panel is reachable from
-//!    the session list, not just the home menu.
+//! 1. The session-list menu legend's panel line — `i stats  w witr
+//!    k skills  m memory  t abtop` — so every panel is reachable from
+//!    the session list, not just the home menu. `b inbox` is NOT on it:
+//!    the Inbox screen is gone, and a session's notification history is
+//!    the right pane's `log` tab now.
 //! 2. The `?` help overlay's "Panels" section, which documents that
 //!    closing a panel returns to its origin.
 //!
@@ -151,7 +153,7 @@ fn session_list_legend_advertises_every_panel() {
         &session,
         "s",
         Instant::now() + Duration::from_secs(40),
-        |c| c.contains("b inbox") && c.contains("t abtop"),
+        |c| c.contains("i stats") && c.contains("t abtop"),
     );
     let final_cap = cap.unwrap_or_else(|| capture_pane(&session));
     kill_session(&session);
@@ -160,14 +162,24 @@ fn session_list_legend_advertises_every_panel() {
     // pairs as the legend paints them (key span + description span are
     // adjacent in the capture). A missing token means a panel is
     // reachable but undiscoverable from the session list.
-    for token in [
-        "b inbox", "i stats", "w witr", "k skills", "m memory", "t abtop",
-    ] {
+    for token in ["i stats", "w witr", "k skills", "m memory", "t abtop"] {
         assert!(
             final_cap.contains(token),
             "session-list legend missing panel shortcut {token:?}:\n---\n{final_cap}\n---"
         );
     }
+    // And the retired one is really retired. A legend advertising a key that
+    // opens nothing is worse than one that omits it: the operator presses it,
+    // nothing happens, and they learn to distrust the whole line.
+    assert!(
+        !final_cap.contains("b inbox"),
+        "the Inbox screen is gone; its shortcut must not still be advertised:\n\
+         ---\n{final_cap}\n---"
+    );
+    assert!(
+        final_cap.contains("log"),
+        "its replacement, the `log` tab, must be on screen:\n---\n{final_cap}\n---"
+    );
 }
 
 #[test]
@@ -197,7 +209,8 @@ fn help_overlay_documents_panels_section() {
     // its origin (and that witr is quit, not Esc-closed).
     for token in [
         "Panels (closing returns here)",
-        "Inbox (Esc closes)",
+        // What replaced the deleted Inbox and Fleet panels.
+        "Sessions: preview / ask / thread / copilot / log",
         "Stats / usage analytics (Esc closes)",
         "Witr process browser (quit witr to return)",
         "Skills catalogue (Esc closes)",
@@ -207,6 +220,15 @@ fn help_overlay_documents_panels_section() {
         assert!(
             final_cap.contains(token),
             "help overlay missing Panels entry {token:?}:\n---\n{final_cap}\n---"
+        );
+    }
+    // And the two retired panels are gone from the page. Documented keys that
+    // open nothing are how a help overlay stops being trusted.
+    for retired in ["Inbox (Esc closes)", "Fleet control panel (Esc closes)"] {
+        assert!(
+            !final_cap.contains(retired),
+            "the help overlay still documents the deleted panel {retired:?}:\n\
+             ---\n{final_cap}\n---"
         );
     }
 }
