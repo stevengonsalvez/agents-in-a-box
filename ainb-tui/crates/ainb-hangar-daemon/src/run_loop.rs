@@ -28,7 +28,7 @@
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
 //! | `HANGAR_DAEMON_DISABLE_SANDBOX` | `1` forces providers UNCONFINED (security downgrade); `0` forces the OS sandbox ON | unset (platform default: ON on Linux, OFF on macOS) |
-//! | `HANGAR_TASK_EXECUTOR` | `acp` runs tasks through an ACP adapter ([`crate::acp_task`]); `process` spawns the provider CLI. An unrecognised value warns and falls back | `process` |
+//! | `HANGAR_TASK_EXECUTOR` | `acp` runs tasks through an ACP adapter ([`crate::acp_task`]); `process` spawns the provider CLI. An unrecognised value warns and falls back. Only the DEFAULT: an agent's own `task_executor` column overrides it per task ([`crate::task_executor`]) | `process` |
 //!
 //! When `HANGAR_DAEMON_RUNTIME_ID` is unset the claim loop is a no-op (the
 //! daemon still sweeps) — a daemon with no runtime has nothing to claim.
@@ -187,25 +187,15 @@ pub struct DaemonConfig {
     pub task_executor: TaskExecutor,
 }
 
-/// Which executor runs a claimed task's provider work.
+/// The executor axis and the daemon-wide default, re-exported at the path they
+/// have always been imported from.
 ///
-/// A second FIRST-CLASS executor, not a mode: `Process` spawns the provider CLI
-/// (`claude -p`, `codex exec`) and keeps its jsonl transcript; `Acp` prompts an
-/// ACP adapter over JSON-RPC and keeps its transcript in `fleet_provider_event`.
-/// Deliberately a different axis from [`Mode`]: executor and interactivity are
-/// two questions, and conflating them is the bug [`interactive_command`] was
-/// extracted to prevent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum TaskExecutor {
-    /// Spawn the provider CLI. Today's path, and the default.
-    #[default]
-    Process,
-    /// Prompt an ACP adapter through [`crate::acp_task`].
-    Acp,
-}
-
-/// The `HANGAR_TASK_EXECUTOR` value that asks for the ACP path.
-const ACP_EXECUTOR: &str = "acp";
+/// They live in [`crate::task_executor`] because
+/// [`DaemonDefaultExecutor`](crate::task_executor::DaemonDefaultExecutor)'s
+/// guarantee is module privacy: its inner [`TaskExecutor`] is unreachable from
+/// this file, so nothing here can spawn work for the daemon's default while the
+/// dispatch says a different executor.
+pub use crate::task_executor::{DaemonDefaultExecutor, TaskExecutor};
 
 /// The wall-clock ceiling on one provider run (`HANGAR_PROVIDER_MAX_RUNTIME_MS`).
 ///
@@ -343,8 +333,8 @@ impl DaemonConfig {
         }
     }
 
-    /// Resolve the task executor from the explicit `HANGAR_TASK_EXECUTOR`
-    /// value (`None` when unset).
+    /// Resolve the DAEMON-WIDE task executor from the explicit
+    /// `HANGAR_TASK_EXECUTOR` value (`None` when unset).
     ///
     /// `acp` selects the ACP path; anything else (including an unset variable
     /// and an unrecognised value) resolves to [`TaskExecutor::Process`], the
@@ -352,19 +342,26 @@ impl DaemonConfig {
     /// diagnosable rather than a silent no-op. Split out as a pure function so
     /// the precedence is testable without mutating process env, exactly like
     /// [`Self::resolve_sandbox`].
+    ///
+    /// This is only the FLOOR: an agent carrying its own `task_executor`
+    /// (migration 0095) overrides it per task, through
+    /// [`DaemonDefaultExecutor::for_agent`](crate::task_executor::DaemonDefaultExecutor::for_agent).
     #[must_use]
     pub fn resolve_task_executor(override_val: Option<&std::ffi::OsStr>) -> TaskExecutor {
-        match override_val.and_then(std::ffi::OsStr::to_str).map(str::trim) {
-            Some(value) if value.eq_ignore_ascii_case(ACP_EXECUTOR) => TaskExecutor::Acp,
-            Some(value) if !value.is_empty() && !value.eq_ignore_ascii_case("process") => {
-                tracing::warn!(
-                    value,
-                    "unknown HANGAR_TASK_EXECUTOR; running tasks on the process executor"
-                );
-                TaskExecutor::Process
-            }
-            _ => TaskExecutor::Process,
-        }
+        let Some(value) = override_val
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return TaskExecutor::Process;
+        };
+        crate::task_executor::parse(value).unwrap_or_else(|| {
+            tracing::warn!(
+                value,
+                "unknown HANGAR_TASK_EXECUTOR; running tasks on the process executor"
+            );
+            TaskExecutor::Process
+        })
     }
 
     /// Resolve the headless OS FS sandbox posture from the explicit
@@ -731,7 +728,9 @@ pub async fn run(
                 let events = events.clone();
                 let interactive = interactive.clone();
                 let secrets = secrets.clone();
-                let executor = cfg.task_executor;
+                // The daemon-wide FLOOR only: each task's own executor is
+                // resolved from its agent against this (A8).
+                let executor = DaemonDefaultExecutor::new(cfg.task_executor);
                 runs.spawn(async move {
                     let clock = SystemClock;
                     if let Err(e) =
@@ -1195,7 +1194,7 @@ async fn execute_claimed(
     events: &EventSink,
     interactive: &InteractiveSessions,
     secrets: Arc<dyn ainb_hangar_secrets::SecretBackend + Send + Sync>,
-    executor: TaskExecutor,
+    daemon_default: DaemonDefaultExecutor,
 ) -> anyhow::Result<()> {
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
@@ -1265,7 +1264,7 @@ async fn execute_claimed(
         &task.agent_id,
         task.issue_id.as_deref(),
         mode,
-        executor,
+        daemon_default,
     )
     .await
     {
@@ -1277,7 +1276,7 @@ async fn execute_claimed(
                 agent_id = %task.agent_id,
                 "dispatch resolve failed; falling back to the default provider + prompt"
             );
-            ResolvedDispatch::fallback(mode, executor)
+            ResolvedDispatch::fallback(mode, daemon_default)
         }
     };
 
@@ -1290,11 +1289,18 @@ async fn execute_claimed(
     // extracted to prevent. Terminalises BEFORE the worktree is provisioned and
     // before the row leaves `dispatched`, so no tmux session and no checkout
     // are created for a run that will not happen.
+    //
+    // Read off the DISPATCH, so it refuses per AGENT (A8): an agent whose
+    // `task_executor` is `acp` is refused on a daemon whose default is
+    // `process`, and an agent that pins `process` is NOT refused on a daemon
+    // whose default is `acp` — in both cases the refusal follows the executor
+    // the task was actually assigned.
     if dispatch.executor == TaskExecutor::Acp && mode == Mode::Interactive {
         let refusal = anyhow::anyhow!(
-            "task mode=interactive is not supported under HANGAR_TASK_EXECUTOR=acp; \
-             run it with HANGAR_TASK_EXECUTOR=process, or use the adapter's \
-             permission_mode for human-in-the-loop under acp"
+            "task mode=interactive is not supported on the acp task executor (selected by \
+             this agent's task_executor, or by HANGAR_TASK_EXECUTOR=acp); run it on the \
+             process executor, or use the adapter's permission_mode for human-in-the-loop \
+             under acp"
         );
         return finalize_setup_failure(pool, &task, &refusal, clock, stats, events).await;
     }
@@ -1406,6 +1412,9 @@ async fn execute_claimed(
     let provider = dispatch.backend.name();
     // Copied out for the same reason `provider` is: the cancel arm below needs
     // to know which executor to stop, and `provider_run` borrows `dispatch`.
+    // From the DISPATCH, never from the daemon-wide default: with per-agent
+    // selection (A8) the two differ per task, and the branch that spawns the
+    // work and the arm that cancels it have to agree on which one ran.
     let executor = dispatch.executor;
 
     // Doctrine hardening (D-e2e-3): bound EVERY await between the `running` commit
@@ -2574,10 +2583,15 @@ async fn materialise_agent_profile(
 pub struct ResolvedDispatch {
     /// Which provider exec path [`execute_claimed`] routes to.
     pub(crate) backend: Backend,
-    /// Which EXECUTOR runs it, resolved once from the daemon config and
-    /// carried here for the same reason `mode` is: the branch that picks the
-    /// exec path reads it from the dispatch, so the executor a task gets and
-    /// the work spawned for it cannot disagree.
+    /// Which EXECUTOR runs it, resolved once from the AGENT against the daemon
+    /// default (A8) and carried here for the same reason `mode` is: the branch
+    /// that picks the exec path reads it from the dispatch, so the executor a
+    /// task gets and the work spawned for it cannot disagree.
+    ///
+    /// This is the only place that answer lives once resolution has happened.
+    /// `execute_claimed` holds a [`DaemonDefaultExecutor`], not a
+    /// [`TaskExecutor`], precisely so no branch below can accidentally spawn
+    /// work for the daemon's default while this field says otherwise.
     pub(crate) executor: TaskExecutor,
     /// Which CONTRACT that exec path is spawned for, resolved once from the
     /// task row (see [`dispatch_mode`]) and carried beside `backend`.
@@ -2636,10 +2650,14 @@ impl ResolvedDispatch {
     /// `mode` is still the task row's own — a resolve fault says nothing about
     /// which contract the operator asked for, and defaulting it would spawn a
     /// print-and-exit process into an interactive pane.
-    fn fallback(mode: Mode, executor: TaskExecutor) -> Self {
+    ///
+    /// The executor falls back to the DAEMON default: this path is taken when
+    /// the agent row could not be read, so there is no per-agent override to
+    /// honour and inventing one would route the task on a guess.
+    fn fallback(mode: Mode, daemon_default: DaemonDefaultExecutor) -> Self {
         Self {
             backend: Backend::default(),
-            executor,
+            executor: daemon_default.for_agent(None),
             mode,
             invocation: ProviderInvocation {
                 prompt: FALLBACK_PROMPT.to_string(),
@@ -2663,6 +2681,13 @@ impl ResolvedDispatch {
 /// `cli_args` become the [`ProviderInvocation`]; its `agent_env` is carried
 /// separately.
 ///
+/// A8 adds the second, ORTHOGONAL axis: the agent's own `task_executor`
+/// (migration 0095) decides HOW that backend runs — as a provider subprocess or
+/// as one turn on an ACP adapter — falling back to the daemon-wide
+/// `HANGAR_TASK_EXECUTOR` when the agent names nothing recognised. Resolved
+/// here, in the same read that resolves the backend, so one row read answers
+/// both questions and the pair cannot drift.
+///
 /// # Errors
 ///
 /// Returns an error if the agent id is malformed or the agent / runtime row is
@@ -2672,7 +2697,7 @@ async fn resolve_dispatch(
     agent_id: &str,
     issue_id: Option<&str>,
     mode: Mode,
-    executor: TaskExecutor,
+    daemon_default: DaemonDefaultExecutor,
 ) -> anyhow::Result<ResolvedDispatch> {
     use ainb_hangar_store::repo::agent::AgentRepo;
     use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
@@ -2685,6 +2710,8 @@ async fn resolve_dispatch(
         .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
     // Per-agent provider wins; an agent with no override uses the runtime default.
     let provider = agent.provider.as_deref().unwrap_or(&runtime.provider);
+    // Same shape on the executor axis: per-agent wins, otherwise the daemon's.
+    let executor = daemon_default.for_agent(agent.task_executor.as_deref());
     Ok(ResolvedDispatch {
         backend: Backend::from_provider(provider),
         executor,
@@ -3124,6 +3151,12 @@ fn warn_danger_access(task: &Task, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon started with no `HANGAR_TASK_EXECUTOR`: the floor every test
+    /// below dispatches against, so an agent's own `task_executor` is the only
+    /// thing that can move a task onto the ACP path.
+    const PROCESS_DEFAULT: DaemonDefaultExecutor =
+        DaemonDefaultExecutor::new(TaskExecutor::Process);
 
     /// hangar-e2e-6: a failed run whose runner captured BOTH stdout and stderr
     /// tails must surface BOTH in the persisted failure detail. This is the core
@@ -3673,7 +3706,7 @@ mod tests {
             &events,
             &interactive,
             Arc::new(HangingBackend),
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await;
 
@@ -3887,7 +3920,7 @@ mod tests {
                 &events,
                 &interactive,
                 Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
-                TaskExecutor::Process,
+                PROCESS_DEFAULT,
             )
             .await
         };
@@ -3930,7 +3963,7 @@ mod tests {
             &events,
             &interactive,
             Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .expect("member execute_claimed handles the spawn failure internally");
@@ -4263,7 +4296,7 @@ mod tests {
             &agent.id,
             Some(&issue_id),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4304,19 +4337,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let disp = resolve_dispatch(
-            pool,
-            &instructed.id,
-            None,
-            Mode::Headless,
-            TaskExecutor::Process,
-        )
-        .await
-        .unwrap();
+        let disp = resolve_dispatch(pool, &instructed.id, None, Mode::Headless, PROCESS_DEFAULT)
+            .await
+            .unwrap();
         assert_eq!(disp.invocation.prompt, "Triage the inbox.");
 
         // (3) Neither → a non-empty fallback, never a promptless spawn.
-        let disp = resolve_dispatch(pool, &agent.id, None, Mode::Headless, TaskExecutor::Process)
+        let disp = resolve_dispatch(pool, &agent.id, None, Mode::Headless, PROCESS_DEFAULT)
             .await
             .unwrap();
         assert!(
@@ -4414,7 +4441,7 @@ mod tests {
             &agent.id,
             Some(&issue_id),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4446,7 +4473,7 @@ mod tests {
             &agent.id,
             Some(&issue_id),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4469,7 +4496,7 @@ mod tests {
             &agent.id,
             Some(&issue_id),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4578,7 +4605,7 @@ mod tests {
             &agent.id,
             Some(&issue_id),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4603,7 +4630,7 @@ mod tests {
             &agent.id,
             Some(&issue_id),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4676,7 +4703,7 @@ mod tests {
             &agent.id,
             Some(&with_ref),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4693,7 +4720,7 @@ mod tests {
             &agent.id,
             Some(&no_ref),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4712,7 +4739,7 @@ mod tests {
             &agent.id,
             Some(&title_only),
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await
         .unwrap();
@@ -4904,12 +4931,12 @@ mod tests {
             "agent-that-does-not-exist",
             None,
             Mode::Headless,
-            TaskExecutor::Process,
+            PROCESS_DEFAULT,
         )
         .await;
         assert!(err.is_err(), "a missing agent must fail to resolve");
 
-        let disp = ResolvedDispatch::fallback(Mode::Headless, TaskExecutor::Process);
+        let disp = ResolvedDispatch::fallback(Mode::Headless, PROCESS_DEFAULT);
         assert!(
             !disp.invocation.prompt.trim().is_empty(),
             "the fault fallback must carry a real brief, or the provider exits 1 \
@@ -4957,7 +4984,7 @@ mod tests {
 
         // A codex agent on that claude-advertised runtime → codex backend.
         let codex = bootstrap::create_agent(pool, &ws, "coder", "codex", None).await.unwrap();
-        let disp = resolve_dispatch(pool, &codex.id, None, Mode::Headless, TaskExecutor::Process)
+        let disp = resolve_dispatch(pool, &codex.id, None, Mode::Headless, PROCESS_DEFAULT)
             .await
             .unwrap();
         assert_eq!(
@@ -4969,15 +4996,9 @@ mod tests {
         // A copilot agent on that claude-advertised runtime → copilot backend
         // (no more silent claude fallback).
         let copilot = bootstrap::create_agent(pool, &ws, "helper", "copilot", None).await.unwrap();
-        let disp = resolve_dispatch(
-            pool,
-            &copilot.id,
-            None,
-            Mode::Headless,
-            TaskExecutor::Process,
-        )
-        .await
-        .unwrap();
+        let disp = resolve_dispatch(pool, &copilot.id, None, Mode::Headless, PROCESS_DEFAULT)
+            .await
+            .unwrap();
         assert_eq!(
             disp.backend,
             Backend::Copilot,
@@ -4988,7 +5009,7 @@ mod tests {
         let agy = bootstrap::create_agent(pool, &ws, "gemini_worker", "antigravity", None)
             .await
             .unwrap();
-        let disp = resolve_dispatch(pool, &agy.id, None, Mode::Headless, TaskExecutor::Process)
+        let disp = resolve_dispatch(pool, &agy.id, None, Mode::Headless, PROCESS_DEFAULT)
             .await
             .unwrap();
         assert_eq!(
@@ -4999,15 +5020,9 @@ mod tests {
 
         // A claude agent on the same runtime → claude backend.
         let claude = bootstrap::create_agent(pool, &ws, "writer", "claude", None).await.unwrap();
-        let disp = resolve_dispatch(
-            pool,
-            &claude.id,
-            None,
-            Mode::Headless,
-            TaskExecutor::Process,
-        )
-        .await
-        .unwrap();
+        let disp = resolve_dispatch(pool, &claude.id, None, Mode::Headless, PROCESS_DEFAULT)
+            .await
+            .unwrap();
         assert_eq!(disp.backend, Backend::Claude);
 
         // An agent with NO provider override falls back to the runtime's provider.
@@ -5024,15 +5039,9 @@ mod tests {
             ..Agent::default()
         };
         AgentRepo::insert(pool, &bare).await.unwrap();
-        let disp = resolve_dispatch(
-            pool,
-            "bare-agent",
-            None,
-            Mode::Headless,
-            TaskExecutor::Process,
-        )
-        .await
-        .unwrap();
+        let disp = resolve_dispatch(pool, "bare-agent", None, Mode::Headless, PROCESS_DEFAULT)
+            .await
+            .unwrap();
         assert_eq!(
             disp.backend,
             Backend::Claude,
