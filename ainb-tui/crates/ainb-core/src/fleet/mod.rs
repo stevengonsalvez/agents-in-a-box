@@ -18,12 +18,12 @@
 
 #![allow(missing_docs)]
 
-pub mod atc;
 pub mod answer;
+pub mod atc;
 pub mod attention;
 pub mod attention_poll;
-pub mod chat_host;
 pub mod bridge;
+pub mod chat_host;
 pub mod control;
 pub mod daemons;
 pub mod plumbing;

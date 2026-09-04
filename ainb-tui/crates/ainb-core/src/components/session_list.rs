@@ -61,7 +61,6 @@ const MAX_BADGE: usize = 9;
 /// The marker the `List` prepends to the selected row (and pads on the others).
 const HIGHLIGHT_SYMBOL: &str = "\u{25b6} ";
 
-
 /// Gap between the row content and the chip strip, and between two chips.
 const CHIP_GAP: usize = 2;
 
@@ -89,7 +88,6 @@ fn next_badge(attach_no: &mut usize) -> Span<'static> {
         empty_badge()
     }
 }
-
 
 /// The colour a chip and its age share.
 const fn chip_color(kind: AttentionKind) -> Color {
@@ -128,10 +126,7 @@ fn chip_strip_width(
     chips
         .iter()
         .map(|chip| {
-            CHIP_GAP
-                + chip_label(chip, sending).len()
-                + 1
-                + format_age(now_ms, chip.since_ms).len()
+            CHIP_GAP + chip_label(chip, sending).len() + 1 + format_age(now_ms, chip.since_ms).len()
         })
         .sum()
 }
@@ -304,14 +299,12 @@ impl SessionListComponent {
         // here would tell the operator there is more waiting on them than there
         // is. Counts ROWS, so a session with both an ASK and an APPROVE is one
         // session needing one human.
-        let needs_you = needs_you_count(
-            state.workspaces.iter().flat_map(|w| {
-                w.sessions
-                    .iter()
-                    .filter(|s| state.session_passes_filter(s))
-                    .map(|s| s.live_attention.as_slice())
-            }),
-        );
+        let needs_you = needs_you_count(state.workspaces.iter().flat_map(|w| {
+            w.sessions
+                .iter()
+                .filter(|s| state.session_passes_filter(s))
+                .map(|s| s.live_attention.as_slice())
+        }));
         let needs_you_label = match needs_you {
             0 => String::new(),
             1 => " · 1 needs you".to_string(),
@@ -341,8 +334,7 @@ impl SessionListComponent {
             Span::raw(if needs_you_label.is_empty() { "" } else { " " }),
         ];
         let filter_label = format!("F [{}]", state.session_filter.label());
-        let title_prefix =
-            format!(" \u{f07b} Workspaces ({workspace_count}){needs_you_label} ");
+        let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}){needs_you_label} ");
         state.sessions_pane_state.set_filter_toggle_area(Rect::new(
             area.x.saturating_add(1 + title_prefix.chars().count() as u16),
             area.y,
@@ -1273,7 +1265,8 @@ mod tests {
             .draw(|frame| {
                 let area = frame.area();
                 let row_width = usize::from(area.width.saturating_sub(2));
-                let items = SessionListComponent::build_list_items_static(state, row_width, CHIP_NOW);
+                let items =
+                    SessionListComponent::build_list_items_static(state, row_width, CHIP_NOW);
                 // Mirror `render`'s block so the snapshot carries the real
                 // border, title and badge, not just the rows.
                 list.update_selection(state);
@@ -1338,7 +1331,10 @@ mod tests {
         let rows: [(&str, Vec<SessionAttention>); 5] = [
             (
                 "ACP-chat",
-                vec![SessionAttention::local(AttentionKind::Ask, CHIP_NOW - 40_000)],
+                vec![SessionAttention::local(
+                    AttentionKind::Ask,
+                    CHIP_NOW - 40_000,
+                )],
             ),
             (
                 "disk-clean",
@@ -1356,7 +1352,10 @@ mod tests {
             ),
             (
                 "site-build",
-                vec![SessionAttention::local(AttentionKind::Done, CHIP_NOW - 60_000)],
+                vec![SessionAttention::local(
+                    AttentionKind::Done,
+                    CHIP_NOW - 60_000,
+                )],
             ),
             ("quiet", Vec::new()),
         ];
@@ -1431,17 +1430,19 @@ mod tests {
                 .filter_map(|line| {
                     let chars: Vec<char> = line.chars().collect();
                     let border = chars.len().checked_sub(1)?;
-                    let last_age = chars
-                        .iter()
-                        .take(border)
-                        .rposition(|c| c.is_ascii_alphanumeric())?;
+                    let last_age =
+                        chars.iter().take(border).rposition(|c| c.is_ascii_alphanumeric())?;
                     ["ASK", "ERR", "APPROVE", "DONE"]
                         .iter()
                         .any(|chip| line.contains(chip))
                         .then_some(border - last_age - 1)
                 })
                 .collect();
-            assert_eq!(gaps.len(), 4, "four chipped rows at width {width}: {rendered}");
+            assert_eq!(
+                gaps.len(),
+                4,
+                "four chipped rows at width {width}: {rendered}"
+            );
             assert!(
                 gaps.iter().all(|gap| *gap == CHIP_RIGHT_MARGIN),
                 "every chip strip must sit {CHIP_RIGHT_MARGIN} cell(s) clear of the border \
@@ -1508,7 +1509,10 @@ mod tests {
                 .filter_map(|line| {
                     let trimmed = line.trim_start_matches(['│', '▶', ' ']);
                     trimmed.chars().next().filter(char::is_ascii_digit).map(|d| {
-                        format!("{d}{}", trimmed.split_whitespace().nth(2).unwrap_or_default())
+                        format!(
+                            "{d}{}",
+                            trimmed.split_whitespace().nth(2).unwrap_or_default()
+                        )
                     })
                 })
                 .collect()

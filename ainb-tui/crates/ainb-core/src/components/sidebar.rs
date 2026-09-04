@@ -35,7 +35,6 @@ pub enum SidebarItem {
     Sessions,     // Session manager
     Inbox,        // ainb-hooks notification inbox
     Daemons,      // Unified runtime-health and repair screen
-    Fleet,        // Fleet control panel (current_state needs + actions)
     Recovery,     // Recover orphaned sessions
     Mcp,          // Shared MCP pool overlay
     Logs,         // Log history viewer
@@ -59,7 +58,6 @@ impl SidebarItem {
             Self::Sessions => "🚀",
             Self::Inbox => "📥",
             Self::Daemons => "⚙",
-            Self::Fleet => "🛫",
             Self::Recovery => "🔄",
             Self::Mcp => "🧬",
             Self::Logs => "📋",
@@ -83,7 +81,6 @@ impl SidebarItem {
             Self::Sessions => "Sessions",
             Self::Inbox => "Inbox",
             Self::Daemons => "Daemons",
-            Self::Fleet => "Fleet",
             Self::Recovery => "Recovery",
             Self::Mcp => "MCP",
             Self::Logs => "Logs",
@@ -107,7 +104,6 @@ impl SidebarItem {
             Self::Sessions => "Manage Active",
             Self::Inbox => "Hook Notifications",
             Self::Daemons => "Runtime health & repair",
-            Self::Fleet => "Who Needs You",
             Self::Recovery => "Resume Orphaned",
             Self::Mcp => "Shared Pool",
             Self::Logs => "View Log History",
@@ -136,7 +132,6 @@ impl SidebarItem {
             Self::Memory => "m",
             Self::Stats => "i",
             Self::Inbox => "b",
-            Self::Fleet => "f",
             Self::Daemons => "d",
             Self::Witr => "w",
             Self::Abtop => "t",
@@ -163,7 +158,6 @@ impl SidebarItem {
             Self::Memory,
             Self::Stats,
             Self::Inbox,
-            Self::Fleet,
             Self::Daemons,
             Self::Witr,
             Self::Abtop,

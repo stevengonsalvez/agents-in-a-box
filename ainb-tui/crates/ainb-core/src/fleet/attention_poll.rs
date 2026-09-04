@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use ainb_hangar_proto::events::AttentionRow as WireRow;
 
-use super::attention::{
-    AttentionOption, DaemonAttention, SessionAttention, chip_for_daemon_kind,
-};
+use super::attention::{AttentionOption, DaemonAttention, SessionAttention, chip_for_daemon_kind};
 
 /// How often the poller asks the daemon.
 ///
@@ -46,42 +44,39 @@ pub fn spawn(shared: &Shared, running: &Arc<AtomicBool>) {
     let shared = Arc::clone(shared);
     let worker_flag = Arc::clone(running);
     let spawn_err_flag = Arc::clone(running);
-    let spawned = std::thread::Builder::new()
-        .name("ainb-attention-poll".into())
-        .spawn(move || {
-            // Release the flag on EVERY exit path, including an unwind, so a
-            // worker that dies is replaced on the next frame rather than
-            // leaving the surface permanently daemon-blind.
-            struct Guard(Arc<AtomicBool>);
-            impl Drop for Guard {
-                fn drop(&mut self) {
-                    self.0.store(false, Ordering::Release);
-                }
+    let spawned = std::thread::Builder::new().name("ainb-attention-poll".into()).spawn(move || {
+        // Release the flag on EVERY exit path, including an unwind, so a
+        // worker that dies is replaced on the next frame rather than
+        // leaving the surface permanently daemon-blind.
+        struct Guard(Arc<AtomicBool>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
             }
-            let _guard = Guard(worker_flag);
-            let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build()
-            else {
-                tracing::warn!("attention poller could not build a runtime");
-                return;
-            };
-            runtime.block_on(async move {
-                // The last rows the daemon actually reported. Carried across a
-                // failed poll so a transient socket error greys the chips
-                // rather than making them disappear — a request that vanishes
-                // because one read timed out is a request nobody answers.
-                let mut last_good: HashMap<String, Vec<SessionAttention>> = HashMap::new();
-                loop {
-                    let next = poll_once(&last_good).await;
-                    if next.reachable {
-                        last_good.clone_from(&next.by_cwd);
-                    }
-                    if let Ok(mut cell) = shared.lock() {
-                        *cell = next;
-                    }
-                    tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        let _guard = Guard(worker_flag);
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            tracing::warn!("attention poller could not build a runtime");
+            return;
+        };
+        runtime.block_on(async move {
+            // The last rows the daemon actually reported. Carried across a
+            // failed poll so a transient socket error greys the chips
+            // rather than making them disappear — a request that vanishes
+            // because one read timed out is a request nobody answers.
+            let mut last_good: HashMap<String, Vec<SessionAttention>> = HashMap::new();
+            loop {
+                let next = poll_once(&last_good).await;
+                if next.reachable {
+                    last_good.clone_from(&next.by_cwd);
                 }
-            });
+                if let Ok(mut cell) = shared.lock() {
+                    *cell = next;
+                }
+                tokio::time::sleep(POLL_INTERVAL).await;
+            }
         });
+    });
     if let Err(error) = spawned {
         tracing::warn!(%error, "attention poller thread spawn failed");
         spawn_err_flag.store(false, Ordering::Release);
@@ -92,9 +87,7 @@ pub fn spawn(shared: &Shared, running: &Arc<AtomicBool>) {
 ///
 /// `last_good` is what the daemon reported when it last answered, handed back
 /// on a failure so the surface greys its chips instead of losing them.
-async fn poll_once(
-    last_good: &HashMap<String, Vec<SessionAttention>>,
-) -> DaemonAttention {
+async fn poll_once(last_good: &HashMap<String, Vec<SessionAttention>>) -> DaemonAttention {
     let client = match crate::fleet::bridge::daemon::DaemonClient::from_env() {
         Ok(client) => client,
         // Not an error worth a banner: no hangar home configured is the normal
@@ -195,7 +188,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::fleet::attention::{AttentionKind, AttentionSource, Answerable};
+    use crate::fleet::attention::{Answerable, AttentionKind, AttentionSource};
 
     fn wire(id: &str, kind: &str, cwd: &str, payload: serde_json::Value) -> WireRow {
         WireRow {
@@ -227,7 +220,10 @@ mod tests {
 
     #[test]
     fn an_unknown_kind_renders_no_chip_rather_than_a_wrong_one() {
-        assert_eq!(chip_for_daemon_kind("something_a_newer_daemon_raises"), None);
+        assert_eq!(
+            chip_for_daemon_kind("something_a_newer_daemon_raises"),
+            None
+        );
         let grouped = group_by_cwd(&[wire("a", "something_new", "/w", serde_json::json!({}))]);
         assert!(grouped.is_empty());
     }
@@ -356,7 +352,12 @@ mod tests {
     fn unmatched_rows_are_counted_elsewhere_not_dropped_silently() {
         let grouped = group_by_cwd(&[
             wire("a", "approval", "/on/screen", serde_json::json!({})),
-            wire("b", "ask_user_question", "/off/screen", serde_json::json!({})),
+            wire(
+                "b",
+                "ask_user_question",
+                "/off/screen",
+                serde_json::json!({}),
+            ),
             // An ERR blocks nobody, so it is not in the needs-you count even
             // when it is elsewhere.
             wire("c", "error", "/off/screen", serde_json::json!({})),
