@@ -79,7 +79,7 @@ Type "q"
 Sleep 2s
 Type "q"
 Sleep 4s
-Type "HOME='/home/claude/ainb-e2e-home' bash /home/claude/ainb-e2e-home/acp-proof/p3-acp-proof.sh"
+Type "HOME='/home/claude/ainb-e2e-home' bash /home/claude/.agents-in-a-box/worktrees/by-name/agents-in-a-box--f-prove-b-p3-acp/scripts/hangar/p3-acp-proof.sh --latest"
 Enter
 Wait+Screen@30s /final message/
 Sleep 3s
