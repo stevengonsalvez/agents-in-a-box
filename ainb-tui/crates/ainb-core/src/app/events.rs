@@ -90,6 +90,17 @@ pub enum AppEvent {
     GoToBottom,
     // Pane focus management
     SwitchPaneFocus,
+    /// The key was consumed by a surface that handled it in place. Emitted so
+    /// the caller stops looking for another handler; the reducer does nothing.
+    Consumed,
+    /// Move to the next available right-pane tab (`Tab`).
+    SessionTabNext,
+    /// Move to the previous available right-pane tab (`Shift+Tab`).
+    SessionTabPrev,
+    /// `Enter` on the `ask` tab: send the selected answer.
+    SessionAskSend,
+    /// `Enter` on a composer tab (`thread` / `copilot`): send the message.
+    SessionTabComposerSend,
     /// Toggle the sessions sidebar between full width and the thin rail —
     /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
     ToggleSessionsSidebar,
@@ -1329,6 +1340,62 @@ impl EventHandler {
         Self::is_text_input_context(state)
     }
 
+    /// Fold one key into the active composer tab's chat surface.
+    ///
+    /// Returns `None` for a key the chat does not claim, so it falls through to
+    /// the sessions screen — `Tab` still moves the strip and the attach digits
+    /// still attach, which is the contract the footer advertises on every tab.
+    fn route_session_composer_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatKey, ChatKeyOutcome, reduce_chat_key};
+        use crate::components::session_tabs::SessionTab;
+
+        // `Tab` belongs to the strip, not the composer. Answered HERE rather
+        // than by falling through: the `in_text_input` short-circuit downstream
+        // swallows everything, so a bare `None` would trap the operator on a
+        // pane they could only leave with Esc.
+        match key_event.code {
+            KeyCode::Tab => return Some(AppEvent::SessionTabNext),
+            KeyCode::BackTab => return Some(AppEvent::SessionTabPrev),
+            _ => {}
+        }
+        // Attach digits ARE passed through to the composer — a digit typed into
+        // a message is a digit, and stealing it would make the composer unable
+        // to type "3". The footer stops advertising them here for that reason.
+        let chat_key = match key_event.code {
+            KeyCode::Char(c) if c != ' ' => ChatKey::Char(c),
+            KeyCode::Char(' ') => ChatKey::Space,
+            KeyCode::Enter => ChatKey::Enter,
+            KeyCode::Esc => ChatKey::Esc,
+            KeyCode::Backspace => ChatKey::Backspace,
+            KeyCode::Up => ChatKey::Up,
+            KeyCode::Down => ChatKey::Down,
+            _ => return None,
+        };
+        let tab = state.session_tab;
+        let host = match tab {
+            SessionTab::Copilot => state.copilot_chat.as_mut(),
+            SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Log => None,
+        }?;
+        let outcome = reduce_chat_key(host.state_mut(), chat_key);
+        state.ui_needs_refresh = true;
+        match outcome {
+            ChatKeyOutcome::Handled => Some(AppEvent::Consumed),
+            // Esc out of the conversation returns to the pane that is never
+            // disabled, rather than leaving the operator on a composer they
+            // have just closed.
+            ChatKeyOutcome::Close => {
+                state.session_tab = SessionTab::Preview;
+                state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                Some(AppEvent::Consumed)
+            }
+            ChatKeyOutcome::Intent(intent) => {
+                host.dispatch(intent);
+                Some(AppEvent::Consumed)
+            }
+        }
+    }
+
     fn is_text_input_context(state: &AppState) -> bool {
         use crate::app::screens::ids as screen_ids;
         use crate::app::state::NewSessionStep;
@@ -1366,6 +1433,12 @@ impl EventHandler {
         // typed into a plugin overlay (8hx), not just the boards card title.
         let plugin_capturing_text =
             crate::app::screens::builtin::focused_plugin_captures_text(state);
+        // A composer tab on the sessions screen owns every printable key. The
+        // sessions screen binds bare `d` to delete-session and bare `q` to
+        // leave, so without this a message typed into the thread composer would
+        // fire session shortcuts one character at a time.
+        let session_composer_active = state.current_screen == screen_ids::SESSION_LIST
+            && state.session_composer_captures_text();
         let skills_text_active =
             state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
         // SkillManager add-source / search prompt — when its input
@@ -1439,6 +1512,7 @@ impl EventHandler {
             || skills_text_active
             || skill_manager_input_active
             || git_view_text_active
+            || session_composer_active
     }
 
     /// Pure decision logic shared between the production global-`W`
@@ -2087,6 +2161,18 @@ impl EventHandler {
             };
         }
 
+        // A composer tab owns the keyboard. Routed BEFORE the `in_text_input`
+        // short-circuit below, which only suppresses the bare-char shortcuts —
+        // suppression alone would leave the operator typing into a pane that
+        // silently drops every character.
+        if state.current_screen == screen_ids::SESSION_LIST
+            && state.session_composer_captures_text()
+        {
+            if let Some(event) = Self::route_session_composer_key(key_event, state) {
+                return Some(event);
+            }
+        }
+
         // Handle session recovery view
         if state.current_screen == screen_ids::SESSION_RECOVERY {
             tracing::debug!("In session recovery view, handling session recovery keys");
@@ -2124,13 +2210,15 @@ impl EventHandler {
                     Some(AppEvent::GoToHomeScreen)
                 }
             }
-            KeyCode::Tab => {
-                tracing::debug!(
-                    "Tab key pressed, current focused_pane: {:?}",
-                    state.focused_pane
-                );
-                Some(AppEvent::SwitchPaneFocus)
-            }
+            // Tab cycles the right pane's tab strip; Shift+Tab walks it back.
+            //
+            // This REPLACES `SwitchPaneFocus`, which toggled Sessions <-> right
+            // pane. Nothing is lost: focus is now implied by which tab is open
+            // (the composer tabs take input, `preview` and `log` do not), so the
+            // one thing Tab used to buy is now a consequence of the same key.
+            // Two keys for one concept is the ambiguity the strip removes.
+            KeyCode::Tab => Some(AppEvent::SessionTabNext),
+            KeyCode::BackTab => Some(AppEvent::SessionTabPrev),
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppEvent::Quit)
             }
@@ -2188,6 +2276,24 @@ impl EventHandler {
                 }
             }
             KeyCode::Enter => {
+                // Enter is SCOPED TO THE ACTIVE TAB. It meant "attach"
+                // everywhere, which is the wrong verb on four of the five panes
+                // the strip now offers — on `ask` it has to send the answer.
+                // Each tab declares its own verb in `session_tabs`, and the
+                // footer prints it, so the operator never has to guess which
+                // one is about to fire.
+                use crate::components::session_tabs::SessionTab;
+                match crate::components::session_tabs::resolve(state, state.session_tab) {
+                    SessionTab::Preview => {}
+                    SessionTab::Ask => return Some(AppEvent::SessionAskSend),
+                    SessionTab::Thread | SessionTab::Copilot => {
+                        return Some(AppEvent::SessionTabComposerSend);
+                    }
+                    // Deliberately nothing: a history pane has no verb, and
+                    // silently attaching from it is the surprise this scoping
+                    // exists to stop.
+                    SessionTab::Log => return None,
+                }
                 // Enter on a Stopped interactive session = resume it.
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
@@ -4659,6 +4765,35 @@ impl EventHandler {
             }
             AppEvent::SwitchToTerminal => {
                 // TODO: Implement terminal view
+            }
+            // The surface already folded the key in; nothing left to reduce.
+            AppEvent::Consumed => {}
+            AppEvent::SessionTabNext | AppEvent::SessionTabPrev => {
+                use crate::app::state::FocusedPane;
+                use crate::components::session_tabs::{SessionTab, cycle, resolve};
+                let forward = matches!(event, AppEvent::SessionTabNext);
+                let from = resolve(state, state.session_tab);
+                state.session_tab = cycle(state, from, forward);
+                // Focus follows the tab. The composer tabs take typed input, so
+                // the right pane owns the keyboard there; `preview` and `log`
+                // do not, so the list keeps it. This is the whole of what
+                // `SwitchPaneFocus` used to provide, now derived rather than
+                // toggled by a second key.
+                state.focused_pane = match state.session_tab {
+                    SessionTab::Ask | SessionTab::Thread | SessionTab::Copilot => {
+                        FocusedPane::LiveLogs
+                    }
+                    SessionTab::Preview | SessionTab::Log => FocusedPane::Sessions,
+                };
+                state.ui_needs_refresh = true;
+            }
+            // Wired by the answering phase; declared here so the key that fires
+            // them is scoped from the moment the strip exists rather than
+            // silently falling through to attach.
+            AppEvent::SessionAskSend | AppEvent::SessionTabComposerSend => {
+                state.add_info_notification(
+                    "not wired yet: the composer lands with the answering path".to_string(),
+                );
             }
             AppEvent::SwitchPaneFocus => {
                 use crate::app::state::FocusedPane;
@@ -10648,5 +10783,98 @@ mod hangar_daemon_persist_tests {
             );
             assert!(PersistOutcome::default().message().is_none());
         });
+    }
+}
+
+#[cfg(test)]
+mod session_composer_key_tests {
+    use super::*;
+    use crate::app::screens::ids;
+    use crate::components::session_tabs::SessionTab;
+    use crate::fleet::chat_host::ChatHost;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn press(state: &mut AppState, code: KeyCode) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), state)
+    }
+
+    /// The sessions screen with a LIVE copilot composer.
+    fn composing() -> AppState {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state.session_tab = SessionTab::Copilot;
+        state.copilot_chat = Some(ChatHost::copilot());
+        assert!(
+            state.session_composer_captures_text(),
+            "the fixture must actually be capturing, or every assertion below is vacuous"
+        );
+        state
+    }
+
+    /// THE safety test. The sessions screen binds bare `d` to delete-session,
+    /// `D` to delete-marked and `q` to leave. A message typed into a composer
+    /// must not fire any of them, one character at a time.
+    #[test]
+    fn typing_into_a_composer_never_fires_a_session_shortcut() {
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('D'),
+            KeyCode::Char('x'),
+            KeyCode::Char('e'),
+            KeyCode::Char('n'),
+            KeyCode::Char('q'),
+            KeyCode::Char(' '),
+        ] {
+            let mut state = composing();
+            let event = press(&mut state, code);
+            assert!(
+                matches!(event, Some(AppEvent::Consumed)),
+                "{code:?} in a composer produced {event:?}"
+            );
+        }
+    }
+
+    /// And the same keys still work the moment the composer is not capturing.
+    /// Without this the test above passes for a handler that eats everything
+    /// forever.
+    #[test]
+    fn the_same_keys_still_work_with_no_composer_open() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        assert!(matches!(
+            press(&mut state, KeyCode::Char('d')),
+            Some(AppEvent::DeleteSession)
+        ));
+    }
+
+    /// `Tab` belongs to the strip even while composing, or the operator is
+    /// trapped on a pane they cannot leave except by Esc.
+    #[test]
+    fn tab_still_moves_the_strip_from_inside_a_composer() {
+        let mut state = composing();
+        assert!(matches!(
+            press(&mut state, KeyCode::Tab),
+            Some(AppEvent::SessionTabNext)
+        ));
+    }
+
+    /// A digit typed into a message is a digit. The footer stops advertising
+    /// the attach digits here for exactly this reason.
+    #[test]
+    fn a_digit_types_rather_than_attaching_while_composing() {
+        let mut state = composing();
+        let event = press(&mut state, KeyCode::Char('3'));
+        assert!(
+            matches!(event, Some(AppEvent::Consumed)),
+            "a digit must reach the composer, not attach: {event:?}"
+        );
+    }
+
+    /// Esc closes the conversation and lands on the tab that is never disabled.
+    #[test]
+    fn esc_leaves_the_composer_for_a_pane_that_is_always_live() {
+        let mut state = composing();
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.session_tab, SessionTab::Preview);
     }
 }

@@ -78,6 +78,85 @@ impl LayoutComponent {
         }
     }
 
+    /// Paint the tab strip and the footer onto a pane's border.
+    ///
+    /// Drawn as a title on the existing block rather than as a row of its own:
+    /// five words in a dedicated row costs the content a line on every screen,
+    /// and the preview pane is the one that can least afford it.
+    fn render_tab_strip(
+        frame: &mut Frame,
+        area: Rect,
+        state: &AppState,
+        active: crate::components::session_tabs::SessionTab,
+    ) {
+        use crate::components::session_tabs;
+        let block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(SUBDUED_BORDER))
+            .title(session_tabs::strip(state, active))
+            .title_bottom(session_tabs::footer(state, active, false));
+        // Only the border cells are painted, so whatever the pane already drew
+        // inside stays exactly as it was.
+        frame.render_widget(block, area);
+    }
+
+    /// Render one non-preview tab into the right pane.
+    fn render_session_tab(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut AppState,
+        active: crate::components::session_tabs::SessionTab,
+    ) {
+        use crate::components::session_tabs::{self, SessionTab};
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBDUED_BORDER))
+            .style(Style::default().bg(PANEL_BG))
+            .title(session_tabs::strip(state, active))
+            .title_bottom(session_tabs::footer(
+                state,
+                active,
+                state.session_composer_captures_text(),
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        match active {
+            // Handled by the caller, which keeps the tmux mirror it always had.
+            SessionTab::Preview => {}
+            SessionTab::Ask => session_tabs::render_ask(frame, inner, state),
+            SessionTab::Log => {
+                let rows = state.get_selected_session().map_or_else(Vec::new, |session| {
+                    session_tabs::read_log(
+                        &session.workspace_path,
+                        AppState::agent_hook_name(session.agent_type),
+                        200,
+                    )
+                });
+                session_tabs::render_log(frame, inner, &rows);
+            }
+            // Both are the same chat state machine over two topics, driven
+            // through one host, so the two conversations cannot drift in what
+            // they render or which failures they report.
+            SessionTab::Thread | SessionTab::Copilot => {
+                match state.chat_host_for(active) {
+                    Some(host) => session_tabs::render_chat(frame, inner, host),
+                    // Reachable only for `thread` with no session selected,
+                    // which the strip already dims — say it rather than paint
+                    // an empty box.
+                    None => frame.render_widget(
+                        Paragraph::new("select a session to open its thread")
+                            .style(Style::default().fg(MUTED_GRAY)),
+                        inner,
+                    ),
+                }
+            }
+        }
+    }
+
     pub fn render(&mut self, frame: &mut Frame, state: &mut AppState) {
         // Full-screen views go through the screen registry. Each Screen impl
         // owns its component(s) and renders any screen-specific overlays
@@ -173,10 +252,21 @@ impl LayoutComponent {
             .is_some()
             || state.selected_shell_session().is_some();
 
+        // The active tab, reconciled against what is actually available: a tab
+        // can go dead under the operator (the ASK is answered, the cursor moves
+        // off a session row) and leaving them on a stale pane shows a question
+        // they can no longer act on.
+        let active_tab = crate::components::session_tabs::resolve(state, state.session_tab);
+        state.session_tab = active_tab;
+
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to
             // the pane interior (minus the border) so the inner program reflows,
             // then render the live terminal in place of the read-only preview.
+            //
+            // The embed OUTRANKS the strip: an attached terminal owns every
+            // keystroke, so painting a tab strip over it would advertise
+            // controls the pane cannot receive.
             let area = content_chunks[1];
             let inner = area.inner(Margin {
                 vertical: 1,
@@ -189,12 +279,19 @@ impl LayoutComponent {
             // 1-based pane-local SGR coordinates (see encode_mouse_event).
             state.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
-        } else if selected_has_tmux {
-            // Render tmux preview pane (read-only capture)
-            self.tmux_preview.render(frame, content_chunks[1], state);
+        } else if active_tab == crate::components::session_tabs::SessionTab::Preview {
+            if selected_has_tmux {
+                // Render tmux preview pane (read-only capture)
+                self.tmux_preview.render(frame, content_chunks[1], state);
+            } else {
+                // Render traditional live logs stream
+                self.live_logs_stream.render(frame, content_chunks[1], state);
+            }
+            // The strip is painted OVER the pane's own title, so `preview`
+            // keeps the pane it always had and simply gains the switchboard.
+            Self::render_tab_strip(frame, content_chunks[1], state, active_tab);
         } else {
-            // Render traditional live logs stream
-            self.live_logs_stream.render(frame, content_chunks[1], state);
+            self.render_session_tab(frame, content_chunks[1], state, active_tab);
         }
 
         // Render bottom logs area (traditional logs viewer)

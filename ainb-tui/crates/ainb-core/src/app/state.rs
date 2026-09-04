@@ -3566,6 +3566,25 @@ pub struct AppState {
     /// activity that arrives after they look away.
     pub attention_baseline: HashMap<Uuid, i64>,
 
+    /// The copilot conversation, opened lazily the first time the tab is.
+    ///
+    /// Lazy because opening it dials the daemon to resolve the minted channel
+    /// scope, and an operator who never opens the tab should never pay for it.
+    pub copilot_chat: Option<crate::fleet::chat_host::ChatHost>,
+
+    /// The selected session's own thread, rebuilt when the selection moves to a
+    /// different session.
+    ///
+    /// One host, not one per session: a thread the operator has navigated away
+    /// from is not being read, and keeping N of them alive means N poll loops
+    /// against the daemon for conversations nobody is looking at.
+    pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
+
+    /// The active right-pane tab. Reconciled every frame against what is
+    /// actually available, so a tab cannot stay open on a pane that has gone
+    /// dead under the operator.
+    pub session_tab: crate::components::session_tabs::SessionTab,
+
     /// The daemon's half of the attention picture, refreshed by
     /// [`crate::fleet::attention_poll`] on its own thread.
     ///
@@ -4063,6 +4082,9 @@ impl Default for AppState {
             )),
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             attention_elsewhere: 0,
+            session_tab: crate::components::session_tabs::SessionTab::default(),
+            copilot_chat: None,
+            session_chat: None,
         }
     }
 }
@@ -11513,7 +11535,7 @@ impl AppState {
     /// The ainb-hooks `agent` string a session's events are recorded
     /// under, or `None` for session types that don't emit hook events
     /// (plain shell / SSH, and the not-yet-wired Gemini/Kiro).
-    const fn agent_hook_name(agent: SessionAgentType) -> Option<&'static str> {
+    pub const fn agent_hook_name(agent: SessionAgentType) -> Option<&'static str> {
         match agent {
             SessionAgentType::Claude => Some("claude"),
             SessionAgentType::Codex => Some("codex"),
@@ -11633,6 +11655,92 @@ impl AppState {
                 None
             }
         }
+    }
+
+    /// Whether a composer tab on the sessions screen is currently swallowing
+    /// printable keys.
+    ///
+    /// The sessions screen binds bare `d` to delete-session and bare `q` to
+    /// leave, so a message typed into the thread composer would otherwise fire
+    /// session shortcuts one character at a time. Reads the LIVE chat surface
+    /// rather than assuming the tab implies capture: the chat's card focus does
+    /// not take text, and suppressing every shortcut there would strand the
+    /// operator on a pane they cannot leave with `q`.
+    #[must_use]
+    pub fn session_composer_captures_text(&self) -> bool {
+        use crate::components::session_tabs::SessionTab;
+        let host = match self.session_tab {
+            SessionTab::Copilot => self.copilot_chat.as_ref(),
+            SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Log => None,
+        };
+        host.is_some_and(|host| host.state().is_capturing_text())
+    }
+
+    /// The chat host backing a tab, opening or re-targeting it as needed.
+    ///
+    /// Called from the render path, which is what makes both conversations
+    /// live: the host's own tick asks the daemon for the next page, so a reply
+    /// lands without the operator pressing anything.
+    pub fn chat_host_for(
+        &mut self,
+        tab: crate::components::session_tabs::SessionTab,
+    ) -> Option<&crate::fleet::chat_host::ChatHost> {
+        use crate::components::session_tabs::SessionTab;
+        use crate::fleet::chat_host::ChatHost;
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        match tab {
+            SessionTab::Copilot => {
+                let host = self.copilot_chat.get_or_insert_with(ChatHost::copilot);
+                if host.tick(now_ms) {
+                    self.ui_needs_refresh = true;
+                }
+                self.copilot_chat.as_ref()
+            }
+            SessionTab::Thread => {
+                let key = self.selected_session_chat_key()?;
+                // Re-target when the cursor moves to a different session. The
+                // old conversation is dropped rather than cached: nobody is
+                // reading it, and a cached host keeps polling the daemon for it.
+                let stale = self
+                    .session_chat
+                    .as_ref()
+                    .is_none_or(|(existing, _)| *existing != key);
+                if stale {
+                    self.session_chat = Some((key.clone(), ChatHost::thread(key)));
+                }
+                if let Some((_, host)) = self.session_chat.as_mut() {
+                    if host.tick(now_ms) {
+                        self.ui_needs_refresh = true;
+                    }
+                }
+                self.session_chat.as_ref().map(|(_, host)| host)
+            }
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Log => None,
+        }
+    }
+
+    /// The selected session's Fleet key (`<provider>:<session id>`), which is
+    /// what a `session:` chat scope is addressed by.
+    ///
+    /// Derived from the tmux session name because that is the identity the host
+    /// tree actually carries; the provider's own session id lives on the daemon
+    /// side and is never learned here.
+    #[must_use]
+    pub fn selected_session_chat_key(&self) -> Option<String> {
+        let session = self.get_selected_session()?;
+        let provider = match session.agent_type {
+            crate::models::SessionAgentType::Codex => "codex",
+            crate::models::SessionAgentType::Copilot => "copilot",
+            // Everything else that can hold a conversation reports as claude to
+            // the fleet reducer today.
+            _ => "claude",
+        };
+        session
+            .tmux_session_name
+            .as_ref()
+            .map(|tmux| format!("{provider}:{tmux}"))
     }
 
     /// Recompute every session's attention marker (`[!]`/`[?]`/`[✓]`)
