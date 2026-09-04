@@ -2959,9 +2959,16 @@ async fn handle_fleet_copilot_configure(
         (session, false)
     } else {
         let retiring = session.session_key.clone();
-        // Captured before the retire, so a failed swap can put the row back in
-        // the state `get_live_by_scope` will find.
-        let was_live = session.state.clone();
+        // `IDLE`, not the state it was in. `get_live_by_scope` only ever hands
+        // back `ACTIVE` or `IDLE`, and by the time a restore runs the adapter
+        // has been torn down — so `ACTIVE`, which means a turn is in flight,
+        // would be a claim about a process that no longer exists. `teardown`
+        // sends its cancel asynchronously and does nothing at all when the
+        // session was not in the pool, so it cannot be relied on to have
+        // settled the turn either. `IDLE` is both true and live, and a stale
+        // `open_turn_id` is left to the deadline sweep, which is the same net
+        // that covers an adapter that crashed.
+        const RESTORED_STATE: &str = "IDLE";
         if let Some(acp) = acp.as_ref() {
             acp.teardown(&retiring, crate::acp_pool::ConvergeCause::OperatorStop).await;
         }
@@ -2991,7 +2998,7 @@ async fn handle_fleet_copilot_configure(
                 // leaves the channel exactly where it started; the adapter was
                 // torn down, and the pool re-dials it on next use.
                 if let Err(restore) =
-                    FleetAcpSessionRepo::set_state(pool, &retiring, &was_live, SystemClock.now_ms())
+                    FleetAcpSessionRepo::set_state(pool, &retiring, RESTORED_STATE, SystemClock.now_ms())
                         .await
                 {
                     tracing::error!(

@@ -1238,11 +1238,18 @@ async fn a_swap_that_cannot_mint_its_replacement_leaves_the_session_live() {
 
     // The mint failure, injected where the swap reads it: `ensure` refuses a
     // blank cwd, and the replacement is minted from the retiring session's own.
-    sqlx::query("UPDATE fleet_acp_session SET cwd = '' WHERE session_key = ?")
-        .bind(&session_key)
-        .execute(store.pool())
-        .await
-        .unwrap();
+    // ACTIVE with a turn open, which is the state the restore must NOT put
+    // back: the adapter is torn down before the mint is attempted, so a
+    // restored ACTIVE would claim a turn on a process that no longer exists.
+    sqlx::query(
+        "UPDATE fleet_acp_session \
+         SET cwd = '', state = 'ACTIVE', open_turn_id = 'turn-1' \
+         WHERE session_key = ?",
+    )
+    .bind(&session_key)
+    .execute(store.pool())
+    .await
+    .unwrap();
 
     let swapped = client
         .call(
@@ -1267,7 +1274,8 @@ async fn a_swap_that_cannot_mint_its_replacement_leaves_the_session_live() {
     );
     assert_eq!(
         state, "IDLE",
-        "and in the state it was in before the swap was attempted"
+        "and IDLE rather than ACTIVE: nothing can be in flight on an adapter \
+         that has been torn down"
     );
 
     // Which is the same thing the channel asks: is there anyone to talk to.
