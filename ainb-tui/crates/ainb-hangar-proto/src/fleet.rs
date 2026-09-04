@@ -1450,7 +1450,16 @@ pub struct FleetMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetAcpSessionCreateParams {
     /// Adapter token validated against the daemon's adapter registry.
-    pub provider: String,
+    ///
+    /// Absent means "whatever this scope already runs": the daemon answers
+    /// with the scope's live session's adapter, and falls back to the built-in
+    /// Claude adapter only when the scope has no session at all. A caller that
+    /// wants the session rather than a particular engine must omit this —
+    /// naming a guess is how a get-or-create reverted an engine the operator
+    /// had swapped, and, once the scope was held by a different adapter, was
+    /// refused outright as `ScopeHeld`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Working directory for the ACP session.
     pub cwd: String,
     /// Scope to bind; the daemon mints `session:<session_key>` when absent.
@@ -2541,9 +2550,16 @@ mod tests {
     #[test]
     fn message_family_params_and_results_round_trip() {
         round_trip(&FleetAcpSessionCreateParams {
-            provider: "claude-agent-acp".to_string(),
+            provider: Some("claude-agent-acp".to_string()),
             cwd: "/repo".to_string(),
             scope_key: None,
+        });
+        // An omitted provider is the shape the chat page sends: it wants the
+        // scope's session, not a named engine.
+        round_trip(&FleetAcpSessionCreateParams {
+            provider: None,
+            cwd: "/repo".to_string(),
+            scope_key: Some("channel:c1".to_string()),
         });
         round_trip(&FleetAcpSessionCreateResult {
             session_key: "acp:01J0KEY".to_string(),

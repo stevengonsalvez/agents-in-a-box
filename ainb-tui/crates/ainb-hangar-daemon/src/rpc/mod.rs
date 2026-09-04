@@ -6064,10 +6064,13 @@ async fn handle_fleet_acp_session_create(
         FLEET_CAPABILITY_ACP_SPAWN, FleetAcpSessionCreateParams, FleetAcpSessionCreateResult,
     };
 
+    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
+
     use crate::acp_session::EnsureError;
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
-    let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
+    let params: FleetAcpSessionCreateParams =
+        parse_params(req, "{ provider?, cwd, scope_key? }")?;
     // `task:<id>` belongs to the task executor (`crate::acp_task`). A chat
     // session minted there would make that task's later run fail `ScopeHeld`
     // (terminal, `SpawnError`, no retry) and would make the pool stamp this
@@ -6079,10 +6082,27 @@ async fn handle_fleet_acp_session_create(
             crate::acp_task::TASK_SCOPE_PREFIX
         )));
     }
+    // An omitted provider means "whatever this scope already runs". Resolved
+    // here because only the daemon can answer it: a client that guessed reverted
+    // a swapped engine, and `ensure` refuses a live scope whose adapter differs
+    // from the one asked for, so the guess did not even fail quietly.
+    let provider = match params.provider.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        Some(named) => named.to_string(),
+        None => {
+            let held = match params.scope_key.as_deref() {
+                Some(scope) => FleetAcpSessionRepo::get_live_by_scope(pool, scope)
+                    .await
+                    .map_err(|error| store_err(&error))?
+                    .map(|row| row.provider),
+                None => None,
+            };
+            held.unwrap_or_else(|| ainb_acp::config::CLAUDE_ADAPTER.to_string())
+        }
+    };
     let row = crate::acp_session::ensure(
         pool,
         events,
-        &params.provider,
+        &provider,
         &params.cwd,
         params.scope_key.as_deref(),
     )

@@ -1142,3 +1142,66 @@ async fn a_copilot_write_persists_the_copilot_as_its_author() {
         "a copilot write must not wear the operator's name"
     );
 }
+
+/// A create that names no provider means "THE session on this scope", and must
+/// answer with the adapter the scope already runs.
+///
+/// The chat page opens the copilot with a get-or-create. Naming a guessed
+/// adapter there did not merely revert an engine the operator had swapped: a
+/// live scope held by a different adapter makes `ensure` refuse with
+/// `ScopeHeld`, so opening the chat page after a swap failed outright.
+#[tokio::test]
+async fn a_create_with_no_provider_keeps_the_scopes_own_adapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({ "kind": "copilot", "name": "#copilot" }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    // The scope runs something OTHER than the adapter the chat page used to
+    // guess, which is the whole point.
+    let session = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "codex-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    assert!(session["error"].is_null(), "{session}");
+    let session_key = session["result"]["session_key"].as_str().unwrap().to_string();
+
+    let reopened = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    assert!(reopened["error"].is_null(), "{reopened}");
+    assert_eq!(
+        reopened["result"]["session_key"], session_key,
+        "an unnamed provider must attach to the standing session"
+    );
+    let provider: String =
+        sqlx::query_scalar("SELECT provider FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(provider, "codex-acp", "and keep the adapter the operator chose");
+
+    // What the guess did instead, kept as the reason the parameter is optional.
+    let guessed = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "claude-agent-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    assert!(
+        guessed["error"]["message"].as_str().unwrap_or_default().contains("codex-acp"),
+        "naming the wrong adapter is still refused, and says which one holds it: {guessed}"
+    );
+}

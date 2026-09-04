@@ -218,7 +218,12 @@ pub fn chat_page_blocking(
         progress(ChatOpenStep::CreatingSession);
         let (target_session_key, session_detail, turn_deadline_ms) = match client
             .acp_session_create(ainb_hangar_proto::fleet::FleetAcpSessionCreateParams {
-                provider: COPILOT_DEFAULT_PROVIDER.to_string(),
+                // Deliberately unnamed: this call wants THE copilot session,
+                // not a particular engine. Naming one reverted an adapter the
+                // operator had swapped, and once the scope was held by that
+                // other adapter the mint was refused outright, so opening the
+                // chat page after a swap failed instead of attaching.
+                provider: None,
                 cwd: std::env::current_dir()
                     .map(|cwd| cwd.display().to_string())
                     .unwrap_or_else(|_| ".".to_string()),
@@ -689,14 +694,6 @@ pub fn copilot_configure_blocking(
         client.copilot_configure(params).await.map_err(|error| error.to_string())
     })
 }
-
-/// The adapter the copilot channel's ACP session is minted with when nothing
-/// has configured one yet.
-///
-/// `fleet/copilot_configure` owns the real choice. This only decides which
-/// adapter the FIRST `fleet/acp_session_create` names, and that call is
-/// idempotent per live scope, so an already-configured copilot keeps its own.
-const COPILOT_DEFAULT_PROVIDER: &str = "claude-agent-acp";
 
 #[cfg(test)]
 mod tests {
