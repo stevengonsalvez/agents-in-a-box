@@ -783,6 +783,81 @@ async fn the_deadline_sweep_cancels_only_the_overdue_session() {
     );
 }
 
+/// The deadline sweep expires an overdue CHAT turn and passes over an overdue
+/// TASK turn, in the same pass.
+///
+/// A task's turn is bounded by the TASK budget (`acp_task::await_leg` polls to
+/// `HANGAR_PROVIDER_MAX_RUNTIME_MS`, cancels and writes the same
+/// `UNKNOWN`/`turn_deadline` pair), so the pool's chat-shaped deadline on top
+/// could only ever cut a run short — by default 5x. Boot used to hide that by
+/// raising the WHOLE pool's deadline whenever `HANGAR_TASK_EXECUTOR=acp`, which
+/// per-agent selection makes unworkable and which charged every chat turn for a
+/// task-path problem.
+///
+/// BOTH halves in one pass on purpose. The e2e that replaced the boot raise can
+/// only assert that the task survived, which is equally true if the sweep never
+/// ran at all — "exempt the scope" and "disable the sweep" are indistinguishable
+/// to it. Here the chat leg's cancellation is the proof the sweep was armed and
+/// firing while the task leg went untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_deadline_sweep_expires_a_chat_turn_and_exempts_a_task_turn() {
+    use ainb_hangar_daemon::acp_session::ensure;
+    use ainb_hangar_daemon::acp_task::scope_key;
+
+    let (_dir, store, pool, broker) = harness_with_broker(
+        &[("FAKE_ACP_HANG_SESSIONS", "*"), ("FAKE_ACP_CHUNKS", "1")],
+        |config| config.turn_deadline = Duration::from_millis(1),
+    )
+    .await;
+    let events = broker.sink();
+    let claude = ainb_acp::config::CLAUDE_ADAPTER;
+
+    // Minted through `ensure`, so the scopes are spelled the way production
+    // spells them — `scope_key()` for the task, `session:<key>` for the chat.
+    let chat = ensure(store.pool(), &events, claude, "/tmp/acp", None)
+        .await
+        .expect("mint the chat session");
+    let task = ensure(
+        store.pool(),
+        &events,
+        claude,
+        "/tmp/acp",
+        Some(&scope_key("t-sweep")),
+    )
+    .await
+    .expect("mint the task session");
+
+    let chat_message = seed_message(&store, &chat.session_key, "a").await;
+    let task_message = seed_message(&store, &task.session_key, "bb").await;
+    pool.submit_prompt(&chat.session_key, &chat_message, "a").await;
+    pool.submit_task_prompt(&task.session_key, &task_message, "bb").await;
+    // Both turns are OPEN and both are past the 1 ms deadline, so the only
+    // thing that can separate them is the scope.
+    await_open_turn(&store, &chat.session_key).await;
+    await_open_turn(&store, &task.session_key).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    pool.sweep_once().await;
+
+    let (state, detail) = await_terminal(&store, &chat_message, &chat.session_key).await;
+    assert_eq!(state, "UNKNOWN", "the chat turn must be swept: {detail:?}");
+    assert_eq!(detail.as_deref(), Some("turn_deadline"));
+    assert_eq!(
+        delivery_state(&store, &task_message, &task.session_key).await,
+        Some(("PENDING".to_string(), None)),
+        "the task turn owns its own deadline and must survive the sweep"
+    );
+    assert!(
+        FleetAcpSessionRepo::get(store.pool(), &task.session_key)
+            .await
+            .expect("row")
+            .expect("task session row")
+            .open_turn_id
+            .is_some(),
+        "and must still be holding the turn the sweep passed over"
+    );
+}
+
 /// The deadline sweep is genuinely WIRED, not just callable: the task
 /// `spawn_sweeper` starts expires an overdue turn on its own cadence with no
 /// explicit `sweep_once` in the test.
