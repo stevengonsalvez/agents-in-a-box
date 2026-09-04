@@ -96,6 +96,13 @@ the always-resolved delivery leg); per-task adapter process, not the shared pool
 (permission mode, `agent_env` and the sandbox are all per process, and the shared pool caps
 task turns at 4 per provider); `interactive` + `acp` is refused at dispatch, not downgraded.
 
+Tracked debt from move 1. Not blocking the exit criterion; each blocks a number an operator
+would otherwise read as true.
+
+| from | the debt | fix shape |
+|------|----------|-----------|
+| A7 | `task_usage.input_tokens` now holds two different MEASURES in one column: the process path writes claude's billed prompt count for the turn, the ACP path writes `used`, tokens in context (`acp_task::provider_usage_from_update`, because ACP v1 reports nothing else prompt-side). `UsageRepo::workspace_totals` and `rollup_by_agent` SUM that column, so the dashboard header and the per-agent rows silently add context occupancy to billing. | An `executor` (or `measure`) discriminator on `task_usage` so the rollups group or exclude rather than mix, and distinct token newtypes at the daemon boundary so summing the two is a compile error rather than a wrong number. |
+
 ### Moves 2-4 (scoped after move 1 lands)
 
 | move | what | size | deletes |

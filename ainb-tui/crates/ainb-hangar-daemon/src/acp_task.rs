@@ -49,7 +49,7 @@ use sqlx::SqlitePool;
 use crate::acp_pool::{AcpPool, ConvergeCause, DeliveryToken, SubmitOutcome};
 use crate::events::EventSink;
 use crate::execenv::ExecEnv;
-use crate::runner::{Backend, RunLocation, RunOutcome, RunnerResult};
+use crate::runner::{Backend, ProviderUsage, RunLocation, RunOutcome, RunnerResult};
 
 /// How often the delivery leg is re-read while the turn is open.
 ///
@@ -499,15 +499,103 @@ async fn build_result(pool: &SqlitePool, session_key: &str, message_id: &str) ->
         // outcome instead.
         exit_code: None,
         session_id: Some(session_key.to_string()),
-        // A7 parses the `acp.usage` rows; until then an ACP run reports none
-        // rather than a fabricated zero.
-        usage: None,
+        usage: usage_from_transcript(pool, session_key).await,
         pr_url: pr_url_from_transcript(pool, session_key).await,
         stdout_tail,
         // The adapter's stderr is INHERITED by the daemon (`ainb_acp::client`),
         // so there is no tail to capture here.
         stderr_tail: String::new(),
     }
+}
+
+/// The run's token/cost accounting, read out of the `acp.usage` rows it wrote.
+///
+/// The LAST such row is the whole answer, and both of ACP's numbers say so:
+/// `used` is the context occupancy right now (not a per-update delta) and
+/// `cost` is the session's cumulative spend, so summing the rows would count
+/// the same tokens once per report. A task's ACP session is minted under its
+/// own `task:<id>` scope and dies with the run, so "the session's last row" and
+/// "this run's last row" are the same row.
+///
+/// A read fault or an unparsable payload answers `None`, the same "the provider
+/// reported no usage" the process executor answers when its final `result` line
+/// carries none: accounting must never down a finalize that has already decided
+/// the task's outcome.
+async fn usage_from_transcript(pool: &SqlitePool, session_key: &str) -> Option<ProviderUsage> {
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    // The token is asked of the enum that MINTS it rather than spelled here, so
+    // a rename cannot leave this read silently matching nothing.
+    let event_type = ainb_acp::reducer::ChunkKind::Usage.event_type();
+    let row = FleetProviderEventRepo::last_by_session_event_type(pool, session_key, event_type)
+        .await
+        .inspect_err(|error| tracing::warn!(%session_key, %error, "acp usage read failed"))
+        .ok()??;
+    provider_usage_from_update(&row.raw_payload)
+}
+
+/// One `acp.usage` payload -> [`ProviderUsage`], or `None` when it reports
+/// nothing worth recording.
+///
+/// **ACP fills two of the three fields, and the third has nothing to read.**
+/// `session/update` `usage_update` (ACP schema v1) carries exactly `used`
+/// (tokens in context), `size` (context window) and an optional `cost`
+/// (`{amount, currency}`):
+///
+/// * `input_tokens` <- `used`. The nearest true thing ACP reports, and it is
+///   prompt-side: the context is what the next request sends. It is NOT the
+///   per-turn billed prompt count the process executor reads off claude's
+///   `result.usage.input_tokens`, so the two executors' token columns are the
+///   same UNIT and different MEASURES. Written down here rather than smoothed
+///   over, because a rollup sums them.
+/// * `output_tokens` <- **nothing**. ACP has no completion-token field at all;
+///   `size` is the window, not the reply. Left 0 (the struct's field is `i64`,
+///   not `Option`, so 0 is the only available "unreported") rather than derived
+///   from `size - used`, which would be a number the agent never reported.
+/// * `cost_usd` <- `cost.amount`, and ONLY when `cost.currency` is USD and the
+///   amount is finite and non-negative. The field is named for its unit; an EUR
+///   amount copied into it is a wrong number, not a converted one, and a
+///   negative one is a wrong number that SUBTRACTS from every other run's, since
+///   `UsageRepo::workspace_totals` SUMs this column. The finiteness half guards
+///   the sharper version of the same thing (one NaN makes that SUM NaN for the
+///   whole workspace, and NaN satisfies the `!= 0.0` record check below, so it
+///   would land rather than be dropped), and is belt-and-braces today: serde
+///   rejects an overflowing literal outright, which
+///   `a_negative_or_non_finite_cost_is_dropped_and_the_tokens_still_land` pins
+///   rather than assumes. Every rejected amount is dropped loudly and the tokens
+///   still land.
+///
+/// All-zero reports `None`, the same contract `runner::provider_usage` applies
+/// to the process executor: "no usage -> record nothing".
+fn provider_usage_from_update(raw_payload: &str) -> Option<ProviderUsage> {
+    use agent_client_protocol::schema::v1::SessionUpdate;
+
+    let SessionUpdate::UsageUpdate(update) = serde_json::from_str(raw_payload).ok()? else {
+        return None;
+    };
+    let cost_usd = update.cost.map_or(0.0, |cost| {
+        if cost.currency.eq_ignore_ascii_case("USD")
+            && cost.amount.is_finite()
+            && cost.amount >= 0.0
+        {
+            cost.amount
+        } else {
+            tracing::warn!(
+                currency = %cost.currency,
+                amount = cost.amount,
+                "acp reported an unusable session cost; recording tokens only"
+            );
+            0.0
+        }
+    });
+    // A token count past `i64::MAX` is not reachable from any context window;
+    // saturating keeps this total rather than dropping a real report.
+    let input_tokens = i64::try_from(update.used).unwrap_or(i64::MAX);
+    (input_tokens != 0 || cost_usd != 0.0).then_some(ProviderUsage {
+        input_tokens,
+        output_tokens: 0,
+        cost_usd,
+    })
 }
 
 /// The PR this ACP turn opened, read out of its own transcript.
@@ -816,5 +904,188 @@ mod tests {
             outcome_for("DELIVERED", Some("resume=loaded"), RunnerResult::default()),
             RunOutcome::Success(_)
         ));
+    }
+
+    /// The `(event_type, raw_payload)` the store writer PERSISTS for one
+    /// `session/update`, produced by the same reducer the live path runs.
+    ///
+    /// Round-tripped rather than hand-written on purpose: the row's payload is
+    /// `TranscriptChunk::payload.to_string()` (`StoreWriter::push`), so a
+    /// hand-rolled JSON literal here would pin the shape someone BELIEVED the
+    /// writer emits. The returned `event_type` is the read's own key, so this
+    /// also proves the row a `usage_update` produces is the row
+    /// [`usage_from_transcript`] looks for.
+    fn persisted(update: serde_json::Value) -> (String, String) {
+        use agent_client_protocol::schema::v1::SessionUpdate;
+
+        let update: SessionUpdate =
+            serde_json::from_value(update).expect("a session/update the schema accepts");
+        let mut reducer = ainb_acp::reducer::TranscriptReducer::new("sess-1");
+        // Structural kinds complete on `push`, text kinds only on `flush`, and
+        // the message case below is the second.
+        let mut chunks = reducer.push(&update);
+        chunks.extend(reducer.flush());
+        let chunk = chunks.pop().expect("one chunk");
+        (
+            chunk.kind.event_type().to_string(),
+            chunk.payload.to_string(),
+        )
+    }
+
+    #[test]
+    fn a_usage_report_lands_as_context_tokens_and_a_usd_cost() {
+        let (event_type, payload) = persisted(serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": 53_000,
+            "size": 200_000,
+            "cost": {"amount": 0.045, "currency": "USD"},
+        }));
+
+        assert_eq!(
+            event_type,
+            ainb_acp::reducer::ChunkKind::Usage.event_type(),
+            "the row this read keys on is the row a usage_update writes"
+        );
+        assert_eq!(
+            provider_usage_from_update(&payload),
+            Some(ProviderUsage {
+                input_tokens: 53_000,
+                // ACP reports no completion tokens at all; `size` is the
+                // context WINDOW, not the reply.
+                output_tokens: 0,
+                cost_usd: 0.045,
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_usd_cost_is_dropped_and_the_tokens_still_land() {
+        let (_, payload) = persisted(serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": 53_000,
+            "size": 200_000,
+            "cost": {"amount": 0.045, "currency": "EUR"},
+        }));
+
+        assert_eq!(
+            provider_usage_from_update(&payload),
+            Some(ProviderUsage {
+                input_tokens: 53_000,
+                output_tokens: 0,
+                // Copied verbatim this would be a wrong number in the column's
+                // own unit, not a converted one.
+                cost_usd: 0.0,
+            })
+        );
+    }
+
+    /// A negative amount never reaches the column the dashboard SUMs, and a
+    /// non-finite one cannot arrive at all.
+    ///
+    /// The two halves are asserted differently on purpose, because only one is
+    /// reachable. NaN is the sharp case the finiteness half of the guard exists
+    /// for (`NaN != 0.0` is TRUE, so it would satisfy "this report has something
+    /// in it" and be RECORDED, after which `UsageRepo::workspace_totals` is NaN
+    /// for the whole workspace rather than the one task), but `serde_json`
+    /// rejects an overflowing literal outright rather than yielding an infinity,
+    /// so no payload can carry one today. That is pinned below rather than
+    /// assumed: if it ever stops being true, this goes red and points at the
+    /// guard that already covers it.
+    #[test]
+    fn a_negative_or_non_finite_cost_is_dropped_and_the_tokens_still_land() {
+        use agent_client_protocol::schema::v1::SessionUpdate;
+
+        let payload = |amount: &str| {
+            format!(
+                r#"{{"sessionUpdate":"usage_update","used":1200,"size":200000,"cost":{{"amount":{amount},"currency":"USD"}}}}"#
+            )
+        };
+
+        // Reachable, and the GUARD is what must drop it, not the parser: a
+        // payload rejected whole would answer `None`, so `Some` with the tokens
+        // intact is what says the amount got as far as the guard.
+        let negative = payload("-0.5");
+        let SessionUpdate::UsageUpdate(update) =
+            serde_json::from_str(&negative).expect("a negative amount is valid JSON")
+        else {
+            panic!("the payload above is a usage_update");
+        };
+        let reached = update.cost.expect("the cost survives parsing").amount;
+        assert!(reached < 0.0, "the guard must be handed {reached}");
+        assert_eq!(
+            provider_usage_from_update(&negative),
+            Some(ProviderUsage {
+                input_tokens: 1_200,
+                output_tokens: 0,
+                cost_usd: 0.0,
+            }),
+            "a negative cost must not reach the summed column, and must not \
+             take the tokens down with it"
+        );
+
+        // Unreachable, and NOT because of `Cost`'s `DefaultOnError`.
+        // `SessionUpdate` is internally tagged, so serde buffers the whole map
+        // before it can dispatch on `sessionUpdate`, and an overflowing literal
+        // fails the NUMBER parse during that buffering: the update is rejected
+        // whole, upstream of any field-level recovery. So no infinity (and
+        // hence no NaN) can be built from a payload.
+        for overflow in ["1e999", "-1e999"] {
+            let error = serde_json::from_str::<SessionUpdate>(&payload(overflow))
+                .expect_err("serde_json must still reject an overflowing amount");
+            assert!(
+                error.to_string().contains("number out of range"),
+                "an overflowing amount must be rejected, not coerced, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_with_no_cost_still_carries_its_tokens() {
+        let (_, payload) = persisted(serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": 1_200,
+            "size": 200_000,
+        }));
+
+        assert_eq!(
+            provider_usage_from_update(&payload),
+            Some(ProviderUsage {
+                input_tokens: 1_200,
+                output_tokens: 0,
+                cost_usd: 0.0,
+            })
+        );
+    }
+
+    #[test]
+    fn a_report_of_nothing_is_no_usage_at_all() {
+        // The same "no usage -> record nothing" the process executor applies,
+        // so an empty report does not put a 0-token row on the dashboard.
+        let (_, payload) = persisted(serde_json::json!({
+            "sessionUpdate": "usage_update",
+            "used": 0,
+            "size": 200_000,
+        }));
+
+        assert_eq!(provider_usage_from_update(&payload), None);
+    }
+
+    #[test]
+    fn a_payload_that_is_not_a_usage_report_yields_nothing_and_never_panics() {
+        // Only `acp.usage` rows reach this parser today, so these stand for the
+        // shapes a drifting writer or a half-written row could hand it.
+        let (_, message) = persisted(serde_json::json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "hello"},
+        }));
+        assert_eq!(provider_usage_from_update(&message), None);
+        assert_eq!(provider_usage_from_update("not json at all"), None);
+        assert_eq!(provider_usage_from_update(""), None);
+        // A usage_update missing its required `used` field: rejected whole,
+        // rather than defaulted to a zero report.
+        assert_eq!(
+            provider_usage_from_update(r#"{"sessionUpdate":"usage_update","size":200000}"#),
+            None
+        );
     }
 }
