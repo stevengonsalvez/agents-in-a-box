@@ -567,6 +567,11 @@ async fn autopilot_right_click_run_now_fires_autopilot() {
             send_key(&mut h.host_write, KeyCode::Char { ch }).await;
         }
         send_key(&mut h.host_write, KeyCode::Char { ch: '\n' }).await;
+        // Drain the walk's own traffic (a key delivery per char plus one
+        // `hangar/search` per query edit) so it does not come out of the
+        // `pump_until` budget the mouse assertion below spends. A predicate that
+        // never matches makes `pump_until` a plain bounded pump.
+        pump_until(&mut h, 24, |_| false).await;
         relay_one_send_or_render(
             &mut h.host_write,
             &mut h.host_read,

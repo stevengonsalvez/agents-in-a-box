@@ -350,6 +350,19 @@ async fn pressing_one_answers_the_selected_ask() {
             send_key(&mut host_write, ch).await;
         }
         send_key(&mut host_write, '\n').await;
+        // Drain the walk's own traffic (a key delivery per char plus one
+        // `hangar/search` per query edit) so it does not come out of the
+        // attention/answer budget below.
+        for _ in 0..18 {
+            relay_once(
+                &mut host_write,
+                &mut host_read,
+                &mut daemon_reader,
+                &mut daemon_write,
+                &stream_id,
+            )
+            .await;
+        }
         send_key(&mut host_write, '1').await;
 
         let mut answered = None;
