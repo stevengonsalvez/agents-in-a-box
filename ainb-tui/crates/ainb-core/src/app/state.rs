@@ -15,6 +15,7 @@ use crate::config::screen_model::{self, ConfigTreeNode};
 use crate::config::{AppConfig, SessionLabelStore, registry};
 use crate::credentials;
 use crate::docker::LogStreamingCoordinator;
+use crate::fleet::attention::{AttentionKind, SessionAttention};
 // Phase 6 (new-session redesign): ParsedRepo / RemoteBranch / legacy
 // `RepoSource` import retired with the legacy remote-clone flow.
 use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
@@ -3564,6 +3565,13 @@ pub struct AppState {
     /// while the user is attached, so re-marking only happens for
     /// activity that arrives after they look away.
     pub attention_baseline: HashMap<Uuid, i64>,
+
+    /// Per-session instant (epoch ms) the ERR chip's failure was FIRST
+    /// observed. `SessionStatus::Error` carries no timestamp of its own, so
+    /// without this the chip's age would reset to `0s` on every refresh and an
+    /// hour-old failure would read as brand new. Cleared the moment the session
+    /// recovers or leaves the tree, so a later failure starts its own clock.
+    pub attention_error_since: HashMap<Uuid, i64>,
 }
 
 /// Result of background workspace loading
@@ -4033,6 +4041,7 @@ impl Default for AppState {
 
             // Per-session attention markers, driven by ainb-hooks events.
             attention_baseline: HashMap::new(),
+            attention_error_since: HashMap::new(),
         }
     }
 }
@@ -11504,6 +11513,19 @@ impl AppState {
     /// match is a `Finished` turn past its short TTL. Returns `None`
     /// (blank — no marker) when nothing qualifies, which is the common
     /// case for an idle session with no pending hook event.
+    /// Map a notifyd alert class to its chip.
+    ///
+    /// One function so the OS notification and the row chip can never disagree
+    /// about what a hook event means — the same reason `classify_attention` is
+    /// the single classifier upstream of both.
+    const fn chip_for_alert(kind: ainb_plugin_notifyd::AlertKind) -> AttentionKind {
+        match kind {
+            ainb_plugin_notifyd::AlertKind::NeedsPermission => AttentionKind::Approve,
+            ainb_plugin_notifyd::AlertKind::WaitingOnUser => AttentionKind::Ask,
+            ainb_plugin_notifyd::AlertKind::Finished => AttentionKind::Done,
+        }
+    }
+
     fn attention_for_session(
         session_cwd: &str,
         agent: Option<&str>,
@@ -11511,9 +11533,9 @@ impl AppState {
         baseline_ms: i64,
         now_ms: i64,
         recent: &[ainb_plugin_notifyd::NotificationRecord],
-    ) -> Option<ainb_plugin_notifyd::AlertKind> {
+    ) -> Option<SessionAttention> {
         use ainb_plugin_notifyd::{AlertKind, classify_attention};
-        // A `[✓]` Finished marker is informational; retire it after this.
+        // A DONE chip is informational; retire it after this.
         const FINISHED_TTL_MS: i64 = 5 * 60 * 1000;
 
         if generating {
@@ -11540,7 +11562,10 @@ impl AppState {
             if kind == AlertKind::Finished && now_ms.saturating_sub(rec.ts) > FINISHED_TTL_MS {
                 return None;
             }
-            return Some(kind);
+            // `rec.ts` — the hook's own instant — is the chip's age, not "when
+            // this process first noticed". Restarting the TUI must not reset a
+            // question that has been waiting nine minutes back to zero.
+            return Some(SessionAttention::local(Self::chip_for_alert(kind), rec.ts));
         }
         None
     }
@@ -11599,11 +11624,11 @@ impl AppState {
         };
 
         // Phase 1 — read-only compute (no mutable borrow of self).
-        let mut marks: Vec<(Uuid, Option<ainb_plugin_notifyd::AlertKind>, bool)> = Vec::new();
+        let mut marks: Vec<(Uuid, Vec<SessionAttention>, bool, bool)> = Vec::new();
         for ws in &self.workspaces {
             for s in &ws.sessions {
                 if s.is_attached {
-                    marks.push((s.id, None, true));
+                    marks.push((s.id, Vec::new(), true, false));
                     continue;
                 }
                 let generating = matches!(s.status, crate::models::SessionStatus::Running);
@@ -11611,28 +11636,51 @@ impl AppState {
                 // the lookback window can mark — so pre-launch waiters show up.
                 // Attaching advances this to "now" (see below).
                 let baseline = self.attention_baseline.get(&s.id).copied().unwrap_or(0);
-                let kind = Self::attention_for_session(
+                let mut chips = Vec::new();
+                if let Some(chip) = Self::attention_for_session(
                     &s.workspace_path,
                     Self::agent_hook_name(s.agent_type),
                     generating,
                     baseline,
                     now_ms,
                     &recent,
-                );
-                marks.push((s.id, kind, false));
+                ) {
+                    chips.push(chip);
+                }
+                let failed = matches!(s.status, crate::models::SessionStatus::Error(_));
+                marks.push((s.id, chips, false, failed));
             }
         }
 
-        // Phase 2 — apply. Bumping an attached session's baseline and
-        // writing its marker are separate self borrows, taken in turn.
+        // Phase 2 — apply. Bumping an attached session's baseline, resolving
+        // the ERR chip's first-observed instant, and writing the chips are
+        // separate self borrows, taken in turn.
         let mut changed = false;
-        for (id, kind, attached) in marks {
+        let live: std::collections::HashSet<Uuid> = marks.iter().map(|(id, ..)| *id).collect();
+        // A session that recovered (or vanished) must lose its ERR clock, or a
+        // later failure would render with the age of the previous one.
+        self.attention_error_since.retain(|id, _| live.contains(id));
+        for (id, mut chips, attached, failed) in marks {
             if attached {
                 self.attention_baseline.insert(id, now_ms);
             }
+            if failed {
+                // ERR is a SECOND, independent chip, not a competitor: a
+                // session that failed and then asked a question is both, and
+                // hiding the ASK behind the ERR is what left the operator with
+                // nothing to act on. `SessionStatus::Error` carries no instant,
+                // so the first refresh that observes it stamps the clock and
+                // every later one reuses it — the age must not restart at 0s
+                // five times a minute.
+                let since = *self.attention_error_since.entry(id).or_insert(now_ms);
+                chips.push(SessionAttention::local(AttentionKind::Err, since));
+            } else {
+                self.attention_error_since.remove(&id);
+            }
+            let chips = crate::fleet::attention::normalise(chips);
             if let Some(s) = self.find_session_mut(id) {
-                if s.live_attention != kind {
-                    s.live_attention = kind;
+                if s.live_attention != chips {
+                    s.live_attention = chips;
                     changed = true;
                 }
             }

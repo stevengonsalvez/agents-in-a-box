@@ -652,13 +652,17 @@ pub struct Session {
     pub preview_content: Option<String>,   // Cached preview content for display
     pub is_attached: bool,                 // Whether user is currently attached to the session
 
-    /// Live "needs you" marker, recomputed every preview refresh:
-    /// `Some(WaitingOnUser)` whenever the agent is **not generating**
-    /// (turn ended / idle / parked at a prompt), `None` while it is
-    /// actively generating. Drives the amber `[?]` in the session list.
-    /// Transient — never persisted; set in `AppState::update_tmux_previews`.
+    /// Live "needs you" chips, recomputed every preview refresh and rendered
+    /// in precedence order (ASK, APPROVE, ERR, DONE) on the session's row.
+    ///
+    /// A row can carry MORE THAN ONE: an ASK arriving while an ERR is still
+    /// open shows both, and only the ASK is counted in the header badge (see
+    /// [`crate::fleet::attention::needs_you_count`]). Empty while the agent is
+    /// actively generating — nothing is waiting on a human then.
+    ///
+    /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
     #[serde(skip)]
-    pub live_attention: Option<ainb_plugin_notifyd::AlertKind>,
+    pub live_attention: Vec<crate::fleet::attention::SessionAttention>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -884,7 +888,7 @@ impl Session {
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,
-            live_attention: None,
+            live_attention: Vec::new(),
         }
     }
 
@@ -913,7 +917,7 @@ impl Session {
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,
-            live_attention: None,
+            live_attention: Vec::new(),
         }
     }
 

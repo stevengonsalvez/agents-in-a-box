@@ -1763,49 +1763,71 @@ mod tests {
     const NOW: i64 = 1_000_000_000;
     const CWD: &str = "/work/feat-x";
 
+    /// The chip kind `attention_for_session` produced, dropping the timestamp
+    /// the age-specific tests below assert on separately.
+    fn kind_of(
+        cwd: &str,
+        agent: Option<&str>,
+        generating: bool,
+        baseline: i64,
+        now: i64,
+        recent: &[ainb_plugin_notifyd::NotificationRecord],
+    ) -> Option<crate::fleet::attention::AttentionKind> {
+        AppState::attention_for_session(cwd, agent, generating, baseline, now, recent)
+            .map(|chip| chip.kind)
+    }
+
     #[test]
     fn attention_permission_event_marks_needs_permission() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::NeedsPermission),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Approve),
         );
     }
 
     #[test]
+    fn a_chip_ages_from_the_hooks_instant_not_from_now() {
+        // The whole point of carrying `rec.ts`: restarting the TUI must not
+        // reset a nine-minute-old question back to `0s`.
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 9 * 60 * 1000)];
+        let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent)
+            .expect("permission event marks the row");
+        assert_eq!(chip.since_ms, NOW - 9 * 60 * 1000);
+        assert_eq!(crate::fleet::attention::format_age(NOW, chip.since_ms), "9m");
+    }
+
+    #[test]
     fn attention_notification_event_marks_waiting() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", CWD, "Notification:idle_prompt", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::WaitingOnUser),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Ask),
         );
     }
 
     #[test]
     fn attention_fresh_stop_marks_finished_stale_stop_clears() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let fresh = vec![rec("claude", CWD, "Stop", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &fresh),
-            Some(AlertKind::Finished),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &fresh),
+            Some(AttentionKind::Done),
         );
-        // Older than the 5-minute Finished TTL → retired, no marker.
+        // Older than the 5-minute DONE TTL → retired, no chip.
         let stale = vec![rec("claude", CWD, "Stop", NOW - 6 * 60 * 1000)];
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &stale),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 0, NOW, &stale), None);
     }
 
     #[test]
     fn attention_suppressed_while_generating() {
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), true, 0, NOW, &recent),
+            kind_of(CWD, Some("claude"), true, 0, NOW, &recent),
             None,
-            "a generating session shows the busy dot, not an attention marker",
+            "a generating session shows the busy dot, not an attention chip",
         );
     }
 
@@ -1813,41 +1835,32 @@ mod tests {
     fn attention_blank_without_a_matching_event() {
         // No events at all → blank (this is the common idle case the old
         // "[?] on everything" behaviour got wrong).
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[]),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 0, NOW, &[]), None);
         // Events exist, but for a different cwd or a different agent —
         // must not bleed across sessions.
         let other = vec![
             rec("codex", CWD, "Notification", NOW - 50),
             rec("claude", "/work/other", "Notification", NOW - 100),
         ];
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &other),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 0, NOW, &other), None);
     }
 
     #[test]
     fn attention_ignores_events_at_or_before_baseline() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", CWD, "Notification", 500)];
         // Baseline at/after the event (e.g. user just attached) → cleared.
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 500, NOW, &recent),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 500, NOW, &recent), None);
         // Baseline just before the event → still marks.
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 499, NOW, &recent),
-            Some(AlertKind::WaitingOnUser),
+            kind_of(CWD, Some("claude"), false, 499, NOW, &recent),
+            Some(AttentionKind::Ask),
         );
     }
 
     #[test]
     fn attention_newest_event_wins() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         // Question asked, then the turn finished — newest (Stop) supersedes
         // the older Notification.
         let recent = vec![
@@ -1855,8 +1868,8 @@ mod tests {
             rec("claude", CWD, "Notification", NOW - 5000),
         ];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::Finished),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Done),
         );
     }
 
@@ -1865,19 +1878,16 @@ mod tests {
         // Shell / SSH session (no hook agent) → never a marker, even with
         // a permission event sitting in the same cwd.
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
-        assert_eq!(
-            AppState::attention_for_session(CWD, None, false, 0, NOW, &recent),
-            None,
-        );
+        assert_eq!(kind_of(CWD, None, false, 0, NOW, &recent), None);
     }
 
     #[test]
     fn attention_matches_cwd_ignoring_trailing_slash() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", "/work/feat-x/", "Notification", NOW - 100)];
         assert_eq!(
-            AppState::attention_for_session("/work/feat-x", Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::WaitingOnUser),
+            kind_of("/work/feat-x", Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Ask),
         );
     }
 
