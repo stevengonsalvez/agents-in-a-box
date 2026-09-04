@@ -267,11 +267,23 @@ enum FleetChatLabels {
         }
     }
 
-    static func copilotProvider(_ provider: FleetCopilotProvider) -> String {
-        switch provider {
-        case .claude: "Claude"
-        case .codex: "Codex"
-        case .unknown: "Unrecognised provider"
+    /// The adapter name, as the daemon's registry spells it.
+    ///
+    /// Verbatim rather than prettified: the registry is config-driven, so there
+    /// is no fixed set to map, and an operator reading `claude-agent-acp` here
+    /// and in `ainb fleet adapter list` is reading one vocabulary.
+    static func copilotProvider(_ provider: String) -> String {
+        provider.isEmpty ? "Unrecognised provider" : provider
+    }
+
+    /// The guardrail dial, in words. Wildcard-free, so a new mode is a compile
+    /// error here rather than a dial rendering as whichever arm was last.
+    static func copilotMode(_ mode: FleetCopilotMode) -> String {
+        switch mode {
+        case .help: "Help (reads only)"
+        case .guarded: "Guarded (writes ask)"
+        case .yolo: "Yolo (writes fire)"
+        case .unknown: "Unrecognised mode"
         }
     }
 

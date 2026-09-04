@@ -118,10 +118,19 @@ final class FleetChatPresentationTests: XCTestCase {
         }
     }
 
-    func testEveryCopilotProviderRendersALabel() {
-        assertLabelsAreDistinctAndNamed(FleetCopilotProvider.allCases, FleetChatLabels.copilotProvider) { provider in
-            switch provider {
-            case .claude, .codex: true
+    /// The provider is a registry name, so it renders verbatim — an operator
+    /// reading it here and in `ainb fleet adapter list` reads one vocabulary.
+    /// Only the empty string, which names no adapter, is called out.
+    func testACopilotProviderRendersItsRegistryName() {
+        XCTAssertEqual(FleetChatLabels.copilotProvider("claude-agent-acp"), "claude-agent-acp")
+        XCTAssertEqual(FleetChatLabels.copilotProvider("some-vendor-acp"), "some-vendor-acp")
+        XCTAssertEqual(FleetChatLabels.copilotProvider(""), "Unrecognised provider")
+    }
+
+    func testEveryCopilotModeRendersALabel() {
+        assertLabelsAreDistinctAndNamed(FleetCopilotMode.allCases, FleetChatLabels.copilotMode) { mode in
+            switch mode {
+            case .help, .guarded, .yolo: true
             case .unknown: false
             }
         }
