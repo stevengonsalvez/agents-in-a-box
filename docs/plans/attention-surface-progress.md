@@ -117,7 +117,7 @@ recreate the duplication this epic is deleting.
 | 1 | Chips on session rows | done |
 | 2 | Attention merge (`AttentionRow` view model) | done |
 | 3 | Right-pane tab strip | done |
-| 4 | Answering from the `ask` tab | pending |
+| 4 | Answering from the `ask` tab | done |
 | 5 | Delete the host Fleet panel | pending |
 | 6 | Delete the host Inbox | pending |
 | 7 | Copilot registry + mode dial | pending |
@@ -163,9 +163,29 @@ Fixed with an RAII guard covering `AINB_BRIDGED_VARS` and releasing on unwind
 
 | Bug | How it surfaced | Fix |
 |---|---|---|
+| A failed **option** send wrote the option's label into the free-text composer and moved the cursor there, so a retry would have sent typed text instead of the option | Daemon-up tripwire picked the second option, watched the send fail, and found `api/src/db.sqlite` in the composer | `355d582e` — only a typed answer is a restorable draft |
+| The `ask` pane opened with no question on a locally-produced row, and with the composer unfocused when the request had no options | Daemon-down tripwire typed into it and `d` opened the delete-session dialog | Local chips now carry the hook's own `message`; `retarget` focuses the composer when there is nothing to pick |
 | A failed `attention/list` poll emptied the row map, so one socket timeout made every live ASK vanish for five seconds | Tab-strip tripwire failed one run in seven, the `ask` tab dimmed because its chip had briefly gone | `f40e09f7` — rows carry across a failed poll and grey out instead, which is the shape the spec asked for all along |
 | `tmux_sessions_at` interpolated a cwd into a tmux FORMAT string, where `#(...)` runs a shell command | Background security review of `c577cbb0` | `391f0607` — deleted; it had no callers and the `N waiting elsewhere` row already serves the case |
 | The elsewhere count truncated to `1 el` in the panel title | Phase-2 tripwire assertion on a real 38-column capture | Moved to its own full-width row |
+
+## Suite status
+
+`cargo test --workspace`: **465 test binaries, 464 pass.**
+
+The one failure is `ainb-plugin-cts-v2::real_plugin_axes`, and it is not a
+code failure — it is that test's own safety guard:
+
+```
+scratch hangar home .../ainb-tui/target/tmp/real-plugin-axes-hangar-home
+must not be inside the live hangar home /Users/stevengonsalvez/.agents-in-a-box
+```
+
+This worktree was created by `ainb run`, so it lives under
+`~/.agents-in-a-box`, and so does its `target/`. Verified by re-running with
+`CARGO_TARGET_DIR=/tmp/ainb-cts-target`: **passes, 74.66s**. A CI checkout is
+not under that path, so it is green there. Nothing in this branch touches that
+crate.
 
 ## Published pages
 
