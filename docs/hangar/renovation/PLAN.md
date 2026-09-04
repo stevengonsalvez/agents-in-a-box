@@ -82,7 +82,7 @@ the hook route for AskUserQuestion.
 | A5 | `acp_task::run_acp` + the flag: one new arm in `execute_claimed` (the shape `run_interactive` already has), per-task adapter process (sandbox, agent_env, permission mode are per process), leg poll bounded by `HANGAR_PROVIDER_MAX_RUNTIME_MS`, outcome mapping table, cancel arm | L | finalize path (success/failure/cancel, board advance, retry) untouched |
 | A6 | Unified durable read: `board_card_timeline` reads `fleet_provider_event` rows for ACP runs; PR URL captured from the transcript | M | |
 | A7 | Usage: `acp.usage` rows into `ProviderUsage` | S | |
-| A8 | Per-agent selection via `agent.provider` = adapter token; no migration | S | |
+| A8 | Per-agent selection via `agent.task_executor` (`process`/`acp`, migration 0095), NULL = the daemon flag; NOT an adapter token on `agent.provider` (open question 3, resolved below) | S | |
 
 Exit criterion, two halves: (A) a card run under each executor shows its transcript growing
 live with the same taxonomy; (B) the Boxtrack P3 leg reproduced with zero tmux: no
@@ -145,4 +145,14 @@ authoring (defects 16, 17).
 
 1. AskUserQuestion under ACP (A0). Owner: first task of track A.
 2. Adapter credential path: passthrough `CLAUDE_CODE_OAUTH_TOKEN` or let the adapter use the keychain? Prove on the first live smoke run, do not hard-wire.
-3. Whether `agent.provider` should carry the executor (A8) or a new column; decided after A5 ships.
+3. ~~Whether `agent.provider` should carry the executor (A8) or a new column; decided after A5 ships.~~
+   **Resolved in A8: a new column, `agent.task_executor` (migration 0095).** `agent.provider`
+   is a CLOSED provider-backend vocabulary with three consumers that assume it —
+   PULL_SQL hard-codes `IN ('claude','codex','copilot')` to derive `agent_kind`, which the
+   closed `AgentKind` enum then parses; `Backend::from_provider` resolves any unrecognised
+   token to Claude *silently*; and `acp_task::adapter_for` maps a provider ONTO its adapter,
+   so naming the adapter in `provider` inverts a mapping the ACP path already relies on.
+   An adapter token there would be indistinguishable from a mis-set one at all three. The
+   axes are also independent: `provider = codex` + `task_executor = acp` is a coherent
+   request the one-column shape cannot express. Cost paid: one nullable `ALTER TABLE ADD
+   COLUMN` (metadata-only, no backfill, NULL = today's behaviour).

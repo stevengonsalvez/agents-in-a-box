@@ -1,11 +1,17 @@
-//! Spine A5 tripwire: `HANGAR_TASK_EXECUTOR` selects the executor, in BOTH
-//! directions, and the ACP path's per-task isolation actually holds.
+//! Spine A5 + A8 tripwire: the executor is selected in BOTH directions by the
+//! daemon-wide `HANGAR_TASK_EXECUTOR` and, per agent, by `agent.task_executor`;
+//! the ACP path's per-task isolation actually holds.
 //!
 //! ```text
 //!   =process ─▶ spawns the provider CLI   ─▶ marker + logs/claude.jsonl
 //!               and NO acp session
 //!   =acp     ─▶ spawns an ACP adapter     ─▶ fleet_acp_session + provider events
 //!               and NO process, no jsonl
+//!
+//!   A8: ONE daemon, two agents, opposite executors
+//!   =process + agent.task_executor='acp'      ─▶ adapter
+//!   =process + agent.task_executor  IS NULL   ─▶ provider CLI  (unchanged)
+//!   =acp     + agent.task_executor='process'  ─▶ provider CLI
 //! ```
 //!
 //! Both directions are asserted because a flag that silently fell back to the
@@ -293,7 +299,229 @@ async fn each_tasks_adapter_sees_only_its_own_environment() {
     );
 }
 
+/// A8: on ONE daemon defaulted to `process`, an agent that asks for `acp` gets
+/// the adapter and an agent that asks for nothing gets the provider CLI.
+///
+/// The whole point of per-agent selection is that these two coexist, so both
+/// halves are asserted against the SAME running daemon rather than two runs
+/// that happen to differ. The inheriting agent is the regression half: it must
+/// dispatch exactly as it did before the column existed, and it would still
+/// reach `done` if per-agent selection leaked onto it — only the absence of an
+/// ACP session and the presence of the provider's jsonl tell the two apart.
+#[tokio::test]
+async fn a_per_agent_acp_override_runs_beside_an_inheriting_agent() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping per-agent executor tripwire");
+        return;
+    }
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+    let rpc_log = home.path().join("rpc.log");
+    let overrider = seed_agent_with_env(
+        &pool,
+        &ids,
+        "agent-wants-acp",
+        &serde_json::json!({ "FAKE_ACP_RPC_LOG": rpc_log.display().to_string() }),
+    )
+    .await;
+    set_agent_executor(&pool, &overrider, "acp").await;
+    // No `task_executor` at all: every agent that predates migration 0095.
+    let inheritor =
+        seed_agent_with_env(&pool, &ids, "agent-inherits", &serde_json::json!({})).await;
+    write_acp_adapter_config(home.path(), &fake_acp_adapter(), "default");
+
+    let fake_claude = fake_claude_happy(home.path(), "claude-sid");
+    // The daemon default is `process`, so ONLY the agent's own column can move
+    // its task onto the adapter.
+    let session = spawn_daemon(home.path(), &ids, &fake_claude, "process");
+    enqueue_task(&pool, &ids, "task-agent-acp", &overrider, "headless").await;
+    enqueue_task(&pool, &ids, "task-agent-inherits", &inheritor, "headless").await;
+
+    let acp_row = wait_for_db(&pool, "task-agent-acp", "done", Duration::from_mins(1)).await;
+    let inherit_row =
+        wait_for_db(&pool, "task-agent-inherits", "done", Duration::from_mins(1)).await;
+    drop(session);
+
+    // The overriding agent took the ACP path on a `process` daemon.
+    assert_eq!(
+        acp_sessions_for(&pool, "task-agent-acp").await,
+        1,
+        "agent.task_executor='acp' must run on the adapter even though the daemon defaults \
+         to process"
+    );
+    assert!(
+        rpc_log.exists(),
+        "the fixture adapter must have been spawned for the overriding agent"
+    );
+    assert!(
+        !logs_dir(&acp_row).join("claude.jsonl").exists(),
+        "the overriding agent must spawn no provider CLI"
+    );
+
+    // The inheriting agent is untouched: provider CLI, its jsonl, its session id.
+    assert_eq!(
+        acp_sessions_for(&pool, "task-agent-inherits").await,
+        0,
+        "an agent with no task_executor must NOT be moved onto the adapter"
+    );
+    assert!(
+        logs_dir(&inherit_row).join("claude.jsonl").exists(),
+        "the inheriting agent must still write the provider's jsonl transcript"
+    );
+    assert_eq!(
+        inherit_row.get::<Option<String>, _>("session_id").as_deref(),
+        Some("claude-sid"),
+        "and still pin the provider's own session id"
+    );
+}
+
+/// A8, the other direction: on a daemon defaulted to `acp`, an agent that pins
+/// `process` runs the provider CLI, and its INTERACTIVE task is not refused.
+///
+/// Both halves are the same bug seen twice. If anything downstream of
+/// resolution still reads the daemon-wide value, this agent runs on the adapter
+/// it opted out of; if the interactive refusal reads it, an operator who
+/// deliberately kept an attachable agent on an `acp` daemon loses every session
+/// they try to drive.
+#[tokio::test]
+async fn a_per_agent_process_override_opts_out_of_an_acp_daemon() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping per-agent opt-out tripwire");
+        return;
+    }
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+    let agent =
+        seed_agent_with_env(&pool, &ids, "agent-pins-process", &serde_json::json!({})).await;
+    set_agent_executor(&pool, &agent, "process").await;
+    write_acp_adapter_config(home.path(), &fake_acp_adapter(), "default");
+
+    let fake_claude = fake_claude_happy(home.path(), "claude-sid");
+    let session = spawn_daemon(home.path(), &ids, &fake_claude, "acp");
+    enqueue_task(&pool, &ids, "task-pinned-process", &agent, "headless").await;
+    enqueue_task(
+        &pool,
+        &ids,
+        "task-pinned-interactive",
+        &agent,
+        "interactive",
+    )
+    .await;
+
+    let row = wait_for_db(&pool, "task-pinned-process", "done", Duration::from_mins(1)).await;
+    let interactive = tripwire_support::wait_until(
+        &pool,
+        "task-pinned-interactive",
+        Duration::from_mins(1),
+        |row| {
+            matches!(
+                row.get::<String, _>("status").as_str(),
+                "done" | "failed" | "cancelled"
+            )
+        },
+    )
+    .await;
+    drop(session);
+
+    assert_eq!(
+        acp_sessions_for(&pool, "task-pinned-process").await,
+        0,
+        "agent.task_executor='process' must keep its tasks off the adapter on an acp daemon"
+    );
+    assert!(
+        logs_dir(&row).join("claude.jsonl").exists(),
+        "and must spawn the provider CLI, which writes its jsonl transcript"
+    );
+
+    // The refusal follows the TASK's executor, so it must not fire here. Asserted
+    // on the message rather than on the status: this agent's interactive run may
+    // end any number of ways in a test tmux, but "refused for being acp" is the
+    // one outcome that would mean the refusal read the daemon default.
+    let detail: String = interactive.get::<Option<String>, _>("result").unwrap_or_default();
+    assert!(
+        !detail.contains("mode=interactive is not supported"),
+        "an agent pinned to the process executor must not be refused an interactive run: \
+         {detail}"
+    );
+}
+
+/// A8: the interactive refusal fires for an agent that selected `acp` ITSELF,
+/// on a daemon whose default is `process`.
+///
+/// The A5 case above proves the refusal under the flag. This proves it follows
+/// the agent, which is the only way it can still be true once the flag stops
+/// deciding: the task is refused before a pane or a worktree exists, exactly as
+/// under the flag.
+#[tokio::test]
+async fn interactive_is_refused_for_an_agent_that_selected_acp() {
+    if !tripwire_support::tmux_available() {
+        eprintln!("tmux not available; skipping per-agent interactive refusal");
+        return;
+    }
+    let home = tempfile::tempdir().expect("tempdir home");
+    let pool = open_pool(&home.path().join("hangar.db")).await;
+    ainb_hangar_store::apply_migrations(&pool).await.expect("migrate");
+    let ids = seed_world(&pool).await;
+    let agent =
+        seed_agent_with_env(&pool, &ids, "agent-acp-interactive", &serde_json::json!({})).await;
+    set_agent_executor(&pool, &agent, "acp").await;
+    write_acp_adapter_config(home.path(), &fake_acp_adapter(), "default");
+
+    let fake_claude = fake_claude_happy(home.path(), "claude-sid");
+    let session = spawn_daemon(home.path(), &ids, &fake_claude, "process");
+    let task_id = "task-agent-acp-interactive";
+    enqueue_task(&pool, &ids, task_id, &agent, "interactive").await;
+
+    let row = wait_for_db(&pool, task_id, "failed", Duration::from_mins(1)).await;
+    drop(session);
+
+    assert_eq!(
+        row.get::<Option<String>, _>("failure_reason").as_deref(),
+        Some("provision_error"),
+        "an unsupported mode is a provisioning refusal, not an agent error"
+    );
+    let result: String = row.get::<Option<String>, _>("result").unwrap_or_default();
+    assert!(
+        result.contains("task_executor"),
+        "the refusal must name the per-agent setting that caused it, got: {result}"
+    );
+    let pane = format!("tmux_hangar-{task_id}");
+    assert!(
+        !tripwire_support::tmux_session_live(&pane),
+        "a refused interactive task must open no pane, found {pane}"
+    );
+    assert!(
+        row.get::<Option<String>, _>("work_dir").is_none(),
+        "the refusal must land before the worktree is provisioned"
+    );
+    assert_eq!(
+        acp_sessions_for(&pool, task_id).await,
+        0,
+        "and before any acp session"
+    );
+}
+
 // ------------------------------------------------------------------ helpers
+
+/// Record a per-agent executor override on an already-seeded agent (migration
+/// 0095), the way `ainb hangar agent create --executor` does at create time.
+async fn set_agent_executor(pool: &SqlitePool, agent_id: &str, executor: &str) {
+    let updated = sqlx::query("UPDATE agent SET task_executor = ? WHERE id = ?")
+        .bind(executor)
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .expect("set agent task_executor");
+    assert_eq!(
+        updated.rows_affected(),
+        1,
+        "the seeded agent {agent_id} must exist before its executor is pinned"
+    );
+}
 
 fn spawn_daemon(
     home: &Path,
