@@ -120,7 +120,10 @@ pub fn is_task_scope(scope: &str) -> bool {
 /// unscoped without this, and a workspace-filtered inbox (which is every
 /// operator surface) never shows it.
 pub async fn workspace_for_scope(pool: &SqlitePool, scope: &str) -> Option<String> {
-    let task_id = scope.strip_prefix(TASK_SCOPE_PREFIX)?;
+    // `trim_start` before the strip, so this agrees with [`is_task_scope`]: a
+    // scope the predicate calls a task's must yield that task's id here, or the
+    // two readers of one convention disagree on the same string.
+    let task_id = scope.trim_start().strip_prefix(TASK_SCOPE_PREFIX)?;
     ainb_hangar_store::repo::task::TaskRepo::get_by_id(pool, task_id)
         .await
         .ok()
@@ -713,6 +716,12 @@ mod tests {
             adapter_key(ainb_acp::config::CLAUDE_ADAPTER, "t-1"),
             "claude-agent-acp#task:t-1"
         );
+        // The predicate the create door, the prompt guard and the deadline
+        // sweep all read. It tolerates leading whitespace, which is the one
+        // behaviour consolidating those three sites changed.
+        assert!(is_task_scope(scope_key("t-1").as_str()));
+        assert!(is_task_scope("  task:t-1"));
+        assert!(!is_task_scope("session:t-1"));
     }
 
     #[test]
