@@ -82,6 +82,86 @@ pub enum Refusal {
     UnknownTool(String),
     /// A required argument is missing, empty, or the wrong JSON type.
     BadArguments(String),
+    /// The channel's mode does not carry this tool. Today that is only
+    /// [`CopilotMode::Help`], which exposes the read tools and nothing else.
+    ///
+    /// Refused rather than confirmed on purpose: `help` is the mode an operator
+    /// picks to say "answer me, do not act", and a confirm card would put the
+    /// write back one keypress away from happening.
+    ModeForbids {
+        /// The tool the model asked for.
+        tool: String,
+        /// The dial that refused it.
+        mode: CopilotMode,
+    },
+}
+
+/// The channel's guardrail dial.
+///
+/// This moves the DAEMON-SIDE copilot guardrail and nothing else. The ACP
+/// adapter's own `permission_mode` stays pinned at `session/new`: an ambient
+/// `bypassPermissions` disables the entire permission surface of the agent
+/// behind the adapter, so a settable one would be a remote off-switch for it.
+/// `yolo` here means "the fleet tools this classifier owns fire without a
+/// card", never "the agent may do anything".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CopilotMode {
+    /// Reads only. Write tools are absent from the tool table AND refused if
+    /// called anyway, because a tool table is advice and a classifier is not.
+    Help,
+    /// The default. Auto-writes fire, confirm-class tools take a card.
+    #[default]
+    Guarded,
+    /// Confirm-class tools fire immediately, EXCEPT [`NEVER_OVERRIDABLE`].
+    /// Reset to [`CopilotMode::Guarded`] at every daemon start.
+    Yolo,
+}
+
+impl CopilotMode {
+    /// The stored spelling, and the one the wire uses.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Help => "help",
+            Self::Guarded => "guarded",
+            Self::Yolo => "yolo",
+        }
+    }
+
+    /// Parse a stored or wire spelling. An unknown one is `None` so the caller
+    /// decides, and every caller here decides [`CopilotMode::Guarded`].
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "help" => Some(Self::Help),
+            "guarded" => Some(Self::Guarded),
+            "yolo" => Some(Self::Yolo),
+            _ => None,
+        }
+    }
+
+    /// The next mode on the `g` dial, wrapping.
+    #[must_use]
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Help => Self::Guarded,
+            Self::Guarded => Self::Yolo,
+            Self::Yolo => Self::Help,
+        }
+    }
+
+    /// The tools this mode puts in front of the model.
+    ///
+    /// `help` hands over the reads alone. That is a real reduction, not a
+    /// cosmetic one: a tool the model cannot see is one it cannot spend a turn
+    /// arguing about.
+    #[must_use]
+    pub fn tools(self) -> Vec<&'static str> {
+        match self {
+            Self::Help => READ_TOOLS.to_vec(),
+            Self::Guarded | Self::Yolo => ALL_TOOLS.to_vec(),
+        }
+    }
 }
 
 /// The state the DAEMON pins for one copilot turn, plus the operator's
@@ -97,9 +177,27 @@ pub enum Refusal {
 pub struct Guardrail {
     named_sessions: BTreeSet<String>,
     auto_overrides: BTreeSet<String>,
+    mode: CopilotMode,
 }
 
 impl Guardrail {
+    /// Pin the channel's guardrail dial for this turn.
+    ///
+    /// The daemon reads it from `fleet_channel.copilot_mode` and pins it the
+    /// same way it pins the named sessions: the model never supplies it, so the
+    /// dial cannot be turned by anything the model writes.
+    #[must_use]
+    pub fn with_mode(mut self, mode: CopilotMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The dial this turn is running under.
+    #[must_use]
+    pub fn mode(&self) -> CopilotMode {
+        self.mode
+    }
+
     /// Pin the sessions the operator's message named for this turn.
     #[must_use]
     pub fn with_named_sessions<I, S>(mut self, sessions: I) -> Self
@@ -136,6 +234,18 @@ impl Guardrail {
     /// influence the answer.
     #[must_use]
     pub fn classify(&self, tool: &str, arguments: &Map<String, Value>) -> Verdict {
+        // `help` before anything else, including argument checking: an unknown
+        // tool is still unknown, but a well-formed write must not be able to
+        // reach a verdict that is not "no" by being well-formed.
+        if self.mode == CopilotMode::Help
+            && !READ_TOOLS.contains(&tool)
+            && ALL_TOOLS.contains(&tool)
+        {
+            return Verdict::Refused(Refusal::ModeForbids {
+                tool: tool.to_string(),
+                mode: self.mode,
+            });
+        }
         if READ_TOOLS.contains(&tool) {
             return match tool {
                 // The only read that needs an argument at all.
@@ -199,6 +309,12 @@ impl Guardrail {
     }
 
     fn confirm_or_override(&self, tool: &str) -> Verdict {
+        // `yolo` is exactly the per-tool override applied to every confirm-class
+        // tool at once, so it inherits the [`NEVER_OVERRIDABLE`] floor for free
+        // rather than restating it: `kill` still takes a card in yolo.
+        if self.mode == CopilotMode::Yolo && !NEVER_OVERRIDABLE.contains(&tool) {
+            return Verdict::Auto;
+        }
         if self.auto_overrides.contains(tool) {
             Verdict::Auto
         } else {
@@ -276,6 +392,77 @@ mod tests {
 
     fn guardrail() -> Guardrail {
         Guardrail::default().with_named_sessions(["claude:one"])
+    }
+
+    #[test]
+    fn help_refuses_every_write_and_still_reads() {
+        let help = Guardrail::default()
+            .with_mode(CopilotMode::Help)
+            .with_named_sessions(["claude:one"]);
+        assert_eq!(
+            help.classify("fleet_status", &args(json!({}))),
+            Verdict::Auto
+        );
+        for tool in AUTO_WRITE_TOOLS.iter().chain(CONFIRM_TOOLS).chain([&SCOPED_TOOL]) {
+            let verdict = help.classify(tool, &args(json!({"session": "claude:one", "text": "go", "answer": "yes", "sessions": ["claude:one"]})));
+            assert!(
+                matches!(&verdict, Verdict::Refused(Refusal::ModeForbids { tool: refused, mode: CopilotMode::Help }) if refused == tool),
+                "`{tool}` must be refused outright in help mode, got {verdict:?}"
+            );
+        }
+    }
+
+    /// The whole point of `help`: not one write is even offered.
+    #[test]
+    fn help_offers_the_reads_and_nothing_else() {
+        assert_eq!(CopilotMode::Help.tools(), READ_TOOLS.to_vec());
+        assert_eq!(CopilotMode::Guarded.tools(), ALL_TOOLS.to_vec());
+        assert_eq!(CopilotMode::Yolo.tools(), ALL_TOOLS.to_vec());
+    }
+
+    /// `yolo` is not a bypass of the floor: `kill` still takes a human.
+    #[test]
+    fn yolo_fires_the_confirm_class_but_never_kill() {
+        let yolo = Guardrail::default().with_mode(CopilotMode::Yolo);
+        assert_eq!(
+            yolo.classify("interrupt", &args(json!({"session": "claude:one"}))),
+            Verdict::Auto
+        );
+        assert_eq!(
+            yolo.classify("spawn_session", &args(json!({}))),
+            Verdict::Auto
+        );
+        assert_eq!(
+            yolo.classify("kill", &args(json!({"session": "claude:one"}))),
+            Verdict::Confirm(ConfirmReason::DestructiveTool),
+            "`kill` is NEVER_OVERRIDABLE, and yolo is an override like any other"
+        );
+    }
+
+    /// A malformed destructive call is refused in yolo too — yolo removes the
+    /// human, not the argument checking.
+    #[test]
+    fn yolo_still_refuses_a_destructive_call_that_names_no_session() {
+        let yolo = Guardrail::default().with_mode(CopilotMode::Yolo);
+        assert!(matches!(
+            yolo.classify("interrupt", &args(json!({}))),
+            Verdict::Refused(Refusal::BadArguments(_))
+        ));
+    }
+
+    #[test]
+    fn the_dial_wraps_and_round_trips_through_its_stored_spelling() {
+        let mut mode = CopilotMode::Guarded;
+        let mut seen = vec![];
+        for _ in 0..3 {
+            seen.push(mode.as_str());
+            assert_eq!(CopilotMode::parse(mode.as_str()), Some(mode));
+            mode = mode.cycle();
+        }
+        assert_eq!(seen, ["guarded", "yolo", "help"]);
+        assert_eq!(mode, CopilotMode::Guarded, "three cycles must return home");
+        assert_eq!(CopilotMode::parse("bypassPermissions"), None);
+        assert_eq!(CopilotMode::default(), CopilotMode::Guarded);
     }
 
     #[test]

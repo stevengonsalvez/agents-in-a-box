@@ -209,6 +209,9 @@ fn gate_verdict(guardrail: &Guardrail, params: &Value) -> Value {
             "detail": match refusal {
                 Refusal::UnknownTool(name) => format!("unknown_tool; {name}"),
                 Refusal::BadArguments(detail) => format!("bad_arguments; {detail}"),
+                Refusal::ModeForbids { tool, mode } => {
+                    format!("mode_forbids; {tool} in {}", mode.as_str())
+                }
             },
         }),
     }

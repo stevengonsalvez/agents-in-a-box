@@ -908,6 +908,18 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             Err(error) => tracing::error!(%error, "could not sweep expired confirm cards at boot"),
         }
 
+        // `yolo` does not survive a restart. It is a dial an operator holds down
+        // for a stretch of work, and a daemon that came back up still armed
+        // would be firing destructive fleet tools on behalf of a conversation
+        // nobody is watching. `help` is a deliberate restriction and is left
+        // alone; only the permissive value resets.
+        match ainb_hangar_store::repo::fleet_chat::FleetChannelRepo::reset_yolo(store.pool()).await
+        {
+            Ok(0) => {}
+            Ok(reset) => tracing::warn!(reset, "copilot channels left in yolo; reset to guarded"),
+            Err(error) => tracing::error!(%error, "could not reset the copilot guardrail at boot"),
+        }
+
         // The ACP agent pool. Installed BEFORE the socket accepts a connection so
         // `fleet/acp_session_create` can never answer "no pool" on a daemon that
         // has one; nothing is spawned until the first prompt reaches it.
