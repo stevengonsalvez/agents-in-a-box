@@ -18,7 +18,7 @@
 // second Enter can double-send — be tested without a socket or a pane.
 
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::attention::{Answerable, SessionAttention};
 
@@ -422,15 +422,6 @@ impl AskState {
             Err(error) => Err(format!("send worker did not start: {error}")),
         }
     }
-
-    /// How long the outstanding send has been going, for the pane to show.
-    #[must_use]
-    pub fn elapsed(&self) -> Option<Duration> {
-        match self.phase() {
-            Some(AnswerPhase::InFlight { since, .. }) => Some(since.elapsed()),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -668,19 +659,6 @@ mod tests {
         state.tick();
         assert_eq!(state.free_text(), "", "a delivered answer is not a draft");
         assert!(!state.in_flight());
-    }
-
-    #[test]
-    fn an_in_flight_send_reports_how_long_it_has_been_going() {
-        let chip = ask_with_options(&["a"]);
-        let mut state = AskState::default();
-        state.retarget(&chip);
-        assert!(state.elapsed().is_none());
-        latch(&mut state, &chip, None);
-        assert!(
-            state.elapsed().is_some(),
-            "a spinner with no elapsed time says nothing"
-        );
     }
 
     #[test]

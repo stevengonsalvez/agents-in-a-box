@@ -454,8 +454,11 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
     // answer that vanished into a worker with no feedback is the failure this
     // pane exists to remove.
     match ask.phase_for(chip) {
-        Some(AnswerPhase::InFlight { .. }) => {
-            let secs = ask.elapsed().map_or(0, |elapsed| elapsed.as_secs());
+        Some(AnswerPhase::InFlight { since, .. }) => {
+            // From the matched phase, not from the pane: the two are the same
+            // request here, and reading the pane's clock for a chip's spinner
+            // is a disagreement waiting for a caller that renders both.
+            let secs = since.elapsed().as_secs();
             lines.push(Line::raw(""));
             lines.push(Line::styled(
                 format!("\u{283b} sending\u{2026} {secs}s"),
