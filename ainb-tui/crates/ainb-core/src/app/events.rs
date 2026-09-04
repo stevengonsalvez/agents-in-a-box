@@ -420,20 +420,9 @@ pub enum AppEvent {
     SkillManagerSourceRemoveConfirm,     // Enter — execute the chosen removal
     SkillManagerSourceRemoveCancel,      // Esc — dismiss, remove nothing
     GoToRecovery,                        // Navigate to session recovery view
-    GoToInbox,                           // Navigate to ainb-hooks notification inbox
     GoToDaemons,                         // Navigate to the daemon runtime-health view
     PanelBack,                           // Close a panel screen: pop previous_screen (home if none)
     GoToHangar,                          // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,                         // Inbox: move selection up one row
-    InboxMoveDown,                       // Inbox: move selection down one row
-    InboxPageUp,                         // Inbox: jump 10 rows up
-    InboxPageDown,                       // Inbox: jump 10 rows down
-    InboxOpenSelected,                   // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,                // Inbox: dismiss selected row (d)
-    InboxDismissVisible,                 // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,                 // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,                     // Inbox: cycle agent filter (p)
-    InboxRefresh,                        // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,             // Return to home screen (Esc)
@@ -1799,11 +1788,6 @@ impl EventHandler {
             return Self::handle_home_screen_keys(key_event, state);
         }
 
-        // ainb-hooks Inbox screen
-        if state.current_screen == screen_ids::INBOX {
-            return Self::handle_inbox_keys(key_event, state);
-        }
-
         // Daemons runtime-health screen. Esc/q must pop back to the
         // origin `GoToDaemons` saved in `previous_screen`, NOT hardcode home —
         // the generic fallthrough below treats this non-plugin screen as
@@ -2378,11 +2362,6 @@ impl EventHandler {
             KeyCode::Char('o') => Some(AppEvent::OpenInEditor), // Open in editor
             KeyCode::Char('E') => Some(AppEvent::ToggleExpandAll), // Toggle expand/collapse all workspaces
             KeyCode::Char('$') => Some(AppEvent::OpenQuickShell), // Quick shell in current workspace/session
-            // Inbox is advertised on the session-list menu bar (`b inbox`), so
-            // the key must work in this view too — not only on the home screen
-            // where `handle_home_screen_keys` also binds it. Without this arm
-            // the menu hint pointed at a dead key.
-            KeyCode::Char('b') => Some(AppEvent::GoToInbox),
             // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
             // 'B' is its keyboard twin. Hinted next to the glyph itself.
             KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
@@ -3168,41 +3147,6 @@ impl EventHandler {
         }
     }
 
-    /// Inbox screen key dispatcher. Keys follow the spec:
-    ///
-    ///   - ↑/↓ k/j         move selection
-    ///   - PageUp/PageDown jump 10 rows
-    ///   - Enter           open + mark read
-    ///   - d               dismiss selected
-    ///   - C               dismiss every visible row (Shift+C)
-    ///   - a               toggle archived filter
-    ///   - p               cycle agent filter
-    ///   - r               refresh
-    ///   - q / Esc         back to previous screen (home if none)
-    fn handle_inbox_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::InboxMoveUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::InboxMoveDown),
-            KeyCode::PageUp => Some(AppEvent::InboxPageUp),
-            KeyCode::PageDown => Some(AppEvent::InboxPageDown),
-            KeyCode::Enter => Some(AppEvent::InboxOpenSelected),
-            KeyCode::Char('d') => Some(AppEvent::InboxDismissSelected),
-            KeyCode::Char('C') => Some(AppEvent::InboxDismissVisible),
-            KeyCode::Char('a') => Some(AppEvent::InboxToggleArchived),
-            KeyCode::Char('p') => Some(AppEvent::InboxCycleAgent),
-            KeyCode::Char('r') => Some(AppEvent::InboxRefresh),
-            _ => None,
-        }
-    }
-
-    /// Daemons screen key dispatcher. Runtime actions reuse the same
-    /// background workers that previously lived in the system overlay:
-    ///
-    ///   - q / Esc   back to the screen it was opened from (home if none)
-    ///
-    /// Routed through `PanelBack` so it pops the `previous_screen` that
-    /// `GoToDaemons` saved, instead of hardcoding home (L2).
     fn handle_daemons_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
         let daemons = &mut state.daemons_state;
         // Selection and the action menu are pure in-memory state, so they are
@@ -3271,7 +3215,6 @@ impl EventHandler {
         // i/I case-pair confusion with Stats ('i'). 'b' is otherwise
         // unused across every screen handler.
         match key_event.code {
-            KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
             // One daemon surface: health, hook status, and repair controls.
             KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
             KeyCode::Char('o') => return Some(AppEvent::GoToConfig),
@@ -5054,12 +4997,6 @@ impl EventHandler {
                     SidebarItem::Sessions => {
                         state.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
-                    SidebarItem::Inbox => {
-                        // Route through the canonical event so the
-                        // origin-save (and its self-clobber guard) has
-                        // exactly one code path.
-                        Self::process_event(AppEvent::GoToInbox, state);
-                    }
                     SidebarItem::Daemons => {
                         // Same canonical-event routing as Inbox.
                         Self::process_event(AppEvent::GoToDaemons, state);
@@ -6370,14 +6307,6 @@ impl EventHandler {
                     }
                 }
             }
-            AppEvent::GoToInbox => {
-                tracing::info!("Navigating to Inbox");
-                if state.current_screen != screen_ids::INBOX {
-                    state.previous_screen = Some(state.current_screen.clone());
-                }
-                state.current_screen = screen_ids::INBOX.to_string();
-                state.inbox_state.refresh();
-            }
             AppEvent::GoToDaemons => {
                 tracing::info!("Navigating to Daemons");
                 if state.current_screen != screen_ids::DAEMONS {
@@ -6412,63 +6341,6 @@ impl EventHandler {
                 }
                 state.current_screen = screen_ids::HANGAR.to_string();
             }
-            AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
-            AppEvent::InboxMoveDown => state.inbox_state.move_down(1),
-            AppEvent::InboxPageUp => state.inbox_state.move_up(10),
-            AppEvent::InboxPageDown => state.inbox_state.move_down(10),
-            AppEvent::InboxOpenSelected => {
-                // Capture the cwd before mark_selected_read invalidates
-                // selection ordering on refresh.
-                let row_cwd =
-                    state.inbox_state.selected_row().map(|r| r.cwd.clone()).unwrap_or_default();
-                state.inbox_state.mark_selected_read();
-                // cwd-based jump-to-tmux: find the ainb session whose
-                // workspace_path matches the notification's cwd (exact
-                // or prefix). If found, surface its tmux session name
-                // for the existing AttachToOtherTmux async action so
-                // ainb's tmux subsystem owns the attach itself.
-                if !row_cwd.is_empty() {
-                    let target = state
-                        .workspaces
-                        .iter()
-                        .find(|ws| {
-                            let p = ws.path.to_string_lossy().to_string();
-                            row_cwd == p || row_cwd.starts_with(&format!("{p}/"))
-                        })
-                        .and_then(|ws| {
-                            // Prefer a non-shell session (an agent-running
-                            // one) since hook events come from agents,
-                            // not shells. Fall back to the workspace
-                            // shell if no agent session has tmux.
-                            ws.sessions.iter().find_map(|s| s.tmux_session_name.clone()).or_else(
-                                || ws.shell_session.as_ref().map(|s| s.tmux_session_name.clone()),
-                            )
-                        });
-                    if let Some(tmux_name) = target {
-                        tracing::info!(
-                            cwd = %row_cwd,
-                            tmux = %tmux_name,
-                            "inbox: jumping to tmux session"
-                        );
-                        state.pending_async_action =
-                            Some(crate::app::state::AsyncAction::AttachToOtherTmux(tmux_name));
-                    } else {
-                        state.add_info_notification(format!(
-                            "no ainb session matches cwd {row_cwd}"
-                        ));
-                    }
-                }
-            }
-            AppEvent::InboxDismissSelected => {
-                state.inbox_state.dismiss_selected();
-            }
-            AppEvent::InboxDismissVisible => {
-                let n = state.inbox_state.dismiss_visible();
-                state.add_info_notification(format!("dismissed {n} row(s)"));
-            }
-            AppEvent::InboxToggleArchived => state.inbox_state.toggle_archived(),
-            AppEvent::InboxCycleAgent => state.inbox_state.cycle_agent_filter(),
-            AppEvent::InboxRefresh => state.inbox_state.refresh(),
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
                 state.session_recovery_state.refresh();
@@ -8564,19 +8436,6 @@ mod panel_back_tests {
         );
     }
 
-    #[test]
-    fn go_to_inbox_saves_origin_and_panel_back_returns_there() {
-        let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
-
-        EventHandler::process_event(AppEvent::GoToInbox, &mut state);
-        assert_eq!(state.current_screen, ids::INBOX);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
-
-        EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
-    }
-
     /// A click anywhere on the published menu-bar rect toggles the legend
     /// (the mouse twin of ⇧M); a click above it does not.
     #[test]
@@ -8961,7 +8820,7 @@ mod panel_back_tests {
     #[test]
     fn panel_back_falls_back_to_home_when_no_origin() {
         let mut state = AppState::default();
-        state.current_screen = ids::INBOX.to_string();
+        state.current_screen = ids::DAEMONS.to_string();
         state.previous_screen = None;
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);

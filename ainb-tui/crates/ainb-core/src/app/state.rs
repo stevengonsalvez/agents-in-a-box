@@ -3385,7 +3385,6 @@ pub struct AppState {
 
     /// Inbox screen state (ainb-hooks notifications: selection,
     /// filters, in-process SQLite store handle).
-    pub inbox_state: crate::components::inbox::InboxState,
 
     /// Daemons screen state (cached runtime-health snapshot + poll tick).
     pub daemons_state: crate::components::daemons::DaemonsState,
@@ -4025,7 +4024,6 @@ impl Default for AppState {
             session_recovery_state: crate::components::SessionRecoveryState::default(),
 
             // ainb-hooks inbox (lazy-opens SQLite on first refresh)
-            inbox_state: crate::components::inbox::InboxState::default(),
 
             // Daemons observability (collects health on first/periodic render)
             daemons_state: crate::components::daemons::DaemonsState::default(),

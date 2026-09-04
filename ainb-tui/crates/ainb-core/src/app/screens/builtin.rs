@@ -749,22 +749,6 @@ impl Screen for SessionRecoveryScreen {
     }
 }
 
-/// Inbox screen — surfaces ainb-hooks notifications from
-/// `~/.agents-in-a-box/notifications.db`. The screen pulls its
-/// per-session state from `AppState::inbox_state` so selection +
-/// filters survive cross-screen navigation.
-#[derive(Default)]
-pub struct InboxScreen;
-
-impl Screen for InboxScreen {
-    fn id(&self) -> &str {
-        ids::INBOX
-    }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        crate::components::inbox::render(frame, area, &mut state.inbox_state);
-    }
-}
-
 /// Daemons screen — runtime health and repair controls for every long-running ainb daemon
 /// (phone bridge / notifyd / ATC / fleet daemon). Renders from
 /// `fleet::daemons::collect` via the shared component, refreshing live on the
@@ -1044,7 +1028,6 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(SetupMenuScreen::new()));
     registry.register(Box::new(AuthSetupScreen::new()));
     registry.register(Box::new(AttachedTerminalScreen::new()));
-    registry.register(Box::new(InboxScreen));
     registry.register(Box::new(DaemonsScreen));
 }
 
@@ -1108,7 +1091,6 @@ mod tests {
             ids::SETUP_MENU,
             ids::AUTH_SETUP,
             ids::ATTACHED_TERMINAL,
-            ids::INBOX,
             ids::DAEMONS,
         ] {
             assert!(r.contains(id), "registry missing built-in screen {id}");

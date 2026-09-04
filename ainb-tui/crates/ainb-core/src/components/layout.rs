@@ -533,28 +533,13 @@ impl LayoutComponent {
 
         // Line 4: Panels + System. Every panel screen mirrors its
         // home-menu letter here (the session-list key handler binds the
-        // same set), and closing a panel returns to this screen. The
-        // inbox hint is always shown so users can discover the Inbox
-        // screen even on a fresh install with zero events. When the
-        // store reports unread + non-dismissed rows, a `● N` glyph is
-        // rendered alongside the `b inbox` hint, capped at `99+` so a
-        // large backlog can't widen the bar unbounded.
-        let inbox_unread = state
-            .inbox_state
-            .store
-            .as_ref()
-            .and_then(|s| s.unread_count().ok())
-            .unwrap_or(0);
+        // same set), and closing a panel returns to this screen.
+        //
+        // The `b inbox` hint and its unread badge are gone with the Inbox
+        // screen: a session's notification history is the `log` tab on this
+        // screen now, and the fleet-wide view is the hangar plugin's own.
         let mut line4_spans = Vec::new();
-        if let Some(badge) = inbox_unread_badge(inbox_unread) {
-            line4_spans.push(Span::styled(
-                badge,
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ));
-        }
         line4_spans.extend([
-            key("b", GOLD),
-            desc(" inbox "),
             key("i", GOLD),
             desc(" stats "),
             key("w", GOLD),
@@ -647,24 +632,8 @@ impl LayoutComponent {
         ];
 
         // ── Right column: panels, views & navigation ─────────────────────
-        // The inbox unread badge keeps its place ahead of `b inbox`, capped at
-        // `99+` so a backlog can't widen the column past the divider.
-        let inbox_unread = state
-            .inbox_state
-            .store
-            .as_ref()
-            .and_then(|s| s.unread_count().ok())
-            .unwrap_or(0);
         let mut row1 = Vec::new();
-        if let Some(badge) = inbox_unread_badge(inbox_unread) {
-            row1.push(Span::styled(
-                badge,
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ));
-        }
         row1.extend([
-            key("b", GOLD),
-            desc(" inbox  "),
             key("i", GOLD),
             desc(" stats  "),
             key("w", GOLD),
@@ -971,32 +940,6 @@ impl LayoutComponent {
         .alignment(Alignment::Center)
         .style(Style::default().bg(PANEL_BG));
         frame.render_widget(help_bar, inner_layout[1]);
-    }
-}
-
-/// Pick the right restart-shaped affordance to show on the bottom menu
-/// bar for the currently-highlighted session.
-///
-/// `r` resumes a Stopped Interactive (tmux) session in-place — the
-/// recoverable escape hatch added with the soft-stop feature. `e`
-/// recreates a Boss/Docker session in a fresh container.
-///
-/// The label deliberately reads `recreate` (not the generic `restart`)
-/// so it is obvious this is the Docker/Boss path — `e` tears down the
-/// old container and spins up a new one. Showing it for a stopped
-/// Interactive session would point users at the wrong key — pressing
-/// `e` triggers Docker logic that doesn't apply, while `r` is what
-/// actually resumes the tmux pane and relaunches the embedded CLI.
-/// Format the inbox unread badge for the menu bar, or `None` when there is
-/// nothing unread. The count is capped at `99+` so a large backlog can't
-/// widen line 1 of the bar past the 80-col minimum (the badge is the only
-/// variable-width token on that line). The widest possible badge is
-/// `"● 99+ "` (6 columns).
-fn inbox_unread_badge(unread: u64) -> Option<String> {
-    match unread {
-        0 => None,
-        1..=99 => Some(format!("● {unread} ")),
-        _ => Some("● 99+ ".to_string()),
     }
 }
 
@@ -1579,231 +1522,6 @@ mod live_widget_tests {
         ];
         for c in cases {
             assert!(!format_reset_at(c).is_empty(), "non-empty for {c}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod menu_bar_tests {
-    use super::inbox_unread_badge;
-
-    #[test]
-    fn inbox_badge_hidden_when_zero() {
-        assert_eq!(inbox_unread_badge(0), None);
-    }
-
-    #[test]
-    fn inbox_badge_shows_exact_count_up_to_99() {
-        assert_eq!(inbox_unread_badge(1).as_deref(), Some("● 1 "));
-        assert_eq!(inbox_unread_badge(99).as_deref(), Some("● 99 "));
-    }
-
-    #[test]
-    fn inbox_badge_caps_at_99_plus_and_bounds_width() {
-        // Beyond 99 the count is clamped so a huge backlog can't widen the
-        // bar. The widest badge must stay at 6 columns ("● 99+ ").
-        assert_eq!(inbox_unread_badge(100).as_deref(), Some("● 99+ "));
-        for n in [100u64, 655, 9_999, u64::MAX] {
-            let badge = inbox_unread_badge(n).expect("badge present");
-            assert_eq!(badge, "● 99+ ");
-            assert!(badge.chars().count() <= 6, "badge too wide: {badge:?}");
-        }
-    }
-
-    /// Render the menu bar at the conventional 80-column minimum and assert
-    /// every advertised key token survives — i.e. nothing is silently
-    /// truncated off either end of the centered four-line bar. This guards
-    /// the regression where adding keys (filter, 1-9, Space, F2, del-sel,
-    /// inbox) overflowed 80 cols and clipped the inbox shortcut.
-    #[test]
-    fn menu_bar_keys_not_truncated_at_80_cols() {
-        use crate::app::state::AppState;
-        use crate::components::layout::LayoutComponent;
-        use ratatui::{Terminal, backend::TestBackend};
-
-        let layout = LayoutComponent::new();
-        let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = true;
-        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.size();
-                layout.render_menu_bar(f, area, &state);
-            })
-            .unwrap();
-
-        let rendered: String =
-            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-
-        // The restart slot shows `r resume`.
-        for token in [
-            "ew",    // new
-            "xpand", // expand
-            "focus", // Tab focus
-            "ttach", // attach
-            "Pane attach",
-            "1-9",     // quick attach
-            "Space",   // multi-select
-            "tar",     // star
-            "resume",  // r — resume a stopped tmux session
-            "del-sel", // D bulk delete
-            "editor",  // o
-            "shell",   // $
-            "F2",      // rename
-            "git",     // g (rendered as g + "it")
-            "commit",  // p
-            "laude",   // c claude
-            "refresh", // f
-            "filter",  // F  ← the key that was missing before
-            "re-auth", // u (moved off A for in-pane attach)
-            "?/H",     // help
-            "home",    // q
-            "inbox",   // b
-            "stats",   // i — analytics panel
-            "witr",    // w — process-causality browser
-            "skills",  // k — skills browser
-            "memory",  // m — learnings KB browser
-            "abtop",   // t — top-for-agents monitor
-        ] {
-            assert!(
-                rendered.contains(token),
-                "menu token {token:?} truncated at 80 cols.\nRendered:\n{rendered}"
-            );
-        }
-
-        // Stronger guard: the centered Paragraph truncates from both ends when
-        // a line is wider than the inner area. Each of the 4 content rows
-        // (rows 1..=4; rows 0 and 5 are the rounded border) must therefore
-        // keep at least one space of padding against both inner edges — if a
-        // row filled edge-to-edge it would mean content was clipped.
-        let buf = terminal.backend().buffer();
-        for y in 1..=4u16 {
-            let left = buf.get(1, y).symbol().to_string();
-            let right = buf.get(78, y).symbol().to_string();
-            assert!(
-                left == " " && right == " ",
-                "menu row {y} fills the bar edge-to-edge (clipped). \
-                 left={left:?} right={right:?}"
-            );
-        }
-    }
-
-    /// On a wide terminal the legend switches to the two-column split. Assert
-    /// the divider and both section headers render (proving we took the split
-    /// path, not the stacked fallback) and that every advertised key survives
-    /// — the wide analogue of `menu_bar_keys_not_truncated_at_80_cols`.
-    #[test]
-    fn menu_bar_two_col_keeps_every_key_and_draws_divider() {
-        use crate::app::state::AppState;
-        use crate::components::layout::LayoutComponent;
-        use ratatui::{Terminal, backend::TestBackend};
-
-        let layout = LayoutComponent::new();
-        let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = true;
-        // Comfortably above TWO_COL_MIN_WIDTH so the split path renders.
-        let mut terminal = Terminal::new(TestBackend::new(140, 6)).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.size();
-                layout.render_menu_bar(f, area, &state);
-            })
-            .unwrap();
-
-        let rendered: String =
-            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-
-        // Vertical divider proves the two-column path (stacked has none).
-        assert!(
-            rendered.contains('│'),
-            "two-column divider missing:\n{rendered}"
-        );
-        // Section headers ride the top border.
-        assert!(
-            rendered.contains("Session actions"),
-            "left header missing:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("Panels & views"),
-            "right header missing:\n{rendered}"
-        );
-
-        for token in [
-            "ew",    // new
-            "ttach", // attach
-            "Pane attach",
-            "1-9",     // quick attach
-            "Space",   // multi-select
-            "tar",     // star
-            "resume",  // r — resume a stopped tmux session
-            "del-sel", // D bulk delete
-            "editor",  // o
-            "shell",   // $
-            "F2",      // rename
-            "commit",  // p
-            "refresh", // f
-            "filter",  // F
-            "re-auth", // u
-            "inbox",   // b
-            "stats",   // i
-            "witr",    // w
-            "skills",  // k
-            "memory",  // m
-            "abtop",   // t
-            "git",     // g
-            "claude",  // c
-            "xpand",   // E expand
-            "focus",   // Tab focus
-            "?/H",     // help
-            "home",    // q
-        ] {
-            assert!(
-                rendered.contains(token),
-                "menu token {token:?} missing in two-col legend.\nRendered:\n{rendered}"
-            );
-        }
-    }
-
-    /// The two-column split first engages at exactly `TWO_COL_MIN_WIDTH` (110),
-    /// which is also where its columns are narrowest and clipping would first
-    /// bite. Render at the boundary and assert the longest token in each column
-    /// (`re-auth` on the left, `home`/`abtop` on the right) survives and the
-    /// content rows keep their edge padding — the centred Paragraphs would eat
-    /// both ends if a line overflowed its half.
-    #[test]
-    fn menu_bar_two_col_no_clip_at_threshold_width() {
-        use crate::app::state::AppState;
-        use crate::components::layout::LayoutComponent;
-        use ratatui::{Terminal, backend::TestBackend};
-
-        let layout = LayoutComponent::new();
-        let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = true;
-        let mut terminal = Terminal::new(TestBackend::new(110, 6)).unwrap();
-        terminal.draw(|f| layout.render_menu_bar(f, f.size(), &state)).unwrap();
-
-        let buf = terminal.backend().buffer();
-        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
-
-        // Took the split path, not the stacked fallback.
-        assert!(
-            rendered.contains('│'),
-            "no divider at threshold:\n{rendered}"
-        );
-        for token in ["re-auth", "resume", "del-sel", "abtop", "home", "witr"] {
-            assert!(
-                rendered.contains(token),
-                "token {token:?} clipped at threshold width 110:\nRendered:\n{rendered}"
-            );
-        }
-        // Inner edges (cols 1 and 108) must stay blank on every content row.
-        for y in 1..=4u16 {
-            let left = buf.get(1, y).symbol().to_string();
-            let right = buf.get(108, y).symbol().to_string();
-            assert!(
-                left == " " && right == " ",
-                "menu row {y} clipped to the edge at width 110. left={left:?} right={right:?}"
-            );
         }
     }
 }

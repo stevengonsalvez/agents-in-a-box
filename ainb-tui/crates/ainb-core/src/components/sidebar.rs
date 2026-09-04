@@ -33,7 +33,6 @@ pub const SIDEBAR_CONTENT_RESERVE: u16 = 50;
 pub enum SidebarItem {
     Config,       // Settings & presets
     Sessions,     // Session manager
-    Inbox,        // ainb-hooks notification inbox
     Daemons,      // Unified runtime-health and repair screen
     Recovery,     // Recover orphaned sessions
     Mcp,          // Shared MCP pool overlay
@@ -56,7 +55,6 @@ impl SidebarItem {
         match self {
             Self::Config => "⚙️",
             Self::Sessions => "🚀",
-            Self::Inbox => "📥",
             Self::Daemons => "⚙",
             Self::Recovery => "🔄",
             Self::Mcp => "🧬",
@@ -79,7 +77,6 @@ impl SidebarItem {
         match self {
             Self::Config => "Config",
             Self::Sessions => "Sessions",
-            Self::Inbox => "Inbox",
             Self::Daemons => "Daemons",
             Self::Recovery => "Recovery",
             Self::Mcp => "MCP",
@@ -102,7 +99,6 @@ impl SidebarItem {
         match self {
             Self::Config => "Settings & Presets",
             Self::Sessions => "Manage Active",
-            Self::Inbox => "Hook Notifications",
             Self::Daemons => "Runtime health & repair",
             Self::Recovery => "Resume Orphaned",
             Self::Mcp => "Shared Pool",
@@ -131,7 +127,6 @@ impl SidebarItem {
             Self::SkillManager => "z",
             Self::Memory => "m",
             Self::Stats => "i",
-            Self::Inbox => "b",
             Self::Daemons => "d",
             Self::Witr => "w",
             Self::Abtop => "t",
@@ -157,7 +152,6 @@ impl SidebarItem {
             Self::SkillManager,
             Self::Memory,
             Self::Stats,
-            Self::Inbox,
             Self::Daemons,
             Self::Witr,
             Self::Abtop,
@@ -615,28 +609,27 @@ mod tests {
         assert_eq!(item.icon(), "⚙️");
     }
 
+    /// `b` and `f` are FREED, not rebound.
+    ///
+    /// Both opened surfaces this epic deleted (the Inbox and the Fleet panel).
+    /// An operator who presses one today expects the old screen, so binding
+    /// either to something else means their reflex fires a verb they did not
+    /// ask for. No tile may advertise them until a release has passed.
     #[test]
-    fn inbox_tile_registered_with_discoverable_shortcut() {
-        // The ainb-hooks Inbox screen is only useful if the user can
-        // find it. Lock in the tile shape + position so a future
-        // refactor doesn't quietly drop it from the home screen.
-        let all = SidebarItem::all();
-        let inbox_pos = all
-            .iter()
-            .position(|i| *i == SidebarItem::Inbox)
-            .expect("SidebarItem::Inbox missing from all()");
-        assert!(inbox_pos > 0, "Inbox shouldn't be first sidebar item");
-        assert_eq!(SidebarItem::Inbox.icon(), "📥");
-        assert_eq!(SidebarItem::Inbox.label(), "Inbox");
-        assert_eq!(SidebarItem::Inbox.shortcut(), "b");
-        assert_eq!(SidebarItem::Inbox.description(), "Hook Notifications");
-        // 'b' must not collide with any other tile shortcut. Picked
-        // over 'I' (Shift+i) to avoid the case-pair confusion with
-        // Stats ('i') — both opening different screens off the same
-        // letter was a UX bug.
-        let collisions =
-            all.iter().filter(|i| **i != SidebarItem::Inbox && i.shortcut() == "b").count();
-        assert_eq!(collisions, 0, "sidebar shortcut 'b' collides");
+    fn the_deleted_screens_shortcuts_are_not_reused() {
+        for freed in ["b", "f"] {
+            let claimed: Vec<&str> = SidebarItem::all()
+                .iter()
+                .filter(|item| item.shortcut() == freed)
+                .map(SidebarItem::label)
+                .collect();
+            assert!(
+                claimed.is_empty(),
+                "`{freed}` opened a screen this epic deleted; leaving it unbound \
+                 is what stops a stale reflex firing something else. Claimed by: \
+                 {claimed:?}"
+            );
+        }
     }
 
     #[test]

@@ -6,13 +6,16 @@
 // 2. Preset Parsing of antigravity-interactive-yolo
 // 3. Tmux Process Detection ("agy") & CLI Command Construction
 // 4. Provider Registry, Environment Variable Mapping (GEMINI_API_KEY) & Permissions Flags
+//
+// The inbox agent-filter cycle test went with the host Inbox screen. Antigravity
+// is still covered here by the registry, preset, tmux-detection and argv cases
+// above; the filter it exercised no longer exists on any surface.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use std::path::PathBuf;
 
 use ainb::agents::SessionAgentRegistry;
-use ainb::components::inbox::AgentFilter;
 use ainb::components::new_session::configure::{
     ConfigureRow, ConfigureState, CustomOverrides, PresetSelection, handle_key, render,
 };
@@ -448,18 +451,4 @@ fn test_provider_registry_aliases_and_builtins() {
     assert!(agy_agent.is_some());
     assert_eq!(agy_agent.as_ref().unwrap().name(), "Google Antigravity");
     assert_eq!(agy_agent.as_ref().unwrap().icon(), "\u{f1a0}");
-}
-
-#[test]
-fn test_inbox_filter_antigravity_cycle() {
-    let mut f = AgentFilter::All;
-    f = f.next(); // Claude
-    f = f.next(); // Codex
-    f = f.next(); // Copilot
-    f = f.next(); // Antigravity
-    assert_eq!(f, AgentFilter::Antigravity);
-    assert_eq!(f.label(), "antigravity");
-    assert_eq!(f.as_sql(), Some("antigravity"));
-    f = f.next(); // All
-    assert_eq!(f, AgentFilter::All);
 }
