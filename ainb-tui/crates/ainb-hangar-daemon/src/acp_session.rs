@@ -98,14 +98,20 @@ pub async fn ensure(
     // floor: an operator's configured adapter appeared in the picker and was
     // then refused here as unknown, which is a picker that offers what the mint
     // will not accept.
-    if !crate::acp_pool::adapter_is_known(provider).await {
+    //
+    // Asked as ONE question, with the scope, because the picker's registry
+    // hides `#task:` keys and the task executor mints against exactly one of
+    // those — validating every mint through the chat list refused every ACP
+    // task run outright. The pin comes back from the same answer, so a
+    // config-only adapter keeps its configured mode and a task keeps the
+    // confinement its per-task recipe pins.
+    let Some(permission_mode) =
+        crate::acp_pool::mintable_permission_mode(provider, scope_key).await
+    else {
         return Err(EnsureError::UnknownProvider {
             provider: provider.to_string(),
         });
-    }
-    // From the SAME registry the name was validated against, so a config-only
-    // adapter gets its configured pin rather than the bare default.
-    let permission_mode = crate::acp_pool::adapter_permission_mode(provider).await;
+    };
 
     let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
     // THE ONLY PRODUCTION WRITER of `fleet_acp_session.scope_key`. Nothing

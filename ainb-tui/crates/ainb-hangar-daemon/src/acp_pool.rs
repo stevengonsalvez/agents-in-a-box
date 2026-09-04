@@ -332,6 +332,47 @@ pub async fn adapter_is_known(provider: &str) -> bool {
     chat_adapters().await.iter().any(|(name, _)| name == wanted)
 }
 
+/// The pinned permission mode for a provider that may be MINTED under
+/// `scope_key`, or `None` when it may not be minted there at all.
+///
+/// One answer instead of two lookups, because the two questions have the same
+/// exception and answering them separately is what broke the task executor.
+///
+/// `chat_adapters` hides `#task:` keys so no caller can point a chat session at
+/// a task's sandboxed process. But the task executor mints against exactly that
+/// key — `acp_task` registers `claude-agent-acp#task:<id>` and then calls
+/// `acp_session::ensure` with it — so validating every mint through the chat
+/// registry refused every ACP task with `UnknownProvider`. It is allowed here
+/// only when the scope IS that task's own scope, which no chat caller can
+/// present: `fleet/acp_session_create` refuses a `task:` scope at the door.
+///
+/// The mode comes from the FULL registry for that case. The chat list would
+/// have missed the key and fallen back to the default, which is precisely the
+/// confinement the per-task adapter exists to pin.
+pub async fn mintable_permission_mode(provider: &str, scope_key: Option<&str>) -> Option<String> {
+    let wanted = provider.trim();
+    if let Some((_, task_id)) = wanted.split_once(TASK_ADAPTER_INFIX) {
+        let owns_it = scope_key.map(str::trim).is_some_and(|scope| {
+            scope == format!("{}{task_id}", crate::acp_task::TASK_SCOPE_PREFIX)
+        });
+        if !owns_it {
+            return None;
+        }
+        return Some(match active_handle().await {
+            Some(pool) => pool.permission_mode(wanted),
+            None => DEFAULT_PERMISSION_MODE.to_string(),
+        });
+    }
+    chat_adapters()
+        .await
+        .into_iter()
+        .find(|(name, _)| name == wanted)
+        .map(|(_, config)| config.permission_mode)
+}
+
+/// The separator between a base adapter and the task that confines it.
+pub const TASK_ADAPTER_INFIX: &str = "#task:";
+
 /// The permission mode pinned for `provider`, from that same registry.
 pub async fn adapter_permission_mode(provider: &str) -> String {
     let wanted = provider.trim();
@@ -823,7 +864,7 @@ impl AcpPool {
             .map(|adapters| {
                 adapters
                     .iter()
-                    .filter(|(key, _)| !key.contains("#task:"))
+                    .filter(|(key, _)| !key.contains(TASK_ADAPTER_INFIX))
                     .map(|(key, config)| (key.clone(), config.clone()))
                     .collect()
             })
@@ -3649,6 +3690,45 @@ fn permission_fingerprint(session_key: &str, permission: &PermissionRequest) -> 
 
 #[cfg(test)]
 mod tests {
+
+    /// A per-task adapter is mintable ONLY under its own task's scope.
+    ///
+    /// `chat_adapters` hides `#task:` keys so no chat caller can point a
+    /// session at a task's sandboxed process, and validating every mint
+    /// through that list refused the task executor's own mints — which is
+    /// every ACP task run, with `spawn_error` and no delivery legs at all.
+    #[tokio::test]
+    async fn a_task_adapter_is_mintable_only_under_its_own_scope() {
+        let infix = super::TASK_ADAPTER_INFIX;
+        let key = format!("claude-agent-acp{infix}t-42");
+
+        assert!(
+            super::mintable_permission_mode(&key, Some("task:t-42")).await.is_some(),
+            "the task executor mints against exactly this key"
+        );
+        assert!(
+            super::mintable_permission_mode(&key, Some("task:t-99")).await.is_none(),
+            "another task's scope must not reach this task's confined adapter"
+        );
+        assert!(
+            super::mintable_permission_mode(&key, Some("channel:c1")).await.is_none(),
+            "a chat scope must not reach a task adapter by naming its key"
+        );
+        assert!(
+            super::mintable_permission_mode(&key, None).await.is_none(),
+            "and neither may a caller that names no scope at all"
+        );
+    }
+
+    /// An adapter nobody configured stays unmintable, task infix or not.
+    #[tokio::test]
+    async fn an_unknown_chat_adapter_is_still_refused() {
+        assert!(
+            super::mintable_permission_mode("no-such-adapter", Some("channel:c1"))
+                .await
+                .is_none()
+        );
+    }
     use super::{
         Arc, DEFAULT_SWEEP_INTERVAL, Duration, HashMap, MIN_SWEEP_INTERVAL, PoolConfig,
         holds_process, retire_if_current,
