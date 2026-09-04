@@ -912,9 +912,9 @@ impl AcpPool {
                 return SubmitOutcome::Rejected(DELIVERY_SESSION_GONE);
             }
         };
-        // `trim_start`, the same shape the create door uses: the two doors read
-        // the scope identically, so neither can be the lenient one.
-        if !task_run && row.scope_key.trim_start().starts_with(crate::acp_task::TASK_SCOPE_PREFIX) {
+        // One reader for the convention, shared with the create door and the
+        // deadline sweep, so no site can be the lenient one.
+        if !task_run && crate::acp_task::is_task_scope(&row.scope_key) {
             tracing::warn!(
                 %session_key,
                 scope_key = %row.scope_key,
@@ -1205,7 +1205,7 @@ impl AcpPool {
             .await
             .unwrap_or_default();
         for row in overdue {
-            if row.scope_key.starts_with(crate::acp_task::TASK_SCOPE_PREFIX) {
+            if crate::acp_task::is_task_scope(&row.scope_key) {
                 continue;
             }
             tracing::warn!(

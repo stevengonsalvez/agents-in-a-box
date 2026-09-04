@@ -5962,11 +5962,7 @@ async fn handle_fleet_acp_session_create(
     // (terminal, `SpawnError`, no retry) and would make the pool stamp this
     // session's approvals with the task's workspace. Refused at the door, which
     // is the only untrusted caller of `acp_session::ensure`.
-    if params
-        .scope_key
-        .as_deref()
-        .is_some_and(|scope| scope.trim_start().starts_with(crate::acp_task::TASK_SCOPE_PREFIX))
-    {
+    if params.scope_key.as_deref().is_some_and(crate::acp_task::is_task_scope) {
         return Err(invalid_params(&format!(
             "scope_key {:?} is reserved for task runs",
             crate::acp_task::TASK_SCOPE_PREFIX

@@ -101,6 +101,17 @@ pub fn scope_key(task_id: &str) -> String {
     format!("{TASK_SCOPE_PREFIX}{task_id}")
 }
 
+/// Whether `scope` belongs to a task run.
+///
+/// Three places refuse or exempt a task's scope — the create door, the prompt
+/// guard and the deadline sweep — and they spelled the test three ways, one of
+/// them without the `trim_start`. Reading it here instead means the next site
+/// cannot be the lenient one.
+#[must_use]
+pub fn is_task_scope(scope: &str) -> bool {
+    scope.trim_start().starts_with(TASK_SCOPE_PREFIX)
+}
+
 /// The workspace an ACP session's scope belongs to, or `None` when the scope
 /// is not a task's.
 ///
