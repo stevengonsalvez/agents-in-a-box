@@ -104,6 +104,12 @@ const ERROR_BEARING_EVENTS: &[&str] = &["StopFailure", "Notification", "acp_erro
 /// enough that a stale incident cannot vote.
 const TRANSITION_LOOKBACK_MS: i64 = 60_000;
 
+/// How fresh the legacy watcher's heartbeat must be to count as live.
+///
+/// It rewrites the record every 5 seconds, so three missed ticks is a process
+/// that has stopped rather than one that was briefly busy.
+const WATCHER_STALE_MS: i64 = 15_000;
+
 /// The prompt the sweep types. Lower case and bare, because it is read by the
 /// agent as its next user turn, not by a parser.
 const CONTINUE_TEXT: &str = "continue";
@@ -224,6 +230,18 @@ pub async fn sweep_once(pool: &SqlitePool, events: &EventSink, now_ms: i64) -> S
         return report;
     }
 
+    // The legacy watcher does the same job uncapped, and its guard against this
+    // daemon only fires at ITS start. Checked per tick for the same reason ATC
+    // ownership is: either can appear between ticks.
+    if watcher_holding_the_fleet(now_ms) {
+        report.skipped_atc_owned = report.scanned;
+        tracing::debug!(
+            scanned = report.scanned,
+            "retry sweep: the legacy fleet watcher owns the fleet; standing down"
+        );
+        return report;
+    }
+
     let Some(inst) = sweep.into_iter().next() else {
         tracing::warn!(
             instance = SWEEP_INSTANCE,
@@ -337,6 +355,39 @@ async fn transient_pattern(pool: &SqlitePool, session: &FleetSessionRow) -> Opti
             _ => None,
         })
     })
+}
+
+/// Whether `ainb fleet daemon`, the legacy uncapped watcher, is running.
+///
+/// The other half of a guard that was one-way. That watcher refuses to START
+/// while this daemon is serving, but nothing stops this daemon from starting
+/// AFTER it: `just dev`, a `brew upgrade`, the Daemons screen's start button,
+/// or an operator who used `--force-race`. All ordinary orderings.
+///
+/// Both then auto-`continue` into the same panes, on 5s and 30s ticks, and the
+/// watcher's own dedupe knows nothing about this ledger, so the cap is defeated
+/// from the outside by a process that has never had one.
+///
+/// Read off the heartbeat FILE rather than through `ainb-core`'s reader: that
+/// crate sits above this one, so the record's location is the only part of the
+/// contract this side can share. A record whose fields cannot be parsed counts
+/// as LIVE, because the safe answer to "is something else typing into these
+/// panes" is yes.
+fn watcher_holding_the_fleet(now_ms: i64) -> bool {
+    let Some(home) = ainb_hangar_core::paths::hangar_home() else {
+        return false;
+    };
+    let path = home.join("daemons").join("fleet-daemon.json");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return true;
+    };
+    let Some(beat) = record.get("last_heartbeat_at").and_then(serde_json::Value::as_i64) else {
+        return true;
+    };
+    now_ms.saturating_sub(beat) <= WATCHER_STALE_MS
 }
 
 /// Apply the cap decision for ONE transient ERR session.
