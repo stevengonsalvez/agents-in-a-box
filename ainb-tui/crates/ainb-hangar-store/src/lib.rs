@@ -613,10 +613,21 @@ mod migration_tests {
         // (This assertion read `exists` for exactly as long as 0094 was the head
         // migration and deleting it left a genuinely pending tail; adding any
         // migration above it restores the original, and now stable, condition.)
+        //
+        // Read the DIRECTORY, never `pre-93.bak` by name: the snapshot is named
+        // `pre-{applied}` from `MAX(version)`, which this seed leaves at the head
+        // migration, so a named check for 93 is absent whether the gate fired or
+        // not and would go on passing forever.
+        let snapshots: Vec<String> = std::fs::read_dir(home.path())
+            .expect("read the hangar home")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("hangar.db.pre-"))
+            .collect();
         assert!(
-            !home.path().join("hangar.db.pre-93.bak").exists(),
+            snapshots.is_empty(),
             "the head migration is still applied, so the numeric gate must see \
-             nothing pending and take no snapshot"
+             nothing pending and take no snapshot; found {snapshots:?}"
         );
     }
 }
