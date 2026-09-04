@@ -280,7 +280,7 @@ impl AskState {
                 Answerable::Daemon { attention_id } => {
                     crate::fleet::control::answer_via_daemon_blocking(attention_id, sent)
                 }
-                Answerable::Tmux { .. } => {
+                Answerable::Tmux => {
                     crate::fleet::control::answer_via_tmux_blocking(&session_id, &cwd, &sent)
                 }
                 Answerable::Broker {

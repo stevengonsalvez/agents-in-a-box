@@ -1331,7 +1331,7 @@ impl EventHandler {
         }
 
         use crate::components::session_tabs::SessionTab;
-        use ainb_plugin_hangar::screen::fleet_chat::{ChatKey, ChatKeyOutcome, reduce_chat_key};
+        use ainb_plugin_hangar::screen::fleet_chat::ChatKey;
 
         // `Tab` belongs to the STRIP, `Shift+Tab` to the conversation's own
         // focus toggle. They collided: the chat uses Tab to move between its
@@ -1424,6 +1424,36 @@ impl EventHandler {
                 return None;
             }
         }
+        // The conversation's OWN pane keys, on ALT for the same reason the
+        // header's dials are: the composer holds focus as soon as a
+        // conversation opens, so a bare `p` is a `p` in a half-typed message
+        // and the binding would be advertised on the pane and do nothing in the
+        // state an operator is usually in.
+        //
+        // Bound HERE rather than in the copilot-only block above so they work
+        // on the `thread` tab too: the chat surface is one state machine over
+        // two tabs, and a retry that only existed on one of them would be the
+        // drift `fleet_chat`'s header warns about. `p` and `c`, because the
+        // copilot header already owns Alt-r for the engine dial's own retry
+        // (`copilot_dial::DialStatus::Failed`) and the two mean different
+        // things three rows apart. The LABELS live beside the reducer
+        // (`CHAT_RETRY_HINT`, `CHAT_CANCEL_HINT`), so the key a pane advertises
+        // and the key bound here cannot drift.
+        if key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+            let pane_key = match key_event.code {
+                KeyCode::Char('p') => Some(ChatKey::Retry),
+                KeyCode::Char('c') => Some(ChatKey::Cancel),
+                _ => None,
+            };
+            if let Some(pane_key) = pane_key {
+                return Self::apply_chat_key(pane_key, state);
+            }
+            // Every other Alt-modified key falls through to the sessions
+            // screen rather than into the composer: an Alt-modified letter is a
+            // binding an operator meant for a pane, never a character they
+            // meant to type.
+            return None;
+        }
         // Attach digits ARE passed through to the composer — a digit typed into
         // a message is a digit, and stealing it would make the composer unable
         // to type "3". The footer stops advertising them here for that reason.
@@ -1439,6 +1469,22 @@ impl EventHandler {
             KeyCode::Down => ChatKey::Down,
             _ => return None,
         };
+        Self::apply_chat_key(chat_key, state)
+    }
+
+    /// Fold one already-translated key into whichever conversation is open.
+    ///
+    /// Split out so the pane-level Alt bindings and the composer's own keys
+    /// reach the reducer through ONE path: two copies of "find the host,
+    /// reduce, dispatch the intent" is how a key ends up handled on one tab and
+    /// silently dropped on the other.
+    fn apply_chat_key(
+        chat_key: ainb_plugin_hangar::screen::fleet_chat::ChatKey,
+        state: &mut AppState,
+    ) -> Option<AppEvent> {
+        use crate::components::session_tabs::SessionTab;
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatKeyOutcome, reduce_chat_key};
+
         let host = match state.session_tab {
             SessionTab::Copilot => state.copilot_chat.as_mut(),
             SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
@@ -9932,7 +9978,7 @@ mod session_ask_key_tests {
                         description: String::new(),
                     },
                 ])
-                .over_tmux("tmux_proj"),
+                .over_tmux(),
         ];
         workspace.add_session(session);
         state.workspaces.push(workspace);

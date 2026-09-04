@@ -119,10 +119,14 @@ pub enum Answerable {
     },
     /// By typing into the session's own tmux pane, through the one verified
     /// send path. Works with the daemon down, which is the whole point.
-    Tmux {
-        /// The pane to send into.
-        tmux_session: String,
-    },
+    ///
+    /// Deliberately carries NO pane name. `resolve_and_send_typed` re-resolves
+    /// the pane from the session's identity and cwd, and that resolution is
+    /// stronger than a name captured when the chip was built: it refuses an
+    /// ambiguous match rather than typing an answer into whichever pane the
+    /// name happens to hit now. A name on this variant would read as
+    /// authoritative and never be the thing that actually decides.
+    Tmux,
     /// Through notifyd's approve broker, which is where a `PermissionRequest`
     /// hook is parked.
     ///
@@ -260,10 +264,8 @@ impl SessionAttention {
 
     /// Route this row over the session's own pane.
     #[must_use]
-    pub fn over_tmux(mut self, tmux_session: impl Into<String>) -> Self {
-        self.answerable = Answerable::Tmux {
-            tmux_session: tmux_session.into(),
-        };
+    pub fn over_tmux(mut self) -> Self {
+        self.answerable = Answerable::Tmux;
         self
     }
 
@@ -486,10 +488,10 @@ pub fn route_answer(
             }
         });
     }
-    tmux_session.map_or(Answerable::No(Unanswerable::NoTransport), |name| {
-        Answerable::Tmux {
-            tmux_session: name.to_string(),
-        }
+    // The presence of a pane is what decides the route; the NAME is not carried,
+    // because the send path re-resolves it and would ignore one anyway.
+    tmux_session.map_or(Answerable::No(Unanswerable::NoTransport), |_| {
+        Answerable::Tmux
     })
 }
 
@@ -673,9 +675,7 @@ mod tests {
         let chip = SessionAttention::local(AttentionKind::Ask, 0);
         assert_eq!(
             route_answer(&chip, Some("tmux_proj"), Some("sess"), false),
-            Answerable::Tmux {
-                tmux_session: "tmux_proj".into()
-            },
+            Answerable::Tmux,
             "the tmux route must survive the daemon being down — that is the point"
         );
     }
