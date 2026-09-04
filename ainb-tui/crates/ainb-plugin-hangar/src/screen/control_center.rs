@@ -160,6 +160,9 @@ pub struct CardOption {
 impl CardOption {
     /// What `attention/answer` carries when this option is picked: the id when
     /// the option has one, else the label.
+    ///
+    /// Only a classifier ASK reaches the fallback; every ACP option carries an
+    /// id ([`parse_acp_options`] voids the list otherwise).
     #[must_use]
     pub fn delivered(&self) -> String {
         self.answer.clone().unwrap_or_else(|| self.label.clone())
@@ -427,14 +430,19 @@ fn parse_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
 /// not the classifier's `{label, description}`: `name` renders, `optionId` is
 /// what gets delivered.
 ///
-/// BOTH fields are required, and one malformed entry voids the whole list
+/// BOTH fields are required here, and one malformed entry voids the whole list
 /// rather than dropping a row. Dropping one would renumber every glyph below
 /// it, and the daemon reads a bare digit as a 1-based index into the options it
-/// holds, so the operator would press ③ and answer something else. The daemon
-/// voids the same payload for the same reason
-/// (`answer::acp_permission_from_payload`); an empty list here renders "this
-/// ASK carries no options", which is the truth about a payload neither side
-/// will act on.
+/// holds, so the operator would press ③ and answer something else. An empty
+/// list renders "this ASK carries no options" instead.
+///
+/// The daemon is STRICTER on `optionId` (a missing one voids its whole row too)
+/// and LOOSER on `name` (missing defaults to `""` and still routes), and it
+/// also requires `sessionKey` and `requestFingerprint`, which this parser does
+/// not read. So the two are not parity, they only agree on the case that
+/// matters: neither will act on a payload whose options lack ids. Both are
+/// unreachable against `acp_pool::raise_permission`, which always writes all
+/// three fields.
 fn parse_acp_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
     v.and_then(serde_json::Value::as_array)
         .and_then(|arr| {
@@ -449,6 +457,14 @@ fn parse_acp_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
                     })
                 })
                 .collect::<Option<Vec<_>>>()
+        })
+        .map(|options| {
+            // The invariant `delivered()`'s fallback relies on: every option
+            // this parser yields carries an id, so an ACP card never answers
+            // with a display name. Asserted rather than argued, because the
+            // fallback is two functions away from the construction site.
+            debug_assert!(options.iter().all(|o| o.answer.is_some()));
+            options
         })
         .unwrap_or_default()
 }
