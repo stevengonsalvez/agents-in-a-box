@@ -367,3 +367,146 @@ mod helper_tests {
         );
     }
 }
+
+/// `keeping_dead_pane` must actually launch the program AND hold the pane.
+///
+/// This is a real-tmux test rather than a unit one because the whole failure
+/// mode lives in tmux's target grammar, which no mock reproduces: the option
+/// and the respawn need a WINDOW target, and a session target (`=name`) is
+/// rejected with "no such window" / "can't find pane". A first cut of this
+/// feature shipped exactly that bug and would have failed every Codex launch;
+/// nothing in the unit suite noticed, because nothing ran tmux.
+#[tokio::test]
+async fn test_keeping_dead_pane_launches_program_and_holds_the_pane() -> Result<()> {
+    require_tmux!();
+
+    let session_name = unique_session_name("deadpane");
+    let temp_dir = tempfile::tempdir()?;
+    let mut session =
+        TmuxSession::new(session_name.clone(), "sleep 30".to_string()).keeping_dead_pane(true);
+
+    // The P0 was here: start() bailed before the session was usable.
+    session.start(temp_dir.path()).await?;
+    // `TmuxSession::new` sanitizes (and prefixes) the name, so the live session
+    // is `session.name()`, never the string handed to the constructor.
+    let live = session.name().to_string();
+    assert!(
+        tmux_session_exists(&live),
+        "session must exist after a keeping_dead_pane start"
+    );
+
+    // The option is really set on the window, not merely attempted.
+    let opt = tokio::process::Command::new("tmux")
+        .args([
+            "show-options",
+            "-w",
+            "-t",
+            &format!("={live}:"),
+            "remain-on-exit",
+        ])
+        .output()
+        .await?;
+    assert!(
+        String::from_utf8_lossy(&opt.stdout).contains("on"),
+        "remain-on-exit must be on, got: {:?}",
+        String::from_utf8_lossy(&opt.stdout)
+    );
+
+    // The program is what is running, not the holder shell it was respawned over.
+    let cmd = tokio::process::Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            &format!("={live}:"),
+            "-F",
+            "#{pane_current_command}",
+        ])
+        .output()
+        .await?;
+    assert!(
+        String::from_utf8_lossy(&cmd.stdout).contains("sleep"),
+        "the program must be running, got: {:?}",
+        String::from_utf8_lossy(&cmd.stdout)
+    );
+
+    cleanup_tmux_session(&live);
+    Ok(())
+}
+
+/// A program that exits immediately leaves a DEAD pane, not a vanished session.
+///
+/// The payoff the option exists for: the pane, and whatever the program wrote
+/// to it, survive long enough to be read.
+#[tokio::test]
+async fn test_keeping_dead_pane_survives_an_immediate_exit() -> Result<()> {
+    require_tmux!();
+
+    let session_name = unique_session_name("deadexit");
+    let temp_dir = tempfile::tempdir()?;
+    let mut session = TmuxSession::new(
+        session_name.clone(),
+        "sh -c 'echo codex-startup-failed; exit 1'".to_string(),
+    )
+    .keeping_dead_pane(true);
+    session.start(temp_dir.path()).await?;
+    let live = session.name().to_string();
+
+    // Poll for the program's own output, do not sleep a guessed interval. The
+    // echo and the exit are two separate events, and a loaded runner can put
+    // the capture between them: the dead-pane marker is drawn while the line is
+    // not readable yet. The sibling assertion in `session_manager` went red on
+    // ubuntu that way while macOS passed the same commit.
+    //
+    // On timeout, fall through and let the assertions below report what the
+    // pane actually held.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = tokio::process::Command::new("tmux")
+            .args(["capture-pane", "-p", "-S", "-", "-t", &format!("={live}:")])
+            .output()
+            .await?;
+        if String::from_utf8_lossy(&seen.stdout).contains("codex-startup-failed")
+            || tokio::time::Instant::now() >= deadline
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    assert!(
+        tmux_session_exists(&live),
+        "an exited program must NOT take its session with it"
+    );
+
+    let panes = tokio::process::Command::new("tmux")
+        .args([
+            "list-panes",
+            "-t",
+            &format!("={live}:"),
+            "-F",
+            "#{pane_dead}",
+        ])
+        .output()
+        .await?;
+    assert!(
+        String::from_utf8_lossy(&panes.stdout).contains('1'),
+        "the pane must read as dead, got: {:?}",
+        String::from_utf8_lossy(&panes.stdout)
+    );
+
+    // And its output is still readable -- the entire point.
+    let captured = tokio::process::Command::new("tmux")
+        // `-S -` mirrors capture_failed_launch_pane: without it the dead-pane
+        // marker overwrites the viewport and the program's own output is lost.
+        .args(["capture-pane", "-p", "-S", "-", "-t", &format!("={live}:")])
+        .output()
+        .await?;
+    assert!(
+        String::from_utf8_lossy(&captured.stdout).contains("codex-startup-failed"),
+        "the failed program's output must still be capturable, got: {:?}",
+        String::from_utf8_lossy(&captured.stdout)
+    );
+
+    cleanup_tmux_session(&live);
+    Ok(())
+}

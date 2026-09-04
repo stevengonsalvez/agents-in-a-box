@@ -243,6 +243,37 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Idle read bound for a request/response connection (no live subscription).
+const DEFAULT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+/// Idle read bound for a connection holding a live subscription: long enough
+/// that a quiet operator never trips it, finite so a wedged peer is reclaimed.
+const DEFAULT_SUBSCRIBED_IDLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24 * 3600);
+/// Longest a fresh connection may sit silent before its `auth/hello`: a peer
+/// that connects and never authenticates holds a task and an fd for this long
+/// at most (capped further by the idle window when that is shorter).
+const AUTH_FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Concurrent connections served at once; an accept past this is closed at
+/// once instead of spawning another task (an operator box has a handful of
+/// TUIs and CLIs, so this is a runaway-client guard, not a capacity plan).
+const MAX_CONNECTIONS: usize = 256;
+/// Operator override (milliseconds) for [`DEFAULT_IDLE_TIMEOUT`].
+const IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_IDLE_MS";
+/// Operator override (milliseconds) for [`DEFAULT_SUBSCRIBED_IDLE_TIMEOUT`].
+const SUBSCRIBED_IDLE_TIMEOUT_ENV: &str = "AINB_HANGAR_RPC_SUBSCRIBED_IDLE_MS";
+
+/// `var` as a millisecond duration, else `default`. A supported knob: the
+/// integration tests shrink both windows to hundreds of milliseconds, and an
+/// operator may tune them the same way; an unset, empty, non-numeric or zero
+/// value keeps the default.
+fn idle_timeout_from_env(var: &str, default: std::time::Duration) -> std::time::Duration {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map_or(default, std::time::Duration::from_millis)
+}
+
 /// Accept connections forever, serving each on its own task.
 ///
 /// `broker` is the daemon-global event broker: each connection that subscribes
@@ -257,13 +288,33 @@ pub async fn serve(
     health: DaemonHealth,
     broker: EventBroker,
 ) {
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    // The cap is logged once per saturation, not once per refused accept: the
+    // runaway client it contains must not turn into a log flood.
+    let mut saturated = false;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                let Ok(slot) = slots.clone().try_acquire_owned() else {
+                    if !saturated {
+                        tracing::warn!(
+                            max = MAX_CONNECTIONS,
+                            "hangar rpc: connection cap reached; closing new connections until one frees"
+                        );
+                        saturated = true;
+                    }
+                    drop(stream);
+                    continue;
+                };
+                if saturated {
+                    tracing::info!("hangar rpc: connection cap cleared");
+                    saturated = false;
+                }
                 let pool = pool.clone();
                 let health = health.clone();
                 let broker = broker.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     if let Err(e) = serve_conn(stream, pool, health, broker).await {
                         tracing::debug!(error = %e, "hangar rpc connection closed");
                     }
@@ -317,8 +368,24 @@ async fn serve_conn(
     // valid `auth/hello`. Unauthenticated or wrong-token connections get an
     // UNAUTHORIZED error envelope back, then the connection closes — no
     // `hangar/*` method is dispatched and no event forwarder ever exists.
+    // The first frame is read under a short bound: a peer that connects and
+    // says nothing is closed like one that closed on us, so an unauthenticated
+    // connection can never sit on the idle window.
+    let idle_timeout = idle_timeout_from_env(IDLE_TIMEOUT_ENV, DEFAULT_IDLE_TIMEOUT);
     let authed = async {
-        let Some(first) = read_frame(&mut reader).await? else {
+        let first = match tokio::time::timeout(
+            idle_timeout.min(AUTH_FIRST_FRAME_TIMEOUT),
+            read_frame(&mut reader),
+        )
+        .await
+        {
+            Ok(frame) => frame?,
+            Err(_elapsed) => {
+                tracing::debug!("hangar rpc: no auth/hello within the first-frame window");
+                None
+            }
+        };
+        let Some(first) = first else {
             // A peer that closes before sending its first frame is
             // unauthenticated, same as a rejected one: no caller identity.
             return Ok(None);
@@ -353,6 +420,10 @@ async fn serve_conn(
     // The connection's event subscription: at most one forwarder; a
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // The TRANSCRIPT half of the same workspace subscription (track A step A2),
+    // on its own broadcast so a run's line volume cannot evict the lifecycle
+    // events `forwarder` carries. Registered and replaced with it.
+    let mut task_stream_forwarder: Option<tokio::task::JoinHandle<()>> = None;
     // The connection's FLEET-WIDE attention subscription (spec P2), independent
     // of the workspace forwarder: a connection may hold both (workspace events +
     // attention nudges) or either. A re-subscribe replaces it.
@@ -372,25 +443,54 @@ async fn serve_conn(
     let mut notification_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     // Idle read timeout so an abandoned / half-open client connection cannot pin
-    // this per-connection task (and its fd) forever. The RPC is request/response
-    // and clients reconnect per request, so a generous idle window only reclaims
-    // dead connections — it never interrupts an in-flight exchange.
-    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+    // this per-connection task (and its fd) forever. Request/response clients
+    // reconnect per request, so a generous idle window only reclaims dead
+    // connections. A connection holding a LIVE subscription is a push channel,
+    // not a request/response one: the TUI plugin subscribes once and then may
+    // legitimately send nothing for an hour while the operator watches a run.
+    // Idle-closing it after ten quiet minutes made the plugin read EOF and paint
+    // "daemon offline" with the daemon perfectly healthy. A subscribed connection
+    // therefore gets the long bound instead (a wedged peer that never closes is
+    // still reclaimed, just not a quiet one), and a forwarder that has already
+    // exited no longer counts as a subscription.
+    let subscribed_idle_timeout =
+        idle_timeout_from_env(SUBSCRIBED_IDLE_TIMEOUT_ENV, DEFAULT_SUBSCRIBED_IDLE_TIMEOUT);
     let served: std::io::Result<()> = async {
-        while let Some(body) =
-            match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut reader)).await {
+        while let Some(body) = {
+            let live = |h: &Option<tokio::task::JoinHandle<()>>| {
+                h.as_ref().is_some_and(|h| !h.is_finished())
+            };
+            let subscribed = live(&forwarder)
+                || live(&task_stream_forwarder)
+                || live(&attention_forwarder)
+                || live(&fleet_forwarder)
+                || live(&message_forwarder)
+                || live(&transcript_forwarder);
+            let window = if subscribed {
+                subscribed_idle_timeout
+            } else {
+                idle_timeout
+            };
+            match tokio::time::timeout(window, read_frame(&mut reader)).await {
                 Ok(frame_result) => frame_result?,
                 Err(_elapsed) => {
-                    tracing::debug!("rpc connection idle {IDLE_TIMEOUT:?}; closing");
+                    tracing::debug!(subscribed, "rpc connection idle {window:?}; closing");
                     None
                 }
             }
-        {
+        } {
             let req = serde_json::from_slice::<RpcRequest>(&body);
             // Subscribe before dispatch reads the snapshot. Events raised while
             // the snapshot query runs stay buffered in this receiver and are
             // drained after the acknowledgement, closing the snapshot-to-live
             // handoff gap without allowing an event to precede the response.
+            let pending_workspace_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::WORKSPACE_SUBSCRIBE).then(|| broker.subscribe())
+            });
+            let pending_task_stream_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::WORKSPACE_SUBSCRIBE)
+                    .then(|| broker.subscribe_task_stream())
+            });
             let pending_attention_rx = req.as_ref().ok().and_then(|request| {
                 (request.method == methods::ATTENTION_SUBSCRIBE)
                     .then(|| broker.subscribe_attention())
@@ -443,11 +543,36 @@ async fn serve_conn(
                         // This ordering guarantees no gap — at worst a boundary
                         // event delivered twice (live + replayed), which the
                         // plugin reconciles via the next snapshot pull.
-                        forwarder = Some(spawn_event_forwarder(
-                            broker.subscribe(),
-                            ws.clone(),
-                            out_tx.clone(),
-                        ));
+                        //
+                        // The receiver was taken BEFORE dispatch (#835), so the
+                        // window this arm used to leave — the snapshot query,
+                        // the ack write and the `resolve` above, all before
+                        // `subscribe()` — buffers rather than drops. It matters
+                        // more since A2: a transcript line rides `emit_live`
+                        // with no durable replay behind it, so one missed in
+                        // that window is gone, not merely late.
+                        let ws_rx = pending_workspace_rx.unwrap_or_else(|| broker.subscribe());
+                        forwarder = Some(spawn_event_forwarder(ws_rx, ws.clone(), out_tx.clone()));
+                        // A2: the same subscription's TRANSCRIPT half, drained
+                        // from its own broadcast so a chatty run cannot evict the
+                        // lifecycle events above it (see `EventBroker`). Two
+                        // forwarders means the two streams are unordered against
+                        // each other in BOTH directions: a `TaskFinished` can
+                        // overtake its run's last `TaskMessage`, and a
+                        // `TaskMessage` can overtake the `TaskStarted` that opens
+                        // the banner. Only `TaskStarted` constructs a banner and
+                        // every consumer guards on the task id, so a late arrival
+                        // is dropped either way and leaves no state behind (pinned
+                        // by `banner_hides_on_task_finished_event`); the visible
+                        // effect is a banner clearing a beat early, or a first
+                        // transcript line missed before it opens.
+                        if let Some(old) = task_stream_forwarder.take() {
+                            old.abort();
+                        }
+                        let rx = pending_task_stream_rx
+                            .unwrap_or_else(|| broker.subscribe_task_stream());
+                        task_stream_forwarder =
+                            Some(spawn_event_forwarder(rx, ws.clone(), out_tx.clone()));
                         // T1 resume: a client that carried a `since_seq` catches
                         // up on every durable event after that cursor before it
                         // goes live. Best-effort (a read fault is logged, the
@@ -951,10 +1076,13 @@ fn subscribe_after_id(req: &RpcRequest) -> Option<String> {
 /// so a replayed frame is byte-identical to the live one it mirrors — a resuming
 /// subscriber cannot tell catch-up from live.
 ///
-/// The backlog is **paged in-loop**, not read once: the durable log holds one
-/// row per emitted event (including high-frequency `TaskProgress`/`TaskMessage`
-/// heartbeats), so a single active task can exceed [`REPLAY_BATCH`] during a
-/// disconnect. A single capped read delivers the OLDEST `REPLAY_BATCH` events
+/// The backlog is **paged in-loop**, not read once: the durable log holds one row
+/// per emitted event, so a busy workspace (a board advancing a run through its
+/// lifecycle, a squad fanning out) can exceed [`REPLAY_BATCH`] during a
+/// disconnect. Transcript lines are NOT in that backlog since track A step A2
+/// (they ride `emit_live`, off the log), so the volume here is lower than it
+/// once was, but the paging is what makes the read correct rather than merely
+/// sufficient. A single capped read delivers the OLDEST `REPLAY_BATCH` events
 /// and would silently drop the newest `(since_seq + REPLAY_BATCH, head]` window
 /// — the live forwarder (registered before this call) only carries events
 /// emitted after subscribe, and the ack advances the client's cursor to the
@@ -1233,7 +1361,7 @@ async fn handle(
         methods::HANGAR_BOARD_COLUMN_REORDER => handle_board_column_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_ADD => handle_board_card(pool, req, true).await,
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
-        methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
+        methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req, events).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
         methods::HANGAR_ISSUE_RUN => handle_issue_run(pool, req).await,
         methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
@@ -2840,15 +2968,24 @@ async fn handle_fleet_copilot_configure(
         FleetAcpSessionRepo::set_state(pool, &retiring, "DEAD", SystemClock.now_ms())
             .await
             .map_err(|error| internal(&format!("retiring the copilot session: {error}")))?;
-        let (minted, _) = mint_acp_session(pool, events, adapter, &session.cwd, &channel.scope_key)
-            .await
-            .map_err(|error| {
-                tracing::error!(
-                    %retiring, %adapter, ?error,
-                    "the copilot session was retired but its replacement could not be minted"
-                );
-                error
-            })?;
+        let minted = crate::acp_session::ensure(
+            pool,
+            events,
+            adapter,
+            &session.cwd,
+            Some(&channel.scope_key),
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                %retiring, %adapter, %error,
+                "the copilot session was retired but its replacement could not be minted"
+            );
+            match error {
+                crate::acp_session::EnsureError::Store(_) => internal(&error.to_string()),
+                _ => invalid_params(&error.to_string()),
+            }
+        })?;
         tracing::info!(
             retired = %retiring,
             session_key = %minted.session_key,
@@ -2896,25 +3033,35 @@ async fn handle_fleet_copilot_configure(
     })
 }
 
-/// The registry as the daemon would spawn from it RIGHT NOW.
+/// The chat engines the daemon would spawn from RIGHT NOW, sorted by name.
 ///
-/// The pool's live config when there is a pool, and the CONFIG FILE when there
-/// is not — never the two-name built-in floor. That floor was the fallback on
-/// both validation paths and it disagreed with `fleet/adapter_list`, which
-/// already read config: the picker offered an operator's configured adapter and
-/// the configure call then refused it as unknown. One resolution, so a name the
-/// list offers is a name the write accepts.
-async fn adapter_registry() -> crate::acp_pool::PoolConfig {
-    crate::acp_pool::active_handle()
-        .await
-        .map_or_else(crate::acp_pool::PoolConfig::from_config, |pool| {
-            pool.config().clone()
-        })
+/// The pool's LIVE registry when there is a pool, and the config file's seed
+/// when there is not — never the two-name built-in floor. That floor was the
+/// fallback on both validation paths and it disagreed with
+/// `fleet/adapter_list`, which already read config: the picker offered an
+/// operator's configured adapter and the configure call then refused it as
+/// unknown. One resolution, so a name the list offers is a name the write
+/// accepts.
+async fn chat_adapters() -> Vec<(String, ainb_acp::config::AdapterConfig)> {
+    match crate::acp_pool::active_handle().await {
+        Some(pool) => pool.chat_adapters(),
+        None => {
+            let mut seed: Vec<(String, ainb_acp::config::AdapterConfig)> =
+                crate::acp_pool::PoolConfig::from_config().adapters.into_iter().collect();
+            seed.sort_by(|left, right| left.0.cmp(&right.0));
+            seed
+        }
+    }
 }
 
-/// Whether the registry can spawn `provider`. See [`adapter_registry`].
+/// Whether the registry can spawn `provider` as a chat engine.
+///
+/// Reads the same list the picker is offered, per-task keys and all excluded:
+/// a caller must not be able to point a chat session at a task's confined
+/// adapter by naming its synthetic key.
 async fn adapter_is_known(provider: &str) -> bool {
-    adapter_registry().await.knows(provider.trim())
+    let wanted = provider.trim();
+    chat_adapters().await.iter().any(|(name, _)| name == wanted)
 }
 
 /// Every adapter this daemon's registry can spawn, in name order.
@@ -2929,138 +3076,18 @@ async fn handle_fleet_adapter_list(req: &RpcRequest) -> Result<serde_json::Value
 
     require_fleet_capability(FLEET_CAPABILITY_CHAT_READ)?;
     let _params: FleetAdapterListParams = parse_params(req, "{}")?;
-    let config = adapter_registry().await;
-    let mut adapters: Vec<FleetAdapter> = config
-        .adapters
-        .iter()
+    let adapters: Vec<FleetAdapter> = chat_adapters()
+        .await
+        .into_iter()
         .map(|(name, adapter)| FleetAdapter {
-            name: name.clone(),
+            built_in: ainb_acp::config::AdapterConfig::is_known_adapter(&name),
+            name,
             command: adapter.command.display().to_string(),
-            permission_mode: adapter.permission_mode.clone(),
-            built_in: ainb_acp::config::AdapterConfig::is_known_adapter(name),
-            models: adapter.models.clone(),
+            permission_mode: adapter.permission_mode,
+            models: adapter.models,
         })
         .collect();
-    adapters.sort_by(|left, right| left.name.cmp(&right.name));
     to_value(&FleetAdapterListResult { adapters })
-}
-
-/// [`mint_acp_session`] onto the session's OWN `session:<key>` scope.
-///
-/// A separate entry point because the scope embeds the minted key, so it cannot
-/// be passed in: the caller does not know it yet.
-async fn mint_acp_session_on_own_scope(
-    pool: &SqlitePool,
-    events: &EventSink,
-    provider: &str,
-    cwd: &str,
-) -> Result<
-    (
-        ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRow,
-        String,
-    ),
-    RpcError,
-> {
-    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
-    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
-    let scope_key = format!("session:{session_key}");
-    mint_acp_session_with_key(pool, events, session_key, provider, cwd, &scope_key).await
-}
-
-/// Mint one `fleet_acp_session` row (plus its fleet session) on `scope_key`.
-///
-/// Shared by `fleet/acp_session_create` and the copilot engine swap so the two
-/// cannot drift: a session minted by one path and read by the other must carry
-/// the same capabilities, the same pinned permission mode, and the same
-/// `acp_session_created` event.
-async fn mint_acp_session(
-    pool: &SqlitePool,
-    events: &EventSink,
-    provider: &str,
-    cwd: &str,
-    scope_key: &str,
-) -> Result<
-    (
-        ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRow,
-        String,
-    ),
-    RpcError,
-> {
-    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
-    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
-    mint_acp_session_with_key(pool, events, session_key, provider, cwd, scope_key).await
-}
-
-async fn mint_acp_session_with_key(
-    pool: &SqlitePool,
-    events: &EventSink,
-    session_key: String,
-    provider: &str,
-    cwd: &str,
-    scope_key: &str,
-) -> Result<
-    (
-        ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRow,
-        String,
-    ),
-    RpcError,
-> {
-    use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
-    use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionRepo, NewFleetAcpSession};
-
-    // From the SAME registry the name was validated against, so a config-only
-    // adapter gets its configured pin rather than the bare default.
-    let permission_mode = adapter_registry().await.permission_mode(provider);
-    let now = SystemClock.now_ms();
-    let event = NewFleetEvent {
-        event_id: format!("acp-session-create:{session_key}"),
-        session_key: session_key.clone(),
-        observed_at: now,
-        authority: ObservationAuthority::Authoritative,
-        event_type: "acp_session_created".to_string(),
-        payload: serde_json::json!({
-            "provider": provider,
-            "cwd": cwd,
-            "scopeKey": scope_key,
-            "permissionMode": permission_mode,
-        })
-        .to_string(),
-        patch: FleetSessionPatch {
-            provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
-            cwd: Some(cwd.to_string()),
-            display_name: crate::fleet::display_name_for_cwd(cwd),
-            management_state: Some("MANAGED".to_string()),
-            capabilities: Some(acp_capabilities()),
-            confidence: Some("HIGH".to_string()),
-            lifecycle_state: Some("IDLE".to_string()),
-            attention_state: Some("NONE".to_string()),
-            transport_health: Some("HEALTHY".to_string()),
-            ..FleetSessionPatch::default()
-        },
-    };
-    let (row, revision) = FleetAcpSessionRepo::insert_with_fleet_session(
-        pool,
-        &NewFleetAcpSession {
-            session_key: session_key.clone(),
-            scope_key: scope_key.to_string(),
-            provider: provider.to_string(),
-            cwd: cwd.to_string(),
-            permission_mode,
-            state: "IDLE".to_string(),
-            created_at: now,
-            last_active_at: now,
-        },
-        &event,
-    )
-    .await
-    .map_err(|error| internal(&format!("acp session create: {error}")))?;
-    if let Some(revision) = revision {
-        events.emit_fleet_revision(revision);
-    }
-    // The MINTED key comes back alongside the row so a caller can tell a fresh
-    // session from a replay onto a scope somebody else already holds: the
-    // insert answers a held scope with the HELD row, and the two keys differ.
-    Ok((row, session_key))
 }
 
 /// The open confirm cards awaiting an operator.
@@ -4612,7 +4639,9 @@ fn managed_codex_tmux_name(thread_id: &str, now_ms: i64) -> String {
 async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
     let tmux_binary = std::ffi::OsString::from("tmux");
     let output = tokio::process::Command::new(tmux_binary)
-        .args(["kill-session", "-t", session_name])
+        // The name says exact, so the target has to be: a bare `-t` resolves
+        // exact, then prefix, then fnmatch.
+        .args(["kill-session", "-t", &format!("={session_name}")])
         .output()
         .await
         .map_err(|error| format!("exact tmux stop failed: {error}"))?;
@@ -6046,9 +6075,9 @@ fn normalize_picker_text(value: &str) -> String {
 /// `session_key`, in ONE transaction, with NO process spawn.
 ///
 /// R3's entry point. Without it no ACP recipient can ever exist, and
-/// `message_send` deliberately never auto-provisions one. The pool spawns the
-/// adapter lazily on the first prompt, so a create that never receives a message
-/// costs nothing but a row.
+/// `message_send` deliberately never auto-provisions one. The write and its
+/// validation are [`crate::acp_session::ensure`], shared with the task
+/// executor; this handler is the capability gate in front of it.
 async fn handle_fleet_acp_session_create(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -6058,90 +6087,37 @@ async fn handle_fleet_acp_session_create(
         FLEET_CAPABILITY_ACP_SPAWN, FleetAcpSessionCreateParams, FleetAcpSessionCreateResult,
     };
 
+    use crate::acp_session::EnsureError;
+
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
     let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
-    if params.cwd.trim().is_empty() {
-        return Err(invalid_params("cwd must not be empty"));
-    }
-    if params.scope_key.as_deref().is_some_and(|scope| scope.trim().is_empty()) {
-        return Err(invalid_params("scope_key must not be empty"));
-    }
-    // Validated against the ADAPTER REGISTRY, not the schema: the store only
-    // length-checks `provider` so the next adapter needs no migration, which
-    // makes this the one place an unknown token is refused.
-    if !adapter_is_known(&params.provider).await {
+    // `task:<id>` belongs to the task executor (`crate::acp_task`). A chat
+    // session minted there would make that task's later run fail `ScopeHeld`
+    // (terminal, `SpawnError`, no retry) and would make the pool stamp this
+    // session's approvals with the task's workspace. Refused at the door, which
+    // is the only untrusted caller of `acp_session::ensure`.
+    if params.scope_key.as_deref().is_some_and(crate::acp_task::is_task_scope) {
         return Err(invalid_params(&format!(
-            "unknown ACP provider {:?}; fleet/adapter_list names the ones this daemon can spawn",
-            params.provider
+            "scope_key {:?} is reserved for task runs",
+            crate::acp_task::TASK_SCOPE_PREFIX
         )));
     }
-
-    // The scope defaults to the session's OWN, which embeds the key, so the two
-    // shapes are separate entry points rather than an `Option` the mint has to
-    // unpick.
-    let (row, session_key) = match params.scope_key.as_deref() {
-        Some(scope_key) => {
-            mint_acp_session(pool, events, &params.provider, &params.cwd, scope_key).await?
-        }
-        None => mint_acp_session_on_own_scope(pool, events, &params.provider, &params.cwd).await?,
-    };
-
-    // The scope was ALREADY held by a live session, so this create replayed onto
-    // it instead of minting the key above. Idempotent only while the caller
-    // asked for the same SESSION: answering a `codex-acp` create with a live
-    // `claude-agent-acp` key would silently hand back a session that prompts a
-    // DIFFERENT agent than the caller believes it is driving, and answering a
-    // create for `~/work/api` with a session rooted at `~/work/web` would run
-    // every later prompt against a different repository. Both misroute in
-    // silence for the whole life of the scope. Graft 4 rejects the same class
-    // of replay on `fleet_message`; this is its ACP twin.
-    if row.session_key != session_key {
-        let mismatch = if row.provider == params.provider {
-            (row.cwd != params.cwd).then(|| ("cwd", row.cwd.clone(), params.cwd.clone()))
-        } else {
-            Some(("provider", row.provider.clone(), params.provider.clone()))
-        };
-        if let Some((field, held, asked)) = mismatch {
-            return Err(invalid_params(&format!(
-                "scope_key {:?} is already held by a session whose {field} is {held:?}, \
-                 not {asked:?}; stop it before creating a different one",
-                row.scope_key
-            )));
-        }
-    }
+    let row = crate::acp_session::ensure(
+        pool,
+        events,
+        &params.provider,
+        &params.cwd,
+        params.scope_key.as_deref(),
+    )
+    .await
+    .map_err(|error| match error {
+        EnsureError::Store(_) => internal(&error.to_string()),
+        _ => invalid_params(&error.to_string()),
+    })?;
     to_value(&FleetAcpSessionCreateResult {
         session_key: row.session_key,
         scope_key: row.scope_key,
     })
-}
-
-/// EXACTLY the actions Phase 5 wires, and nothing else.
-///
-/// `action_capability` gates on this JSON before any handler runs, so an unset
-/// flag is a Rejected receipt rather than an action that reaches the pool and
-/// fails somewhere less legible.
-fn acp_capabilities() -> String {
-    serde_json::to_string(&ainb_hangar_proto::fleet::FleetCapabilities {
-        structured_answer: true,
-        structured_dismiss: false,
-        approvals: true,
-        approval_session: false,
-        send_prompt: true,
-        continue_turn: false,
-        retry: false,
-        interrupt: true,
-        start: false,
-        stop: true,
-        restart: false,
-        kill: true,
-        archive: false,
-        // An ACP session has no pane. Leaving these true would make the tmux
-        // surfaces offer attach/paste for a session that can never honour it.
-        tmux_attach: false,
-        tmux_text: false,
-        verified_picker: false,
-    })
-    .unwrap_or_else(|_| "{}".to_string())
 }
 
 /// One chat delivery to an ACP recipient: persist nothing new, just hand the
@@ -6202,7 +6178,7 @@ async fn execute_acp_action(
             // An operator prompt joins the SAME bus a chat message does, so it
             // gets a message row, a delivery leg, and a threaded reply rather
             // than a turn nothing can correlate afterwards.
-            match acp_operator_message(pool, &session.session_key, text).await {
+            match crate::acp_session::enqueue(pool, &session.session_key, "operator", text).await {
                 Ok(message_id) => {
                     let outcome = acp.submit_prompt(&session.session_key, &message_id, text).await;
                     match outcome {
@@ -6369,42 +6345,6 @@ fn acp_permission_receipt(
             Some("no live ACP session for this key".to_string()),
         ),
     }
-}
-
-/// Persist an operator's direct `SendPrompt` as a chat message plus its leg, so
-/// the ACP turn resolves through exactly one receipt path.
-async fn acp_operator_message(
-    pool: &SqlitePool,
-    session_key: &str,
-    text: &str,
-) -> Result<String, sqlx::Error> {
-    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
-    use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
-
-    let scope_key = FleetAcpSessionRepo::get(pool, session_key)
-        .await?
-        .map_or_else(|| format!("session:{session_key}"), |row| row.scope_key);
-    let row = FleetMessageRepo::insert_message_with_deliveries(
-        pool,
-        &NewFleetMessage {
-            id: SystemIdGen.new_ulid(),
-            request_id: None,
-            request_fingerprint: None,
-            scope_key,
-            origin_message_id: None,
-            sender: "operator".to_string(),
-            kind: "user".to_string(),
-            body: text.to_string(),
-            created_at: SystemClock.now_ms(),
-        },
-        std::slice::from_ref(&session_key.to_string()),
-    )
-    .await
-    .map_err(|error| match error {
-        ainb_hangar_store::repo::fleet_message::FleetMessageError::Sql(sql) => sql,
-        other => sqlx::Error::Protocol(other.to_string()),
-    })?;
-    Ok(row.id)
 }
 
 fn action_capability(
@@ -7193,6 +7133,7 @@ async fn handle_issue_create(
             title: &params.title,
             description: params.description.as_deref(),
             creator: &creator,
+            assignee: None,
             external_ref,
             parent_issue_id,
             stage: params.stage,
@@ -8174,6 +8115,11 @@ async fn handle_comment_mention_preview(
 /// `provider` is rejected with `INVALID_PARAMS`. The recorded provider is HONOURED
 /// at dispatch (the daemon spawns that backend per task), so a `codex` agent runs
 /// codex even though it binds the single `claude`-advertised runtime.
+///
+/// The optional `task_executor` (`process`/`acp`, migration 0095) is the second
+/// dispatch axis and is validated the same way: absent means the agent inherits
+/// whatever `HANGAR_TASK_EXECUTOR` the daemon was started with, so omitting it
+/// leaves behaviour exactly as it was before the column existed.
 async fn handle_agent_create(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -8182,8 +8128,8 @@ async fn handle_agent_create(
     // `agent_env` write channel, so it uses the same rule as agent_update.
     let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params_secret(
         req,
-        "{ workspace_id?, name, provider?, model?, instructions?, description?, avatar_url?, \
-         service_tier? }",
+        "{ workspace_id?, name, provider?, task_executor?, model?, instructions?, description?, \
+         avatar_url?, service_tier? }",
     )?;
     let name = params.name.trim();
     if name.is_empty() {
@@ -8192,6 +8138,9 @@ async fn handle_agent_create(
     let description = validate_description(params.description.as_deref())?.unwrap_or_default();
     let provider = ainb_hangar_store::bootstrap::normalize_provider(params.provider.as_deref())
         .map_err(|e| invalid_params(&e))?;
+    let task_executor =
+        ainb_hangar_store::bootstrap::normalize_task_executor(params.task_executor.as_deref())
+            .map_err(|e| invalid_params(&e))?;
     let wire = params.workspace_id.as_deref().unwrap_or("").trim();
     let ws = resolve_or_bootstrap_default(pool, wire).await?;
     let created = ainb_hangar_store::bootstrap::create_agent_from(
@@ -8200,6 +8149,7 @@ async fn handle_agent_create(
         ainb_hangar_store::bootstrap::AgentDraft {
             name: name.to_string(),
             provider,
+            task_executor,
             instructions: params.instructions,
             description,
             avatar_url: params.avatar_url,
@@ -9434,11 +9384,12 @@ fn normalise_fsm_state<'a>(raw: Option<&'a str>) -> Result<Option<&'a str>, RpcE
 async fn handle_board_card_create(
     pool: &SqlitePool,
     req: &RpcRequest,
+    events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
-    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_proto::events::HangarEvent;
     use ainb_hangar_store::repo::board::BoardRepo;
-    use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
     let params: ainb_hangar_proto::snapshots::BoardCardCreateParams = parse_params(
         req,
@@ -9475,39 +9426,49 @@ async fn handle_board_card_create(
     // The TUI user owns cards it creates — mirror the plugin's `SELF_AUTHOR_REF`.
     let creator = ActorRef::new(ActorKind::Member, "me")
         .map_err(|e| internal(&format!("build creator ref: {e}")))?;
-    let issue_id = SystemIdGen.new_ulid();
-    IssueRepo::insert(
+    // Mint the issue through the SAME helper `issue_create` uses, so a card-made
+    // issue gets the workspace's issue prefix, its `manual` origin stamp and the
+    // same row shape `issue_create` answers and pushes (the `Created` activity
+    // row is recorded below, as `handle_issue_create` does after its create).
+    // The prefix lands on the stored title, which is the brief of EVERY run of
+    // any issue (`run_loop` builds the brief from `issue.title`), so a card in a
+    // prefixed workspace briefs its agent exactly as a wizard issue would. Card
+    // titles are the whole brief, so a card carries no description.
+    let mut row = snapshots::issue_create(
         pool,
-        &NewIssue {
-            id: issue_id.clone(),
-            workspace_id: ws.as_str().to_string(),
-            title: params.title.clone(),
+        &SystemIdGen,
+        &SystemClock,
+        &snapshots::IssueCreateInput {
+            workspace_id: ws.as_str(),
+            title: &params.title,
             description: None,
-            state: "open".to_string(),
-            assignee,
-            creator,
-            created_at: SystemClock.now_ms(),
-            priority: 0,
-            due_date: None,
-            labels: Vec::new(),
-            acceptance_criteria: Vec::new(),
-            context_refs: Vec::new(),
+            creator: &creator,
+            assignee: assignee.as_ref(),
+            external_ref: None,
             parent_issue_id: None,
             stage: None,
+            acceptance_criteria: &[],
+            context_refs: &[],
+            priority: 0,
+            due_date: None,
+            labels: &[],
+            origin: Some(&ainb_hangar_core::origin::IssueOrigin::manual()),
         },
     )
     .await
     .map_err(|e| store_err(&e))?;
-    // 0056: a board card is authored by the TUI user, so its provenance is
-    // `manual` (stamped explicitly, never left NULL — see migration 0056).
-    IssueRepo::set_origin(
+    let issue_id = row.id.as_str().to_string();
+    ActivityService::record(
         pool,
+        &SystemIdGen,
+        &SystemClock,
         ws.as_str(),
         &issue_id,
-        &ainb_hangar_core::origin::IssueOrigin::manual(),
+        &ActivityActor::Actor(creator.clone()),
+        ActivityAction::Created,
+        serde_json::json!({}),
     )
-    .await
-    .map_err(|e| store_err(&e))?;
+    .await;
 
     BoardRepo::card_add(
         pool,
@@ -9549,7 +9510,15 @@ async fn handle_board_card_create(
         )
         .await
         .map_err(|e| store_err(&e))?;
+        row.repo_ref.clone_from(&resolved_repo_ref);
+        row.agent = agent.map(|a| a.as_str().to_string());
     }
+    // A card create inserts a real issue row, so announce it exactly like
+    // `issue_create` does, with the row the create returned (list-shaped, the
+    // two card-parity fields patched in above): without this push the issue
+    // list, Kanban titles and inbox never learn the issue exists until a full
+    // snapshot refresh.
+    events.emit(ws.as_str(), HangarEvent::IssueCreated(row));
     boards_list_value(pool, &ws).await
 }
 
@@ -10459,6 +10428,22 @@ async fn run_card_inner(
             .await
             .map_err(CardRunError::Db)?;
     }
+    // A single-agent Run on a card that sits in a role-gated stage IS that
+    // stage's run: stamp the column the way the pull does, so the stage counts
+    // as finished when the task completes (otherwise the issue-lifecycle gate
+    // sees an unrun current stage forever and never promotes the issue).
+    if let Some(column_id) =
+        ainb_hangar_store::service::pull::current_gated_column(&mut *tx, ws, board_id, issue_id)
+            .await
+            .map_err(CardRunError::Db)?
+    {
+        sqlx::query("UPDATE agent_task_queue SET board_column_id = ?1 WHERE id = ?2")
+            .bind(&column_id)
+            .bind(&task_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(CardRunError::Db)?;
+    }
     CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
         .await
         .map_err(CardRunError::Db)?;
@@ -11258,15 +11243,43 @@ async fn handle_board_card_remove(
     }
 }
 
-/// `hangar/board_card_timeline` (tcp T3 / F6, P10 §4.9): the raw stream-json
+/// `hangar/board_card_timeline` (tcp T3 / F6, P10 §4.9): the CLASSIFIED
 /// transcript of a card's newest run, for the prettied timeline overlay.
 ///
-/// Resolves the card's most recent task, derives the deterministic per-task logs
-/// dir ([`crate::execenv::logs_dir`] — the exact tree the run wrote), and reads a
-/// bounded TAIL of whichever provider log exists (`claude.jsonl` / `codex.jsonl`).
-/// The plugin parses the returned text into the transcript taxonomy. A card that
-/// never ran, or whose log is absent/unreadable, yields an empty transcript (a
-/// read: never an `INVALID_PARAMS` on a missing log).
+/// One read, both executors (track A step A6). Each keeps its own durable
+/// transcript, deliberately — dual-writing a chatty process run's stdout into
+/// SQLite would put thousands of rows per run through the one write lock the
+/// whole control plane shares — so the UNIFICATION happens here, on the read:
+///
+/// ```text
+///   task ─▶ an acp session under scope "task:<id>"?
+///             yes ─▶ fleet_provider_event tail  ─▶ AcpClassifier
+///             no  ─▶ {logs}/<provider>.jsonl tail ─▶ StreamJsonClassifier
+///                              └──────▶ Vec<TranscriptLine> ◀──────┘
+/// ```
+///
+/// The caller cannot tell which executor ran, which is the point: the expanded
+/// run view is identical either way, and identical to the live `TaskMessage`
+/// stream because that classifies through the same code.
+///
+/// # Both reads are bounded, and neither is complete
+///
+/// A run's transcript has no ceiling, so both halves return a TAIL under the
+/// same 512 KiB budget and both degrade the same way at that boundary: a
+/// `tool_result` / `tool_call_update` whose opening call fell outside the
+/// window renders in the unnamed `tool` form.
+///
+/// They are not bounded IDENTICALLY, and the differences run in both
+/// directions. The process half can lose half a LINE, because a byte seek
+/// lands mid-file and the classifier skips the leading partial; an ACP row is
+/// atomic, so its tail loses whole rows and never half of one. But the ACP half
+/// carries a second, row-count cap ([`TAIL_ROWS`]) that can bite well before
+/// the byte budget. So the ACP half SAYS when it truncated and the process half
+/// does not — a marker line is the only honest way to close a gap one side can
+/// detect and the other cannot.
+///
+/// A card that never ran, or whose record is absent/unreadable, yields an empty
+/// transcript (a read: never an `INVALID_PARAMS` on a missing log).
 async fn handle_board_card_timeline(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -11275,15 +11288,36 @@ async fn handle_board_card_timeline(
     /// socket; the plugin's timeline is a tail view, and the parser skips the
     /// leading partial line a mid-file seek leaves.
     const TAIL_CAP: u64 = 512 * 1024;
+    /// Row ceiling on the ACP half of the same budget.
+    ///
+    /// The byte budget alone would still make the daemon materialise a whole
+    /// session's rows before it could measure them; this caps what SQLite hands
+    /// back first.
+    ///
+    /// WHICH cap binds depends on the run, and neither dominates: a transcript
+    /// of short structural rows (~100 B each) exhausts 512 ROWS at ~54 KiB, a
+    /// tenth of the byte budget, while one of coalesced 4 KiB text chunks
+    /// exhausts the BYTES after ~128 rows. Raising this so bytes always bound
+    /// first would just move the cost: 8192 rows of 4 KiB payloads is 32 MB
+    /// materialised per timeline open. So both caps stand, and the read reports
+    /// when either one bit (see [`acp_timeline`]) instead of pretending one
+    /// never does.
+    const TAIL_ROWS: i64 = 512;
 
-    let params: ainb_hangar_proto::snapshots::BoardCardParams =
-        parse_params(req, "{ workspace_id, board_id, issue_id }")?;
+    let params: ainb_hangar_proto::snapshots::BoardCardTimelineParams =
+        parse_params(req, "{ workspace_id, board_id?, issue_id }")?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
 
-    // The issue must be a real card on this board (a timeline is a card affordance).
-    let board = board_in_ws(pool, &ws, &params.board_id).await?;
-    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
-        return Err(invalid_params("that issue is not a card on this board"));
+    // With a board named, the issue must be a real card on it (the Boards overlay
+    // is a card affordance). Without one (the task-detail backfill, crisp B1) the
+    // workspace guard above plus the workspace-scoped task query below are the
+    // whole tenant check: an issue in another workspace yields no task, never a
+    // foreign transcript.
+    if let Some(board_id) = params.board_id.as_deref() {
+        let board = board_in_ws(pool, &ws, board_id).await?;
+        if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+            return Err(invalid_params("that issue is not a card on this board"));
+        }
     }
 
     // The card's newest task (any status) — its run is the one to show.
@@ -11301,6 +11335,19 @@ async fn handle_board_card_timeline(
         // No run yet — an empty transcript, not an error.
         return to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult::default());
     };
+
+    // The ACP arm FIRST, because it is the decisive one: an ACP run writes no
+    // jsonl at all, so a session under this task's scope means the file read
+    // below could only ever return an empty transcript.
+    if let Some((provider, entries)) =
+        acp_timeline(pool, &task_id, TAIL_ROWS, TAIL_CAP as usize).await
+    {
+        return to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+            task_id: Some(task_id),
+            provider: Some(provider),
+            entries,
+        });
+    }
 
     let ws_slug = crate::run_loop::workspace_slug(pool, ws.as_str())
         .await
@@ -11328,8 +11375,72 @@ async fn handle_board_card_timeline(
     to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult {
         task_id: Some(task_id),
         provider,
-        jsonl,
+        entries: transcript_lines(ainb_hangar_proto::transcript::classify_stream_json(&jsonl)),
     })
+}
+
+/// The ACP half of [`handle_board_card_timeline`]: `(provider, entries)` when
+/// this task ran over ACP, `None` when it did not.
+///
+/// The task → session hop is the `task:<id>` scope convention
+/// [`crate::acp_task::scope_key`] mints, so neither side needed a new column.
+/// A store fault degrades to `None` — the caller then reads the (empty) jsonl
+/// and renders "no transcript yet", which is the same thing this read does for
+/// a run that has not written a row yet.
+async fn acp_timeline(
+    pool: &SqlitePool,
+    task_id: &str,
+    max_rows: i64,
+    max_bytes: usize,
+) -> Option<(String, Vec<ainb_hangar_proto::snapshots::TranscriptLine>)> {
+    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
+    use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+    let scope = crate::acp_task::scope_key(task_id);
+    let session = FleetAcpSessionRepo::latest_by_scope(pool, &scope)
+        .await
+        .inspect_err(|error| tracing::warn!(%task_id, %error, "acp session lookup failed"))
+        .ok()
+        .flatten()?;
+    let (rows, truncated) = FleetProviderEventRepo::list_by_session_tail(
+        pool,
+        &session.session_key,
+        max_rows,
+        max_bytes,
+    )
+    .await
+    .inspect_err(|error| tracing::warn!(%task_id, %error, "acp transcript read failed"))
+    .unwrap_or_default();
+
+    let mut classifier = ainb_hangar_proto::transcript::AcpClassifier::default();
+    let mut entries = Vec::new();
+    // The read SAYS when it left rows behind, in the error lane and in stream
+    // position, rather than returning a short transcript that reads as a whole
+    // one. It is the same admission `ainb-acp`'s store writer makes when IT
+    // drops rows (`acp.transcript_truncated`), for the same reason, and the
+    // process half of this read is the one that stays silent — it starts
+    // mid-file with nothing to mark the seam.
+    if truncated {
+        entries.push((
+            ainb_hangar_proto::events::MessageKind::Error,
+            "· transcript truncated · older lines not shown".to_string(),
+        ));
+    }
+    entries.extend(
+        rows.iter()
+            .flat_map(|row| classifier.classify_row(&row.event_type, &row.raw_payload)),
+    );
+    Some((session.provider, transcript_lines(entries)))
+}
+
+/// Wire-shape the classifier's `(kind, body)` pairs.
+fn transcript_lines(
+    entries: Vec<(ainb_hangar_proto::events::MessageKind, String)>,
+) -> Vec<ainb_hangar_proto::snapshots::TranscriptLine> {
+    entries
+        .into_iter()
+        .map(|(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body })
+        .collect()
 }
 
 /// Read the last `cap` bytes of `path` as a lossy string, or `None` when the file

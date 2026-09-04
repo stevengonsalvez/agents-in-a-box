@@ -212,7 +212,7 @@ impl SessionAgent for AntigravityAgent {
         "antigravity"
     }
     fn icon(&self) -> &'static str {
-        "\u{f1a0}"
+        "▲"
     }
     fn name(&self) -> &'static str {
         "Google Antigravity"
@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(r.get("claude").unwrap().name(), "Claude Code");
         assert_eq!(r.get("ssh").unwrap().icon(), "🔐");
         assert_eq!(r.get("ssh").unwrap().name(), "SSH");
-        assert_eq!(r.get("antigravity").unwrap().icon(), "\u{f1a0}");
+        assert_eq!(r.get("antigravity").unwrap().icon(), "▲");
         assert_eq!(r.get("antigravity").unwrap().name(), "Google Antigravity");
         assert_eq!(r.get("kiro").unwrap().icon(), "🔮");
     }

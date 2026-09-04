@@ -297,6 +297,30 @@ impl TaskRepo {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Record the provider `session_id` a run is executing under, mid-run.
+    ///
+    /// The terminal finalize writes it too ([`crate::service::CompleteTaskService`]),
+    /// but only on SUCCESS, so a run that failed or was cancelled kept no
+    /// pointer to the transcript it produced. An ACP run writes it the moment
+    /// its session exists, which is also what makes the session reachable while
+    /// the run is still live. Returns `true` iff exactly one row was updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_session_id(
+        pool: &SqlitePool,
+        id: &str,
+        session_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE agent_task_queue SET session_id = ? WHERE id = ?")
+            .bind(session_id)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Record the worktree `branch` (`ainb/<slug>`) a run produced commits on
     /// (tcp T2), written at finalize only when the run left commits ahead of its
     /// base. Returns `true` iff exactly one row was updated.

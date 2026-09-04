@@ -181,11 +181,12 @@ fn render_five_column_board_snapshot() {
     assert!(map.contains("Board: Delivery"), "title:\n{map}");
     assert!(map.contains("auto-move"), "auto-move toggle:\n{map}");
     assert!(map.contains("ON"), "toggle ON:\n{map}");
-    // The hint band renders the controls next to the widget; the F6 card verbs
-    // (timeline / remove / move) lead so they read even before the column verbs.
+    // Crisp B2 §2.6: there is ONE hint bar on this screen and it is the chrome
+    // footer, which `render_boards` does not paint. The sixteen-pair band that
+    // used to sit under the title is gone, and the board starts a row higher.
     assert!(
-        map.contains("run") && map.contains("timeline") && map.contains("remove"),
-        "hint band:\n{map}"
+        !map.contains("run/rerun") && !map.contains("depends-on"),
+        "the second hint bar is gone:\n{map}"
     );
     // Columns carry their FSM mapping in the header (auto-move columns use `↦`).
     assert!(map.contains("Backlog"), "manual column:\n{map}");

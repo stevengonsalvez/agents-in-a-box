@@ -98,6 +98,11 @@ pub fn render_transcript(
 
 /// Paint `<glyph> <body>` at column 0 of `row` in `color`, clipping at `area_w`.
 /// Multi-byte safe; truncates the body rather than wrapping.
+///
+/// The BODY is agent-authored text — a tool result is whatever the tool printed
+/// — so every char goes through [`crate::screen::display_char`], the one
+/// sanitiser (crisp B3), before it reaches a cell. A raw `\u{202E}` in a tool
+/// result would otherwise reorder the line it lands on.
 fn put_line(buf: &mut WireBuffer, row: u16, area_w: u16, glyph: char, body: &str, color: Color) {
     let mut x: u16 = 0;
     x = put_char(buf, x, row, glyph, color, area_w);
@@ -106,7 +111,7 @@ fn put_line(buf: &mut WireBuffer, row: u16, area_w: u16, glyph: char, body: &str
         if x >= area_w {
             break;
         }
-        x = put_char(buf, x, row, ch, color, area_w);
+        x = put_char(buf, x, row, crate::screen::display_char(ch), color, area_w);
     }
 }
 
@@ -140,6 +145,38 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), 5, "taxonomy glyphs must be distinct");
+    }
+
+    /// A bidi override inside a tool result renders as the visible middot, not
+    /// as a terminal instruction: the transcript is the one pane on this screen
+    /// whose text an agent (or a tool it ran) wrote in full.
+    #[test]
+    fn agent_authored_bodies_are_sanitised() {
+        use crate::screen::task_detail::ViewEntry;
+
+        let mut buf = WireBuffer::new(40, 2);
+        render_transcript(
+            &mut buf,
+            40,
+            0,
+            1,
+            &[ViewEntry::line(
+                MessageKind::ToolResult,
+                "ok\u{202E}drowssap",
+            )],
+        );
+        let row: String = {
+            let mut cells: Vec<(u16, &str)> = buf
+                .cells
+                .iter()
+                .filter(|(c, _)| c.y == 0)
+                .map(|(c, cell)| (c.x, cell.symbol.as_str()))
+                .collect();
+            cells.sort_by_key(|(x, _)| *x);
+            cells.into_iter().map(|(_, s)| s).collect()
+        };
+        assert!(!row.contains('\u{202E}'), "the override is gone: {row:?}");
+        assert!(row.contains("ok·drowssap"), "shown as a middot: {row:?}");
     }
 
     /// Every taxonomy lane maps to a distinct colour.

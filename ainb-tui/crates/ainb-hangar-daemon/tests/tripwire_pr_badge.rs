@@ -23,9 +23,19 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{TuiSession, can_run_tripwire, prepare_pipeline, seed_completed_task_with_pr, skip};
 
-/// The PR URL seeded onto the completed task — both the on-screen badge marker
-/// and the expected probe-file contents.
+/// The PR URL seeded onto the completed task — the expected probe-file contents,
+/// and the source of the on-screen chip.
 const PR_URL: &str = "https://example.com/pr/1";
+/// What the run card paints for [`PR_URL`]: the number off the URL's tail, never
+/// the URL itself (crisp B4 §2.3).
+///
+/// Asserting the chip still proves the capture travelled daemon → wire → plugin
+/// → screen, because `pr_chip` parses `#1` off the URL's tail: the chip cannot
+/// paint unless the URL arrived. The chip's own shapes (CI glyphs, CONFLICT, the
+/// no-PR negative) are pinned by `ainb-plugin-hangar/tests/pr_badge_snapshot.rs`,
+/// and `o` carrying the URL by `pr_open_keybinding.rs`; what is unique HERE is
+/// the end-to-end trip, which is why this file asserts the chip and not a shape.
+const PR_CHIP: &str = "PR #1";
 
 #[test]
 fn pr_badge_renders_and_o_opens_the_url() {
@@ -59,16 +69,13 @@ fn pr_badge_renders_and_o_opens_the_url() {
     sess.send_enter();
     let detail = sess
         .poll_capture(Instant::now() + Duration::from_secs(15), |c| {
-            c.contains(&format!("PR {PR_URL}"))
+            c.contains(PR_CHIP)
         })
         .unwrap_or_else(|| panic!("PR badge never rendered:\n{}", sess.capture()));
 
-    // POSITIVE: the gold badge row carries the captured PR URL. NEGATIVE: the
+    // POSITIVE: the run card carries the captured PR as a chip. NEGATIVE: the
     // issue-list status-group header is gone, so we genuinely left the list.
-    assert!(
-        detail.contains(&format!("PR {PR_URL}")),
-        "PR badge missing:\n{detail}"
-    );
+    assert!(detail.contains(PR_CHIP), "PR chip missing:\n{detail}");
     assert!(
         !detail.contains("Todo (3)"),
         "still on the issue list:\n{detail}"

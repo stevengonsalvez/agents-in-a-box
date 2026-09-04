@@ -1,6 +1,7 @@
-//! P4.7 — Settings screen: the pure reducer + five-section width-aware render.
+//! P4.7 — Settings screen: the pure reducer + section-stacked width-aware render.
 //!
-//! The settings screen (hotkey `,`) has five j/k-navigable sections:
+//! The settings screen (hotkey `,`) has seven j/k-navigable sections. The first
+//! five:
 //!
 //! 1. **Daemon connection** — socket path, PID, uptime, version, connection state
 //!    (from the `hangar/health` RPC snapshot).
@@ -20,6 +21,9 @@
 //!    a `Pending invites` sub-header — `email · role · expires in Nd` — so an
 //!    invited-but-not-yet-joined human is visible. Nothing paints when there are
 //!    none.
+//! 6. **Notifications** (tcp T5) — the attention-kind × channel routing grid.
+//! 7. **More screens** (crisp B5 §2.5) — the nine screens the tab-strip shrink
+//!    demoted, each beside the `^P` word that reaches it. Read-only.
 //!
 //! The reducer ([`reduce_settings`]) is **pure**. The crucial security property
 //! (P4.7 risk register, "keychain write leaks key into log"): entered key
@@ -89,10 +93,15 @@ pub enum SettingsSection {
     /// host-wide GLOBAL rule and the active workspace override
     /// (agents-in-a-box-cqh).
     Notifications,
+    /// The nine screens crisp B5 §2.5 took off the tab strip, listed with the
+    /// word that reaches each from `^P`. Read-only, and the DISCOVERABLE of the
+    /// two routes to a demoted screen: the palette only helps an operator who
+    /// already suspects the screen exists.
+    MoreScreens,
 }
 
 impl SettingsSection {
-    /// The next section down (j), clamped at [`Self::Notifications`].
+    /// The next section down (j), clamped at [`Self::MoreScreens`].
     #[must_use]
     const fn next(self) -> Self {
         match self {
@@ -100,7 +109,8 @@ impl SettingsSection {
             Self::Providers => Self::Keys,
             Self::Keys => Self::Workspaces,
             Self::Workspaces => Self::Members,
-            Self::Members | Self::Notifications => Self::Notifications,
+            Self::Members => Self::Notifications,
+            Self::Notifications | Self::MoreScreens => Self::MoreScreens,
         }
     }
 
@@ -113,6 +123,7 @@ impl SettingsSection {
             Self::Workspaces => Self::Keys,
             Self::Members => Self::Workspaces,
             Self::Notifications => Self::Members,
+            Self::MoreScreens => Self::Notifications,
         }
     }
 
@@ -126,6 +137,7 @@ impl SettingsSection {
             Self::Workspaces => "Workspaces",
             Self::Members => "Members",
             Self::Notifications => "Notifications",
+            Self::MoreScreens => "More screens",
         }
     }
 }
@@ -631,7 +643,9 @@ fn reduce_cursor(state: &SettingsState, delta: i32) -> SettingsReduction {
     }
     match state.section {
         SettingsSection::Daemon => move_config_sel(state, delta),
-        SettingsSection::Notifications => unchanged(state),
+        // Neither has an in-section list: Notifications owns a 2D grid cursor,
+        // More screens is a static reference list with nothing to select.
+        SettingsSection::Notifications | SettingsSection::MoreScreens => unchanged(state),
         _ => move_list(state, delta),
     }
 }
@@ -1101,8 +1115,11 @@ fn move_list(state: &SettingsState, delta: i32) -> SettingsReduction {
         SettingsSection::Providers => next.providers.len(),
         SettingsSection::Members => members_section_len(&next),
         // Notifications owns its own 2D cursor (see `reduce_notify_key`); the
-        // generic list mover is never reached for it.
-        SettingsSection::Daemon | SettingsSection::Notifications => 0,
+        // generic list mover is never reached for it, nor for the static
+        // More-screens list.
+        SettingsSection::Daemon | SettingsSection::Notifications | SettingsSection::MoreScreens => {
+            0
+        }
     };
     if delta < 0 {
         next.list_selected = next.list_selected.saturating_sub(1);
@@ -1623,6 +1640,7 @@ fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> S
         SettingsSection::Workspaces,
         SettingsSection::Members,
         SettingsSection::Notifications,
+        SettingsSection::MoreScreens,
     ] {
         if row >= bottom {
             break;
@@ -1703,6 +1721,28 @@ fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> S
             SettingsSection::Notifications => {
                 let selected = state.section == SettingsSection::Notifications;
                 row = render_notify_grid(buf, area_w, row, bottom, state, selected);
+            }
+            // One row per demoted screen, `^P <word>` beside its label, straight
+            // off `GO_SCREENS` so the list cannot advertise a word the palette
+            // does not match (crisp B5 §2.5).
+            SettingsSection::MoreScreens => {
+                if row < bottom {
+                    put(buf, 4, row, "off the tab strip, reach with ^P", MUTED);
+                    row += 1;
+                }
+                for (word, screen) in crate::screen::command_palette::GO_SCREENS {
+                    if row >= bottom {
+                        break;
+                    }
+                    put(
+                        buf,
+                        4,
+                        row,
+                        &format!("^P {word:<11}{}", screen.tab_label()),
+                        TEXT,
+                    );
+                    row += 1;
+                }
             }
         }
         if is_active {

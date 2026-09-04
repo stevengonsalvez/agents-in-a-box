@@ -157,6 +157,32 @@ const fn column_glyph(column: IssueColumn) -> char {
     }
 }
 
+/// The card's run chip (crisp B2 §2.2): the issue's LATEST run, named and aged,
+/// or `None` when it never ran.
+///
+/// `last_run_status` is the status of that run and `last_run_at` when it was
+/// created, both already on `IssueRow` — this is composition, not a new fetch. A
+/// status OUTSIDE the task FSM (a newer daemon's token) yields no chip at all
+/// rather than a confidently wrong word: the card falls back to its priority
+/// chip, which is stale-looking rather than untrue.
+///
+/// The chip names the assignee ONLY when the issue is assigned to an agent. A
+/// `member:` assignee is a human owner, not the thing executing the run, and
+/// `◔ dana · running 2m` claims dana is running it.
+fn run_chip(
+    row: &IssueRow,
+    agent: Option<String>,
+    now_ms: i64,
+) -> Option<crate::widgets::card_board::RunChip> {
+    let state = crate::vocab::RunState::parse(row.last_run_status.as_deref()?)?;
+    let is_agent = row.assignee.as_deref().is_some_and(|a| a.starts_with("agent:"));
+    Some(crate::widgets::card_board::RunChip {
+        agent: agent.filter(|_| is_agent),
+        state,
+        elapsed_ms: row.last_run_at.map(|at| now_ms.saturating_sub(at)),
+    })
+}
+
 /// The filter chips that narrow which rows are visible (UX §1).
 ///
 /// `Members` / `Agents` filter by assignee actor kind; `Mine` is a placeholder
@@ -726,6 +752,9 @@ pub enum WizardKey {
     Char(char),
     /// Backspace (delete the last input char).
     Backspace,
+    /// Ctrl+U: clear the focused text row (crisp B1, defect 21), or the `@` repo
+    /// query while the dropdown is open. The picker-only rows ignore it.
+    ClearLine,
     /// Enter (create when the required fields are satisfied, else jump focus to
     /// the missing one).
     Enter,
@@ -1075,6 +1104,11 @@ pub struct IssueListState {
     /// assign picker uses (agent actors only). Empty on a workspace with no named
     /// agents, in which case the Agent row falls back to the provider chips.
     agents: Vec<WizardAgent>,
+    /// The `actor_ref -> display_name` map for EVERY actor (agents and members)
+    /// from the cached `hangar/agents_list`, so a card's footer names its
+    /// assignee (crisp B1, defect 8) instead of painting the first char of a
+    /// ULID. An unknown ref falls back to a short id, never the full ULID.
+    actor_names: BTreeMap<String, String>,
     /// A transient status note (create/run dispatch feedback or failure),
     /// rendered on the bottom row and replaced by the next note / cleared when a
     /// new wizard opens. Errors surface HERE, never silently dropped.
@@ -1123,6 +1157,7 @@ impl Default for IssueListState {
             wizard: None,
             repos: Vec::new(),
             agents: Vec::new(),
+            actor_names: BTreeMap::new(),
             note: None,
             task_issue: HashMap::new(),
             scroll_offsets: [0; COLUMN_COUNT],
@@ -1143,6 +1178,50 @@ impl IssueListState {
         Self {
             rows,
             ..Self::default()
+        }
+    }
+
+    /// Replace the cached rows from a fresh `hangar/issues_list` snapshot while
+    /// keeping every piece of operator state alive across the refresh: the open
+    /// create wizard, filter text, facets, transient note, repo and agent
+    /// rosters. Rebuilding through [`with_rows`](Self::with_rows) wiped all of
+    /// it, so a background refresh landing mid-typing silently destroyed the
+    /// wizard (the Boards screen already guards this via `adopt_context`).
+    ///
+    /// The selection follows the ROW, not the index: rows reorder and vanish
+    /// between snapshots, and an index carried across that silently retargets
+    /// `d` / `a` / `x` onto a different issue. A delete confirm whose target
+    /// left the snapshot is dropped, so Enter cannot fire at an issue that is
+    /// already gone.
+    pub fn replace_rows(&mut self, rows: Vec<IssueRow>) {
+        let selected_id = self.selected_row().map(|r| r.id.clone());
+        self.rows = rows;
+        let visible = self.visible_rows().count();
+        self.selected = selected_id
+            .and_then(|id| self.visible_rows().position(|r| r.id == id))
+            .unwrap_or(self.selected)
+            .min(visible.saturating_sub(1));
+        let still_present = |pending: &Option<PendingDelete>| {
+            pending.as_ref().is_none_or(|p| self.rows.iter().any(|r| r.id == p.id))
+        };
+        if !still_present(&self.confirm_delete) {
+            self.confirm_delete = None;
+            if self.mode == IssueListMode::ConfirmDelete {
+                self.mode = IssueListMode::Normal;
+            }
+        }
+        if !still_present(&self.confirm_cancel_delete) {
+            self.confirm_cancel_delete = None;
+            if self.mode == IssueListMode::ConfirmCancelDelete {
+                self.mode = IssueListMode::Normal;
+            }
+        }
+        if self
+            .hovered_id
+            .as_ref()
+            .is_some_and(|h| !self.rows.iter().any(|r| r.id.as_str() == h))
+        {
+            self.hovered_id = None;
         }
     }
 
@@ -1361,6 +1440,24 @@ impl IssueListState {
         &self.agents
     }
 
+    /// Inject the `actor_ref -> display_name` map the card footers resolve their
+    /// assignee through (crisp B1), from the glue's cached `hangar/agents_list`
+    /// (agents AND members: either can be assigned).
+    pub fn set_actor_names(&mut self, names: BTreeMap<String, String>) {
+        self.actor_names = names;
+    }
+
+    /// The footer label for an issue's assignee: the roster display name, or a
+    /// readable short form until the roster lands. `None` when unassigned.
+    ///
+    /// The BARE variant of the shared helper, because a card is ~21 cells and the
+    /// `agent:` / `member:` kind the wide rows keep would push the name itself off
+    /// the tile. Same shortening rule, owned there.
+    fn assignee_label(&self, assignee: Option<&str>) -> Option<String> {
+        let resolved = assignee.and_then(|r| self.actor_names.get(r)).map(String::as_str);
+        crate::screen::assignee_label_bare(resolved, assignee)
+    }
+
     /// The transient status note (dispatch feedback / failure), if any.
     #[must_use]
     pub fn note(&self) -> Option<&str> {
@@ -1481,33 +1578,49 @@ impl IssueListState {
             .into_iter()
             .enumerate()
             .map(|(idx, column)| {
-                let cards =
-                    self.rows_in_column(column)
-                        .map(|r| BoardCard {
-                            issue_id: r.id.as_str().to_string(),
-                            display_id: r
-                                .display_id
-                                .clone()
-                                .unwrap_or_else(|| r.id.as_str().to_string()),
-                            title: r.title.clone(),
-                            priority: PriorityChip::from_priority(r.priority),
-                            assignee_initial: r.assignee.as_deref().and_then(|a| {
-                                a.split_once(':').map_or(a, |(_, id)| id).chars().next()
-                            }),
-                            linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
-                            // 0046: the sub-issue roll-up, so a PARENT card shows a
-                            // `⊟ done/total` badge that flips to gold `1/1` when its
-                            // last child completes. `None` for a childless issue.
-                            subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
-                            // multica parity #12: the card wears a ⚠ when its
-                            // newest dispatch attempt was declined, so "not
-                            // running, and why" is discoverable from the board.
-                            not_dispatched: r
-                                .last_dispatch_reason
-                                .as_deref()
-                                .is_some_and(|c| !c.trim().is_empty()),
-                        })
-                        .collect::<Vec<_>>();
+                let cards = self
+                    .rows_in_column(column)
+                    .map(|r| BoardCard {
+                        issue_id: r.id.as_str().to_string(),
+                        display_id: r
+                            .display_id
+                            .clone()
+                            .unwrap_or_else(|| r.id.as_str().to_string()),
+                        title: r.title.clone(),
+                        priority: PriorityChip::from_priority(r.priority),
+                        assignee: self.assignee_label(r.assignee.as_deref()),
+                        // Crisp B2 §2.2: the issue's latest run, so a card
+                        // mid-run stops rendering identically to an untouched
+                        // backlog card. The same resolved name the idle footer
+                        // would have shown, so one card never names its agent
+                        // two ways.
+                        run: run_chip(r, self.assignee_label(r.assignee.as_deref()), self.now_ms),
+                        pr: r
+                            .pr_url
+                            .as_deref()
+                            .is_some_and(|u| !u.trim().is_empty())
+                            .then_some(crate::widgets::card_board::PrChip::Unknown),
+                        // Still nothing to project after crisp B3: an
+                        // `AttentionRow` carries a session id and a cwd, never a
+                        // task or an issue, and no snapshot the plugin holds
+                        // joins the two. B3 made the Inbox the attention
+                        // surface; the card flag needs that join first, which is
+                        // spine work, not plugin work.
+                        attention: None,
+                        linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
+                        // 0046: the sub-issue roll-up, so a PARENT card shows a
+                        // `⊟ done/total` badge that flips to gold `1/1` when its
+                        // last child completes. `None` for a childless issue.
+                        subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
+                        // multica parity #12: the card wears a ⚠ when its
+                        // newest dispatch attempt was declined, so "not
+                        // running, and why" is discoverable from the board.
+                        not_dispatched: r
+                            .last_dispatch_reason
+                            .as_deref()
+                            .is_some_and(|c| !c.trim().is_empty()),
+                    })
+                    .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
                 // that shrank (a moved/deleted card) never scrolls past its last
                 // card into a blank body.
@@ -1870,6 +1983,12 @@ pub enum IssueListIntent {
     /// its success reply, retries `hangar/issue_delete` (cancel commits before the
     /// delete).
     CancelAndDeleteIssue(IssueId),
+    /// Re-pull the `@` repo roster (`hangar/repo_list`), raised whenever the
+    /// create wizard opens (crisp B1, defect 6): the roster was fetched once at
+    /// connect and a repo added since (the CLI writes the store with no event)
+    /// was unpickable until a restart. The reply lands through the same
+    /// `set_repos` seam, so an open wizard simply sees more candidates.
+    RefreshRepos,
 }
 
 /// The result of folding one [`IssueListEvent`] into an [`IssueListState`].
@@ -1914,11 +2033,14 @@ fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
     }
 }
 
-/// Map the legacy reducer char vocabulary onto a [`WizardKey`].
-const fn wizard_key_from_char(c: char) -> WizardKey {
+/// Map the reducer char vocabulary onto a [`WizardKey`]. Also the wizard's half
+/// of the ONE key translation ([`crate::screen::app_screens`]), so the wizard's
+/// text rows read a Ctrl chord exactly as every other input does.
+pub(crate) const fn wizard_key_from_char(c: char) -> WizardKey {
     match c {
         '\n' | '\r' => WizardKey::Enter,
         '\u{8}' | '\u{7f}' => WizardKey::Backspace,
+        crate::screen::app_screens::CLEAR_LINE => WizardKey::ClearLine,
         other => WizardKey::Char(other),
     }
 }
@@ -1983,7 +2105,7 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
 }
 
 /// Filter-input-mode key handling: Enter/Esc leave the mode, Backspace deletes,
-/// any other printable char appends to the query.
+/// Ctrl+U clears the query, any other printable char appends to it.
 fn reduce_filter_input_key(state: &IssueListState, c: char) -> IssueListReduction {
     let mut next = state.clone();
     match c {
@@ -1994,6 +2116,9 @@ fn reduce_filter_input_key(state: &IssueListState, c: char) -> IssueListReductio
         '\u{8}' | '\u{7f}' => {
             next.query.pop();
         }
+        // Ctrl+U empties the query without leaving filter mode (crisp B1,
+        // defect 21), the same chord the Boards inputs and the create wizard take.
+        crate::screen::app_screens::CLEAR_LINE => next.query.clear(),
         other => next.query.push(other),
     }
     next.clamp_selection();
@@ -2034,7 +2159,7 @@ fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
     next.wizard = Some(CreateWizard::default());
     // A fresh wizard supersedes any stale dispatch note.
     next.note = None;
-    no_intent(next)
+    with_intent(next, IssueListIntent::RefreshRepos)
 }
 
 /// Open the create wizard as an "add sub-issue" (`s`, 0046): identical to the
@@ -2058,7 +2183,7 @@ fn enter_create_subissue_mode(state: &IssueListState) -> IssueListReduction {
     next.mode = IssueListMode::CreateInput;
     next.wizard = Some(wizard);
     next.note = None;
-    no_intent(next)
+    with_intent(next, IssueListIntent::RefreshRepos)
 }
 
 /// Swap the open wizard for `wizard`, emitting no intent (a stage edit /
@@ -2207,6 +2332,7 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
         WizardKey::Right => wizard_cycle_value(state, wizard, true),
         WizardKey::Char(c) => wizard_type_char(state, wizard, c),
         WizardKey::Backspace => wizard_backspace(state, wizard),
+        WizardKey::ClearLine => wizard_clear_line(state, wizard),
         // Esc handled above.
         WizardKey::Esc => unchanged(state),
     }
@@ -2333,37 +2459,36 @@ fn wizard_type_char(
 /// Delete the last char of the focused text row (Title / Source / Target). A
 /// no-op on the picker rows.
 fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
-    match wizard.focus {
-        WizardRow::Title => {
-            wizard.title.pop();
-        }
-        WizardRow::Brief => {
-            wizard.brief.pop();
-        }
-        WizardRow::Link => {
-            wizard.link.pop();
-        }
-        WizardRow::Acceptance => {
-            wizard.acceptance.pop();
-        }
-        WizardRow::Context => {
-            wizard.context.pop();
-        }
-        WizardRow::Due => {
-            wizard.due.pop();
-        }
-        WizardRow::Labels => {
-            wizard.labels.pop();
-        }
-        WizardRow::Source => {
-            wizard.source_branch.pop();
-        }
-        WizardRow::Target => {
-            wizard.target_branch.pop();
-        }
-        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => {}
+    if let Some(field) = wizard_focused_field(&mut wizard) {
+        field.pop();
     }
     set_wizard(state, wizard)
+}
+
+/// Clear the focused text row (Ctrl+U, crisp B1 defect 21). A no-op on the picker
+/// rows, which hold no typed text to clear.
+fn wizard_clear_line(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
+    if let Some(field) = wizard_focused_field(&mut wizard) {
+        field.clear();
+    }
+    set_wizard(state, wizard)
+}
+
+/// The buffer the focused row types into, or `None` on a picker row (Repo /
+/// Priority / Agent), which is driven by `@` and ←→ rather than free text.
+fn wizard_focused_field(wizard: &mut CreateWizard) -> Option<&mut String> {
+    match wizard.focus {
+        WizardRow::Title => Some(&mut wizard.title),
+        WizardRow::Brief => Some(&mut wizard.brief),
+        WizardRow::Link => Some(&mut wizard.link),
+        WizardRow::Acceptance => Some(&mut wizard.acceptance),
+        WizardRow::Context => Some(&mut wizard.context),
+        WizardRow::Due => Some(&mut wizard.due),
+        WizardRow::Labels => Some(&mut wizard.labels),
+        WizardRow::Source => Some(&mut wizard.source_branch),
+        WizardRow::Target => Some(&mut wizard.target_branch),
+        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => None,
+    }
 }
 
 /// Handle a key while the `@` repo dropdown is open: chars filter, Backspace
@@ -2384,6 +2509,10 @@ fn wizard_dropdown_key(
         }
         WizardKey::Backspace => {
             wizard.repo_query.pop();
+            wizard.repo_dropdown = Some(0);
+        }
+        WizardKey::ClearLine => {
+            wizard.repo_query.clear();
             wizard.repo_dropdown = Some(0);
         }
         WizardKey::Up | WizardKey::Left => {
@@ -3839,6 +3968,130 @@ mod tests {
         );
     }
 
+    /// The card footer NAMES its assignee (crisp B1, defect 8): the roster display
+    /// name resolved through `set_actor_names`, never the `◔0` first char of a
+    /// ULID the board used to paint.
+    ///
+    /// Pinned on the CARD SURFACE — the board had no assignee assertion at all,
+    /// so the resolution could break end-to-end while every mapping unit test
+    /// stayed green (crisp B1 review).
+    #[test]
+    fn a_card_footer_names_its_assignee() {
+        const AGENT: &str = "agent:01M1FHM2YSRSXZQFR29ZAYF56V";
+        let mut s = IssueListState::with_rows(vec![row("i1", "todo", Some(AGENT))]);
+        s.set_actor_names(std::iter::once((AGENT.to_string(), "impl-1".to_string())).collect());
+
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
+
+        // `painted_text` concatenates only the cells that were WRITTEN, and the
+        // assignee glyph sits two cells before the name, so the gap between them
+        // is absent here while it is a space on screen.
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("◔impl-1"),
+            "the card must name its assignee: {painted:?}"
+        );
+        assert!(
+            !painted.contains("AYF56V"),
+            "and never fall back to the raw id beside it: {painted:?}"
+        );
+    }
+
+    /// Crisp B2 §2.2: an issue whose latest run is LIVE wears that run in its card
+    /// footer — `◔ impl-1 · running 2m` — composed from the `last_run_status` /
+    /// `last_run_at` the snapshot already carries.
+    ///
+    /// The same card with no run keeps its priority chip, which is what makes the
+    /// running one distinguishable: before this both painted `◇ None ◔0`.
+    #[test]
+    fn a_running_issue_card_names_its_run() {
+        const AGENT: &str = "agent:01M1FHM2YSRSXZQFR29ZAYF56V";
+        const NOW: i64 = 1_700_000_000_000;
+        let mut running = row("i1", "in_progress", Some(AGENT));
+        running.last_run_status = Some("running".into());
+        running.last_run_at = Some(NOW - 125_000);
+        running.pr_url = Some("https://github.com/o/r/pull/6".into());
+        let idle = row("i2", "todo", Some(AGENT));
+
+        let mut s = IssueListState::with_rows(vec![running, idle]);
+        s.set_actor_names(std::iter::once((AGENT.to_string(), "impl-1".to_string())).collect());
+        s.set_now_ms(NOW);
+
+        let mut buf = WireBuffer::new(168, 16);
+        render_issue_list(&mut buf, 168, 1, 15, &s, 0);
+        let painted = painted_text(&buf);
+
+        assert!(
+            painted.contains("◔impl-1 · running 2m"),
+            "the running card must wear its run: {painted:?}"
+        );
+        // Only ONE of the two cards names a run — that difference is the point:
+        // before this both painted `◇ None ◔0`.
+        assert_eq!(
+            painted.matches("running").count(),
+            1,
+            "only the running card names a run: {painted:?}"
+        );
+        // Seven columns at 168 cells leave a 21-cell card, which the PR chip does
+        // not fit; it is dropped WHOLE rather than clipped to a bare `· PR`.
+        assert!(
+            !painted.contains("PR"),
+            "a chip that does not fit is dropped, not cut: {painted:?}"
+        );
+    }
+
+    /// A run on a MEMBER-assigned issue names no agent: a human owner is not the
+    /// thing executing the run, and `◔ dana · running 2m` says dana is running it.
+    #[test]
+    fn a_run_on_a_member_assigned_issue_names_no_agent() {
+        let mut r = row("i1", "in_progress", Some("member:dana"));
+        r.last_run_status = Some("running".into());
+        r.last_run_at = Some(0);
+        let mut s = IssueListState::with_rows(vec![r]);
+        s.set_actor_names(
+            std::iter::once(("member:dana".to_string(), "dana".to_string())).collect(),
+        );
+        s.set_now_ms(125_000);
+
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
+        let painted = painted_text(&buf);
+
+        assert!(
+            painted.contains("◔running 2m"),
+            "the run still reads: {painted:?}"
+        );
+        assert!(
+            !painted.contains("dana · running"),
+            "the human owner is not the runner: {painted:?}"
+        );
+    }
+
+    /// A run status the task FSM does not define (a newer daemon's token) yields
+    /// NO run chip rather than a confidently wrong word — the card falls back to
+    /// its priority chip.
+    #[test]
+    fn an_unknown_run_status_paints_no_run_chip() {
+        let mut r = row("i1", "in_progress", None);
+        r.last_run_status = Some("hibernating".into());
+        r.priority = 2;
+        let s = IssueListState::with_rows(vec![r]);
+
+        let mut buf = WireBuffer::new(120, 16);
+        render_issue_list(&mut buf, 120, 1, 15, &s, 0);
+
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("◆ High"),
+            "the card falls back to its chip: {painted:?}"
+        );
+        assert!(
+            !painted.contains("hibernating") && !painted.contains("queued"),
+            "an unknown status is neither echoed nor guessed: {painted:?}"
+        );
+    }
+
     /// A card renders its HGR-<n> display id on the id line (63l.4). The daemon
     /// supplies the id; the card paints it so a person reading the board sees the
     /// human-facing id leading the tile.
@@ -4442,19 +4695,7 @@ mod tests {
         })
     }
 
-    /// Reconstruct the full painted text of a rendered buffer (every cell, in
-    /// row-major order) so a render assertion can search for headers / glyphs.
-    fn painted_text(buf: &WireBuffer) -> String {
-        let mut out = String::new();
-        for y in 0..buf.height {
-            for (coord, cell) in &buf.cells {
-                if coord.y == y {
-                    out.push_str(&cell.symbol);
-                }
-            }
-        }
-        out
-    }
+    use crate::test_support::painted_text;
 
     /// The Issues screen renders through the seven-column card-board (63l.4):
     /// every canonical lifecycle column appears with its live count header, and a
@@ -4864,6 +5105,91 @@ mod tests {
         assert_eq!(out.intent, None);
         assert_eq!(out.state.mode(), IssueListMode::Normal, "no confirm opens");
         assert!(out.state.confirm_delete().is_none());
+    }
+
+    /// A background `issues_list` refresh landing while the create wizard is open
+    /// must NOT destroy it: `replace_rows` swaps only the row cache and keeps the
+    /// wizard (and its typed text) and the mode intact.
+    #[test]
+    fn replace_rows_keeps_the_open_wizard_and_its_text() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        let mut wizard = reduce_issue_list(&s, IssueListEvent::Key('c')).state;
+        for c in ['a', 'b', 'c'] {
+            wizard = reduce_issue_list(&wizard, IssueListEvent::Key(c)).state;
+        }
+        assert_eq!(wizard.mode(), IssueListMode::CreateInput);
+        assert_eq!(
+            wizard.wizard.as_ref().map(|w| w.title.clone()).as_deref(),
+            Some("abc")
+        );
+
+        wizard.replace_rows(vec![row("i9", "open", None)]);
+
+        assert_eq!(
+            wizard.mode(),
+            IssueListMode::CreateInput,
+            "refresh kept the wizard open"
+        );
+        assert_eq!(
+            wizard.wizard.as_ref().map(|w| w.title.clone()).as_deref(),
+            Some("abc"),
+            "refresh kept the typed title"
+        );
+        assert_eq!(wizard.all_rows().len(), 1, "rows were replaced");
+    }
+
+    /// The selection follows the selected ROW across a refresh that reorders or
+    /// drops rows (an index would silently retarget the next `d`/`a`/`x`), and
+    /// clamps when the row is gone.
+    #[test]
+    fn replace_rows_follows_the_selected_row_and_clamps() {
+        let mut s = IssueListState::with_rows(vec![
+            row("i1", "open", None),
+            row("i2", "open", None),
+            row("i3", "open", None),
+        ]);
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i3"));
+
+        // Reordered: i3 now first. The cursor follows it.
+        s.replace_rows(vec![
+            row("i3", "open", None),
+            row("i1", "open", None),
+            row("i2", "open", None),
+        ]);
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i3"));
+        assert_eq!(s.selected, 0);
+
+        // Gone: the cursor clamps onto the last remaining row, never past the end.
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i2"));
+        s.replace_rows(vec![row("i3", "open", None)]);
+        assert_eq!(s.selected, 0);
+        assert_eq!(s.selected_row().map(|r| r.id.as_str()), Some("i3"));
+
+        // Empty snapshot: nothing selected, no panic.
+        s.replace_rows(Vec::new());
+        assert!(s.selected_row().is_none());
+    }
+
+    /// A refresh that drops the issue under an open `x` confirm closes the
+    /// confirm instead of leaving Enter armed at an issue that no longer exists.
+    #[test]
+    fn replace_rows_drops_a_delete_confirm_whose_target_vanished() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        let mut confirm = reduce_issue_list(&s, IssueListEvent::Key('x')).state;
+        assert_eq!(confirm.mode(), IssueListMode::ConfirmDelete);
+
+        // i1 (the confirm target) survives: the confirm stays.
+        confirm.replace_rows(vec![row("i1", "open", None)]);
+        assert_eq!(confirm.mode(), IssueListMode::ConfirmDelete);
+
+        // i1 is gone: the confirm is dropped and Enter is a plain open again.
+        confirm.replace_rows(vec![row("i2", "open", None)]);
+        assert_eq!(confirm.mode(), IssueListMode::Normal);
+        assert!(confirm.confirm_delete.is_none());
     }
 
     /// `x` does NOT open the confirm while the create wizard is open — the wizard

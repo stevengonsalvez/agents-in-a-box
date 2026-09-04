@@ -40,6 +40,58 @@ pub use codex::CodexProvider;
 pub use copilot::CopilotProvider;
 pub use gemini::GeminiProvider;
 
+/// What ainb can actually do when driving a provider as the ATC **full-mode**
+/// supervisor brain.
+///
+/// Full mode is not "run any CLI": ATC needs a resident session it can spawn and
+/// keep alive, and it needs to inject a `[HEARTBEAT …]` turn into that session
+/// and have the session act on it. A provider that ainb cannot do both for has
+/// no honest full mode, and the supervisor must say so rather than provision an
+/// instance whose heartbeat lands nowhere.
+///
+/// This is the extension seam: a provider that gains real control later
+/// overrides [`Provider::atc_control`] and becomes selectable with no change to
+/// the supervisor, the mode toggle, or the Daemons screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AtcControl {
+    /// ainb can spawn this provider as a long-lived supervisor session and
+    /// prove whether it is still alive.
+    pub resident_session: bool,
+    /// ainb can inject a heartbeat turn into that session's input and have it
+    /// submitted (the tmux send path).
+    pub heartbeat_injection: bool,
+    /// The policy filename this provider actually reads out of its cwd. ATC
+    /// renders its playbook there, so a wrong name is a silently unread brain.
+    pub policy_file: &'static str,
+}
+
+impl AtcControl {
+    /// The honest default for a provider ainb cannot drive as a supervisor.
+    pub const UNSUPPORTED: Self = Self {
+        resident_session: false,
+        heartbeat_injection: false,
+        policy_file: "",
+    };
+
+    /// A provider ainb can spawn AND nudge, reading `policy_file` for its policy.
+    #[must_use]
+    pub const fn supported(policy_file: &'static str) -> Self {
+        Self {
+            resident_session: true,
+            heartbeat_injection: true,
+            policy_file,
+        }
+    }
+
+    /// Can this provider be the full-mode brain? Both halves are required: a
+    /// session ainb can start but never nudge is a brain that never wakes, and
+    /// a nudge with no session to receive it lands nowhere.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        self.resident_session && self.heartbeat_injection
+    }
+}
+
 /// One CLI agent provider (claude, codex, gemini, copilot, …).
 ///
 /// Method semantics match the legacy `enum CliProvider` 1:1 so call sites
@@ -63,6 +115,16 @@ pub trait Provider: Send + Sync {
 
     /// URL pointing at the provider's install / setup docs.
     fn install_docs_url(&self) -> &'static str;
+
+    /// What ainb can drive when this provider is the ATC full-mode brain.
+    ///
+    /// Defaults to [`AtcControl::UNSUPPORTED`] deliberately: a provider that has
+    /// not proven it can host a resident, nudgeable supervisor session must not
+    /// be offered as one. Overriding this is the whole cost of adding a provider
+    /// to full mode.
+    fn atc_control(&self) -> AtcControl {
+        AtcControl::UNSUPPORTED
+    }
 }
 
 /// In-process registry of `Provider` impls keyed by `id()`.

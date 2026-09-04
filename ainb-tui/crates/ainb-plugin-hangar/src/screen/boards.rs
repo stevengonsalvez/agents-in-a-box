@@ -38,14 +38,14 @@ use crate::screen::task_detail::ViewEntry;
 use crate::widgets::card_board::{self, BoardCard, PriorityChip};
 use crate::widgets::transcript::render_transcript;
 
-/// The prettied JSONL timeline overlay opened over a card (`t`, tcp T3 / F6).
+/// The prettied timeline overlay opened over a card (`t`, tcp T3 / F6).
 ///
-/// A read-only, scrollable view of a card's newest run transcript, parsed from the
-/// provider's on-disk stream-json ([`crate::widgets::jsonl_timeline`]) into the
-/// shared transcript taxonomy. Held as a side-cache on [`BoardsState`] (not the
-/// pure overlay enum) because its content is IO-derived: the glue fetches the
-/// transcript over `hangar/board_card_timeline`, parses it, and stashes the entries
-/// here for the render to paint. Scrolls with `j`/`k`, closes with `Esc`.
+/// A read-only, scrollable view of a card's newest run transcript in the shared
+/// transcript taxonomy, whichever executor produced it. Held as a side-cache on
+/// [`BoardsState`] (not the pure overlay enum) because its content is
+/// IO-derived: the glue fetches the transcript over `hangar/board_card_timeline`
+/// (already classified, daemon-side) and stashes the entries here for the render
+/// to paint. Scrolls with `j`/`k`, closes with `Esc`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineView {
     /// The overlay title (`Timeline · #<issue> · <provider>`).
@@ -99,7 +99,7 @@ impl TimelineView {
     /// Cap on the live-appended transcript entries: a long run streams without
     /// bound, so the tail view keeps only the most recent lines (dropping the
     /// oldest), matching the daemon's 512 KiB tail on the initial fetch.
-    const MAX_ENTRIES: usize = 5000;
+    pub(crate) const MAX_ENTRIES: usize = 5000;
 
     /// Append one live transcript line (from a `TaskMessage` on this task's run),
     /// following the tail: if the view was scrolled to the last entry it advances
@@ -443,20 +443,20 @@ impl RepoOption {
     }
 }
 
-/// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first
-/// (ALWAYS, the F2 guaranteed repo), then the injected roster
-/// (favorites-first + recency order preserved) fuzzy-filtered on `query`.
-/// Crate-visible so the Issues create-wizard repo stage shares the exact same
-/// candidate order + fuzzy filter as the Boards card create.
+/// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first (the
+/// F2 guaranteed repo, so an EMPTY query always leads with it), then the
+/// injected roster (favorites-first + recency order preserved), every entry
+/// fuzzy-filtered on `query`, scratch included. Scratch used to be prepended
+/// unconditionally while the cursor reset to row 0 on every keystroke, so
+/// typing `@box` narrowed the list to boxtrack and Enter still picked scratch
+/// (proving run defect 12). Crate-visible so the Issues create-wizard repo
+/// stage shares the exact same candidate order + fuzzy filter as the Boards
+/// card create.
 pub(crate) fn repo_candidates(repos: &[RepoOption], query: &str) -> Vec<RepoOption> {
-    let mut out = vec![RepoOption::scratch()];
-    out.extend(
-        repos
-            .iter()
-            .filter(|r| fuzzy_matches(&r.label, query) || fuzzy_matches(&r.repo_ref, query))
-            .cloned(),
-    );
-    out
+    std::iter::once(RepoOption::scratch())
+        .chain(repos.iter().cloned())
+        .filter(|r| fuzzy_matches(&r.label, query) || fuzzy_matches(&r.repo_ref, query))
+        .collect()
 }
 
 /// Case-insensitive subsequence match: every char of `query`, in order, appears
@@ -661,6 +661,9 @@ pub enum BoardsKey {
     Up,
     /// Cursor down (move a picker selection down).
     Down,
+    /// Ctrl+U: clear the text input (crisp B1, defect 21). The rename / title /
+    /// repo-query inputs empty their buffer; the pickers and confirms ignore it.
+    ClearLine,
 }
 
 /// The render-state cache for the Boards screen.
@@ -1469,13 +1472,15 @@ fn squad_pick_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
-            state,
-            BoardsOverlay::SquadPick {
-                issue_id: issue_id.to_string(),
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            set_overlay(
+                state,
+                BoardsOverlay::SquadPick {
+                    issue_id: issue_id.to_string(),
+                    cursor,
+                },
+            )
+        }
     }
 }
 
@@ -1542,7 +1547,9 @@ fn dep_pick_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(state, repick(cursor, kind)),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::ClearLine => {
+            set_overlay(state, repick(cursor, kind))
+        }
     }
 }
 
@@ -1572,7 +1579,8 @@ fn remove_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
         | BoardsKey::Backspace
         | BoardsKey::Up
         | BoardsKey::Down
-        | BoardsKey::Tab => set_overlay(
+        | BoardsKey::Tab
+        | BoardsKey::ClearLine => set_overlay(
             state,
             BoardsOverlay::RemoveConfirm {
                 issue_id: issue_id.to_string(),
@@ -1608,7 +1616,8 @@ fn cancel_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
         | BoardsKey::Backspace
         | BoardsKey::Up
         | BoardsKey::Down
-        | BoardsKey::Tab => set_overlay(
+        | BoardsKey::Tab
+        | BoardsKey::ClearLine => set_overlay(
             state,
             BoardsOverlay::CancelConfirm {
                 issue_id: issue_id.to_string(),
@@ -1644,6 +1653,13 @@ fn card_title_key(
             BoardsOverlay::CardTitle {
                 column_id: column_id.to_string(),
                 title,
+            },
+        ),
+        BoardsKey::ClearLine => set_overlay(
+            state,
+            BoardsOverlay::CardTitle {
+                column_id: column_id.to_string(),
+                title: String::new(),
             },
         ),
         BoardsKey::Char(c) => {
@@ -1747,6 +1763,7 @@ fn card_repo_key(
             query.pop();
             reopen(state, query, Some(0))
         }
+        (Some(_), BoardsKey::ClearLine) => reopen(state, String::new(), Some(0)),
         // Tab is the dep picker's kind cycle; here it is inert.
         (Some(cursor), BoardsKey::Tab) => reopen(state, query, Some(cursor)),
         (Some(cursor), BoardsKey::Up) => reopen(state, query, Some(cursor.saturating_sub(1))),
@@ -1757,7 +1774,8 @@ fn card_repo_key(
         (Some(cursor), BoardsKey::Enter) => {
             let candidates = repo_candidates(state.repos(), &query);
             let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) else {
-                // Impossible (scratch is always present), but never advance repo-less.
+                // A query that matches nothing: hold the dropdown open, never
+                // advance repo-less.
                 return reopen(state, query, Some(0));
             };
             set_overlay(
@@ -1859,7 +1877,9 @@ fn card_agent_key(
                 },
             ),
         },
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            reopen(state, cursor)
+        }
     }
 }
 
@@ -1912,7 +1932,9 @@ fn card_profile_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            reopen(state, cursor)
+        }
     }
 }
 
@@ -1943,6 +1965,7 @@ fn column_rename_key(
             name.push(c);
             reopen(state, name)
         }
+        BoardsKey::ClearLine => reopen(state, String::new()),
         BoardsKey::Up | BoardsKey::Down | BoardsKey::Tab => reopen(state, name),
         BoardsKey::Enter => {
             if name.trim().is_empty() {
@@ -2005,13 +2028,15 @@ fn run_mode_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
-            state,
-            BoardsOverlay::RunMode {
-                issue_id: issue_id.to_string(),
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab | BoardsKey::ClearLine => {
+            set_overlay(
+                state,
+                BoardsOverlay::RunMode {
+                    issue_id: issue_id.to_string(),
+                    cursor,
+                },
+            )
+        }
     }
 }
 
@@ -2283,12 +2308,11 @@ pub fn render_boards(
         next_row = next_row.saturating_add(1);
     }
 
-    // Hint band NEXT to the widget (letters next to the controls they affect).
-    let hint_row = next_row;
-    render_hint_band(buf, area_w, hint_row);
-
-    // Card-board body below the hint band.
-    let body_top = hint_row.saturating_add(1);
+    // Card-board body. There is no second hint bar here any more (crisp B2 §2.6):
+    // the sixteen-pair band that used to sit on this row painted a hint set that
+    // overlapped, and disagreed with, the footer three rows down. The card verbs
+    // are on the footer, the column verbs in `?`, and the board gets the row back.
+    let body_top = next_row;
     if body_top >= bottom {
         return;
     }
@@ -2657,53 +2681,6 @@ fn render_no_board(buf: &mut WireBuffer, area_w: u16, top: u16, status: &BoardsS
     }
 }
 
-/// The Boards key-hint band, as `(key, description)` pairs.
-///
-/// Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a runnable
-/// card AND reruns a finished/failed/cancelled one (same launch path), `X`
-/// cancels a running one. `feedback_keybinding_hints_near_control`. The
-/// lifecycle verbs lead so they render even when a narrow pane clips the
-/// trailing column verbs. `⇧↑↓` reorders a card within its column, `d` removes
-/// it.
-///
-/// Crate-visible so the tests can prove every advertised single-char key is
-/// actually reachable — i.e. none of them is a reserved router/host key that
-/// would be eaten before the boards reducer sees it (#450).
-pub(crate) const BOARDS_HINTS: [(&str, &str); 16] = [
-    ("↵", "run/rerun"),
-    ("a", "attach"),
-    ("X", "cancel"),
-    ("t", "timeline"),
-    ("e", "edit"),
-    ("d", "remove"),
-    ("s", "squad"),
-    ("w", "depends-on"),
-    ("R", "auto-run"),
-    ("⇧↑↓", "move card"),
-    ("n", "add col"),
-    ("r", "rename"),
-    ("x", "del col"),
-    ("c", "add card"),
-    ("⇧←→", "reorder col"),
-    ("m", "auto-move"),
-];
-
-/// The key-hint band rendered under the board title — the column/card bindings
-/// next to the widget they drive.
-fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
-    let hints = BOARDS_HINTS;
-    let mut x = 0u16;
-    for (key, desc) in hints {
-        x = put_str(buf, x, row, key, GOLD, area_w);
-        x = put_str(buf, x, row, ":", MUTED, area_w);
-        x = put_str(buf, x, row, desc, MUTED, area_w);
-        x = put_str(buf, x, row, "  ", MUTED, area_w);
-        if x >= area_w {
-            break;
-        }
-    }
-}
-
 /// Flatten a board's columns (plus a trailing `unmapped` pseudo-column when it
 /// holds parked cards) into the shared card-board columns.
 fn board_columns(board: &BoardView) -> Vec<card_board::BoardColumn> {
@@ -2945,9 +2922,19 @@ fn card_view_to_board_card(c: &CardView) -> BoardCard {
         display_id: format!("{marker}{}", c.display_id),
         title: card_title_with_t4_badges(c),
         priority: PriorityChip::from_priority(0),
-        assignee_initial: c.title.chars().next(),
+        // The Boards wire card carries no agent id to name (only the provider
+        // token + squad chips), so it wears no assignee glyph rather than the
+        // title's first char it used to (crisp B1).
+        assignee: None,
         linked: false,
         subtasks: None,
+        // `CardView` carries a card STATE (`is_succeeded` / `is_blocked`), which
+        // the id-line marker already paints, and no task status, agent name or
+        // start stamp — the three things a run chip is. Wiring one here needs the
+        // board card's task, which is the spine's state collapse, not track B.
+        run: None,
+        pr: None,
+        attention: None,
     }
 }
 
@@ -3266,7 +3253,10 @@ mod tests {
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test\"}}]}}\n",
             "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"green\"}\n",
         );
-        let entries = crate::widgets::jsonl_timeline::parse_timeline(jsonl);
+        let entries: Vec<_> = ainb_hangar_proto::transcript::classify_stream_json(jsonl)
+            .into_iter()
+            .map(|(kind, body)| crate::screen::task_detail::ViewEntry::line(kind, body))
+            .collect();
         assert!(!entries.is_empty(), "fixture parses to entries");
         let mut state = BoardsState::from_snapshot(&one_board());
         state.set_timeline(TimelineView::new(
@@ -3523,8 +3513,11 @@ mod tests {
         assert!(out.state.overlay().is_none());
     }
 
-    /// Typing after `@` fuzzy-filters the dropdown; Enter picks the highlighted
-    /// scanned repo. Scratch stays index 0 (always first).
+    /// Typing after `@` fuzzy-filters the dropdown, scratch included, and Enter
+    /// picks the highlighted row: with `wid` typed the ONLY candidate is widget,
+    /// so a bare Enter picks it. Scratch used to be pinned at row 0 regardless
+    /// of the query while every keystroke reset the cursor there, so this exact
+    /// sequence picked scratch (proving run defect 12).
     #[test]
     fn repo_dropdown_fuzzy_filters_on_query() {
         let mut state = BoardsState::from_snapshot(&one_board());
@@ -3532,18 +3525,59 @@ mod tests {
         let s = typed_card(&state, "T");
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
-        // Type "wid" — only "widget" (and scratch, always-first) survive the filter.
+        assert_eq!(
+            repo_candidates(s.repos(), "").first().map(|r| r.label.as_str()),
+            Some("scratch"),
+            "an empty query still leads with the guaranteed repo"
+        );
         let mut s = s;
         for ch in "wid".chars() {
             s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
         }
-        // Candidates are [scratch, widget]; Down + Enter picks widget.
-        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
+        assert_eq!(
+            repo_candidates(s.repos(), "wid")
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["widget"],
+            "scratch is filtered like any other candidate"
+        );
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
         assert!(matches!(
             s.overlay(),
             Some(BoardsOverlay::CardAgent { repo_ref, .. }) if repo_ref == "/src/widget"
         ));
+    }
+
+    /// A query matching nothing leaves an empty dropdown; Enter holds it open
+    /// (never advances repo-less) and Backspace brings the candidates back.
+    #[test]
+    fn repo_dropdown_with_no_match_holds_open_on_enter() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_repos(repo_roster());
+        let s = typed_card(&state, "T");
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // → repo
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('q'))).state;
+        assert!(repo_candidates(s.repos(), "q").is_empty());
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(out.intent, None);
+        assert!(
+            matches!(
+                out.state.overlay(),
+                Some(BoardsOverlay::CardRepo {
+                    dropdown: Some(0),
+                    ..
+                })
+            ),
+            "Enter on an empty dropdown holds the repo stage open"
+        );
+        let s = reduce_boards(&out.state, BoardsEvent::Key(BoardsKey::Backspace)).state;
+        assert_eq!(
+            repo_candidates(s.repos(), "").len(),
+            3,
+            "scratch + the two repos are back"
+        );
     }
 
     /// F2 repo-REQUIRED: Enter with the dropdown closed re-opens it (pointing at
@@ -3686,6 +3720,26 @@ mod tests {
                 name: "Today!".into(),
             })
         );
+
+        // Ctrl+U empties the input instead of typing a `u` (crisp B1, defect 21);
+        // Enter on the emptied input holds it open, typing then commits fresh.
+        let s = reduce_boards(&state, BoardsEvent::RenameColumn).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::ClearLine)).state;
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::ColumnRename { name, .. }) if name.is_empty()
+        ));
+        let held = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(held.intent, None, "a blank rename never commits");
+        let mut s = held.state;
+        for ch in "QA".chars() {
+            s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char(ch))).state;
+        }
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert!(matches!(
+            out.intent,
+            Some(BoardsIntent::RenameColumn { name, .. }) if name == "QA"
+        ));
     }
 
     /// Esc cancels an open overlay without raising an intent.
@@ -4433,9 +4487,10 @@ mod tests {
         let mut buf = WireBuffer::new(80, 16);
         render_boards(&mut buf, 80, 0, 16, &state);
 
-        // Title row 0, health strip row 1 (this board IS a pipeline), hint band
-        // row 2, so the card board's header row is row 3.
-        let header_y = 3;
+        // Title row 0, health strip row 1 (this board IS a pipeline), so the card
+        // board's header row is row 2 — the hint band that used to take this row
+        // is gone (crisp B2 §2.6).
+        let header_y = 2;
         let map = painted(&buf);
         assert!(
             map.contains("QA"),

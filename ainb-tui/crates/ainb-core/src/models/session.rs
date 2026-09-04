@@ -64,10 +64,10 @@ impl SessionAgentType {
             SessionAgentType::Codex => "✦",
             SessionAgentType::Copilot => "\u{ec1e}", // cod-copilot - real GitHub Copilot logo
             SessionAgentType::Gemini => "\u{f1a0}",  // fa-google - Gemini is a Google product
-            SessionAgentType::Antigravity => "\u{f1a0}", // fa-google - Antigravity is a Google product
-            SessionAgentType::Kiro => "\u{e62f}",        // seti-crystal - Kiro crystal motif
-            SessionAgentType::Shell => "\u{ea85}",       // cod-terminal
-            SessionAgentType::Ssh => "\u{f023}",         // fa-lock
+            SessionAgentType::Antigravity => "▲",
+            SessionAgentType::Kiro => "\u{e62f}", // seti-crystal - Kiro crystal motif
+            SessionAgentType::Shell => "\u{ea85}", // cod-terminal
+            SessionAgentType::Ssh => "\u{f023}",  // fa-lock
         }
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
         let agent = SessionAgentType::Antigravity;
         assert_eq!(agent.id(), "antigravity");
         assert_eq!(agent.name(), "Google Antigravity");
-        assert_eq!(agent.icon(), "\u{f1a0}");
+        assert_eq!(agent.icon(), "▲");
         assert!(agent.is_available());
         assert_eq!(agent.description(), "Google's agentic AI coding assistant");
     }

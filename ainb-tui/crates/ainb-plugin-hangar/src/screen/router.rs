@@ -3,10 +3,10 @@
 //! [`reduce`] is the single entry point through which every key press and host
 //! event flows. It owns the tab-switch / modal / quit semantics of P4.1:
 //!
-//! - `1` / `3` / `4` / `,` switch to the issue-list / skill-manager /
-//!   autopilot-manager / settings tabs (the numbered tabs are contiguous; the
-//!   old `[3]Agents` tab folded into the issue-list filter chip, so Skills/
-//!   Autopilots shifted down to `3`/`4` — e38.38).
+//! - `1` / `,` switch to the issue-list / settings tabs, and `K` / `B` / `I` /
+//!   `A` to the four lettered ones (crisp B5 §2.5 cut the strip from sixteen
+//!   tabs to seven; the nine demoted screens keep their reducers and are reached
+//!   through the `Go:` palette family instead — [`super::command_palette`]).
 //! - `2` switches to task detail **only** when a task is selected (otherwise a
 //!   no-op, per the RED test `reduce_tab_key_2_only_valid_when_task_selected`).
 //! - `?` opens the [help overlay](Screen::Help) modal, remembering the screen
@@ -24,43 +24,47 @@ use super::{AppEvent, AppState, Intent, Reduction, Screen};
 /// Chars the ROUTING layer claims on EVERY hangar screen (tab switches, help,
 /// settings, quit) before the active screen's reducer is consulted.
 ///
-/// Kept in lock-step with [`reduce_key`]: a char listed here MUST have a
-/// `reduce_key` arm, and every `reduce_key` arm MUST be listed here
-/// (`router_keys_all_have_a_reduce_key_arm`).
-pub const ROUTER_KEYS: [char; 18] = [
-    '1', '2', '3', '4', 'B', 'K', 'D', 'U', 'L', 'I', 'C', 'F', 'S', 'P', 'A', ',', '?', 'q',
-];
+/// Kept in lock-step with [`reduce_key`]: every char listed here MUST have a
+/// `reduce_key` arm, pinned by `router_keys_all_have_a_reduce_key_arm`. The
+/// reverse needs no test: [`is_router_key`] reads THIS array, so a `reduce_key`
+/// arm for a char that is not listed is unreachable rather than wrong.
+///
+/// Nine of eighteen went out with the crisp B5 tab shrink (`3` `4` `D` `U` `L`
+/// `C` `F` `S` `P`). Their screens did not: they are reached with `^P` and the
+/// screen's word, and every one of them is pinned reachable by
+/// `palette_reaches_every_demoted_screen`. A char dropped here also stops being
+/// reserved, so a screen-local binding on it now REACHES the screen reducer
+/// instead of being eaten first. (No screen has claimed one yet: the fleet lens
+/// row paints `1`..`5` but `reduce_browse_key` has no digit arm, so those stay
+/// inert either way.)
+pub const ROUTER_KEYS: [char; 9] = ['1', '2', 'B', 'K', 'I', 'A', ',', '?', 'q'];
 
 /// Chars the HOST swallows before the plugin ever sees them.
 ///
-/// The `?` / `H` help toggle, while the plugin is not capturing text
-/// (`ainb-core`'s `is_host_reserved_key`). `Ctrl+C` is a chord, not a bare char,
-/// so it is not listed.
-pub const HOST_RESERVED_KEYS: [char; 2] = ['?', 'H'];
+/// Empty since `ainb-core` lists `hangar-tui` in `PLUGINS_WITH_OWN_HELP`: the
+/// host forwards `?` and `H` to this plugin whatever the capture flag says (the
+/// `?` overlay is ours, and `H` is a screen key: fleet history, board hint).
+/// `Ctrl+C` is a chord, not a bare char, so it is not listed. Kept as the seam
+/// the reserved-key invariant test unions with [`ROUTER_KEYS`], so a host that
+/// starts claiming a char again has one place to declare it.
+pub const HOST_RESERVED_KEYS: [char; 0] = [];
 
 /// Whether the routing layer claims `ch` (drives `routing_event` in the plugin).
+///
+/// READS [`ROUTER_KEYS`] rather than restating it: the two were a hand-kept
+/// `matches!` mirror of the array, so shrinking the strip was three edits that
+/// had to stay in step. Now it is two, and the one that remains ([`reduce_key`])
+/// is covered by `router_keys_all_have_a_reduce_key_arm`.
 #[must_use]
 pub const fn is_router_key(ch: char) -> bool {
-    matches!(
-        ch,
-        '1' | '2'
-            | '3'
-            | '4'
-            | 'B'
-            | 'K'
-            | 'D'
-            | 'U'
-            | 'L'
-            | 'I'
-            | 'C'
-            | 'F'
-            | 'S'
-            | 'P'
-            | 'A'
-            | ','
-            | '?'
-            | 'q'
-    )
+    let mut i = 0;
+    while i < ROUTER_KEYS.len() {
+        if ROUTER_KEYS[i] == ch {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Every char a hangar SCREEN must not bind while it is not capturing text.
@@ -70,7 +74,7 @@ pub const fn is_router_key(ch: char) -> bool {
 /// so an advertised hint on it lies to the user (issue #450).
 #[must_use]
 pub const fn is_reserved_key(ch: char) -> bool {
-    is_router_key(ch) || matches!(ch, '?' | 'H')
+    is_router_key(ch)
 }
 
 /// Fold one [`AppEvent`] into `state`, returning the next state and any
@@ -96,31 +100,13 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
             || unchanged(state),
             |task| switch_tab(state, Screen::TaskDetail(task.clone())),
         ),
-        // `3`/`4` are contiguous after the old `[3]Agents` tab folded into the
-        // issue-list filter chip (e38.38): Skills/Autopilots shifted down to close
-        // the numbering gap.
-        '3' => switch_tab(state, Screen::SkillManager),
-        '4' => switch_tab(state, Screen::Autopilots),
         // `K` (capital) opens the Kanban board from anywhere (P8.4).
         'K' => switch_tab(state, Screen::Kanban),
         // `B` (capital) opens the user-defined Boards screen from anywhere (P4).
         'B' => switch_tab(state, Screen::Boards),
-        // `D` (capital) opens the daemon-health pane from anywhere (P8.5).
-        'D' => switch_tab(state, Screen::DaemonHealth),
-        // `U` (capital) opens the usage dashboard from anywhere (e38.35).
-        'U' => switch_tab(state, Screen::Usage),
-        // `L` (capital) opens the logs-tail pane from anywhere (P8.6).
-        'L' => switch_tab(state, Screen::Logs),
-        // `I` (capital) opens the notification inbox from anywhere (e38.14).
+        // `I` (capital) opens the notification inbox from anywhere (e38.14) — the
+        // one attention surface since crisp B3 §2.4.
         'I' => switch_tab(state, Screen::Inbox),
-        // `C` (capital) opens the fleet-wide control center from anywhere (P2).
-        'C' => switch_tab(state, Screen::ControlCenter),
-        // `F` opens the authoritative Fleet registry and control pane.
-        'F' => switch_tab(state, Screen::Fleet),
-        // `S` (capital) opens the Squads screen from anywhere (P7).
-        'S' => switch_tab(state, Screen::Squads),
-        // `P` (capital) opens the profile editor from anywhere (P5).
-        'P' => switch_tab(state, Screen::Profiles),
         // `A` (capital) opens the Agents roster from anywhere (slice 2). `A` was
         // free — the old `[3]Agents` tab folded into the issue-list filter chip
         // (e38.38) and never reclaimed a letter, so this is the first `A` binding.

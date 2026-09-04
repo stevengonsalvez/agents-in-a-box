@@ -50,12 +50,13 @@ fn control_center_shuffles_ask_above_wait_with_inline_options() {
         "control-center chrome bled into the issue-list landing screen:\n{landing}"
     );
 
-    // Forward nav: `C` opens the control center. Re-send until the seeded ASK
-    // question text has round-tripped through the socket (the plugin's snapshot
-    // fetch races the first render).
+    // Forward nav: `^P control` opens the control center (crisp B5 §2.5 demoted
+    // the `C` tab key). Re-send until the seeded ASK question text has
+    // round-tripped through the socket (the plugin's snapshot fetch races the
+    // first render).
     let deadline = Instant::now() + Duration::from_secs(30 * common::budget_scale());
     let board = sess
-        .switch_tab_until("C", deadline, |c| {
+        .go_to_screen_until("control", deadline, |c| {
             c.contains(ATTENTION_ASK_QUESTION) && c.contains("need you")
         })
         .unwrap_or_else(|| panic!("control center never rendered:\n{}", sess.capture()));

@@ -1,0 +1,9 @@
+---
+source: crates/ainb-plugin-hangar/tests/execution_view_snapshot.rs
+expression: "glyph_map(&buf, 100)"
+---
+╭─ 📋 HGR-5 · Ticket stats: GET /api/tickets/stats ─────────────────────────────────────────────────╮
+│ in progress · P2 · impl-1 · created 2026-09-01 · @boxtrack · main → main                         │
+│──────────────────────────────────────────────────────────────────────────────────────────────────│
+│ Add GET /api/tickets/stats to the hono api under api/: returns {total, open, closed}.            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯

@@ -470,7 +470,9 @@ mod tests {
         struct ExactTmuxSession(String);
         impl Drop for ExactTmuxSession {
             fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", &format!("={}", self.0)])
+                    .output();
             }
         }
 
@@ -2312,6 +2314,835 @@ mod tests {
             Some("Automate repetitive tasks"),
             "use_case selection must survive the State -> Config -> disk mapping"
         );
+    }
+
+    // ========================================================================
+    // Bulk delete confirmation
+    //
+    // Pressing `d` (or Shift+D) with rows checked used to queue
+    // BulkDeleteSessions immediately: no dialog, no Stop option, no
+    // uncommitted-work warning, and every selected worktree was removed. These
+    // tests pin the confirmation step in place.
+    // ========================================================================
+
+    struct RestoreAinbHome {
+        previous: Option<String>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Drop for RestoreAinbHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var("AINB_HOME", v),
+                None => std::env::remove_var("AINB_HOME"),
+            }
+        }
+    }
+
+    /// Take the crate-wide env lock and point `AINB_HOME` at a fresh tempdir
+    /// until the returned guard drops.
+    fn pin_ainb_home() -> RestoreAinbHome {
+        let dir = tempfile::tempdir().expect("tempdir");
+        RestoreAinbHome {
+            _guard: crate::headroom::HEADROOM_ENV_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            previous: {
+                let previous = std::env::var("AINB_HOME").ok();
+                std::env::set_var("AINB_HOME", dir.path());
+                previous
+            },
+            _dir: dir,
+        }
+    }
+
+    /// Point `AINB_HOME` at a tempdir for the duration of `body`.
+    ///
+    /// Opening the bulk dialog probes worktrees, which builds a
+    /// `WorktreeManager` and so reads `AINB_HOME` and creates directories under
+    /// it. Without this these tests would touch the developer's real
+    /// `~/.agents-in-a-box`. The lock is the crate-wide env lock, not a private
+    /// one, so this serialises against EVERY `AINB_HOME`-mutating test in the
+    /// binary rather than just other callers here. The restore runs from `Drop`,
+    /// so a failing assertion inside `body` cannot leave a deleted tempdir path
+    /// in the env for every later test in the binary.
+    fn with_ainb_home<R>(body: impl FnOnce() -> R) -> R {
+        let _restore = pin_ainb_home();
+        body()
+    }
+
+    /// `with_ainb_home` for an async body. `stop_interactive_session` falls back
+    /// to `SessionStore::load()`, which reads `AINB_HOME`, so the bulk-stop tests
+    /// need the same isolation the synchronous ones get.
+    // The env guard is deliberately held across the await: that is what makes the
+    // isolation cover the whole body. Test-only, single-threaded.
+    #[allow(clippy::future_not_send)]
+    async fn with_ainb_home_async<F, Fut, R>(body: F) -> R
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        let _restore = pin_ainb_home();
+        body().await
+    }
+
+    /// Two checked, running interactive sessions, plus their ids in list order.
+    fn state_with_checked_sessions(names: &[&str]) -> (AppState, Vec<uuid::Uuid>) {
+        use crate::models::SessionStatus;
+
+        let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+        let mut ids = Vec::new();
+        for name in names {
+            let session = resumable_session(
+                name,
+                SessionMode::Interactive,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            ids.push(session.id);
+            ws.add_session(session);
+        }
+
+        let mut state = AppState::new();
+        state.workspaces.push(ws);
+        for id in &ids {
+            state.selected_sessions.insert(*id);
+        }
+        (state, ids)
+    }
+
+    /// The regression guard: `d` with rows checked must ask first. If the
+    /// confirmation is removed this goes red on `pending_async_action`.
+    #[test]
+    fn bulk_delete_asks_before_destroying_anything() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            assert!(
+                state.pending_async_action.is_none(),
+                "bulk delete must not queue any action before the user confirms"
+            );
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert_eq!(opts.len(), 3, "Stop all / Delete all / Cancel");
+            assert_eq!(opts[0].label, "Stop all");
+            assert_eq!(opts[1].label, "Delete all");
+            assert_eq!(opts[2].label, "Cancel");
+            assert_eq!(dialog.selected_index, 0, "Default = Stop all (safe option)");
+            assert!(matches!(
+                &opts[0].action,
+                ConfirmAction::BulkStopSessions(got) if got == &ids
+            ));
+            assert!(matches!(
+                &opts[1].action,
+                ConfirmAction::BulkDeleteSessions(got) if got == &ids
+            ));
+            assert!(matches!(opts[2].action, ConfirmAction::Cancel));
+            assert_eq!(
+                state.selected_sessions.len(),
+                2,
+                "selection survives until the user picks an outcome"
+            );
+        });
+    }
+
+    /// Shift+D (the explicit bulk key) takes the same confirmed path as `d`.
+    #[test]
+    fn bulk_delete_selected_sessions_asks_before_destroying_anything() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+
+            EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
+
+            assert!(state.pending_async_action.is_none());
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert!(matches!(
+                &dialog.options.as_ref().expect("tri-option dialog")[0].action,
+                ConfirmAction::BulkStopSessions(got) if got == &ids
+            ));
+        });
+    }
+
+    /// The dialog names the sessions and says how many are affected.
+    #[test]
+    fn bulk_delete_dialog_names_the_affected_sessions() {
+        with_ainb_home(|| {
+            let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert_eq!(dialog.title, "Stop or Delete 2 Session(s)");
+            assert!(
+                dialog.message.contains("2 session(s): alpha, beta"),
+                "{}",
+                dialog.message
+            );
+            assert!(
+                dialog.message.contains("Stop keeps every worktree"),
+                "{}",
+                dialog.message
+            );
+        });
+    }
+
+    /// Accepting the default (Stop all) must queue a stop, never a delete.
+    #[test]
+    fn bulk_dialog_default_option_queues_stop_not_delete() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
+            ));
+            assert!(state.selected_sessions.is_empty(), "selection consumed");
+            assert!(state.confirmation_dialog.is_none());
+        });
+    }
+
+    /// Explicitly choosing Delete all still deletes, so the fix does not remove
+    /// the capability, only the surprise.
+    #[test]
+    fn bulk_dialog_delete_option_queues_bulk_delete() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationToggle, &mut state);
+
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkDeleteSessions(ref got)) if got == &ids
+            ));
+        });
+    }
+
+    /// Cancel (either the option or Esc) leaves the selection and every session
+    /// exactly as it was.
+    #[test]
+    fn bulk_dialog_cancel_does_nothing() {
+        with_ainb_home(|| {
+            let (mut state, _ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationPrev, &mut state); // wrap to Cancel
+
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(
+                state.pending_async_action.is_none(),
+                "Cancel queues nothing"
+            );
+            assert_eq!(state.selected_sessions.len(), 2, "selection untouched");
+
+            // Esc on a freshly-opened dialog is equally inert.
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationCancel, &mut state);
+            assert!(state.confirmation_dialog.is_none());
+            assert!(state.pending_async_action.is_none());
+            assert_eq!(state.selected_sessions.len(), 2);
+        });
+    }
+
+    /// Long selections stay readable: three names, then a count.
+    #[test]
+    fn bulk_session_summary_truncates_long_selections() {
+        let names: Vec<(uuid::Uuid, String)> =
+            (1..=12).map(|i| (uuid::Uuid::new_v4(), format!("s{i}"))).collect();
+        assert_eq!(
+            AppState::format_bulk_session_summary(&names),
+            "12 session(s): s1, s2, s3, and 9 more"
+        );
+        assert_eq!(
+            AppState::format_bulk_session_summary(&[(uuid::Uuid::new_v4(), "only".to_string())]),
+            "1 session(s): only"
+        );
+    }
+
+    /// The uncommitted-work warning is the whole point of the dialog: it names
+    /// the sessions whose work "Delete all" would destroy.
+    #[test]
+    fn bulk_uncommitted_warning_names_the_dirty_sessions() {
+        assert_eq!(AppState::format_bulk_uncommitted_warning(&[], 0, 2), None);
+
+        let dirty = vec![("alpha".to_string(), 3), ("beta".to_string(), 1)];
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&dirty, 0, 2).expect("dirty sessions warn");
+        assert!(warning.contains("4 uncommitted file(s)"), "{}", warning);
+        assert!(warning.contains("2 session(s)"), "{}", warning);
+        assert!(warning.contains("alpha (3)"), "{}", warning);
+        assert!(warning.contains("beta (1)"), "{}", warning);
+
+        let many: Vec<(String, usize)> = (1usize..=5).map(|i| (format!("s{i}"), i)).collect();
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&many, 0, 5).expect("dirty sessions warn");
+        assert!(warning.contains("and 2 more"), "{}", warning);
+    }
+
+    /// A worktree whose status cannot be read must never read as clean: the
+    /// dialog says it could not be checked, so "no warning" keeps meaning
+    /// "nothing to lose".
+    #[test]
+    fn bulk_uncommitted_warning_reports_what_could_not_be_checked() {
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&[], 3, 3).expect("unchecked sessions warn");
+        assert!(
+            warning.contains("could not check 3 session(s)"),
+            "{}",
+            warning
+        );
+
+        let dirty = vec![("alpha".to_string(), 2)];
+        let warning =
+            AppState::format_bulk_uncommitted_warning(&dirty, 2, 3).expect("dirty sessions warn");
+        assert!(warning.contains("alpha (2)"), "{}", warning);
+        assert!(
+            warning.contains("2 more could not be checked"),
+            "{}",
+            warning
+        );
+    }
+
+    /// Stop is meaningless for a Boss (Docker) session: killing tmux leaves the
+    /// container running. A selection of only such sessions must fall back to
+    /// the binary delete confirmation, defaulting to No, rather than offering a
+    /// Stop button that would lie about what happened.
+    #[test]
+    fn bulk_dialog_without_any_stop_path_falls_back_to_delete_confirmation() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            for name in ["boss-a", "boss-b"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Boss,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                state.selected_sessions.insert(session.id);
+                ws.add_session(session);
+            }
+            state.workspaces.push(ws);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            assert!(state.pending_async_action.is_none(), "still asks first");
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.options.is_none(), "no Stop option for Boss sessions");
+            assert!(!dialog.selected_option, "Default = No");
+            assert!(matches!(
+                dialog.confirm_action,
+                ConfirmAction::BulkDeleteSessions(_)
+            ));
+        });
+    }
+
+    /// One Boss row in the selection must not strip the safe option from the
+    /// rows that can use it: Stop covers the stoppable subset, Delete still
+    /// covers everything, and Stop stays the default.
+    #[test]
+    fn bulk_dialog_offers_stop_for_the_stoppable_subset_of_a_mixed_selection() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            let boss = resumable_session(
+                "boss",
+                SessionMode::Boss,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            let boss_id = boss.id;
+            state.workspaces[0].add_session(boss);
+            state.selected_sessions.insert(boss_id);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert_eq!(dialog.selected_index, 0, "Stop is still the default");
+            assert_eq!(opts[0].label, "Stop 2", "names how many Stop covers");
+            assert!(
+                matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
+                "Stop covers only the two interactive sessions"
+            );
+            let ConfirmAction::BulkDeleteSessions(delete_ids) = &opts[1].action else {
+                panic!("second option must delete");
+            };
+            assert_eq!(delete_ids.len(), 3, "Delete still covers everything");
+            assert!(delete_ids.contains(&boss_id));
+            assert!(
+                dialog.message.contains("the other one cannot be stopped"),
+                "a Boss row is excluded because it has no stop path, not because it \
+                 is already stopped: {}",
+                dialog.message
+            );
+        });
+    }
+
+    /// When the excluded rows are merely already stopped, the message must say
+    /// so rather than claiming they cannot be stopped at all.
+    #[test]
+    fn bulk_dialog_names_already_stopped_rows_as_the_reason_they_are_excluded() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["running"]);
+            let stopped = resumable_session(
+                "stopped",
+                SessionMode::Interactive,
+                SessionAgentType::Claude,
+                SessionStatus::Stopped,
+            );
+            state.selected_sessions.insert(stopped.id);
+            state.workspaces[0].add_session(stopped);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            assert!(
+                matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
+                "Stop covers only the running session"
+            );
+            assert!(
+                dialog.message.contains("the other one is already stopped"),
+                "{}",
+                dialog.message
+            );
+        });
+    }
+
+    /// A checked id that no longer resolves to a session still takes part in the
+    /// bulk delete (nothing silently drops out), but the dialog shows a short
+    /// label rather than a full 36-character uuid.
+    #[test]
+    fn bulk_dialog_labels_unresolvable_ids_without_dumping_a_uuid() {
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha"]);
+            let stale = uuid::Uuid::new_v4();
+            state.selected_sessions.insert(stale);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.message.contains("unknown ("), "{}", dialog.message);
+            assert!(
+                !dialog.message.contains(&stale.to_string()),
+                "the full uuid would eat three rows of the dialog: {}",
+                dialog.message
+            );
+            let opts = dialog.options.as_ref().expect("tri-option dialog");
+            let ConfirmAction::BulkDeleteSessions(delete_ids) = &opts[1].action else {
+                panic!("second option must delete");
+            };
+            assert!(delete_ids.contains(&stale), "stale ids stay in the delete");
+            assert!(delete_ids.contains(&ids[0]));
+        });
+    }
+
+    /// A bulk stop must not claim to have stopped sessions that were already
+    /// stopped: the count is what the user reads to know the operation worked.
+    #[tokio::test]
+    async fn bulk_stop_reports_already_stopped_sessions_separately() {
+        with_ainb_home_async(|| async {
+            use crate::models::SessionStatus;
+
+            // No tmux name on these, so the stop never shells out and the test
+            // does not need a tmux binary.
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            let mut ids = Vec::new();
+            for (name, status) in [
+                ("running", SessionStatus::Running),
+                ("already", SessionStatus::Stopped),
+            ] {
+                let mut session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    status,
+                );
+                session.tmux_session_name = None;
+                ids.push(session.id);
+                ws.add_session(session);
+            }
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            state.bulk_stop_sessions(ids).await;
+
+            let message = state
+                .notifications
+                .iter()
+                .map(|n| n.message.clone())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            assert!(message.contains("Stopped 1 session(s)"), "{message}");
+            assert!(message.contains("1 already stopped"), "{message}");
+        })
+        .await;
+    }
+
+    /// A selection that is already entirely stopped has nothing to stop, so
+    /// offering "Stop all" as the default would make Enter a no-op that also
+    /// throws the selection away.
+    #[test]
+    fn bulk_dialog_offers_no_stop_when_everything_is_already_stopped() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            let mut ws = crate::models::Workspace::new("ws".to_string(), PathBuf::from("/tmp/ws"));
+            for name in ["a", "b"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Stopped,
+                );
+                state.selected_sessions.insert(session.id);
+                ws.add_session(session);
+            }
+            state.workspaces.push(ws);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+
+            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(dialog.options.is_none(), "nothing left to stop");
+            assert!(!dialog.selected_option, "Default = No");
+            assert!(
+                dialog.message.contains("already stopped"),
+                "the message must say why Stop is absent, and these sessions are \
+                 resumable, so claiming they cannot be stopped and resumed would be \
+                 the opposite of the truth: {}",
+                dialog.message
+            );
+            assert!(
+                !dialog.message.contains("None of these sessions can be stopped"),
+                "{}",
+                dialog.message
+            );
+        });
+    }
+
+    /// Stopping the stoppable subset must leave the rows it did not touch
+    /// checked, or the user has to find and re-select them.
+    #[test]
+    fn bulk_stop_of_a_subset_keeps_the_untouched_rows_selected() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let (mut state, ids) = state_with_checked_sessions(&["alpha", "beta"]);
+            let boss = resumable_session(
+                "boss",
+                SessionMode::Boss,
+                SessionAgentType::Claude,
+                SessionStatus::Running,
+            );
+            let boss_id = boss.id;
+            state.workspaces[0].add_session(boss);
+            state.selected_sessions.insert(boss_id);
+
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            assert!(matches!(
+                state.pending_async_action,
+                Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
+            ));
+            assert_eq!(
+                state.selected_sessions.iter().copied().collect::<Vec<_>>(),
+                vec![boss_id],
+                "the row Stop did not touch stays checked"
+            );
+        });
+    }
+
+    /// An empty selection has nothing to confirm, so it must not open a
+    /// "Stop or Delete 0 Session(s)" dialog whose Delete deletes nothing.
+    #[test]
+    fn bulk_dialog_refuses_an_empty_selection() {
+        with_ainb_home(|| {
+            let mut state = AppState::new();
+            state.show_bulk_delete_or_stop_confirmation(Vec::new());
+            assert!(state.confirmation_dialog.is_none());
+            assert!(state.pending_async_action.is_none());
+        });
+    }
+
+    /// Two sessions pointing at the same tree must be probed once: reporting
+    /// its four modified files twice would tell the user eight are at risk, and
+    /// "Delete removes N worktree(s)" would count the tree twice too.
+    #[test]
+    fn bulk_worktree_status_counts_a_shared_tree_once() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            if std::process::Command::new("git").arg("--version").status().is_err() {
+                eprintln!("SKIP: git unavailable");
+                return;
+            }
+
+            // One real repo with an uncommitted file, two sessions symlinked to it.
+            let home = std::env::var("AINB_HOME").expect("pinned by with_ainb_home");
+            let by_session = std::path::PathBuf::from(&home)
+                .join(".agents-in-a-box")
+                .join("worktrees")
+                .join("by-session");
+            std::fs::create_dir_all(&by_session).expect("by-session");
+            let tree = std::path::PathBuf::from(&home).join("shared-tree");
+            std::fs::create_dir_all(&tree).expect("tree");
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "-q"])
+                    .current_dir(&tree)
+                    .status()
+                    .expect("git init")
+                    .success()
+            );
+            std::fs::write(tree.join("dirty.txt"), b"work").expect("write");
+
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tree.clone());
+            let mut ids = Vec::new();
+            for name in ["alpha", "beta"] {
+                let session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                std::os::unix::fs::symlink(&tree, by_session.join(session.id.to_string()))
+                    .expect("symlink");
+                ids.push(session.id);
+                ws.add_session(session);
+            }
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            let id_names: Vec<(uuid::Uuid, String)> = ids
+                .iter()
+                .zip(["alpha", "beta"])
+                .map(|(id, name)| (*id, name.to_string()))
+                .collect();
+            let status = AppState::bulk_uncommitted_counts(&id_names);
+
+            assert_eq!(status.with_worktree, 1, "one tree, not two");
+            assert_eq!(status.dirty.len(), 1, "probed once");
+            assert_eq!(status.dirty[0].1, 1, "one dirty file, not two");
+            assert_eq!(
+                status.dirty[0].0, "alpha, beta",
+                "both sessions map to the dirty tree, so both are named"
+            );
+            assert_eq!(status.unchecked, 0);
+        });
+    }
+
+    /// A Shell session's row is deletable like any other, and delete removes
+    /// whatever its `by-session` symlink points at, so it must be counted and
+    /// probed rather than assumed to own nothing.
+    #[test]
+    fn bulk_worktree_status_counts_a_shell_session_with_a_tree() {
+        use crate::models::SessionStatus;
+
+        with_ainb_home(|| {
+            let home = std::env::var("AINB_HOME").expect("pinned by with_ainb_home");
+            let by_session = std::path::PathBuf::from(&home)
+                .join(".agents-in-a-box")
+                .join("worktrees")
+                .join("by-session");
+            std::fs::create_dir_all(&by_session).expect("by-session");
+            let tree = std::path::PathBuf::from(&home).join("shell-tree");
+            std::fs::create_dir_all(&tree).expect("tree");
+
+            let session = resumable_session(
+                "shell",
+                SessionMode::Interactive,
+                SessionAgentType::Shell,
+                SessionStatus::Running,
+            );
+            std::os::unix::fs::symlink(&tree, by_session.join(session.id.to_string()))
+                .expect("symlink");
+            let id = session.id;
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tree);
+            ws.add_session(session);
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+
+            let status = AppState::bulk_uncommitted_counts(&[(id, "shell".to_string())]);
+
+            assert_eq!(
+                status.with_worktree, 1,
+                "delete would remove this directory"
+            );
+            assert_eq!(
+                status.unchecked, 1,
+                "not a git tree, so its contents are unknown, whether or not the \
+                 temp directory happens to sit inside some other repository"
+            );
+            assert!(status.dirty.is_empty(), "no ancestor repository's files");
+        });
+    }
+
+    /// A session directory that is not a checkout must never be answered for by
+    /// an ancestor repository: `git status` walks up, so probing a plain folder
+    /// nested inside a repo would report hundreds of files the session does not
+    /// own, on the dialog whose entire job is to state what is at risk.
+    #[test]
+    fn a_plain_directory_inside_a_repo_is_unknown_not_dirty() {
+        if std::process::Command::new("git").arg("--version").status().is_err() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let outer = tempfile::tempdir().expect("tempdir");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(outer.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
+        std::fs::write(outer.path().join("dirty.txt"), b"work").expect("write");
+        let nested = outer.path().join("not-a-checkout");
+        std::fs::create_dir_all(&nested).expect("nested");
+
+        let err = crate::git::WorktreeManager::uncommitted_file_count_at(&nested)
+            .expect_err("a plain directory is not a checkout");
+        assert!(format!("{err}").contains("no .git"), "{err}");
+    }
+
+    /// In a bulk selection the name is the point of the warning, even when only
+    /// one of the selected sessions turns out to be dirty. Only a one-row dialog
+    /// drops it, because there the name is the row the user is looking at.
+    #[test]
+    fn bulk_warning_names_the_dirty_session_even_when_only_one_is_dirty() {
+        let dirty = vec![("beta".to_string(), 3)];
+
+        let bulk = AppState::format_bulk_uncommitted_warning(&dirty, 0, 12)
+            .expect("one dirty session in a bulk selection still warns");
+        assert!(bulk.contains("beta (3)"), "{bulk}");
+
+        let single = AppState::format_bulk_uncommitted_warning(&dirty, 0, 1)
+            .expect("a single-row dialog still warns");
+        assert_eq!(single, "⚠️ 3 uncommitted file(s) in worktree");
+    }
+
+    /// A single-row dialog must not hedge in the plural about "1 session(s)"
+    /// when its own worktree could not be read.
+    #[test]
+    fn single_row_unchecked_warning_reads_singly() {
+        let single = AppState::format_bulk_uncommitted_warning(&[], 1, 1)
+            .expect("an unreadable worktree warns");
+        assert_eq!(
+            single,
+            "⚠️ could not check this worktree for uncommitted work"
+        );
+
+        let bulk = AppState::format_bulk_uncommitted_warning(&[], 2, 6)
+            .expect("unreadable worktrees warn");
+        assert!(bulk.contains("could not check 2 session(s)"), "{bulk}");
+    }
+
+    /// Multi-select ids come out in list order, once each.
+    #[test]
+    fn selected_session_ids_in_order_dedups_and_follows_the_list() {
+        let (state, ids) = state_with_checked_sessions(&["alpha", "beta", "gamma"]);
+        assert_eq!(state.selected_session_ids_in_order(), ids);
+    }
+
+    /// End to end for the safe path: check the rows, press `d`, accept the
+    /// default, and every worktree is still on disk afterwards.
+    ///
+    /// The keypress and the confirmation are driven through the real event
+    /// handler, so re-introducing the original bug (queuing a bulk delete from
+    /// `d`) fails this test at the action assertion before any directory is
+    /// touched. Only the stop is executed; the delete action is never run,
+    /// because running it in a test would remove real directories.
+    #[tokio::test]
+    async fn bulk_stop_preserves_every_worktree() {
+        with_ainb_home_async(|| async {
+            use crate::models::SessionStatus;
+
+            // The stop path shells out to tmux; without the binary every stop
+            // reports failure and the status assertions below are meaningless.
+            if std::process::Command::new("tmux").arg("-V").status().is_err() {
+                eprintln!("SKIP: tmux unavailable");
+                return;
+            }
+
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let mut ws = crate::models::Workspace::new("ws".to_string(), tmp.path().to_path_buf());
+            let mut ids = Vec::new();
+            let mut worktrees = Vec::new();
+
+            for name in ["alpha", "beta", "gamma"] {
+                let worktree = tmp.path().join(name);
+                std::fs::create_dir_all(&worktree).expect("create worktree");
+                std::fs::write(worktree.join("uncommitted.txt"), b"work").expect("write file");
+
+                let mut session = resumable_session(
+                    name,
+                    SessionMode::Interactive,
+                    SessionAgentType::Claude,
+                    SessionStatus::Running,
+                );
+                session.workspace_path = worktree.to_string_lossy().to_string();
+                // A name that exists nowhere, so the real kill path runs and
+                // reports "can't find session". Safe only because the kill
+                // targets `=name`: a bare `-t` would prefix-match and could
+                // reach a developer's live session.
+                session.tmux_session_name = Some(format!("ainb-test-{}", session.id));
+                ids.push(session.id);
+                worktrees.push(worktree);
+                ws.add_session(session);
+            }
+
+            let mut state = AppState::new();
+            state.workspaces.push(ws);
+            for id in &ids {
+                state.selected_sessions.insert(*id);
+            }
+
+            // `d` with rows checked, then Enter on the default option.
+            EventHandler::process_event(AppEvent::DeleteSession, &mut state);
+            assert!(
+                state.pending_async_action.is_none(),
+                "the keypress must not queue anything before the user confirms"
+            );
+            EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
+
+            let queued = state.pending_async_action.take();
+            let stop_ids = match queued {
+                Some(AsyncAction::BulkStopSessions(stop_ids)) => stop_ids,
+                other => panic!("the default must be a stop, not {other:?}"),
+            };
+            assert_eq!(stop_ids, ids, "every checked session is stopped");
+
+            state.bulk_stop_sessions(stop_ids).await;
+
+            for worktree in &worktrees {
+                assert!(worktree.is_dir(), "Stop must keep {}", worktree.display());
+                assert!(
+                    worktree.join("uncommitted.txt").exists(),
+                    "Stop must keep the uncommitted work in {}",
+                    worktree.display()
+                );
+            }
+            for id in &ids {
+                let session = state.find_session(*id).expect("session still registered");
+                assert!(matches!(session.status, SessionStatus::Stopped));
+            }
+        })
+        .await;
     }
 }
 

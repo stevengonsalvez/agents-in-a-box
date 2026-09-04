@@ -2786,6 +2786,20 @@ fn build_atc_command() -> Command {
                         .help(
                             "Skip installing the event-driven lifecycle hooks into ~/.claude/settings.json (poll-mode only)",
                         ),
+                )
+                .arg(
+                    clap::Arg::new("mode")
+                        .long("mode")
+                        .value_parser(["lite", "full"])
+                        .help(
+                            "Supervisor mode (default: keep an existing instance's mode, else full). \
+                             lite runs no LLM; full schedules a heartbeat into a brain session",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("provider")
+                        .long("provider")
+                        .help("Full-mode brain (claude | codex; default claude)"),
                 ),
         )
         .subcommand(
@@ -2845,6 +2859,66 @@ fn build_atc_command() -> Command {
                         .long("dry-run")
                         .action(clap::ArgAction::SetTrue)
                         .help("Report what repair would do without writing anything"),
+                ),
+        )
+        .subcommand(
+            Command::new("mode")
+                .about("Report or switch the supervisor mode (lite | full) — exactly one owner per fleet")
+                .long_about(
+                    "One ATC supervisor owns a fleet, in exactly one mode.\n\n\
+                     lite — no LLM. A deterministic scan of the same LLM-free `fleet needs` \
+                     read, auto-continuing only known transient errors, inside the same \
+                     per-session retry cap. It never answers an ASK and never resolves an \
+                     ambiguous session: those are reported, not decided.\n\n\
+                     full — the scheduled heartbeat wakes an LLM session that triages the \
+                     ambiguous work and coordinates the fleet. It spends tokens every beat and \
+                     needs a provider ainb can actually drive.\n\n\
+                     Both modes share ONE safety ledger, so switching never hands a \
+                     permanently-broken session a fresh set of retries. Without --set this \
+                     verb only reports; switching a fleet's controller is not something to do \
+                     by accident while looking.",
+                )
+                .arg(clap::Arg::new("name").required(true).help("Instance name"))
+                .arg(
+                    clap::Arg::new("set")
+                        .long("set")
+                        .value_parser(["lite", "full"])
+                        .help("Switch the mode. Stops the outgoing controller before starting the incoming one"),
+                )
+                .arg(
+                    clap::Arg::new("provider")
+                        .long("provider")
+                        .help(
+                            "Full-mode brain (claude | codex). Remembered across a switch to lite, \
+                             which runs no brain. A provider ainb cannot drive is refused, not faked",
+                        ),
+                )
+                .arg(
+                    clap::Arg::new("no-reconcile")
+                        .long("no-reconcile")
+                        .action(clap::ArgAction::SetTrue)
+                        .help(
+                            "Persist the mode without starting or stopping either controller. The \
+                             old one still stands down on its next action",
+                        ),
+                ),
+        )
+        .subcommand(
+            Command::new("supervise")
+                .hide(true)
+                .about("Internal: run the LITE controller — the LLM-free scan loop")
+                .arg(clap::Arg::new("name").required(true))
+                .arg(
+                    clap::Arg::new("once")
+                        .long("once")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Run a single scan and exit (diagnostics)"),
+                )
+                .arg(
+                    clap::Arg::new("dry-run")
+                        .long("dry-run")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Report what the scan would do; send nothing and spend no retry budget"),
                 ),
         )
         .subcommand(Command::new("list").about("List all provisioned ATC instances"))
@@ -3031,15 +3105,28 @@ impl CliCommand for DaemonCommand {
                 .about(kind.display_name())
                 .subcommand_required(true)
                 .arg_required_else_help(true);
-            // `for_kind`, not `ALL`: pairing exists only on the daemon that
-            // owns the Codex transport, so it must not appear under every one.
-            for action in crate::cli::daemon::Action::for_kind(kind) {
+            // `cli_verbs`, not `ALL`: pairing exists only on the daemon that
+            // owns the Codex transport, and the mode switches only on ATC, so
+            // neither may appear under every one.
+            for action in crate::cli::daemon::Action::cli_verbs(kind) {
                 sub = sub.subcommand(Command::new(action.id()).about(match action {
                     crate::cli::daemon::Action::Start => "Bring it up",
                     crate::cli::daemon::Action::Stop => "Take it down",
                     crate::cli::daemon::Action::Restart => "Take it down and bring it back up",
                     crate::cli::daemon::Action::Pair => {
                         "Print a Codex remote-control pairing code for the phone app"
+                    }
+                    crate::cli::daemon::Action::ModeLite => {
+                        "Switch the supervisor to lite mode (no LLM, deterministic scan)"
+                    }
+                    crate::cli::daemon::Action::ModeFull => {
+                        "Switch the supervisor to full mode (scheduled LLM heartbeat)"
+                    }
+                    crate::cli::daemon::Action::Provision => {
+                        "Provision the instance and bring it up, creating it if absent"
+                    }
+                    crate::cli::daemon::Action::RemoveOrphan => {
+                        "Remove a heartbeat timer whose instance does not exist"
                     }
                 }));
             }

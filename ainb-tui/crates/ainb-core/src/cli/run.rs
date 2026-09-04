@@ -8,7 +8,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::PathBuf;
-use tokio::process::Command;
 use tokio::time::{Duration, Instant, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -17,8 +16,9 @@ use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{
-    ModelSource, SessionMetadata, SessionStore, claim_codex_remote_thread,
-    discard_codex_remote_thread, ensure_codex_remote_thread, rollback_failed_interactive_launch,
+    InteractiveSessionManager, ModelSource, SessionMetadata, SessionStore, WorktreeRollback,
+    claim_codex_remote_thread, discard_codex_remote_thread, ensure_codex_remote_thread,
+    rollback_failed_interactive_launch,
 };
 use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
@@ -42,6 +42,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
 
     let work_dir: PathBuf;
     let branch_name: String;
+    // `Some` only when this run created a worktree, which is what makes it the
+    // tree a failed launch may delete.
     let worktree_manager: Option<WorktreeManager>;
     let session_id = Uuid::new_v4();
     // Set when the session ends up running directly in the user's checkout.
@@ -90,6 +92,14 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         }
     }
 
+    // `--worktree` created the tree above and nothing else did, so a failed
+    // launch either removes the tree this run made or removes nothing: the
+    // no-worktree path runs in the checkout the user pointed at.
+    let rollback_worktree = || match worktree_manager.as_ref() {
+        Some(manager) => WorktreeRollback::CreatedTree(manager),
+        None => WorktreeRollback::Nothing,
+    };
+
     // Step 4: Generate session name
     let session_name = args.name.clone().unwrap_or_else(|| {
         let short_id = &session_id.to_string()[..8];
@@ -131,8 +141,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             // without.
             Ok(remote) => remote,
             Err(error) => {
-                rollback_failed_interactive_launch(session_id, None, worktree_manager.as_ref())
-                    .await;
+                rollback_failed_interactive_launch(session_id, None, rollback_worktree()).await;
                 return Err(error)
                     .context("Codex failed to start; AINB ran failed-session cleanup");
             }
@@ -141,23 +150,30 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         None
     };
 
-    let claude_cmd = codex_remote
-        .as_ref()
-        .map(|remote| {
-            // Pre-launch, at the launch site rather than inside the builder:
-            // `-C` into a directory Codex has not seen shows a blocking trust
-            // modal, and under `--remote` no flag suppresses it. Kept out of
-            // `remote_codex_command` so that stays pure and its tests never
-            // write to the user's Codex config.
-            crate::interactive::session_manager::trust_codex_project_dir(&work_dir);
-            remote_codex_command(
+    let claude_cmd = if provider == CliProvider::Codex {
+        // Pre-launch, at the launch site rather than inside the builders: a
+        // directory Codex has not seen shows a blocking trust modal, and no CLI
+        // flag suppresses it. Kept out of the builders so they stay pure and
+        // their tests never write to the user's Codex config.
+        crate::interactive::session_manager::trust_codex_project_dir(&work_dir);
+        match codex_remote.as_ref() {
+            Some(remote) => remote_codex_command(
                 remote,
                 &work_dir,
                 model.as_deref(),
                 args.dangerously_skip_permissions,
-            )
-        })
-        .unwrap_or_else(|| build_agent_command(&args));
+            ),
+            // No shared thread (no daemon, or an ephemeral home). Everything
+            // that keeps the CLI off a blocking modal still applies, so this
+            // does NOT fall through to `build_agent_command`: that builder is
+            // provider-generic and emits neither the trust write above nor the
+            // hook-trust flag, and a modal STALLS the pane instead of failing,
+            // so the run reports success over a session that never started.
+            None => codex_local_command(model.as_deref(), args.dangerously_skip_permissions),
+        }
+    } else {
+        build_agent_command(&args)
+    };
 
     // Step 6b: Parent linkage (event-driven plumbing). When spawned with
     // `--parent <id>`, this session is a child of an orchestrator (e.g. ATC).
@@ -183,14 +199,17 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     }
 
     // Step 7: Create tmux session
-    let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone()).with_env(session_env);
+    // `keeping_dead_pane` only for Codex: its startup failures are one line
+    // written to the pane a second before it exits, and without the pane the
+    // launch surfaces as a bare claim timeout that names nothing. It is NOT on
+    // for every provider, because a held pane keeps the session alive and
+    // `tmux has-session` is the only liveness signal several callers have.
+    let mut tmux = TmuxSession::new(session_name.clone(), claude_cmd.clone())
+        .with_env(session_env)
+        .keeping_dead_pane(codex_remote.is_some());
     if let Err(error) = tmux.start(&work_dir).await {
-        rollback_failed_interactive_launch(
-            session_id,
-            Some(tmux.name()),
-            worktree_manager.as_ref(),
-        )
-        .await;
+        rollback_failed_interactive_launch(session_id, Some(tmux.name()), rollback_worktree())
+            .await;
         return Err(error).context("Failed to start tmux session");
     }
 
@@ -204,6 +223,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
             model.as_deref(),
             args.dangerously_skip_permissions,
             false,
+            &tmux_name,
         )
         .await
         {
@@ -212,7 +232,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
                 rollback_failed_interactive_launch(
                     session_id,
                     Some(&tmux_name),
-                    worktree_manager.as_ref(),
+                    rollback_worktree(),
                 )
                 .await;
                 return Err(error)
@@ -265,8 +285,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing
     // this write must not lost-update the store.
     if let Err(error) = SessionStore::mutate(|store| store.upsert(metadata)) {
-        rollback_failed_interactive_launch(session_id, Some(&tmux_name), worktree_manager.as_ref())
-            .await;
+        rollback_failed_interactive_launch(session_id, Some(&tmux_name), rollback_worktree()).await;
         if codex_thread_id.is_some() {
             if let Err(cleanup_error) = discard_codex_remote_thread(session_id).await {
                 warn!("Failed to discard claimed Codex thread for {session_id}: {cleanup_error:#}");
@@ -429,68 +448,66 @@ async fn resolve_repo_path(args: &RunArgs) -> Result<PathBuf> {
     Ok(current_dir)
 }
 
-/// Clone a remote repository to a local cache directory
+/// Parse a `--remote-repo` value into the source and the host/owner/repo
+/// components `RemoteRepoManager` keys its cache path on.
+///
+/// Reads a bare `owner/repo` as a GitHub shorthand first (see
+/// [`crate::git::RepoSource::github_shorthand`]), falls back to `from_input` for URL forms, and then
+/// REJECTS anything that did not classify as a remote. `from_input` is used
+/// rather than smart-parse `parse_with` so an `owner/repo` value cannot be
+/// captured by a directory of that name under the cwd; both parsers have a
+/// `LocalPath` fallback that swallows unrecognised input, and a local path is
+/// not something this flag can clone: `to_clone_url` hands the raw string to
+/// `git clone`, so a value beginning with `-` would be read by git as an option
+/// rather than a repository. Local checkouts belong on `--repo`.
+fn parse_remote_repo(remote: &str) -> Result<(crate::git::RepoSource, crate::git::ParsedRepo)> {
+    let source = match crate::git::RepoSource::github_shorthand(remote) {
+        Some(source) => source,
+        None =>
+        {
+            #[allow(deprecated)]
+            crate::git::RepoSource::from_input(remote)
+                .with_context(|| format!("Cannot parse --remote-repo value: {remote}"))?
+        }
+    };
+    anyhow::ensure!(
+        source.is_remote(),
+        "--remote-repo needs a remote: `owner/repo`, an https:// URL, or git@host:owner/repo. \
+         Use --repo for a local checkout. Got: {remote}"
+    );
+    let parsed = source
+        .parse_components()
+        .with_context(|| format!("Cannot extract repo components from: {remote}"))?;
+    Ok((source, parsed))
+}
+
+/// Clone (or fetch) a remote repository into AINB's shared clone cache.
+///
+/// Routes through [`RemoteRepoManager`] so the CLI lands clones in the SAME
+/// place the TUI does: `~/.agents-in-a-box/repos/<host>/<owner>/<repo>`. This
+/// used to clone into a private flat `~/.agents-in-a-box/repo-cache/<repo>`,
+/// which gave one GitHub repo two on-disk roots. The workspace list keys its
+/// groups on a session's source repository path, so the same repo rendered as
+/// two identically-named rows depending on whether the session was spawned
+/// from the CLI or the TUI.
 async fn clone_remote_repo(remote: &str) -> Result<PathBuf> {
-    // Normalize remote URL
-    let url = if remote.starts_with("http") || remote.starts_with("git@") {
-        remote.to_string()
-    } else {
-        // Assume GitHub shorthand: owner/repo
-        format!("https://github.com/{remote}.git")
-    };
+    let (source, parsed) = parse_remote_repo(remote)?;
+    let manager = crate::git::RemoteRepoManager::new()?;
 
-    // Extract repo name for cache directory (sanitized to prevent path traversal)
-    let repo_name = url
-        .trim_end_matches(".git")
-        .rsplit('/')
-        .next()
-        .unwrap_or("repo")
-        .replace("..", "")
-        .replace(['/', '\\'], "-");
+    // `clone_repo` reports through `info!`, which a plain `ainb run` does not
+    // print, so say something before a transfer that can take minutes. Phrased
+    // for both outcomes rather than probing `is_cached` for a better verb: the
+    // probe would race a concurrent publish and `clone_repo` re-checks anyway.
+    println!("Preparing {}...", source.to_clone_url());
 
-    // Validate repo name is safe
-    let repo_name = if repo_name.is_empty() || repo_name == "." {
-        "repo".to_string()
-    } else {
-        repo_name
-    };
-
-    let cache_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?
-        .join(".agents-in-a-box")
-        .join("repo-cache");
-
-    std::fs::create_dir_all(&cache_dir)?;
-
-    let repo_path = cache_dir.join(repo_name);
-
-    if repo_path.exists() {
-        info!("Repository already cached, fetching updates...");
-        let output = Command::new("git")
-            .current_dir(&repo_path)
-            .args(["fetch", "--all"])
-            .output()
-            .await?;
-
-        if !output.status.success() {
-            warn!(
-                "Failed to fetch updates: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    } else {
-        println!("Cloning {url}...");
-        let output = Command::new("git").arg("clone").arg(&url).arg(&repo_path).output().await?;
-
-        if !output.status.success() {
-            anyhow::bail!(
-                "Failed to clone repository: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    Ok(repo_path)
+    // `RemoteRepoManager` shells out synchronously, and this replaced a
+    // `tokio::process::Command::output().await`, so hand it to a blocking
+    // thread rather than holding a runtime worker for the whole transfer. The
+    // TUI's own call sites do the same with this manager.
+    tokio::task::spawn_blocking(move || manager.clone_repo(&source, &parsed))
+        .await
+        .context("clone task panicked")?
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 // The current-branch lookup lives in `crate::git::current_branch_at`. It used
@@ -595,17 +612,48 @@ fn remote_codex_command(
     model: Option<&str>,
     skip_permissions: bool,
 ) -> String {
-    crate::interactive::session_manager::codex_remote_command(
+    shell_join(&crate::interactive::session_manager::codex_remote_command(
         &crate::config::CliProvider::Codex,
         remote,
         cwd,
         model,
         skip_permissions,
-    )
-    .iter()
-    .map(|part| shell_escape::escape(part.into()).into_owned())
-    .collect::<Vec<_>>()
-    .join(" ")
+    ))
+}
+
+/// Shell-ready argv for a Codex session running WITHOUT a shared remote thread.
+///
+/// Delegates to the TUI's launch builder, like [`remote_codex_command`]
+/// delegates to the remote one, so the degraded CLI path and the degraded TUI
+/// path cannot drift. They already had: this path used to fall through to
+/// `build_agent_command`, which is provider-generic and emits neither
+/// `-c check_for_update_on_startup=false` nor `--dangerously-bypass-hook-trust`,
+/// so Codex parked on the update picker or the hooks-need-review modal. A modal
+/// STALLS the pane instead of failing, which is a launch that reports success.
+///
+/// The only Codex arguments this drops are the remote-specific ones
+/// (`--disable apps`, `--remote <endpoint>`, `-C <dir>`, `resume <thread_id>`),
+/// which is exactly what a session with no shared thread does not have.
+fn codex_local_command(model: Option<&str>, skip_permissions: bool) -> String {
+    shell_join(&InteractiveSessionManager::build_cli_cmd_parts(
+        &CliProvider::Codex,
+        SessionAgentType::Codex,
+        skip_permissions,
+        model,
+        // `ainb run` always starts a fresh session, and `has_history` gates
+        // Claude's `--continue` only.
+        false,
+        false,
+    ))
+}
+
+/// Join argv into the shell-ready string a tmux session is started with.
+fn shell_join(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| shell_escape::escape(part.into()).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
@@ -730,6 +778,127 @@ mod tests {
     use crate::cli::Tool;
 
     use crate::test_support::git_bin;
+
+    /// `--remote-repo` must land in the SAME cache root the TUI clones into:
+    /// `<cache>/<host>/<owner>/<repo>`. The CLI used to clone into a private
+    /// flat `~/.agents-in-a-box/repo-cache/<repo>`, which gave one GitHub repo
+    /// two on-disk roots and split its sessions into two identically-named
+    /// workspace groups (the list keys groups on the source repository path).
+    ///
+    /// Asserts the path the CLI derives, not a clone: no network.
+    #[test]
+    fn remote_repo_resolves_into_the_shared_clone_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manager = crate::git::RemoteRepoManager::with_cache_dir(tmp.path().to_path_buf())
+            .expect("manager");
+
+        for remote in [
+            "stevengonsalvez/agents-in-a-box",
+            "stevengonsalvez/agents-in-a-box.git",
+            "https://github.com/stevengonsalvez/agents-in-a-box.git",
+        ] {
+            let (_source, parsed) = parse_remote_repo(remote).expect("parse");
+            assert_eq!(
+                manager.get_cache_path(&parsed),
+                tmp.path().join("github.com").join("stevengonsalvez").join("agents-in-a-box"),
+                "{remote} must resolve to the host/owner/repo cache path the TUI uses"
+            );
+        }
+    }
+
+    /// A repo whose NAME contains a dot is an ordinary GitHub shorthand.
+    ///
+    /// `from_input`'s shorthand branch rejects a `.` anywhere in the value, so
+    /// `mrdoob/three.js` became `https://mrdoob/three.js` and failed to parse.
+    /// The inline clone this replaced wrapped bare values into
+    /// `https://github.com/<value>.git`, so these used to clone fine.
+    #[test]
+    fn remote_repo_accepts_shorthand_with_a_dotted_repo_name() {
+        for (remote, owner, repo) in [
+            ("mrdoob/three.js", "mrdoob", "three.js"),
+            ("chartjs/Chart.js", "chartjs", "Chart.js"),
+            ("socketio/socket.io", "socketio", "socket.io"),
+            // Surrounding whitespace is trimmed rather than carried into the
+            // clone URL and the cache directory name.
+            (" mrdoob/three.js\n", "mrdoob", "three.js"),
+        ] {
+            let (_source, parsed) = parse_remote_repo(remote)
+                .unwrap_or_else(|e| panic!("{remote} must parse as a shorthand: {e}"));
+            assert_eq!(
+                (
+                    parsed.host.as_str(),
+                    parsed.owner.as_str(),
+                    parsed.repo_name.as_str()
+                ),
+                ("github.com", owner, repo),
+                "{remote}"
+            );
+        }
+    }
+
+    /// A `--remote-repo` value whose path segments climb out of the cache root
+    /// must be rejected, not joined. `get_cache_path` concatenates
+    /// host/owner/repo onto the cache dir, so `../..` would otherwise land the
+    /// clone on the AINB state directory itself.
+    #[test]
+    fn remote_repo_rejects_path_traversal() {
+        for remote in [
+            "https://github.com/../../evil",
+            "https://github.com/owner/..",
+            "git@github.com:../evil.git",
+        ] {
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} must not resolve to a cache path"
+            );
+        }
+    }
+
+    /// Anything that does not classify as a remote must be rejected outright.
+    ///
+    /// `from_input` falls back to `LocalPath` for unrecognised input and
+    /// `to_clone_url` then hands that string to `git clone` verbatim, so a
+    /// value starting with `-` would be read by git as an option. The clone
+    /// this replaced wrapped every non-URL value into
+    /// `https://github.com/<value>.git`, which made the shape unreachable;
+    /// routing through `RemoteRepoManager` removes that accidental guard, so
+    /// the flag has to reject non-remotes itself.
+    #[test]
+    fn remote_repo_rejects_values_that_are_not_remotes() {
+        for remote in [
+            "--upload-pack=touch /tmp/pwn",
+            "-u",
+            "/Users/someone/checkout",
+            "~/checkout",
+            "myrepo",
+        ] {
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} is not a remote and must not reach `git clone`"
+            );
+        }
+    }
+
+    /// A host-shaped `<host>/<repo>` is NOT a GitHub shorthand.
+    ///
+    /// Reading it as one turns a clean local parse error into a GitHub clone
+    /// attempt, which reports back as "Authentication failed - check your git
+    /// credentials" — the worst available answer for someone who typed a
+    /// GitLab path. The dot in the OWNER segment is what separates it from a
+    /// dotted repo NAME like `mrdoob/three.js`.
+    #[test]
+    fn remote_repo_does_not_read_a_host_path_as_a_shorthand() {
+        for remote in ["gitlab.com/repo", "git.example.com/repo"] {
+            assert!(
+                crate::git::RepoSource::github_shorthand(remote).is_none(),
+                "{remote} has a host-shaped owner and is not a shorthand"
+            );
+            assert!(
+                parse_remote_repo(remote).is_err(),
+                "{remote} must fail locally, not as a GitHub credentials error"
+            );
+        }
+    }
 
     /// Run a git command in `dir`, failing the test with git's own stderr.
     fn git(dir: &std::path::Path, args: &[&str]) {
@@ -894,6 +1063,38 @@ mod tests {
             "codex -c check_for_update_on_startup=false --disable apps \
              --dangerously-bypass-hook-trust --remote \
              'unix:///tmp/codex-app-server.sock' -C /tmp/worktree"
+        );
+    }
+
+    /// The degraded launch (no daemon, so no shared thread) keeps every flag
+    /// whose job is to reach a prompt, and drops only the remote ones.
+    ///
+    /// `build_agent_command` is what this path used to fall through to, and it
+    /// is provider-generic: it emits neither modal suppressor, nor the trust
+    /// write its caller does, so the pane parked on the update picker or the
+    /// hooks-need-review modal while `ainb run` reported a session created.
+    /// Sharing the TUI's builder is what keeps the two degraded paths equal.
+    #[test]
+    fn codex_local_command_keeps_the_flags_that_reach_a_prompt() {
+        let command = codex_local_command(Some("gpt-5.6-luna"), true);
+        assert_eq!(
+            command,
+            "codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false \
+             --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox"
+        );
+
+        let plain = codex_local_command(None, false);
+        assert_eq!(
+            plain,
+            "codex --dangerously-bypass-hook-trust -c check_for_update_on_startup=false"
+        );
+        assert!(
+            !plain.contains("--remote"),
+            "a degraded session has no endpoint to join"
+        );
+        assert!(
+            !plain.contains("resume"),
+            "a degraded session has no thread to resume"
         );
     }
 

@@ -1118,7 +1118,7 @@ journey_j6() {
   # The panel opens on the `Needs input` lens, and a freshly minted ACP session
   # needs nothing, so its card is filtered out until the operator widens the
   # lens. `5` is not a workaround: it is the key the panel's OWN empty state
-  # prints ("Press 5 for All"), so this is still the path a user walks.
+  # prints ("press 5 for all"), so this is still the path a user walks.
   step "pressing \`5\` for the All lens, the key the panel's empty state names"
   tmux_cmd send-keys -t "$TUI_SESSION" 5
   wait_until 45 "the card for $session_key ($identity) to appear in the panel" \

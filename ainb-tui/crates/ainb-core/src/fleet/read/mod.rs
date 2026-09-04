@@ -1,5 +1,6 @@
 // ABOUTME: Read-side fleet primitives — tmux capture, errors regex, state merge, JSONL tail.
 
+pub mod claude_probe;
 pub mod current_state;
 pub mod state;
 
@@ -10,7 +11,11 @@ pub mod state;
 // `current_state` + `state` stay local (TUI/notifyd-facing, daemon-irrelevant).
 pub use ainb_fleet_core::fleet::read::{errors, jsonl_tail, needs, tmux_pane};
 
-pub use current_state::{CurrentStateIndex, Resolution};
+pub use claude_probe::{
+    ClaudeProbe, PidObservation, ProbeIndex, SOURCE_PROBE, discover_from_probes,
+    load_dir as load_probe_dir, observe_pid, parse_probe, probe_is_live, resolve_probe,
+};
+pub use current_state::{CurrentStateIndex, EvidenceCensus, EvidenceHealth, Resolution};
 pub use errors::{API_ERROR_PATTERNS, detect_error_signals};
 /// Canonical turn-end stop_reason helper — crate-internal (the bridge transport
 /// and the needs classifier both import it from here).

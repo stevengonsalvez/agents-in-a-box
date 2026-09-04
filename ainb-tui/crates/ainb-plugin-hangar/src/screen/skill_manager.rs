@@ -218,9 +218,14 @@ impl SkillManagerState {
                     }
                 },
                 priority: PriorityChip::from_priority(0),
-                assignee_initial: s.name.chars().next(),
+                // The name is the id line already; no footer glyph (crisp B1).
+                assignee: None,
                 linked: false,
                 subtasks: None,
+                // A skill never runs on its own, so it carries no run chip.
+                run: None,
+                pr: None,
+                attention: None,
             })
             .collect::<Vec<_>>();
         vec![BoardColumn {

@@ -26,6 +26,10 @@ use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "palette_nav_common.rs"]
+mod palette_nav;
+use palette_nav::nav_drain_rounds;
+
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// Read one Content-Length frame body, decoding the JSON. `None` on EOF.
@@ -337,6 +341,58 @@ async fn send_key<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: char
         .unwrap();
 }
 
+/// Walk the command palette to a screen crisp B5 §2.5 took off the tab strip:
+/// `^P`, the screen's word, Enter. `\u{10}` is the bare-DLE spelling of Ctrl+P
+/// the plugin accepts alongside the modifier flag (`plugin::is_ctrl_p`).
+///
+/// DRAINS its own traffic before returning. The walk costs `word.len() + 2` key
+/// deliveries and one `hangar/search` per keystroke; left in the pipe, that came
+/// out of the caller's bounded relay budget and the assertion under test could
+/// run out of pumps before its RPC was ever reached (a ~2/23 flake here).
+async fn go_to_screen<W, R, DR, DW>(
+    host_write: &mut W,
+    host_read: &mut R,
+    daemon_reader: &mut DR,
+    daemon_write: &mut DW,
+    stream_id: &str,
+    word: &str,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
+    DR: tokio::io::AsyncBufRead + Unpin,
+    DW: tokio::io::AsyncWrite + Unpin,
+{
+    send_key(host_write, '\u{10}').await;
+    for ch in word.chars() {
+        send_key(host_write, ch).await;
+    }
+    send_key(host_write, '\n').await;
+    for _ in 0..nav_drain_rounds(word) {
+        relay_one_send_or_render(
+            host_write,
+            host_read,
+            daemon_reader,
+            daemon_write,
+            stream_id,
+        )
+        .await;
+    }
+}
+
+/// Write the `first_run` ack into `home` and THEN publish it as
+/// `AINB_HANGAR_HOME`, so no window exists where the env names a home whose
+/// `state.toml` is not there yet.
+///
+/// The var is process-global and both tests in this binary set it, so whichever
+/// home `on_init` happens to resolve must already carry the ack; otherwise the
+/// danger-full-access modal opens over the board and swallows the test's keys.
+fn seed_first_run_ack(home: &std::path::Path) {
+    let state = home.join("hangar").join("state.toml");
+    std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
+    std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+    std::env::set_var("AINB_HANGAR_HOME", home);
+}
+
 #[tokio::test]
 async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
     let body = async {
@@ -344,12 +400,15 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         // P5.6: this test asserts issue-list rendering, not the first-run
         // danger-full-access modal. Point the plugin's `state.toml` resolution at
         // this isolated home (hermetic — no real `~/.agents-in-a-box`) and pre-seed the
-        // `first_run` ack so the modal is deterministically skipped. Single test
-        // per binary, so the process-wide env set is race-free here.
-        std::env::set_var("AINB_HANGAR_HOME", home.path());
-        let state = home.path().join("hangar").join("state.toml");
-        std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
-        std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+        // `first_run` ack so the modal is deterministically skipped.
+        //
+        // SEED FIRST, then publish the home. `AINB_HANGAR_HOME` is process-global
+        // and this binary holds two tests, so the sibling's `set_var` can land
+        // between ours and our write; `on_init` reading in that window finds no
+        // file, no acks, and paints the modal over the board, which then eats
+        // every key the test sends. (The comment here used to claim one test per
+        // binary; there have been two since the sync test landed.)
+        seed_first_run_ack(home.path());
 
         let socket_path = home.path().join("hangar.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind daemon");
@@ -390,9 +449,17 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         assert!(!last.contains("Loading"), "stuck on loading:\n{last}");
         assert!(last.contains("Todo"), "Todo column header missing:\n{last}");
 
-        // Route the `3` tab key → skill manager renders `commit` (e38.38: Skills
-        // renumbered 4→3 to close the `[3]Agents` gap).
-        send_key(&mut host_write, '3').await;
+        // `^P skills` → skill manager renders `commit`. Was the `3` tab key until
+        // crisp B5 §2.5 demoted it; the palette is the replacement route.
+        go_to_screen(
+            &mut host_write,
+            &mut host_read,
+            &mut daemon_reader,
+            &mut daemon_write,
+            &stream_id,
+            "skills",
+        )
+        .await;
         let (skills, last2) = poll_render_for(&mut host_write, &mut host_read, "commit").await;
         assert!(skills, "tab to skills did not render `commit`:\n{last2}");
         assert!(
@@ -456,10 +523,7 @@ where
 async fn skill_screen_s_invokes_skills_sync_rpc() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
-        std::env::set_var("AINB_HANGAR_HOME", home.path());
-        let state = home.path().join("hangar").join("state.toml");
-        std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
-        std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+        seed_first_run_ack(home.path());
 
         let socket_path = home.path().join("hangar.sock");
         let listener = UnixListener::bind(&socket_path).expect("bind daemon");
@@ -490,9 +554,17 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
         )
         .await;
 
-        // Tab to the skill manager (`3`), then press `s` (sync). (e38.38: Skills
-        // renumbered 4→3 to close the `[3]Agents` gap.)
-        send_key(&mut host_write, '3').await;
+        // `^P skills` to the skill manager, then press `s` (sync). Was the `3`
+        // tab key until crisp B5 §2.5 demoted it.
+        go_to_screen(
+            &mut host_write,
+            &mut host_read,
+            &mut daemon_reader,
+            &mut daemon_write,
+            &stream_id,
+            "skills",
+        )
+        .await;
         send_key(&mut host_write, 's').await;
 
         // Pump renders until the plugin's deferred skill action fires the sync
@@ -513,11 +585,19 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            sent,
-            "pressing `s` on the skill screen must issue a `hangar/skills_sync` RPC; saw: {:?}",
-            seen.lock().unwrap()
-        );
+        // On failure, print the PANE as well as the RPC list. Two different
+        // causes produce an identical RPC list here — a drained-too-late budget,
+        // and the danger-full-access modal swallowing every key before the walk
+        // is delivered — and only the pane tells them apart. Distinguishing them
+        // cost a whole extra diagnosis round.
+        if !sent {
+            let (_, pane) = poll_render_for(&mut host_write, &mut host_read, "\u{0}").await;
+            panic!(
+                "pressing `s` on the skill screen must issue a `hangar/skills_sync` RPC;\n\
+                 saw: {:?}\n--- pane ---\n{pane}",
+                seen.lock().unwrap()
+            );
+        }
 
         drop(host_write);
         server.abort();

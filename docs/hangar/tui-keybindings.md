@@ -10,25 +10,49 @@ Hints are rendered next to the control they affect (per
 
 ## Routing layer (all screens)
 
+Nine keys, down from eighteen (crisp B5). The tab strip carries the seven
+screens the loop runs through; the rest moved behind the command palette.
+
 | Key | Action |
 |-----|--------|
 | `1` | Issue list (landing) |
 | `2` | Task detail (only when a task is selected) |
-| `3` | Skill manager |
-| `4` | Autopilots |
-| `K` | Kanban |
+| `K` | Runs (the task board; the screen and its widget are still `kanban`) |
 | `B` | Boards |
-| `C` | Control center |
-| `S` | Squads |
-| `P` | Profile editor |
-| `D` | Daemon health |
-| `U` | Usage dashboard |
-| `L` | Logs |
 | `I` | Inbox |
+| `A` | Agents (roster + guided create wizard) |
 | `,` | Settings |
+| `Ctrl+P` | Command palette: `Go: <screen>` first, then `hangar/search` as you type; Enter jumps |
 | `?` | Help overlay |
 | `Esc` | Close the active modal |
-| `q` | Quit |
+| `q` | Back to the `ainb` home screen (press `q` again there to quit) |
+
+### Screens behind the palette
+
+These nine kept their screens, their reducers and their per-screen keys; only
+the tab hotkey went. Reach one with `Ctrl+P` and its word, or read the list off
+the Settings screen's **More screens** section.
+
+| Type | Screen |
+|------|--------|
+| `^P skills` | Skill manager |
+| `^P autopilots` | Autopilots |
+| `^P daemon` | Daemon health |
+| `^P usage` | Usage dashboard |
+| `^P logs` | Logs |
+| `^P control` | Control center |
+| `^P fleet` | Fleet (every live session: lenses, stop / interrupt / continue / kill, chat) |
+| `^P squads` | Squads |
+| `^P profiles` | Profile editor |
+
+The freed keys (`3` `4` `C` `D` `F` `L` `P` `S` `U`) now reach the active
+screen's reducer, so a screen-local binding on one of them is live rather than
+eaten by the router.
+
+`?` and `H` belong to the plugin on every hangar screen, typed or not: the host
+never reserves them here, so a title or brief containing `H` reads through
+verbatim (they used to toggle the host help and then swallow every key until
+Esc).
 
 ## Issue list (`1`)
 
@@ -38,8 +62,13 @@ Hints are rendered next to the control they affect (per
 | `Enter` | Open the selected issue's task detail |
 | `c` | Open the create-issue wizard |
 | `a` | Open the agent picker for the selected issue (sets the assignee) |
+| `s` | Create a sub-issue with the selected issue as parent |
+| `d` | Mark the selected issue Done (cascades to a parent's child-done barrier) |
 | `x` | Delete the selected issue (confirm overlay; Enter confirms, Esc cancels) |
+| `y` | Activity timeline modal for the selected issue (`j`/`k` scroll, `r` refresh) |
 | `/` | Filter |
+| `f` | Faceted filter panel (arrows / `hjkl` move, Space toggles, `C` clears, `f` / Esc closes) |
+| `Tab` / `Shift+Tab` | Cycle the filter chips All → Members → Agents → Mine |
 
 If a delete is refused because the issue still has active run(s), a
 second-chance amber overlay offers to cancel the run(s) and delete
@@ -55,7 +84,12 @@ The rows, in focus order:
 | Title | required | A trimmed-blank title blocks create. |
 | Brief | optional | Multi-line free text; becomes the issue description and the dispatched prompt. Enter here inserts a newline (it never fires create). |
 | Linked issue | optional | Single-line upstream reference (a URL or `owner/repo#123`); stored as the issue's `external_ref` and appended to the dispatched brief. |
-| Repo | required | `@` opens a fuzzy dropdown (favorites-first roster, `scratch` always offered); `←` / `→` cycle the roster. A repo-less create is impossible. |
+| Accept | optional | Acceptance criteria, one per line (Enter inserts a newline). They render as checkboxes on the task detail (`a` / `t` there) and do NOT gate `done`. |
+| Context | optional | Context references, one per line. |
+| Priority | — | `←` / `→` cycle P3 … P0. |
+| Due | optional | `YYYY-MM-DD`. |
+| Labels | optional | Comma-separated. |
+| Repo | required | `@` opens a fuzzy dropdown (favorites-first roster, `scratch` always offered); `←` / `→` cycle the roster. A repo-less create is impossible. The roster is read from the host's New Session scan cache + favorites when the plugin connects. |
 | Source branch | — | The branch the run branches FROM (prefilled `main`; blank = repo default). |
 | PR-into (target) branch | — | The branch a future PR lands INTO (prefilled `main`). |
 | Agent | — | `←` / `→` cycle the workspace's named agents (or the provider chips `claude`/`codex`/`copilot` when no named agents exist). Always valid. |
@@ -78,18 +112,30 @@ and re-run.
 
 ## Task detail (`2` / Enter on an issue)
 
-The screen opens on the issue's **detail card**: title (with display id),
-Status / Priority / Created, Assignee / Agent, Repo / Source → Target branches,
-Labels, a `Linked: ⧉ <ref>` line when an upstream issue is linked, the wrapped
-description, and a run-history line — with the live transcript below.
+The screen is the **execution view**. Top to bottom: a sticky run card for the
+EXPANDED run (`◔ impl-1 is working · 7m 17s · 10 tools · $0.42`) with its branch
+and PR beneath it; the issue's **detail card** — title (with display id), one
+meta line (status · priority · assignee · created · `@repo` · source → target),
+Labels/Due when set, a `Linked: ⧉ <ref>` line when an upstream issue is linked,
+acceptance criteria, properties and the wrapped description; then the
+**execution log** of every run of this issue (running on top, then failed,
+newest first inside each bucket); then that run's **transcript**; with the
+issue's **activity** narrative in a right-hand column.
+
+The transcript is the issue's NEWEST run: expanding an older attempt says it has
+no readable transcript rather than showing another run's lines.
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Scroll |
+| `j` / `k` | Scroll the transcript |
+| `Enter` | Expand the next run in the execution log (wraps; a no-op with fewer than two runs) |
 | `c` | Compose a comment (Enter submits, Esc cancels) |
-| `R` | Retry the task (only once terminal). Whether a retry spawns anything is decided by the failure reason — see [Task failures](#task-failures); the reasons marked **No retry** there do nothing. |
-| `X` | Cancel the running task (confirm overlay) |
+| `R` | Retry the task (only once terminal). This is the OPERATOR override: it force-requeues a `failed` or `cancelled` task whatever its `failure_reason` (an `agent_error` that the automatic chain would never retry included), as a child attempt chained by `parent_task_id`. On a `done` task it does nothing. The reason still decides whether the child RESUMES the parent's provider session or starts FRESH — see [Task failures](#task-failures). |
+| `X` | Cancel the running task (confirm overlay). The process group is killed (an interactive run's tmux session by exact name); a dirty worktree is kept. |
 | `x` | Delete the bound issue (confirm overlay; the daemon rejects a delete with active tasks and the rejection surfaces as a note) |
+| `a` | Walk the acceptance-criteria cursor |
+| `t` | Toggle the selected acceptance criterion |
+| `o` | Open the captured PR URL in the host browser (only when a PR was captured) |
 
 Issue deletion here and on the Issue list mirrors the `ainb hangar issue delete`
 CLI command (dry-run preview without `--yes`).
@@ -104,9 +150,10 @@ anything. Retries classify three ways:
   same provider session.
 - **Fresh** — the conversation is poisoned (the model wedged on its own
   context); the retry starts a new session instead of resuming.
-- **No retry** — the failure is deterministic or terminal by intent; a retry is
-  refused (`not retried (non-retryable or attempts exhausted)`), so pressing
-  `R` on these does nothing useful.
+- **No retry** — the failure is deterministic or terminal by intent; the
+  AUTOMATIC chain refuses (`not retried (non-retryable or attempts exhausted)`).
+  The operator's `R` (and `ainb hangar task retry <id>`) still force-requeues
+  such a task as a FRESH attempt; use it once the cause is fixed.
 
 | Reason | What triggers it | Retry |
 |--------|------------------|-------|
@@ -129,10 +176,10 @@ Every retry chain is capped by the task's `max_attempts` regardless of reason.
 **Where the real error surfaces:** a `provision_error` writes the underlying
 setup error (the failed clone / worktree message) into the task's `result`, so
 the task-detail screen shows it directly. A `spawn_timeout`'s cause is logged by
-the daemon — check the Logs screen (`L`) or the daemon log. For agent-side
+the daemon — check the Logs screen (`^P logs`) or the daemon log. For agent-side
 failures the transcript on this screen carries the run output.
 
-## Skill manager (`3`) — P6.5
+## Skill manager (`^P skills`) — P6.5
 
 The three panes: a left skill list, a middle file tree (collapses below ~100
 cols), and a right detail/editor pane. The action-key hints
@@ -156,9 +203,12 @@ pair (`hangar/skill_attach` returns an error).
 
 ## Settings (`,`)
 
-Six stacked sections: Daemon, Providers, Keys, Workspaces, Members,
-Notifications. `j` / `k` switch sections; `J` / `K` (and `↑` / `↓`) move the
-row cursor within the focused section.
+Seven stacked sections: Daemon, Providers, Keys, Workspaces, Members,
+Notifications, More screens. `j` / `k` switch sections; `J` / `K` (and `↑` /
+`↓`) move the row cursor within the focused section.
+
+**More screens** is read-only: the nine screens the tab strip dropped, each
+beside the `^P` word that reaches it.
 
 | Key | Action |
 |-----|--------|
@@ -174,6 +224,80 @@ kind×channel cell (`h` / `l` move the channel column; `g` flips the edit scope
 between the host-wide global rule and the active-workspace override). The
 Providers, Keys, Workspaces, and Members panes are read-only here (their
 mutations are CLI-first, e.g. `ainb hangar member set-role`).
+
+## Boards (`B`)
+
+| Key | Action |
+|-----|--------|
+| `←` `→` `↑` `↓` / `hjkl` | Move the focus |
+| `[` / `]` | Previous / next board |
+| `b` | Create a board |
+| `n` / `r` / `x` | Add / rename / delete a column |
+| `m` | Toggle auto-move |
+| `c` | Create a card: title → repo (`@` dropdown, `↑`/`↓` pick, Enter) → agent → assignee profile. The TITLE is the run prompt; a card has no brief field. |
+| `e` | Edit the focused card |
+| `Enter` | `Run ▾`: `↑`/`↓` pick Headless (`claude -p`) or Interactive (a real, attachable tmux session `tmux_hangar-<task>`), Enter launches |
+| `a` | Attach to the focused card's live session (tmux popup; needs the TUI inside tmux) |
+| `X` | Cancel the focused card's run |
+| `t` | Run timeline overlay |
+| `s` | Assign the focused card to a squad |
+| `w` | Add a depends-on blocker (Tab cycles the link kind) |
+| `R` | Toggle auto-run |
+| `Shift+↑` / `Shift+↓` | Reorder cards |
+| `Shift+←` / `Shift+→` | Reorder columns |
+| `d` | Remove the card from the board (the issue survives) |
+
+A role-gated Pipeline board (`ainb hangar pipeline init`) pulls a card through
+its stages by itself; there is no key for that. Its columns carry no FSM
+mapping, so cards move only when a stage finishes.
+
+## Control center (`^P control`)
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Move between cards (needs-input first, newest first) |
+| `h` / `l` | Move the option cursor on an ASK |
+| `Enter` | Answer with the highlighted option |
+| `1` … `9` | Answer with that option directly |
+
+An ASK answer is routed by option POSITION into the agent's live picker and the
+title row confirms delivery by dropping the card; when the daemon refuses
+(ambiguous target, no live session, delivery failed, already answered elsewhere)
+the reason is painted on the title row in red and the card stays.
+
+## Squads (`^P squads`)
+
+| Key | Action |
+|-----|--------|
+| `n` | Create an agent (name) |
+| `c` | Create a squad |
+| `a` / `d` | Add / remove a member |
+| `r` | Edit the selected member's role (comma-separated tokens; the pipeline's role gates match these) |
+| `i` | Edit the squad instructions |
+| `x` | Fan the CURRENT issue (the one selected on the Issue list) out to the squad: onto the pipeline's first stage when one exists, else a leader-only brief |
+
+## Agents (`A`)
+
+| Key | Action |
+|-----|--------|
+| `n` | Guided create: Name → Description → Provider (`←`/`→`) → Model → Instructions → confirm (Enter) |
+| `x` | Delete the selected agent (confirm) |
+
+## Runs (`K`)
+
+| Key | Action |
+|-----|--------|
+| `←` `→` `↑` `↓` / `hjkl` | Move the focus |
+| `Shift+←` / `Shift+→` (or `<` / `>`) | Move the card to the adjacent column |
+| `R` | Force-requeue a focused failed / cancelled card |
+
+## Logs (`^P logs`) · Inbox (`I`) · Profiles (`^P profiles`)
+
+| Screen | Keys |
+|--------|------|
+| Logs | `a` all · `i` info · `w` warn · `e` error (level floor; re-reads the newest daemon log file) |
+| Inbox | `j` / `k` move the attention row · `h` / `l` move the option cursor · `Enter` or `1`-`9` answer the focused ASK · `r` mark all read · `f` cycle the filter (all → asks → runs → issues) |
+| Profiles | `j` / `k` move · `t` cycle the tier premium → balanced → fast |
 
 ## Agent picker (modal)
 

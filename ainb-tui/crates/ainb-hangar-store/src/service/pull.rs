@@ -96,6 +96,7 @@
 
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::IdGen;
+use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::{Row, SqlitePool};
 
 /// A card successfully pulled into the execution queue: the freshly-inserted
@@ -287,6 +288,119 @@ impl PullService {
             .map(|r| Ok((r.try_get("board_id")?, r.try_get("column_id")?)))
             .collect()
     }
+
+    /// Whether `issue_id`'s card still has a ROLE-GATED stage left to run.
+    ///
+    /// `true` when a gated column sits to the RIGHT of the card, or when the
+    /// card sits IN a gated column whose stage has not yet produced a `done`
+    /// task in the current generation. The current column counts because the
+    /// issue-lifecycle hook runs AFTER [`advance_after_stage`](Self::advance_after_stage)
+    /// moved the card: when Review finishes the card is already in QA, and QA
+    /// is a real stage whose task has not run. Counting only columns strictly
+    /// to the right marked the issue `done` at that moment, and [`PULL_SQL`]
+    /// excludes done issues, so the last gated stage of every pipeline could
+    /// never be pulled. The "not yet done here" clause mirrors the pull's
+    /// finished-stage guard, so a card parked in its last gated column with that
+    /// stage complete (auto-move off) still lets the issue finish.
+    ///
+    /// The "current generation" is the newest among the issue's STAGE tasks
+    /// (rows carrying a `board_column_id`), so a later push-path run, chat task
+    /// or infra retry on the same issue cannot un-finish a completed stage.
+    /// Only the card on a board of the issue's own workspace counts.
+    ///
+    /// `false` for an issue on no board, a board with no gated columns, and a
+    /// card that reached the terminal (ungated) column.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn stages_remain(pool: &SqlitePool, issue_id: &str) -> Result<bool, sqlx::Error> {
+        let found: Option<i64> = sqlx::query_scalar(STAGES_REMAIN_SQL)
+            .bind(issue_id)
+            .fetch_optional(pool)
+            .await?;
+        Ok(found.is_some())
+    }
+}
+
+/// The predicate behind [`PullService::stages_remain`]. `?1` = `issue_id`.
+/// `pub` for the same reason [`ADVANCE_SQL`] is: `tests/pipeline_advance.rs`
+/// pins each clause.
+///
+/// Evaluated per card: an issue carded on two boards of its workspace has
+/// stages remaining while EITHER pipeline does, and each board's current stage
+/// is judged against the newest stage task of THAT board's columns, so a
+/// finished stage on one board is never un-finished by a newer run on the
+/// other. Only stage tasks (a stamped `board_column_id`) set the generation; a
+/// push-path retry or a chat task never does.
+pub const STAGES_REMAIN_SQL: &str = "\
+SELECT 1 FROM board_card AS bc \
+  JOIN board_column AS cur ON cur.id = bc.column_id \
+  JOIN board AS bd ON bd.id = bc.board_id \
+  JOIN issue AS i ON i.id = bc.issue_id \
+ WHERE bc.issue_id = ?1 \
+   AND bd.workspace_id = i.workspace_id \
+   AND EXISTS ( \
+        SELECT 1 FROM board_column AS n \
+         WHERE n.board_id = bc.board_id \
+           AND n.services_role IS NOT NULL \
+           AND ( n.ord > cur.ord \
+              OR ( n.id = cur.id AND NOT EXISTS ( \
+                   SELECT 1 FROM agent_task_queue AS f \
+                    WHERE f.issue_id = bc.issue_id \
+                      AND f.status = 'done' \
+                      AND f.board_column_id = cur.id \
+                      AND f.generation = (SELECT MAX(g.generation) FROM agent_task_queue AS g \
+                                             JOIN board_column AS gc ON gc.id = g.board_column_id \
+                                           WHERE g.issue_id = bc.issue_id \
+                                             AND gc.board_id = bc.board_id) \
+                 ) ) ) \
+       ) \
+ LIMIT 1";
+
+/// The gated column `issue_id`'s card sits in right now within `workspace`,
+/// or `None` when the card is not in a role-gated stage (no card, an ungated
+/// column, a board of another workspace). A single-agent `Run` on such a card
+/// stamps the task with it, so the push path leaves the same stage record the
+/// pull path does and [`PullService::stages_remain`] can see that stage finish.
+///
+/// `board_id` narrows the lookup to the board the run was launched from, so an
+/// issue carded on two boards is stamped with the stage of the board the
+/// operator acted on (each board's stages are judged separately); `None` (the
+/// board-agnostic auto-run seam) takes the earliest gated stage on any board.
+///
+/// Takes any executor so the run path reads inside its own write transaction
+/// (the stamp is decided in the same unit of work that inserts the task) while
+/// a plain read passes the pool.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn current_gated_column<'e, E>(
+    executor: E,
+    workspace: &WorkspaceId,
+    board_id: Option<&str>,
+    issue_id: &str,
+) -> Result<Option<String>, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_scalar(
+        "SELECT bc.column_id FROM board_card AS bc \
+           JOIN board_column AS col ON col.id = bc.column_id \
+           JOIN board AS bd ON bd.id = bc.board_id \
+          WHERE bc.issue_id = ?1 \
+            AND bd.workspace_id = ?2 \
+            AND (?3 IS NULL OR bc.board_id = ?3) \
+            AND col.services_role IS NOT NULL \
+          ORDER BY col.ord, col.id \
+          LIMIT 1",
+    )
+    .bind(issue_id)
+    .bind(workspace.as_str())
+    .bind(board_id)
+    .fetch_optional(executor)
+    .await
 }
 
 /// Move a finished card one column to the right.

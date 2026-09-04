@@ -128,7 +128,7 @@ impl SnapshotManager {
 
     async fn check_tmux_alive(session_name: &str) -> bool {
         Command::new("tmux")
-            .args(["has-session", "-t", session_name])
+            .args(["has-session", "-t", &format!("={session_name}")])
             .output()
             .await
             .map(|o| o.status.success())

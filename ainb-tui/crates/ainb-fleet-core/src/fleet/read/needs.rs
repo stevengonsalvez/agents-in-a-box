@@ -16,6 +16,11 @@ use crate::fleet::read::jsonl_tail::{
 };
 use crate::fleet::types::{Session, Signal};
 
+/// The opt-in markers a session may use to announce it is deliberately
+/// waiting. Both are documented on [`WaitContext`] and both are produced
+/// somewhere in the tree, so both must be matched here.
+pub const WAIT_MARKERS: [&str; 2] = ["WAITING:", "needs input:"];
+
 /// JSONL ERR-fallback window — newest N transcript rows scanned when the pane
 /// capture finds no error.
 const ERR_JSONL_WINDOW: usize = 40;
@@ -108,14 +113,26 @@ pub struct ClassifyInput {
     pub now_ms: i64,
 }
 
+/// Resolve the idle threshold in minutes from `AINB_FLEET_IDLE_MIN`, falling
+/// back to [`DEFAULT_IDLE_MIN`]. Non-numeric and non-positive values are
+/// ignored rather than honoured, so a typo cannot make every session idle.
+///
+/// Public because EVERY tier that ages an idle session must age it by the same
+/// rule: a probe-sourced idle and a transcript-sourced idle disagreeing about
+/// the threshold would surface as a session flickering in and out of `needs`.
+#[must_use]
+pub fn idle_threshold_from_env() -> i64 {
+    std::env::var("AINB_FLEET_IDLE_MIN")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_IDLE_MIN)
+}
+
 impl ClassifyInput {
     #[must_use]
     pub fn from_env(session: Session, pane_text: Option<String>, now_ms: i64) -> Self {
-        let idle_threshold_min = std::env::var("AINB_FLEET_IDLE_MIN")
-            .ok()
-            .and_then(|v| v.parse::<i64>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_IDLE_MIN);
+        let idle_threshold_min = idle_threshold_from_env();
         Self {
             session,
             pane_text,
@@ -175,17 +192,48 @@ pub fn classify(input: ClassifyInput) -> Option<NeedsRow> {
     //    Broker summary starts with "WAITING:" (carried in Session.summary
     //    when explicitly set). Extract the text into an owned string first
     //    so the session-borrow ends before we move session into NeedsRow.
-    let wait_text: Option<String> = input
+    //    BOTH documented markers are matched. `WaitContext` has always
+    //    promised "WAITING:" or "needs input:", and the daemon WRITES the
+    //    latter (attention_ingest.rs), but this path only ever stripped the
+    //    former — so a session announcing itself with the second marker was
+    //    documented as WAIT, produced as WAIT elsewhere, and silently read as
+    //    not-waiting here.
+    let wait: Option<(&'static str, String)> = input
         .session
         .summary
         .as_deref()
-        .and_then(|s| s.strip_prefix("WAITING:"))
-        .map(|rest| rest.trim().to_string());
-    if let Some(text) = wait_text {
+        .and_then(|s| {
+            let s = s.trim_start();
+            WAIT_MARKERS.iter().find_map(|m| {
+                // Case-insensitive on the marker only: it is a machine-written
+                // sentinel, and a session that shouts "WAITING:" or writes
+                // "Needs input:" means the same thing either way.
+                //
+                // Compared over CHARS, never a byte slice. `s[..m.len()]`
+                // panics whenever a multi-byte character straddles that byte
+                // index, and a summary is free-form text that routinely starts
+                // with an emoji — one such session would take down every
+                // `fleet needs` call, not just its own row.
+                let mut marker = m.chars();
+                let mut text = s.chars();
+                loop {
+                    match (marker.next(), text.clone().next()) {
+                        (None, _) => break,
+                        (Some(a), Some(b)) if a.eq_ignore_ascii_case(&b) => {
+                            text.next();
+                        }
+                        _ => return None,
+                    }
+                }
+                Some((*m, text.as_str().to_string()))
+            })
+        })
+        .map(|(m, rest)| (m, rest.trim().to_string()));
+    if let Some((marker, text)) = wait {
         return Some(make_row(
             input.session,
             NeedsContext::Wait(WaitContext {
-                marker: "WAITING:".to_string(),
+                marker: marker.to_string(),
                 text,
             }),
             route_hint,
@@ -651,5 +699,82 @@ mod tests {
         })
         .expect("an unanswered ask classifies ASK");
         assert!(matches!(row.context, NeedsContext::Ask(_)));
+    }
+}
+
+#[cfg(test)]
+mod wait_marker_tests {
+    use super::*;
+    use crate::fleet::types::{Session, SessionSource};
+
+    fn session_with_summary(summary: &str) -> Session {
+        Session {
+            id: "s1".into(),
+            cwd: "/w/s1".into(),
+            pid: None,
+            git_root: None,
+            tmux_session: Some("t1".into()),
+            workspace_name: None,
+            worktree_path: None,
+            peer_id: None,
+            bg_job_id: None,
+            transcript_path: None,
+            sources: vec![SessionSource::Ainb],
+            summary: Some(summary.into()),
+            last_seen_ms: None,
+        }
+    }
+
+    fn wait_of(summary: &str) -> Option<WaitContext> {
+        let row = classify(ClassifyInput {
+            session: session_with_summary(summary),
+            pane_text: None,
+            now_ms: 60_000,
+            idle_threshold_min: 5,
+        })?;
+        match row.context {
+            NeedsContext::Wait(w) => Some(w),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn both_documented_markers_are_matched() {
+        // "needs input:" is written by the daemon and documented on
+        // WaitContext, but was never matched here — a session announcing
+        // itself with it read as not-waiting.
+        let w = wait_of("needs input: pick a branch").expect("needs input: must be a WAIT");
+        assert_eq!(w.marker, "needs input:");
+        assert_eq!(w.text, "pick a branch");
+
+        let w = wait_of("WAITING: on the deploy").expect("WAITING: must still be a WAIT");
+        assert_eq!(w.marker, "WAITING:");
+        assert_eq!(w.text, "on the deploy");
+    }
+
+    #[test]
+    fn marker_matching_ignores_case_and_leading_space() {
+        let w = wait_of("  Needs Input: review the diff").expect("case-insensitive");
+        assert_eq!(w.marker, "needs input:");
+        assert_eq!(w.text, "review the diff");
+    }
+
+    #[test]
+    fn an_unmarked_summary_is_not_a_wait() {
+        assert!(wait_of("just a normal summary").is_none());
+        assert!(wait_of("waiting for nothing in particular").is_none());
+    }
+
+    #[test]
+    fn a_multibyte_summary_does_not_panic_the_whole_scan() {
+        // A byte-slice match panicked whenever a multi-byte char straddled
+        // byte 8 or 12. One such session took down every `fleet needs` call,
+        // not just its own row.
+        assert!(wait_of("🚀🚀🚀 shipping").is_none());
+        assert!(wait_of("日本語のサマリー").is_none());
+        assert!(wait_of("é").is_none());
+        // And a marker still matches when the TEXT is multi-byte.
+        let w = wait_of("WAITING: 承認をお願いします").expect("marker + multibyte text");
+        assert_eq!(w.text, "承認をお願いします");
     }
 }

@@ -148,9 +148,15 @@ impl AutopilotsState {
                         ap.cron_expr
                     ),
                     priority: PriorityChip::from_priority(0),
-                    assignee_initial: ap.name.chars().next(),
+                    // The name is the id line already; no footer glyph (crisp B1).
+                    assignee: None,
                     linked: false,
                     subtasks: None,
+                    // An autopilot is a schedule, not a run: its per-fire history
+                    // is the detail pane, so no run/attention chip on the card.
+                    run: None,
+                    pr: None,
+                    attention: None,
                 }
             })
             .collect::<Vec<_>>();

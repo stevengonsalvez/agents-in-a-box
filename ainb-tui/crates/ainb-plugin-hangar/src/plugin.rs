@@ -274,6 +274,11 @@ const ISSUE_CRITERION_SET_REQ_ID: i64 = 63;
 /// `hangar/issue_timeline` — the per-issue activity + comment narrative behind
 /// the `y` modal (multica parity #13).
 const ISSUE_TIMELINE_REQ_ID: i64 = 64;
+/// `hangar/board_card_timeline` fired for a just-opened TASK-DETAIL screen
+/// (crisp B1, defect 7): its own id, so the reply backfills the detail's
+/// transcript instead of opening the Boards overlay the shared
+/// [`BOARD_CARD_TIMELINE_REQ_ID`] reply does.
+const TASK_DETAIL_TIMELINE_REQ_ID: i64 = 66;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -427,6 +432,27 @@ pub struct HangarPlugin {
     /// Last redial attempt inside the window — throttles dials to ~1/s while
     /// `wants_redraw` keeps frames coming.
     daemon_start_last_redial: Option<std::time::Instant>,
+    /// When an ESTABLISHED link dropped (EOF / socket error after `Connected`),
+    /// or `None` while the link is up or was never up. Drives the automatic
+    /// reconnect in [`Self::pump_reconnect`]: the daemon used to idle-close a
+    /// quiet subscribed connection after ten minutes, and the plugin then sat
+    /// on "daemon offline" until restarted, with the daemon perfectly healthy.
+    link_lost_at: Option<std::time::Instant>,
+    /// The attention row whose `attention/answer` reply is being applied, so
+    /// the verdict is filed against THAT card even if the cursor moved before
+    /// the reply. Set from [`Self::answers_in_flight`] as the reply arrives.
+    answer_in_flight: Option<String>,
+    /// Every `attention/answer` still awaiting its reply, by the negative wire
+    /// id it was sent under (one per answer, so two answers dispatched before
+    /// the first reply each file their own verdict).
+    answers_in_flight: BTreeMap<i64, String>,
+    /// Wire id for the next `attention/answer`: counts down from -1, a space
+    /// no snapshot generation can reach.
+    next_answer_wire_id: i64,
+    /// Last automatic reconnect attempt, for the backoff.
+    link_last_redial: Option<std::time::Instant>,
+    /// Consecutive failed automatic reconnects (backoff exponent).
+    link_redial_attempts: u32,
     /// The in-flight `[s]` start's late-arriving verdict. `DaemonStarter::start`
     /// returns immediately and reports here; `render` polls it with `try_recv`.
     /// Waiting on it inline is exactly what used to wedge `q`/`Esc` for three
@@ -438,6 +464,18 @@ pub struct HangarPlugin {
     /// socket send can't run inline in the `apply_nav` key path). `None` when no
     /// refresh is armed; consumed (taken) once fired.
     pending_pr_status_refresh: Option<String>,
+    /// The issue id of a task-detail screen that just opened (crisp B1, defect
+    /// 7), so `render` can fire `hangar/board_card_timeline` (no board named)
+    /// and backfill the transcript from the run's on-disk stream-json. `None`
+    /// when nothing is armed; consumed (taken) once fired.
+    pending_task_timeline_fetch: Option<String>,
+    /// Log lines raised from the SYNCHRONOUS daemon-response path, drained by
+    /// `render`, which owns the [`HostClient`].
+    ///
+    /// A response handler has no host to log through, so a reply it cannot act on
+    /// used to vanish: a new plugin against a pre-#831 daemon showed an empty
+    /// task-detail transcript with nothing anywhere to say why (crisp B1 review).
+    pending_logs: Vec<String>,
     /// The card-board mouse drag FSM (63l.2). `handle_mouse` folds each forwarded
     /// pointer event against the [`hit_map`](Self::hit_map) into this, producing a
     /// [`MouseIntent`](crate::mouse::MouseIntent).
@@ -482,6 +520,17 @@ pub struct HangarPlugin {
     /// [`fold_board_mouse`](crate::board_mouse::fold_board_mouse) against. Rebuilt
     /// each render; `None` off those screens (a click there resolves to nothing).
     board_layout: Option<crate::widgets::card_board::BoardLayout>,
+    /// Live transcript lines that arrived while a `board_card_timeline` fetch was
+    /// in flight, `None` when no fetch is pending (F6 / track A step A2).
+    ///
+    /// The reply REPLACES the overlay's entries with the snapshot the daemon read
+    /// off disk, so without this a line emitted after that read but before the
+    /// reply lands is dropped and never repaired: the durable file is not re-read
+    /// and the live stream has no replay. Buffered here and replayed onto the
+    /// fresh overlay, the transcript is continuous across the open.
+    timeline_fetch_buffer: Option<
+        std::collections::VecDeque<(String, ainb_hangar_proto::events::MessageKind, String)>,
+    >,
     /// List-screen mouse intents `handle_mouse` produced (63l.6), drained on the
     /// next `render`. Like the issue board's queue, this is the inline,
     /// non-blocking stash: the spawned `render` binds each to the active screen's
@@ -548,6 +597,20 @@ fn read_daemon_token() -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let token = raw.trim().to_string();
     (!token.is_empty()).then_some(token)
+}
+
+/// Whether `event` can move a name the inbox lookup holds (an agent label, a
+/// parent issue's display id or title) — i.e. whether it must re-project.
+///
+/// Everything can EXCEPT a live transcript line. A streaming run pushes
+/// `TaskMessage` faster than anything else on this path and moves no name at all,
+/// so re-projecting on one would rebuild two maps per line of agent output.
+///
+/// Named rather than inlined so the gate can be pinned: inverting it is silent
+/// (the inbox stays correct, the plugin just does the work per transcript line),
+/// which is exactly the kind of regression nothing notices.
+const fn names_may_move(event: &HangarEvent) -> bool {
+    !matches!(event, HangarEvent::TaskMessage { .. })
 }
 
 /// The current wall-clock time in epoch milliseconds, for the Kanban card-age
@@ -638,8 +701,16 @@ impl Default for HangarPlugin {
             daemon_start_error: None,
             daemon_start_redial_until: None,
             daemon_start_last_redial: None,
+            link_lost_at: None,
+            answer_in_flight: None,
+            answers_in_flight: BTreeMap::new(),
+            next_answer_wire_id: -1,
+            link_last_redial: None,
+            link_redial_attempts: 0,
             daemon_start_verdict: None,
             pending_pr_status_refresh: None,
+            pending_task_timeline_fetch: None,
+            pending_logs: Vec::new(),
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
             pending_mouse_intents: Vec::new(),
@@ -648,6 +719,7 @@ impl Default for HangarPlugin {
             pending_issue_priority_update: None,
             pending_issue_assignee_update: None,
             board_layout: None,
+            timeline_fetch_buffer: None,
             pending_board_mouse_intents: Vec::new(),
             list_context_menu: None,
             wizard_dispatch_in_flight: None,
@@ -656,6 +728,78 @@ impl Default for HangarPlugin {
             cancel_delete_in_flight: None,
         }
     }
+}
+
+/// The operator-facing note for an `attention/answer` verdict, or `None` for a
+/// delivered answer (which clears any earlier note). Exhaustive over
+/// [`AnswerResult`](ainb_hangar_proto::snapshots::AnswerResult) so a new
+/// verdict variant cannot fall back to silence.
+fn answer_verdict_note(
+    verdict: Option<&ainb_hangar_proto::snapshots::AnswerResult>,
+    error: Option<&ainb_hangar_proto::RpcError>,
+) -> Option<String> {
+    use ainb_hangar_proto::snapshots::AnswerResult;
+    Some(match verdict {
+        Some(AnswerResult::Delivered { .. }) => return None,
+        Some(AnswerResult::AlreadyAnswered { by }) => format!("already answered by {by}"),
+        Some(AnswerResult::Ambiguous { reason }) => {
+            format!("not delivered (ambiguous target): {reason}")
+        }
+        Some(AnswerResult::NoTarget { reason }) => {
+            format!("not delivered (no live session): {reason}")
+        }
+        Some(AnswerResult::DeliveryFailed { reason }) => {
+            format!("delivery failed, row reopened: {reason}")
+        }
+        None => {
+            let detail =
+                error.map_or_else(|| "unrecognised reply".to_string(), |e| e.message.clone());
+            format!("answer failed: {detail}")
+        }
+    })
+}
+
+/// How many LEADING entries of `buffered` the tail of `snapshot` already carries.
+///
+/// The timeline snapshot and the live buffer overlap by construction: the buffer
+/// arms when the request is written, the snapshot covers the log up to the
+/// daemon's read, and the runner writes each line to the JSONL before emitting
+/// it. Both halves are the same `(kind, body)` from the same classifier, so an
+/// overlap shows up as a matching prefix/suffix. Returns 0 when none matches.
+///
+/// Both sides are scoped to ONE task before this runs, so a concurrent run's
+/// lines cannot break the match.
+///
+/// ponytail: the seam is GUESSED from content, not identified. Longest match
+/// wins, so a repeated `(kind, body)` at the seam (snapshot tail `[X, X]`,
+/// buffer `[X, Y]`) matches at length 1 and replays `[Y]`, dropping the second
+/// genuine `X` if there was one. Losing a
+/// duplicate line beats printing one twice, which is why the bias is this way
+/// round; carrying the daemon's line ordinal on `TaskMessage` would identify the
+/// seam instead of guessing it, and that is the fix if it ever matters.
+/// Longest-first costs O(n*m) worst case on a few thousand short entries, once
+/// per timeline open.
+fn leading_overlap(
+    snapshot: &[crate::screen::task_detail::ViewEntry],
+    buffered: &std::collections::VecDeque<(String, ainb_hangar_proto::events::MessageKind, String)>,
+) -> usize {
+    let tail: Vec<(ainb_hangar_proto::events::MessageKind, &str)> = snapshot
+        .iter()
+        .filter_map(|e| match e {
+            crate::screen::task_detail::ViewEntry::Line(l) => Some((l.kind(), l.body())),
+            _ => None,
+        })
+        .collect();
+    let max = buffered.len().min(tail.len());
+    (1..=max)
+        .rev()
+        .find(|&n| {
+            tail[tail.len() - n..]
+                .iter()
+                .zip(buffered.iter().take(n))
+                .all(|((sk, sb), (_, bk, bb))| sk == bk && sb == bb)
+        })
+        .unwrap_or(0)
 }
 
 impl HangarPlugin {
@@ -952,11 +1096,104 @@ impl HangarPlugin {
                     Err(e) => self.conn.on_error(format!("frame decode: {e}")),
                 }
             }
-            UnixSocketEventKind::Eof => self.conn.on_eof(),
+            UnixSocketEventKind::Eof => {
+                self.note_link_lost();
+                self.conn.on_eof();
+            }
             UnixSocketEventKind::Error => {
                 let msg = event.error.clone().unwrap_or_else(|| "socket error".into());
+                self.note_link_lost();
                 self.conn.on_error(msg);
             }
+        }
+    }
+
+    /// Whether the next automatic redial is due: the initial gap after the drop
+    /// for the first attempt, then `2s << attempts` capped at
+    /// [`Self::RECONNECT_MAX_GAP`] after the previous attempt.
+    fn reconnect_due(&self) -> bool {
+        let Some(lost_at) = self.link_lost_at else {
+            return false;
+        };
+        match self.link_last_redial {
+            None => lost_at.elapsed() >= Self::RECONNECT_INITIAL_GAP,
+            Some(last) => {
+                let gap = Self::RECONNECT_INITIAL_GAP
+                    .saturating_mul(1u32 << self.link_redial_attempts.min(4))
+                    .min(Self::RECONNECT_MAX_GAP);
+                last.elapsed() >= gap
+            }
+        }
+    }
+
+    /// Remember that a live link just dropped so [`Self::pump_reconnect`] dials
+    /// again. Only an established link counts: a failed first dial is the
+    /// offline empty state's business (`[s]` start), not a reconnect.
+    fn note_link_lost(&mut self) {
+        if matches!(
+            self.conn.state(),
+            ConnState::Connected | ConnState::Handshake
+        ) && self.link_lost_at.is_none()
+        {
+            self.link_lost_at = Some(std::time::Instant::now());
+            self.link_last_redial = None;
+            self.link_redial_attempts = 0;
+        }
+    }
+
+    /// Pause before the first automatic reconnect and the backoff floor. The
+    /// first dial is NOT immediate: the render that paints "offline" must return
+    /// before any host round trip, or a host that answers the dial slowly (or a
+    /// test harness that never does) wedges that frame.
+    const RECONNECT_INITIAL_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+    /// Longest pause between two automatic reconnect attempts.
+    const RECONNECT_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(30);
+    /// How long a dropped link keeps self-rendering so the reconnect pump runs
+    /// with no input. A daemon down for hours would otherwise cost a frame per
+    /// tick all night; past this window the pump waits for the next keypress or
+    /// snapshot (that render redials at once, the backoff is long overdue).
+    const RECONNECT_REDRAW_WINDOW: std::time::Duration = std::time::Duration::from_mins(10);
+
+    /// Re-dial a link that dropped after it was up (called from `render`, where
+    /// host IO is safe), with exponential backoff from
+    /// [`Self::RECONNECT_INITIAL_GAP`] to [`Self::RECONNECT_MAX_GAP`], for as
+    /// long as the link stays down. Stands aside while an `[s]` daemon-start
+    /// window owns the dialing.
+    ///
+    /// Frames keep coming while the link is down (`wants_redraw`), which the
+    /// host's redraw governor caps after ~20s of continuous redraws; past that
+    /// cap the host still grants one render per 5s idle tick, so the pump keeps
+    /// running unattended at that cadence, which is coarser than every backoff
+    /// step here except the first.
+    async fn pump_reconnect(&mut self, host: &HostClient) {
+        let Some(lost_at) = self.link_lost_at else {
+            return;
+        };
+        match self.conn.state() {
+            ConnState::Connected => {
+                let _ = host
+                    .log_info(format!(
+                        "hangar: link restored after {:?} ({} redial(s))",
+                        lost_at.elapsed(),
+                        self.link_redial_attempts
+                    ))
+                    .await;
+                self.link_lost_at = None;
+                self.link_last_redial = None;
+                self.link_redial_attempts = 0;
+                return;
+            }
+            ConnState::Dialing | ConnState::Handshake => return,
+            ConnState::Disconnected | ConnState::Error(_) => {}
+        }
+        if self.daemon_start_redial_until.is_some() {
+            return;
+        }
+        let due = self.reconnect_due();
+        if due {
+            self.link_last_redial = Some(std::time::Instant::now());
+            self.link_redial_attempts = self.link_redial_attempts.saturating_add(1);
+            self.connect(host).await;
         }
     }
 
@@ -1051,14 +1288,30 @@ impl HangarPlugin {
             body,
         } = &event
         {
+            if let Some(buffered) = &mut self.timeline_fetch_buffer {
+                // Bounded like the overlay it feeds: a reply that never arrives
+                // (daemon gone mid-fetch) would otherwise buffer every line of
+                // every run for the rest of the session. Oldest out, same as
+                // `TimelineView::append_line`.
+                if buffered.len() >= crate::screen::boards::TimelineView::MAX_ENTRIES {
+                    buffered.pop_front();
+                }
+                buffered.push_back((task_id.as_str().to_string(), *kind, body.clone()));
+            }
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
+        let names_may_move = names_may_move(&event);
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
             IssueListEvent::Event(event.clone()),
         )
         .state;
         self.screens.kanban = reduce_kanban(&self.screens.kanban, KanbanEvent::Event(event)).state;
+        // The inbox resolves its rows through a projection of those two caches, so
+        // it is re-projected WITH them (crisp B1 review) rather than per frame.
+        if names_may_move {
+            self.screens.refresh_inbox_names();
+        }
     }
 
     /// React to one fully-decoded daemon response.
@@ -1067,6 +1320,15 @@ impl HangarPlugin {
             if let Some(handler_id) = self.snapshot_response_ids.remove(&wire_id) {
                 let mut normalized = resp.clone();
                 normalized.id = RpcId::Number(handler_id);
+                self.on_daemon_response(&normalized);
+                return;
+            }
+            // An answer reply: remember which card it was for, then dispatch it
+            // under the handler id like any other answer verdict.
+            if let Some(attention_id) = self.answers_in_flight.remove(&wire_id) {
+                self.answer_in_flight = Some(attention_id);
+                let mut normalized = resp.clone();
+                normalized.id = RpcId::Number(ATTENTION_ANSWER_REQ_ID);
                 self.on_daemon_response(&normalized);
                 return;
             }
@@ -1146,6 +1408,7 @@ impl HangarPlugin {
             RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
             RpcId::Number(ISSUE_TIMELINE_REQ_ID) => self.apply_issue_timeline(resp),
+            RpcId::Number(TASK_DETAIL_TIMELINE_REQ_ID) => self.apply_task_detail_timeline(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             // tcp T5: the notification routing grid snapshot.
             RpcId::Number(NOTIFY_RULES_REQ_ID) => self.apply_notify_rules(resp),
@@ -1235,6 +1498,14 @@ impl HangarPlugin {
             // Parity #24: a toggle changes only the per-agent link, so refresh
             // the link map rather than the whole snapshot batch.
             RpcId::Number(SKILL_SET_ENABLED_REQ_ID) => self.refresh_agent_skill_links = true,
+            // An answer verdict other than `delivered` means the agent is STILL
+            // blocked; say so on the board instead of silently refreshing, which
+            // read as "nothing happened" while the row stayed open.
+            RpcId::Number(ATTENTION_ANSWER_REQ_ID) => {
+                self.apply_answer_verdict(resp);
+                self.fetch_pending = true;
+                self.conn.on_event();
+            }
             RpcId::Number(
                 SKILLS_SYNC_REQ_ID
                 | SKILL_ATTACH_REQ_ID
@@ -1244,7 +1515,6 @@ impl HangarPlugin {
                 | TASK_TRANSITION_REQ_ID
                 | ISSUE_UPDATE_REQ_ID
                 | INBOX_MARK_READ_REQ_ID
-                | ATTENTION_ANSWER_REQ_ID
                 // P5: a profile/upsert reply re-fetches the snapshot batch so the
                 // roster row reflects the new tier; the detail re-fetch is armed
                 // separately in the render drain (both previews re-resolve).
@@ -1259,6 +1529,29 @@ impl HangarPlugin {
             // Any other response/event keeps the link alive.
             _ => self.conn.on_event(),
         }
+    }
+
+    /// Fold an `attention/answer` reply into the control-center note: a
+    /// delivered answer clears it; a refusal, a lost target, a failed delivery
+    /// or a race lost to another surface names itself so the operator knows the
+    /// agent is still waiting.
+    fn apply_answer_verdict(&mut self, resp: &RpcResponse) {
+        let verdict = resp.result.as_ref().and_then(|r| {
+            serde_json::from_value::<ainb_hangar_proto::snapshots::AnswerResult>(r.clone()).ok()
+        });
+        // The reply carries no attention id; the note is about the card whose
+        // answer was sent, remembered at send time (the cursor may have moved
+        // since). A reply with nothing in flight (a restart mid-answer) falls
+        // back to the selected card.
+        let card = self
+            .answer_in_flight
+            .take()
+            .or_else(|| self.screens.control_center.selected_id().map(str::to_string));
+        let Some(note) = answer_verdict_note(verdict.as_ref(), resp.error.as_ref()) else {
+            self.screens.control_center.clear_note();
+            return;
+        };
+        self.screens.control_center.set_note(card.unwrap_or_default(), note);
     }
 
     /// Populate the issue-list cache from an `hangar/issues_list` result.
@@ -1615,12 +1908,20 @@ impl HangarPlugin {
         }
     }
 
-    /// Surface a `hangar/board_card_timeline` reply (tcp T3 / F6, P10 §4.9): parse
-    /// the returned raw stream-json into the prettied transcript taxonomy and open
-    /// the scrollable timeline overlay over the card. A daemon rejection, or a card
-    /// that never ran (empty transcript), surfaces a note instead of an overlay so
-    /// the key never dead-ends.
+    /// Surface a `hangar/board_card_timeline` reply (tcp T3 / F6, P10 §4.9): open
+    /// the scrollable timeline overlay over the card on the transcript the daemon
+    /// classified. A daemon rejection, or a card that never ran (empty
+    /// transcript), surfaces a note instead of an overlay so the key never
+    /// dead-ends.
+    ///
+    /// The classification is daemon-side since A6, so this handler is shape-blind
+    /// to which executor ran and the buffered live lines below (which arrive
+    /// already classified, from the same code) are directly comparable to it.
     fn apply_board_card_timeline(&mut self, resp: &RpcResponse) {
+        // Disarm FIRST, so every return below drops the buffer rather than leaving
+        // it armed to grow for the rest of the session: this handler returns early
+        // on a daemon error and on two decode failures.
+        let buffered = self.timeline_fetch_buffer.take().unwrap_or_default();
         if let Some(err) = &resp.error {
             self.screens.boards.set_note(format!("timeline failed: {}", err.message));
             return;
@@ -1633,7 +1934,23 @@ impl HangarPlugin {
         ) else {
             return;
         };
-        let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl);
+        let entries: Vec<_> = r
+            .entries
+            .iter()
+            .map(|line| crate::screen::task_detail::ViewEntry::line(line.kind, line.body.clone()))
+            .collect();
+        // The buffer collects EVERY task's lines, so drop the foreign ones before
+        // measuring: a concurrent run's line at or before the seam would otherwise
+        // break the match and replay the whole overlap twice. The replay below
+        // discards them anyway, so this only moves the filter earlier.
+        let mut buffered = buffered;
+        buffered.retain(|(t, _, _)| Some(t.as_str()) == r.task_id.as_deref());
+        // The buffer arms before the request goes out, while the snapshot covers
+        // the log up to the daemon's read, and the runner writes each line to the
+        // JSONL BEFORE it emits it. So every line in that window is in BOTH halves,
+        // and `append_line` does not dedupe. Measure the overlap here, while
+        // `entries` is still ours, and skip that many on replay below.
+        let overlap = leading_overlap(&entries, &buffered);
         // A card that NEVER ran (no task) with no transcript: a note, not an empty
         // overlay. But a run that HAS started (task present) yet not emitted its
         // first JSONL line still opens the overlay with zero entries, so the F6
@@ -1650,6 +1967,13 @@ impl HangarPlugin {
         self.screens.boards.set_timeline(crate::screen::boards::TimelineView::new(
             title, r.task_id, entries,
         ));
+        // Replay whatever streamed in while the fetch was in flight, minus the
+        // overlap measured above. `fold_timeline_message` filters by task id, so a
+        // line for a different run is discarded here exactly as it would have been
+        // live.
+        for (task_id, kind, body) in buffered.into_iter().skip(overlap) {
+            self.screens.boards.fold_timeline_message(&task_id, kind, body);
+        }
     }
 
     /// Fold a `profile/get` result into the selected profile's detail (P5): the
@@ -1878,6 +2202,26 @@ impl HangarPlugin {
         }
     }
 
+    /// Re-fire the host-scoped `hangar/repo_list` (crisp B1, defect 6) under the
+    /// connect-time handler id, so the reply folds into the cached roster exactly
+    /// as the first fetch did. A send failure is logged, not fatal: the wizard
+    /// keeps the roster it has.
+    async fn refresh_repo_list(&mut self, host: &HostClient) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let Ok(body) = encode_request(
+            REPO_LIST_REQ_ID,
+            daemon_methods::HANGAR_REPO_LIST,
+            serde_json::json!({}),
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: repo list refresh send failed: {e}")).await;
+        }
+    }
+
     /// Fire a deferred `attention/answer` raised by the control-center screen
     /// (P2): deliver the picked option label to the raising session of
     /// `attention_id`, framed over the socket cap. `answered_by = "tui"` tags the
@@ -1886,7 +2230,7 @@ impl HangarPlugin {
     /// mutating reply re-fetches the fleet-wide attention list so the answered card
     /// drops off the board. A send failure is logged but non-fatal.
     async fn answer_attention(
-        &self,
+        &mut self,
         host: &HostClient,
         action: crate::screen::AttentionAnswerAction,
     ) {
@@ -1899,15 +2243,19 @@ impl HangarPlugin {
             "answered_by": "tui",
             "is_answer": true,
         });
-        let Ok(body) = encode_request(
-            ATTENTION_ANSWER_REQ_ID,
-            daemon_methods::ATTENTION_ANSWER,
-            params,
-        ) else {
+        // One wire id per answer, so each reply finds its own card.
+        let wire_id = self.next_answer_wire_id;
+        self.next_answer_wire_id = self.next_answer_wire_id.saturating_sub(1);
+        let Ok(body) = encode_request(wire_id, daemon_methods::ATTENTION_ANSWER, params) else {
             return;
         };
-        if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host.log_info(format!("hangar: attention answer send failed: {e}")).await;
+        match host.unix_socket_send(stream_id, body).await {
+            Ok(()) => {
+                self.answers_in_flight.insert(wire_id, action.attention_id);
+            }
+            Err(e) => {
+                let _ = host.log_info(format!("hangar: attention answer send failed: {e}")).await;
+            }
         }
     }
 
@@ -2446,6 +2794,9 @@ impl HangarPlugin {
         self.snapshot_generation = self.snapshot_generation.saturating_add(1);
         self.snapshot_fetch_cursor = 0;
         self.snapshot_response_ids.clear();
+        // An answer whose reply was lost with the link never gets one: drop
+        // its slot with the rest of the in-flight correlation.
+        self.answers_in_flight.clear();
     }
 
     fn try_fetch_fleet_snapshot(
@@ -2833,6 +3184,25 @@ impl HangarPlugin {
         }
     }
 
+    /// Arm the live-line buffer and return the timeline fetch's request id, so
+    /// lines streaming in during the round trip are replayed onto the fresh
+    /// overlay (see [`Self::timeline_fetch_buffer`]).
+    ///
+    /// Returns the id rather than taking one: called from inside the
+    /// `CardTimeline` arm that BUILDS the request, so the arming and the fetch are
+    /// one expression and cannot be separated. Deleting the arming deletes the
+    /// fetch, which fails loudly instead of silently reopening the hole where a
+    /// timeline opened mid-run loses every line between the daemon's read and the
+    /// overlay install.
+    ///
+    /// Arms only when UNARMED: both replies carry the same req id, so overwriting
+    /// on a second open would hand reply 1 fetch 2's buffer and leave reply 2
+    /// nothing to replay.
+    fn arm_timeline_buffer(&mut self) -> i64 {
+        self.timeline_fetch_buffer.get_or_insert_with(Default::default);
+        BOARD_CARD_TIMELINE_REQ_ID
+    }
+
     /// Fire a deferred board mutation RPC raised by the Boards screen (P4 / D8,
     /// ccc / D6, D16).
     ///
@@ -2984,7 +3354,9 @@ impl HangarPlugin {
             // Timeline fetch answers under its own req id with the raw transcript;
             // the reply handler parses it into the overlay.
             BoardsAction::CardTimeline { board_id, issue_id } => (
-                BOARD_CARD_TIMELINE_REQ_ID,
+                // Armed HERE, in the arm that builds the request, so the buffer and
+                // the fetch cannot be separated. See `arm_timeline_buffer`.
+                self.arm_timeline_buffer(),
                 daemon_methods::HANGAR_BOARD_CARD_TIMELINE,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id }),
             ),
@@ -3479,6 +3851,13 @@ impl HangarPlugin {
     /// overlay), and an error leaves the modal in its loading state rather than
     /// showing a fabricated empty narrative.
     fn apply_issue_timeline(&mut self, resp: &ainb_hangar_proto::RpcResponse) {
+        // Claim FIRST, above every early return. The ledger counts replies, not
+        // usable ones: an error reply (the daemon answers `invalid_params` for
+        // an unresolvable issue and `store_err` on a DB failure) and an
+        // undecodable one both consume the fetch they answer. Claiming after
+        // the returns leaked one per error, and a single leak parks the counter
+        // at 1 forever, which silently stops the pane ever being written again.
+        let claimed = self.screens.claim_activity_reply().map(ToString::to_string);
         let Some(result) = resp.result.as_ref() else {
             return;
         };
@@ -3487,6 +3866,12 @@ impl HangarPlugin {
         ) else {
             return;
         };
+        // The pane folds in only the narrative of the issue the fetch was sent
+        // for: the reply frame names no issue, and the detail screen may have
+        // moved on to another one since.
+        if let Some(issue_id) = claimed {
+            self.screens.set_task_detail_activity(&issue_id, &parsed.entries);
+        }
         if let Some(activity) = self.screens.activity.as_mut() {
             activity.apply_entries(parsed.entries);
         }
@@ -3494,8 +3879,9 @@ impl HangarPlugin {
     }
 
     /// Fire a deferred `hangar/issue_timeline` fetch for the open activity modal
-    /// (multica parity #13). A send failure is logged but non-fatal — the modal
-    /// keeps its loading state and `r` retries.
+    /// (multica parity #13) and the task-detail activity pane (crisp B4 §2.3). A
+    /// send failure is logged but non-fatal — the modal keeps its loading state
+    /// and `r` retries.
     async fn fire_issue_timeline(&mut self, host: &HostClient, issue_id: String) {
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
@@ -3511,7 +3897,13 @@ impl HangarPlugin {
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: issue timeline send failed: {e}")).await;
+            return;
         }
+        // Only a request that actually went out is owed a reply. The three
+        // early returns above (no stream, encode failure, send failure) all log
+        // and continue, so counting the ARM instead would owe a reply that can
+        // never arrive.
+        self.screens.note_activity_fetch_sent(issue_id);
     }
 
     /// Fire the deferred `hangar/pr_status_refresh` for the just-opened
@@ -3538,6 +3930,72 @@ impl HangarPlugin {
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: pr status refresh send failed: {e}")).await;
+        }
+    }
+
+    /// Fire the deferred `hangar/board_card_timeline` for the just-opened
+    /// task-detail's issue (crisp B1, defect 7), naming NO board so an issue
+    /// that was never placed on one still resolves. The reply
+    /// ([`Self::apply_task_detail_timeline`]) backfills the transcript. A send
+    /// failure is logged, not fatal: the screen simply opens empty as before.
+    async fn fire_task_detail_timeline(&mut self, host: &HostClient, issue_id: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
+        let Ok(body) = encode_request(
+            TASK_DETAIL_TIMELINE_REQ_ID,
+            daemon_methods::HANGAR_BOARD_CARD_TIMELINE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: task timeline send failed: {e}")).await;
+        }
+    }
+
+    /// Backfill the open task-detail transcript from a `hangar/board_card_timeline`
+    /// reply (crisp B1, defect 7): the run's transcript in the same taxonomy the
+    /// Boards overlay and the live `TaskMessage` stream use, classified daemon-side
+    /// from whichever durable record its executor wrote. Applied only when the
+    /// reply's task is the one the screen is bound to (the daemon serves the
+    /// issue's NEWEST run, the screen may show an older attempt); an error, a
+    /// malformed reply, a never-run issue, or a closed screen leaves the
+    /// transcript as it was.
+    ///
+    /// A reply that carries no usable transcript is LOGGED, never silent: a new
+    /// plugin against a pre-#831 daemon is rejected outright (`board_id` used to
+    /// be required), and the operator otherwise sees an empty transcript with
+    /// nothing anywhere to explain it (crisp B1 review).
+    fn apply_task_detail_timeline(&mut self, resp: &RpcResponse) {
+        let Some(result) = &resp.result else {
+            let why = resp.error.as_ref().map_or_else(
+                || "no result and no error".to_string(),
+                |e| format!("{} ({})", e.message, e.code),
+            );
+            self.pending_logs.push(format!("hangar: task timeline failed: {why}"));
+            return;
+        };
+        let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::BoardCardTimelineResult>(
+            result.clone(),
+        ) else {
+            self.pending_logs.push("hangar: task timeline reply did not decode".to_string());
+            return;
+        };
+        let Some(task_id) = r.task_id else {
+            return;
+        };
+        let entries = r
+            .entries
+            .into_iter()
+            .map(|line| {
+                crate::screen::task_detail::TranscriptEntry::new(line.kind, line.body, false)
+            })
+            .collect::<Vec<_>>();
+        if self.screens.backfill_task_detail_transcript(&task_id, entries) {
+            self.conn.on_event();
         }
     }
 
@@ -4213,6 +4671,18 @@ impl HangarPlugin {
             let _ = route_key(&app, &mut self.screens, key);
             return;
         }
+        // The command-palette query is a text-capture surface like any other, and
+        // the one `captures_text` already declared to the host without a matching
+        // guard here: the host forwards `q` into the plugin, and the routing layer
+        // then quit the TUI mid-word. A palette you cannot type `q` into cannot
+        // search for `queued`, and after the crisp B5 shrink it cannot reach
+        // `squads` either.
+        if matches!(app.screen, Screen::CommandPalette) {
+            if let Some(nav) = route_key(&app, &mut self.screens, key) {
+                self.apply_nav(&app, nav);
+            }
+            return;
+        }
 
         // e38.13: `Ctrl+P` opens the global command palette from any non-modal
         // screen. It is a modifier chord, so it never shadows a per-screen `p`
@@ -4226,22 +4696,24 @@ impl HangarPlugin {
             return;
         }
 
-        // P2: on the control center, the digit keys answer the selected ASK's
-        // options inline (①②③) and MUST NOT be swallowed by the numbered
-        // tab-switch (`1`..`4`). They only intercept when the selected card is an
-        // answerable ASK; on an idle board a digit still falls through to the tab
-        // router, so number-key tab navigation off the control center keeps working
-        // (mirrors the issue-list free-text-capture guard above).
-        if matches!(app.screen, Screen::ControlCenter) {
+        // P2: on the control center — and, since crisp B3 §2.4, on the Inbox's
+        // `needs you` block, which is the same board — the digit keys answer the
+        // selected ASK's options inline (①②③) and MUST NOT be swallowed by the
+        // numbered tab-switch (`1`..`4`).
+        //
+        // The intercept is exactly as wide as the answer: a digit is taken only
+        // when it names an option that EXISTS. `3` on a two-option ASK falls
+        // through to the tab router rather than being eaten for nothing, so a
+        // key never does nothing at all (mirrors the issue-list free-text-capture
+        // guard above).
+        if matches!(app.screen, Screen::ControlCenter | Screen::Inbox) {
             if let KeyCode::Char { ch } = key.code {
-                if ch.is_ascii_digit()
-                    && ch != '0'
-                    && self
-                        .screens
-                        .control_center
-                        .selected_card()
-                        .is_some_and(|c| c.kind.is_answerable())
-                {
+                let picked = ch
+                    .to_digit(10)
+                    .filter(|d| *d > 0)
+                    .and_then(|d| usize::try_from(d).ok())
+                    .unwrap_or(0);
+                if picked > 0 && self.screens.control_center.answer_at(picked).is_some() {
                     let _ = route_key(&app, &mut self.screens, key);
                     return;
                 }
@@ -4722,13 +5194,22 @@ impl HangarPlugin {
             dependencies: Vec::new(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
-        // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
-        self.screens.open_task_detail(tid.clone(), issue, card.branch.clone());
+        // card so the detail view surfaces `ainb/<slug>` exactly as the card does,
+        // and the card's status so retry / cancel gate on the real lifecycle.
+        self.screens.open_task_detail(
+            tid.clone(),
+            issue,
+            card.branch.clone(),
+            Some(card.status.as_str()),
+        );
         // Seed the card's already-fetched PR CI/merge status so the badge renders
         // the real state (not a muted unknown) with no extra round-trip.
         if let Some(status) = card.pr_status {
             self.screens.set_task_detail_pr_status(status);
         }
+        // Crisp B1 (defect 7): backfill the transcript from the run's on-disk
+        // stream-json. Deferred to `render` (no socket send in the key path).
+        self.pending_task_timeline_fetch = card.issue_id.clone();
         let mut next = self.app_state().clone();
         next.selected_task = Some(tid.clone());
         next.prior_screen = None;
@@ -5058,7 +5539,7 @@ impl HangarPlugin {
                 self.screens.activity = Some(crate::screen::activity::ActivityState::loading(
                     &issue_id, title,
                 ));
-                self.screens.pending_activity_fetch = Some(issue_id.as_str().to_string());
+                self.screens.arm_activity_fetch(issue_id.as_str().to_string());
                 let reduction =
                     crate::screen::reduce(app, AppEvent::OpenActivityTimeline(issue_id));
                 self.app = Some(reduction.state);
@@ -5068,16 +5549,27 @@ impl HangarPlugin {
                 let issue =
                     self.screens.issue_list.visible_rows().find(|r| r.id == issue_id).cloned();
                 if let Some(issue) = issue {
-                    // A synthetic task id keyed off the issue — the daemon binds
-                    // the real running task to the issue, and the task-detail
-                    // transcript folds events addressed to it.
-                    let task_id = ainb_hangar_core::ids::TaskId::from_str(format!(
-                        "task-{}",
-                        issue_id.as_str()
-                    ))
-                    .unwrap_or_else(|_| {
-                        ainb_hangar_core::ids::TaskId::from_str("task").expect("non-empty")
-                    });
+                    // Bind the issue's LATEST real task (newest Kanban card) when
+                    // one exists, so retry / cancel address a task row the daemon
+                    // actually has. Only an issue with no runs yet falls back to
+                    // the synthetic `task-<issue>` id — that screen still folds
+                    // transcript events, it just has nothing to retry.
+                    let latest =
+                        self.screens.kanban.latest_card_for_issue(issue_id.as_str()).cloned();
+                    let task_id = latest
+                        .as_ref()
+                        .and_then(|card| {
+                            ainb_hangar_core::ids::TaskId::from_str(card.task_id.clone()).ok()
+                        })
+                        .unwrap_or_else(|| {
+                            ainb_hangar_core::ids::TaskId::from_str(format!(
+                                "task-{}",
+                                issue_id.as_str()
+                            ))
+                            .unwrap_or_else(|_| {
+                                ainb_hangar_core::ids::TaskId::from_str("task").expect("non-empty")
+                            })
+                        });
                     // e38.34: a task-detail screen on an issue with a captured PR
                     // arms a `hangar/pr_status_refresh` so the badge surfaces the
                     // CI + merge status (and a merged PR auto-moves to Done). The
@@ -5086,13 +5578,25 @@ impl HangarPlugin {
                     if issue.pr_url.is_some() {
                         self.pending_pr_status_refresh = Some(issue.id.as_str().to_string());
                     }
-                    // ch3: the issue-list open is a synthetic task with no per-run
-                    // branch of its own, so seed the detail from the issue row's
-                    // `branch` — the daemon derives it from the issue's latest
-                    // completed task (mirroring `pr_url`), so the branch line reads
-                    // on the issue-list-opened detail exactly as on the Kanban path.
-                    let branch = issue.branch.clone();
-                    self.screens.open_task_detail(task_id.clone(), issue, branch);
+                    // Crisp B1 (defect 7): backfill the transcript of the issue's
+                    // newest run from its on-disk stream-json, fired in `render`.
+                    self.pending_task_timeline_fetch = Some(issue.id.as_str().to_string());
+                    // ch3: prefer the bound card's own run branch; an issue with
+                    // no runs seeds from the issue row's `branch` — the daemon
+                    // derives it from the issue's latest completed task (mirroring
+                    // `pr_url`), so the branch line reads on the issue-list-opened
+                    // detail exactly as on the Kanban path.
+                    let branch = latest
+                        .as_ref()
+                        .and_then(|card| card.branch.clone())
+                        .or_else(|| issue.branch.clone());
+                    let status = latest.as_ref().map(|card| card.status.clone());
+                    self.screens.open_task_detail(
+                        task_id.clone(),
+                        issue,
+                        branch,
+                        status.as_deref(),
+                    );
                     let mut next = app.clone();
                     next.screen = Screen::TaskDetail(task_id.clone());
                     next.selected_task = Some(task_id);
@@ -5135,6 +5639,12 @@ impl HangarPlugin {
             }
             NavIntent::NavigateToEntity { screen, id, kind } => {
                 self.navigate_to_entity(app, &screen, &id, &kind);
+            }
+            NavIntent::GoToScreen(screen) => {
+                let mut next = app.clone();
+                next.screen = screen;
+                next.prior_screen = None;
+                self.app = Some(next);
             }
         }
     }
@@ -5344,6 +5854,11 @@ impl Plugin for HangarPlugin {
             // input — renders were the only place host IO is safe, and with no
             // frames the daemon coming up was never noticed.
             || self.daemon_start_redial_until.is_some()
+            // A dropped link keeps frames coming so the reconnect pump runs,
+            // bounded like the `[s]` window (RECONNECT_REDRAW_WINDOW).
+            || self
+                .link_lost_at
+                .is_some_and(|lost| lost.elapsed() < Self::RECONNECT_REDRAW_WINDOW)
             // Phase 5: a wizard dispatch armed by the `issue_create` reply needs a
             // render to fire its `issue_update` + `issue_run` (host IO is only
             // safe there). Consumed (taken) by that render, so not level-held.
@@ -5401,6 +5916,11 @@ impl Plugin for HangarPlugin {
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        // The issue board ages its card run chips against this clock (crisp B2
+        // §2.2), and the `f` facet panel buckets due dates against it. Set per
+        // FRAME, not per snapshot, so a running card's `2m` ticks between pulls.
+        // Nothing set it before, so both read an epoch-zero clock.
+        self.screens.issue_list.set_now_ms(now_ms_clock());
         self.drain_pending_refreshes(host);
         if let Some(intent) = self.screens.take_pending_fleet_intent() {
             self.apply_fleet_intent(host, intent).await;
@@ -5547,10 +6067,21 @@ impl Plugin for HangarPlugin {
         if let Some(issue_id) = self.pending_pr_status_refresh.take() {
             self.fire_pr_status_refresh(host, issue_id).await;
         }
+        // Crisp B1 (defect 7): drain a deferred transcript backfill (armed when a
+        // task-detail screen opened) and fire `hangar/board_card_timeline` with no
+        // board named; the reply folds the parsed run transcript into the screen.
+        if let Some(issue_id) = self.pending_task_timeline_fetch.take() {
+            self.fire_task_detail_timeline(host, issue_id).await;
+        }
+        // Drain whatever the SYNCHRONOUS response path wanted to say: it holds no
+        // host of its own, so a reply it could not act on queues its reason here.
+        for line in std::mem::take(&mut self.pending_logs) {
+            let _ = host.log_info(line).await;
+        }
         // multica parity #13: drain a deferred activity-timeline fetch (armed by
         // `y` opening the modal, or `r` inside it) and fire
         // `hangar/issue_timeline`. The reply folds the merged narrative in.
-        if let Some(issue_id) = self.screens.pending_activity_fetch.take() {
+        if let Some(issue_id) = self.screens.take_pending_activity_fetch() {
             self.fire_issue_timeline(host, issue_id).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
@@ -5565,6 +6096,13 @@ impl Plugin for HangarPlugin {
         // re-fetches the snapshots, so the unread badge drops to zero next render.
         if self.screens.take_pending_inbox_mark_read() {
             self.mark_inbox_read(host).await;
+        }
+        // Crisp B1 (defect 6): drain a deferred repo-roster refresh (the Issues
+        // create wizard opened) and re-fire `hangar/repo_list`; the reply lands
+        // through `apply_repos` like the connect-time fetch, so a repo added since
+        // connect is pickable without a restart.
+        if self.screens.take_pending_repo_refresh() {
+            self.refresh_repo_list(host).await;
         }
         // P2: drain a deferred `attention/answer` (Enter / a number key on an ASK
         // in the control center) and fire it over the daemon socket. The daemon
@@ -5607,6 +6145,8 @@ impl Plugin for HangarPlugin {
         // Keep re-dialing after a `[s]` start until the daemon binds or the
         // window expires (`wants_redraw` keeps frames coming meanwhile).
         self.pump_start_redial(host).await;
+        // And re-dial on our own after an established link drops.
+        self.pump_reconnect(host).await;
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch
         // skips the warning. An IO fault is logged, not fatal.
@@ -5667,6 +6207,19 @@ impl Plugin for HangarPlugin {
 mod tests {
     use super::*;
     use ainb_plugin_protocol::manifest::{CapabilityGrant, Manifest};
+
+    /// A `board_card_timeline` reply's `entries`, built from a stream-json
+    /// fixture the way the DAEMON builds them: through
+    /// [`ainb_hangar_proto::transcript`]. Classifying here rather than hand
+    /// writing `(kind, body)` pairs keeps these fixtures comparable to the live
+    /// `TaskMessage` lines the same tests interleave, which is the whole
+    /// property the overlap/dedupe logic under test depends on.
+    fn timeline_entries(jsonl: &str) -> Vec<ainb_hangar_proto::snapshots::TranscriptLine> {
+        ainb_hangar_proto::transcript::classify_stream_json(jsonl)
+            .into_iter()
+            .map(|(kind, body)| ainb_hangar_proto::snapshots::TranscriptLine { kind, body })
+            .collect()
+    }
 
     /// Both inbox RPCs must carry the local human as the `recipient`, or the
     /// daemon silently answers with `member:me`'s inbox by default while the
@@ -5887,6 +6440,237 @@ mod tests {
         assert!(matches!(p.conn.state(), ConnState::Error(_)));
     }
 
+    /// A line that streams in WHILE a `board_card_timeline` fetch is in flight
+    /// must survive the reply, which replaces the overlay's entries with the
+    /// snapshot the daemon read off disk. Nothing re-reads that file and the live
+    /// stream has no replay, so a dropped line here is a permanent hole in the
+    /// transcript the operator is watching.
+    #[test]
+    fn a_line_streamed_during_the_timeline_fetch_survives_the_reply() {
+        use ainb_hangar_core::ids::TaskId;
+        use ainb_hangar_proto::events::{EVENT_METHOD, MessageKind};
+
+        let mut p = HangarPlugin::new();
+        // The fetch is in flight: the overlay does not exist yet, so without the
+        // buffer this line has nowhere to land.
+        p.timeline_fetch_buffer = Some(std::collections::VecDeque::new());
+        p.on_daemon_event(&serde_json::json!({
+            "method": EVENT_METHOD,
+            "params": serde_json::to_value(&HangarEvent::TaskMessage {
+                task_id: TaskId::from_str("t1").unwrap(),
+                kind: MessageKind::Agent,
+                body: "mid-fetch line".into(),
+            })
+            .unwrap(),
+        }));
+
+        // The reply lands with a snapshot taken BEFORE that line was written.
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some("t1".into()),
+                    provider: Some("claude".into()),
+                    entries: timeline_entries(
+                        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"earlier line"}]}}"#,
+                    ),
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+
+        let bodies: Vec<&str> = p
+            .screens
+            .boards
+            .timeline()
+            .expect("the reply opens the overlay")
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                crate::screen::task_detail::ViewEntry::Line(l) => Some(l.body()),
+                crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+            })
+            .collect();
+        assert!(
+            bodies.contains(&"mid-fetch line"),
+            "the line streamed during the fetch must be replayed onto the overlay; got {bodies:?}"
+        );
+        assert!(
+            p.timeline_fetch_buffer.is_none(),
+            "the buffer is disarmed by the reply"
+        );
+    }
+
+    /// A line in the window `[buffer armed, daemon read]` is in BOTH halves: the
+    /// runner writes it to the JSONL before it emits it. `append_line` does not
+    /// dedupe, so replaying the buffer whole duplicates the overlap.
+    #[test]
+    fn the_overlap_between_snapshot_and_buffer_is_not_replayed_twice() {
+        use ainb_hangar_proto::events::MessageKind;
+
+        let mut p = HangarPlugin::new();
+        // Both lines are already in the snapshot; the second also streamed live.
+        let mut armed = std::collections::VecDeque::new();
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "second".to_string()));
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "third".to_string()));
+        p.timeline_fetch_buffer = Some(armed);
+
+        let jsonl = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#,
+        ]
+        .join("\n");
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some("t1".into()),
+                    provider: Some("claude".into()),
+                    entries: timeline_entries(&jsonl),
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+
+        let bodies: Vec<&str> = p
+            .screens
+            .boards
+            .timeline()
+            .expect("overlay opens")
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                crate::screen::task_detail::ViewEntry::Line(l) => Some(l.body()),
+                crate::screen::task_detail::ViewEntry::CollapsedThinking { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second", "third"],
+            "the overlapping line appears once, and the live-only line still lands"
+        );
+    }
+
+    /// The buffer holds EVERY task's lines, so a concurrent run's line must not
+    /// reach the overlay OR shift the overlap. Deleting the `retain` leaves the
+    /// whole crate green, because every other fixture uses one task id.
+    #[test]
+    fn a_concurrent_runs_line_neither_shifts_the_overlap_nor_lands() {
+        use ainb_hangar_proto::events::MessageKind;
+
+        let mut p = HangarPlugin::new();
+        let mut armed = std::collections::VecDeque::new();
+        // A FOREIGN line first: without the retain it breaks the prefix match, so
+        // the overlap collapses to 0 and "second" is replayed on top of itself.
+        armed.push_back((
+            "t2".to_string(),
+            MessageKind::Agent,
+            "other run".to_string(),
+        ));
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "second".to_string()));
+        armed.push_back(("t1".to_string(), MessageKind::Agent, "third".to_string()));
+        p.timeline_fetch_buffer = Some(armed);
+
+        let jsonl = [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"second"}]}}"#,
+        ]
+        .join("\n");
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some("t1".into()),
+                    provider: Some("claude".into()),
+                    entries: timeline_entries(&jsonl),
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+
+        let bodies: Vec<&str> = p
+            .screens
+            .boards
+            .timeline()
+            .expect("overlay opens")
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                crate::screen::task_detail::ViewEntry::Line(l) => Some(l.body()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            bodies,
+            vec!["first", "second", "third"],
+            "the foreign line neither lands nor breaks the dedupe"
+        );
+    }
+
+    /// A second open while one fetch is in flight must NOT overwrite the buffer:
+    /// both replies carry the same req id, so reply 1 would drain fetch 2's buffer
+    /// and reply 2 would find nothing.
+    #[test]
+    fn a_second_timeline_fetch_keeps_the_buffered_lines() {
+        use ainb_hangar_proto::events::MessageKind;
+        let mut p = HangarPlugin::new();
+        let mut armed = std::collections::VecDeque::new();
+        armed.push_back((
+            "t1".to_string(),
+            MessageKind::Agent,
+            "already here".to_string(),
+        ));
+        p.timeline_fetch_buffer = Some(armed);
+        p.arm_timeline_buffer();
+        assert_eq!(
+            p.timeline_fetch_buffer.as_ref().map(std::collections::VecDeque::len),
+            Some(1),
+            "re-arming must keep what the first fetch already buffered"
+        );
+    }
+
+    /// Arming installs the buffer AND yields the fetch's request id, so the
+    /// dispatch cannot obtain one without the other.
+    #[test]
+    fn arming_the_buffer_yields_the_timeline_request_id() {
+        let mut p = HangarPlugin::new();
+        assert!(
+            p.timeline_fetch_buffer.is_none(),
+            "unarmed before the fetch"
+        );
+        assert_eq!(p.arm_timeline_buffer(), BOARD_CARD_TIMELINE_REQ_ID);
+        assert!(p.timeline_fetch_buffer.is_some(), "the fetch arms it");
+    }
+
+    /// A failed timeline fetch must DISARM the buffer, not leave it armed. The
+    /// handler returns early on a daemon error, so an armed buffer would keep
+    /// growing for the rest of the session, holding every line of every run.
+    #[test]
+    fn a_failed_timeline_fetch_disarms_the_buffer() {
+        let mut p = HangarPlugin::new();
+        p.timeline_fetch_buffer = Some(std::collections::VecDeque::new());
+        p.apply_board_card_timeline(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32000,
+                message: "no such board".into(),
+                data: None,
+            }),
+        });
+        assert!(
+            p.timeline_fetch_buffer.is_none(),
+            "a rejected fetch must disarm the buffer, not leak it"
+        );
+    }
+
     /// A `TaskMessage` (transcript line) must NOT arm a snapshot re-pull — the
     /// timeline live-appends it locally (F6), so a fanout per streamed line would
     /// hammer the daemon. Every OTHER event still arms the reconciling re-fetch.
@@ -5920,6 +6704,49 @@ mod tests {
         );
     }
 
+    /// The SECOND gate on the same event: a `TaskMessage` must not re-project the
+    /// inbox name lookup either (crisp B1 review).
+    ///
+    /// The refetch gate above and this one are separate decisions that happen to
+    /// share a condition, and this one is silent when it breaks: inverting it
+    /// leaves the inbox correct and simply rebuilds two maps per line of streamed
+    /// agent output, which no other test notices. Every non-transcript event
+    /// re-projects, because any of them can move an agent label or an issue title.
+    #[test]
+    fn a_transcript_line_does_not_reproject_the_inbox_names() {
+        use ainb_hangar_core::ids::{AgentId, IssueId, TaskId};
+        use ainb_hangar_proto::events::{MessageKind, PresenceState};
+
+        assert!(
+            !names_may_move(&HangarEvent::TaskMessage {
+                task_id: TaskId::from_str("t1").unwrap(),
+                kind: MessageKind::Agent,
+                body: "streaming line".into(),
+            }),
+            "a transcript line moves no name the inbox holds"
+        );
+
+        for event in [
+            HangarEvent::IssueDeleted {
+                issue_id: IssueId::from_str("i1").unwrap(),
+            },
+            HangarEvent::TaskQueued {
+                task_id: TaskId::from_str("t1").unwrap(),
+                issue_id: IssueId::from_str("i1").unwrap(),
+                agent_id: AgentId::from_str("a1").unwrap(),
+            },
+            HangarEvent::AgentPresence {
+                agent_id: AgentId::from_str("a1").unwrap(),
+                state: PresenceState::Online,
+            },
+        ] {
+            assert!(
+                names_may_move(&event),
+                "{event:?} may move a name, so it must re-project"
+            );
+        }
+    }
+
     /// An EOF socket event drops a connected link back to Disconnected.
     #[test]
     fn socket_eof_disconnects() {
@@ -5935,6 +6762,75 @@ mod tests {
         };
         p.on_socket_event(&eof);
         assert_eq!(*p.conn.state(), ConnState::Disconnected);
+        // ...and arms the automatic reconnect (the daemon idle-closed quiet
+        // subscribed links for months; the plugin must dial again by itself).
+        assert!(
+            p.link_lost_at.is_some(),
+            "an established link dropping arms the reconnect"
+        );
+        assert!(
+            p.wants_redraw(),
+            "frames keep coming so the reconnect pump runs"
+        );
+    }
+
+    /// The redial schedule: nothing inside the initial gap after the drop (the
+    /// "offline" frame must return first), then a doubling backoff from the last
+    /// attempt capped at 30s, and a reset once the link is back.
+    #[test]
+    fn reconnect_backoff_schedule() {
+        use std::time::{Duration, Instant};
+        let mut p = HangarPlugin::new();
+        assert!(!p.reconnect_due(), "no drop, nothing due");
+        p.link_lost_at = Some(Instant::now());
+        assert!(!p.reconnect_due(), "the first redial waits the initial gap");
+        p.link_lost_at = Some(Instant::now() - Duration::from_secs(3));
+        assert!(p.reconnect_due(), "first redial due after the initial gap");
+        // After N attempts the gap is 2s << N, capped at 30s.
+        for (attempts, gap_secs) in [(1u32, 4u64), (2, 8), (3, 16), (4, 30), (9, 30)] {
+            p.link_redial_attempts = attempts;
+            p.link_last_redial = Some(Instant::now() - Duration::from_secs(gap_secs - 1));
+            assert!(
+                !p.reconnect_due(),
+                "attempt {attempts}: not yet at {gap_secs}s"
+            );
+            p.link_last_redial = Some(Instant::now() - Duration::from_secs(gap_secs + 1));
+            assert!(
+                p.reconnect_due(),
+                "attempt {attempts}: due after {gap_secs}s"
+            );
+        }
+    }
+
+    /// The self-render that drives the reconnect pump is bounded: a link down
+    /// longer than `RECONNECT_REDRAW_WINDOW` stops asking for frames (the next
+    /// keypress or snapshot render redials), so a daemon down overnight does not
+    /// cost a frame per tick all night.
+    #[test]
+    fn reconnect_redraw_stops_after_the_window() {
+        use std::time::{Duration, Instant};
+        let mut p = HangarPlugin::new();
+        p.link_lost_at = Some(Instant::now() - Duration::from_secs(3));
+        assert!(p.wants_redraw(), "inside the window the pump needs frames");
+        p.link_lost_at =
+            Some(Instant::now() - HangarPlugin::RECONNECT_REDRAW_WINDOW - Duration::from_secs(1));
+        assert!(!p.wants_redraw(), "past the window the plugin goes quiet");
+        assert!(p.reconnect_due(), "...but the next render still redials");
+    }
+
+    /// A first dial that never came up is the offline empty state's business
+    /// (`[s]` start), not a reconnect: EOF before `Connected` arms nothing.
+    #[test]
+    fn socket_eof_before_connected_does_not_arm_reconnect() {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        let eof = UnixSocketEvent {
+            kind: UnixSocketEventKind::Eof,
+            bytes: None,
+            error: None,
+        };
+        p.on_socket_event(&eof);
+        assert!(p.link_lost_at.is_none());
     }
 
     // ----- e38.36: offline empty-state + [s] start-daemon -----
@@ -6268,6 +7164,244 @@ mod tests {
         p
     }
 
+    /// USER-VISIBLE PROOF (key+reply+render), crisp B1 defect 7: Enter on an
+    /// issue opens task detail AND arms a board-less `hangar/board_card_timeline`
+    /// for it; the reply's stream-json backfills the transcript, which renders on
+    /// the screen instead of the empty pane the open used to leave behind. A
+    /// reply for a different task (an older attempt on screen) is ignored.
+    #[test]
+    fn opening_task_detail_backfills_the_transcript_from_the_timeline_reply() {
+        use ainb_hangar_proto::events::TaskCardRow;
+        let mut p = connected_plugin_with_issue();
+        // The issue's newest run, so the detail binds a REAL task id.
+        p.screens.set_tasks(&[TaskCardRow {
+            id: ainb_hangar_core::ids::TaskId::from_str("task-9").unwrap(),
+            workspace_id: "default".into(),
+            agent_id: "agent-1".into(),
+            issue_id: Some("issue-1".into()),
+            status: "done".into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }]);
+
+        p.on_key(&enter_press());
+        assert!(matches!(p.app_state().screen, Screen::TaskDetail(_)));
+        assert_eq!(
+            p.pending_task_timeline_fetch.as_deref(),
+            Some("issue-1"),
+            "opening the detail arms the transcript backfill for its issue"
+        );
+        assert_eq!(p.screens.task_detail.as_ref().unwrap().transcript_len(), 0);
+
+        // A reply for ANOTHER task (not the one on screen) changes nothing.
+        let fixture = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test\"}}]}}\n",
+            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}}\n",
+        );
+        let reply = |task_id: &str| ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(TASK_DETAIL_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+                    task_id: Some(task_id.into()),
+                    provider: Some("claude".into()),
+                    entries: timeline_entries(fixture),
+                })
+                .unwrap(),
+            ),
+            error: None,
+        };
+        p.on_daemon_response(&reply("task-other"));
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().transcript_len(),
+            0,
+            "a transcript for a different task never lands on this screen"
+        );
+
+        // The bound task's reply backfills and renders.
+        p.on_daemon_response(&reply("task-9"));
+        assert_eq!(p.screens.task_detail.as_ref().unwrap().transcript_len(), 2);
+        let text = buf_text(&p.compose_frame(100, 40), 100, 40);
+        assert!(
+            text.contains("cargo test"),
+            "the backfilled tool call renders on the detail screen:\n{text}"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (key+reply+render), crisp B4 §2.3: Enter on an issue
+    /// opens task detail AND arms the SAME `hangar/issue_timeline` fetch the
+    /// activity modal uses; the reply's rows compose into the activity pane,
+    /// which renders beside the transcript. A reply armed for a different issue
+    /// never lands.
+    #[test]
+    fn opening_task_detail_fills_the_activity_pane_from_the_timeline_reply() {
+        use ainb_hangar_proto::snapshots::{IssueTimelineResult, TimelineEntryRow};
+
+        let mut p = connected_plugin_with_issue();
+        p.on_key(&enter_press());
+        assert!(matches!(p.app_state().screen, Screen::TaskDetail(_)));
+        assert_eq!(
+            p.screens.take_pending_activity_fetch().as_deref(),
+            Some("issue-1"),
+            "opening the detail arms the activity fetch for its issue"
+        );
+        // `render` is what sends it and records that it went out; there is no
+        // host here, so stand in for that leg explicitly.
+        p.screens.note_activity_fetch_sent("issue-1".into());
+
+        let entries = vec![TimelineEntryRow {
+            id: "tl-1".into(),
+            kind: "activity".into(),
+            created_at: 0,
+            actor_type: Some("agent".into()),
+            actor_id: Some("agent-1".into()),
+            action: Some("task_started".into()),
+            ..TimelineEntryRow::default()
+        }];
+        let reply = |entries: Vec<TimelineEntryRow>| ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_TIMELINE_REQ_ID),
+            result: Some(serde_json::to_value(IssueTimelineResult { entries }).unwrap()),
+            error: None,
+        };
+
+        assert!(
+            p.screens.task_detail.as_ref().unwrap().activity().is_empty(),
+            "the pane starts empty"
+        );
+
+        // The open's own fetch is answered: composed, attributed, landed.
+        p.on_daemon_response(&reply(entries.clone()));
+        let landed = p.screens.task_detail.as_ref().unwrap().activity().to_vec();
+        assert_eq!(landed.len(), 1, "one narrative row: {landed:?}");
+
+        // A reply for ANOTHER issue never replaces it: the fetch is attributed
+        // to issue-other, the open detail is issue-1, so the pane keeps what it
+        // had rather than captioning one issue's narrative with another's title.
+        p.screens.note_activity_fetch_sent("issue-other".into());
+        p.on_daemon_response(&reply(Vec::new()));
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().activity(),
+            landed.as_slice(),
+            "another issue's reply leaves this pane alone"
+        );
+
+        // TWO fetches in flight share one JSON-RPC id, so the first reply back
+        // cannot be told from the second. The pane skips the ambiguous one and
+        // takes the last, which is the one its own send was for.
+        p.screens.note_activity_fetch_sent("issue-other".into());
+        p.screens.note_activity_fetch_sent("issue-1".into());
+        p.on_daemon_response(&reply(Vec::new()));
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().activity(),
+            landed.as_slice(),
+            "an unattributable reply is skipped, never guessed"
+        );
+        p.on_daemon_response(&reply(entries));
+        let pane = p.screens.task_detail.as_ref().unwrap().activity().to_vec();
+        assert_eq!(pane.len(), 1, "one narrative row: {pane:?}");
+        let text = buf_text(&p.compose_frame(100, 40), 100, 40);
+        assert!(
+            text.contains("activity"),
+            "the pane is titled on screen:\n{text}"
+        );
+        assert!(
+            text.contains(&pane[0].text),
+            "the composed line renders:\n{text}"
+        );
+    }
+
+    /// An ERROR timeline reply must not wedge the activity pane.
+    ///
+    /// The ledger counts replies owed, so a reply that returns early without
+    /// claiming leaks one — and a single leak parks the counter at 1 forever:
+    /// every later fetch arms it to 2, the claim refuses as ambiguous and puts
+    /// it back to 1, and the pane is never written again for the life of the
+    /// process. The daemon answers `invalid_params` for an unresolvable issue
+    /// and `store_err` on a DB failure, so this needs no exotic conditions.
+    #[test]
+    fn an_error_timeline_reply_does_not_wedge_the_activity_pane() {
+        use ainb_hangar_proto::snapshots::{IssueTimelineResult, TimelineEntryRow};
+
+        let mut p = connected_plugin_with_issue();
+        p.on_key(&enter_press());
+        let _ = p.screens.take_pending_activity_fetch();
+        p.screens.note_activity_fetch_sent("issue-1".into());
+
+        // The daemon rejects it. Nothing renders, and nothing is owed after.
+        p.on_daemon_response(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_TIMELINE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32602,
+                message: "issue not found".into(),
+                data: None,
+            }),
+        });
+        assert!(
+            p.screens.task_detail.as_ref().unwrap().activity().is_empty(),
+            "an error reply paints nothing"
+        );
+
+        // The NEXT fetch still works. Without the claim above the early return,
+        // this reply reads as the second of two in flight and is dropped.
+        p.screens.note_activity_fetch_sent("issue-1".into());
+        p.on_daemon_response(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_TIMELINE_REQ_ID),
+            result: Some(
+                serde_json::to_value(IssueTimelineResult {
+                    entries: vec![TimelineEntryRow {
+                        id: "tl-1".into(),
+                        kind: "activity".into(),
+                        created_at: 0,
+                        actor_type: Some("agent".into()),
+                        actor_id: Some("agent-1".into()),
+                        action: Some("task_started".into()),
+                        ..TimelineEntryRow::default()
+                    }],
+                })
+                .unwrap(),
+            ),
+            error: None,
+        });
+        assert_eq!(
+            p.screens.task_detail.as_ref().unwrap().activity().len(),
+            1,
+            "the pane recovers: one error reply must not disable it forever"
+        );
+    }
+
+    /// Crisp B1 review: a REJECTED timeline reply (a new plugin against a daemon
+    /// that still demands `board_id`) leaves the transcript empty, so it must at
+    /// least say why. The reason is queued for `render` to log, since the
+    /// response path holds no host of its own.
+    #[test]
+    fn a_rejected_timeline_reply_queues_the_reason_for_the_log() {
+        let mut p = connected_plugin_with_issue();
+
+        p.on_daemon_response(&ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(TASK_DETAIL_TIMELINE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32602,
+                message: "missing field `board_id`".into(),
+                data: None,
+            }),
+        });
+
+        assert_eq!(
+            p.pending_logs,
+            vec!["hangar: task timeline failed: missing field `board_id` (-32602)".to_string()],
+            "the rejection is explained, not swallowed"
+        );
+    }
+
     /// USER-VISIBLE PROOF (key+render): `Ctrl+P` opens the command-palette modal
     /// over any screen, a typed query arms the `hangar/search` RPC, loaded results
     /// render in the overlay, and Enter on a result JUMPS to that entity's screen
@@ -6296,6 +7430,11 @@ mod tests {
             "a keystroke arms hangar/search for the typed query, got {:?}",
             p.screens.pending_palette_action
         );
+        // Narrow past every `Go:` word so the entity path is what Enter takes
+        // (crisp B5 merged the nine screen rows ahead of the daemon's results).
+        for ch in "efactor".chars() {
+            p.on_key(&char_press(ch));
+        }
 
         // Feed a ranked result back (as the `hangar/search` reply would) and prove
         // it renders inside the overlay.
@@ -6340,12 +7479,56 @@ mod tests {
         );
     }
 
+    /// Every char the ROUTER claims is query text once the palette is open.
+    ///
+    /// `captures_text` already told the host the palette is a text surface, so the
+    /// host forwards `q` / `1` / `,` / `B` into the plugin instead of eating them —
+    /// and the routing layer then quit the TUI, or teleported to a tab, mid-word.
+    /// Pinned over the WHOLE reserved set, not one char: `queued`, `Boards`, `1:1`
+    /// and `Kanban` are all things an operator types into a search box.
+    #[test]
+    fn the_palette_query_swallows_every_router_key() {
+        for ch in crate::screen::router::ROUTER_KEYS {
+            let mut p = connected_plugin_with_issue();
+            p.on_key(&ctrl_p_press());
+            p.on_key(&char_press(ch));
+            assert!(
+                matches!(p.app_state().screen, Screen::CommandPalette),
+                "typing `{ch}` into the palette left it for {:?}",
+                p.app_state().screen
+            );
+            assert!(
+                !p.close_request_pending,
+                "typing `{ch}` into the palette asked the host to close"
+            );
+            assert_eq!(
+                p.screens.command_palette.as_ref().map(|s| s.query().to_string()),
+                Some(ch.to_string()),
+                "`{ch}` must land in the query"
+            );
+        }
+    }
+
+    /// Drive the palette exactly as an operator does — `^P`, the screen's word,
+    /// Enter — to land on a screen crisp B5 took off the tab strip.
+    ///
+    /// The tests below used the tab hotkey (`4`, `C`, `F`) to get there. Routing
+    /// them through the palette instead means the replacement route is exercised
+    /// by every one of them, not only by its own guard.
+    fn go_to(p: &mut HangarPlugin, word: &str) {
+        p.on_key(&ctrl_p_press());
+        for ch in word.chars() {
+            p.on_key(&char_press(ch));
+        }
+        p.on_key(&enter_press());
+    }
+
     /// Esc closes the palette back to the screen that opened it, with no jump.
     #[test]
     fn esc_closes_palette_back_to_prior_screen() {
         let mut p = connected_plugin_with_issue();
         // Open from the Autopilots screen so the restore target is non-default.
-        p.on_key(&char_press('4'));
+        go_to(&mut p, "autopilots");
         assert!(matches!(p.app_state().screen, Screen::Autopilots));
         p.on_key(&ctrl_p_press());
         assert!(matches!(p.app_state().screen, Screen::CommandPalette));
@@ -7367,11 +8550,13 @@ mod tests {
             "an open card-title overlay must declare text-capture (8hx)"
         );
 
-        // Typing the title's leading `C` must be captured, not switch to Control.
+        // Typing the title's leading `C` must be captured. `C` stopped being a
+        // router key with the crisp B5 shrink, so this now guards the overlay's
+        // own capture rather than a live tab switch.
         p.on_key(&char_press('C'));
         assert!(
             matches!(p.app_state().screen, Screen::Boards),
-            "typing `C` into the title must NOT switch to the control center, got {:?}",
+            "typing `C` into the title must NOT leave the boards screen, got {:?}",
             p.app_state().screen
         );
 
@@ -7392,6 +8577,33 @@ mod tests {
             matches!(p.app_state().screen, Screen::Boards),
             "typing `H`/`?` must not toggle help or leave the Boards screen, got {:?}",
             p.app_state().screen
+        );
+
+        // Crisp B1 (defect 21): Ctrl+U through the real key path CLEARS the input
+        // instead of typing a `u`; another Ctrl chord is dropped, not typed.
+        let ctrl = |ch: char| ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: ainb_plugin_sdk::KEY_MOD_CTRL,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        };
+        p.on_key(&ctrl('u'));
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::CardTitle { title, .. }) if title.is_empty()
+            ),
+            "Ctrl+U must clear the title, got {:?}",
+            p.screens.boards.overlay()
+        );
+        p.on_key(&char_press('x'));
+        p.on_key(&ctrl('k'));
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::CardTitle { title, .. }) if title == "x"
+            ),
+            "an unmapped Ctrl chord is dropped, never typed as its letter, got {:?}",
+            p.screens.boards.overlay()
         );
     }
 
@@ -7598,36 +8810,90 @@ mod tests {
         );
     }
 
-    /// THE GENERAL GUARD: every single-char key the Boards hint band ADVERTISES
-    /// must actually reach the boards screen — pressing it may never switch tabs
-    /// or close the panel.
+    /// THE GENERAL GUARD: every single-char key the Boards screen ADVERTISES must
+    /// actually reach the boards screen — pressing it may never switch tabs or
+    /// close the panel.
     ///
-    /// Fails on `main` for `q` (quit) and `D` (daemon health): the band was
-    /// advertising keys the router ate first.
+    /// Fails on `main` for `q` (quit) and `D` (daemon health): the old top hint
+    /// band was advertising keys the router ate first.
+    ///
+    /// Crisp B2 §2.6 deleted that band, so the guard now reads the two surfaces
+    /// that replaced it — the five-verb footer and the `boards` rows of the help
+    /// overlay — which between them advertise every key the band did.
     #[test]
-    fn every_boards_hint_band_key_is_reachable() {
-        for (key, desc) in crate::screen::boards::BOARDS_HINTS {
-            let mut chars = key.chars();
-            let (Some(ch), None) = (chars.next(), chars.next()) else {
-                continue; // compound / glyph hint (`↵`, `⇧←→`) — not a bare char
-            };
-            if !ch.is_ascii() {
-                continue;
-            }
+    fn every_advertised_boards_key_is_reachable() {
+        for (ch, source) in advertised_boards_keys() {
             let mut p = plugin_on_seeded_board();
             p.on_key(&char_press(ch));
             assert!(
                 matches!(p.app_state().screen, Screen::Boards),
-                "Boards advertises `{ch}:{desc}` but pressing it left the screen \
-                 (went to {:?}) — the router stole it",
+                "Boards advertises `{ch}` in {source} but pressing it left the \
+                 screen (went to {:?}) — the router stole it",
                 p.app_state().screen
             );
             assert!(
                 !p.close_request_pending,
-                "Boards advertises `{ch}:{desc}` but pressing it closed the panel — \
-                 the router stole it as quit"
+                "Boards advertises `{ch}` in {source} but pressing it closed the \
+                 panel — the router stole it as quit"
             );
         }
+    }
+
+    /// Every single ASCII-letter key the Boards screen advertises, tagged with
+    /// where it is advertised. Compound and glyph keys (`↵`, `⇧←→`, `enter`) are
+    /// not bare chars and are skipped.
+    fn advertised_boards_keys() -> Vec<(char, &'static str)> {
+        let mut keys: Vec<(char, &'static str)> = crate::chrome::footer_hints(&Screen::Boards)
+            .into_iter()
+            // The trailing globals (`^P`, `?`, `q`) ARE router keys, advertised by
+            // the layer that owns them.
+            .filter(|(key, _)| !matches!(*key, "^P" | "?" | "q"))
+            .filter_map(|(key, _)| {
+                let mut chars = key.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(ch), None) if ch.is_ascii_alphabetic() => Some((ch, "the footer")),
+                    _ => None,
+                }
+            })
+            .collect();
+        // The `boards` block of the help overlay: its heading line, then every
+        // indented continuation until the next section.
+        let mut in_boards = false;
+        for line in crate::screen::app_screens::HELP_LINES {
+            if !line.starts_with(' ') {
+                in_boards = line.split_whitespace().next() == Some("boards");
+            }
+            if !in_boards {
+                continue;
+            }
+            for token in line.split_whitespace().skip(usize::from(!line.starts_with(' '))) {
+                // `c` and slash groups like `n/r/x` are keys; words are labels.
+                for key in token.split('/') {
+                    let mut chars = key.chars();
+                    if let (Some(ch), None) = (chars.next(), chars.next()) {
+                        if ch.is_ascii_alphabetic() {
+                            keys.push((ch, "the help overlay"));
+                        }
+                    }
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup_by_key(|(ch, _)| *ch);
+        // Every ASCII key the deleted sixteen-pair band advertised must still be
+        // advertised SOMEWHERE. A count floor does not prove that: dropping a
+        // hint and adding another keeps the number and loses the key, which is
+        // how `e` (edit card) shipped undiscoverable in the first place.
+        for key in [
+            'a', 'c', 'd', 'e', 'm', 'n', 'r', 's', 't', 'w', 'x', 'R', 'X',
+        ] {
+            assert!(
+                keys.iter().any(|(ch, _)| *ch == key),
+                "`{key}` was advertised by the old Boards hint band and is now \
+                 advertised nowhere; found {keys:?}"
+            );
+        }
+        keys
     }
 
     /// #450 (Fleet row): `a` on the Fleet pane raises the takeover-attach intent
@@ -7829,7 +9095,7 @@ mod tests {
             dependencies: Vec::new(),
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
-        p.screens.open_task_detail(tid.clone(), issue, None);
+        p.screens.open_task_detail(tid.clone(), issue, None, None);
         let mut app = p.app_state().clone();
         app.screen = Screen::TaskDetail(tid);
         p.app = Some(app);
@@ -7846,7 +9112,7 @@ mod tests {
         p.on_key(&char_press('C'));
         assert!(
             matches!(p.app_state().screen, Screen::TaskDetail(_)),
-            "typing `C` in the compose draft must NOT switch to the control center, got {:?}",
+            "typing `C` in the compose draft must NOT leave task detail, got {:?}",
             p.app_state().screen
         );
         assert_eq!(
@@ -7897,7 +9163,7 @@ mod tests {
         p.on_key(&char_press('C'));
         assert!(
             matches!(p.app_state().screen, Screen::Settings),
-            "typing `C` in the key-entry modal must NOT switch to the control center, got {:?}",
+            "typing `C` in the key-entry modal must NOT leave settings, got {:?}",
             p.app_state().screen
         );
         assert!(
@@ -7933,8 +9199,8 @@ mod tests {
     /// REGRESSION (routing level, not the pure reducer): the Daemon-section
     /// numeric-config overlay is a text-capture surface. Every realistic value for
     /// an int knob (30, 120, 240, 1440) contains a digit `routing_event` claims as
-    /// a tab switch, so without the capture guard typing `3` teleported the user to
-    /// the Skill Manager and dropped the keystroke — the headline editing path did
+    /// a tab switch, so without the capture guard typing `1` teleports the user to
+    /// the issue list and drops the keystroke — the headline editing path does
     /// not work at all. Drive the real `on_key` (which consults `routing_event`
     /// BEFORE `route_key`), not `reduce_settings`, or the bug is invisible.
     #[test]
@@ -7960,25 +9226,29 @@ mod tests {
             "Enter on an int knob opens an empty numeric overlay"
         );
 
-        // THE REGRESSION: `3` must extend the buffer, not switch to the Skill
-        // Manager tab (`routing_event` maps '3' → Screen::SkillManager).
-        p.on_key(&key_press(KeyCode::Char { ch: '3' }));
+        // THE REGRESSION: `1` must extend the buffer, not switch tabs. Typed as
+        // `120`, not the `30` this test used to type: crisp B5 demoted `3`, so a
+        // value starting with it no longer crosses the routing layer at all, and
+        // the guard would have passed with the capture guard deleted. `1` and `2`
+        // are still router keys, and `120` is as realistic a minute count as `30`.
+        p.on_key(&key_press(KeyCode::Char { ch: '1' }));
         assert!(
             matches!(p.app_state().screen, Screen::Settings),
-            "typing `3` in the config overlay must NOT switch tabs, got {:?}",
+            "typing `1` in the config overlay must NOT switch tabs, got {:?}",
             p.app_state().screen
         );
         assert_eq!(
             p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()),
-            Some("3"),
-            "`3` must land in the overlay buffer"
+            Some("1"),
+            "`1` must land in the overlay buffer"
         );
 
-        // `0` completes `30`; the overlay is still open on Settings.
+        // `2` then `0` complete `120`; the overlay is still open on Settings.
+        p.on_key(&key_press(KeyCode::Char { ch: '2' }));
         p.on_key(&key_press(KeyCode::Char { ch: '0' }));
         assert_eq!(
             p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()),
-            Some("30"),
+            Some("120"),
             "digits accumulate in the overlay"
         );
         assert!(matches!(p.app_state().screen, Screen::Settings));
@@ -8188,13 +9458,24 @@ mod tests {
         assert!(!p.captures_text(), "capture is released with the overlay");
     }
 
+    /// `^P fleet` lands on the Fleet pane, and bare `F` no longer does.
+    ///
+    /// Was `fleet_hotkey_routes_to_dedicated_pane`, asserting `routing_event('F')`
+    /// yielded the Fleet tab switch. Crisp B5 §2.5 demoted `F`; the negative half
+    /// is kept so freeing the key stays deliberate — `F` now reaches the screen
+    /// reducer, which is the point.
     #[test]
-    fn fleet_hotkey_routes_to_dedicated_pane() {
+    fn the_palette_word_routes_to_the_dedicated_fleet_pane() {
+        let mut p = connected_plugin_with_issue();
+        go_to(&mut p, "fleet");
+        assert_eq!(p.app_state().screen, Screen::Fleet);
+
         let app =
             AppState::new(WorkspaceId::from_str("default").expect("valid default workspace id"));
-        let event = routing_event(&char_press('F'), &app).expect("Fleet route event");
-        let out = crate::screen::reduce(&app, event);
-        assert_eq!(out.state.screen, Screen::Fleet);
+        assert!(
+            routing_event(&char_press('F'), &app).is_none(),
+            "`F` is no longer a router key"
+        );
     }
 
     #[test]
@@ -8283,7 +9564,7 @@ mod tests {
         };
         plugin.screens.fleet.set_sessions(vec![row("claude:one"), row("claude:two")]);
 
-        plugin.on_key(&char_press('F'));
+        go_to(&mut plugin, "fleet");
         plugin.on_key(&key_press(KeyCode::Down));
         assert!(matches!(plugin.app_state().screen, Screen::Fleet));
         assert_eq!(plugin.screens.fleet.selected_key(), Some("claude:two"));
@@ -8296,7 +9577,7 @@ mod tests {
     #[test]
     fn fleet_f5_arms_direct_snapshot_refresh() {
         let mut plugin = connected_plugin_with_issue();
-        plugin.on_key(&char_press('F'));
+        go_to(&mut plugin, "fleet");
         assert!(matches!(plugin.app_state().screen, Screen::Fleet));
 
         plugin.fleet_fetch_pending = false;
@@ -8733,5 +10014,337 @@ mod tests {
         assert!(command.contains("tmux select-window -t 'fleet-alpha:3.7'"));
         assert!(command.contains("tmux select-pane -t 'fleet-alpha:3.7'"));
         assert!(command.ends_with("tmux attach-session -t 'fleet-alpha'"));
+    }
+}
+
+/// The `attention/answer` reply (request id [`ATTENTION_ANSWER_REQ_ID`]) drives
+/// the control-center note: a refusal is painted against the card whose answer
+/// was in flight, a delivery clears it. Goes through `on_daemon_response` so the
+/// id dispatch is under test, not just the note text.
+#[cfg(test)]
+mod answer_verdict_tests {
+    use super::*;
+    use ainb_hangar_proto::events::AttentionRow;
+
+    fn ask_row(id: &str) -> AttentionRow {
+        let payload = serde_json::json!({
+            "kind": "ASK",
+            "context": { "question": "which?", "options": [{ "label": "x" }, { "label": "y" }] }
+        });
+        AttentionRow {
+            id: id.to_string(),
+            session_id: format!("sess-{id}"),
+            cwd: format!("/work/{id}"),
+            workspace_id: None,
+            kind: "ask_user_question".into(),
+            payload: payload.to_string(),
+            degraded: false,
+            created_at: 1,
+            channels: ainb_hangar_proto::ChannelSet::NONE,
+        }
+    }
+
+    fn plugin_with_open_card() -> HangarPlugin {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        p.conn.on_dialed("s1");
+        p.conn.on_subscribe_ack();
+        p.screens.set_attention(&[ask_row("a1")]);
+        p
+    }
+
+    fn answer_reply(result: serde_json::Value) -> RpcResponse {
+        RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ATTENTION_ANSWER_REQ_ID),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn every_non_delivery_verdict_paints_a_note_on_the_selected_card() {
+        let cases = [
+            (
+                serde_json::json!({ "outcome": "ambiguous", "reason": "2 sessions" }),
+                "ambiguous",
+            ),
+            (
+                serde_json::json!({ "outcome": "no_target", "reason": "exited" }),
+                "no live session",
+            ),
+            (
+                serde_json::json!({ "outcome": "delivery_failed", "reason": "tmux gone" }),
+                "row reopened",
+            ),
+            (
+                serde_json::json!({ "outcome": "already_answered", "by": "slack" }),
+                "already answered by slack",
+            ),
+        ];
+        for (result, needle) in cases {
+            let mut p = plugin_with_open_card();
+            p.on_daemon_response(&answer_reply(result.clone()));
+            let note = p
+                .screens
+                .control_center
+                .note()
+                .unwrap_or_else(|| panic!("verdict {result} must leave a note"));
+            assert!(note.contains(needle), "{result} -> {note:?}");
+            // The note belongs to a1: a refresh that keeps a1 keeps it.
+            p.screens.set_attention(&[ask_row("a1")]);
+            assert!(p.screens.control_center.note().is_some());
+            // ...and a refresh where a1 is gone drops it.
+            p.screens.set_attention(&[ask_row("a2")]);
+            assert!(
+                p.screens.control_center.note().is_none(),
+                "{result}: stale note survived"
+            );
+        }
+    }
+
+    /// The note is filed against the card whose answer was SENT, not whichever
+    /// card the cursor sits on when the reply lands: moving to a2 while a1's
+    /// answer is in flight still parks a1's refusal on a1 (and a refresh that
+    /// keeps a1 keeps it).
+    #[test]
+    fn a_verdict_is_filed_against_the_card_that_was_answered() {
+        let mut p = plugin_with_open_card();
+        p.screens.set_attention(&[ask_row("a1"), ask_row("a2")]);
+        // a1's answer went out under wire id -1 (as `answer_attention` records).
+        p.answers_in_flight.insert(-1, "a1".to_string());
+        // Cursor moves on before the reply.
+        p.screens.control_center.select_next();
+        assert_eq!(p.screens.control_center.selected_id(), Some("a2"));
+        let mut reply =
+            answer_reply(serde_json::json!({ "outcome": "no_target", "reason": "exited" }));
+        reply.id = RpcId::Number(-1);
+        p.on_daemon_response(&reply);
+        assert!(p.screens.control_center.note().is_some());
+        p.screens.set_attention(&[ask_row("a2")]);
+        assert!(
+            p.screens.control_center.note().is_none(),
+            "the note belonged to a1: it leaves with a1"
+        );
+        assert!(p.answer_in_flight.is_none(), "consumed by the reply");
+        assert!(p.answers_in_flight.is_empty(), "the wire id is retired");
+    }
+
+    /// Two answers in flight at once each file their own verdict: the replies
+    /// come back under their own wire ids, so a2's refusal is not parked on a1.
+    #[test]
+    fn concurrent_answers_file_their_own_verdicts() {
+        let mut p = plugin_with_open_card();
+        p.screens.set_attention(&[ask_row("a1"), ask_row("a2")]);
+        p.answers_in_flight.insert(-1, "a1".to_string());
+        p.answers_in_flight.insert(-2, "a2".to_string());
+        // a1 delivered (no note), a2 refused: the note must be a2's.
+        let mut ok = answer_reply(serde_json::json!({ "outcome": "delivered", "via": "tmux (s)" }));
+        ok.id = RpcId::Number(-1);
+        p.on_daemon_response(&ok);
+        let mut refused =
+            answer_reply(serde_json::json!({ "outcome": "ambiguous", "reason": "2 sessions" }));
+        refused.id = RpcId::Number(-2);
+        p.on_daemon_response(&refused);
+        assert!(p.screens.control_center.note().is_some());
+        p.screens.set_attention(&[ask_row("a1")]);
+        assert!(
+            p.screens.control_center.note().is_none(),
+            "a2's note left with a2"
+        );
+    }
+
+    #[test]
+    fn a_delivered_verdict_clears_the_note_and_an_rpc_error_sets_one() {
+        let mut p = plugin_with_open_card();
+        p.on_daemon_response(&answer_reply(
+            serde_json::json!({ "outcome": "ambiguous", "reason": "2 sessions" }),
+        ));
+        assert!(p.screens.control_center.note().is_some());
+
+        p.on_daemon_response(&answer_reply(
+            serde_json::json!({ "outcome": "delivered", "via": "tmux (s)" }),
+        ));
+        assert!(
+            p.screens.control_center.note().is_none(),
+            "delivery clears the note"
+        );
+
+        p.on_daemon_response(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ATTENTION_ANSWER_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32000,
+                message: "attention row not found".into(),
+                data: None,
+            }),
+        });
+        assert_eq!(
+            p.screens.control_center.note(),
+            Some("answer failed: attention row not found")
+        );
+    }
+}
+
+/// Crisp B3 §2.4 — the Inbox is the one attention surface, so every key that
+/// answers on the Control Center must answer from `I` too.
+///
+/// Drives the REAL [`Plugin::on_key`], which is where the numbered-tab guard
+/// lives: a test that called `route_key` directly would pass while `2` still
+/// switched tabs on the operator.
+#[cfg(test)]
+mod inbox_attention_key_tests {
+    use super::*;
+    use crate::screen::inbox::InboxFilter;
+    use ainb_hangar_proto::events::AttentionRow;
+
+    fn char_press(ch: char) -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    fn enter_press() -> ainb_plugin_sdk::KeyEvent {
+        ainb_plugin_sdk::KeyEvent {
+            code: KeyCode::Enter,
+            mods: 0,
+            kind: ainb_plugin_sdk::KeyKind::Press,
+        }
+    }
+
+    fn attention_row(id: &str, kind: &str, payload: serde_json::Value) -> AttentionRow {
+        AttentionRow {
+            id: id.to_string(),
+            session_id: format!("sess-{id}"),
+            cwd: format!("/work/{id}"),
+            workspace_id: None,
+            kind: kind.into(),
+            payload: payload.to_string(),
+            degraded: false,
+            created_at: 1,
+            channels: ainb_hangar_proto::ChannelSet::NONE,
+        }
+    }
+
+    /// An answerable ASK with two options, `x` then `y`.
+    fn ask_row(id: &str) -> AttentionRow {
+        attention_row(
+            id,
+            "ask_user_question",
+            serde_json::json!({
+                "kind": "ASK",
+                "context": { "question": "which?", "options": [{ "label": "x" }, { "label": "y" }] }
+            }),
+        )
+    }
+
+    /// An error row: surfaced for visibility, not answerable inline.
+    fn err_row(id: &str) -> AttentionRow {
+        attention_row(
+            id,
+            "error",
+            serde_json::json!({ "kind": "ERR", "context": { "pattern": "boom" } }),
+        )
+    }
+
+    /// A connected plugin sitting on the Inbox with `rows` open.
+    fn plugin_on_inbox(rows: &[AttentionRow]) -> HangarPlugin {
+        let mut p = HangarPlugin::new();
+        p.conn.dialing();
+        p.conn.on_dialed("s1");
+        p.conn.on_subscribe_ack();
+        p.screens.set_attention(rows);
+        p.on_key(&char_press('I'));
+        assert!(
+            matches!(p.app_state().screen, Screen::Inbox),
+            "`I` opens the inbox"
+        );
+        p
+    }
+
+    /// A digit answers the focused ASK from the Inbox rather than switching to
+    /// the numbered tab it normally claims.
+    ///
+    /// MUTATION GUARD: measured. Drop `Screen::Inbox` from the digit guard in
+    /// `on_key` and this fails — the tab router eats the key and no answer is
+    /// raised, so the operator presses `2` and the agent stays blocked. That is
+    /// the regression the Control Center's guard exists for, one screen over.
+    #[test]
+    fn a_digit_answers_the_focused_ask_from_the_inbox() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('2'));
+        assert!(
+            matches!(p.app_state().screen, Screen::Inbox),
+            "answering never navigates away"
+        );
+        let action = p.screens.take_pending_answer_action().expect("`2` answers option two");
+        assert_eq!(action.attention_id, "a1");
+        assert_eq!(action.answer, "y");
+    }
+
+    /// With nothing answerable focused, a digit still navigates: number-key tab
+    /// switching off the Inbox keeps working.
+    #[test]
+    fn a_digit_still_switches_tabs_when_nothing_is_answerable() {
+        let mut p = plugin_on_inbox(&[err_row("e1")]);
+        p.on_key(&char_press('1'));
+        assert!(matches!(p.app_state().screen, Screen::IssueList));
+        assert!(p.screens.take_pending_answer_action().is_none());
+    }
+
+    /// A digit past the last option is never swallowed as an answer.
+    ///
+    /// The intercept is exactly as wide as the answer. Guarding on "an ASK is
+    /// focused" instead ate every digit on the screen operators live in.
+    ///
+    /// This was `an_out_of_range_digit_falls_through_to_the_tab_router`, pressing
+    /// `3` on a two-option ASK and landing on the Skills tab. Crisp B5 demoted
+    /// `3`, and the only router digits left (`1`, `2`) are both IN range on a
+    /// two-option ASK, so "out of range AND a tab key" is no longer a state that
+    /// exists. The other half of the contract — a digit with nothing to answer
+    /// still navigates — is `a_digit_still_switches_tabs_when_nothing_is_answerable`.
+    #[test]
+    fn a_freed_digit_never_answers_an_option_that_does_not_exist() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('3'));
+        assert!(
+            p.screens.take_pending_answer_action().is_none(),
+            "a two-option ASK has no third option"
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Inbox),
+            "`3` is no longer a tab key, so the Inbox keeps the screen, got {:?}",
+            p.app_state().screen
+        );
+    }
+
+    /// `h`/`l` move the option cursor and Enter answers what it sits on — the
+    /// Control Center's reducer, driven from `I`.
+    #[test]
+    fn the_option_cursor_and_enter_answer_from_the_inbox() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('l'));
+        p.on_key(&enter_press());
+        let action = p.screens.take_pending_answer_action().expect("enter answers");
+        assert_eq!(action.attention_id, "a1");
+        assert_eq!(action.answer, "y", "the cursor had moved to option two");
+    }
+
+    /// `r` and `f` stay the Inbox's own keys, and neither raises an answer.
+    #[test]
+    fn r_marks_read_and_f_cycles_the_filter() {
+        let mut p = plugin_on_inbox(&[ask_row("a1")]);
+        p.on_key(&char_press('r'));
+        assert!(p.screens.take_pending_inbox_mark_read(), "`r` marks read");
+        assert_eq!(p.screens.inbox.filter(), InboxFilter::All);
+        p.on_key(&char_press('f'));
+        assert_eq!(p.screens.inbox.filter(), InboxFilter::Asks, "`f` cycles");
+        assert!(
+            p.screens.take_pending_answer_action().is_none(),
+            "neither key answers anything"
+        );
     }
 }

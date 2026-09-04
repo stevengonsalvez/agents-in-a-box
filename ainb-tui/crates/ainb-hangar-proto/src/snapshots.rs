@@ -1622,6 +1622,15 @@ pub struct AgentCreateParams {
     /// advertised default (`claude`). Recorded on the agent row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Optional task EXECUTOR (`process`/`acp`); absent = the daemon's own
+    /// `HANGAR_TASK_EXECUTOR` (migration 0095).
+    ///
+    /// The other half of `provider`, not a variant of it: `provider` names which
+    /// agent CLI does the work, this names whether that work runs as a provider
+    /// subprocess or as one turn on an ACP adapter. Append-only field: an old
+    /// client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_executor: Option<String>,
     /// Optional free-form system prompt / instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -2755,21 +2764,62 @@ pub struct BoardCardReorderParams {
     pub issue_ids: Vec<String>,
 }
 
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_TIMELINE`] (tcp T3 / F6): the
+/// issue whose newest run transcript to read.
+///
+/// `board_id` is OPTIONAL (crisp B1): the Boards overlay sends it and the daemon
+/// checks the issue is a card on that board; the task-detail screen omits it so
+/// an issue that was never placed on a board can still backfill its transcript.
+/// The workspace tenant guard applies either way. Additive: an older caller's
+/// `{ workspace_id, board_id, issue_id, column_id }` still decodes (`column_id`
+/// is ignored as before).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardTimelineParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the issue must be a card on, or `None` to skip that check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<String>,
+    /// The issue whose newest run's transcript to read.
+    pub issue_id: String,
+}
+
+/// One classified transcript line: the unit both the durable read and the live
+/// [`crate::events::HangarEvent::TaskMessage`] stream carry.
+///
+/// Identical by construction, not by discipline: both are produced by
+/// [`crate::transcript`], so a line appended live and its later re-read twin
+/// are byte-for-byte the same entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TranscriptLine {
+    /// Which of the 5 transcript lanes this line paints in.
+    pub kind: crate::events::MessageKind,
+    /// The line's rendered text, already classified and capped.
+    pub body: String,
+}
+
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_TIMELINE`] (tcp T3 / F6): the
-/// card's latest run transcript, raw, for the plugin to parse + render.
+/// card's latest run transcript, CLASSIFIED, for the plugin to render.
+///
+/// Classified daemon-side (track A step A6) rather than shipped raw, because
+/// the two executors keep different durable transcripts — the process one tees
+/// stream-json to `{logs}/<provider>.jsonl`, the ACP one writes
+/// `fleet_provider_event` rows — and a client that parsed the raw form could
+/// only ever read the first. One read, one taxonomy, both executors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BoardCardTimelineResult {
     /// The task whose transcript this is, or `None` when the card never ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    /// The provider whose log was read (`claude` / `codex`), or `None` when no log
-    /// exists yet.
+    /// The provider the run used (`claude` / `codex` / an ACP adapter token), or
+    /// `None` when no transcript exists yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// The RAW provider stream-json (a bounded tail of `claude.jsonl` /
-    /// `codex.jsonl`). Empty when the card never ran or the log is gone — the
-    /// plugin renders "no transcript yet", never an error.
-    pub jsonl: String,
+    /// The run's transcript in stream order. Empty when the card never ran or
+    /// the record is gone — the plugin renders "no transcript yet", never an
+    /// error.
+    #[serde(default)]
+    pub entries: Vec<TranscriptLine>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_ASSIGN_SQUAD`] (tcp T4 / F7):
@@ -4458,6 +4508,7 @@ mod tests {
             workspace_id: Some("ws-1".into()),
             name: "reviewer".into(),
             provider: Some("codex".into()),
+            task_executor: Some("acp".into()),
             instructions: Some("be terse".into()),
             model: Some("gpt-5-codex".into()),
             token_budget: Some(250_000),
@@ -4473,6 +4524,9 @@ mod tests {
         assert_eq!(minimal.name, "claude");
         assert!(minimal.workspace_id.is_none());
         assert!(minimal.provider.is_none());
+        // Migration-0095's executor override: a payload written before it existed
+        // carries no key and still deserializes as "no override" (append-only).
+        assert!(minimal.task_executor.is_none());
         assert!(minimal.instructions.is_none());
         assert!(minimal.model.is_none());
         // Migration-0050 metadata: a PRE-0050 payload carries none of these keys

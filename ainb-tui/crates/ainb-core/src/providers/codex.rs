@@ -1,6 +1,6 @@
 //! Built-in `codex` provider — OpenAI Codex CLI.
 
-use super::Provider;
+use super::{AtcControl, Provider};
 
 #[derive(Debug, Default)]
 pub struct CodexProvider;
@@ -23,5 +23,12 @@ impl Provider for CodexProvider {
     }
     fn install_docs_url(&self) -> &'static str {
         "https://github.com/openai/codex"
+    }
+    /// Codex hosts a resident tmux session the same way Claude does and takes the
+    /// same `fleet send` injection, so full mode is real for it. It reads
+    /// `AGENTS.md`, not `CLAUDE.md` — rendering the policy under the wrong name
+    /// would give a brain that boots and then ignores its playbook.
+    fn atc_control(&self) -> AtcControl {
+        AtcControl::supported("AGENTS.md")
     }
 }

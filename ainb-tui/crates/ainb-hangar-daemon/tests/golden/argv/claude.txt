@@ -63,6 +63,8 @@ argv:
 program: <CLAUDE_BIN>
 argv:
   --dangerously-skip-permissions
+  --settings
+  {"skipDangerousModePermissionPrompt":true}
   --
   <PROMPT>
 
@@ -70,6 +72,8 @@ argv:
 program: <CLAUDE_BIN>
 argv:
   --dangerously-skip-permissions
+  --settings
+  {"skipDangerousModePermissionPrompt":true}
   --extra-flag
   --extra-key=extra-value
   --
@@ -79,6 +83,8 @@ argv:
 program: <CLAUDE_BIN>
 argv:
   --dangerously-skip-permissions
+  --settings
+  {"skipDangerousModePermissionPrompt":true}
   --model
   pinned-model-id
   --
@@ -88,6 +94,8 @@ argv:
 program: <CLAUDE_BIN>
 argv:
   --dangerously-skip-permissions
+  --settings
+  {"skipDangerousModePermissionPrompt":true}
   --model
   pinned-model-id
   --extra-flag

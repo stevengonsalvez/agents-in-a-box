@@ -64,6 +64,27 @@
 //!   parallel tool calls blocks on several at once, and `parked` (not
 //!   `fleet_session.current_request_fingerprint`, which has room for one) is
 //!   what says which are live.
+//!
+//! # A TASK session also streams live (track A step A5's live half)
+//!
+//! A session whose scope is `task:<id>` publishes every transcript row it
+//! commits as a `HangarEvent::TaskMessage` as well, through the same
+//! [`crate::runner::RunStream`] the process executor publishes with and the same
+//! [`AcpClassifier`] the durable `board_card_timeline` read classifies with. A
+//! chat session publishes nothing: it has no task to name, and its transcript
+//! has its own stream. [`bind_task_stream`] is the whole discriminator.
+//!
+//! **Live is published BEFORE the durable commit, and that is a real
+//! asymmetry, not a detail.** The writer buffers and commits on a cadence, so
+//! publishing after it would hold the operator's view back by up to a flush
+//! interval. The cost is that [`StoreWriter`] may later DROP a buffered row
+//! under memory pressure (minting an `acp.transcript_truncated` marker in its
+//! place), and that row was already streamed: in that window the live view
+//! carries a line the durable re-read does not. The process executor has no
+//! equivalent, because its tee to disk is unconditional and happens first. So
+//! "live equals durable" holds for any run whose transcript buffer does not
+//! overflow, which is the same shape as the qualification the 512 KiB tail
+//! already puts on the other end of that equality.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -88,35 +109,128 @@ use ainb_hangar_store::repo::fleet_acp_session::{
     FleetAcpSessionRepo, FleetAcpSessionRow, TurnEnd, TurnEndOutcome,
 };
 use ainb_hangar_store::repo::fleet_message::{FleetMessageRepo, NewFleetMessage};
-use ainb_hangar_store::repo::fleet_provider_event::{
-    FleetProviderEventRepo, NewFleetProviderEvent,
-};
+use ainb_hangar_store::repo::fleet_provider_event::NewFleetProviderEvent;
 use sqlx::SqlitePool;
 use tokio::sync::{Semaphore, mpsc, oneshot};
+
+use crate::acp_transcript::TranscriptSink;
 use tracing::Instrument as _;
 
 // ------------------------------------------------------------ detail taxonomy
 
+/// The enumerated delivery-detail vocabulary, as a TYPE.
+///
+/// The `DELIVERY_*` constants below are its wire spellings and are derived from
+/// it, so the two cannot drift. It exists as an enum for one reason: every
+/// reader of this taxonomy matches on it exhaustively, so adding a token here
+/// without deciding what it means for a task run is a COMPILE ERROR rather than
+/// a silent fall-through. The reader that matters is
+/// [`crate::acp_task::outcome_for`], which decides whether a task finalizes
+/// `done`, `failed` or `cancelled` and whether it is retried; the previous
+/// hand-written token list let a new token reach it as contract drift, and its
+/// own regression test could not see the gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryToken {
+    /// See [`DELIVERY_QUEUE_FULL`].
+    QueueFull,
+    /// See [`DELIVERY_BREAKER_OPEN`].
+    BreakerOpen,
+    /// See [`DELIVERY_ADAPTER_EXIT`].
+    AdapterExit,
+    /// See [`DELIVERY_OPERATOR_STOP`].
+    OperatorStop,
+    /// See [`DELIVERY_TURN_DEADLINE`].
+    TurnDeadline,
+    /// See [`DELIVERY_DAEMON_RESTART`].
+    DaemonRestart,
+    /// See [`DELIVERY_SPAWN_FAILED`].
+    SpawnFailed,
+    /// See [`DELIVERY_TURN_FAILED`].
+    TurnFailed,
+    /// See [`DELIVERY_TURN_UNRECORDED`].
+    TurnUnrecorded,
+    /// See [`DELIVERY_SESSION_GONE`].
+    SessionGone,
+    /// See [`DELIVERY_PROVIDER_AT_CAPACITY`].
+    ProviderAtCapacity,
+    /// See [`DELIVERY_MODE_UNPROVEN`].
+    ModeUnproven,
+    /// See [`DELIVERY_TASK_SCOPE_REFUSED`].
+    TaskScopeRefused,
+}
+
+impl DeliveryToken {
+    /// Every variant, so a test enumerating the vocabulary reads it from here
+    /// instead of a hand-written list that falls behind in silence.
+    ///
+    /// ponytail: a variant added to the enum but not to this array degrades to
+    /// "unparsed", which fails closed as contract drift; the exhaustive
+    /// [`Self::as_str`] and the exhaustive match in `acp_task` are what force
+    /// the author to decide its meaning.
+    pub const ALL: &'static [Self] = &[
+        Self::QueueFull,
+        Self::BreakerOpen,
+        Self::AdapterExit,
+        Self::OperatorStop,
+        Self::TurnDeadline,
+        Self::DaemonRestart,
+        Self::SpawnFailed,
+        Self::TurnFailed,
+        Self::TurnUnrecorded,
+        Self::SessionGone,
+        Self::ProviderAtCapacity,
+        Self::ModeUnproven,
+        Self::TaskScopeRefused,
+    ];
+
+    /// The wire spelling persisted in `fleet_message_delivery.detail`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueueFull => "queue_full",
+            Self::BreakerOpen => "breaker_open",
+            Self::AdapterExit => "adapter_exit",
+            Self::OperatorStop => "operator_stop",
+            Self::TurnDeadline => "turn_deadline",
+            Self::DaemonRestart => "daemon_restart",
+            Self::SpawnFailed => "spawn_failed",
+            Self::TurnFailed => "turn_failed",
+            Self::TurnUnrecorded => "turn_unrecorded",
+            Self::SessionGone => "session_gone",
+            Self::ProviderAtCapacity => "provider_at_capacity",
+            Self::ModeUnproven => "mode_unproven",
+            Self::TaskScopeRefused => "task_scope_refused",
+        }
+    }
+
+    /// The token `raw` names, or `None` when it is not one of ours (free error
+    /// text, a `resume=`/`stop=` pair, or a spelling this build does not know).
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|token| token.as_str() == raw)
+    }
+}
+
 /// The per-scope FIFO was full; the prompt was never accepted.
-pub const DELIVERY_QUEUE_FULL: &str = "queue_full";
+pub const DELIVERY_QUEUE_FULL: &str = DeliveryToken::QueueFull.as_str();
 /// The provider's breaker is open; every scope routed there fails fast.
-pub const DELIVERY_BREAKER_OPEN: &str = "breaker_open";
+pub const DELIVERY_BREAKER_OPEN: &str = DeliveryToken::BreakerOpen.as_str();
 /// The adapter process went away (crash or kill).
-pub const DELIVERY_ADAPTER_EXIT: &str = "adapter_exit";
+pub const DELIVERY_ADAPTER_EXIT: &str = DeliveryToken::AdapterExit.as_str();
 /// An operator stopped the session while the adapter was alive.
 ///
 /// DISTINCT from [`DELIVERY_ADAPTER_EXIT`] on purpose: the runbook's first
 /// question is "did the adapter exit", and answering it `yes` for a warm
 /// process would inflate every crash count by every operator interrupt.
-pub const DELIVERY_OPERATOR_STOP: &str = "operator_stop";
+pub const DELIVERY_OPERATOR_STOP: &str = DeliveryToken::OperatorStop.as_str();
 /// The turn outlived its wall-clock deadline and was cancelled.
-pub const DELIVERY_TURN_DEADLINE: &str = "turn_deadline";
+pub const DELIVERY_TURN_DEADLINE: &str = DeliveryToken::TurnDeadline.as_str();
 /// Convergence ran at boot: the daemon that owned this turn is gone.
-pub const DELIVERY_DAEMON_RESTART: &str = "daemon_restart";
+pub const DELIVERY_DAEMON_RESTART: &str = DeliveryToken::DaemonRestart.as_str();
 /// The adapter could not be started at all.
-pub const DELIVERY_SPAWN_FAILED: &str = "spawn_failed";
+pub const DELIVERY_SPAWN_FAILED: &str = DeliveryToken::SpawnFailed.as_str();
 /// The turn ended with an adapter-reported failure (refusal, cancel).
-pub const DELIVERY_TURN_FAILED: &str = "turn_failed";
+pub const DELIVERY_TURN_FAILED: &str = DeliveryToken::TurnFailed.as_str();
 /// The turn could not be RECORDED, so it was never issued (I16).
 ///
 /// Both convergence paths key off the persisted `open_turn_id`: the deadline
@@ -125,20 +239,37 @@ pub const DELIVERY_TURN_FAILED: &str = "turn_failed";
 /// failed would be invisible to both, so a hung adapter would never be swept
 /// and a dying one would resolve the leg with no marker. Nothing reached the
 /// adapter, so FAILED is honest and an operator can resend.
-pub const DELIVERY_TURN_UNRECORDED: &str = "turn_unrecorded";
+pub const DELIVERY_TURN_UNRECORDED: &str = DeliveryToken::TurnUnrecorded.as_str();
 /// The recipient exists but its session row is gone or dead.
-pub const DELIVERY_SESSION_GONE: &str = "session_gone";
+pub const DELIVERY_SESSION_GONE: &str = DeliveryToken::SessionGone.as_str();
 /// The provider's process is at its session cap and every tenant is busy.
 ///
 /// Terminal, never requeued: the cap is a standing ceiling, not a transient
 /// fault, and a retry that ignored it would put the process one tenant over the
 /// maximum an operator configured. An operator resends once a turn ends.
-pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = "provider_at_capacity";
+pub const DELIVERY_PROVIDER_AT_CAPACITY: &str = DeliveryToken::ProviderAtCapacity.as_str();
 /// The pinned permission mode could not be proven for the session (I13).
 ///
 /// Terminal, never requeued: retrying an adapter that will not hold the mode
 /// just drives the same session in the wrong permission regime a second time.
-pub const DELIVERY_MODE_UNPROVEN: &str = "mode_unproven";
+pub const DELIVERY_MODE_UNPROVEN: &str = DeliveryToken::ModeUnproven.as_str();
+/// A CHAT prompt targeted a TASK's session ([`AcpPool::submit_prompt`]).
+///
+/// Terminal: the session belongs to a run, and there is no version of the
+/// request that becomes valid later. See `submit_prompt` for why the refusal
+/// lives at the pool rather than at each RPC door.
+pub const DELIVERY_TASK_SCOPE_REFUSED: &str = DeliveryToken::TaskScopeRefused.as_str();
+/// Prefix of the token a leg carries when the turn stopped for a reason worth
+/// naming: `stop=<reason>`, in the ACP wire spelling ([`stop_reason_token`]),
+/// so `stop=max_tokens`, `stop=max_turn_requests`, `stop=refusal`.
+///
+/// ABSENT on a DELIVERED leg means the ordinary `EndTurn`, the same way an
+/// absent [`RESUME_LOADED`] on the same leg means the context never had to be
+/// rebuilt: `DELIVERED` already says the agent finished, so a token on every
+/// turn would put a non-event in front of the operator, and in front of the
+/// `resume=` half they do need on a narrow pane. A FAILED turn carries its
+/// reason after [`DELIVERY_TURN_FAILED`] instead.
+pub const DELIVERY_STOP_PREFIX: &str = "stop=";
 
 /// The resume path fingerprint carried on the next delivery's receipt detail
 /// and in the `acp.context_rebuilt` marker: the adapter still had the session.
@@ -219,11 +350,23 @@ fn acp_adapters_from_config() -> std::collections::HashMap<String, AcpAdapterTom
     })
 }
 
+/// How often the deadline/idle sweep runs on a production daemon, and the
+/// CEILING [`PoolConfig::set_turn_deadline`] recouples against.
+pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Floor on the recoupled sweep cadence.
+///
+/// A test that pins a 100 ms deadline must not turn the sweep into a spin loop
+/// on the store; the sweep's own read is indexed but it is still a read.
+const MIN_SWEEP_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Pool tuning. Every knob the plan names, with its documented default.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
-    /// The adapter registry: token to spawn recipe. A provider absent here
-    /// cannot be created by `fleet/acp_session_create`.
+    /// The adapter registry the pool STARTS with: token to spawn recipe. The
+    /// live registry ([`AcpPool::register_adapter`]) grows past this at
+    /// runtime; a provider in neither cannot be created by
+    /// `fleet/acp_session_create`.
     pub adapters: HashMap<String, AdapterConfig>,
     /// Sessions multiplexed on ONE provider process before the LRU evicts.
     ///
@@ -267,7 +410,7 @@ impl Default for PoolConfig {
             queue_depth: 32,
             process_idle_window: Duration::from_mins(10),
             turn_deadline: Duration::from_mins(30),
-            sweep_interval: Duration::from_secs(15),
+            sweep_interval: DEFAULT_SWEEP_INTERVAL,
             writer: WriterConfig::default(),
             circuit: CircuitConfig::default(),
         }
@@ -280,10 +423,7 @@ impl PoolConfig {
     ///
     /// The 30-minute default is right for a human waiting on a real adapter and
     /// useless to a smoke run that has to PROVE the deadline converges a wedged
-    /// turn (`scripts/chat-bus-smoke.sh`, journey `j5b`). The sweep interval
-    /// follows the deadline down, because a 15 s sweep cannot observe a 2 s
-    /// deadline promptly; it is never lengthened, so the production cadence is
-    /// untouched when the variable is unset or junk.
+    /// turn (`scripts/chat-bus-smoke.sh`, journey `j5b`).
     #[must_use]
     pub fn from_env() -> Self {
         let mut config = Self::from_config();
@@ -292,12 +432,28 @@ impl PoolConfig {
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|ms| *ms > 0)
         {
-            config.turn_deadline = Duration::from_millis(ms);
-            config.sweep_interval = config
-                .sweep_interval
-                .min(Duration::from_millis(ms / 2).max(Duration::from_millis(100)));
+            config.set_turn_deadline(Duration::from_millis(ms));
         }
         config
+    }
+
+    /// Pin the turn deadline, and recouple the sweep cadence to it.
+    ///
+    /// The ONE way to move the deadline, because moving it alone is a bug the
+    /// two callers found in opposite directions. A sweep cannot observe a
+    /// deadline shorter than its own period, so the cadence follows the
+    /// deadline DOWN; and it is never lengthened past
+    /// [`DEFAULT_SWEEP_INTERVAL`], so production cadence is untouched.
+    ///
+    /// Recoupling matters because the deadline is set TWICE on a task-executor
+    /// daemon: `AINB_ACP_TURN_DEADLINE_MS` sets it here, then
+    /// `HANGAR_TASK_EXECUTOR=acp` raises it to the task runtime budget
+    /// (`ainb_hangar_daemon::run`). While each site did its own coupling
+    /// arithmetic, the raise left the cadence pinned to the value it REPLACED —
+    /// a 1 s sweep chasing a 2.5 h deadline it can never match.
+    pub fn set_turn_deadline(&mut self, deadline: Duration) {
+        self.turn_deadline = deadline;
+        self.sweep_interval = DEFAULT_SWEEP_INTERVAL.min((deadline / 2).max(MIN_SWEEP_INTERVAL));
     }
 
     /// [`PoolConfig::default`] with `[acp.adapters.*]` from the host config
@@ -348,21 +504,6 @@ impl PoolConfig {
             }
         }
         config
-    }
-
-    /// The pinned permission mode for `provider`, or `default`.
-    #[must_use]
-    pub fn permission_mode(&self, provider: &str) -> String {
-        self.adapters.get(provider).map_or_else(
-            || "default".to_string(),
-            |config| config.permission_mode.clone(),
-        )
-    }
-
-    /// Whether the registry knows how to spawn `provider`.
-    #[must_use]
-    pub fn knows(&self, provider: &str) -> bool {
-        self.adapters.contains_key(provider)
     }
 }
 
@@ -569,6 +710,11 @@ pub struct AcpPool {
     store: Store,
     events: crate::events::EventSink,
     config: PoolConfig,
+    /// The LIVE adapter registry: seeded from [`PoolConfig::adapters`], grown
+    /// by [`AcpPool::register_adapter`] and shrunk by
+    /// [`AcpPool::unregister_adapter`]. Keyed by the same string as
+    /// `providers`, so one key is one spawn recipe AND at most one process.
+    adapters: StdMutex<HashMap<String, AdapterConfig>>,
     providers: tokio::sync::Mutex<HashMap<String, Arc<ProviderProcess>>>,
     /// One spawn at a time per provider, held INSTEAD of the `providers` map
     /// lock: `AdapterProcess::spawn` runs initialize plus the mode assertion and
@@ -592,6 +738,7 @@ impl AcpPool {
         Arc::new(Self {
             store,
             events,
+            adapters: StdMutex::new(config.adapters.clone()),
             config,
             providers: tokio::sync::Mutex::new(HashMap::new()),
             spawn_locks: StdMutex::new(HashMap::new()),
@@ -603,21 +750,189 @@ impl AcpPool {
         })
     }
 
-    /// The adapter registry this pool validates `fleet/acp_session_create`
-    /// against.
+    /// The tuning this pool was built with. Its `adapters` is the SEED; ask
+    /// [`AcpPool::knows`] and [`AcpPool::permission_mode`] about the live
+    /// registry.
     #[must_use]
     pub const fn config(&self) -> &PoolConfig {
         &self.config
     }
 
-    /// Hand one prompt to the recipient's OWN session (never a broadcast
+    /// Whether the live registry knows how to spawn `provider`.
+    ///
+    /// Panics on a poisoned registry rather than answering `false`, which
+    /// [`AcpPool::provider_process`] would report as "provider is not in the
+    /// adapter registry": a lie about which thing broke, now that this gates
+    /// the spawn.
+    #[must_use]
+    pub fn knows(&self, provider: &str) -> bool {
+        self.adapters.lock().expect("adapter registry").contains_key(provider)
+    }
+
+    /// Every adapter in the live registry that names a CHAT engine, sorted.
+    ///
+    /// Per-task keys (`<base>#task:<id>`) are excluded: they are one confined
+    /// recipe for one task's own child, so offering one in an engine picker
+    /// would point a chat session at another task's sandbox.
+    #[must_use]
+    pub fn chat_adapters(&self) -> Vec<(String, AdapterConfig)> {
+        let mut adapters: Vec<(String, AdapterConfig)> = self
+            .adapters
+            .lock()
+            .map(|adapters| {
+                adapters
+                    .iter()
+                    .filter(|(key, _)| !key.contains("#task:"))
+                    .map(|(key, config)| (key.clone(), config.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        adapters.sort_by(|left, right| left.0.cmp(&right.0));
+        adapters
+    }
+
+    /// The pinned permission mode for `provider`, or `default`.
+    #[must_use]
+    pub fn permission_mode(&self, provider: &str) -> String {
+        self.adapters
+            .lock()
+            .ok()
+            .and_then(|adapters| {
+                adapters.get(provider).map(|config| config.permission_mode.clone())
+            })
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// Add `adapter` to the live registry under `key`, so a session whose
+    /// `provider` is `key` spawns from THIS recipe on its first prompt.
+    ///
+    /// This is how a task gets its own adapter process: register under a
+    /// synthetic key (`claude-agent-acp#task:<id>`) whose recipe carries the
+    /// task's command wrapper, environment and permission mode, and the pool's
+    /// one-process-per-key rule does the isolation. Replaces an existing entry;
+    /// a process already running under `key` keeps the recipe it was spawned
+    /// with until it stops.
+    pub fn register_adapter(&self, key: impl Into<String>, adapter: AdapterConfig) {
+        self.adapters.lock().expect("adapter registry").insert(key.into(), adapter);
+    }
+
+    /// Remove `key` from the live registry and stop its process, if one is
+    /// running. Returns whether `key` was registered.
+    ///
+    /// The registry entry goes FIRST, and only then does this take the key's
+    /// spawn gate. That order is the whole proof, and the other one is a race.
+    ///
+    /// A spawn reads the recipe ([`AcpPool::adapter_config`]) inside the gate,
+    /// so by then it has already published its gate in `spawn_locks`. Order
+    /// that recipe read against the `adapters` removal below, the two being
+    /// mutations of one mutex-guarded map and so totally ordered:
+    ///
+    /// * recipe read FIRST: its gate was published even earlier, therefore
+    ///   before the removal, therefore before the `spawn_locks` read here, so
+    ///   this call sees that gate and blocks on it until the spawn has put its
+    ///   process in `providers`, where `stop_process` below then kills it;
+    /// * removal FIRST: the recipe read finds nothing and the spawn refuses.
+    ///
+    /// Either way no process exists under an unregistered key once this
+    /// returns. Read `spawn_locks` before removing the registry entry and the
+    /// second case gains a third leg (gate not yet published, recipe read still
+    /// wins the race), which leaves a live process under the removed key that
+    /// `provider_process` keeps serving, because `live_process` runs before its
+    /// `knows` check.
+    ///
+    /// NOT claimed: "exactly one spawn per key across an unregister then a
+    /// re-register". A spawn parked between publishing its gate and taking it
+    /// holds a stale `Arc` while a re-registered spawn mints a fresh gate, so
+    /// the two do not serialise. Closing that needs a generation counter, which
+    /// is a different claim and has no caller yet.
+    ///
+    /// The stop is INTENTIONAL, exactly like the idle sweep's: it neither counts
+    /// on the breaker nor leaves a phantom `exited` row on the health pane, and
+    /// the breaker entry goes with it so a fleet of short-lived task keys does
+    /// not accrete bookkeeping. Sessions hosted on the process converge through
+    /// the ordinary exit path.
+    pub async fn unregister_adapter(&self, key: &str) -> bool {
+        let was_registered = self.adapters.lock().expect("adapter registry").remove(key).is_some();
+        let gate = self.spawn_locks.lock().expect("spawn lock map").get(key).map(Arc::clone);
+        let _held = match gate.as_ref() {
+            Some(gate) => Some(gate.lock().await),
+            None => None,
+        };
+        self.spawn_locks.lock().expect("spawn lock map").remove(key);
+        if let Ok(mut circuits) = self.circuits.lock() {
+            circuits.remove(key);
+        }
+        if self.stop_process(key).await {
+            tracing::info!(provider = %key, "stopped the adapter process of an unregistered key");
+        }
+        was_registered
+    }
+
+    /// Stop the process under `key` on purpose: drop it from `providers`, mark
+    /// it so its exit is not counted as a crash, and kill it. `false` when
+    /// there was none.
+    async fn stop_process(&self, key: &str) -> bool {
+        let process = self.providers.lock().await.remove(key);
+        if let Some(process) = process {
+            process.stopping.store(true, Ordering::Relaxed);
+            process.process.kill();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Hand one CHAT prompt to the recipient's OWN session (never a broadcast
     /// scope's, which owns no session). The delivery stays PENDING; the actor
     /// resolves it at turn end.
+    ///
+    /// REFUSES a session whose scope is a task run's
+    /// ([`crate::acp_task::TASK_SCOPE_PREFIX`]), because a task's session is not
+    /// a chat surface: its turns are the run, and a prompt injected into one is
+    /// bounded by nothing an operator can see — `acp_task`'s own poll only
+    /// watches the leg IT submitted, and the pool's deadline sweep deliberately
+    /// exempts task scopes.
+    ///
+    /// The refusal lives HERE, not at each RPC door, for two reasons. This
+    /// function already reads the session row, so the scope costs no extra
+    /// query; and it is the single choke point every prompt to an existing
+    /// session passes through, so a door added later is refused by default
+    /// rather than by remembering. `fleet/acp_session_create` guards the
+    /// creation door with the same constant; `fleet/message_send` and
+    /// `fleet/action` are guarded by this one.
+    ///
+    /// The task executor prompts its own session through
+    /// [`Self::submit_task_prompt`].
     pub async fn submit_prompt(
         self: &Arc<Self>,
         session_key: &str,
         message_id: &str,
         text: &str,
+    ) -> SubmitOutcome {
+        self.submit(session_key, message_id, text, false).await
+    }
+
+    /// [`Self::submit_prompt`] for the run that OWNS a `task:` session.
+    ///
+    /// The one caller is [`crate::acp_task::run_acp`], which submits the brief
+    /// of the task whose scope it is. Named apart from `submit_prompt` so the
+    /// exemption is a deliberate act at one call site instead of a flag every
+    /// chat door could pass by accident.
+    pub async fn submit_task_prompt(
+        self: &Arc<Self>,
+        session_key: &str,
+        message_id: &str,
+        text: &str,
+    ) -> SubmitOutcome {
+        self.submit(session_key, message_id, text, true).await
+    }
+
+    async fn submit(
+        self: &Arc<Self>,
+        session_key: &str,
+        message_id: &str,
+        text: &str,
+        task_run: bool,
     ) -> SubmitOutcome {
         let row = match FleetAcpSessionRepo::get(self.store.pool(), session_key).await {
             Ok(Some(row)) if row.state != "DEAD" => row,
@@ -627,6 +942,16 @@ impl AcpPool {
                 return SubmitOutcome::Rejected(DELIVERY_SESSION_GONE);
             }
         };
+        // One reader for the convention, shared with the create door and the
+        // deadline sweep, so no site can be the lenient one.
+        if !task_run && crate::acp_task::is_task_scope(&row.scope_key) {
+            tracing::warn!(
+                %session_key,
+                scope_key = %row.scope_key,
+                "refused a chat prompt aimed at a task's acp session"
+            );
+            return SubmitOutcome::Rejected(DELIVERY_TASK_SCOPE_REFUSED);
+        }
         // The breaker is consulted BEFORE the queue: a provider that is
         // crash-looping must fail every scope routed to it fast, not fill 32
         // queue slots per scope with prompts that will fail anyway.
@@ -890,6 +1215,19 @@ impl AcpPool {
     }
 
     /// One sweep pass: expire overdue turns, then stop idle processes.
+    ///
+    /// TASK-scoped sessions are exempt. A task turn already carries its own
+    /// bound — [`crate::acp_task`]'s poll gives up at
+    /// `HANGAR_PROVIDER_MAX_RUNTIME_MS`, cancels the turn and writes the SAME
+    /// `(UNKNOWN, turn_deadline)` pair this sweep would have — so applying the
+    /// pool's chat-shaped deadline on top can only ever CUT a run short, by
+    /// default 5x (30 min against a 2.5 h budget). That cut used to be papered
+    /// over at boot by raising the whole pool's deadline whenever
+    /// `HANGAR_TASK_EXECUTOR=acp`, which A8 makes unworkable (an agent selects
+    /// the executor per task, so the flag no longer says whether task turns ride
+    /// this pool) and which charged every CHAT turn on the daemon for it.
+    /// Exempting the scope that owns its own deadline is the same fix without
+    /// the collateral.
     pub async fn sweep_once(&self) {
         let deadline_ms = i64::try_from(self.config.turn_deadline.as_millis()).unwrap_or(i64::MAX);
         let cutoff = SystemClock.now_ms().saturating_sub(deadline_ms);
@@ -897,6 +1235,9 @@ impl AcpPool {
             .await
             .unwrap_or_default();
         for row in overdue {
+            if crate::acp_task::is_task_scope(&row.scope_key) {
+                continue;
+            }
             tracing::warn!(
                 session_key = %row.session_key,
                 turn_id = ?row.open_turn_id,
@@ -930,18 +1271,12 @@ impl AcpPool {
                 .collect()
         };
         for provider in expired {
-            let process = {
-                let mut providers = self.providers.lock().await;
-                providers.remove(&provider)
-            };
-            if let Some(process) = process {
+            if self.stop_process(&provider).await {
                 tracing::info!(
                     %provider,
                     idle_window_secs = self.config.process_idle_window.as_secs(),
-                    "stopping an acp adapter process that has been idle for its whole window"
+                    "stopped an acp adapter process that had been idle for its whole window"
                 );
-                process.stopping.store(true, Ordering::Relaxed);
-                process.process.kill();
             }
         }
     }
@@ -1006,6 +1341,16 @@ impl AcpPool {
         }
     }
 
+    /// The spawn recipe for `provider` from the live registry.
+    fn adapter_config(&self, provider: &str) -> Result<AdapterConfig, AcpError> {
+        self.adapters
+            .lock()
+            .expect("adapter registry")
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| not_in_registry(provider))
+    }
+
     /// The live process for `provider`, or `None` when there is none.
     async fn live_process(&self, provider: &str) -> Option<Arc<ProviderProcess>> {
         let mut providers = self.providers.lock().await;
@@ -1038,6 +1383,12 @@ impl AcpPool {
         if let Some(existing) = self.live_process(provider).await {
             return Ok(existing);
         }
+        // The registry BEFORE the gate: an unknown key must not mint a spawn
+        // lock, or every prompt against a key `unregister_adapter` already
+        // cleaned up would put its entry straight back.
+        if !self.knows(provider) {
+            return Err(not_in_registry(provider));
+        }
         let gate = {
             let mut locks = self.spawn_locks.lock().expect("spawn lock map");
             Arc::clone(
@@ -1047,18 +1398,13 @@ impl AcpPool {
             )
         };
         let _spawning = gate.lock().await;
-        // Another caller may have spawned it while we waited on the gate.
+        // Another caller may have spawned it while we waited on the gate, or an
+        // `unregister_adapter` that held the gate may have taken the key out of
+        // the registry, which is why the recipe is read HERE and not above.
         if let Some(existing) = self.live_process(provider).await {
             return Ok(existing);
         }
-        let config =
-            self.config.adapters.get(provider).cloned().ok_or_else(|| AcpError::Spawn {
-                adapter: provider.to_string(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "provider is not in the adapter registry",
-                ),
-            })?;
+        let config = self.adapter_config(provider)?;
         let span = tracing::info_span!(
             "acp.spawn",
             provider = %provider,
@@ -1228,13 +1574,13 @@ impl AcpPool {
             scope_key: row.scope_key.clone(),
             provider: row.provider.clone(),
             cwd: row.cwd.clone(),
-            writer: StoreWriter::new(
+            sink: TranscriptSink::new(StoreWriter::new(
                 self.store.clone(),
                 row.provider.clone(),
                 row.session_key.clone(),
                 Box::new(SystemIdGen),
                 self.pool_writer_config(),
-            ),
+            )),
             reducer: TranscriptReducer::new(String::new()),
             acp_session_id: None,
             process: None,
@@ -1403,7 +1749,10 @@ pub async fn converge_dirty_session(
         };
         // A deterministic event_id makes the SECOND convergence of the same
         // turn a no-op insert rather than a duplicate marker.
-        match FleetProviderEventRepo::append(pool, &marker).await {
+        // Appended AND published as one operation: this row never touches a
+        // StoreWriter, so nothing else would make it stream.
+        match crate::acp_transcript::append_and_publish(pool, events, &row.scope_key, &marker).await
+        {
             Ok(stored) => events.emit_transcript_order(session_key, stored.ingest_order),
             Err(error) => tracing::error!(
                 %session_key,
@@ -1534,7 +1883,9 @@ struct SessionActor {
     scope_key: String,
     provider: String,
     cwd: String,
-    writer: StoreWriter,
+    /// This session's transcript, live and durable. See [`TranscriptSink`] for
+    /// why the store writer is not reachable from here directly.
+    sink: TranscriptSink,
     reducer: TranscriptReducer,
     acp_session_id: Option<String>,
     process: Option<Arc<ProviderProcess>>,
@@ -1560,6 +1911,16 @@ type TurnResult = Result<PromptResponse, AcpError>;
 
 impl SessionActor {
     async fn run(mut self) {
+        // Resolved off CLONES, not `&self`: the actor holds a parked-permission
+        // responder that is `Send` but not `Sync`, so a future that borrowed
+        // `self` across this await would not be spawnable.
+        let stream = crate::acp_transcript::bind_task_stream(
+            self.pool.store.pool().clone(),
+            self.pool.events.clone(),
+            self.scope_key.clone(),
+        )
+        .await;
+        self.sink.stream = stream;
         let (turn_tx, mut turn_rx) = mpsc::channel::<TurnResult>(1);
         let mut ticker = tokio::time::interval(self.pool.config.writer.flush_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1686,16 +2047,35 @@ impl SessionActor {
     async fn ingest(&mut self, notification: &SessionNotification) {
         let chunks = self.reducer.push(&notification.update);
         for chunk in &chunks {
-            match self.writer.push(chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::error!(
-                        session_key = %self.session_key,
-                        %error,
-                        "acp transcript commit failed"
-                    );
-                }
+            self.commit_chunk(chunk).await;
+        }
+    }
+
+    /// Published live, then committed durably.
+    ///
+    /// This is the chunk door into [`crate::acp_transcript`]; the marker door is
+    /// `TranscriptSink::lifecycle` and the append-straight-to-the-ledger door is
+    /// `acp_transcript::append_and_publish`. Every `event_type` the classifier
+    /// RENDERS is minted behind one of those three, which is the guarantee worth
+    /// stating because it is checkable — see that module's header for why
+    /// counting tokens bounds this and counting write sites does not.
+    ///
+    /// Live BEFORE durable, deliberately: `writer.push` buffers and commits on a
+    /// cadence, so publishing after it would hold the operator's transcript back
+    /// by up to a flush interval for no gain. The ordering costs one guarantee,
+    /// named in the module docs: a row the writer later DROPS under buffer
+    /// pressure was already published, so live can carry a line durable does
+    /// not.
+    async fn commit_chunk(&mut self, chunk: &ainb_acp::reducer::TranscriptChunk) {
+        match self.sink.chunk(chunk).await {
+            Ok(Some(high_water)) => self.wake(&high_water),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    session_key = %self.session_key,
+                    %error,
+                    "acp transcript commit failed"
+                );
             }
         }
     }
@@ -1703,7 +2083,13 @@ impl SessionActor {
     /// The cadence leg: commit whatever is buffered so a slow turn still
     /// streams (I12), then wake subscribers with the committed high-water mark.
     async fn pump(&mut self) {
-        match self.writer.tick().await {
+        // The run banner's other half, on the cadence the writer already ticks
+        // rather than a timer of its own. Only while a turn is open: the tally
+        // and the clock are the RUN's, and an idle session has neither.
+        if let Some(turn) = &self.turn {
+            self.sink.progress(turn.started.elapsed());
+        }
+        match self.sink.tick().await {
             Ok(Some(high_water)) => self.wake(&high_water),
             Ok(None) => {}
             Err(error) => tracing::error!(
@@ -1714,12 +2100,18 @@ impl SessionActor {
         }
     }
 
+    /// Publish one durable transcript row to the LIVE stream too.
+    ///
+    /// The ONE place a row becomes a `TaskMessage`, called beside every write
+    /// that reaches the store writer — chunks from [`Self::ingest`], the parked
+    /// approval from [`Self::raise_permission`], and the closing marker from
+    /// [`Self::finish_turn`] — because a live view missing any of the three
+    /// would differ from the durable re-read that has all of them, which is
+    /// exactly the equality track A step A5 has to hold.
     fn wake(&self, high_water: &HighWater) {
         // The demux channels are unbounded on purpose, so committed bytes are
         // the growth signal the health pane carries in their place.
-        self.stats
-            .transcript_bytes
-            .store(self.writer.bytes_written(), Ordering::Relaxed);
+        self.stats.transcript_bytes.store(self.sink.bytes_written(), Ordering::Relaxed);
         self.pool
             .events
             .emit_transcript_order(&high_water.session_key, high_water.ingest_order);
@@ -1824,6 +2216,7 @@ impl SessionActor {
         self.drain_updates().await;
         self.reducer.begin_turn();
 
+        self.sink.tool_calls = 0;
         self.turn = Some(OpenTurn {
             message_id: job.message_id.clone(),
             started: Instant::now(),
@@ -1884,7 +2277,7 @@ impl SessionActor {
         .await;
         self.set_state("ACTIVE");
         if let Ok(Some(high_water)) = self
-            .writer
+            .sink
             .lifecycle(
                 Lifecycle::TurnStarted,
                 serde_json::json!({ "turnId": message_id }),
@@ -1931,26 +2324,41 @@ impl SessionActor {
         if let Ok(mut slot) = self.stats.turn_started_at.lock() {
             *slot = None;
         }
-        // Everything the reducer still holds belongs to THIS turn.
+        // Everything the reducer still holds belongs to THIS turn. Through the
+        // same commit path as every other chunk: this flush carries the turn's
+        // FINAL agent message, so a live view that skipped it would end without
+        // the one line the operator was waiting for.
         if let Some(chunk) = self.reducer.flush() {
-            match self.writer.push(&chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => tracing::error!(%error, "final transcript chunk failed to commit"),
-            }
+            self.commit_chunk(&chunk).await;
         }
         self.pump().await;
 
         let (marker, state, detail) = match &result {
-            Ok(response) if turn_succeeded(response) => {
-                (Lifecycle::TurnCompleted, "DELIVERED", None)
-            }
+            // The stop reason rides on a SUCCESS too, because `turn_succeeded`
+            // folds `EndTurn`, `MaxTokens` and `MaxTurnRequests` into one
+            // DELIVERED and a task caller has to tell "the agent finished" from
+            // "the agent ran out of budget" without opening the transcript. Only
+            // the two that say something, though: among DELIVERED legs no token
+            // unambiguously means `EndTurn`, so writing one would spend the
+            // operator's line width on every ordinary turn.
+            Ok(response) if turn_succeeded(response) => (
+                Lifecycle::TurnCompleted,
+                "DELIVERED",
+                (!matches!(response.stop_reason, StopReason::EndTurn)).then(|| {
+                    format!(
+                        "{DELIVERY_STOP_PREFIX}{}",
+                        stop_reason_token(response.stop_reason)
+                    )
+                }),
+            ),
+            // The same `stop=` shape as the success arm, so a reader parses ONE
+            // field whichever side of `turn_succeeded` the turn fell on.
             Ok(response) => (
                 Lifecycle::TurnFailed,
                 "FAILED",
                 Some(format!(
-                    "{DELIVERY_TURN_FAILED}; {:?}",
-                    response.stop_reason
+                    "{DELIVERY_TURN_FAILED}; {DELIVERY_STOP_PREFIX}{}",
+                    stop_reason_token(response.stop_reason)
                 )),
             ),
             // The request WAS issued, so the honest answer is UNKNOWN. A resend
@@ -1970,19 +2378,22 @@ impl SessionActor {
             (None, detail) => detail,
         };
         turn.span.record("outcome", state);
-        if let Ok(Some(high_water)) = self
-            .writer
-            .lifecycle(
-                marker,
-                serde_json::json!({
-                    "turnId": turn.message_id,
-                    "durationMs": turn.started.elapsed().as_millis(),
-                }),
-            )
-            .await
-        {
+        let marker_payload = serde_json::json!({
+            "turnId": turn.message_id,
+            "durationMs": turn.started.elapsed().as_millis(),
+        });
+        // The run-status line that closes the transcript. Without it the live
+        // view ends one line short of the durable re-read, which is the whole
+        // equality T1 asserts.
+        if let Ok(Some(high_water)) = self.sink.lifecycle(marker, marker_payload).await {
             self.wake(&high_water);
         }
+        // One last heartbeat, the same closing tick `stream_stdout` fires at
+        // EOF: a turn shorter than the writer's flush interval would otherwise
+        // publish no tally at all, or only the one from before its first tool
+        // ran, and the run banner would read zero on a run that used tools.
+        // AFTER the marker, so the tally counts every tool the turn published.
+        self.sink.progress(turn.started.elapsed());
 
         let now = SystemClock.now_ms();
         // I4/I11: the TIMELINE gets exactly the final agent message, in the
@@ -2378,7 +2789,7 @@ impl SessionActor {
         self.updates = Some(update_rx);
         self.permissions = Some(permission_rx);
         self.reducer = TranscriptReducer::new(acp_session_id.to_string());
-        self.writer.set_acp_session_id(Some(acp_session_id.to_string()));
+        self.sink.set_acp_session_id(Some(acp_session_id.to_string()));
         // Set NOW, not at the end of the attach, so `detach` can unwind a
         // half-built attach (a load that failed) instead of leaking the route.
         self.acp_session_id = Some(acp_session_id.to_string());
@@ -2392,7 +2803,7 @@ impl SessionActor {
     /// agent forgot" and "the agent was never told".
     async fn record_context_rebuilt(&mut self, path: &'static str, acp_session_id: &str) {
         match self
-            .writer
+            .sink
             .lifecycle(
                 Lifecycle::ContextRebuilt,
                 serde_json::json!({
@@ -2455,15 +2866,7 @@ impl SessionActor {
             self.ingest(&notification).await;
         }
         if let Some(chunk) = self.reducer.flush() {
-            match self.writer.push(&chunk).await {
-                Ok(Some(high_water)) => self.wake(&high_water),
-                Ok(None) => {}
-                Err(error) => tracing::error!(
-                    session_key = %self.session_key,
-                    %error,
-                    "the adapter's last transcript chunk failed to commit"
-                ),
-            }
+            self.commit_chunk(&chunk).await;
         }
         self.pump().await;
     }
@@ -2540,11 +2943,7 @@ impl SessionActor {
             "toolCall": permission.request.tool_call,
         });
         let chunk = self.reducer.permission_chunk(payload.clone());
-        match self.writer.push(&chunk).await {
-            Ok(Some(high_water)) => self.wake(&high_water),
-            Ok(None) => {}
-            Err(error) => tracing::error!(%error, "permission transcript row failed to commit"),
-        }
+        self.commit_chunk(&chunk).await;
         self.pump().await;
 
         let now = SystemClock.now_ms();
@@ -2553,7 +2952,15 @@ impl SessionActor {
             id: attention_id.clone(),
             session_id: self.session_key.clone(),
             cwd: self.cwd.clone(),
-            workspace_id: None,
+            // A TASK's session knows its workspace through its scope, and an
+            // unscoped approval misses every workspace-filtered inbox, which
+            // is every operator surface an ACP task's permission has to reach.
+            // A chat session's scope names no workspace, so it stays `None`.
+            workspace_id: crate::acp_task::workspace_for_scope(
+                self.pool.store.pool(),
+                &self.scope_key,
+            )
+            .await,
             kind: ainb_hangar_store::repo::attention::AttentionKind::Approval,
             payload: payload.to_string(),
             degraded: false,
@@ -3042,6 +3449,35 @@ async fn resolve_leg(
     }
 }
 
+/// The spawn refusal for a key the live registry does not hold.
+fn not_in_registry(provider: &str) -> AcpError {
+    AcpError::Spawn {
+        adapter: provider.to_string(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "provider is not in the adapter registry",
+        ),
+    }
+}
+
+/// The persisted token for a stop reason: the ACP wire name, snake_case like
+/// every other token in this taxonomy.
+///
+/// An explicit match rather than the enum's Debug name, because the upstream
+/// enum is `#[non_exhaustive]` and a token that reaches the store and the
+/// operator's screen must not change spelling when a variant is renamed
+/// upstream or arrive as a name nothing else in the vocabulary looks like.
+const fn stop_reason_token(reason: StopReason) -> &'static str {
+    match reason {
+        StopReason::EndTurn => "end_turn",
+        StopReason::MaxTokens => "max_tokens",
+        StopReason::MaxTurnRequests => "max_turn_requests",
+        StopReason::Refusal => "refusal",
+        StopReason::Cancelled => "cancelled",
+        _ => "unknown",
+    }
+}
+
 /// A turn that ended on the agent's own terms, as opposed to a refusal or a
 /// cancellation.
 const fn turn_succeeded(response: &PromptResponse) -> bool {
@@ -3172,7 +3608,10 @@ fn permission_fingerprint(session_key: &str, permission: &PermissionRequest) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{Arc, HashMap, holds_process, retire_if_current};
+    use super::{
+        Arc, DEFAULT_SWEEP_INTERVAL, Duration, HashMap, MIN_SWEEP_INTERVAL, PoolConfig,
+        holds_process, retire_if_current,
+    };
 
     /// The exit event is PROCESS-SCOPED. The interleaving it defends against
     /// (the watcher snapshots the routes a dying process hosted, the actor then
@@ -3234,5 +3673,43 @@ mod tests {
         retire_if_current(&mut sessions, "acp:1", 8, |generation| *generation);
         retire_if_current(&mut sessions, "acp:missing", 1, |generation| *generation);
         assert!(sessions.is_empty());
+    }
+
+    /// A5 review N3: the sweep cadence follows the EFFECTIVE deadline, both
+    /// ways, however many times the deadline moves.
+    ///
+    /// The sequence pinned here is the one a task-executor daemon actually
+    /// performs (`ainb_hangar_daemon::run`): `AINB_ACP_TURN_DEADLINE_MS`
+    /// shortens the deadline, then `HANGAR_TASK_EXECUTOR=acp` raises it to the
+    /// task runtime budget. The RAISE is the arm that was broken — the cadence
+    /// stayed pinned to the value it replaced — so a guard that only checked
+    /// the shortening direction would have passed on the bug it exists to
+    /// catch.
+    #[test]
+    fn the_sweep_cadence_recouples_to_the_deadline_in_both_directions() {
+        let mut config = PoolConfig::default();
+        assert_eq!(config.sweep_interval, DEFAULT_SWEEP_INTERVAL);
+
+        // Down: a 2 s deadline a 15 s sweep could never observe promptly.
+        config.set_turn_deadline(Duration::from_secs(2));
+        assert_eq!(
+            config.sweep_interval,
+            Duration::from_secs(1),
+            "a short deadline pulls the cadence down to half of it"
+        );
+
+        // Back up: the task budget. The cadence must return to the production
+        // default, not stay at the 1 s the previous line set.
+        config.set_turn_deadline(Duration::from_mins(150));
+        assert_eq!(
+            config.sweep_interval, DEFAULT_SWEEP_INTERVAL,
+            "a raised deadline must restore the production cadence"
+        );
+        assert_eq!(config.turn_deadline, Duration::from_mins(150));
+
+        // The floor holds, so a pathologically short test deadline cannot turn
+        // the sweep into a spin loop on the store.
+        config.set_turn_deadline(Duration::from_millis(10));
+        assert_eq!(config.sweep_interval, MIN_SWEEP_INTERVAL);
     }
 }

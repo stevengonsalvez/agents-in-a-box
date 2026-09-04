@@ -23,11 +23,12 @@ fn skill_manager_lists_skills() {
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
     let (sess, _landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
-    // Re-send the nav key until the screen switches: a lone keypress can be
-    // dropped on a loaded CI runner (the flake that reddened the Linux leg).
+    // Re-send the whole `^P skills` sequence until the screen switches: a lone
+    // keystroke can be dropped on a loaded CI runner (the flake that reddened the
+    // Linux leg). Was the `3` tab key until crisp B5 §2.5 demoted it.
     let skills = sess
-        .switch_tab_until(
-            "3",
+        .go_to_screen_until(
+            "skills",
             Instant::now() + Duration::from_secs(15 * common::budget_scale()),
             |c| c.contains("commit") && c.contains("Used"),
         )

@@ -1,7 +1,7 @@
 //! Shared chrome: the top tab bar and bottom footer that wrap every screen.
 //!
 //! The chrome is the persistent frame around the Core 5 screens (P4.1). The
-//! [top tab bar](render_top_bar) shows the four primary tabs, the active
+//! [top tab bar](render_top_bar) shows the seven primary tabs, the active
 //! workspace slug, and an online/offline presence dot; the
 //! [footer](render_footer) shows the contextual key hints for the active
 //! screen. Both are **width-aware**: they derive their sub-region widths from
@@ -37,26 +37,21 @@ const ACTIVE_TAB_BG: Color = Color::rgb(40, 40, 60);
 /// though it is only reachable with a selection — it keeps the tab positions
 /// stable so the eye doesn't jump when a task is opened.
 ///
-/// The numbered hotkeys are **contiguous** (`1`→`4`, no gap): the old `[3]Agents`
-/// tab was folded into the issue-list `[Agents]` filter chip, so `Skills` and
-/// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
-/// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
-/// `Agents` slot renumber, and only by one.
-const PRIMARY_TABS: [(char, &str); 16] = [
+/// SEVEN, down from sixteen (crisp B5 §2.5). The strip was 138 columns and never
+/// fitted the 80×24 floor, advertising a screen for every noun in the daemon;
+/// these seven are the loop an operator actually runs (author, run, answer, read
+/// the result). It measures 72 columns of ink (74 with the trailing separator),
+/// pinned by `the_seven_tab_strip_fits_the_eighty_column_floor`.
+///
+/// The numbered hotkeys stay **contiguous** (`1`→`2`, no gap) and keep their
+/// muscle memory; the nine demoted screens are reached with `^P` + their word
+/// ([`crate::screen::command_palette::GO_SCREENS`]) and listed under Settings.
+const PRIMARY_TABS: [(char, &str); 7] = [
     ('1', "Issues"),
     ('2', "Task"),
-    ('3', "Skills"),
-    ('4', "Autopilots"),
-    ('K', "Kanban"),
+    ('K', "Runs"),
     ('B', "Boards"),
-    ('D', "Daemon"),
-    ('U', "Usage"),
-    ('L', "Logs"),
     ('I', "Inbox"),
-    ('C', "Control"),
-    ('F', "Fleet"),
-    ('S', "Squads"),
-    ('P', "Profiles"),
     ('A', "Agents"),
     (',', "Settings"),
 ];
@@ -82,7 +77,7 @@ impl Presence {
 
 /// Render the top tab bar onto row 0 of `buf`.
 ///
-/// Layout: `[1]Issues [2]Task [3]Skills [,]Settings` on the left, and
+/// Layout: `[1]Issues [2]Task [K]Runs … [,]Settings` on the left, and
 /// `<workspace> · <dot> <presence>` flushed to the right. The right cluster is
 /// dropped first when width is too tight to fit both — the tabs always win the
 /// space contest so navigation stays visible at the 80×24 floor.
@@ -166,47 +161,62 @@ pub fn render_footer(buf: &mut WireBuffer, area_w: u16, area_h: u16, active: &Sc
 }
 
 /// The contextual + global key hints for `active`, in render order.
-fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
+///
+/// Grammar (crisp B2 §2.6): at most FIVE contextual hints, then the globals —
+/// `^P:search ?:help q:quit`, or the last two inside a modal, where `^P` would
+/// type a `p` into the query. One `key:verb` pair per hint, the verb a single
+/// lowercase word, and no two hints on a screen sharing a verb. Everything past
+/// five goes to `?` — never to a second hint bar (the Boards screen carried 24
+/// hints across two bars, which is how the audit found this).
+pub(crate) fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
     let mut hints: Vec<(&str, &str)> = match active {
+        // Nine to five: `y` activity, `s` sub-issue, `d` done and `f` facets keep
+        // their bindings and their `?` lines, but stop competing for the eye with
+        // the four verbs the board is actually for.
         Screen::IssueList => {
             vec![
-                ("a", "assign"),
-                ("y", "activity"),
                 ("c", "create"),
-                ("s", "sub-issue"),
-                ("d", "done"),
-                ("x", "delete"),
-                ("f", "facets"),
+                ("↵", "open"),
+                ("a", "assign"),
                 ("/", "filter"),
-                ("tab", "chip"),
+                ("x", "delete"),
             ]
         }
+        // Five to four: `x` delete moves to the `task` row of `HELP_LINES`.
+        // `X` cancel and `x` delete sat next to each other on one bar, one
+        // keystroke apart, one of them irreversible.
         Screen::TaskDetail(_) => vec![
+            ("↵", "expand"),
             ("R", "retry"),
             ("X", "cancel"),
-            ("x", "delete"),
+            ("o", "PR"),
             ("a", "criterion"),
-            ("t", "tick"),
         ],
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::ActivityTimeline(_) => vec![("j/k", "scroll"), ("r", "refresh"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
         Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move"), ("R", "retry")],
+        // The card verbs, and only those. Boards used to paint these five at the
+        // bottom AND a sixteen-hint band at the top: two bars, overlapping
+        // subsets, different keys for the same act. The band is gone (crisp B2
+        // §2.6) and its column verbs live in `?`.
         Screen::Boards => vec![
             ("↵", "run"),
             ("a", "attach"),
-            ("n", "add col"),
-            ("x", "del col"),
-            ("m", "auto-move"),
+            ("t", "timeline"),
+            ("c", "card"),
+            ("X", "cancel"),
         ],
         // Read-only panes with no footer hints: the daemon-health pane, the usage
         // dashboard (e38.35), and the logs pane (its level-filter chips
         // `a`/`i`/`w`/`e` carry their hints in the body next to each chip, not in
         // the footer).
         Screen::DaemonHealth | Screen::Usage | Screen::Logs => vec![],
-        // The inbox surfaces its mark-all-read key (e38.14).
-        Screen::Inbox => vec![("r", "mark read")],
+        // The one attention surface (crisp B3 §2.4): answer an ASK inline, clear
+        // the badge, narrow the list. The `h/l` option cursor and the `1`-`9`
+        // direct picks render in the body next to the options they move.
+        Screen::Inbox => vec![("enter", "answer"), ("r", "mark read"), ("f", "filter")],
         // The control center: navigate sessions + answer an ASK inline (P2). The
         // option / number-key answer hints render in the body next to the options.
         Screen::ControlCenter => vec![("j/k", "sessions"), ("enter", "answer")],
@@ -247,30 +257,48 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
     hints
 }
 
+/// The tab-strip hotkey that lights up for `screen`, or `None` for a screen with
+/// no tab: the nine crisp B5 demoted, and the four modals (which overlay a tab
+/// rather than being one, so nothing lights while one is open).
+///
+/// Keyed off the SCREEN, not off the hotkey, so it is the one place that decides
+/// what is on the strip. `tab_is_active` reads it, and
+/// `every_tab_on_the_strip_is_reachable_and_labelled` pins it against both
+/// [`PRIMARY_TABS`] and `ROUTER_KEYS` — the previous shape was a second
+/// hotkey→screen table that could keep an arm for a tab the strip had dropped.
+pub(crate) const fn tab_hotkey(screen: &Screen) -> Option<char> {
+    match screen {
+        Screen::IssueList => Some('1'),
+        Screen::TaskDetail(_) => Some('2'),
+        Screen::Kanban => Some('K'),
+        Screen::Boards => Some('B'),
+        Screen::Inbox => Some('I'),
+        Screen::Agents => Some('A'),
+        Screen::Settings => Some(','),
+        // Demoted off the strip by crisp B5 §2.5; reached through `^P`.
+        Screen::SkillManager
+        | Screen::Autopilots
+        | Screen::DaemonHealth
+        | Screen::Usage
+        | Screen::Logs
+        | Screen::ControlCenter
+        | Screen::Fleet
+        | Screen::Squads
+        | Screen::Profiles => None,
+        // Modals overlay a tab; they are not one.
+        Screen::AgentPicker(_)
+        | Screen::ActivityTimeline(_)
+        | Screen::Help
+        | Screen::CommandPalette => None,
+    }
+}
+
 /// Whether `hotkey`'s tab is the active one. `Task` (`2`) highlights for any
 /// task-detail screen; the agent-picker modal keeps the screen *under* it
 /// highlighted, so it falls through to no match (no tab lit) which is correct —
 /// the modal is an overlay, not a tab.
 const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
-    match hotkey {
-        '1' => matches!(active, Screen::IssueList),
-        '2' => matches!(active, Screen::TaskDetail(_)),
-        '3' => matches!(active, Screen::SkillManager),
-        '4' => matches!(active, Screen::Autopilots),
-        'K' => matches!(active, Screen::Kanban),
-        'B' => matches!(active, Screen::Boards),
-        'D' => matches!(active, Screen::DaemonHealth),
-        'U' => matches!(active, Screen::Usage),
-        'L' => matches!(active, Screen::Logs),
-        'I' => matches!(active, Screen::Inbox),
-        'C' => matches!(active, Screen::ControlCenter),
-        'F' => matches!(active, Screen::Fleet),
-        'S' => matches!(active, Screen::Squads),
-        'P' => matches!(active, Screen::Profiles),
-        'A' => matches!(active, Screen::Agents),
-        ',' => matches!(active, Screen::Settings),
-        _ => false,
-    }
+    matches!(tab_hotkey(active), Some(key) if key == hotkey)
 }
 
 /// Column at which the right cluster should start, or `None` if it doesn't fit
@@ -348,9 +376,11 @@ mod tests {
     fn active_tab_detection() {
         assert!(tab_is_active(&Screen::IssueList, '1'));
         assert!(!tab_is_active(&Screen::IssueList, '2'));
-        assert!(tab_is_active(&Screen::SkillManager, '3'));
-        assert!(tab_is_active(&Screen::Autopilots, '4'));
+        assert!(tab_is_active(&Screen::Kanban, 'K'));
+        assert!(tab_is_active(&Screen::Inbox, 'I'));
         assert!(tab_is_active(&Screen::Settings, ','));
+        // A demoted screen lights no tab at all — the strip has none for it.
+        assert!(!tab_is_active(&Screen::SkillManager, '3'));
         let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
         assert!(!tab_is_active(&Screen::AgentPicker(issue), '1'));
     }
@@ -367,32 +397,9 @@ mod tests {
     #[test]
     fn footer_hint_keys_never_collide_with_reserved_router_keys() {
         use crate::screen::router::is_reserved_key;
-        let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
-        let task = ainb_hangar_core::ids::TaskId::from_str("01HANGARTASK000000000001").unwrap();
-        let screens = [
-            Screen::IssueList,
-            Screen::TaskDetail(task),
-            Screen::AgentPicker(issue),
-            Screen::SkillManager,
-            Screen::Autopilots,
-            Screen::Kanban,
-            Screen::Boards,
-            Screen::DaemonHealth,
-            Screen::Usage,
-            Screen::Logs,
-            Screen::Inbox,
-            Screen::ControlCenter,
-            Screen::Fleet,
-            Screen::Squads,
-            Screen::Profiles,
-            Screen::Agents,
-            Screen::Settings,
-            Screen::Help,
-            Screen::CommandPalette,
-        ];
         // The globals the footer appends unconditionally — reserved BY DESIGN.
         let global = [("^P", "search"), ("?", "help"), ("q", "quit")];
-        for active in screens {
+        for active in every_screen() {
             for hint in footer_hints(&active) {
                 if global.contains(&hint) {
                     continue;
@@ -426,28 +433,208 @@ mod tests {
         }
     }
 
-    /// The issue-list and task-detail footers both advertise the `x:delete`
-    /// keybinding (63l.5) alongside their other hints.
+    /// The issue-list footer advertises `x:delete` (63l.5); the task-detail
+    /// footer no longer does.
+    ///
+    /// Crisp B2 §2.6 keeps `x` in the issue list's five — deleting an issue is a
+    /// board verb an operator reaches for — and drops it from task detail, where
+    /// it sat one keystroke from `X:cancel` on the same bar. `x` still deletes
+    /// there; it is documented in `?` instead of advertised beside the key that
+    /// looks like it.
     #[test]
-    fn footer_advertises_delete_on_issue_list_and_detail() {
+    fn footer_advertises_delete_on_the_issue_list_only() {
         assert!(
             footer_hints(&Screen::IssueList).contains(&("x", "delete")),
             "issue list footer must show x:delete"
         );
         let task = ainb_hangar_core::ids::TaskId::from_str("t1").unwrap();
+        let detail = footer_hints(&Screen::TaskDetail(task));
         assert!(
-            footer_hints(&Screen::TaskDetail(task)).contains(&("x", "delete")),
-            "task-detail footer must show x:delete"
+            !detail.iter().any(|(key, _)| *key == "x"),
+            "task detail must not advertise `x` beside `X:cancel`, got {detail:?}"
+        );
+        assert!(
+            detail.contains(&("X", "cancel")),
+            "the cancel it sat next to stays: {detail:?}"
         );
     }
 
-    /// The issue-list footer advertises the `f:facets` faceted-filter panel
-    /// keybinding (multica-gap #10) so the panel is discoverable.
+    /// The issue-list footer is the FIVE board verbs (crisp B2 §2.6).
+    ///
+    /// `f:facets` was pinned here before and is deliberately not any more: it is
+    /// the sixth of nine hints on a five-hint bar, it stays bound, and it stays
+    /// documented in `HELP_LINES` (`help_overlay_screen_rows_pair_every_label_with_a_key`
+    /// keeps that honest). The bar is what an operator scans mid-task; the panel
+    /// is discovered once.
     #[test]
-    fn footer_advertises_facets_on_issue_list() {
+    fn issue_list_footer_is_the_five_board_verbs() {
+        assert_eq!(
+            footer_hints(&Screen::IssueList)
+                .into_iter()
+                .take_while(|hint| *hint != ("^P", "search"))
+                .collect::<Vec<_>>(),
+            vec![
+                ("c", "create"),
+                ("↵", "open"),
+                ("a", "assign"),
+                ("/", "filter"),
+                ("x", "delete"),
+            ],
+        );
+    }
+
+    /// The hint-bar grammar (crisp B2 §2.6), over EVERY screen: at most five
+    /// contextual hints, then exactly the three globals, and no two hints on one
+    /// screen sharing a verb.
+    ///
+    /// A screen that grows a sixth hint fails here rather than shipping a bar an
+    /// operator reads as noise — the audit counted twenty-four hints on Boards.
+    #[test]
+    fn every_footer_obeys_the_hint_grammar() {
+        for active in every_screen() {
+            let hints = footer_hints(&active);
+            let globals: Vec<(&str, &str)> =
+                hints.iter().copied().filter(|h| matches!(h.0, "^P" | "?" | "q")).collect();
+            let contextual: Vec<(&str, &str)> =
+                hints.iter().copied().filter(|h| !globals.contains(h)).collect();
+            assert!(
+                contextual.len() <= 5,
+                "{active:?} paints {} contextual hints, the bar holds five: {contextual:?}",
+                contextual.len()
+            );
+            // The globals trail, in order, and are the last thing on the bar.
+            assert_eq!(
+                &hints[contextual.len()..],
+                globals.as_slice(),
+                "{active:?} must end with its globals"
+            );
+            let mut verbs: Vec<&str> = contextual.iter().map(|h| h.1).collect();
+            verbs.sort_unstable();
+            let unique = verbs.len();
+            verbs.dedup();
+            assert_eq!(
+                verbs.len(),
+                unique,
+                "{active:?} advertises one verb twice: {contextual:?}"
+            );
+        }
+    }
+
+    /// The three screens crisp B2 §2.6 rewrites hold the FULL grammar: every verb
+    /// is one bare word, lowercase unless it is an acronym (`o:PR`).
+    ///
+    /// Scoped to those three on purpose. Three untouched screens still carry a
+    /// two-word hint (`,` add key, `I` mark read, `P` cycle tier); they are named
+    /// here rather than silently exempted, and sweeping them belongs with the B5
+    /// help/keys pass that touches those screens.
+    #[test]
+    fn rewritten_footers_use_one_bare_word_per_verb() {
+        let task = ainb_hangar_core::ids::TaskId::from_str("t1").unwrap();
+        for active in [Screen::IssueList, Screen::TaskDetail(task), Screen::Boards] {
+            for (key, verb) in footer_hints(&active) {
+                if matches!(key, "^P" | "?" | "q") {
+                    continue;
+                }
+                assert!(
+                    !verb.contains(char::is_whitespace),
+                    "{active:?} hint {key}:{verb} is not one word"
+                );
+                assert!(
+                    verb == verb.to_lowercase() || verb == verb.to_uppercase(),
+                    "{active:?} hint {key}:{verb} is neither lowercase nor an acronym"
+                );
+            }
+        }
+    }
+
+    use crate::test_support::every_screen;
+
+    /// COVERAGE (crisp B5 §2.5): the strip, the active-tab map and the router key
+    /// set name exactly the same seven tabs.
+    ///
+    /// A tab is a promise of three things at once — it is painted, it lights up
+    /// when you are on it, and its key gets you there. This walks every `Screen`
+    /// variant and both directions of [`PRIMARY_TABS`], so shrinking the strip
+    /// without shrinking [`tab_hotkey`] (a tab that never highlights), or without
+    /// shrinking `ROUTER_KEYS` (a key the router no longer claims painted as if it
+    /// worked), fails here. A count assertion would have passed for both.
+    #[test]
+    fn every_tab_on_the_strip_is_reachable_and_labelled() {
+        use crate::screen::router::ROUTER_KEYS;
+        for screen in every_screen() {
+            let Some(hotkey) = tab_hotkey(&screen) else {
+                assert!(
+                    !PRIMARY_TABS.iter().any(|(_, label)| *label == screen.tab_label()),
+                    "{screen:?} is painted on the strip but lights no tab"
+                );
+                continue;
+            };
+            assert!(
+                PRIMARY_TABS.iter().any(|(key, _)| *key == hotkey),
+                "{screen:?} claims tab `{hotkey}` but the strip does not paint it"
+            );
+            assert!(
+                ROUTER_KEYS.contains(&hotkey),
+                "the strip paints `{hotkey}` for {screen:?} but the router no longer claims it"
+            );
+        }
+        // The other direction: no tab is painted for a screen that dropped out.
+        for (hotkey, label) in PRIMARY_TABS {
+            let owner = every_screen().into_iter().find(|s| tab_hotkey(s) == Some(hotkey));
+            assert_eq!(
+                owner.as_ref().map(Screen::tab_label),
+                Some(label),
+                "the strip paints `[{hotkey}]{label}` but no screen answers to it"
+            );
+        }
+    }
+
+    /// The seven-tab strip measures 74 columns and clears the 80×24 floor with
+    /// every label intact — the sixteen-tab strip was 138 and truncated four tabs
+    /// off the right edge at the floor (crisp B5 §2.5).
+    ///
+    /// The right-hand cluster still yields at 80, which §2.5 predicted it would
+    /// not: the strip is 72 columns of ink and the cursor lands at 74 (each tab
+    /// carries a two-space separator), so `default · ● online` at 18 columns needs
+    /// 93. The tabs winning that contest is the documented rule
+    /// (`right_cluster_yields_to_tabs_when_tight`); pinned here at both widths so
+    /// the trade is a measured number rather than an assumption.
+    #[test]
+    fn the_seven_tab_strip_fits_the_eighty_column_floor() {
+        let mut buf = WireBuffer::new(80, 24);
+        render_top_bar(
+            &mut buf,
+            80,
+            &Screen::IssueList,
+            "default",
+            Presence::Online,
+        );
+        let row0 = row_text(&buf, 0, 80);
+        for (hotkey, label) in PRIMARY_TABS {
+            assert!(
+                row0.contains(&format!("[{hotkey}]{label}")),
+                "`[{hotkey}]{label}` is cut off at the 80-column floor: {row0:?}"
+            );
+        }
+        assert_eq!(row0.trim_end().chars().count(), 72, "row0 = {row0:?}");
         assert!(
-            footer_hints(&Screen::IssueList).contains(&("f", "facets")),
-            "issue list footer must show f:facets"
+            !row0.contains("online"),
+            "the right cluster does not fit at 80 and must yield: {row0:?}"
+        );
+
+        // 93 columns is where it fits, and there it paints.
+        let mut wide = WireBuffer::new(93, 24);
+        render_top_bar(
+            &mut wide,
+            93,
+            &Screen::IssueList,
+            "default",
+            Presence::Online,
+        );
+        let wide0 = row_text(&wide, 0, 93);
+        assert!(
+            wide0.contains("default · ● online"),
+            "the cluster paints once there is room: {wide0:?}"
         );
     }
 
@@ -464,13 +651,11 @@ mod tests {
     }
 
     /// The top bar renders every tab hotkey + the workspace slug on row 0 at a
-    /// realistic width. The six-tab strip (P8.4 added Kanban) needs >80 cols to
-    /// also fit the right cluster; the slug-yields-to-tabs behaviour at the 80×24
-    /// floor is covered by `chrome_renders_at_80x24_floor_without_overflow`.
+    /// realistic width. The width the strip needs is pinned separately by
+    /// `the_seven_tab_strip_fits_the_eighty_column_floor`.
     #[test]
     fn top_bar_renders_tabs_and_slug() {
-        // Wide enough that the full fifteen-tab strip (P4 added `[B]Boards`, P7
-        // `[S]Squads`, P5 `[P]Profiles`, slice 2 `[A]Agents` — ~168 cols) AND the
+        // Wide enough that the seven-tab strip (74 cols, crisp B5 §2.5) AND the
         // right-side workspace-slug cluster both fit; the tabs win width
         // contention, so a narrower buffer drops the slug (covered by the 80x24
         // floor smoke).
@@ -479,9 +664,9 @@ mod tests {
         // Reconstruct row 0 text from the wire buffer cells.
         let row0 = row_text(&buf, 0, 200);
         assert!(row0.contains("Issues"), "row0 = {row0:?}");
-        assert!(row0.contains("Skills"), "row0 = {row0:?}");
-        assert!(row0.contains("Kanban"), "row0 = {row0:?}");
-        assert!(row0.contains("Usage"), "row0 = {row0:?}");
+        assert!(row0.contains("Inbox"), "row0 = {row0:?}");
+        assert!(row0.contains("Runs"), "row0 = {row0:?}");
+        assert!(row0.contains("Settings"), "row0 = {row0:?}");
         assert!(row0.contains("acme"), "row0 = {row0:?}");
     }
 

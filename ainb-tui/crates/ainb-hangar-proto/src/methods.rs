@@ -1326,16 +1326,19 @@ pub const HANGAR_BOARD_CARD_REORDER: &str = "hangar/board_card_reorder";
 pub const HANGAR_BOARD_CARD_REMOVE: &str = "hangar/board_card_remove";
 
 /// `hangar/board_card_timeline` — the card's latest run transcript, for the
-/// prettied JSONL timeline overlay (tcp T3 / F6, P10 §4.9).
+/// prettied timeline overlay (tcp T3 / F6, P10 §4.9).
 ///
-/// Params: [`crate::snapshots::BoardCardParams`]
-/// (`{ workspace_id, board_id, issue_id }`, `column_id` ignored). Result:
-/// [`crate::snapshots::BoardCardTimelineResult`] — the RAW provider stream-json
-/// (`claude.jsonl` / `codex.jsonl`) the card's newest task teed to disk, bounded
-/// to a tail so a huge run never floods the socket. The plugin parses it into the
-/// transcript taxonomy ([`ainb-plugin-hangar`'s `jsonl_timeline`]). A card that
-/// never ran (or whose log is gone) yields an empty transcript, never an error. A
-/// read, workspace-scoped via the board.
+/// Params: [`crate::snapshots::BoardCardTimelineParams`]
+/// (`{ workspace_id, board_id?, issue_id }`). Result:
+/// [`crate::snapshots::BoardCardTimelineResult`] — the run's transcript already
+/// CLASSIFIED into the [`crate::transcript`] taxonomy, bounded so a huge run
+/// never floods the socket. One read serves both executors (track A step A6):
+/// a process run classifies from the `{logs}/<provider>.jsonl` it teed to disk,
+/// an ACP run from its `fleet_provider_event` rows, and the caller cannot tell
+/// which ran. A card that never ran (or whose record is gone) yields an empty
+/// transcript, never an error. A read, workspace-scoped; with a `board_id` the
+/// issue must also be a card on that board (the Boards overlay), without one any
+/// issue in the workspace resolves (the task-detail backfill, crisp B1).
 pub const HANGAR_BOARD_CARD_TIMELINE: &str = "hangar/board_card_timeline";
 
 /// `hangar/repo_list` — the card-create `@` autocomplete repo roster (spec F3).

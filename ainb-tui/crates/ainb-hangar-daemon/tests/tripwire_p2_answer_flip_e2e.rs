@@ -59,10 +59,11 @@ fn answering_the_control_center_ask_delivers_and_flips_the_board() {
 
     let scale = budget_scale();
 
-    // Open the control center; wait for the seeded ASK + the `1 need you` count.
+    // Open the control center with `^P control` (crisp B5 §2.5 demoted the `C`
+    // tab key); wait for the seeded ASK + the `1 need you` count.
     let open_deadline = Instant::now() + Duration::from_secs(30 * scale);
     let board = sess
-        .switch_tab_until("C", open_deadline, |c| {
+        .go_to_screen_until("control", open_deadline, |c| {
             c.contains(ATTENTION_ASK_QUESTION) && c.contains("1 need you")
         })
         .unwrap_or_else(|| {
@@ -113,7 +114,11 @@ fn answering_the_control_center_ask_delivers_and_flips_the_board() {
             pressed = true;
         } else if pressed && !cur.contains("need you") {
             // Drifted off the control center after a stray digit — return to it.
-            sess.send_key("C");
+            // `^P control`, since crisp B5 §2.5 demoted the `C` tab key.
+            sess.send_key("Escape");
+            sess.send_key("C-p");
+            sess.type_literal("control");
+            sess.send_enter();
         }
         std::thread::sleep(Duration::from_millis(300));
     };

@@ -845,6 +845,8 @@ pub struct DialogOption {
 pub enum ConfirmAction {
     DeleteSession(Uuid),
     StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
+    BulkDeleteSessions(Vec<Uuid>), // Delete every multi-selected session (removes worktrees)
+    BulkStopSessions(Vec<Uuid>), // Soft-stop every multi-selected session (preserves worktrees)
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     KillWorkspaceShell(usize), // Kill workspace shell by workspace index
@@ -856,6 +858,127 @@ pub enum ConfirmAction {
     OpenAbtopSkipSetup, // Open abtop now without running `abtop --setup`
     DismissAbtopSetup, // Remember "don't ask again" for the abtop setup offer, then open abtop
     Cancel,            // No-op terminator for tri-option dialogs
+}
+
+/// Assemble the shared Stop / Delete / Cancel dialog.
+///
+/// One builder for the single-row and the bulk path, so a future safety change
+/// (a new warning, a different default) lands on both at once. Stop is always
+/// `selected_index: 0`: the safe option is the one an accidental Enter picks.
+fn stop_or_delete_dialog(
+    title: String,
+    message: String,
+    warning: Option<String>,
+    stop: (&str, ConfirmAction),
+    delete: (&str, ConfirmAction),
+) -> ConfirmationDialog {
+    let (stop_label, stop_action) = stop;
+    let (delete_label, delete_action) = delete;
+    ConfirmationDialog {
+        title,
+        message,
+        // confirm_action mirrors the default (Stop) so the legacy binary
+        // ConfirmationConfirm handler still does the safe thing if it ever runs
+        // without options.
+        confirm_action: stop_action.clone(),
+        selected_option: true,
+        warning,
+        options: Some(vec![
+            DialogOption {
+                label: stop_label.to_string(),
+                action: stop_action,
+            },
+            DialogOption {
+                label: delete_label.to_string(),
+                action: delete_action,
+            },
+            DialogOption {
+                label: "Cancel".to_string(),
+                action: ConfirmAction::Cancel,
+            },
+        ]),
+        selected_index: 0, // Default = Stop (safe option)
+    }
+}
+
+/// `true` for the sessions Stop actually applies to: interactive agent sessions,
+/// where killing tmux leaves a worktree that resumes later. Boss (Docker) and
+/// Shell sessions have no soft-stop, so they only ever get a delete
+/// confirmation.
+pub(crate) const fn is_stoppable_interactive(session: &crate::models::session::Session) -> bool {
+    use crate::models::{SessionAgentType, SessionMode};
+    matches!(session.mode, SessionMode::Interactive)
+        && matches!(
+            session.agent_type,
+            SessionAgentType::Claude
+                | SessionAgentType::Codex
+                | SessionAgentType::Gemini
+                | SessionAgentType::Copilot
+        )
+}
+
+/// What one selection has to lose, as the bulk dialog reports it.
+#[derive(Debug, Clone)]
+pub(crate) struct BulkWorktreeStatus {
+    /// `(session name, uncommitted file count)` per dirty tree.
+    pub dirty: Vec<(String, usize)>,
+    /// Trees that are there but could not be read. Never folded into "clean".
+    pub unchecked: usize,
+    /// Distinct trees on disk, which is what a delete actually removes.
+    pub with_worktree: usize,
+    /// False when nothing could be resolved, so `with_worktree` is a guess and
+    /// the dialog must not print it as a fact.
+    pub worktree_count_known: bool,
+}
+
+impl Default for BulkWorktreeStatus {
+    fn default() -> Self {
+        Self {
+            dirty: Vec::new(),
+            unchecked: 0,
+            with_worktree: 0,
+            worktree_count_known: true,
+        }
+    }
+}
+
+/// One tree's uncommitted count, with the reason logged when it cannot be read:
+/// "could not check N session(s)" is undiagnosable otherwise.
+fn probe_tree(path: &std::path::Path) -> Result<usize, ()> {
+    crate::git::WorktreeManager::uncommitted_file_count_at(path).map_err(|e| {
+        warn!(
+            "Could not check {} for uncommitted work: {}",
+            path.display(),
+            e
+        );
+    })
+}
+
+/// Shown when a bulk key is pressed with nothing checked.
+pub(crate) const NOTHING_SELECTED_WARNING: &str =
+    "No sessions selected. Use Space to select sessions first.";
+
+/// Render at most three items, then "and N more". Shared by the bulk dialog's
+/// message and its warning so the two cannot truncate at different lengths or
+/// word it differently.
+fn truncate_list(items: impl Iterator<Item = String>) -> String {
+    const MAX_NAMED: usize = 3;
+    let items: Vec<String> = items.collect();
+    let shown = items.len().min(MAX_NAMED);
+    let listed = items[..shown].join(", ");
+    if items.len() > shown {
+        format!("{listed}, and {} more", items.len() - shown)
+    } else {
+        listed
+    }
+}
+
+/// Label for a selected id that no longer resolves to a session. The id is kept
+/// in the bulk action (so nothing silently drops out of a delete) but a full
+/// 36-character uuid would eat three rows of the dialog on its own.
+fn unknown_session_label(id: Uuid) -> String {
+    let id = id.to_string();
+    format!("unknown ({})", &id[..8])
 }
 
 // ============================================================================
@@ -1021,173 +1144,6 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
     let mut result = mcp_fetch_blocking();
     result.action_msg = Some(summary);
     result
-}
-
-// ============================================================================
-// Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions)
-// ============================================================================
-
-/// Fetched snapshot delivered through the daemons overlay channel.
-#[derive(Debug, Clone)]
-pub struct DaemonsFetchResult {
-    pub mcp_alive: bool,
-    pub(crate) mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus,
-    pub headroom: crate::headroom::ProxyStatus,
-    pub headroom_consumers: Vec<String>,
-    /// Every running `notifyd` process, classified live / stale / orphan.
-    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
-    /// approve.sock liveness: serving? + the probe's health reason (carries the
-    /// pending-waiter count). Sockets are tracked here too, not just daemons.
-    pub approve_running: bool,
-    pub approve_reason: String,
-    pub hangar_running: bool,
-    pub hangar_reason: String,
-    pub(crate) hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus,
-}
-
-/// One restartable daemon in the overlay, in the order the rows are drawn.
-///
-/// The overlay used to expose lifecycle only through per-daemon keys (`S`
-/// hangar, `M` mcp, `P` headroom) which all START, plus `R` hardcoded to
-/// notifyd. That left no way to cycle an already-running daemon — exactly what
-/// a version drift after `brew upgrade` needs, since the old binary keeps
-/// serving until the process is replaced. Selecting a row and pressing `R`
-/// gives every daemon the same lever.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DaemonRow {
-    Mcp,
-    Headroom,
-    Hangar,
-    Notifyd,
-}
-
-impl DaemonRow {
-    /// Draw order, which is also selection order.
-    pub const ORDER: [Self; 4] = [Self::Mcp, Self::Headroom, Self::Hangar, Self::Notifyd];
-
-    /// Label used in the table and in restart status lines.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Mcp => "MCP pool",
-            Self::Headroom => "Headroom",
-            Self::Hangar => "Hangar",
-            Self::Notifyd => "notifyd",
-        }
-    }
-
-    /// Move the selection, saturating at both ends.
-    ///
-    /// Deliberately does NOT wrap: a wrapping list gives no feedback that you
-    /// reached the end, and this list is short enough to see in full.
-    #[must_use]
-    pub fn step(self, delta: isize) -> Self {
-        let at = Self::ORDER.iter().position(|k| *k == self).unwrap_or(0);
-        let next = at.saturating_add_signed(delta).min(Self::ORDER.len().saturating_sub(1));
-        Self::ORDER[next]
-    }
-}
-
-/// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
-/// the overlay is open; dropping it stops all refresh activity.
-#[derive(Debug)]
-pub struct DaemonsOverlayState {
-    /// Row the `R` restart acts on. Starts at the top row.
-    pub selected: DaemonRow,
-    pub mcp_alive: bool,
-    pub(crate) mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus,
-    pub headroom: crate::headroom::ProxyStatus,
-    pub headroom_consumers: Vec<String>,
-    /// Every running `notifyd` process, classified live / stale / orphan.
-    pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
-    /// approve.sock liveness + health reason (see [`DaemonsFetchResult`]).
-    pub approve_running: bool,
-    pub approve_reason: String,
-    pub hangar_running: bool,
-    pub hangar_reason: String,
-    pub(crate) hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus,
-    pub loading: bool,
-    pub last_refreshed: Option<std::time::Instant>,
-    /// Receiver for the in-flight fetch (None = no fetch pending).
-    pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
-    /// Receiver for an in-flight `notifyd` restart (None = no restart pending).
-    /// Carries the one-line outcome to show under the notifyd section.
-    pub restart_rx: Option<mpsc::UnboundedReceiver<String>>,
-    /// Last restart outcome line (transient, shown until the next refresh).
-    pub restart_status: Option<String>,
-    /// Receiver for a targeted hook reinstall. Kept separate from notifyd
-    /// restart: repairing a binary pointer must not imply daemon lifecycle.
-    pub hooks_repair_rx: Option<mpsc::UnboundedReceiver<String>>,
-    /// Last hook repair outcome, rendered in the Hooks section.
-    pub hooks_repair_status: Option<String>,
-    pub hangar_start_rx: Option<mpsc::UnboundedReceiver<String>>,
-    pub hangar_start_status: Option<String>,
-    /// MCP start result, shown in the unified Daemons table.
-    pub mcp_start_rx: Option<mpsc::UnboundedReceiver<String>>,
-    pub mcp_start_status: Option<String>,
-    /// Headroom start result, shown in the unified Daemons table.
-    pub headroom_start_rx: Option<mpsc::UnboundedReceiver<String>>,
-    pub headroom_start_status: Option<String>,
-}
-
-/// How long the whole blocking probe gets before the overlay gives up on it and
-/// unlatches. Every individual probe inside is bounded too; this is the backstop
-/// that guarantees the screen leaves `collecting…` even when one of them wedges.
-pub(crate) const DAEMONS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
-/// + notifyd process scan. These are sync calls (the notifyd scan shells out
-/// to `ps`) so they run on the blocking thread pool.
-pub(crate) fn daemons_sync_probe() -> (
-    bool,
-    crate::mcp_pool::client::DaemonRuntimeStatus,
-    Vec<String>,
-    Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
-    (bool, String),
-    (bool, String),
-    crate::cli::hangar::DaemonRuntimeStatus,
-) {
-    let mcp_alive = crate::mcp_pool::client::daemon_alive();
-    let mcp_runtime = crate::mcp_pool::client::daemon_runtime_status();
-    let headroom_consumers = crate::interactive::SessionStore::load()
-        .sessions
-        .into_values()
-        .filter(|m| m.headroom_enabled)
-        .map(|m| m.tmux_session_name.clone())
-        .collect::<Vec<_>>();
-    let notifyd = ainb_plugin_notifyd::scan_daemons();
-    // approve.sock — same probe the `ainb fleet daemons` health view uses, so
-    // the two surfaces can't drift. Reason carries the pending-waiter count.
-    let approve = match ainb_plugin_notifyd::Paths::from_home() {
-        Ok(paths) => {
-            let s = crate::fleet::daemons::probe::probe_approve_broker(
-                &paths.base,
-                crate::fleet::daemons::heartbeat::now_ms(),
-            );
-            (s.state.is_healthy(), s.reason)
-        }
-        Err(e) => (false, format!("home unresolved: {e}")),
-    };
-    let hangar = crate::fleet::bridge::daemon::socket_path()
-        .and_then(|socket| {
-            crate::fleet::daemons::probe::connect_bounded(
-                &socket,
-                crate::fleet::daemons::probe::SOCKET_PROBE_TIMEOUT,
-            )
-        })
-        .map_or((false, "not running".to_string()), |_| {
-            (true, "serving".to_string())
-        });
-    let hangar_runtime = crate::cli::hangar::daemon_runtime_status();
-    (
-        mcp_alive,
-        mcp_runtime,
-        headroom_consumers,
-        notifyd,
-        approve,
-        hangar,
-        hangar_runtime,
-    )
 }
 
 // ============================================================================
@@ -3242,8 +3198,6 @@ pub struct AppState {
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
     pub mcp_overlay: Option<McpOverlayState>,
-    // Daemons runtime snapshot (MCP pool + Headroom proxy + repair actions).
-    pub daemons_overlay: Option<DaemonsOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -3877,6 +3831,7 @@ pub enum AsyncAction {
     ResumeSession(Uuid, String), // Recreate tmux for a Stopped interactive session; String is the trigger key for audit
     BulkResumeSessions(Vec<Uuid>, String), // Resume multiple Stopped interactive sessions; String is the trigger key for audit
     BulkDeleteSessions(Vec<Uuid>),         // Bulk delete multiple sessions
+    BulkStopSessions(Vec<Uuid>),           // Soft-stop many sessions (tmux only; keeps worktrees)
     RefreshWorkspaces,                     // Manual refresh of workspace data
     FetchContainerLogs(Uuid),              // Fetch container logs for a session
     AttachToContainer(Uuid),               // Attach to a container session
@@ -3950,7 +3905,6 @@ impl Default for AppState {
             async_operation_cancelled: false,
             confirmation_dialog: None,
             mcp_overlay: None,
-            daemons_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
@@ -4882,7 +4836,11 @@ impl AppState {
                 if let Some(shell) = preserved_shells.get(&workspace.path) {
                     // Only restore if the tmux session still exists
                     let check = tokio::process::Command::new("tmux")
-                        .args(["has-session", "-t", &shell.tmux_session_name])
+                        .args([
+                            "has-session",
+                            "-t",
+                            &format!("={}", shell.tmux_session_name),
+                        ])
                         .output()
                         .await;
 
@@ -5454,395 +5412,6 @@ impl AppState {
                 });
             let _ = tx.send(result);
         });
-    }
-
-    // ── Daemons overlay ──────────────────────────────────────────────────────
-
-    /// Open the Daemons overlay and fire the first fetch; idempotent (toggle).
-    pub fn toggle_daemons_overlay(&mut self) {
-        if self.daemons_overlay.is_some() {
-            self.daemons_overlay = None;
-            return;
-        }
-        self.daemons_overlay = Some(DaemonsOverlayState {
-            selected: DaemonRow::ORDER[0],
-            mcp_alive: false,
-            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-            headroom: crate::headroom::ProxyStatus {
-                running: false,
-                port: crate::headroom::proxy_port(),
-                pid: None,
-                tokens_saved: None,
-            },
-            headroom_consumers: Vec::new(),
-            notifyd: Vec::new(),
-            approve_running: false,
-            approve_reason: "probing…".to_string(),
-            loading: true,
-            last_refreshed: None,
-            fetch_rx: None,
-            restart_rx: None,
-            restart_status: None,
-            hooks_repair_rx: None,
-            hooks_repair_status: None,
-            hangar_running: false,
-            hangar_reason: "probing…".to_string(),
-            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
-            hangar_start_rx: None,
-            hangar_start_status: None,
-            mcp_start_rx: None,
-            mcp_start_status: None,
-            headroom_start_rx: None,
-            headroom_start_status: None,
-        });
-        self.spawn_daemons_fetch();
-    }
-
-    pub fn close_daemons_overlay(&mut self) {
-        self.daemons_overlay = None;
-    }
-
-    /// Spawn one off-thread fetch of both daemon statuses (one-outstanding guard).
-    /// Runs MCP + SessionStore probes on the blocking pool; headroom::status()
-    /// is async so it runs directly in the spawned task.
-    pub fn spawn_daemons_fetch(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.fetch_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.fetch_rx = Some(rx);
-        o.loading = true;
-        tokio::spawn(async move {
-            // Blocking I/O (control socket + file read + `ps` scan) on the
-            // blocking pool. Bounded by DAEMONS_PROBE_TIMEOUT: a probe that
-            // wedges must degrade to "probe timed out" rows, never to a screen
-            // stuck on `collecting…`. On timeout the blocking task is left to
-            // finish on its own thread — its result is simply discarded.
-            let probe = tokio::time::timeout(
-                DAEMONS_PROBE_TIMEOUT,
-                tokio::task::spawn_blocking(daemons_sync_probe),
-            );
-            let (
-                mcp_alive,
-                mcp_runtime,
-                headroom_consumers,
-                notifyd,
-                approve,
-                hangar,
-                hangar_runtime,
-            ) = match probe.await {
-                Ok(Ok(values)) => values,
-                Ok(Err(_)) | Err(_) => (
-                    false,
-                    crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-                    Vec::new(),
-                    Vec::new(),
-                    (false, "probe timed out".to_string()),
-                    (false, "probe timed out".to_string()),
-                    crate::cli::hangar::DaemonRuntimeStatus::default(),
-                ),
-            };
-            // Async HTTP probe of the Headroom /health + /stats endpoints.
-            let headroom = crate::headroom::status().await;
-            let result = DaemonsFetchResult {
-                mcp_alive,
-                mcp_runtime,
-                headroom,
-                headroom_consumers,
-                notifyd,
-                approve_running: approve.0,
-                approve_reason: approve.1,
-                hangar_running: hangar.0,
-                hangar_reason: hangar.1,
-                hangar_runtime,
-            };
-            let _ = tx.send(result);
-        });
-    }
-
-    /// Restart whichever daemon the overlay has selected.
-    ///
-    /// One in-flight restart at a time, shared across kinds: the outcome line
-    /// has a single slot in the overlay, and cycling two daemons at once would
-    /// race for it. Every arm reuses the same lifecycle the CLI uses rather
-    /// than reimplementing stop/start here, so the TUI and `ainb <d> daemon
-    /// restart` cannot drift apart.
-    pub fn spawn_daemon_restart(&mut self, kind: DaemonRow) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.restart_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.restart_rx = Some(rx);
-        o.restart_status = Some(format!("restarting {}…", kind.label()));
-        match kind {
-            DaemonRow::Notifyd => self.spawn_notifyd_restart(tx),
-            DaemonRow::Hangar => {
-                // Quiet: this runs while the TUI holds the alternate screen, so
-                // the announcing variant's stdout lands on top of the frame.
-                Self::spawn_blocking_restart(tx, kind, || {
-                    crate::cli::hangar::run_daemon_restart_quiet(
-                        crate::cli::hangar::LauncherLifetime::Persistent,
-                    )
-                })
-            }
-            DaemonRow::Mcp => {
-                Self::spawn_blocking_restart(tx, kind, || crate::mcp_pool::client::restart_daemon())
-            }
-            // Headroom has no single restart entry point, so it is composed
-            // from its own stop + start. `stop()` returning false means it was
-            // not running, which is not an error for a restart. Its start is
-            // async, so this cannot use the blocking helper: `stop()` is sync
-            // and runs on the blocking pool, then the proxy is awaited.
-            DaemonRow::Headroom => {
-                tokio::spawn(async move {
-                    let _ = tokio::task::spawn_blocking(crate::headroom::stop).await;
-                    let line = crate::headroom::ensure_proxy_running()
-                        .await
-                        .map(|()| "restarted Headroom".to_string())
-                        .unwrap_or_else(|e| format!("Headroom restart failed: {e:#}"));
-                    let _ = tx.send(line);
-                });
-            }
-        }
-    }
-
-    /// Run one blocking daemon lifecycle call and report a single outcome line.
-    fn spawn_blocking_restart<F>(tx: mpsc::UnboundedSender<String>, kind: DaemonRow, action: F)
-    where
-        F: FnOnce() -> anyhow::Result<()> + Send + 'static,
-    {
-        let label = kind.label();
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(move || match action() {
-                Ok(()) => format!("restarted {label}"),
-                Err(e) => format!("{label} restart failed: {e:#}"),
-            })
-            .await
-            .unwrap_or_else(|e| format!("{label} restart task panicked: {e}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// notifyd's arm of [`Self::spawn_daemon_restart`].
-    ///
-    /// Kept separate from the blocking helper because its outcome line is
-    /// richer than "restarted": the restart SIGTERMs the old owner, reaps
-    /// stragglers, respawns and then polls the approve socket, and whether
-    /// that socket rebound is the part that matters — once it does, every
-    /// still-blocked permission waiter re-dials and resumes on its own.
-    fn spawn_notifyd_restart(&mut self, tx: mpsc::UnboundedSender<String>) {
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(|| {
-                match ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3)) {
-                    Ok(out) => {
-                        let spawned = out
-                            .spawned
-                            .map(|p| format!("pid {p}"))
-                            .unwrap_or_else(|| "spawn failed".to_string());
-                        if out.socket_bound {
-                            format!("restarted notifyd ({spawned}) — approve socket live, pending prompts resume")
-                        } else {
-                            format!("restarted notifyd ({spawned}) — socket not yet rebound; hooks keep re-dialling")
-                        }
-                    }
-                    Err(e) => format!("restart failed: {e:#}"),
-                }
-            })
-            .await
-            .unwrap_or_else(|e| format!("restart task panicked: {e}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Reinstall installed hooks against this running binary, or perform the
-    /// first install for every agent when no hooks are installed yet.
-    /// This is the repair action for stale package-manager paths and damaged
-    /// wiring; it deliberately does not start/restart any daemon.
-    pub fn spawn_hooks_repair(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.hooks_repair_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.hooks_repair_rx = Some(rx);
-        o.hooks_repair_status = Some("installing hooks…".to_string());
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(|| {
-                let result = ainb_plugin_notifyd::Paths::from_home()
-                    .and_then(|paths| ainb_plugin_notifyd::repair_or_install_hooks(&paths));
-                match result {
-                    Ok(report) => format!(
-                        "hooks installed for {}",
-                        report
-                            .record
-                            .agents
-                            .iter()
-                            .map(|agent| agent.name())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    Err(error) => format!("hook repair failed: {error:#}"),
-                }
-            })
-            .await
-            .unwrap_or_else(|error| format!("hook repair task panicked: {error}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    pub fn spawn_hangar_start(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.hangar_start_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.hangar_start_rx = Some(rx);
-        o.hangar_start_status = Some("starting / upgrading Hangar daemon…".to_string());
-        tokio::spawn(async move {
-            let line = tokio::task::spawn_blocking(|| {
-                crate::cli::hangar::start_or_upgrade_daemon_from_current(
-                    crate::cli::hangar::LauncherLifetime::Persistent,
-                )
-                .map(|_| "Hangar running against current Ainb".to_string())
-                .unwrap_or_else(|e| format!("Hangar start / upgrade failed: {e:#}"))
-            })
-            .await
-            .unwrap_or_else(|e| format!("Hangar start failed: {e}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Restart the shared MCP pool from this Ainb binary. If absent, starts it.
-    pub fn spawn_mcp_start(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.mcp_start_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.mcp_start_rx = Some(rx);
-        o.mcp_start_status = Some("restarting MCP pool against current Ainb…".to_string());
-        tokio::spawn(async move {
-            let result = tokio::task::spawn_blocking(crate::mcp_pool::client::restart_daemon)
-                .await
-                .unwrap_or_else(|e| Err(anyhow::anyhow!("MCP start task panicked: {e}")));
-            let line = result
-                .map(|()| "MCP pool running against current Ainb".to_string())
-                .unwrap_or_else(|error| format!("MCP pool restart failed: {error:#}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Start the Headroom proxy off the UI thread and report its result in the
-    /// unified Daemons screen. Headroom remains optional.
-    pub fn spawn_headroom_start(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if o.headroom_start_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::unbounded_channel();
-        o.headroom_start_rx = Some(rx);
-        o.headroom_start_status = Some("starting Headroom…".to_string());
-        tokio::spawn(async move {
-            let line = crate::headroom::ensure_proxy_running()
-                .await
-                .map(|()| "Headroom started".to_string())
-                .unwrap_or_else(|error| format!("Headroom start failed: {error:#}"));
-            let _ = tx.send(line);
-        });
-    }
-
-    /// Drain a completed daemons fetch. Called from the 250ms app tick.
-    pub fn check_daemons_overlay(&mut self) {
-        let Some(o) = self.daemons_overlay.as_mut() else {
-            return;
-        };
-        if let Some(rx) = o.fetch_rx.as_mut() {
-            match rx.try_recv() {
-                Ok(result) => {
-                    o.fetch_rx = None;
-                    o.loading = false;
-                    o.mcp_alive = result.mcp_alive;
-                    o.mcp_runtime = result.mcp_runtime;
-                    o.headroom = result.headroom;
-                    o.headroom_consumers = result.headroom_consumers;
-                    o.notifyd = result.notifyd;
-                    o.approve_running = result.approve_running;
-                    o.approve_reason = result.approve_reason;
-                    o.hangar_running = result.hangar_running;
-                    o.hangar_reason = result.hangar_reason;
-                    o.hangar_runtime = result.hangar_runtime;
-                    o.last_refreshed = Some(std::time::Instant::now());
-                }
-                // A dropped sender (the fetch task died before sending) MUST
-                // release the one-outstanding guard too. Leaving `fetch_rx`
-                // armed made every later refresh return early, which is how the
-                // screen used to sit on `collecting…` forever.
-                Err(mpsc::error::TryRecvError::Disconnected) => {
-                    o.fetch_rx = None;
-                    o.loading = false;
-                    o.approve_reason = "probe did not report".to_string();
-                    o.hangar_reason = "probe did not report".to_string();
-                    o.last_refreshed = Some(std::time::Instant::now());
-                }
-                Err(mpsc::error::TryRecvError::Empty) => {}
-            }
-        }
-        let mut refresh_after_start = false;
-        if let Some(rx) = o.hangar_start_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.hangar_start_rx = None;
-                o.hangar_start_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        if let Some(rx) = o.mcp_start_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.mcp_start_rx = None;
-                o.mcp_start_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        if let Some(rx) = o.headroom_start_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.headroom_start_rx = None;
-                o.headroom_start_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        // A finished restart updates the status line and triggers a fresh scan
-        // so the new pid shows up in the notifyd section.
-        if let Some(rx) = o.restart_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.restart_rx = None;
-                o.restart_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        if let Some(rx) = o.hooks_repair_rx.as_mut() {
-            if let Ok(line) = rx.try_recv() {
-                o.hooks_repair_rx = None;
-                o.hooks_repair_status = Some(line);
-                refresh_after_start = true;
-            }
-        }
-        drop(o);
-        if refresh_after_start {
-            self.spawn_daemons_fetch();
-        }
     }
 
     /// Headroom proxy watchdog. If a Headroom-enabled session is live but the
@@ -6639,28 +6208,44 @@ impl AppState {
     /// Of the multi-selected managed sessions, return the IDs that can actually
     /// be resumed: interactive agent sessions that are currently Stopped.
     /// Running sessions are excluded so a bulk resume never kills+recreates a
-    /// live tmux session. Order is unspecified (sourced from a HashSet).
+    /// live tmux session. Returned in list order, like the delete path.
     pub fn selected_resumable_session_ids(&self) -> Vec<Uuid> {
-        use crate::models::{SessionAgentType, SessionMode, SessionStatus};
-        self.selected_sessions
-            .iter()
-            .copied()
+        use crate::models::SessionStatus;
+        // List order, like the delete path: the order sessions are resumed in,
+        // and the order they appear in the log and the audit trail, should not
+        // be the per-process randomisation of HashSet iteration.
+        self.selected_session_ids_in_order()
+            .into_iter()
             .filter(|id| {
-                self.find_session(*id)
-                    .map(|s| {
-                        let is_interactive = matches!(s.mode, SessionMode::Interactive)
-                            && matches!(
-                                s.agent_type,
-                                SessionAgentType::Claude
-                                    | SessionAgentType::Codex
-                                    | SessionAgentType::Gemini
-                                    | SessionAgentType::Copilot
-                            );
-                        is_interactive && matches!(s.status, SessionStatus::Stopped)
-                    })
-                    .unwrap_or(false)
+                self.find_session(*id).is_some_and(|s| {
+                    is_stoppable_interactive(s) && matches!(s.status, SessionStatus::Stopped)
+                })
             })
             .collect()
+    }
+
+    /// Multi-selected managed session ids in list order (workspace, then
+    /// session), so a dialog that names them reads the same way the list does
+    /// instead of following `HashSet` iteration order. Ids no longer present in
+    /// any workspace are kept, at the end, so nothing silently drops out of a
+    /// bulk operation.
+    pub fn selected_session_ids_in_order(&self) -> Vec<Uuid> {
+        let mut seen: HashSet<Uuid> = HashSet::new();
+        let mut ordered: Vec<Uuid> = self
+            .workspaces
+            .iter()
+            .flat_map(|w| w.sessions.iter())
+            .map(|s| s.id)
+            .filter(|id| self.selected_sessions.contains(id) && seen.insert(*id))
+            .collect();
+        // Ids that resolve to no session have no list position, so they are
+        // sorted rather than left in HashSet order, which Rust randomises per
+        // process and would make the dialog text differ run to run.
+        let mut orphans: Vec<Uuid> =
+            self.selected_sessions.iter().copied().filter(|id| !seen.contains(id)).collect();
+        orphans.sort();
+        ordered.extend(orphans);
+        ordered
     }
 
     /// Toggle multi-select for the currently highlighted "Other tmux" session.
@@ -7690,7 +7275,7 @@ impl AppState {
             session_id
         );
 
-        // Check for uncommitted changes in worktree (only for non-Shell sessions)
+        // Check for uncommitted changes in the session's worktree
         let warning = self.check_session_uncommitted_warning(session_id);
 
         self.confirmation_dialog = Some(ConfirmationDialog {
@@ -7717,58 +7302,294 @@ impl AppState {
 
         let warning = self.check_session_uncommitted_warning(session_id);
 
-        let options = vec![
-            DialogOption {
-                label: "Stop".to_string(),
-                action: ConfirmAction::StopSession(session_id),
-            },
-            DialogOption {
-                label: "Delete".to_string(),
-                action: ConfirmAction::DeleteSession(session_id),
-            },
-            DialogOption {
-                label: "Cancel".to_string(),
-                action: ConfirmAction::Cancel,
-            },
-        ];
-
-        self.confirmation_dialog = Some(ConfirmationDialog {
-            title: "Stop or Delete Session".to_string(),
-            message: "Stop keeps the worktree and resumes later. Delete removes the worktree."
-                .to_string(),
-            // confirm_action mirrors the default (Stop) so the legacy ConfirmationConfirm
-            // handler still has something sensible if it ever runs without options.
-            confirm_action: ConfirmAction::StopSession(session_id),
-            selected_option: true,
+        self.confirmation_dialog = Some(stop_or_delete_dialog(
+            "Stop or Delete Session".to_string(),
+            "Stop keeps the worktree and resumes later. Delete removes the worktree.".to_string(),
             warning,
-            options: Some(options),
-            selected_index: 0, // Default = Stop (safe option)
+            ("Stop", ConfirmAction::StopSession(session_id)),
+            ("Delete", ConfirmAction::DeleteSession(session_id)),
+        ));
+    }
+
+    /// Uncommitted-work warning for one session, or None when there is nothing
+    /// to say.
+    ///
+    /// Runs the same code as the bulk dialog on a one-element selection, so the
+    /// two cannot apply different skip rules or different wording to the same
+    /// session.
+    fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
+        let name = self
+            .find_session(session_id)
+            .map_or_else(|| unknown_session_label(session_id), |s| s.name.clone());
+        let status = Self::bulk_uncommitted_counts(&[(session_id, name)]);
+        Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, 1)
+    }
+
+    /// Show the tri-option Stop all / Delete all / Cancel dialog for every
+    /// multi-selected session.
+    ///
+    /// The single-row flow has always defaulted to Stop so a stray `d` cannot
+    /// destroy a worktree. The bulk flow used to skip confirmation entirely and
+    /// delete immediately, taking uncommitted work with it; it now gets the same
+    /// dialog, the same Stop default, and an aggregate uncommitted-work warning.
+    pub fn show_bulk_delete_or_stop_confirmation(&mut self, session_ids: Vec<Uuid>) {
+        use crate::models::SessionStatus;
+
+        if session_ids.is_empty() {
+            self.add_warning_notification(NOTHING_SELECTED_WARNING.to_string());
+            return;
+        }
+        let count = session_ids.len();
+        info!(
+            "Showing bulk Stop/Delete/Cancel dialog for {} session(s)",
+            count
+        );
+
+        // One pass over the selection: every later question (what to name, how
+        // many worktrees, what can be stopped) is answered from this, rather
+        // than walking the workspace list once per question per id.
+        let mut id_names: Vec<(Uuid, String)> = Vec::with_capacity(count);
+        let mut stoppable: Vec<Uuid> = Vec::new();
+        let mut already_stopped = 0;
+        let mut no_stop_path = 0;
+        for id in &session_ids {
+            let session = self.find_session(*id);
+            id_names.push((
+                *id,
+                session.map_or_else(|| unknown_session_label(*id), |s| s.name.clone()),
+            ));
+            // Stop only means something for interactive agent sessions: it kills
+            // tmux and the session resumes later. Boss (Docker) and Shell
+            // sessions have no such path, and an already-Stopped session has
+            // nothing to stop. The two exclusions are counted apart because the
+            // dialog has to say which applies: "cannot be stopped" and "already
+            // stopped" are opposite claims about whether it can come back.
+            match session {
+                Some(s) if !is_stoppable_interactive(s) => no_stop_path += 1,
+                Some(s) if matches!(s.status, SessionStatus::Stopped) => already_stopped += 1,
+                Some(_) => stoppable.push(*id),
+                None => no_stop_path += 1,
+            }
+        }
+
+        let status = Self::bulk_uncommitted_counts(&id_names);
+        // What Delete actually removes: distinct trees on disk, not selected
+        // rows. When nothing could be resolved the number is a guess, so the
+        // message says "their worktrees" rather than printing a figure as fact.
+        let removes = if status.worktree_count_known {
+            format!("{} worktree(s)", status.with_worktree)
+        } else {
+            "their worktrees".to_string()
+        };
+        let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, count);
+        let summary = Self::format_bulk_session_summary(&id_names);
+
+        self.confirmation_dialog = Some(if stoppable.len() == count {
+            stop_or_delete_dialog(
+                format!("Stop or Delete {count} Session(s)"),
+                format!(
+                    "{summary}\nStop keeps every worktree and resumes later. \
+                     Delete removes {removes}."
+                ),
+                warning,
+                ("Stop all", ConfirmAction::BulkStopSessions(stoppable)),
+                ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
+            )
+        } else if stoppable.is_empty() {
+            let reason = if no_stop_path == 0 {
+                "Every one of these is already stopped, so there is nothing to stop"
+            } else if already_stopped == 0 {
+                "None of these sessions can be stopped and resumed"
+            } else {
+                "These sessions are either already stopped or have no stop path"
+            };
+            ConfirmationDialog {
+                title: format!("Delete {count} Session(s)"),
+                message: format!(
+                    "{summary}\n{reason}, so Delete is the only option offered. \
+                     It removes {removes}."
+                ),
+                confirm_action: ConfirmAction::BulkDeleteSessions(session_ids),
+                selected_option: false, // Default = No
+                warning,
+                options: None,
+                selected_index: 0,
+            }
+        } else {
+            let stoppable_count = stoppable.len();
+            let rest = count - stoppable_count;
+            let (subject, verb) = if rest == 1 {
+                ("the other one".to_string(), "is")
+            } else {
+                (format!("the other {rest}"), "are")
+            };
+            let excluded = if no_stop_path == 0 {
+                format!("{subject} {verb} already stopped")
+            } else if already_stopped == 0 {
+                format!("{subject} cannot be stopped")
+            } else {
+                format!("{subject} {verb} already stopped or cannot be stopped")
+            };
+            stop_or_delete_dialog(
+                format!("Stop or Delete {count} Session(s)"),
+                format!(
+                    "{summary}\nStop covers {stoppable_count} and keeps their worktrees, \
+                     {excluded}. Delete removes {removes}."
+                ),
+                warning,
+                (
+                    &format!("Stop {stoppable_count}"),
+                    ConfirmAction::BulkStopSessions(stoppable),
+                ),
+                ("Delete all", ConfirmAction::BulkDeleteSessions(session_ids)),
+            )
         });
     }
 
-    /// Check if a session's worktree has uncommitted changes.
-    /// Returns None for Shell sessions (no dedicated worktree) or if no uncommitted changes.
-    fn check_session_uncommitted_warning(&self, session_id: Uuid) -> Option<String> {
+    /// One-line "which sessions are affected" summary for the bulk dialog.
+    /// Long selections are truncated so the message still fits the dialog.
+    fn format_bulk_session_summary(names: &[(Uuid, String)]) -> String {
+        debug_assert!(
+            !names.is_empty(),
+            "the caller returns early on an empty selection"
+        );
+        format!(
+            "{} session(s): {}",
+            names.len(),
+            truncate_list(names.iter().map(|(_, name)| name.clone()))
+        )
+    }
+
+    /// What the selection has to lose.
+    ///
+    /// Probes each distinct worktree once, not each session: two sessions can
+    /// resolve to the same tree, and reporting its four modified files twice
+    /// would say eight. A tree whose status cannot be read is NOT reported as
+    /// clean, because "unknown" and "nothing to lose" must never look the same
+    /// on a delete confirmation. Every selected id is resolved, Shell sessions
+    /// included: what delete removes is whatever `by-session/<uuid>` points at,
+    /// so anything with a directory is counted and probed.
+    fn bulk_uncommitted_counts(names: &[(Uuid, String)]) -> BulkWorktreeStatus {
         use crate::git::WorktreeManager;
-        use crate::models::SessionAgentType;
 
-        // Find the session to check its type
-        let session = self.find_session(session_id)?;
+        /// Probes in flight at once. Each one forks a `git status`, so the fan
+        /// out is bounded: a 40-row selection must not spawn 40 threads and 40
+        /// child processes off a single keypress.
+        const MAX_CONCURRENT_PROBES: usize = 8;
 
-        // Skip for Shell sessions - they don't have dedicated worktrees
-        if matches!(session.agent_type, SessionAgentType::Shell) {
-            return None;
+        let Ok(worktree_manager) = WorktreeManager::for_reading() else {
+            warn!("Cannot resolve worktrees: uncommitted work is unknown for this selection");
+            return BulkWorktreeStatus {
+                dirty: Vec::new(),
+                unchecked: names.len(),
+                with_worktree: names.len(),
+                worktree_count_known: false,
+            };
+        };
+
+        // Resolve directories first: a stat, not a subprocess, and it collapses
+        // sessions that share a tree into one probe. Every selected id is
+        // resolved, including ones with no session row and Shell sessions: what
+        // delete removes is whatever `by-session/<uuid>` points at, so anything
+        // with a directory gets probed and counted.
+        let mut probes: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        let mut seen: HashMap<PathBuf, usize> = HashMap::new();
+        let mut status = BulkWorktreeStatus::default();
+        for (id, name) in names {
+            let dir = match worktree_manager.session_dir(*id) {
+                // Nothing on disk: deleting this session destroys no files.
+                Ok(None) => continue,
+                Ok(Some(dir)) => dir,
+                Err(e) => {
+                    // The link is there and could not be followed, which is
+                    // unknown, not empty.
+                    warn!("Could not resolve the worktree for {id}: {e}");
+                    status.unchecked += 1;
+                    status.with_worktree += 1;
+                    continue;
+                }
+            };
+            // Canonicalise before deduping, or /tmp and /private/tmp count twice
+            // on macOS. Fall back to the raw path when it cannot be resolved.
+            let key = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            // Sessions sharing a tree are named together: naming only the first
+            // would tell the user the others have nothing to lose.
+            if let Some(&idx) = seen.get(&key) {
+                probes[idx].1.push(name.clone());
+            } else {
+                seen.insert(key, probes.len());
+                status.with_worktree += 1;
+                probes.push((dir, vec![name.clone()]));
+            }
         }
 
-        // Try to check worktree status
-        let worktree_manager = WorktreeManager::new().ok()?;
-        let count = worktree_manager.uncommitted_file_count(session_id).ok()?;
+        // `git status` is a subprocess per tree and this runs inline on a
+        // keypress. Batching does not reduce the number of calls, one per tree
+        // either way; it bounds how many run at once so a large selection cannot
+        // spawn a thread and a child process per tree all at the same time.
+        let mut counts: Vec<Result<usize, ()>> = Vec::with_capacity(probes.len());
+        for batch in probes.chunks(MAX_CONCURRENT_PROBES) {
+            let batch_counts: Vec<Result<usize, ()>> = std::thread::scope(|scope| {
+                // Spawn every probe in the batch before joining any of them,
+                // otherwise they run one at a time.
+                let mut handles = Vec::with_capacity(batch.len());
+                for (path, _) in batch {
+                    handles.push(scope.spawn(move || probe_tree(path)));
+                }
+                handles.into_iter().map(|h| h.join().unwrap_or(Err(()))).collect()
+            });
+            counts.extend(batch_counts);
+        }
 
-        if count > 0 {
-            Some(format!("⚠️ {} uncommitted file(s) in worktree", count))
+        for ((_, names), count) in probes.into_iter().zip(counts) {
+            match count {
+                Ok(0) => {}
+                Ok(count) => status.dirty.push((names.join(", "), count)),
+                Err(()) => status.unchecked += 1,
+            }
+        }
+        status
+    }
+
+    /// Aggregate uncommitted-work warning for the bulk dialog: this is exactly
+    /// the work "Delete all" would destroy, so it names the dirty sessions
+    /// rather than reporting a bare total.
+    /// `selected` is how many rows the dialog is about, which decides the
+    /// wording: on a one-row dialog naming the session and saying "1 session(s)"
+    /// repeats what the user is looking at, but in a bulk selection the name is
+    /// the whole point of the warning.
+    fn format_bulk_uncommitted_warning(
+        dirty: &[(String, usize)],
+        unchecked: usize,
+        selected: usize,
+    ) -> Option<String> {
+        if dirty.is_empty() {
+            if unchecked == 0 {
+                return None;
+            }
+            return Some(if selected == 1 {
+                "⚠️ could not check this worktree for uncommitted work".to_string()
+            } else {
+                format!("⚠️ could not check {unchecked} session(s) for uncommitted work")
+            });
+        }
+        let total: usize = dirty.iter().map(|(_, count)| *count).sum();
+        let listed = truncate_list(dirty.iter().map(|(name, count)| format!("{name} ({count})")));
+        let unknown = if unchecked > 0 {
+            format!("; {unchecked} more could not be checked")
         } else {
-            None
+            String::new()
+        };
+        if selected == 1 && unchecked == 0 {
+            return Some(format!("⚠️ {total} uncommitted file(s) in worktree"));
         }
+        Some(format!(
+            "⚠️ {} uncommitted file(s) in {} session(s): {}{}",
+            total,
+            dirty.len(),
+            listed,
+            unknown
+        ))
     }
 
     /// `true` if ainb should offer to run `abtop --setup` (the Claude
@@ -7847,19 +7668,24 @@ impl AppState {
         });
     }
 
-    /// Show confirmation dialog for killing multiple "other" tmux sessions
+    /// Show confirmation dialog for killing multiple "other" tmux sessions.
+    ///
+    /// Names them, like the managed-session bulk dialog reached by the same key:
+    /// a count alone does not tell the user whether the selection is the one
+    /// they meant.
     pub fn show_kill_other_tmux_sessions_confirmation(&mut self, session_names: Vec<String>) {
         let count = session_names.len();
-        info!(
-            "Showing kill confirmation for {} other tmux sessions",
-            count
-        );
+        info!("Showing kill confirmation for {count} other tmux sessions");
+        let listed = truncate_list(session_names.iter().cloned());
         self.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Sessions".to_string(),
-            message: format!("Are you sure you want to kill {} tmux session(s)?", count),
+            message: format!(
+                "Kill {count} tmux session(s): {listed}?\nThese are not managed by ainb, so \
+                 only the tmux session is killed."
+            ),
             confirm_action: ConfirmAction::KillOtherTmuxSessions(session_names),
-            selected_option: false,
-            warning: Some("This closes all selected external tmux sessions.".to_string()),
+            selected_option: false, // Default to "No"
+            warning: Some("⚠️ This closes all selected external tmux sessions".to_string()),
             options: None,
             selected_index: 0,
         });
@@ -8279,11 +8105,12 @@ impl AppState {
             "codex" => SessionAgentType::Codex,
             "gemini" => SessionAgentType::Gemini,
             "copilot" => SessionAgentType::Copilot,
+            "antigravity" => SessionAgentType::Antigravity,
             _ => SessionAgentType::Claude,
         };
         let model = if matches!(
             agent_type,
-            SessionAgentType::Claude | SessionAgentType::Codex
+            SessionAgentType::Claude | SessionAgentType::Codex | SessionAgentType::Antigravity
         ) {
             let model = preset.agent_model.trim();
             (!is_default_model(model)).then(|| model.to_string())
@@ -9446,6 +9273,11 @@ impl AppState {
                     model.clone(),
                     headroom_enabled,
                     rtk_enabled,
+                    // `prepare_remote_worktree` cloned this tree into a path derived
+                    // from THIS session id moments ago, so a failed launch must remove
+                    // it rather than leave the directory, its checked-out cache branch
+                    // and its index entry behind.
+                    crate::interactive::session_manager::WorktreeOwner::ThisSession,
                 )
                 .await
         } else {
@@ -9842,7 +9674,13 @@ impl AppState {
 
         for session_name in &orphaned_shells {
             info!("Killing orphaned tmux shell session: {}", session_name);
-            match Command::new("tmux").args(["kill-session", "-t", session_name]).output().await {
+            // `=name` so an orphan named "shell-x" cannot take out a live
+            // "shell-x-2" via tmux's prefix matching.
+            match Command::new("tmux")
+                .args(["kill-session", "-t", &format!("={session_name}")])
+                .output()
+                .await
+            {
                 Ok(output) if output.status.success() => {
                     killed_count += 1;
                     info!("Successfully killed tmux session: {}", session_name);
@@ -9999,7 +9837,11 @@ impl AppState {
     ///
     /// The session is rediscovered as `Stopped` on the next workspace reload (and
     /// across TUI restarts) and can be resumed via `resume_interactive_session`.
-    async fn stop_interactive_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
+    async fn stop_interactive_session(
+        &mut self,
+        session_id: Uuid,
+        trigger_key: &str,
+    ) -> anyhow::Result<()> {
         use crate::interactive::SessionStore;
         use crate::models::SessionStatus;
 
@@ -10024,29 +9866,39 @@ impl AppState {
         let worktree_path = self.find_session(session_id).map(|s| s.workspace_path.clone());
 
         let result: anyhow::Result<()> = if let Some(ref name) = tmux_name {
-            // Hard constraint: kill only the exact named session. NEVER kill-server.
+            // Hard constraint: kill only the exact named session, never a prefix
+            // match. `-t name` resolves exact, then prefix, then fnmatch, so
+            // killing "feat-auth" would take out a live "feat-auth-2"; `=name`
+            // forces exact. NEVER kill-server.
             let output = tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", name])
+                .args(["kill-session", "-t", &format!("={name}")])
                 .output()
-                .await?;
+                .await;
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                // tmux returns non-zero when the session is already gone — treat as success
-                // since the post-condition (no tmux session) is what we care about.
-                if stderr.contains("can't find session") || stderr.contains("no server running") {
-                    info!("tmux session '{}' already gone — proceeding", name);
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "Failed to kill tmux session '{}': {}",
-                        name,
-                        stderr
-                    ));
+            // Every exit path below reaches the audit record: a failed kill
+            // still has to leave a trail. Only a successful one flips the row
+            // to Stopped, see below.
+            match output {
+                Err(e) => Err(anyhow::anyhow!("Failed to run tmux kill-session: {e}")),
+                Ok(output) if output.status.success() => {
+                    info!("Killed tmux session: {name}");
+                    Ok(())
                 }
-            } else {
-                info!("Killed tmux session: {}", name);
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // tmux returns non-zero when the session is already gone, which
+                    // is the post-condition we want, so treat it as success.
+                    if stderr.contains("can't find session") || stderr.contains("no server running")
+                    {
+                        info!("tmux session '{name}' already gone, proceeding");
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "Failed to kill tmux session '{name}': {stderr}"
+                        ))
+                    }
+                }
             }
-            Ok(())
         } else {
             warn!(
                 "No tmux_session_name for {} — nothing to kill, just marking Stopped",
@@ -10055,12 +9907,18 @@ impl AppState {
             Ok(())
         };
 
-        // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
-        self.tmux_sessions.remove(&session_id);
+        // Only a successful kill flips the row to Stopped. Marking a session
+        // Stopped while its agent is still running is worse than reporting the
+        // failure: the row invites a resume, which would tear down and replace
+        // the live agent.
+        if result.is_ok() {
+            // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
+            self.tmux_sessions.remove(&session_id);
 
-        if let Some(session) = self.find_session_mut(session_id) {
-            session.set_status(SessionStatus::Stopped);
-            session.is_attached = false;
+            if let Some(session) = self.find_session_mut(session_id) {
+                session.set_status(SessionStatus::Stopped);
+                session.is_attached = false;
+            }
         }
 
         let audit_result = match &result {
@@ -10071,15 +9929,70 @@ impl AppState {
             session_id,
             tmux_name,
             worktree_path,
-            AuditTrigger::UserKeypress("D→Stop".to_string()),
+            AuditTrigger::UserKeypress(trigger_key.to_string()),
             audit_result,
         );
 
-        // Mirror delete_session: refresh workspace view so the Stopped indicator is rendered.
-        self.load_real_workspaces().await;
-        self.ui_needs_refresh = true;
-
+        // The caller owns the workspace refresh so a bulk stop repaints once
+        // instead of rescanning every workspace per session.
         result
+    }
+
+    /// Soft-stop every session in `session_ids`.
+    ///
+    /// Each one goes through `stop_interactive_session`, so tmux is killed and
+    /// nothing else is: worktrees, the `sessions.json` entries, and the
+    /// `by-session/<uuid>` symlinks all survive and every session stays
+    /// resumable. The caller refreshes the workspace view once afterwards.
+    async fn bulk_stop_sessions(&mut self, session_ids: Vec<Uuid>) {
+        use crate::models::SessionStatus;
+
+        let total = session_ids.len();
+        let mut stopped = 0;
+        let mut already_stopped = 0;
+        let mut failed = 0;
+        for id in session_ids {
+            // The dialog already filters these out, so this is normally zero.
+            // It still has to be here: a session can reach Stopped between the
+            // dialog opening and this running, and counting it as a stop would
+            // report "Stopped 10" for what stopped 5.
+            if self
+                .find_session(id)
+                .is_some_and(|s| matches!(s.status, SessionStatus::Stopped))
+            {
+                // The dialog excludes these from the action, so their check was
+                // never cleared and there is nothing to restore.
+                already_stopped += 1;
+                continue;
+            }
+            if let Err(e) = self.stop_interactive_session(id, "D→Stop (bulk)").await {
+                error!("Failed to stop session {}: {}", id, e);
+                failed += 1;
+                // The row was unchecked optimistically when the user confirmed.
+                // It is still running, so put the check back rather than making
+                // the user hunt for it.
+                self.selected_sessions.insert(id);
+            } else {
+                stopped += 1;
+            }
+        }
+        if failed > 0 {
+            let attempted = total - already_stopped;
+            let skipped = if already_stopped > 0 {
+                format!(", {already_stopped} already stopped")
+            } else {
+                String::new()
+            };
+            self.add_warning_notification(format!(
+                "Stopped {stopped}/{attempted} sessions ({failed} failed{skipped})"
+            ));
+        } else if already_stopped > 0 {
+            self.add_success_notification(format!(
+                "Stopped {stopped} session(s) ({already_stopped} already stopped)"
+            ));
+        } else {
+            self.add_success_notification(format!("Stopped {stopped} session(s)"));
+        }
     }
 
     /// Resume a previously-stopped interactive session.
@@ -10130,9 +10043,15 @@ impl AppState {
 
             // Recreate the tmux session at the worktree. If something is already
             // listening on this name (shouldn't be, since we set Stopped), kill it
-            // first so we get a clean shell — narrow target, never wildcard.
+            // first so we get a clean shell. `=name` forces an exact target:
+            // bare `-t name` falls through to prefix matching, so resuming
+            // "feat-auth" would kill a live "feat-auth-2".
             let _ = tokio::process::Command::new("tmux")
-                .args(["kill-session", "-t", &metadata.tmux_session_name])
+                .args([
+                    "kill-session",
+                    "-t",
+                    &format!("={}", metadata.tmux_session_name),
+                ])
                 .output()
                 .await;
 
@@ -10209,6 +10128,7 @@ impl AppState {
                     model.as_deref(),
                     skip_permissions,
                     metadata.headroom_enabled,
+                    &metadata.tmux_session_name,
                 )
                 .await?;
             }
@@ -10244,11 +10164,11 @@ impl AppState {
                         encoded
                     )
                 }
-                // Codex resumes via `codex resume --last`, Copilot via `--continue` —
-                // both continue the most recent session in the worktree cwd.
-                (SessionAgentType::Codex, _) | (SessionAgentType::Copilot, _) => {
-                    "Resuming most recent session".to_string()
-                }
+                // Codex resumes via `codex resume --last`, Copilot and Antigravity via `--continue`:
+                // all continue the most recent session in the worktree cwd.
+                (SessionAgentType::Codex, _)
+                | (SessionAgentType::Copilot, _)
+                | (SessionAgentType::Antigravity, _) => "Resuming most recent session".to_string(),
                 (other, _) => {
                     format!("Started fresh ({} has no resume support)", other.name())
                 }
@@ -10513,10 +10433,13 @@ impl AppState {
                     }
                 }
                 AsyncAction::StopSession(session_id) => {
-                    if let Err(e) = self.stop_interactive_session(session_id).await {
+                    if let Err(e) = self.stop_interactive_session(session_id, "D→Stop").await {
                         error!("Failed to stop session {}: {}", session_id, e);
                         self.add_error_notification(format!("Stop failed: {}", e));
                     }
+                    // Refresh so the Stopped indicator is rendered.
+                    self.load_real_workspaces().await;
+                    self.ui_needs_refresh = true;
                 }
                 AsyncAction::ResumeSession(session_id, trigger) => {
                     if let Err(e) = self.resume_interactive_session(session_id, trigger).await {
@@ -10549,6 +10472,11 @@ impl AppState {
                     }
                     self.ui_needs_refresh = true;
                 }
+                AsyncAction::BulkStopSessions(session_ids) => {
+                    self.bulk_stop_sessions(session_ids).await;
+                    self.load_real_workspaces().await;
+                    self.ui_needs_refresh = true;
+                }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();
                     let mut deleted = 0;
@@ -10557,6 +10485,9 @@ impl AppState {
                         if let Err(e) = self.delete_session_core(id).await {
                             error!("Failed to delete session {}: {}", id, e);
                             failed += 1;
+                            // Still there, so keep it checked: the row was
+                            // unchecked optimistically on confirmation.
+                            self.selected_sessions.insert(id);
                         } else {
                             deleted += 1;
                         }
@@ -11549,6 +11480,7 @@ impl AppState {
             SessionAgentType::Claude => Some("claude"),
             SessionAgentType::Codex => Some("codex"),
             SessionAgentType::Copilot => Some("copilot"),
+            SessionAgentType::Antigravity => Some("antigravity"),
             _ => None,
         }
     }
@@ -12248,6 +12180,7 @@ impl AppState {
                 model.as_deref(),
                 skip_permissions,
                 headroom_enabled,
+                &tmux_session_name,
             )
             .await?;
         }
@@ -13309,8 +13242,6 @@ impl App {
 
         // Drain + lazily refresh the MCP pool overlay (no-op when closed).
         self.state.check_mcp_overlay();
-        // Drain completed daemons overlay fetch (no-op when closed).
-        self.state.check_daemons_overlay();
         // Re-ensure the Headroom proxy if a Headroom session is live but the
         // proxy died (throttled, async, best-effort).
         self.state.headroom_watchdog();
@@ -13697,75 +13628,6 @@ mod plugin_render_gate_tests {
         );
 
         runtime.shutdown();
-    }
-}
-
-#[cfg(test)]
-mod daemons_overlay_unlatch_tests {
-    //! The Daemons screen used to sit on `collecting…` forever. Two latches
-    //! caused it: a fetch that never reported, and a `fetch_rx` left armed
-    //! afterwards so the one-outstanding guard rejected every later refresh.
-    //! Both must clear on a fetch that dies without sending.
-
-    use super::{AppState, DaemonsOverlayState};
-
-    /// An overlay in exactly the state `spawn_daemons_fetch` leaves behind:
-    /// `loading` set and the receiver armed, waiting on a sender that is
-    /// already gone (the shape of a fetch task that died mid-probe).
-    fn overlay_awaiting_a_dead_sender() -> DaemonsOverlayState {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(tx);
-        DaemonsOverlayState {
-            mcp_alive: false,
-            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-            headroom: crate::headroom::ProxyStatus {
-                running: false,
-                port: crate::headroom::proxy_port(),
-                pid: None,
-                tokens_saved: None,
-            },
-            headroom_consumers: Vec::new(),
-            notifyd: Vec::new(),
-            approve_running: false,
-            approve_reason: "probing…".to_string(),
-            hangar_running: false,
-            hangar_reason: "probing…".to_string(),
-            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
-            loading: true,
-            last_refreshed: None,
-            fetch_rx: Some(rx),
-            selected: super::DaemonRow::Notifyd,
-            restart_rx: None,
-            restart_status: None,
-            hooks_repair_rx: None,
-            hooks_repair_status: None,
-            hangar_start_rx: None,
-            hangar_start_status: None,
-            mcp_start_rx: None,
-            mcp_start_status: None,
-            headroom_start_rx: None,
-            headroom_start_status: None,
-        }
-    }
-
-    #[test]
-    fn a_fetch_that_never_reports_clears_loading_and_rearms_refresh() {
-        let mut state = AppState::default();
-        state.daemons_overlay = Some(overlay_awaiting_a_dead_sender());
-
-        state.check_daemons_overlay();
-
-        let overlay = state.daemons_overlay.as_ref().expect("overlay still open");
-        assert!(!overlay.loading, "screen must leave `collecting…`");
-        assert!(
-            overlay.fetch_rx.is_none(),
-            "one-outstanding guard must release so `r` can refetch"
-        );
-        assert!(
-            overlay.last_refreshed.is_some(),
-            "a failed probe still counts as a completed attempt"
-        );
-        assert_eq!(overlay.hangar_reason, "probe did not report");
     }
 }
 

@@ -611,6 +611,16 @@ pub struct ScreenStates {
     /// Inbox screen cache (e38.14), filled from the `hangar/inbox_list` snapshot
     /// (the aggregated issue/comment/task entries + the unread count).
     pub inbox: InboxState,
+    /// The names the inbox resolves its rows through (crisp B1), projected from
+    /// the cached tasks + issues snapshots.
+    ///
+    /// Rebuilt by [`Self::refresh_inbox_names`] when either snapshot moves, NOT
+    /// per paint: the projection is two maps with a `String` clone per row, it
+    /// only changes when a snapshot lands, and the Inbox repaints on every frame.
+    /// It rides the SNAPSHOT path instead, which is quieter by construction: the
+    /// one high-rate event, a streaming run's transcript line, moves no name in
+    /// here and is skipped (`plugin::apply_hangar_event`).
+    inbox_names: super::inbox::InboxLookup,
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
     pub control_center: ControlCenterState,
@@ -638,7 +648,26 @@ pub struct ScreenStates {
     pub activity: Option<super::activity::ActivityState>,
     /// An issue id whose `hangar/issue_timeline` fetch is armed, awaiting the
     /// `render` pass to fire it over the daemon socket. `None` when idle.
-    pub pending_activity_fetch: Option<String>,
+    ///
+    /// PRIVATE, and the accessors are the point: armed only through
+    /// [`ScreenStates::arm_activity_fetch`] (which also records WHICH issue the
+    /// reply is for) and drained only through
+    /// [`ScreenStates::take_pending_activity_fetch`]. A `pub` field made that a
+    /// doc comment rather than a rule, and the next direct write reopens the
+    /// stale-reply bug this pairing exists to close.
+    pending_activity_fetch: Option<String>,
+    /// The issue the most recently armed `hangar/issue_timeline` fetch was for
+    /// (crisp B4 §2.3). Survives the fire, unlike
+    /// [`Self::pending_activity_fetch`], so a reply can be matched to the screen
+    /// that asked for it instead of folding one issue's narrative into another's
+    /// detail pane.
+    activity_fetch_issue: Option<String>,
+    /// How many armed `hangar/issue_timeline` fetches have not yet been
+    /// answered. Every fetch rides the same constant JSON-RPC id, so two in
+    /// flight are indistinguishable on the way back; while more than one is
+    /// outstanding the pane skips the reply rather than attributing issue A's
+    /// narrative to issue B.
+    activity_fetches_outstanding: u32,
     /// Command-palette modal cache (present only while the palette is open,
     /// e38.13).
     pub command_palette: Option<CommandPaletteState>,
@@ -742,6 +771,10 @@ pub struct ScreenStates {
     /// awaiting the `render` pass to fire `hangar/inbox_mark_read` over the daemon
     /// socket. Drained by the `render` pass. `false` when idle.
     pub pending_inbox_mark_read: bool,
+    /// Set when the Issues create wizard opened (crisp B1, defect 6), awaiting the
+    /// `render` pass to re-fire `hangar/repo_list` so a repo added since connect
+    /// is pickable. Drained by the `render` pass. `false` when idle.
+    pub pending_repo_refresh: bool,
     /// An `attention/answer` raised by the control-center screen (Enter / a number
     /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
     /// (P2). `None` when idle.
@@ -779,10 +812,14 @@ impl Default for SkillManagerState {
 impl ScreenStates {
     /// Replace the issue-list rows from an `hangar/issues_list` snapshot.
     pub fn set_issues(&mut self, issues: Vec<IssueRow>) {
-        self.issue_list = IssueListState::with_rows(issues);
+        // Replace the row cache ONLY: a snapshot can land at any instant (every
+        // daemon push arms a refetch), and rebuilding the whole state here wiped
+        // an open create wizard mid-typing along with filters and selection.
+        self.issue_list.replace_rows(issues);
         // Re-label any Kanban card already on the board with its parent issue's
         // title: the tasks snapshot may have landed before this one did.
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
+        self.refresh_inbox_names();
     }
 
     /// Replace the skill-manager rows from an `hangar/skills_list` snapshot.
@@ -800,6 +837,7 @@ impl ScreenStates {
     /// are recomputed at render time, so a placeholder `now` is fine here — the
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
+        self.working_count = working_agent_count(tasks);
         self.kanban = KanbanState::from_tasks(tasks, 0);
         // Resolve each card's agent id to its roster name, and its issue id to
         // that issue's title, against the cached snapshots. All three snapshots
@@ -807,6 +845,8 @@ impl ScreenStates {
         // `set_issues` re-apply their half the other way round.
         self.kanban.set_agent_names(&agent_names(&self.actors));
         self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
+        self.resolve_task_detail_names();
+        self.refresh_inbox_names();
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
@@ -893,20 +933,80 @@ impl ScreenStates {
         pending
     }
 
-    /// Replace the inbox cache from a `hangar/inbox_list` snapshot (e38.14).
+    /// Replace the inbox cache from a `hangar/inbox_list` snapshot (e38.14),
+    /// keeping the operator's filter across the refresh (crisp B3 §2.4).
     pub fn set_inbox(
         &mut self,
         entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
         unread: i64,
         recipient: String,
     ) {
-        self.inbox = InboxState::from_snapshot(entries, unread, recipient);
+        self.inbox.replace_rows(entries, unread, recipient);
+    }
+
+    /// The cached names the inbox resolves its rows through (crisp B1).
+    #[must_use]
+    pub const fn inbox_lookup(&self) -> &super::inbox::InboxLookup {
+        &self.inbox_names
+    }
+
+    /// Re-project the inbox name lookup from the cached tasks (agent label +
+    /// parent issue) and issues (display id + title) snapshots, so whichever
+    /// order they landed in the rows read `impl-1 done  HGR-3 <title>` on the
+    /// next paint.
+    ///
+    /// Called from EVERY seam that moves either snapshot: the two snapshot
+    /// setters, the roster that re-labels the cards, and the live-event fold.
+    /// Miss one and the inbox shows a stale name until the next snapshot lands.
+    pub fn refresh_inbox_names(&mut self) {
+        use super::inbox::{InboxIssueRef, InboxLookup, InboxTaskRef};
+        let tasks = self
+            .kanban
+            .columns()
+            .iter()
+            .flat_map(|col| col.cards.iter())
+            .map(|c| {
+                (
+                    c.task_id.clone(),
+                    InboxTaskRef {
+                        agent: c.agent_label.clone(),
+                        issue_id: c.issue_id.clone(),
+                    },
+                )
+            })
+            .collect();
+        let issues = self
+            .issue_list
+            .all_rows()
+            .iter()
+            .map(|r| {
+                (
+                    r.id.as_str().to_string(),
+                    InboxIssueRef {
+                        display_id: r
+                            .display_id
+                            .clone()
+                            .unwrap_or_else(|| super::kanban::short_id(r.id.as_str())),
+                        title: r.title.clone(),
+                    },
+                )
+            })
+            .collect();
+        self.inbox_names = InboxLookup { tasks, issues };
     }
 
     /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
     pub const fn take_pending_inbox_mark_read(&mut self) -> bool {
         let pending = self.pending_inbox_mark_read;
         self.pending_inbox_mark_read = false;
+        pending
+    }
+
+    /// Take the pending repo-roster refresh (the create wizard opened), if any
+    /// (crisp B1, defect 6).
+    pub const fn take_pending_repo_refresh(&mut self) -> bool {
+        let pending = self.pending_repo_refresh;
+        self.pending_repo_refresh = false;
         pending
     }
 
@@ -1008,6 +1108,11 @@ impl ScreenStates {
             })
             .collect();
         self.issue_list.set_agents(named);
+        // Every actor (agents AND members) by ref, so a board card's footer names
+        // its assignee whichever kind it is (crisp B1, defect 8).
+        self.issue_list.set_actor_names(
+            actors.iter().map(|a| (a.actor_ref.clone(), a.display_name.clone())).collect(),
+        );
         // Rebuild the Agents roster screen from the same snapshot (agent actors
         // only), preserving the selection + any open create/delete overlay so a
         // background refresh mid-interaction does not wipe the user's input. A
@@ -1026,7 +1131,13 @@ impl ScreenStates {
         // Re-label any Kanban card already on the board: the tasks snapshot may
         // have landed before this roster did, in which case its cards are still
         // on the short-id fallback.
-        self.kanban.set_agent_names(&agent_names(&self.actors));
+        let names = agent_names(&self.actors);
+        self.kanban.set_agent_names(&names);
+        // The usage dashboard's per-agent rows label themselves from the same
+        // roster (crisp B1, defect 8); it keeps the map across workspace resets.
+        self.usage.set_agent_names(names);
+        self.resolve_task_detail_names();
+        self.refresh_inbox_names();
     }
 
     /// Build the settings cache from the four daemon snapshots.
@@ -1229,6 +1340,23 @@ impl ScreenStates {
     }
 }
 
+/// How many DISTINCT agents are running a task right now — the count behind the
+/// issue board's `⬡⬡ 2 working` chip (crisp B2, Q11).
+///
+/// Distinct agents, not running tasks: the chip paints one avatar per agent, so
+/// counting rows would draw two people where one agent runs two tasks. The chip
+/// was dead code before this — declared, read, and never assigned, so it painted
+/// `0` on every real board while its test seeded the count by hand.
+fn working_agent_count(tasks: &[TaskCardRow]) -> usize {
+    use ainb_hangar_core::task_status::TaskStatus;
+    tasks
+        .iter()
+        .filter(|t| TaskStatus::parse(&t.status) == Some(TaskStatus::Running))
+        .map(|t| t.agent_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
 /// The `agent_id -> display_name` roster the Kanban cards label themselves from,
 /// projected out of the cached `hangar/agents_list` actor snapshot.
 ///
@@ -1252,6 +1380,59 @@ fn agent_names(actors: &[ActorRow]) -> std::collections::BTreeMap<String, String
 /// state, so a card's parent resolves whatever state it is in).
 fn issue_titles(rows: &[IssueRow]) -> std::collections::BTreeMap<String, String> {
     rows.iter().map(|r| (r.id.as_str().to_string(), r.title.clone())).collect()
+}
+
+/// Project every run of `issue_id` for the task-detail execution log
+/// (crisp B4 §2.3), joining the two snapshots that between them know a run.
+///
+/// `hangar/tasks_list` (through the Kanban cards) is the SPINE: it is the only
+/// snapshot that says which runs belong to which issue, and the only one that
+/// carries a run still going. `hangar/run_history` is joined on the task id for
+/// what a finished run cost — it has no issue column of its own, so it can only
+/// ever enrich, never enumerate. A run with no history row simply prints no
+/// cost, which is every running run.
+///
+/// The join is a map build over the history (≤ the daemon's row cap, a few
+/// hundred) plus one lookup per card, and it runs when a SNAPSHOT lands, not per
+/// paint.
+fn project_runs(
+    kanban: &KanbanState,
+    history: &[ainb_hangar_proto::snapshots::RunHistoryRow],
+    issue_id: &str,
+    names: &std::collections::BTreeMap<String, String>,
+) -> Vec<super::task_detail::RunRow> {
+    let cost_by_task: std::collections::BTreeMap<&str, i64> = history
+        .iter()
+        .filter_map(|r| {
+            let task = r.task_id.as_deref()?;
+            #[allow(clippy::cast_possible_truncation)]
+            Some((task, (r.cost_usd * 100.0).round() as i64))
+        })
+        .collect();
+    let finished_by_task: std::collections::BTreeMap<&str, i64> = history
+        .iter()
+        .filter_map(|r| r.task_id.as_deref().map(|task| (task, r.finished_at)))
+        .collect();
+    kanban
+        .cards_for_issue(issue_id)
+        // A status outside the CHECK'd FSM (a daemon newer than this plugin) has
+        // no word in the vocabulary, and the log would rather drop a row than
+        // paint a confident `queued` over a state it does not know.
+        .filter_map(|card| {
+            Some(super::task_detail::RunRow {
+                state: crate::vocab::RunState::parse(&card.status)?,
+                agent: names.get(&card.agent_id).unwrap_or(&card.agent_label).clone(),
+                started_at: card.created_at,
+                finished_at: finished_by_task.get(card.task_id.as_str()).copied(),
+                cost_cents: cost_by_task.get(card.task_id.as_str()).copied(),
+                short_id: card.short_id.clone(),
+                task_id: card.task_id.clone(),
+                branch: card.branch.clone(),
+                pr_url: card.pr_url.clone(),
+                pr_status: card.pr_status,
+            })
+        })
+        .collect()
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
@@ -1280,15 +1461,158 @@ impl ScreenStates {
     /// run's `branch` (tcp T2, agents-in-a-box-ch3) when the opening card carries
     /// one — the detail view renders it as a branch line under the PR badge. Pass
     /// `None` when there is no per-run branch (e.g. opened from the issue list).
+    ///
+    /// `status` is the bound task's wire status from the opening snapshot; it
+    /// seeds the lifecycle so retry / cancel gate correctly on a task that
+    /// finalized BEFORE this screen subscribed (live task events still override).
+    /// `None` (no known task yet) keeps the reducer's `Queued` default.
     pub fn open_task_detail(
         &mut self,
         task_id: ainb_hangar_core::ids::TaskId,
         issue: IssueRow,
         branch: Option<String>,
+        status: Option<&str>,
     ) {
+        let issue_id = issue.id.as_str().to_string();
         let mut td = TaskDetailState::new(task_id, issue);
         td.set_branch(branch);
+        if let Some(lifecycle) =
+            status.and_then(super::task_detail::TaskLifecycle::from_wire_status)
+        {
+            td.seed_lifecycle(lifecycle);
+        }
         self.task_detail = Some(td);
+        self.resolve_task_detail_names();
+        // Crisp B4 §2.3: the activity pane rides the SAME deferred
+        // `hangar/issue_timeline` fetch the activity modal arms — one RPC, one
+        // reply, both surfaces. Fired by `render`, never inline in the key path.
+        self.arm_activity_fetch(issue_id);
+    }
+
+    /// Arm a `hangar/issue_timeline` fetch for `issue_id` and record that the
+    /// next reply is for it. The ONE way to ask for a timeline — enforced by the
+    /// field being private, not by this sentence.
+    pub fn arm_activity_fetch(&mut self, issue_id: String) {
+        self.pending_activity_fetch = Some(issue_id);
+    }
+
+    /// Take the armed fetch to fire it, if any. The ONE drain.
+    pub fn take_pending_activity_fetch(&mut self) -> Option<String> {
+        self.pending_activity_fetch.take()
+    }
+
+    /// Record that a `hangar/issue_timeline` request for `issue_id` actually
+    /// went out. Called ONLY after a successful send.
+    ///
+    /// Counting sends rather than arms is what keeps the ledger honest: an arm
+    /// that never reaches the socket (no stream yet, an encode failure, a send
+    /// failure — all three log and continue) would otherwise leave a reply owed
+    /// forever, and one such leak wedges the pane for the life of the process.
+    /// It also makes the batching case correct for free, since two arms with no
+    /// render between them coalesce into the one `Option` and so into one send.
+    pub fn note_activity_fetch_sent(&mut self, issue_id: String) {
+        self.activity_fetch_issue = Some(issue_id);
+        self.activity_fetches_outstanding = self.activity_fetches_outstanding.saturating_add(1);
+    }
+
+    /// The issue a just-arrived `hangar/issue_timeline` reply belongs to, or
+    /// `None` when it cannot be attributed.
+    ///
+    /// Consumes one outstanding fetch, and MUST be called for every reply
+    /// including an error or an undecodable one — the ledger counts replies, not
+    /// usable ones, so a caller that claims only on the happy path leaks.
+    /// While two or more were in flight the answer is `None`: they share one
+    /// JSON-RPC id, so the second reply cannot be told from the first, and a
+    /// wrong narrative under the right title is worse than a pane that stays as
+    /// it was for one more round trip.
+    ///
+    /// ponytail: counter, not a per-request id. Give the fetch its own id if a
+    /// second surface ever needs to read a timeline concurrently.
+    pub fn claim_activity_reply(&mut self) -> Option<&str> {
+        let outstanding = self.activity_fetches_outstanding;
+        self.activity_fetches_outstanding = outstanding.saturating_sub(1);
+        if outstanding == 1 {
+            self.activity_fetch_issue.as_deref()
+        } else {
+            None
+        }
+    }
+
+    /// Resolve the open task-detail header's names against the cached agents +
+    /// tasks snapshots (crisp B1, defects 5 + 8): the assignee's roster name, the
+    /// bound run's agent name, and the issue's still-active run (the row an
+    /// `already_active` dispatch refusal names). Called at open AND whenever
+    /// either snapshot lands, so their arrival order never leaves a raw ULID on
+    /// the header. A no-op when no task detail is open.
+    fn resolve_task_detail_names(&mut self) {
+        let Some(td) = self.task_detail.as_mut() else {
+            return;
+        };
+        let names = agent_names(&self.actors);
+        let issue = td.issue();
+        let assignee_name = issue
+            .assignee
+            .as_deref()
+            .and_then(|a| a.strip_prefix("agent:"))
+            .and_then(|id| names.get(id).cloned());
+        let agent_name = self
+            .kanban
+            .card_for_task(td.task_id().as_str())
+            .and_then(|c| names.get(&c.agent_id).cloned());
+        let issue_id = issue.id.as_str().to_string();
+        let blocking_run = self.kanban.active_card_for_issue(&issue_id).map(|c| {
+            let agent = names.get(&c.agent_id).unwrap_or(&c.agent_label);
+            format!("#{} {agent} ({})", c.short_id, c.status)
+        });
+        td.set_resolved_names(assignee_name, agent_name, blocking_run);
+        // Crisp B4 §2.3: the execution log rides the same two snapshots, and the
+        // same seam, so it can never disagree with the header about which runs
+        // this issue has.
+        td.set_runs(project_runs(
+            &self.kanban,
+            self.usage.runs(),
+            &issue_id,
+            &names,
+        ));
+    }
+
+    /// Compose the open task-detail's ACTIVITY pane from an `hangar/issue_timeline`
+    /// reply (crisp B4 §2.3), newest first — the same rows the activity modal
+    /// renders, through the same three label helpers, so the pane and the modal
+    /// can never tell different stories. A no-op when no task-detail is open or
+    /// the reply is for a different issue.
+    pub fn set_task_detail_activity(
+        &mut self,
+        issue_id: &str,
+        entries: &[ainb_hangar_proto::snapshots::TimelineEntryRow],
+    ) {
+        let names = agent_names(&self.actors);
+        let Some(td) = self.task_detail.as_mut() else {
+            return;
+        };
+        if td.issue().id.as_str() != issue_id {
+            return;
+        }
+        let resolve = |id: &str| names.get(id).cloned();
+        let mut rows: Vec<super::task_detail::ActivityRow> = entries
+            .iter()
+            .map(|e| {
+                let actor = super::activity::actor_label(e, &resolve);
+                let action = super::activity::action_label(e);
+                let detail = super::activity::detail_label(e);
+                let text = if detail.is_empty() {
+                    format!("{actor} {action}")
+                } else {
+                    format!("{actor} {action} {detail}")
+                };
+                super::task_detail::ActivityRow {
+                    at_ms: e.created_at,
+                    text,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+        td.set_activity(rows);
     }
 
     /// Apply a freshly-fetched PR status to the open task-detail screen (e38.34)
@@ -1309,6 +1633,23 @@ impl ScreenStates {
     pub fn push_task_detail_system_line(&mut self, body: String) {
         if let Some(td) = self.task_detail.as_mut() {
             td.push_system_line(body);
+        }
+    }
+
+    /// Backfill the OPEN task-detail transcript with `entries` parsed from the
+    /// durable run log (crisp B1, defect 7), but only when that screen is bound
+    /// to `task_id`: the daemon serves an issue's NEWEST run, and a detail opened
+    /// on an older attempt must not show another run's transcript. Returns
+    /// whether anything was applied (a screen already backfilled by an earlier
+    /// open's reply refuses a second one). A no-op on a closed screen.
+    pub fn backfill_task_detail_transcript(
+        &mut self,
+        task_id: &str,
+        entries: Vec<super::task_detail::TranscriptEntry>,
+    ) -> bool {
+        match self.task_detail.as_mut() {
+            Some(td) if td.task_id().as_str() == task_id => td.backfill_transcript(entries),
+            _ => false,
         }
     }
 }
@@ -1351,6 +1692,10 @@ pub enum NavIntent {
         /// The selected entity's kind tag (e.g. `"issue"`).
         kind: String,
     },
+    /// Switch to a screen the palette's `Go:` family named (crisp B5 §2.5). The
+    /// replacement for the nine tab hotkeys the strip shrink took away, so it
+    /// behaves like one: switch and clear the modal-restore bookkeeping.
+    GoToScreen(Screen),
 }
 
 /// Render the active screen's body between the chrome top bar (row 0) and footer
@@ -1391,7 +1736,18 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             super::logs::render_logs(buf, w, top, bottom, &states.logs);
         }
         Screen::Inbox => {
-            super::inbox::render_inbox(buf, w, top, bottom, &states.inbox);
+            // The attention store is handed in, not copied (crisp B3 §2.4): the
+            // `needs you` block and the Control Center paint the SAME rows.
+            super::inbox::render_inbox(
+                buf,
+                w,
+                top,
+                bottom,
+                &states.inbox,
+                states.inbox_lookup(),
+                &states.control_center,
+                now_ms(),
+            );
         }
         Screen::ControlCenter => {
             super::control_center::render_control_center(
@@ -1422,7 +1778,7 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         }
         Screen::TaskDetail(_) => {
             if let Some(td) = &states.task_detail {
-                super::task_detail::render_task_detail(buf, w, top, bottom, td);
+                crate::screen::task_detail::render_task_detail(buf, w, top, bottom, td, now_ms());
             }
         }
         Screen::AgentPicker(_) => {
@@ -1489,18 +1845,61 @@ fn render_prior(buf: &mut WireBuffer, w: u16, h: u16, prior: &Screen, states: &S
 }
 
 /// Render the help overlay (a simple centred hint list).
+/// The help overlay's lines: every screen the router reaches plus the keys an
+/// operator reaches for most on each. Kept as data so a test can pin it against
+/// the router's key set, and so a new screen shows up here or fails the build.
+///
+/// TWO screen blocks since crisp B5 §2.5. `screens` is the seven-tab strip, one
+/// `<key> <label>` pair each (`help_overlay_names_every_router_key` pins that
+/// every surviving router key appears). `more` is the nine demoted screens, which
+/// have no key at all: they are the words to type after `^P`, and both blocks are
+/// exempt from `help_overlay_screen_keys_are_not_router_keys` because their
+/// tokens are destinations, not screen-local bindings.
+pub const HELP_LINES: &[&str] = &[
+    "Hangar — keys",
+    "",
+    "screens   1 issues  2 task  K runs  B boards  I inbox  A agents  , settings",
+    "          ^P search  q back to ainb home",
+    "more      ^P then the word:  skills  autopilots  daemon  usage  logs",
+    "                            control  fleet  squads  profiles",
+    "",
+    "issues    j/k move  enter open  c create  s sub-issue  a assign  d done",
+    "          x delete  y timeline  / filter  f facets  tab chips",
+    "task      enter expand run  R retry (operator override)  X cancel  c comment",
+    "          a/t criteria  o open PR  x delete",
+    "boards    c card  enter run ▾ (headless / interactive)  a attach  X cancel",
+    "          b board  n/r/x column  s squad  w depends-on  R auto-run  d remove",
+    "          t timeline  e edit  m auto-move  ⇧↑↓ move card  ⇧←→ reorder column",
+    "inbox     j/k row  h/l option  enter or 1-9 answer  r mark read  f filter",
+    "control   j/k card  h/l option  enter or 1-9 answer",
+    "squads    n agent  c squad  a/d member  r role  i instructions  x fan out",
+    "agents    n create  x delete",
+    "profiles  t tier",
+    "logs      a/i/w/e level",
+    "",
+    "esc close  q back to ainb home",
+];
+
 fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     use ainb_plugin_sdk::{Cell, Color, Coord};
     const GOLD: Color = Color::rgb(255, 215, 0);
-    let lines = [
-        "Hangar — keys",
-        "1 issues  2 task  3 skills  , settings",
-        "a assign  c create  / filter",
-        "esc close  q quit",
-    ];
-    let y0 = h / 2 - 2;
+    let lines = HELP_LINES;
+    // The table centres inside the BODY band (row 0 is the tab strip, the last
+    // row is the footer) and never above it. Centring over the whole area was
+    // fine while the table was a row shorter than the band: crisp B5 added a
+    // `more` block, `y0` went to 0, and the title painted THROUGH the tab strip
+    // (`[BHangar — keysnbox`). Clamped rather than re-tuned, so the next line
+    // added clips the tail instead of eating the chrome.
+    let band = h.saturating_sub(2);
+    let y0 = 1 + band.saturating_sub(u16::try_from(lines.len()).unwrap_or(0)) / 2;
     for (i, line) in lines.iter().enumerate() {
         let y = y0 + u16::try_from(i).unwrap_or(0);
+        // A short pane shows the head of the table and drops the tail; the
+        // host clamps off-viewport cells silently, so without this the top
+        // rows are the only ones lost.
+        if y >= h.saturating_sub(1) {
+            break;
+        }
         let line_w = u16::try_from(line.chars().count()).unwrap_or(u16::MAX);
         let x0 = w.saturating_sub(line_w) / 2;
         for (ch, cx) in line.chars().zip(x0..w) {
@@ -1511,17 +1910,53 @@ fn render_help(buf: &mut WireBuffer, w: u16, h: u16) {
     }
 }
 
+/// Kill-line: clear the whole text input (Ctrl+U). `\u{15}` is the NAK control
+/// char a terminal itself sends for the chord, so the reducer vocabulary carries
+/// it the same way it carries `'\u{8}'` for Backspace.
+pub(crate) const CLEAR_LINE: char = '\u{15}';
+
 /// Translate a wire [`KeyEvent`] into the `char` the pure screen reducers expect.
 ///
 /// The reducers model navigation as printable chars (`'j'`, `'/'`, …) plus `'\n'`
 /// for Enter and `'\u{8}'` for Backspace. Esc and the tab-switch keys are handled
 /// by the caller before reaching a reducer.
+///
+/// A Ctrl chord yields `None`. Most reducers here end in a catch-all that PUSHES
+/// the char into a text buffer (a comment body, a workspace name, an API key), so
+/// handing them a C0 control char types something the operator cannot see and
+/// then submits it to the daemon. A screen whose reducer actually models the
+/// chord calls [`key_char_with_chords`] instead.
 const fn key_char(key: &KeyEvent) -> Option<char> {
     match &key.code {
+        // A chord in EITHER spelling the terminals use: the modifier flag, or the
+        // bare control char with no flag at all (`plugin::is_ctrl_p` documents the
+        // same split for Ctrl+P). Neither is text the operator meant to type, so
+        // both are dropped rather than pushed into a buffer.
+        //
+        // Only the kill-line char, NOT every C0: `'\r'` / `'\n'` / `'\u{8}'` are
+        // how a caller spells Enter and Backspace on this path, and the reducers
+        // model them (`tripwire_issue_acceptance_tick` sends Enter as `'\r'`).
+        KeyCode::Char { .. } if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 => None,
+        KeyCode::Char { ch: CLEAR_LINE } => None,
         KeyCode::Char { ch } => Some(*ch),
         KeyCode::Enter => Some('\n'),
         KeyCode::Backspace => Some('\u{8}'),
         _ => None,
+    }
+}
+
+/// [`key_char`], plus the Ctrl chords the caller's reducer models: Ctrl+U becomes
+/// [`CLEAR_LINE`], in either spelling. The ONE chord table (crisp B1, defect 21),
+/// so the Boards overlay, the Issues create wizard and the issue-list filter
+/// cannot drift apart on it. Every OTHER translation site keeps the dropping
+/// [`key_char`].
+const fn key_char_with_chords(key: &KeyEvent) -> Option<char> {
+    match &key.code {
+        KeyCode::Char { ch: 'u' | 'U' } if key.mods & ainb_plugin_sdk::KEY_MOD_CTRL != 0 => {
+            Some(CLEAR_LINE)
+        }
+        KeyCode::Char { ch: CLEAR_LINE } => Some(CLEAR_LINE),
+        _ => key_char(key),
     }
 }
 
@@ -1690,11 +2125,20 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             None
         }
         Screen::Inbox => {
-            // The inbox owns the mark-all-read key (`r`): it flags a deferred
-            // `hangar/inbox_mark_read` request the `render` pass fires, after
-            // which the re-pulled snapshot drops the unread badge to zero.
-            if key_char(key) == Some('r') {
-                states.pending_inbox_mark_read = true;
+            match key_char(key) {
+                // The inbox owns the mark-all-read key (`r`): it flags a deferred
+                // `hangar/inbox_mark_read` request the `render` pass fires, after
+                // which the re-pulled snapshot drops the unread badge to zero.
+                Some('r') => states.pending_inbox_mark_read = true,
+                // `f` cycles the client-side filter chips (crisp B3 §2.4). No
+                // refetch: the rows the screen already holds are the rows it
+                // filters.
+                Some('f') => states.inbox.cycle_filter(),
+                // Everything else drives the `needs you` block, which IS the
+                // control-center board: the same reducer, the same selection,
+                // the same `attention/answer` RPC. An ASK is answerable from `I`
+                // exactly as it is from `C`.
+                _ => route_control_center(states, key),
             }
             None
         }
@@ -1799,9 +2243,11 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     // carry. Any other key is an unmodelled no-op.
     let ev = if states.issue_list.wizard().is_some() {
         let k = match &key.code {
-            KeyCode::Char { ch } => super::issue_list::WizardKey::Char(*ch),
-            KeyCode::Enter => super::issue_list::WizardKey::Enter,
-            KeyCode::Backspace => super::issue_list::WizardKey::Backspace,
+            // Text input, including the Ctrl chords the wizard models, through
+            // the one shared translation.
+            KeyCode::Char { .. } | KeyCode::Enter | KeyCode::Backspace => {
+                super::issue_list::wizard_key_from_char(key_char_with_chords(key)?)
+            }
             KeyCode::Esc => super::issue_list::WizardKey::Esc,
             KeyCode::Up => super::issue_list::WizardKey::Up,
             KeyCode::Down => super::issue_list::WizardKey::Down,
@@ -1851,7 +2297,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             KeyCode::BackTab if states.issue_list.mode() == IssueListMode::Normal => {
                 IssueListEvent::SetFilter(states.issue_list.filter().prev())
             }
-            _ => IssueListEvent::Key(key_char(key)?),
+            // The `/` filter buffer models CLEAR_LINE, so this path takes the
+            // chords too; every other issue-list mode ignores an unknown char.
+            _ => IssueListEvent::Key(key_char_with_chords(key)?),
         }
     };
     let out = reduce_issue_list(&states.issue_list, ev);
@@ -1916,6 +2364,11 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         // reply the plugin retries the delete (cancel commits before delete).
         Some(IssueListIntent::CancelAndDeleteIssue(id)) => {
             states.pending_cancel_delete_action = Some(id);
+            None
+        }
+        // Crisp B1 (defect 6): a wizard open re-pulls the repo roster in `render`.
+        Some(IssueListIntent::RefreshRepos) => {
+            states.pending_repo_refresh = true;
             None
         }
         None => None,
@@ -2128,16 +2581,20 @@ fn route_timeline_key(states: &mut ScreenStates, key: &KeyEvent) {
 /// the input; unmapped keys are dropped.
 fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
     let k = match &key.code {
-        KeyCode::Enter => BoardsKey::Enter,
         KeyCode::Esc => BoardsKey::Esc,
-        KeyCode::Backspace => BoardsKey::Backspace,
         KeyCode::Up => BoardsKey::Up,
         KeyCode::Down => BoardsKey::Down,
-        KeyCode::Char { ch } => BoardsKey::Char(*ch),
         // Overlay-local only: the dep picker cycles its link kind (multica parity
         // #20). No global binding is added, so no host-reserved key is touched.
         KeyCode::Tab => BoardsKey::Tab,
-        _ => return None,
+        // Text input, including the Ctrl chords the overlay models, through the
+        // one shared translation.
+        _ => match key_char_with_chords(key)? {
+            '\n' => BoardsKey::Enter,
+            '\u{8}' => BoardsKey::Backspace,
+            CLEAR_LINE => BoardsKey::ClearLine,
+            c => BoardsKey::Char(c),
+        },
     };
     Some(BoardsEvent::Key(k))
 }
@@ -2511,11 +2968,14 @@ fn route_profiles(states: &mut ScreenStates, key: &KeyEvent) {
 /// reducer-closed state) raises [`NavIntent::CloseModal`] with no assign, popping
 /// the modal back to its prior screen.
 fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
-    let picker = states.agent_picker.take()?;
+    // The event is built BEFORE the take: an unmodelled key returns here, and
+    // returning between a take and its write-back DROPS the whole modal off the
+    // screen (crisp B1 round-2 review).
     let ev = match key.code {
         KeyCode::Esc => AgentPickerEvent::Esc,
         _ => AgentPickerEvent::Key(key_char(key)?),
     };
+    let picker = states.agent_picker.take()?;
     let out = reduce_agent_picker(&picker, ev);
 
     // Enter on a picked actor: queue the assign RPC and dismiss the modal.
@@ -2563,7 +3023,7 @@ fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent
     };
     let out = reduce_activity(&state, ActivityEvent::Key(c));
     if let Some(ActivityIntent::Refresh { issue_id }) = out.intent {
-        states.pending_activity_fetch = Some(issue_id);
+        states.arm_activity_fetch(issue_id);
     }
     states.activity = Some(out.state);
     None
@@ -2580,13 +3040,16 @@ fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent
 /// [`PaletteAction::Search`] the `render` pass drains + fires (the sync key router
 /// can't `await`).
 fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
-    let palette = states.command_palette.take()?;
+    // The event is built BEFORE the take: an unmodelled key returns here, and
+    // returning between a take and its write-back DROPS the whole modal off the
+    // screen (crisp B1 round-2 review).
     let ev = match key.code {
         KeyCode::Esc => CommandPaletteEvent::Esc,
         KeyCode::Down => CommandPaletteEvent::SelectDown,
         KeyCode::Up => CommandPaletteEvent::SelectUp,
         _ => CommandPaletteEvent::Key(key_char(key)?),
     };
+    let palette = states.command_palette.take()?;
     let out = reduce_command_palette(&palette, ev);
 
     match out.intent {
@@ -2594,6 +3057,11 @@ fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<Na
         Some(CommandPaletteIntent::Navigate { screen, id, kind }) => {
             states.command_palette = None;
             return Some(NavIntent::NavigateToEntity { screen, id, kind });
+        }
+        // Enter on a `Go:` row: switch screen and dismiss the modal.
+        Some(CommandPaletteIntent::GoToScreen(screen)) => {
+            states.command_palette = None;
+            return Some(NavIntent::GoToScreen(screen));
         }
         // A query edit: queue the search RPC, keep the modal open.
         Some(CommandPaletteIntent::Search(query)) => {
@@ -2610,6 +3078,235 @@ fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<Na
         Some(NavIntent::CloseModal)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod help_overlay_tests {
+    use super::HELP_LINES;
+    use crate::screen::router::ROUTER_KEYS;
+
+    /// Every router key names its screen on the help overlay, so a screen added
+    /// to the router without a help line fails here instead of staying hidden
+    /// (the overlay listed 8 of ~40 keys for months).
+    #[test]
+    fn help_overlay_names_every_router_key() {
+        // A key counts as documented when it stands as its own token with a
+        // word label right after it (`K kanban`, `, settings`, `q back`), not
+        // when the letter merely appears somewhere inside another hint.
+        let tokens: Vec<&str> = HELP_LINES.iter().flat_map(|l| l.split_whitespace()).collect();
+        for key in ROUTER_KEYS {
+            // `?` IS the overlay; it needs no line about itself.
+            if key == '?' {
+                continue;
+            }
+            let key_token = key.to_string();
+            let labelled = tokens.windows(2).any(|pair| {
+                pair[0] == key_token
+                    && pair[1].len() > 1
+                    && pair[1].chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+            });
+            assert!(
+                labelled,
+                "router key {key:?} has no `{key} <label>` help entry"
+            );
+        }
+    }
+
+    /// Every screen row of the overlay reads `<section> <key> <label>...`: a
+    /// description with no key in front of it (a section name stranded
+    /// mid-line, a hint whose key was stripped) is operator-visible garbling.
+    /// Rows are tokenised as key / label pairs: a key token is a single char,
+    /// a slash group, a digit range or a named key; anything else is a label
+    /// word and must follow a key.
+    #[test]
+    fn help_overlay_screen_rows_pair_every_label_with_a_key() {
+        let is_key = |tok: &str| {
+            tok.chars().count() == 1
+                || tok.split('/').all(|k| k.chars().count() == 1)
+                || matches!(tok, "enter" | "esc" | "tab" | "1-9" | "^P" | "space")
+                // A chord written in glyphs (`⇧↑↓`, `⇧←→`) is a key, not a label:
+                // it carries no letter or digit for a label word to be confused
+                // with. These moved here from the deleted Boards hint band.
+                || tok.chars().all(|c| !c.is_alphanumeric())
+        };
+        // Section names are the first token of every unindented screen row;
+        // one appearing anywhere else is a stranded heading.
+        let sections: Vec<&str> = HELP_LINES
+            .iter()
+            .filter(|l| !l.starts_with(' ') && !l.starts_with("esc") && !l.starts_with("Hangar"))
+            .filter_map(|l| l.split_whitespace().next())
+            .collect();
+        let mut in_screens = false;
+        for line in HELP_LINES {
+            let first = line.split_whitespace().next().unwrap_or_default();
+            if !line.starts_with(' ') {
+                // `more` (crisp B5) is a screen block like `screens`: its tokens
+                // are destinations to type after `^P`, not `<key> <label>` pairs,
+                // and its words collide with the section names by design.
+                in_screens = matches!(first, "screens" | "more");
+            }
+            if in_screens || first.is_empty() || first == "Hangar" || line.starts_with("esc") {
+                continue;
+            }
+            let tokens: Vec<&str> = line.split_whitespace().collect();
+            let body = if line.starts_with(' ') {
+                &tokens[..]
+            } else {
+                &tokens[1..]
+            };
+            // Every label word follows a key, and no section heading is
+            // stranded mid-row.
+            let mut saw_key = false;
+            for tok in body {
+                assert!(
+                    !sections.contains(tok),
+                    "help row {line:?}: section {tok:?} stranded mid-line"
+                );
+                if is_key(tok) {
+                    saw_key = true;
+                } else {
+                    assert!(
+                        saw_key,
+                        "help row {line:?}: label {tok:?} has no key before it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every SCREEN-LOCAL key the overlay advertises (the rows below the
+    /// `screens` block) must be a key the screen can receive: a router key
+    /// (`B`, `K`, `q`, ...) is consumed before any screen reducer runs, so a hint
+    /// on one would document a dead binding (issue #450). Single keys and
+    /// slash groups (`j/k`, `n/r/x`) are checked; words (`enter`, `tab`, `esc`,
+    /// `1-9`, `^P`) are not chars the router claims.
+    #[test]
+    fn help_overlay_screen_keys_are_not_router_keys() {
+        use crate::screen::router::is_router_key;
+        let mut in_screens = false;
+        for line in HELP_LINES {
+            let mut tokens = line.split_whitespace().peekable();
+            if let Some(first) = tokens.peek() {
+                // `more` joins `screens` as a destination block (crisp B5 §2.5):
+                // its words are what you type after `^P`, not keys a screen binds.
+                if matches!(*first, "screens" | "more") {
+                    in_screens = true;
+                } else if !line.starts_with(' ') && !first.is_empty() {
+                    in_screens = false;
+                }
+            }
+            if in_screens || line.starts_with("esc close") || line.starts_with("Hangar") {
+                continue;
+            }
+            for tok in tokens {
+                let keys: Vec<char> = if tok.len() == 1 {
+                    tok.chars().collect()
+                } else if tok.split('/').all(|k| k.chars().count() == 1) {
+                    tok.split('/').filter_map(|k| k.chars().next()).collect()
+                } else {
+                    continue;
+                };
+                for key in keys {
+                    assert!(
+                        !is_router_key(key),
+                        "help advertises screen key {key:?} on {line:?}, but the router eats it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A pane shorter than the table paints its first rows (the title and the
+    /// global keys) inside the BODY BAND and nothing below it, instead of
+    /// centring the block so the rows that survive are the middle ones.
+    #[test]
+    fn help_overlay_clips_to_a_short_pane_from_the_top() {
+        let (w, h) = (120, 10);
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(w, h);
+        super::render_help(&mut buf, w, h);
+        let rows: std::collections::BTreeSet<u16> = buf.cells.iter().map(|(c, _)| c.y).collect();
+        assert!(
+            rows.iter().all(|&y| y < h),
+            "painted below the viewport: {rows:?}"
+        );
+        // The band is rows `1..h-1`; blank separators paint no cells, so count
+        // the non-blank head of what fits in it.
+        let band = usize::from(h) - 2;
+        let painted_head = HELP_LINES[..band].iter().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(
+            rows.len(),
+            painted_head,
+            "the first {band} lines land, one per row"
+        );
+        let first: String = buf
+            .cells
+            .iter()
+            .filter(|(c, _)| c.y == 1)
+            .map(|(_, cell)| cell.symbol.clone())
+            .collect();
+        assert_eq!(
+            first.trim(),
+            HELP_LINES[0].trim(),
+            "row 1 (the top of the band) is the table's first line"
+        );
+    }
+
+    /// COVERAGE: the `more` block names every screen in `GO_SCREENS`.
+    ///
+    /// It is the third copy of the demoted set and the only hand-written one —
+    /// Settings renders straight off `GO_SCREENS` and the palette rows ARE
+    /// `GO_SCREENS`. Both structural help guards deliberately SKIP this block
+    /// (its tokens are destinations, not screen-local keys), which left it the
+    /// one copy nothing checked: demote a tenth screen and the help would simply
+    /// not mention it.
+    #[test]
+    fn the_help_more_block_names_every_demoted_screen() {
+        use crate::screen::command_palette::GO_SCREENS;
+        let tokens: Vec<&str> = HELP_LINES.iter().flat_map(|l| l.split_whitespace()).collect();
+        for (word, screen) in GO_SCREENS {
+            assert!(
+                tokens.contains(&word),
+                "help `more` block omits `{word}` ({screen:?})"
+            );
+        }
+    }
+
+    /// The overlay never paints on the chrome: row 0 is the tab strip and the
+    /// last row is the footer, and both stay legible under `?`.
+    ///
+    /// Found by looking at an 80×24 pane, not by an assertion: crisp B5 grew the
+    /// table by a `more` block, the whole-area centring put `y0` at 0, and the
+    /// title rendered THROUGH the strip as `[BHangar — keysnbox`. Checked at the
+    /// floor and one row either side of it, where the arithmetic turns over.
+    #[test]
+    fn help_overlay_never_paints_over_the_tab_strip_or_the_footer() {
+        for h in [10, 23, 24, 25, 40] {
+            let w = 80;
+            let mut buf = ainb_plugin_sdk::WireBuffer::new(w, h);
+            super::render_help(&mut buf, w, h);
+            for (coord, cell) in &buf.cells {
+                assert!(
+                    coord.y > 0 && coord.y < h - 1,
+                    "at {w}x{h} the overlay painted {:?} on chrome row {}",
+                    cell.symbol,
+                    coord.y
+                );
+            }
+        }
+    }
+
+    /// The whole table fits the body band at the 80×24 floor, so no row of it is
+    /// clipped on the smallest supported terminal.
+    #[test]
+    fn help_overlay_fits_the_eighty_by_twenty_four_floor() {
+        assert!(
+            HELP_LINES.len() <= 22,
+            "the help table is {} lines; the 80x24 body band holds 22",
+            HELP_LINES.len()
+        );
+        let longest = HELP_LINES.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert!(longest <= 80, "the widest help line is {longest} columns");
     }
 }
 
@@ -2729,6 +3426,423 @@ mod kanban_retry_route_tests {
         assert!(
             states.take_pending_task_retry_action().is_none(),
             "R on a non-terminal card must not lift a retry"
+        );
+    }
+}
+
+#[cfg(test)]
+mod task_detail_open_tests {
+    use super::*;
+    use ainb_hangar_core::ids::{IssueId, TaskId};
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// Also the base fixture for the sibling inbox-lookup tests.
+    pub(super) fn issue() -> IssueRow {
+        IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
+            id: IssueId::from_str("issue-1").unwrap(),
+            display_id: None,
+            workspace_id: "ws".into(),
+            title: "Fix the widget".into(),
+            description: None,
+            state: "in_progress".into(),
+            assignee: None,
+            creator: "member:me".into(),
+            created_at: 0,
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
+            pr_url: None,
+            branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            external_ref: None,
+            run_count: 1,
+            last_run_status: None,
+            last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
+            acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
+            context_refs: Vec::new(),
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// Opening task detail from the issue list on a task that failed BEFORE
+    /// this screen subscribed seeds the lifecycle from the snapshot status, so
+    /// `R` lifts a retry at once. Without the seed the reducer's `Queued`
+    /// default made `R` a silent no-op on every already-terminal task.
+    #[test]
+    fn open_with_a_failed_status_makes_r_retry_live() {
+        let mut states = ScreenStates::default();
+        states.open_task_detail(
+            TaskId::from_str("t-1").unwrap(),
+            issue(),
+            None,
+            Some("failed"),
+        );
+
+        route_task_detail(&mut states, &press('R'));
+
+        assert_eq!(
+            states.take_pending_task_retry_action().as_deref(),
+            Some("t-1")
+        );
+    }
+
+    /// A running task is not retryable: the same open path with a live status
+    /// leaves `R` inert, so a run is never forked from the detail screen.
+    #[test]
+    fn open_with_a_running_status_keeps_r_inert() {
+        let mut states = ScreenStates::default();
+        states.open_task_detail(
+            TaskId::from_str("t-1").unwrap(),
+            issue(),
+            None,
+            Some("running"),
+        );
+
+        route_task_detail(&mut states, &press('R'));
+
+        assert!(states.take_pending_task_retry_action().is_none());
+    }
+
+    use crate::test_support::painted_text;
+
+    fn agent(id: &str, name: &str) -> ActorRow {
+        ActorRow {
+            actor_ref: format!("agent:{id}"),
+            display_name: name.into(),
+            is_agent: true,
+            ..ActorRow::default()
+        }
+    }
+
+    fn task(id: &str, agent_id: &str, status: &str) -> ainb_hangar_proto::events::TaskCardRow {
+        ainb_hangar_proto::events::TaskCardRow {
+            id: TaskId::from_str(id).unwrap(),
+            workspace_id: "ws".into(),
+            agent_id: agent_id.into(),
+            issue_id: Some("issue-1".into()),
+            status: status.into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
+    /// Crisp B4 §2.3: the execution log enumerates EVERY task-FSM state the
+    /// issue has runs in, ordered running on top then failed then the rest, with
+    /// the cost joined on from `run_history` for the runs that have one.
+    ///
+    /// The assertion is over the WHOLE known set (one run per `TaskStatus`, fed
+    /// in a deliberately wrong order), not over a "running is first" sample: a
+    /// sixth FSM state has to be placed here to keep this green.
+    #[test]
+    fn the_execution_log_covers_every_run_state_running_on_top_then_failed() {
+        use ainb_hangar_core::task_status::TaskStatus;
+
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1")]);
+        // One run per FSM state, newest first on the way IN so a stable sort
+        // alone could not produce the expected order.
+        let tasks: Vec<_> = TaskStatus::ALL
+            .iter()
+            .enumerate()
+            .map(|(i, status)| {
+                let mut t = task(&format!("t-{i}"), "a1", status.as_str());
+                t.created_at = i as i64 * 1_000;
+                t
+            })
+            .collect();
+        states.set_tasks(&tasks);
+        states.set_run_history(
+            "ws",
+            RunHistoryResult {
+                runs: vec![ainb_hangar_proto::snapshots::RunHistoryRow {
+                    run_id: "r-1".into(),
+                    task_id: Some("t-3".into()),
+                    session_id: None,
+                    provider: "claude".into(),
+                    profile: None,
+                    started_at: Some(0),
+                    finished_at: 90_000,
+                    outcome: "success".into(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost_usd: 0.425,
+                    diff_add: 0,
+                    diff_del: 0,
+                }],
+            },
+        );
+        states.open_task_detail(TaskId::from_str("t-2").unwrap(), issue(), None, None);
+        let td = states.task_detail.as_ref().unwrap();
+
+        // `queued` and `dispatched` share the `queued` word, so the six FSM
+        // states are six rows in five vocabulary words.
+        let words: Vec<&str> = td.runs().iter().map(|r| r.state.word()).collect();
+        assert_eq!(
+            words,
+            vec!["running", "queued", "queued", "failed", "cancelled", "done"],
+            "running on top, failed first, newest first inside each bucket"
+        );
+        assert_eq!(td.runs().len(), TaskStatus::ALL.len(), "no run dropped");
+
+        // The cursor opens on the BOUND run wherever the ordering put it.
+        assert_eq!(
+            td.expanded_run().map(|r| r.task_id.as_str()),
+            Some("t-2"),
+            "the expanded run is the one the screen is bound to"
+        );
+        // The history join is by task id, and it rounds to whole cents.
+        let joined: Vec<Option<i64>> = td.runs().iter().map(|r| r.cost_cents).collect::<Vec<_>>();
+        assert_eq!(
+            joined.iter().filter(|c| c.is_some()).count(),
+            1,
+            "only the run with a history row has a cost: {joined:?}"
+        );
+        let with_cost = td.runs().iter().find(|r| r.cost_cents.is_some()).unwrap();
+        assert_eq!(with_cost.task_id, "t-3");
+        assert_eq!(with_cost.cost_cents, Some(43), "0.425 USD → 43 cents");
+        assert_eq!(with_cost.finished_at, Some(90_000));
+        assert_eq!(with_cost.agent, "impl-1", "the roster name, not the id");
+    }
+
+    /// The real Enter key, through the real router, expands the next run.
+    ///
+    /// The reducer models Enter as `'\n'`/`'\r'`, but nothing on the key path
+    /// hands it those bytes directly: `route_key` → `route_task_detail` →
+    /// `key_char` is what turns [`KeyCode::Enter`] into one. A reducer-only test
+    /// stays green even if the screen never receives the key.
+    #[test]
+    fn the_real_enter_key_expands_the_next_run() {
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1"), agent("a2", "rev-1")]);
+        let mut older = task("t-1", "a2", "failed");
+        older.created_at = 1;
+        let mut live = task("t-2", "a1", "running");
+        live.created_at = 2;
+        states.set_tasks(&[older, live]);
+        states.open_task_detail(TaskId::from_str("t-2").unwrap(), issue(), None, None);
+
+        let mut app = AppState::new(
+            ainb_hangar_core::ids::WorkspaceId::from_str("ws").expect("workspace id"),
+        );
+        app.screen = Screen::TaskDetail(TaskId::from_str("t-2").unwrap());
+        let expanded = |s: &ScreenStates| {
+            s.task_detail
+                .as_ref()
+                .and_then(|td| td.expanded_run().map(|r| r.task_id.clone()))
+        };
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-2"),
+            "opens on the bound run"
+        );
+
+        let enter = KeyEvent {
+            code: KeyCode::Enter,
+            mods: 0,
+            kind: KeyKind::Press,
+        };
+        route_key(&app, &mut states, &enter);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "Enter walked the cursor to the other run"
+        );
+        route_key(&app, &mut states, &enter);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-2"),
+            "and wraps back round"
+        );
+    }
+
+    /// An expanded run SURVIVES a snapshot refresh.
+    ///
+    /// This is the path that made `enter` useless: `resolve_task_detail_names`
+    /// runs on every `tasks_list` / `agents_list` snapshot, and every
+    /// non-`TaskMessage` daemon event arms a re-pull, so a `set_runs` that
+    /// recomputed the cursor from the bound task id snapped an expanded older
+    /// attempt back to the live run every few seconds — on a LIVE issue, which
+    /// is the only kind with a second run to expand.
+    #[test]
+    fn an_expanded_run_survives_the_snapshot_refresh_that_arrives_seconds_later() {
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1"), agent("a2", "rev-1")]);
+        let mut older = task("t-1", "a2", "failed");
+        older.created_at = 1;
+        let mut live = task("t-2", "a1", "running");
+        live.created_at = 2;
+        states.set_tasks(&[older.clone(), live.clone()]);
+        states.open_task_detail(TaskId::from_str("t-2").unwrap(), issue(), None, None);
+
+        let expanded = |s: &ScreenStates| {
+            s.task_detail
+                .as_ref()
+                .and_then(|td| td.expanded_run().map(|r| r.task_id.clone()))
+        };
+
+        // Expand the older attempt, as the operator would with `enter`.
+        let out = reduce_task_detail(
+            states.task_detail.as_ref().unwrap(),
+            TaskDetailEvent::Key('\r'),
+        );
+        states.task_detail = Some(out.state);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "enter expanded it"
+        );
+
+        // The next snapshot lands (a heartbeat, another card moving, anything).
+        states.set_tasks(&[older, live]);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "the refresh must not snap the cursor back to the bound run"
+        );
+
+        // And a run that FINISHES keeps its expanded row across the re-order
+        // that moves it out of the running bucket.
+        let mut finished = task("t-2", "a1", "done");
+        finished.created_at = 2;
+        let mut older_done = task("t-1", "a2", "failed");
+        older_done.created_at = 1;
+        states.set_tasks(&[finished, older_done]);
+        assert_eq!(
+            expanded(&states).as_deref(),
+            Some("t-1"),
+            "still the operator's choice after the bucket re-order"
+        );
+    }
+
+    /// A run of ANOTHER issue never reaches this issue's log — the tasks
+    /// snapshot is workspace-wide, so the filter is the only thing keeping the
+    /// screens apart.
+    #[test]
+    fn the_execution_log_holds_only_this_issues_runs() {
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("a1", "impl-1")]);
+        let mut other = task("t-other", "a1", "running");
+        other.issue_id = Some("issue-2".into());
+        let mut orphan = task("t-orphan", "a1", "running");
+        orphan.issue_id = None;
+        states.set_tasks(&[task("t-1", "a1", "running"), other, orphan]);
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue(), None, None);
+
+        let td = states.task_detail.as_ref().unwrap();
+        let ids: Vec<&str> = td.runs().iter().map(|r| r.task_id.as_str()).collect();
+        assert_eq!(ids, vec!["t-1"], "only issue-1's run");
+    }
+
+    /// Crisp B1 (defects 5 + 8): the header's names resolve from the agents +
+    /// tasks snapshots whichever order they land in, at open or afterwards. The
+    /// assignee resolves through the roster, the bound run's agent through its
+    /// task card, and the issue's live run is named for the dispatch refusal.
+    #[test]
+    fn open_resolves_names_from_snapshots_in_any_order() {
+        let mut issue = issue();
+        issue.assignee = Some("agent:01M1FHM2YSRSXZQFR29ZAYF56V".into());
+
+        // Snapshots landed BEFORE the open: resolved at once.
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![
+            agent("01M1FHM2YSRSXZQFR29ZAYF56V", "impl-1"),
+            agent("rev", "rev-1"),
+        ]);
+        states.set_tasks(&[task("t-1", "rev", "running")]);
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue.clone(), None, None);
+        let td = states.task_detail.as_ref().unwrap();
+        assert_eq!(td.assignee_name(), Some("impl-1"));
+        assert_eq!(td.agent_name(), Some("rev-1"));
+
+        // Snapshots land AFTER the open: the same names, no raw ULID left behind.
+        let mut states = ScreenStates::default();
+        states.open_task_detail(TaskId::from_str("t-1").unwrap(), issue, None, None);
+        assert_eq!(states.task_detail.as_ref().unwrap().assignee_name(), None);
+        states.set_tasks(&[task("t-1", "rev", "running")]);
+        states.set_actors(vec![
+            agent("01M1FHM2YSRSXZQFR29ZAYF56V", "impl-1"),
+            agent("rev", "rev-1"),
+        ]);
+        let td = states.task_detail.as_ref().unwrap();
+        assert_eq!(td.assignee_name(), Some("impl-1"));
+        assert_eq!(td.agent_name(), Some("rev-1"));
+    }
+
+    /// Crisp B1 (defect 5): an `already_active` refusal names the issue's live
+    /// run from the tasks snapshot; once every run is terminal there is nothing
+    /// to name and the line falls back to the daemon's detail.
+    #[test]
+    fn already_active_refusal_names_the_live_run() {
+        let mut issue = issue();
+        issue.last_dispatch_reason = Some("already_active".into());
+        issue.last_dispatch_detail = Some("a run is already active (queued)".into());
+        let mut states = ScreenStates::default();
+        states.set_actors(vec![agent("rev", "rev-1")]);
+        states.set_tasks(&[task("01HANGARTASKRUNNING001", "rev", "running")]);
+        states.open_task_detail(
+            TaskId::from_str("01HANGARTASKRUNNING001").unwrap(),
+            issue.clone(),
+            None,
+            Some("running"),
+        );
+        let mut buf = WireBuffer::new(100, 40);
+        crate::screen::task_detail::render_task_detail(
+            &mut buf,
+            100,
+            0,
+            39,
+            states.task_detail.as_ref().unwrap(),
+            0,
+        );
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("a run is already active: #ING001 rev-1 (running)"),
+            "the live run is named: {text}"
+        );
+
+        // The run finished: no live row to name, the detail prints once.
+        states.set_tasks(&[task("01HANGARTASKRUNNING001", "rev", "done")]);
+        let mut buf = WireBuffer::new(100, 40);
+        crate::screen::task_detail::render_task_detail(
+            &mut buf,
+            100,
+            0,
+            39,
+            states.task_detail.as_ref().unwrap(),
+            0,
+        );
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("Not dispatched: a run is already active (queued)"),
+            "falls back to the daemon detail, undoubled: {text}"
         );
     }
 }
@@ -3007,5 +4121,258 @@ mod fleet_routing_tests {
                 action: FleetAction::ReconcileStructured { request_fingerprint },
             }) if session_key == "claude:one" && request_fingerprint == "fingerprint"
         ));
+    }
+}
+
+/// Crisp B1 review: the inbox name lookup is a CACHE now, rebuilt on the seams
+/// that move a snapshot rather than on every paint. These pin the seams, which
+/// is where a cache goes wrong: miss one and the inbox paints a stale name until
+/// something unrelated lands.
+#[cfg(test)]
+mod inbox_lookup_cache_tests {
+    use ainb_hangar_core::ids::{IssueId, TaskId};
+    use ainb_hangar_proto::events::{ActorRow, TaskCardRow};
+
+    use super::*;
+
+    const AGENT: &str = "01M1FHM2YSRSXZQFR29ZAYF56V";
+
+    fn task_card(id: &str, agent_id: &str) -> TaskCardRow {
+        TaskCardRow {
+            id: TaskId::from_str(id).unwrap(),
+            workspace_id: "ws".into(),
+            agent_id: agent_id.into(),
+            issue_id: Some("issue-1".into()),
+            status: "running".into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
+    fn issue_row() -> IssueRow {
+        let mut row = super::task_detail_open_tests::issue();
+        row.id = IssueId::from_str("issue-1").unwrap();
+        row.display_id = Some("HGR-3".into());
+        row.title = "Add GET /api/version endpoint".into();
+        row
+    }
+
+    /// Each of the three snapshot seams re-projects the lookup on its own, in
+    /// whichever order the batch lands: tasks alone give the row its task entry,
+    /// issues alone its `HGR-3 <title>`, and the roster relabels the agent from
+    /// the short-id fallback to its display name.
+    #[test]
+    fn every_snapshot_seam_reprojects_the_lookup() {
+        let mut states = ScreenStates::default();
+
+        states.set_tasks(&[task_card("t-1", AGENT)]);
+        let entry = states.inbox_lookup().tasks.get("t-1").expect("tasks seam projects");
+        assert_eq!(entry.agent, "AYF56V", "short-id fallback before the roster");
+        assert_eq!(entry.issue_id.as_deref(), Some("issue-1"));
+        assert!(
+            states.inbox_lookup().issues.is_empty(),
+            "no issues snapshot yet"
+        );
+
+        states.set_issues(vec![issue_row()]);
+        let issue = states.inbox_lookup().issues.get("issue-1").expect("issues seam projects");
+        assert_eq!(issue.display_id, "HGR-3");
+        assert_eq!(issue.title, "Add GET /api/version endpoint");
+
+        states.set_actors(vec![ActorRow {
+            actor_ref: format!("agent:{AGENT}"),
+            display_name: "impl-1".into(),
+            is_agent: true,
+            ..ActorRow::default()
+        }]);
+        assert_eq!(
+            states.inbox_lookup().tasks.get("t-1").expect("still there").agent,
+            "impl-1",
+            "the roster seam relabels the cached card"
+        );
+    }
+}
+
+/// Crisp B1 (defect 21 review): every text input reads a Ctrl chord through the
+/// ONE translation in [`key_char`]. The chord used to be decoded per screen, so
+/// Ctrl+U cleared a Boards input while the Issues wizard and the issue filter
+/// typed a literal `u` into it.
+#[cfg(test)]
+mod ctrl_chord_tests {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    use super::*;
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    fn ctrl(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: ainb_plugin_sdk::KEY_MOD_CTRL,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// The OTHER spelling of a chord: the bare C0 control char, no modifier flag,
+    /// which is how some terminals deliver it (`plugin::is_ctrl_p`).
+    fn bare_nak() -> KeyEvent {
+        press(CLEAR_LINE)
+    }
+
+    /// The shared translation: a screen that MODELS the chord reads Ctrl+U as the
+    /// clear-line char, an unmapped chord types NOTHING, and a bare `u` is still
+    /// a `u`. The Boards overlay mapper reads the same answer.
+    #[test]
+    fn a_ctrl_chord_is_translated_in_one_place() {
+        assert_eq!(key_char_with_chords(&ctrl('u')), Some(CLEAR_LINE));
+        assert_eq!(key_char_with_chords(&ctrl('U')), Some(CLEAR_LINE));
+        // The same chord spelled as a bare NAK, which is how some terminals send
+        // it: the opt-in sites must read BOTH as clear-line or the key works on
+        // one terminal and not another.
+        assert_eq!(key_char_with_chords(&bare_nak()), Some(CLEAR_LINE));
+        assert_eq!(key_char_with_chords(&ctrl('k')), None);
+        assert_eq!(key_char_with_chords(&press('u')), Some('u'));
+        assert_eq!(
+            overlay_key_event(&ctrl('u')),
+            Some(BoardsEvent::Key(BoardsKey::ClearLine))
+        );
+        assert_eq!(
+            overlay_key_event(&bare_nak()),
+            Some(BoardsEvent::Key(BoardsKey::ClearLine))
+        );
+        assert_eq!(overlay_key_event(&ctrl('k')), None);
+    }
+
+    /// The DEFAULT translation drops every Ctrl chord. Most reducers end in a
+    /// catch-all that pushes the char into a text buffer, so a chord that made it
+    /// through as `'\u{15}'` typed an invisible control char into a comment body
+    /// or an API key and then submitted it (crisp B1 round-2 review). Only the
+    /// three screens that decode it opt in.
+    #[test]
+    fn key_char_drops_a_ctrl_chord_for_the_screens_that_do_not_model_it() {
+        assert_eq!(key_char(&ctrl('u')), None);
+        assert_eq!(key_char(&ctrl('U')), None);
+        assert_eq!(key_char(&ctrl('k')), None);
+        // Both spellings, or the terminal that sends the bare control char walks
+        // straight past the modifier check into a text buffer.
+        assert_eq!(key_char(&bare_nak()), None);
+        assert_eq!(key_char(&press('u')), Some('u'));
+        // The kill-line char only. Enter and Backspace are spelled as chars on
+        // this path too, and the reducers model them.
+        assert_eq!(key_char(&press('\r')), Some('\r'));
+        assert_eq!(key_char(&press('\u{8}')), Some('\u{8}'));
+    }
+
+    /// A modal that does NOT model the chord keeps both its query and its own
+    /// existence. The routers took the modal out of the state before translating
+    /// the key, so an unmodelled key returned between the take and the write-back
+    /// and the modal vanished off the screen (found by driving Ctrl+U into the
+    /// palette in a real terminal, crisp B1 round-2 review).
+    #[test]
+    fn an_unmodelled_key_leaves_a_modal_open_and_unchanged() {
+        let mut app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        app.screen = Screen::CommandPalette;
+        let mut states = ScreenStates::default();
+        states.command_palette =
+            Some(super::super::command_palette::CommandPaletteState::default());
+        for ch in "note".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(
+            states
+                .command_palette
+                .as_ref()
+                .map(super::super::command_palette::CommandPaletteState::query),
+            Some("note")
+        );
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(
+            states
+                .command_palette
+                .as_ref()
+                .map(super::super::command_palette::CommandPaletteState::query),
+            Some("note"),
+            "the palette is still open and its query untouched"
+        );
+    }
+
+    /// End to end on the surface that would have SENT the control char: the
+    /// task-detail comment-compose buffer takes nothing from Ctrl+U.
+    #[test]
+    fn ctrl_u_types_nothing_into_the_comment_compose_buffer() {
+        use ainb_hangar_core::ids::TaskId;
+        let task = TaskId::from_str("t-1").unwrap();
+        let mut app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        app.screen = Screen::TaskDetail(task.clone());
+        let mut states = ScreenStates::default();
+        states.open_task_detail(
+            task,
+            super::task_detail_open_tests::issue(),
+            None,
+            Some("running"),
+        );
+
+        // `c` opens compose, then type a word.
+        route_key(&app, &mut states, &press('c'));
+        for ch in "note".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        let before = states.task_detail.as_ref().unwrap().compose_buffer().map(str::to_string);
+        assert_eq!(before.as_deref(), Some("note"));
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(
+            states.task_detail.as_ref().unwrap().compose_buffer(),
+            Some("note"),
+            "the chord neither cleared nor typed a control char"
+        );
+    }
+
+    /// `/` filter query: Ctrl+U empties it in place, without leaving filter mode.
+    #[test]
+    fn ctrl_u_clears_the_issue_filter_query() {
+        let app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        let mut states = ScreenStates::default();
+
+        route_key(&app, &mut states, &press('/'));
+        for ch in "auth".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(states.issue_list.query(), "auth");
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(states.issue_list.query(), "");
+        assert_eq!(states.issue_list.mode(), IssueListMode::FilterInput);
+    }
+
+    /// Create-wizard title row: Ctrl+U empties it instead of appending a `u`.
+    #[test]
+    fn ctrl_u_clears_the_create_wizard_title() {
+        let app = AppState::new(WorkspaceId::from_str("ws-1").expect("valid workspace id"));
+        let mut states = ScreenStates::default();
+
+        route_key(&app, &mut states, &press('c'));
+        for ch in "Add auth".chars() {
+            route_key(&app, &mut states, &press(ch));
+        }
+        assert_eq!(states.issue_list.wizard().unwrap().title(), "Add auth");
+
+        route_key(&app, &mut states, &ctrl('u'));
+
+        assert_eq!(states.issue_list.wizard().unwrap().title(), "");
     }
 }

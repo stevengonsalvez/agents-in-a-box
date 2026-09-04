@@ -36,6 +36,7 @@ use std::collections::HashMap;
 
 use ainb_plugin_notifyd::{Paths, StateRow, Store};
 
+use crate::fleet::read::claude_probe::ProbeIndex;
 use crate::fleet::read::jsonl_tail::AskUserQuestionData;
 use crate::fleet::read::needs::{
     ErrContext, IdleContext, NeedsContext, NeedsRow, RouteHint, WaitContext, make_row,
@@ -46,6 +47,68 @@ use crate::fleet::types::Session;
 pub const SOURCE_HOOK: &str = "hook";
 /// Provenance string for a tmux/transcript-folded row (non-Claude / transient).
 pub const SOURCE_TMUX: &str = "tmux";
+
+/// Evidence health for a hook-backed fleet reader. This describes observation
+/// only: callers decide what, if anything, to do with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceHealth {
+    /// Hook wiring has current evidence for active Claude work, or no work is expected.
+    Healthy,
+    /// Fresh Claude activity exists but the hook state has not caught up.
+    Silent,
+    /// The hook wiring itself cannot produce evidence.
+    Unavailable,
+}
+
+impl EvidenceHealth {
+    /// Short, stable operator-facing status label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Healthy => "Healthy",
+            Self::Silent => "Silent",
+            Self::Unavailable => "Unavailable",
+        }
+    }
+}
+
+/// Counts behind one hook-evidence health verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvidenceCensus {
+    /// Verdict for the hook-backed state reader.
+    pub health: EvidenceHealth,
+    /// Fresh, live Claude working directories that can reasonably expect hook activity.
+    pub active_probes: usize,
+    /// Fresh materialized hook states matching active Claude directories.
+    pub fresh_hook_states: usize,
+}
+
+impl EvidenceCensus {
+    /// Build a verdict from already-collected evidence counts.
+    #[must_use]
+    pub const fn from_counts(
+        hooks_ready: bool,
+        active_probes: usize,
+        fresh_hook_states: usize,
+    ) -> Self {
+        let health = if !hooks_ready {
+            EvidenceHealth::Unavailable
+        } else if active_probes > fresh_hook_states {
+            EvidenceHealth::Silent
+        } else {
+            // Zero is healthy here. A quiet host has no hook events to report.
+            EvidenceHealth::Healthy
+        };
+        Self {
+            health,
+            active_probes,
+            fresh_hook_states,
+        }
+    }
+}
+
+/// How recent an event must be to satisfy fresh Claude activity.
+const EVIDENCE_FRESH_MS: i64 = 30 * 60_000;
 
 /// A folded view of the `current_state` table, indexed by `cwd` for the
 /// per-session merge. Holds the *most recent* hook-sourced row per cwd (the
@@ -112,6 +175,28 @@ impl CurrentStateIndex {
     #[must_use]
     pub fn get(&self, cwd: &str) -> Option<&StateRow> {
         self.by_cwd.get(cwd)
+    }
+
+    /// Compare fresh live probes with fresh hook materialization without
+    /// assigning policy to either source. Suitable for every ATC presentation.
+    #[must_use]
+    pub fn evidence_census(
+        &self,
+        probes: &ProbeIndex,
+        hooks_ready: bool,
+        now_ms: i64,
+    ) -> EvidenceCensus {
+        let active_cwds = probes.expected_hook_cwds(now_ms);
+        let active_probes = active_cwds.len();
+        let fresh_hook_states = active_cwds
+            .iter()
+            .filter_map(|cwd| self.by_cwd.get(*cwd))
+            .filter(|row| {
+                row.source == SOURCE_HOOK
+                    && now_ms.saturating_sub(row.last_event_ts) <= EVIDENCE_FRESH_MS
+            })
+            .count();
+        EvidenceCensus::from_counts(hooks_ready, active_probes, fresh_hook_states)
     }
 
     /// Resolve a session against the event-sourced state. Returns:
@@ -470,6 +555,25 @@ mod tests {
             last_event_ts: ts,
             source: source.to_string(),
         }
+    }
+
+    #[test]
+    fn evidence_census_needs_fresh_activity_before_calling_hooks_silent() {
+        assert_eq!(
+            EvidenceCensus::from_counts(true, 0, 0).health,
+            EvidenceHealth::Healthy,
+            "a quiet host has no missing hook event"
+        );
+        assert_eq!(
+            EvidenceCensus::from_counts(true, 2, 0).health,
+            EvidenceHealth::Silent,
+            "fresh probes make missing hook state actionable"
+        );
+        assert_eq!(
+            EvidenceCensus::from_counts(false, 2, 2).health,
+            EvidenceHealth::Unavailable,
+            "broken wiring is unavailable, not merely quiet"
+        );
     }
 
     #[test]

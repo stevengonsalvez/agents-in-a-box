@@ -2748,6 +2748,55 @@ impl TuiSession {
         }
     }
 
+    /// Walk the command palette to a screen crisp B5 §2.5 took off the tab strip:
+    /// `^P`, the screen's word (one literal `send-keys -l` run so a busy pane
+    /// cannot drop a char mid-word), then Enter.
+    ///
+    /// The nine demoted screens have no nav key at all any more, so this is the
+    /// replacement for [`switch_tab_until`](Self::switch_tab_until) on Skills,
+    /// Autopilots, Daemon, Usage, Logs, Control, Fleet, Squads and Profiles. Like
+    /// its sibling the whole sequence is RE-SENT every ~1.5s until `pred` holds:
+    /// a lone keystroke can be dropped on a loaded runner, and re-opening the
+    /// palette over an already-open one is a no-op, so a repeat is harmless.
+    ///
+    /// Esc first, so a repeat starts from a closed palette rather than typing a
+    /// second copy of the word into the query left over from the last attempt.
+    ///
+    /// The word is typed ONLY once the palette's ` Search: ` title is on the
+    /// pane. A dropped `C-p` is the exact failure the resend loop exists for, and
+    /// without the gate the word lands on the live screen instead: on the
+    /// issue-list landing, `c` in `control` / `skills` opens the create-issue
+    /// wizard and the trailing Enter advances it, so every later iteration fights
+    /// an overlay this helper never opened.
+    pub fn go_to_screen_until(
+        &self,
+        word: &str,
+        deadline: Instant,
+        pred: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        loop {
+            self.send_key("Escape");
+            self.send_key("C-p");
+            if self
+                .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                    c.contains(" Search: ")
+                })
+                .is_some()
+            {
+                self.type_literal(word);
+                self.send_enter();
+                if let Some(c) =
+                    self.poll_capture(Instant::now() + Duration::from_millis(1500), &pred)
+                {
+                    return Some(c);
+                }
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+        }
+    }
+
     /// Convenience: spawn `ainb tui`, open the Hangar screen, and return the
     /// landing capture. Panics if the seeded screen never rendered.
     pub fn launch_to_hangar(bin: &Path, home: &Path) -> (Self, String) {
@@ -2770,7 +2819,10 @@ impl Drop for TuiSession {
 /// confirm the `g` navigation switched to the plugin screen even before the
 /// snapshot rows arrive — distinct from the host home screen.
 pub fn hangar_chrome_visible(capture: &str) -> bool {
-    capture.contains("Issues") && capture.contains("Skills") && capture.contains("Settings")
+    // Three of the SEVEN tabs the strip carries since crisp B5 §2.5 cut it from
+    // sixteen. `Skills` was the middle probe here and left the strip with that
+    // cut, which made every tripwire that gates on the chrome time out.
+    capture.contains("Issues") && capture.contains("Inbox") && capture.contains("Settings")
 }
 
 /// Re-send single-char `key` every ~1.5s until `pred` holds on the pane or

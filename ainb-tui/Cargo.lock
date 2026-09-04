@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "ainb"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "ainb-cli",
  "ainb-fleet-core",
@@ -199,6 +199,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-term",
  "two-face",
+ "unicode-width 0.2.2",
  "url",
  "uuid",
  "vt100",
@@ -212,6 +213,7 @@ dependencies = [
  "agent-client-protocol",
  "ainb-hangar-core",
  "ainb-hangar-proto",
+ "ainb-hangar-sandbox",
  "ainb-hangar-store",
  "rand 0.8.7",
  "serde_json",
@@ -363,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-hangar-daemon"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "agent-client-protocol",
  "ainb-acp",
@@ -518,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-plugin-cts-v2"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-secrets",
@@ -538,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-plugin-hangar"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",
@@ -582,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-plugin-notifyd"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",
@@ -752,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "ainb-web"
-version = "1.23.0"
+version = "1.24.0"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",

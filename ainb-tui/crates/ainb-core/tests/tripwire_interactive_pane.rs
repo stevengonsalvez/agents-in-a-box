@@ -95,6 +95,22 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
         state.is_interactive_pane(),
         "should be interactive after enter"
     );
+    // The embed must NOT queue a fullscreen attach on its way in. Both paths
+    // target the same tmux session, so a leaked `pending_async_action` would
+    // hand the whole terminal over to `AttachHandler` a frame after the embed
+    // painted, and the operator would lose the TUI they were driving.
+    assert!(
+        state.pending_async_action.is_none(),
+        "in-pane attach must not route through the fullscreen AttachHandler"
+    );
+    // And it attached to the EXACT session, not a prefix match. `tmux -t name`
+    // matches by prefix, so an embed pointed at `tmux_proj` would silently
+    // drive `tmux_project` if that existed.
+    let active = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "-t", &session, "#{pane_active}"])
+        .output()
+        .expect("read exact pane state");
+    assert_eq!(String::from_utf8_lossy(&active.stdout).trim(), "1");
 
     let pane = TmuxPreviewPane::new();
     let mut term = Terminal::new(TestBackend::new(100, 26)).expect("test terminal");

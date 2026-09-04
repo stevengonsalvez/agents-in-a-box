@@ -130,7 +130,10 @@ impl Screen {
             Self::ActivityTimeline(_) => "Activity",
             Self::SkillManager => "Skills",
             Self::Autopilots => "Autopilots",
-            Self::Kanban => "Kanban",
+            // `Runs` since crisp B5 §2.5: `Kanban` names the widget, this
+            // board is the only run-centric one, and the hotkey is unchanged so
+            // muscle memory survives the rename.
+            Self::Kanban => "Runs",
             Self::Boards => "Boards",
             Self::DaemonHealth => "Daemon",
             Self::Usage => "Usage",
@@ -246,6 +249,111 @@ pub enum Intent {
     Quit,
 }
 
+/// The label an assignee slot paints: the roster display name once `resolved`
+/// carries one, else the actor ref with a ULID id cut to its short form.
+/// `None` when there is no assignee at all (the caller words its own blank).
+///
+/// Shared by the three surfaces that paint an assignee (board card footer,
+/// task-detail header, issue sidebar) so they degrade the same way: two of them
+/// fell back to a whole 26-char ULID while the cards fell back to a bare short id
+/// (crisp B1 review).
+///
+/// Only a ULID is unreadable, so only a ULID is cut. A human ref
+/// (`member:dana`, `agent:claude-agent`) is already its own label and survives
+/// whole, KIND prefix included: that prefix is what tells a human assignee apart
+/// from an agent one, and shortening it blindly turned `agent:claude-agent` into
+/// `e-agent`.
+#[must_use]
+pub fn assignee_label(resolved: Option<&str>, actor_ref: Option<&str>) -> Option<String> {
+    if let Some(name) = resolved {
+        return Some(name.to_string());
+    }
+    let actor_ref = actor_ref?;
+    let Some((kind, id)) = actor_ref.split_once(':') else {
+        return Some(shorten_ulid(actor_ref));
+    };
+    Some(format!("{kind}:{}", shorten_ulid(id)))
+}
+
+/// [`assignee_label`] WITHOUT the actor kind, for a surface too narrow to spend
+/// the prefix: a board card footer is ~21 cells, where `agent:` pushes the name
+/// itself off the tile.
+///
+/// Same shortening rule, so the callers cannot drift; the kind is dropped here
+/// rather than by the caller pre-splitting the ref, which left the caller owning
+/// half the rule (crisp B1 round-2 review). A RESOLVED display name is returned
+/// verbatim, never split on a colon it happens to contain.
+#[must_use]
+pub fn assignee_label_bare(resolved: Option<&str>, actor_ref: Option<&str>) -> Option<String> {
+    let label = assignee_label(resolved, actor_ref)?;
+    if resolved.is_some() {
+        return Some(label);
+    }
+    Some(match label.split_once(':') {
+        Some((_, name)) => name.to_string(),
+        None => label,
+    })
+}
+
+/// `id` cut to its last-6 short form when it is a ULID, else `id` unchanged.
+fn shorten_ulid(id: &str) -> String {
+    if kanban::is_ulid(id) {
+        kanban::short_id(id)
+    } else {
+        id.to_string()
+    }
+}
+
+/// Whether a run's terminal `outcome` token is a FAILURE, the one row an
+/// operator opens a list to find. The daemon writes exactly three tokens
+/// (`success` / `failed` / `cancelled`, `run_loop::record_run_history`), so
+/// "not success" is NOT the same rule: it floats a user's own cancel, and a
+/// running row whose outcome has not landed, up with the real failures.
+///
+/// Shared so the inbox and the usage dashboard cannot drift apart on what
+/// "failed" means (crisp B1 review): both float the same rows first.
+#[must_use]
+pub fn is_failed_outcome(outcome: &str) -> bool {
+    outcome == "failed"
+}
+
+/// `ch` as it is safe to hand a terminal, or `·` when it is not.
+///
+/// Every rendered char becomes a `Cell` symbol the host paints verbatim, so a
+/// screen that shows session-originated free text (assistant replies, error
+/// snippets, ASK option labels, issue titles) must strip anything that acts on
+/// the terminal or on the reader rather than printing:
+///
+/// - **C0 / DEL / C1** (`char::is_control`): a raw ESC or BEL reassembles on
+///   flush into a live control sequence — an OSC 52 clipboard write, a title
+///   set, a cursor jump — in the operator's own terminal.
+/// - **Every `Bidi_Control` character** (`U+061C`, `U+200E`, `U+200F`,
+///   `U+202A`-`U+202E`, `U+2066`-`U+2069`) and the invisible formatters around
+///   them (`U+200B`-`U+200D`, `U+2060`-`U+2064`, `U+FEFF`): these do not
+///   execute, they REORDER. On the one surface whose job is "pick the option you
+///   read", a crafted ASK label can render as a different string than the bytes
+///   that get delivered as the answer. All twelve of the Bidi_Control set, since
+///   neutralising eleven of them is a gap, not a policy.
+///
+/// Surfaced as a visible middot, never dropped: a label that silently loses
+/// characters is its own kind of lie.
+#[must_use]
+pub fn display_char(ch: char) -> char {
+    if ch.is_control()
+        || matches!(ch,
+            '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}')
+    {
+        '·'
+    } else {
+        ch
+    }
+}
+
 /// The result of folding one [`AppEvent`] into an [`AppState`].
 ///
 /// Carries the next state plus an optional [`Intent`] for the IO layer. A
@@ -257,4 +365,91 @@ pub struct Reduction {
     pub state: AppState,
     /// A side-effect for the plugin glue to perform, if any.
     pub intent: Option<Intent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 26-char ULID, the shape every id on the wire has.
+    const ULID: &str = "01M1FHM2YSRSXZQFR29ZAYF56V";
+
+    /// The BARE label (the card-footer variant) over all four assignee shapes.
+    ///
+    /// Three surfaces share this helper and each one is ~21 cells wide, so every
+    /// rule it encodes is load-bearing: cut a ULID because nobody can read one,
+    /// keep a human ref whole because it is already its own label, and drop the
+    /// actor KIND because `agent:` alone is a third of a card footer.
+    ///
+    /// Pinned directly rather than through a caller (crisp B1 review): the three
+    /// callers each render it through a whole board, so a regression here used to
+    /// surface as an unrelated snapshot diff.
+    #[test]
+    fn assignee_label_bare_over_every_assignee_shape() {
+        for (actor_ref, expected) in [
+            // An agent ref: kind dropped, ULID cut to its last six.
+            (format!("agent:{ULID}"), "AYF56V"),
+            // A bare ULID with no kind at all: still cut.
+            (ULID.to_string(), "AYF56V"),
+            // A human ref: readable already, so it survives whole minus the kind.
+            ("member:dana".to_string(), "dana"),
+            // A ref whose id itself contains a colon: only the KIND is dropped,
+            // never the rest of the ref.
+            ("member:dana:x".to_string(), "dana:x"),
+        ] {
+            assert_eq!(
+                assignee_label_bare(None, Some(&actor_ref)).as_deref(),
+                Some(expected),
+                "bare label for {actor_ref:?}"
+            );
+        }
+        // No assignee at all is `None`, not an empty string the caller would paint
+        // a stray glyph beside.
+        assert_eq!(assignee_label_bare(None, None), None);
+    }
+
+    /// A RESOLVED display name is returned verbatim — including one that happens
+    /// to contain a colon, which the kind-stripping rule must not cut.
+    ///
+    /// `ops: dana` is a legal roster display name; splitting it would render the
+    /// agent as ` dana` and lose the team it belongs to.
+    #[test]
+    fn a_resolved_name_survives_its_own_colon() {
+        assert_eq!(
+            assignee_label_bare(Some("ops: dana"), Some(&format!("agent:{ULID}"))).as_deref(),
+            Some("ops: dana")
+        );
+        // And the WIDE variant agrees: a resolved name is the label on every
+        // surface, kind prefix or not.
+        assert_eq!(
+            assignee_label(Some("ops: dana"), Some("member:dana")).as_deref(),
+            Some("ops: dana")
+        );
+    }
+
+    /// The WIDE label keeps the actor kind — that prefix is what tells a human
+    /// assignee from an agent one on a row with room for it.
+    #[test]
+    fn assignee_label_keeps_the_kind_it_can_afford() {
+        assert_eq!(
+            assignee_label(None, Some(&format!("agent:{ULID}"))).as_deref(),
+            Some("agent:AYF56V")
+        );
+        assert_eq!(
+            assignee_label(None, Some("agent:claude-agent")).as_deref(),
+            Some("agent:claude-agent"),
+            "a named agent is not shortened into nonsense"
+        );
+    }
+
+    /// `failed` is the one outcome the run lists float first — NOT "anything that
+    /// is not success", which would float a user's own cancel and a still-running
+    /// row in with the real failures.
+    #[test]
+    fn only_failed_is_a_failed_outcome() {
+        assert!(is_failed_outcome("failed"));
+        for other in ["success", "cancelled", "running", "", "FAILED"] {
+            assert!(!is_failed_outcome(other), "{other:?} is not a failure");
+        }
+    }
 }

@@ -19,6 +19,21 @@ use crate::run_loop::{DaemonConfig, run};
 /// ([`acp_pool::converge_dirty_sessions_at_boot`], run from [`boot`]), the
 /// process-exit path and the turn-deadline sweep all fan out to.
 pub mod acp_pool;
+/// One ACP session on the chat bus, from either door: [`acp_session::ensure`]
+/// mints the `fleet_session` + `fleet_acp_session` pair for a scope and
+/// [`acp_session::enqueue`] puts a prompt on the bus with its PENDING leg.
+/// `fleet/acp_session_create` and a task caller share these two transactions.
+pub mod acp_session;
+/// The ACP task executor (move 1, step A5): the third arm of `execute_claimed`'s
+/// exec-path branch, selected by `HANGAR_TASK_EXECUTOR=acp`. Runs a task's brief
+/// as one ACP turn against a PER-TASK adapter process and maps the delivery leg
+/// onto the same [`runner::RunOutcome`] the process executor returns.
+pub mod acp_task;
+/// One ACP session's transcript, live and durable, behind one door. A separate
+/// module so the `StoreWriter` inside it is unreachable from [`acp_pool`],
+/// which is what makes "every durable row was published live" a compile error
+/// rather than a convention.
+mod acp_transcript;
 /// Beads CLI adapter — shells out to `bd` and parses `--json` (P2.2).
 ///
 /// The answer router (spec P2): deliver one attention answer from any surface,
@@ -103,6 +118,9 @@ pub mod execenv;
 pub mod fleet;
 /// Claude and Codex provider transports for authoritative Fleet control.
 pub mod fleet_provider;
+/// Hourly `fleet_provider_event` retention: raw-payload eviction on rows a
+/// reducer has already consumed.
+pub mod fleet_provider_retention;
 /// Bounded live provider-quota projection for the public Fleet RPC.
 pub mod fleet_quota;
 /// Hourly `fleet_event` retention: payload eviction, row delete, byte ceiling.
@@ -291,6 +309,15 @@ pub mod standup;
 /// The daemon's tokio runtime registers these as periodic tasks; they are also
 /// callable directly (with an injected clock) for deterministic testing.
 pub mod sweeper;
+/// Which executor a claimed task runs on, and the precedence that picks it
+/// (spine A5's flag, A8's per-agent override).
+///
+/// [`task_executor::TaskExecutor`] is the axis (`process` spawns the provider
+/// CLI, `acp` prompts an adapter); [`task_executor::DaemonDefaultExecutor`] is
+/// the daemon-wide `HANGAR_TASK_EXECUTOR` floor, wrapped so it cannot be
+/// mistaken for the executor a TASK was assigned. Pure — the precedence is
+/// testable without mutating process env.
+pub mod task_executor;
 /// `ainb hangar templates use <name>` transactional materialisation (P6.3).
 ///
 /// Turns an embedded curated [`ainb_hangar_core::template::AgentTemplate`] into a
@@ -923,11 +950,17 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // The ACP agent pool. Installed BEFORE the socket accepts a connection so
         // `fleet/acp_session_create` can never answer "no pool" on a daemon that
         // has one; nothing is spawned until the first prompt reaches it.
-        let acp_pool = crate::acp_pool::AcpPool::new(
-            store.clone(),
-            broker.sink(),
-            crate::acp_pool::PoolConfig::from_env(),
-        );
+        // The pool's turn deadline is the CHAT deadline, and stays exactly what
+        // the operator configured. A task's ACP turn is bounded by the task
+        // budget instead (`HANGAR_PROVIDER_MAX_RUNTIME_MS`, enforced by
+        // `acp_task`'s own poll), and `AcpPool::sweep_once` exempts task scopes
+        // so the two bounds cannot fight. Boot used to raise this whole pool's
+        // deadline to the task budget under `HANGAR_TASK_EXECUTOR=acp`; A8 makes
+        // that trigger meaningless (the executor is chosen per agent, so the
+        // flag no longer predicts whether task turns ride this pool) and the
+        // raise charged every chat turn for a task-path problem.
+        let acp_config = crate::acp_pool::PoolConfig::from_env();
+        let acp_pool = crate::acp_pool::AcpPool::new(store.clone(), broker.sink(), acp_config);
         let _acp_sweeper = acp_pool.spawn_sweeper();
         crate::acp_pool::install(acp_pool).await;
 
@@ -950,15 +983,27 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // the canonical Fleet roster as degraded rows with exact pane identity.
         let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
 
-        // Two slow janitors, each on its OWN clock rather than folded into the 3s
+        // Three slow janitors, each on its OWN clock rather than folded into the 3s
         // reconciler tick above. Measured on a real profile: 1,440 of 1,472 visible
-        // sessions were dead EXITED rows that every snapshot scanned, and
-        // fleet_event had grown to 1.1M rows / 847 MB under no retention at all.
-        // Both are pure cleanup with no deadline, so neither belongs on a hot path.
+        // sessions were dead EXITED rows that every snapshot scanned, fleet_event
+        // had grown to 1.1M rows / 847 MB under no retention at all, and
+        // fleet_provider_event to 372k rows / 2,207 MB under none either — the last
+        // of those saturating the single writer until session spawn failed with
+        // `database is locked`. All three are pure cleanup with no deadline, so none
+        // belongs on a hot path. The two payload sweeps start five and seven
+        // minutes in (fleet_event first, then fleet_provider_event) so their
+        // FIRST passes do not land together. That stagger does not survive a
+        // cold backlog: both re-arm on the 1-minute catch-up period, so their
+        // drains do overlap from about t+7min until the shorter one settles.
+        // Overlap is tolerable rather than prevented -- each pass is bounded,
+        // yields the writer between batches, and checkpoints -- so the writer
+        // is shared politely, not serialised.
         let _fleet_archiver =
             crate::fleet::spawn_session_archiver(store.pool().clone(), broker.sink());
         let _fleet_retention =
             crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
+        let _fleet_provider_retention =
+            crate::fleet_provider_retention::spawn_provider_retention_sweeper(store.pool().clone());
 
         // Managed Codex transport starts independently from daemon readiness. A
         // missing or incompatible Codex binary leaves hook and tmux observation

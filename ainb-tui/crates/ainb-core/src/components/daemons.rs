@@ -15,12 +15,27 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table},
 };
 
-use crate::app::state::DaemonsOverlayState;
 use crate::cli::daemon::Action;
 use crate::cli::fleet::daemons::{fmt_ago, fmt_duration_ms};
+use crate::fleet::atc::SupervisorMode;
 use crate::fleet::daemons::heartbeat::now_ms;
 use crate::fleet::daemons::probe::{DaemonKind, DaemonState, DaemonStatus};
+use crate::fleet::read::{CurrentStateIndex, EvidenceCensus, EvidenceHealth, ProbeIndex};
+use ainb_plugin_notifyd::install::BinaryIntent;
 use ainb_plugin_notifyd::{HookHealth, Paths};
+
+/// The table's floor, and the height the Hooks box asks for. `render` draws the
+/// Hooks section only when the table chunk can seat both, and the ATC-help
+/// budget has to respect the same number or it evicts the panel silently.
+///
+/// Derived, not hand-synced. These were two literals kept in step by a comment,
+/// and they drifted the moment the box grew a row for the evidence census: the
+/// gate moved to 15 while the budget still said 14, so at some heights the
+/// panel vanished with no notice — exactly what
+/// `the_hooks_panel_never_disappears_without_saying_so` exists to catch.
+const TABLE_MIN: u16 = 7;
+const HOOKS_BOX: u16 = 8;
+const HOOKS_NEEDS: u16 = TABLE_MIN + HOOKS_BOX;
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -41,11 +56,19 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 /// connect and `sysinfo` process lookups — work that must NEVER run on the UI
 /// render thread (H-D2). A few seconds keeps the screen live while staying cheap.
 const COLLECT_INTERVAL: Duration = Duration::from_secs(2);
+/// Evidence needs fresh process checks, unlike daemon rows. Avoid one `ps` per
+/// historical probe on every screen refresh.
+const EVIDENCE_INTERVAL_MS: i64 = 30_000;
 
 /// How long a lifecycle action may run before the row gives up on it. Generous:
 /// a real restart genuinely takes seconds. The point is only that a wedged
 /// action cannot hold its row's one-outstanding guard forever.
 const ACTION_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a finished hook action's line stays on screen before the live issue
+/// line comes back. Long enough to read a failure, short enough that it cannot
+/// mask a fault that appears afterwards.
+const STATUS_LINGER: Duration = Duration::from_secs(20);
 
 /// The immutable snapshot the background collector publishes and `render` reads.
 /// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
@@ -59,6 +82,34 @@ pub struct Snapshot {
     /// Most-recent hook wiring health. Collected beside daemon state, never in
     /// the render path.
     pub hook_health: Option<HookHealth>,
+    /// Hook evidence freshness, collected beside the wiring health.
+    pub evidence_census: Option<EvidenceCensus>,
+    /// Clock of the last process-backed evidence census.
+    evidence_collected_at_ms: i64,
+    /// The ATC supervisor's mode + full-mode provider, when a single instance
+    /// makes it unambiguous. Read off disk by the collector, never in render.
+    ///
+    /// `None` when there is no instance, several (nothing here could say WHICH
+    /// one a switch would act on), or the meta will not parse. The mode toggle
+    /// and the inline help are both hidden in that case rather than guessing.
+    pub atc: Option<AtcModeView>,
+}
+
+/// What the Daemons screen needs to know about the ATC supervisor beyond its
+/// runtime row: which mode owns the fleet, and which brain full mode would use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtcModeView {
+    pub name: String,
+    pub mode: SupervisorMode,
+    pub provider: String,
+    /// The mode help, rendered once by the collector.
+    ///
+    /// `mode_help` rebuilds the whole provider registry (five `Arc`s, a HashMap,
+    /// a Vec) and allocates seven `String`s. Calling it from `render` ran that
+    /// every frame while the ATC row was selected, in the file whose entire
+    /// design is about keeping work off the UI thread. It is a pure function of
+    /// (mode, provider), so it belongs on the snapshot with everything else.
+    pub help: Vec<String>,
 }
 
 /// All state owned by the Daemons screen. Stored at app-level so the cached
@@ -75,6 +126,9 @@ pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
     shared: Option<Arc<Mutex<Snapshot>>>,
+    /// Wakes the collector for an immediate re-collect. `None` until the
+    /// collector is armed.
+    wake: Option<std::sync::mpsc::Sender<()>>,
     /// Index of the highlighted row, clamped to the snapshot on every render.
     selected: usize,
     /// The open per-row action menu, if any.
@@ -96,6 +150,26 @@ pub struct DaemonsState {
             std::time::Instant,
         ),
     >,
+    /// The in-flight hook install/repair, if one is running. Same shape and
+    /// same one-outstanding guarantee as [`DaemonsState::inflight`]; the Hooks
+    /// box is a panel rather than a row, so it needs its own slot.
+    hooks_inflight: Option<(
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        std::time::Instant,
+    )>,
+    /// What the last hook action reported, and when it may stop being shown.
+    ///
+    /// It has to expire: the panel replaces the live issue line while a status
+    /// is set, and this state is app-level, so a status that never expired
+    /// would hide every fault found after it for the rest of the process. It
+    /// also has to be READABLE, and the collector republishes every two
+    /// seconds, so expiry is a wall clock the reader can keep up with rather
+    /// than the next collect.
+    hooks_status: Option<(String, std::time::Instant)>,
+    /// A tmux session the screen wants attached. Drained by the key handler,
+    /// which owns the app-level pending-action slot; the component itself must
+    /// not reach into `AppState`.
+    attach_request: Option<String>,
 }
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
@@ -104,6 +178,42 @@ struct ActionMenu {
     kind: DaemonKind,
     /// Index into [`ActionMenu::entries`].
     cursor: usize,
+    /// The row's state when the menu opened, NOT re-read while it is open: the
+    /// background collector republishes every two seconds, and a menu whose
+    /// entries move under the cursor mid-keystroke acts on the wrong one.
+    row: RowFacts,
+}
+
+/// The parts of a row's status that decide which entries its menu offers.
+#[derive(Debug, Clone, Default)]
+struct RowFacts {
+    /// The provisioned ATC instance, when there is one. `None` means every
+    /// lifecycle verb would bail. Read from a typed field, never inferred from
+    /// the reason sentence: which actions the row offers, and which tmux
+    /// session it attaches, must not change when someone rewords a message.
+    instance: Option<String>,
+    /// ATC has an OS timer installed for an instance that does not exist.
+    orphan: bool,
+    /// Which supervisor mode owns the fleet, when it is unambiguous. Captured
+    /// with the rest of the row so the mode entry cannot change under the
+    /// cursor mid-keystroke either.
+    mode: Option<SupervisorMode>,
+}
+
+impl RowFacts {
+    fn of(status: &DaemonStatus) -> Self {
+        Self {
+            instance: status.atc_instance.clone(),
+            orphan: status.scheduler_orphan.is_some(),
+            // Filled in by `open_menu`, which has the snapshot; a status row
+            // alone does not carry the supervisor mode.
+            mode: None,
+        }
+    }
+
+    fn unprovisioned(&self) -> bool {
+        self.instance.is_none()
+    }
 }
 
 /// One entry in the action menu.
@@ -111,6 +221,8 @@ struct ActionMenu {
 enum MenuEntry {
     /// A lifecycle verb.
     Act(Action),
+    /// Attach to the ATC mission-control tmux session.
+    OpenMissionControl,
     /// Show the full error of this row's last failed action.
     ViewError,
 }
@@ -119,14 +231,59 @@ impl ActionMenu {
     /// The entries for this menu. `view last error` only appears when there IS
     /// one — an always-present entry that usually does nothing is noise.
     fn entries(&self, has_error: bool) -> Vec<MenuEntry> {
-        // Per-kind, not `Action::ALL`: only the daemon that owns the Codex
-        // transport offers `pair`.
-        let mut entries: Vec<MenuEntry> =
-            Action::for_kind(self.kind).into_iter().map(MenuEntry::Act).collect();
+        // Per-kind AND per-mode, not `Action::ALL`: only the daemon that owns
+        // the Codex transport offers `pair`, and ATC offers exactly the
+        // supervisor mode it is NOT in.
+        //
+        // `for_kind_in_mode` is asked for that rather than the menu re-deriving
+        // it: the same rule already decides what `ainb daemon atc --help`
+        // documents, and a second copy here is a rule that can drift on one
+        // surface while the other keeps the old answer. `offers` still gates
+        // every verb it returns, so an unprovisioned row is filtered as before.
+        let mut entries: Vec<MenuEntry> = Action::for_kind_in_mode(self.kind, self.row.mode)
+            .into_iter()
+            .filter(|action| self.offers(*action))
+            .map(MenuEntry::Act)
+            .collect();
+        // Same rule as `offers`: with nothing provisioned there is no tmux
+        // session, so attaching could only fail. `provision` is the entry that
+        // gets you one.
+        //
+        // LITE has no session either, and that is by design, not a fault to
+        // repair: `fleet atc setup --mode lite` spawns no brain at all, because
+        // a session nothing ever nudges would burn a slot and lie to every
+        // liveness surface. So the entry could only ever attach a session that
+        // was never created, which is the failure this whole method exists to
+        // keep off the menu. An UNKNOWN mode still offers it: `None` means the
+        // meta would not parse or several instances made it ambiguous, and
+        // hiding a working attach on a guess is the worse error.
+        if self.kind == DaemonKind::Atc
+            && !self.row.unprovisioned()
+            && self.row.mode != Some(SupervisorMode::Lite)
+        {
+            entries.push(MenuEntry::OpenMissionControl);
+        }
         if has_error {
             entries.push(MenuEntry::ViewError);
         }
         entries
+    }
+
+    /// Whether this row can act on `action` right now.
+    ///
+    /// An entry that is guaranteed to fail is worse than no entry: it reads as
+    /// the fix and is not one. With no instance provisioned every lifecycle
+    /// verb bails before it looks at the verb, and removing a timer that is
+    /// not orphaned would tear down a live instance's heartbeat.
+    fn offers(&self, action: Action) -> bool {
+        if self.kind != DaemonKind::Atc {
+            return true;
+        }
+        match action {
+            Action::Provision => self.row.unprovisioned(),
+            Action::RemoveOrphan => self.row.orphan,
+            _ => !self.row.unprovisioned(),
+        }
     }
 }
 
@@ -156,9 +313,20 @@ impl DaemonsState {
             return Arc::clone(shared);
         }
         let shared = Arc::new(Mutex::new(Snapshot::default()));
-        spawn_collector(Arc::clone(&shared));
+        let (wake, wake_rx) = std::sync::mpsc::channel();
+        spawn_collector(Arc::clone(&shared), wake_rx);
+        self.wake = Some(wake);
         self.shared = Some(Arc::clone(&shared));
         shared
+    }
+
+    /// Ask the collector to re-collect now. The table free-runs anyway, so this
+    /// only shortens the wait; it never collects on the UI thread.
+    pub fn force_collect(&mut self) {
+        self.arm();
+        if let Some(wake) = &self.wake {
+            let _ = wake.send(());
+        }
     }
 
     /// Arm the background collector without rendering — called on navigation INTO
@@ -189,11 +357,11 @@ impl DaemonsState {
         guard.rows.len()
     }
 
-    /// The daemon the selection is on, if the snapshot has landed.
-    fn selected_kind(&mut self) -> Option<DaemonKind> {
+    /// The whole selected row, so a caller can read more than its kind.
+    fn selected_status(&mut self) -> Option<DaemonStatus> {
         let shared = self.shared();
         let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
-        guard.rows.get(self.selected).map(|r| r.kind)
+        guard.rows.get(self.selected).cloned()
     }
 
     // ── Action menu ─────────────────────────────────────────────────────────
@@ -208,9 +376,24 @@ impl DaemonsState {
     /// Open the action menu on the selected row. No-op before the first
     /// snapshot lands — a menu over an empty table has nothing to act on.
     pub fn open_menu(&mut self) {
-        if let Some(kind) = self.selected_kind() {
-            self.menu = Some(ActionMenu { kind, cursor: 0 });
+        let atc_mode = self.atc_mode();
+        if let Some(status) = self.selected_status() {
+            self.menu = Some(ActionMenu {
+                kind: status.kind,
+                cursor: 0,
+                row: RowFacts {
+                    mode: atc_mode,
+                    ..RowFacts::of(&status)
+                },
+            });
         }
+    }
+
+    /// The ATC supervisor mode from the latest snapshot, when unambiguous.
+    fn atc_mode(&mut self) -> Option<SupervisorMode> {
+        let shared = self.shared();
+        let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.atc.as_ref().map(|a| a.mode)
     }
 
     /// Close every overlay at once — for a key that leaves the screen outright.
@@ -253,12 +436,24 @@ impl DaemonsState {
             return;
         };
         let kind = menu.kind;
+        let menu_instance = menu.row.instance.clone();
         let entries = menu.entries(self.has_error_for(kind));
         let Some(entry) = entries.get(menu.cursor).copied() else {
             return;
         };
         match entry {
             MenuEntry::ViewError => self.error_open = Some(kind),
+            MenuEntry::OpenMissionControl => {
+                self.error_open = None;
+                self.menu = None;
+                // The name comes off THIS row. Re-deriving it would resolve a
+                // leftover or a default rather than the instance the row is
+                // reporting, and attach a session that does not exist.
+                if let Some(name) = menu_instance {
+                    self.attach_request =
+                        Some(crate::fleet::atc::meta::AtcMeta::new(&name).tmux_session());
+                }
+            }
             MenuEntry::Act(action) => {
                 // BOTH overlays close. Clearing only `menu` left `error_open`
                 // set with nothing to render it: the screen painted normally but
@@ -323,6 +518,66 @@ impl DaemonsState {
         }
     }
 
+    /// Take the pending tmux attach, if the menu asked for one.
+    pub fn take_attach_request(&mut self) -> Option<String> {
+        self.attach_request.take()
+    }
+
+    /// Install or repair the hooks off the UI thread.
+    ///
+    /// [`BinaryIntent::Install`] repoints at the INSTALLED ainb, which is what
+    /// rescues a pointer left aimed at a deleted worktree build.
+    /// [`BinaryIntent::PinRunning`] deliberately aims at the binary running
+    /// now, for testing a local build's hooks.
+    pub fn dispatch_hooks(&mut self, intent: BinaryIntent) {
+        if self.hooks_inflight.is_some() {
+            return;
+        }
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.hooks_inflight = Some((rx, std::time::Instant::now()));
+        self.hooks_status = Some((
+            match intent {
+                BinaryIntent::Install => "installing hooks…",
+                BinaryIntent::PinRunning => "pinning the running binary…",
+            }
+            .to_string(),
+            // A running action outlives every clock until it finishes.
+            std::time::Instant::now() + ACTION_TIMEOUT + STATUS_LINGER,
+        ));
+        std::thread::spawn(move || {
+            let _ = tx.send(run_hook_action(intent));
+        });
+    }
+
+    /// Drain a finished hook action. A channel poll, not I/O, same reasoning
+    /// as [`DaemonsState::poll_actions`].
+    fn poll_hooks(&mut self) {
+        let Some((rx, started)) = self.hooks_inflight.as_mut() else {
+            return;
+        };
+        if let Ok(line) = rx.try_recv() {
+            self.hooks_status = Some((line, std::time::Instant::now() + STATUS_LINGER));
+            self.hooks_inflight = None;
+        } else if started.elapsed() > ACTION_TIMEOUT {
+            self.hooks_status = Some((
+                format!(
+                    "hook repair did not finish within {}s",
+                    ACTION_TIMEOUT.as_secs()
+                ),
+                std::time::Instant::now() + STATUS_LINGER,
+            ));
+            self.hooks_inflight = None;
+        }
+    }
+
+    /// The hook status to paint, until it expires and the issue line returns.
+    fn live_hooks_status(&self) -> Option<&str> {
+        self.hooks_status
+            .as_ref()
+            .filter(|(_, until)| std::time::Instant::now() < *until)
+            .map(|(line, _)| line.as_str())
+    }
+
     /// Read the latest published snapshot. Off the render path this is a pure
     /// memory read under a microsecond lock.
     pub fn snapshot(&mut self) -> Snapshot {
@@ -332,6 +587,69 @@ impl DaemonsState {
             rows: guard.rows.clone(),
             collected_at_ms: guard.collected_at_ms,
             hook_health: guard.hook_health.clone(),
+            evidence_census: guard.evidence_census,
+            evidence_collected_at_ms: guard.evidence_collected_at_ms,
+            atc: guard.atc.clone(),
+        }
+    }
+}
+
+/// Run one hook install/repair in-process and report it in one line.
+///
+/// In-process, not shelled: unlike a daemon lifecycle verb there is no separate
+/// process to talk to, and the repair is exactly the library call
+/// `repair_or_install_hooks` performs.
+fn run_hook_action(intent: BinaryIntent) -> String {
+    // The row's one-outstanding guard is released on ACTION_TIMEOUT while the
+    // thread is still alive, so a wedged install can be joined by a second one.
+    // Unlike a row action these run IN-PROCESS and both write install.json and
+    // hooks/ainb-bin, so they are serialised here rather than left to race.
+    static HOOK_WRITES: Mutex<()> = Mutex::new(());
+    let _serialised = HOOK_WRITES.lock().unwrap_or_else(|p| p.into_inner());
+
+    let paths = match ainb_plugin_notifyd::Paths::from_home() {
+        Ok(paths) => paths,
+        Err(error) => return format!("hook repair failed: {error:#}"),
+    };
+    match intent {
+        BinaryIntent::Install => match ainb_plugin_notifyd::repair_or_install_hooks(&paths) {
+            Ok(report) => {
+                let agents = report
+                    .record
+                    .agents
+                    .iter()
+                    .map(|agent| agent.name())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                // Claude is wired through its marketplace, which can fail on
+                // its own while the record still lists Claude. Reporting a
+                // clean install then is how hooks that never fire look fine.
+                let mut line = match &report.claude {
+                    Some(ainb_plugin_notifyd::ClaudeRegister::Failed(error)) => {
+                        format!("hooks installed for {agents}, but Claude plugin FAILED: {error}")
+                    }
+                    Some(ainb_plugin_notifyd::ClaudeRegister::ClaudeCliMissing) => {
+                        format!(
+                            "hooks installed for {agents}; Claude plugin skipped (no claude on \
+                             PATH)"
+                        )
+                    }
+                    _ => format!("hooks installed for {agents}"),
+                };
+                // `agents` is the cumulative record, so an agent that failed
+                // THIS run is still in it. Name the failures explicitly.
+                for (agent, error) in &report.failures {
+                    line.push_str(&format!("; {} FAILED: {error}", agent.name()));
+                }
+                line
+            }
+            Err(error) => format!("hook repair failed: {error:#}"),
+        },
+        BinaryIntent::PinRunning => {
+            match ainb_plugin_notifyd::install::pin_running_hook_binary(&paths) {
+                Ok(target) => format!("hooks pinned to {}", target.path.display()),
+                Err(error) => format!("pinning the running binary failed: {error:#}"),
+            }
         }
     }
 }
@@ -374,7 +692,13 @@ fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let ok = out.status.success();
-            let first_line = |s: &str| {
+            // The LAST non-empty line, not the first — it was named `first_line`
+            // for long enough that a CLI ending its output with a help block
+            // badged the row with the help's closing line. Every verb reachable
+            // from this menu therefore has to end its stdout with the sentence
+            // worth badging; `fleet atc mode --set` prints its notes first for
+            // exactly this reason.
+            let badge_line = |s: &str| {
                 s.lines()
                     .rev()
                     .find(|l| !l.trim().is_empty())
@@ -383,7 +707,7 @@ fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome
                     .to_string()
             };
             let summary = if ok {
-                let line = first_line(&stdout);
+                let line = badge_line(&stdout);
                 if line.is_empty() {
                     format!("{verb} ok")
                 } else {
@@ -420,12 +744,33 @@ fn collect_into(shared: &Mutex<Snapshot>) {
     // still belongs here, not in render: hooks may live on a slow volume and a
     // stale socket can block briefly while connecting.
     let hook_health = Paths::from_home().ok().map(|paths| ainb_plugin_notifyd::hook_health(&paths));
+    let hooks_ready = hook_health.as_ref().is_some_and(|health| {
+        health.script_ready
+            && health.hook_binary_ready
+            && health.agents.iter().any(|agent| agent.agent == "claude" && agent.wiring_ready)
+    });
+    let now = now_ms();
+    let collect_evidence = shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .evidence_collected_at_ms
+        .saturating_add(EVIDENCE_INTERVAL_MS)
+        <= now;
+    let evidence_census = collect_evidence
+        .then(|| CurrentStateIndex::load().evidence_census(&ProbeIndex::load(), hooks_ready, now));
+    if let Some(evidence_census) = evidence_census {
+        let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+        guard.evidence_census = Some(evidence_census);
+        guard.evidence_collected_at_ms = now;
+    }
+    let atc = collect_atc_mode();
     match crate::fleet::daemons::collect() {
         Ok(rows) => {
             let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
             guard.rows = rows;
-            guard.collected_at_ms = now_ms();
+            guard.collected_at_ms = now;
             guard.hook_health = hook_health;
+            guard.atc = atc;
         }
         // Best-effort: an error leaves the prior snapshot in place (and logs)
         // rather than blanking the view.
@@ -433,16 +778,47 @@ fn collect_into(shared: &Mutex<Snapshot>) {
     }
 }
 
+/// Read the ATC supervisor mode, but only when ONE instance makes it
+/// unambiguous — the same rule `ainb daemon atc` uses to refuse acting on a
+/// guessed instance. Disk I/O, so it runs on the collector thread (H-D2).
+fn collect_atc_mode() -> Option<AtcModeView> {
+    use crate::fleet::atc::meta::AtcMeta;
+    use crate::fleet::atc::paths::{AtcPaths, list_instance_names_in};
+    let root = crate::fleet::plumbing::paths::ainb_home().ok()?.join("atc");
+    let names = list_instance_names_in(&root);
+    let [name] = names.as_slice() else {
+        return None;
+    };
+    let paths = AtcPaths::under_root(&root, name);
+    let meta = AtcMeta::from_json(&std::fs::read_to_string(&paths.meta).ok()?).ok()?;
+    let help = crate::fleet::atc::mode_help(meta.mode, &meta.provider);
+    Some(AtcModeView {
+        name: meta.name,
+        mode: meta.mode,
+        provider: meta.provider,
+        help,
+    })
+}
+
 /// Spawn the detached background collector: one immediate collect, then a collect
 /// every [`COLLECT_INTERVAL`] forever. Keeps ALL disk I/O / socket connects off
 /// the UI render thread (H-D2).
-fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
+fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: std::sync::mpsc::Receiver<()>) {
     std::thread::Builder::new()
         .name("ainb-daemons-collect".into())
         .spawn(move || {
             loop {
                 collect_into(&shared);
-                std::thread::sleep(COLLECT_INTERVAL);
+                // Blocks for the whole interval and returns the INSTANT `r` is
+                // pressed. Polling a flag on a short timer would wake this
+                // detached thread several times a second for the life of the
+                // process to answer a question that is almost always "no".
+                match wake.recv_timeout(COLLECT_INTERVAL) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    // The screen's state was dropped; nothing will read another
+                    // snapshot.
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                }
             }
         })
         // A failure to spawn the collector must not crash the app: the screen
@@ -453,13 +829,9 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>) {
 
 /// Render the Daemons screen into `area`. Reads ONLY the cached background
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    state: &mut DaemonsState,
-    runtime: Option<&DaemonsOverlayState>,
-) {
+pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
     state.poll_actions();
+    state.poll_hooks();
     let snapshot = state.snapshot();
     // Clamp before painting: the collector can shrink the table under us.
     state.selected = state.selected.min(snapshot.rows.len().saturating_sub(1));
@@ -486,10 +858,80 @@ pub fn render(
     let inner = outer.inner(area);
     frame.render_widget(outer, area);
 
-    // Carve a one-line help footer off the bottom.
+    // Carve a one-line help footer off the bottom, plus — when the cursor is on
+    // the ATC row — the supervisor-mode help above it. The help is inline rather
+    // than an overlay on purpose: an operator about to switch the thing that
+    // drives their whole fleet should be reading what each mode does WHILE the
+    // row's real state is still on screen, not instead of it.
+    // WRAP FIRST, then budget. `mode_help`'s longest line is ~95 chars, so on an
+    // 80-column terminal an unwrapped Paragraph clipped it to
+    // "never resolves an ambiguo" — the stated limit of the mode cut off exactly
+    // where it matters, on the screen whose whole purpose is to inform a switch.
+    // The height must come from the WRAPPED count or the extra lines overflow
+    // the chunk they were budgeted into.
+    let atc_help = wrap_help(&atc_help_lines(&snapshot, state.selected), inner.width);
+    let wanted = u16::try_from(atc_help.len()).unwrap_or(0);
+    // The eviction order is: help first, then the Hooks box, then never the
+    // table. Budgeting only against the table let the help silently delete the
+    // hook-health panel on a 19-23 row terminal — it vanished when the cursor
+    // landed on the ATC row and came back when it left, with nothing to say so.
+    // HOOKS_SECTION_ROWS + HOOKS_MIN_TABLE is what `render` below requires to
+    // draw both.
+    // The eviction order is: help first, then never the Hooks box, then never
+    // the table. Budgeting only against the table let the help silently delete
+    // the hook-health panel on a mid-size terminal — it vanished when the cursor
+    // landed on the ATC row and came back when it left, with nothing to say so.
+    //
+    const FOOTER: u16 = 1;
+    // The first attempt at this budget fixed the silent eviction by making the
+    // help almost never appear: it required `inner.height >= wanted + 15`, so on
+    // a standard 80x24 terminal (inner 78x22, wanted 12 after wrapping) the
+    // screen whose stated purpose is to inform a mode switch showed nothing at
+    // all. Hiding the thing is not a fix for hiding the wrong thing.
+    //
+    // What was actually wrong in round one was that the hooks panel vanished
+    // SILENTLY. So the help renders whenever the table stays usable, and when it
+    // costs the operator the hooks panel it SAYS so, on a line it pays for out
+    // of its own budget.
+    let without_help = inner.height.saturating_sub(FOOTER);
+    let hooks_fit_without_help = without_help >= HOOKS_NEEDS;
+    let displaces_hooks = wanted > 0
+        && hooks_fit_without_help
+        && inner.height.saturating_sub(wanted + FOOTER) < HOOKS_NEEDS;
+    let atc_help = if displaces_hooks {
+        let mut lines = atc_help;
+        // Wrapped like every other line. Pushing it AFTER `wrap_help` left it
+        // the one line in the block that could be clipped mid-sentence, and it
+        // is the line explaining why a panel is missing.
+        lines.extend(wrap_help(
+            &["(hook health hidden at this height — move off this row to see it)".to_string()],
+            inner.width,
+        ));
+        lines
+    } else {
+        atc_help
+    };
+    let wanted = u16::try_from(atc_help.len()).unwrap_or(0);
+    let with_help = inner.height.saturating_sub(wanted + FOOTER);
+    let help_height = if wanted > 0 && with_help >= TABLE_MIN {
+        wanted
+    } else {
+        // No help, or showing it would squeeze the table itself — and the table
+        // is the screen. The footer still names the CLI verb that prints the
+        // same text.
+        0
+    };
+    debug_assert!(
+        help_height == 0 || inner.height.saturating_sub(help_height + FOOTER) >= TABLE_MIN,
+        "the help must never squeeze the table below a usable size"
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(help_height),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
     // One table, plus the Hooks box. The old System services panel is gone: it
@@ -497,23 +939,36 @@ pub fn render(
     // lines because they had no DaemonKind, and it sat on "collecting…" when
     // its separate async fetch wedged. Those three are real rows now, so the
     // panel was a second place to look that showed strictly less.
-    if chunks[0].height >= 14 {
+    if chunks[0].height >= HOOKS_NEEDS {
         let sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(7), Constraint::Length(7)])
+            .constraints([Constraint::Min(TABLE_MIN), Constraint::Length(HOOKS_BOX)])
             .split(chunks[0]);
         render_table(frame, sections[0], &snapshot, state);
         render_hook_section(
             frame,
             sections[1],
             snapshot.hook_health.as_ref(),
-            runtime,
+            snapshot.evidence_census,
+            state.live_hooks_status(),
             snapshot.collected_at_ms > 0,
         );
     } else {
         render_table(frame, chunks[0], &snapshot, state);
     }
-    render_footer(frame, chunks[1], state);
+    if help_height > 0 {
+        render_atc_help(frame, chunks[1], &atc_help);
+    }
+    // The hint follows the SELECTION, not merely "an ATC exists somewhere":
+    // advertising a mode switch while the cursor sits on the bridge promises a
+    // menu entry that `Action::for_kind_in_mode` will not offer.
+    let atc_selected = snapshot.rows.get(state.selected).map(|r| r.kind) == Some(DaemonKind::Atc);
+    render_footer(
+        frame,
+        chunks[2],
+        state,
+        snapshot.atc.as_ref().filter(|_| atc_selected),
+    );
     // Overlays paint last so they float above the table.
     if state.error_open.is_some() {
         render_error_view(frame, inner, state);
@@ -528,7 +983,9 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
         return;
     };
     let entries = menu.entries(state.has_error_for(menu.kind));
-    let width = 30_u16.min(area.width.saturating_sub(2));
+    // Wide enough for the longest label ("switch to full mode"), which the old
+    // 30-column popup clipped.
+    let width = 34_u16.min(area.width.saturating_sub(2));
     let height = u16::try_from(entries.len()).unwrap_or(3) + 3;
     let popup = centered(area, width, height.min(area.height));
     frame.render_widget(ratatui::widgets::Clear, popup);
@@ -552,7 +1009,10 @@ fn render_action_menu(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     let mut lines: Vec<Line> = Vec::with_capacity(entries.len() + 1);
     for (i, entry) in entries.iter().enumerate() {
         let label = match entry {
-            MenuEntry::Act(a) => a.id(),
+            // `label`, not `id`: a bare verb id cannot say which mode a
+            // switch switches to.
+            MenuEntry::Act(a) => a.label(),
+            MenuEntry::OpenMissionControl => "open mission control",
             MenuEntry::ViewError => "view last error",
         };
         let selected = i == menu.cursor;
@@ -649,7 +1109,8 @@ fn render_hook_section(
     frame: &mut Frame,
     area: Rect,
     health: Option<&HookHealth>,
-    runtime: Option<&DaemonsOverlayState>,
+    evidence: Option<EvidenceCensus>,
+    status: Option<&str>,
     collected: bool,
 ) {
     let block = Block::default()
@@ -665,6 +1126,11 @@ fn render_hook_section(
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" install / repair", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                "  B",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" pin running", Style::default().fg(MUTED_GRAY)),
         ]))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -704,21 +1170,32 @@ fn render_hook_section(
                 })
                 .collect::<Vec<_>>()
                 .join("   ");
-            let issue =
-                runtime.and_then(|runtime| runtime.hooks_repair_status.as_deref()).map_or_else(
-                    || {
-                        health.issues.first().map_or_else(
-                            || "✓ wiring healthy".to_string(),
-                            |issue| {
-                                format!(
-                                    "! {}: {} — {}",
-                                    issue.component, issue.message, issue.repair
-                                )
-                            },
-                        )
-                    },
-                    |status| format!("I {status}"),
-                );
+            let issue = status.map_or_else(
+                || {
+                    health.issues.first().map_or_else(
+                        || "✓ wiring healthy".to_string(),
+                        |issue| {
+                            format!("! {}: {}: {}", issue.component, issue.message, issue.repair)
+                        },
+                    )
+                },
+                |status| format!("I {status}"),
+            );
+            // The pointer and the binary you are looking at are separate facts,
+            // and the failure being diagnosed here is precisely them being
+            // different. One combined line hid that; two lines cannot.
+            let pointer = health
+                .hook_binary
+                .as_ref()
+                .map_or_else(|| "(no pointer)".to_string(), |p| p.display().to_string());
+            let running = health
+                .running_binary
+                .as_ref()
+                .map_or_else(|| "(unknown)".to_string(), |p| p.display().to_string());
+            // Decided by the probe with `canonical_eq`: current_exe resolves
+            // symlinks and the pointer does not, so comparing the paths here
+            // would gold-flag every healthy Homebrew install.
+            let pointer_matches_running = health.hook_binary_is_running_binary;
             vec![
                 Line::from(vec![
                     Span::styled("version ", Style::default().fg(MUTED_GRAY)),
@@ -729,7 +1206,7 @@ fn render_hook_section(
                 ]),
                 Line::from(Span::styled(
                     format!(
-                        "script {}  ·  ainb binary {} ({}){}",
+                        "script {}  ·  hooks {} ({}) → {pointer}",
                         if health.script_ready { "✓" } else { "✗" },
                         if health.hook_binary_ready {
                             "✓"
@@ -737,10 +1214,6 @@ fn render_hook_section(
                             "✗"
                         },
                         health.hook_binary_mode.map(|mode| mode.label()).unwrap_or("unknown"),
-                        health
-                            .hook_binary
-                            .as_ref()
-                            .map_or_else(String::new, |target| format!(" · {}", target.display()),),
                     ),
                     Style::default().fg(if health.script_ready && health.hook_binary_ready {
                         HEALTHY_GREEN
@@ -748,23 +1221,20 @@ fn render_hook_section(
                         STOPPED_RED
                     }),
                 )),
-                Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
                 Line::from(Span::styled(
-                    format!(
-                        "notifyd {}  ·  approval broker {}",
-                        if health.notify_socket_live {
-                            "running"
-                        } else {
-                            "idle"
-                        },
-                        if health.approve_socket_live {
-                            "running"
-                        } else {
-                            "idle"
-                        },
-                    ),
-                    Style::default().fg(MUTED_GRAY),
+                    format!("running → {running}"),
+                    Style::default().fg(if pointer_matches_running {
+                        MUTED_GRAY
+                    } else {
+                        GOLD
+                    }),
                 )),
+                evidence_line(evidence),
+                Line::from(Span::styled(agent_line, Style::default().fg(SOFT_WHITE))),
+                // notifyd and the approve broker had a line here when they had
+                // no row of their own. They are first-class rows in the table
+                // above now, so this only restated it, and the line it costs is
+                // what made the whole panel vanish on a short terminal.
                 Line::from(Span::styled(
                     issue,
                     Style::default().fg(if health.issues.is_empty() {
@@ -780,6 +1250,29 @@ fn render_hook_section(
         Paragraph::new(lines).style(Style::default().bg(PANEL_BG)),
         inner,
     );
+}
+
+fn evidence_line(evidence: Option<EvidenceCensus>) -> Line<'static> {
+    let Some(evidence) = evidence else {
+        return Line::from(Span::styled(
+            "Claude hook evidence unavailable",
+            Style::default().fg(STOPPED_RED),
+        ));
+    };
+    let style = match evidence.health {
+        EvidenceHealth::Healthy => Style::default().fg(HEALTHY_GREEN),
+        EvidenceHealth::Silent => Style::default().fg(GOLD),
+        EvidenceHealth::Unavailable => Style::default().fg(STOPPED_RED),
+    };
+    Line::from(Span::styled(
+        format!(
+            "Claude hook {}  ·  {} active probe(s), {} fresh state",
+            evidence.health.label(),
+            evidence.active_probes,
+            evidence.fresh_hook_states
+        ),
+        style,
+    ))
 }
 
 fn render_table(frame: &mut Frame, area: Rect, snapshot: &Snapshot, state: &DaemonsState) {
@@ -920,7 +1413,96 @@ fn daemon_version_label(daemon: &DaemonStatus) -> (String, Style) {
     }
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
+/// The supervisor-mode help for the ATC row, or empty when the cursor is
+/// elsewhere / the mode is unknown.
+///
+/// The lines come from [`crate::fleet::atc::mode_help`] — the same text
+/// `ainb fleet atc mode` prints — so the screen and the CLI can never describe
+/// the modes differently.
+fn atc_help_lines(snapshot: &Snapshot, selected: usize) -> Vec<String> {
+    if snapshot.rows.get(selected).map(|r| r.kind) != Some(DaemonKind::Atc) {
+        return Vec::new();
+    }
+    let Some(atc) = snapshot.atc.as_ref() else {
+        return Vec::new();
+    };
+    atc.help.clone()
+}
+
+/// Wrap help lines to `width`, preserving each line's leading indent.
+///
+/// Done here rather than with `Paragraph::wrap` because the caller has to budget
+/// the block's height, and only the WRAPPED count is the real height.
+///
+/// The indent is load-bearing: `mode_help` indents its "limits:" lines so they
+/// read as belonging to the mode above them. An earlier version seeded the first
+/// output line from the first WORD, which silently dropped that indent and
+/// detached every limits line from its mode.
+///
+/// ponytail: a single word longer than `width` is emitted over-long rather than
+/// hard-split. Nothing in `mode_help` comes close, and an over-long line is
+/// clipped horizontally without changing the line COUNT, so the height budget
+/// stays correct. Hard-split if that ever stops being true.
+fn wrap_help(lines: &[String], width: u16) -> Vec<String> {
+    let width = usize::from(width).max(20);
+    let mut out = Vec::new();
+    for line in lines {
+        if line.chars().count() <= width {
+            out.push(line.clone());
+            continue;
+        }
+        let lead: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+        // Continuations sit two columns inside the original indent, so a wrapped
+        // line is visibly a continuation and not a new bullet.
+        let hang = format!("{lead}  ");
+        let mut current = lead.clone();
+        let mut has_word = false;
+        for word in line.split_whitespace() {
+            let prospective = if has_word {
+                current.chars().count() + 1 + word.chars().count()
+            } else {
+                current.chars().count() + word.chars().count()
+            };
+            if prospective > width && has_word {
+                out.push(std::mem::take(&mut current));
+                current.push_str(&hang);
+                has_word = false;
+            }
+            if has_word {
+                current.push(' ');
+            }
+            current.push_str(word);
+            has_word = true;
+        }
+        if has_word {
+            out.push(current);
+        }
+    }
+    out
+}
+
+/// Paint the mode help. The first line (the current owner) is emphasised: it is
+/// the fact the rest of the block is context for.
+fn render_atc_help(frame: &mut Frame, area: Rect, lines: &[String]) {
+    let painted: Vec<Line> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let style = if i == 0 {
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED_GRAY)
+            };
+            Line::from(Span::styled(text.clone(), style))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(painted).style(Style::default().bg(PANEL_BG)),
+        area,
+    );
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState, atc: Option<&AtcModeView>) {
     // Hints name the keys that work RIGHT NOW: an overlay owns Enter and Esc,
     // so advertising the table's keys underneath it would be a lie.
     let spans = if state.error_open.is_some() {
@@ -938,11 +1520,21 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &DaemonsState) {
             Span::styled(" close", Style::default().fg(MUTED_GRAY)),
         ]
     } else {
+        let enter_hint = match atc {
+            Some(a) => format!(
+                " start / restart / stop / switch to {} mode  ",
+                a.mode.other().id()
+            ),
+            None => " start / restart / stop  ".to_string(),
+        };
         vec![
             Span::styled("↑/↓", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" select  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("Enter", Style::default().fg(CORNFLOWER_BLUE)),
-            Span::styled(" start / restart / stop  ", Style::default().fg(MUTED_GRAY)),
+            // Not "start / restart / stop": the entries a row offers depend on
+            // its state, so naming three of them in a fixed list goes stale the
+            // moment a row offers a fourth — which the mode switch is.
+            Span::styled(" actions  ", Style::default().fg(MUTED_GRAY)),
             Span::styled("r", Style::default().fg(CORNFLOWER_BLUE)),
             Span::styled(" refresh", Style::default().fg(MUTED_GRAY)),
             Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)),
@@ -986,6 +1578,12 @@ mod tests {
             inbound_expected: 0,
             inbound_live: 0,
             last_inbound_error: None,
+            scheduler_orphan: None,
+            // A real ATC row names its instance whenever one is provisioned,
+            // and the menu reads that rather than the reason text. A fixture
+            // that left it None would be an UNPROVISIONED row.
+            atc_instance: (kind == DaemonKind::Atc)
+                .then(|| channel.map_or_else(|| "main".to_string(), ToString::to_string)),
             reason: if connected {
                 "running + connected".to_string()
             } else {
@@ -1019,14 +1617,369 @@ mod tests {
     /// This is the H-D2 test seam — render is decoupled from any live collect.
     fn seeded_state(rows: Vec<DaemonStatus>) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
+            atc: None,
             rows,
             collected_at_ms: now_ms(),
             hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
             ..DaemonsState::default()
         }
+    }
+
+    fn atc_view(mode: SupervisorMode, provider: &str) -> AtcModeView {
+        AtcModeView {
+            name: "tower".to_string(),
+            mode,
+            provider: provider.to_string(),
+            help: crate::fleet::atc::mode_help(mode, provider),
+        }
+    }
+
+    /// A seeded state whose ATC supervisor mode is known — the shape the mode
+    /// toggle and the inline help both read.
+    fn seeded_state_with_atc(rows: Vec<DaemonStatus>, mode: SupervisorMode) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            atc: Some(atc_view(mode, "claude")),
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
+        }));
+        DaemonsState {
+            shared: Some(shared),
+            ..DaemonsState::default()
+        }
+    }
+
+    /// A seeded state carrying BOTH the ATC mode and hook health, for the
+    /// layout-budget tests.
+    fn seeded_state_with_atc_and_hooks(
+        rows: Vec<DaemonStatus>,
+        mode: SupervisorMode,
+    ) -> DaemonsState {
+        let shared = Arc::new(Mutex::new(Snapshot {
+            atc: Some(atc_view(mode, "claude")),
+            rows,
+            collected_at_ms: now_ms(),
+            hook_health: Some(hook_health()),
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
+        }));
+        DaemonsState {
+            shared: Some(shared),
+            ..DaemonsState::default()
+        }
+    }
+
+    fn atc_row() -> DaemonStatus {
+        status(DaemonKind::Atc, DaemonState::Running, true, Some("tower"))
+    }
+
+    // ── Supervisor mode toggle ──────────────────────────────────────────────
+
+    #[test]
+    fn the_atc_menu_offers_only_the_mode_the_fleet_is_not_in() {
+        // Offering both would put "switch to the mode you are already in" on
+        // screen, which reads as a state the fleet might not be in.
+        for (mode, expected, forbidden) in [
+            (SupervisorMode::Full, Action::ModeLite, Action::ModeFull),
+            (SupervisorMode::Lite, Action::ModeFull, Action::ModeLite),
+        ] {
+            let mut state = seeded_state_with_atc(vec![atc_row()], mode);
+            state.open_menu();
+            let menu = state.menu.as_ref().expect("menu opens on the ATC row");
+            let entries = menu.entries(false);
+            assert!(
+                entries.contains(&MenuEntry::Act(expected)),
+                "{} mode must offer {expected:?}: {entries:?}",
+                mode.id()
+            );
+            assert!(
+                !entries.contains(&MenuEntry::Act(forbidden)),
+                "{} mode must not offer {forbidden:?}",
+                mode.id()
+            );
+        }
+    }
+
+    /// The defect the probe fix exists to clear, asserted where it was actually
+    /// visible: the MENU, not the status field the menu reads.
+    ///
+    /// A probe-level assertion on `atc_instance` pins the input; it says nothing
+    /// about the row being usable, which is the thing that was broken. Both
+    /// halves are needed, because either one can be right while the other is not
+    /// (and was: `atc_instance` alone still leaves mission control offered).
+    #[test]
+    fn a_lite_atc_row_offers_the_lifecycle_verbs_but_not_a_session_lite_never_creates() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Lite);
+        state.open_menu();
+        let entries = state.menu.as_ref().expect("menu opens on the ATC row").entries(false);
+
+        for verb in [Action::Start, Action::Restart, Action::Stop] {
+            assert!(
+                entries.contains(&MenuEntry::Act(verb)),
+                "a provisioned lite row must offer {}: {entries:?}",
+                verb.id()
+            );
+        }
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::ModeFull)),
+            "a lite row must offer the switch out of lite: {entries:?}"
+        );
+        assert!(
+            !entries.contains(&MenuEntry::Act(Action::Provision)),
+            "the instance IS provisioned, and provision refuses: {entries:?}"
+        );
+        // `setup --mode lite` spawns no brain session, so this could only ever
+        // attach one that was never created.
+        assert!(
+            !entries.contains(&MenuEntry::OpenMissionControl),
+            "lite has no mission control to open: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_atc_row_never_offers_a_mode_switch() {
+        // Mode is an ATC supervisor concept; a bridge has no modes to switch.
+        let mut state = seeded_state_with_atc(
+            vec![status(DaemonKind::Bridge, DaemonState::Running, true, None)],
+            SupervisorMode::Full,
+        );
+        state.open_menu();
+        let menu = state.menu.as_ref().unwrap();
+        for entry in menu.entries(false) {
+            assert!(
+                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
+                "bridge offered a mode switch: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_mode_switch_is_offered_when_the_mode_is_unknown() {
+        // Several instances, or an unreadable meta: nothing here could say WHICH
+        // fleet a switch would act on, and a guessed one is worse than none.
+        let mut state = seeded_state(vec![atc_row()]);
+        state.open_menu();
+        let menu = state.menu.as_ref().unwrap();
+        for entry in menu.entries(false) {
+            assert!(
+                !matches!(entry, MenuEntry::Act(Action::ModeLite | Action::ModeFull)),
+                "offered a switch with no known mode: {entry:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_open_menu_does_not_reshuffle_when_the_collector_republishes() {
+        // The entry list is captured at open. If it re-read the mode per frame,
+        // a collect landing mid-keystroke would move the cursor's meaning — you
+        // press "switch to lite" and get "stop".
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        state.open_menu();
+        let before = state.menu.as_ref().unwrap().entries(false);
+
+        // The collector publishes a switched mode underneath the open menu.
+        {
+            let shared = state.shared();
+            let mut guard = shared.lock().unwrap();
+            guard.atc = Some(atc_view(SupervisorMode::Lite, "claude"));
+        }
+        let after = state.menu.as_ref().unwrap().entries(false);
+        assert_eq!(before, after, "the open menu must not reshuffle");
+    }
+
+    #[test]
+    fn the_menu_labels_say_which_mode_they_switch_to() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        state.open_menu();
+        let text = render_to_string(&mut state, 100, 24);
+        assert!(
+            text.contains("switch to lite mode"),
+            "a bare verb id would not say what it does: {text}"
+        );
+    }
+
+    // ── Inline mode help ────────────────────────────────────────────────────
+
+    #[test]
+    fn selecting_the_atc_row_explains_both_modes_and_names_the_owner() {
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, 120, 30);
+        assert!(text.contains("full heartbeat"), "current owner: {text}");
+        assert!(text.contains("no LLM"), "lite behaviour: {text}");
+        assert!(text.contains("never answers an ASK"), "lite limits: {text}");
+        assert!(text.contains("spends tokens"), "full limits: {text}");
+    }
+
+    #[test]
+    fn the_help_comes_from_the_same_text_the_cli_prints() {
+        // One source for both surfaces: a screen and a CLI that describe the
+        // modes differently is how an operator switches the wrong way.
+        let snapshot = Snapshot {
+            atc: Some(atc_view(SupervisorMode::Lite, "codex")),
+            rows: vec![atc_row()],
+            collected_at_ms: now_ms(),
+            hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
+        };
+        assert_eq!(
+            atc_help_lines(&snapshot, 0),
+            crate::fleet::atc::mode_help(SupervisorMode::Lite, "codex")
+        );
+    }
+
+    #[test]
+    fn the_help_is_absent_on_every_other_row() {
+        let snapshot = Snapshot {
+            atc: Some(atc_view(SupervisorMode::Full, "claude")),
+            rows: vec![
+                status(DaemonKind::Bridge, DaemonState::Running, true, None),
+                atc_row(),
+            ],
+            collected_at_ms: now_ms(),
+            hook_health: None,
+            evidence_census: None,
+            evidence_collected_at_ms: 0,
+        };
+        assert!(atc_help_lines(&snapshot, 0).is_empty(), "bridge row");
+        assert!(!atc_help_lines(&snapshot, 1).is_empty(), "atc row");
+    }
+
+    #[test]
+    fn the_mode_switch_is_offered_only_on_a_provisioned_atc_row() {
+        // The footer no longer names individual verbs (it says "actions", since
+        // the entries a row offers depend on its state), so the property lives
+        // in the MENU: the switch appears on a provisioned ATC row and nowhere
+        // else — never on another daemon, never on an unprovisioned ATC.
+        let bridge = status(DaemonKind::Bridge, DaemonState::Running, true, None);
+        let mut state = seeded_state_with_atc(vec![atc_row(), bridge], SupervisorMode::Full);
+
+        state.open_menu();
+        let on_atc = state.menu.as_ref().unwrap().entries(false);
+        assert!(
+            on_atc.contains(&MenuEntry::Act(Action::ModeLite)),
+            "a provisioned full ATC row must offer the lite switch: {on_atc:?}"
+        );
+
+        state.close_all_overlays();
+        state.move_selection(1);
+        state.open_menu();
+        let on_bridge = state.menu.as_ref().unwrap().entries(false);
+        for verb in [Action::ModeLite, Action::ModeFull] {
+            assert!(
+                !on_bridge.contains(&MenuEntry::Act(verb)),
+                "the bridge row must not offer {verb:?}: {on_bridge:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_wraps_instead_of_clipping_the_limits_it_exists_to_state() {
+        // On 80 columns the longest help line was cut at "…ambiguo", losing the
+        // limit on the screen whose purpose is to inform a switch.
+        let lines = crate::fleet::atc::mode_help(SupervisorMode::Full, "claude");
+        let wrapped = wrap_help(&lines, 78);
+        assert!(
+            wrapped.iter().all(|l| l.chars().count() <= 78),
+            "a wrapped line still overflows: {wrapped:?}"
+        );
+        // Wrapping inserts a continuation indent, so compare on collapsed
+        // whitespace — the phrase surviving across a line break is the point.
+        let joined = wrapped.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        for phrase in [
+            "never answers an ASK",
+            "no fleet coordination",
+            "spends tokens",
+        ] {
+            assert!(
+                joined.contains(phrase),
+                "wrapping lost {phrase:?}: {joined}"
+            );
+        }
+        assert!(
+            wrapped.len() >= lines.len(),
+            "wrapping cannot shrink the block"
+        );
+    }
+
+    #[test]
+    fn the_help_renders_on_a_standard_eighty_by_twentyfour_terminal() {
+        // The regression an over-cautious budget introduced: suppressing the
+        // help whenever it would cost the hooks panel meant it needed a 29-row
+        // terminal, so the screen whose purpose is to inform a mode switch
+        // showed nothing at the commonest size. Hiding the thing is not a fix
+        // for hiding the wrong thing.
+        let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, 80, 24);
+        assert!(
+            text.contains("never answers an ASK"),
+            "the mode help must render at 80x24: {text}"
+        );
+    }
+
+    #[test]
+    fn the_help_never_squeezes_the_table_itself() {
+        // The one thing that outranks both help and hooks: the rows ARE the
+        // screen.
+        for height in 8..40_u16 {
+            let mut state = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            let text = render_to_string(&mut state, 100, height);
+            assert!(
+                text.contains("ATC"),
+                "height {height}: the daemon row was squeezed out"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hooks_panel_never_disappears_without_saying_so() {
+        // A sweep rather than one band: the budget is a size calculation, so the
+        // property is the invariant, not any single terminal size.
+        for height in 8..40_u16 {
+            let mut bare = seeded_state_with_atc_and_hooks(vec![atc_row()], SupervisorMode::Full);
+            // Selection defaults to the ATC row (index 0) in both, so the only
+            // difference is whether the help is eligible at this height.
+            let with_atc_selected = render_to_string(&mut bare, 100, height);
+
+            let mut other = seeded_state_with_atc_and_hooks(
+                vec![
+                    atc_row(),
+                    status(DaemonKind::Bridge, DaemonState::Running, true, None),
+                ],
+                SupervisorMode::Full,
+            );
+            other.move_selection(1); // off the ATC row: no help
+            let without_help = render_to_string(&mut other, 100, height);
+
+            // The panel may yield to the help. What it may never do is vanish
+            // in silence, which was the actual complaint.
+            if without_help.contains("Hooks") && !with_atc_selected.contains("Hooks") {
+                assert!(
+                    with_atc_selected.contains("hook health hidden"),
+                    "height {height}: the hooks panel vanished with nothing to say so"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_short_terminal_drops_the_help_rather_than_the_table() {
+        // The rows are the point of the screen; the help is context. On a
+        // terminal too short for both, the help goes.
+        let mut state = seeded_state_with_atc(vec![atc_row()], SupervisorMode::Full);
+        let text = render_to_string(&mut state, 100, 10);
+        assert!(text.contains("ATC"), "the row must survive: {text}");
+        assert!(
+            !text.contains("never answers an ASK"),
+            "the help must not squeeze the table: {text}"
+        );
     }
 
     fn hook_health() -> HookHealth {
@@ -1039,6 +1992,8 @@ mod tests {
             hook_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
             hook_binary_mode: Some(HookBinaryMode::Release),
             hook_binary_ready: true,
+            running_binary: Some(PathBuf::from("/usr/local/bin/ainb")),
+            hook_binary_is_running_binary: true,
             agents: vec![
                 HookAgentHealth {
                     agent: "claude".to_string(),
@@ -1072,9 +2027,12 @@ mod tests {
 
     fn seeded_state_with_hook(rows: Vec<DaemonStatus>, hook_health: HookHealth) -> DaemonsState {
         let shared = Arc::new(Mutex::new(Snapshot {
+            atc: None,
             rows,
             collected_at_ms: now_ms(),
             hook_health: Some(hook_health),
+            evidence_census: Some(EvidenceCensus::from_counts(true, 1, 1)),
+            evidence_collected_at_ms: 0,
         }));
         DaemonsState {
             shared: Some(shared),
@@ -1084,30 +2042,20 @@ mod tests {
 
     /// Render the screen against an in-memory TestBackend and return the buffer
     /// as a single string for substring assertions.
-    fn render_to_string(
-        state: &mut DaemonsState,
-        runtime: Option<&DaemonsOverlayState>,
-        w: u16,
-        h: u16,
-    ) -> String {
+    fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
     }
 
     /// Render and return the buffer as LINES, so a test can ask which row the
     /// cursor is drawn on rather than only whether a glyph exists somewhere.
-    fn render_to_lines(
-        state: &mut DaemonsState,
-        runtime: Option<&DaemonsOverlayState>,
-        w: u16,
-        h: u16,
-    ) -> Vec<String> {
+    fn render_to_lines(state: &mut DaemonsState, w: u16, h: u16) -> Vec<String> {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| render(f, f.area(), state, runtime)).unwrap();
+        terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
             .map(|y| {
@@ -1146,10 +2094,12 @@ mod tests {
             state.selected = 0;
             state.move_selection(want as isize);
 
-            let target =
-                state.selected_kind().expect("a populated table always has a selected row");
+            let target = state
+                .selected_status()
+                .expect("a populated table always has a selected row")
+                .kind;
 
-            let lines = render_to_lines(&mut state, None, 160, 30);
+            let lines = render_to_lines(&mut state, 160, 30);
             let marked: Vec<&String> = lines.iter().filter(|l| l.contains('\u{25b6}')).collect();
             assert_eq!(
                 marked.len(),
@@ -1162,40 +2112,6 @@ mod tests {
                 marked[0].trim(),
                 target.display_name()
             );
-        }
-    }
-
-    fn system_runtime() -> DaemonsOverlayState {
-        DaemonsOverlayState {
-            selected: crate::app::state::DaemonRow::ORDER[0],
-            mcp_alive: true,
-            mcp_runtime: crate::mcp_pool::client::DaemonRuntimeStatus::default(),
-            headroom: ProxyStatus {
-                running: true,
-                port: 8787,
-                pid: Some(42),
-                tokens_saved: Some(9),
-            },
-            headroom_consumers: Vec::new(),
-            notifyd: Vec::new(),
-            approve_running: true,
-            approve_reason: "serving".to_string(),
-            hangar_running: true,
-            hangar_reason: "running".to_string(),
-            hangar_runtime: crate::cli::hangar::DaemonRuntimeStatus::default(),
-            loading: false,
-            last_refreshed: None,
-            fetch_rx: None,
-            restart_rx: None,
-            restart_status: None,
-            hooks_repair_rx: None,
-            hooks_repair_status: None,
-            hangar_start_rx: None,
-            hangar_start_status: None,
-            mcp_start_rx: None,
-            mcp_start_status: None,
-            headroom_start_rx: None,
-            headroom_start_status: None,
         }
     }
 
@@ -1226,7 +2142,7 @@ mod tests {
             ),
             status(DaemonKind::FleetDaemon, DaemonState::Stopped, false, None),
         ]);
-        let out = render_to_string(&mut state, None, 120, 12);
+        let out = render_to_string(&mut state, 120, 12);
         assert!(out.contains("Daemons"), "title missing: {out}");
         assert!(out.contains("DAEMON"), "header missing");
         assert!(out.contains("HEALTH"), "header missing");
@@ -1252,7 +2168,7 @@ mod tests {
             true,
             Some("Telegram (@seam)"),
         )]);
-        let out = render_to_string(&mut state, None, 120, 8);
+        let out = render_to_string(&mut state, 120, 8);
         assert!(
             out.contains("Telegram (@seam)"),
             "seeded row missing: {out}"
@@ -1276,8 +2192,7 @@ mod tests {
             )],
             hook_health(),
         );
-        let runtime = system_runtime();
-        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         // The System services panel is gone on purpose: everything it listed is
         // a real table row now, so a second panel would show strictly less.
         assert!(
@@ -1307,6 +2222,29 @@ mod tests {
             "repair missing: {out}"
         );
         assert!(out.contains("claude ✓"), "agent wiring missing: {out}");
+        assert!(
+            out.contains("Claude hook Healthy"),
+            "hook evidence health missing: {out}"
+        );
+    }
+
+    #[test]
+    fn renders_silent_and_unavailable_hook_evidence_as_warnings() {
+        let mut state = seeded_state_with_hook(Vec::new(), hook_health());
+        let shared = Arc::clone(state.shared.as_ref().expect("seeded state"));
+        shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(true, 2, 0));
+        let silent = render_to_string(&mut state, 120, 24);
+        assert!(
+            silent.contains("Claude hook Silent"),
+            "silent warning missing: {silent}"
+        );
+
+        shared.lock().unwrap().evidence_census = Some(EvidenceCensus::from_counts(false, 2, 2));
+        let unavailable = render_to_string(&mut state, 120, 24);
+        assert!(
+            unavailable.contains("Claude hook Unavailable"),
+            "unavailable warning missing: {unavailable}"
+        );
     }
 
     /// Bug 3: a stopped daemon had no way back up. Every row is now selectable
@@ -1323,7 +2261,7 @@ mod tests {
             ),
         ]);
         state.open_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(out.contains("start"), "menu must offer start: {out}");
         assert!(out.contains("restart"), "menu must offer restart: {out}");
         assert!(out.contains("stop"), "menu must offer stop: {out}");
@@ -1372,6 +2310,70 @@ mod tests {
         assert_eq!(state.selected, 1);
     }
 
+    /// The reported complaint: an ATC with no instance offered start, restart
+    /// and stop, all three of which bail before they read the verb, and the
+    /// only real fix was a CLI command quoted in the error.
+    #[test]
+    fn an_unprovisioned_atc_offers_provisioning_instead_of_dead_verbs() {
+        let mut row = status(DaemonKind::Atc, DaemonState::Stopped, false, None);
+        // No instance: what the probe reports when nothing is provisioned.
+        row.atc_instance = None;
+        row.reason = format!(
+            "{}, but a heartbeat timer for 'main' is installed and failing every interval",
+            crate::fleet::daemons::probe::ATC_UNPROVISIONED
+        );
+        row.scheduler_orphan = Some("main".to_string());
+        let mut state = seeded_state(vec![row]);
+
+        state.open_menu();
+        let menu = state.menu.as_ref().expect("menu opened");
+        let entries = menu.entries(false);
+
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::Provision)),
+            "provisioning must be offered: {entries:?}"
+        );
+        assert!(
+            entries.contains(&MenuEntry::Act(Action::RemoveOrphan)),
+            "the orphan timer must be removable: {entries:?}"
+        );
+        // Mission control is a tmux session that provisioning creates, so with
+        // nothing provisioned there is nothing to attach and the entry would
+        // only fail.
+        assert!(
+            !entries.contains(&MenuEntry::OpenMissionControl),
+            "there is no session to open yet: {entries:?}"
+        );
+        for dead in [Action::Start, Action::Restart, Action::Stop] {
+            assert!(
+                !entries.contains(&MenuEntry::Act(dead)),
+                "{} would bail on an unprovisioned ATC: {entries:?}",
+                dead.id()
+            );
+        }
+    }
+
+    /// The mirror image: a provisioned ATC must not be offered a `provision`
+    /// that would reset its meta, nor a teardown of a timer that is doing its
+    /// job.
+    #[test]
+    fn a_provisioned_atc_keeps_the_lifecycle_verbs_and_hides_provisioning() {
+        let mut state = seeded_state(vec![status(
+            DaemonKind::Atc,
+            DaemonState::Running,
+            true,
+            Some("main"),
+        )]);
+
+        state.open_menu();
+        let entries = state.menu.as_ref().expect("menu opened").entries(false);
+
+        assert!(entries.contains(&MenuEntry::Act(Action::Restart)));
+        assert!(entries.contains(&MenuEntry::OpenMissionControl));
+        assert!(!entries.contains(&MenuEntry::Act(Action::Provision)));
+        assert!(!entries.contains(&MenuEntry::Act(Action::RemoveOrphan)));
+    }
+
     /// A failure belongs to the daemon it happened to. The row shows a badge
     /// plus the way to read the rest, and the full text is one Enter away.
     #[test]
@@ -1391,7 +2393,7 @@ mod tests {
                 detail: "cmd: ainb daemon atc start\nexit: exit status: 1\n\nstderr:\nsocket already bound by pid 4412".to_string(),
             },
         );
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("✗ failed"),
             "row must badge the failure: {out}"
@@ -1402,11 +2404,13 @@ mod tests {
         );
 
         state.open_menu();
-        // start, restart, stop, then `view last error` — the entry only exists
-        // because this row HAS an error.
-        state.move_menu(3);
+        // `view last error` is always last, and it exists only because this row
+        // HAS an error. Saturating to the end rather than counting entries: the
+        // count moves whenever a row gains an action, and this test is about
+        // the error view, not the menu's length.
+        state.move_menu(isize::MAX);
         state.confirm_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("socket already bound by pid 4412"),
             "the error view must show the real stderr: {out}"
@@ -1427,7 +2431,7 @@ mod tests {
             Some("sock"),
         )]);
         state.open_menu();
-        let out = render_to_string(&mut state, None, 120, 24);
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             !out.contains("view last error"),
             "nothing failed here, so there is nothing to view: {out}"
@@ -1541,12 +2545,69 @@ mod tests {
         assert!(!state.has_overlay(), "and the screen is free to pop");
     }
 
+    /// The reported failure was a pointer aimed at a deleted worktree while a
+    /// perfectly good ainb was running. The panel has to show BOTH paths, or
+    /// the only way to see the mismatch is to go and read the pointer file.
     #[test]
-    fn renders_hook_repair_progress_from_runtime_state() {
+    fn hook_panel_shows_the_pointer_and_the_running_binary() {
+        let mut health = hook_health();
+        health.hook_binary = Some(PathBuf::from("/gone/worktree/target/debug/ainb"));
+        health.hook_binary_ready = false;
+        health.hook_binary_mode = Some(HookBinaryMode::Dev);
+        health.running_binary = Some(PathBuf::from("/home/u/.local/bin/ainb"));
+        let mut state = seeded_state_with_hook(Vec::new(), health);
+
+        let out = render_to_string(&mut state, 160, 30);
+
+        assert!(
+            out.contains("/gone/worktree/target/debug/ainb"),
+            "the hook pointer must be visible: {out}"
+        );
+        assert!(
+            out.contains("/home/u/.local/bin/ainb"),
+            "the running binary must be visible beside it: {out}"
+        );
+        assert!(
+            out.contains("B pin running"),
+            "the pin-running action must be advertised: {out}"
+        );
+    }
+
+    /// A finished action's line must not outlive the health beside it. The
+    /// state is app-level, so a status that never expires would replace the
+    /// live issue line for the rest of the process, hiding every fault found
+    /// after the last repair.
+    #[test]
+    fn a_finished_hook_status_expires_and_gives_the_issue_line_back() {
+        let mut state = DaemonsState::default();
+        let now = std::time::Instant::now();
+
+        state.hooks_status = Some((
+            "hooks installed for claude".to_string(),
+            now + STATUS_LINGER,
+        ));
+        assert_eq!(
+            state.live_hooks_status(),
+            Some("hooks installed for claude"),
+            "a fresh result must be readable, not gone on the next collect"
+        );
+
+        state.hooks_status = Some(("hooks installed for claude".to_string(), now));
+        assert_eq!(
+            state.live_hooks_status(),
+            None,
+            "once expired the live issue line must come back"
+        );
+    }
+
+    #[test]
+    fn renders_hook_repair_progress_from_its_own_state() {
         let mut state = seeded_state_with_hook(Vec::new(), hook_health());
-        let mut runtime = system_runtime();
-        runtime.hooks_repair_status = Some("hooks repaired for claude, codex".to_string());
-        let out = render_to_string(&mut state, Some(&runtime), 120, 24);
+        state.hooks_status = Some((
+            "hooks repaired for claude, codex".to_string(),
+            std::time::Instant::now() + STATUS_LINGER,
+        ));
+        let out = render_to_string(&mut state, 120, 24);
         assert!(
             out.contains("I hooks repaired for claude, codex"),
             "hook repair status missing: {out}"
@@ -1560,10 +2621,15 @@ mod tests {
         let shared = Mutex::new(Snapshot::default());
         collect_into(&shared);
         let guard = shared.lock().unwrap();
-        assert_eq!(
+        // At most every controllable daemon, and never more. Not equality: the
+        // fleet-daemon row is conditional now (it appears only while one is
+        // actually running, since ATC is the supervisor), so on the machine
+        // running this test it is normally absent.
+        assert!(
+            !guard.rows.is_empty() && guard.rows.len() <= crate::cli::daemon::CONTROLLABLE.len(),
+            "collect published {} rows, expected 1..={}",
             guard.rows.len(),
-            crate::cli::daemon::CONTROLLABLE.len(),
-            "collect publishes every daemon"
+            crate::cli::daemon::CONTROLLABLE.len()
         );
         assert!(
             guard.collected_at_ms > 0,
@@ -1577,7 +2643,7 @@ mod tests {
         // sees an empty snapshot (the collector hasn't published yet) and must
         // render an empty table without panicking.
         let mut state = DaemonsState::default();
-        let _ = render_to_string(&mut state, None, 100, 10);
+        let _ = render_to_string(&mut state, 100, 10);
         // The collector handle is now installed (spawned lazily on first render).
         assert!(
             state.shared.is_some(),
