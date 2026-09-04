@@ -19,6 +19,7 @@
 #![allow(missing_docs)]
 
 pub mod atc;
+pub mod attention;
 pub mod bridge;
 pub mod control;
 pub mod daemons;
