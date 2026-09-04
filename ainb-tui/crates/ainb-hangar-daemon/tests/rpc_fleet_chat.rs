@@ -1191,7 +1191,10 @@ async fn a_create_with_no_provider_keeps_the_scopes_own_adapter() {
             .fetch_one(store.pool())
             .await
             .unwrap();
-    assert_eq!(provider, "codex-acp", "and keep the adapter the operator chose");
+    assert_eq!(
+        provider, "codex-acp",
+        "and keep the adapter the operator chose"
+    );
 
     // What the guess did instead, kept as the reason the parameter is optional.
     let guessed = client
@@ -1204,4 +1207,77 @@ async fn a_create_with_no_provider_keeps_the_scopes_own_adapter() {
         guessed["error"]["message"].as_str().unwrap_or_default().contains("codex-acp"),
         "naming the wrong adapter is still refused, and says which one holds it: {guessed}"
     );
+}
+
+/// A swap whose replacement cannot be minted must leave the channel where it
+/// started, not with no live session at all.
+///
+/// The retire has to come first, because a live session holds the scope the
+/// replacement needs. That makes the engine picker — whose entire job is
+/// swapping adapters — the thing that could end the conversation.
+#[tokio::test]
+async fn a_swap_that_cannot_mint_its_replacement_leaves_the_session_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({ "kind": "copilot", "name": "#copilot" }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    let session = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "claude-agent-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    let session_key = session["result"]["session_key"].as_str().unwrap().to_string();
+
+    // The mint failure, injected where the swap reads it: `ensure` refuses a
+    // blank cwd, and the replacement is minted from the retiring session's own.
+    sqlx::query("UPDATE fleet_acp_session SET cwd = '' WHERE session_key = ?")
+        .bind(&session_key)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let swapped = client
+        .call(
+            methods::FLEET_COPILOT_CONFIGURE,
+            json!({ "provider": "codex-acp" }),
+        )
+        .await;
+    assert!(
+        !swapped["error"].is_null(),
+        "the swap could not complete and must say so: {swapped}"
+    );
+
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert!(
+        matches!(state.as_str(), "ACTIVE" | "IDLE"),
+        "a failed swap must leave the session live, not DEAD: {state}"
+    );
+    assert_eq!(
+        state, "IDLE",
+        "and in the state it was in before the swap was attempted"
+    );
+
+    // Which is the same thing the channel asks: is there anyone to talk to.
+    let live: Option<String> = sqlx::query_scalar(
+        "SELECT session_key FROM fleet_acp_session \
+         WHERE scope_key = ? AND state IN ('ACTIVE','IDLE')",
+    )
+    .bind(&scope)
+    .fetch_optional(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(live.as_deref(), Some(session_key.as_str()));
 }

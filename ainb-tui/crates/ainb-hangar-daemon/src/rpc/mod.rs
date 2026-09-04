@@ -2959,6 +2959,9 @@ async fn handle_fleet_copilot_configure(
         (session, false)
     } else {
         let retiring = session.session_key.clone();
+        // Captured before the retire, so a failed swap can put the row back in
+        // the state `get_live_by_scope` will find.
+        let was_live = session.state.clone();
         if let Some(acp) = acp.as_ref() {
             acp.teardown(&retiring, crate::acp_pool::ConvergeCause::OperatorStop).await;
         }
@@ -2969,7 +2972,7 @@ async fn handle_fleet_copilot_configure(
         FleetAcpSessionRepo::set_state(pool, &retiring, "DEAD", SystemClock.now_ms())
             .await
             .map_err(|error| internal(&format!("retiring the copilot session: {error}")))?;
-        let minted = crate::acp_session::ensure(
+        let minted = match crate::acp_session::ensure(
             pool,
             events,
             adapter,
@@ -2977,16 +2980,36 @@ async fn handle_fleet_copilot_configure(
             Some(&channel.scope_key),
         )
         .await
-        .map_err(|error| {
-            tracing::error!(
-                %retiring, %adapter, %error,
-                "the copilot session was retired but its replacement could not be minted"
-            );
-            match error {
-                crate::acp_session::EnsureError::Store(_) => internal(&error.to_string()),
-                _ => invalid_params(&error.to_string()),
+        {
+            Ok(minted) => minted,
+            Err(error) => {
+                // The retire has to come first, because a live session holds
+                // the scope the replacement needs. So a mint that fails leaves
+                // the channel with NO live session and no way back: the engine
+                // picker, whose whole job is swapping adapters, would be the
+                // thing that ends the conversation. Putting the row back live
+                // leaves the channel exactly where it started; the adapter was
+                // torn down, and the pool re-dials it on next use.
+                if let Err(restore) =
+                    FleetAcpSessionRepo::set_state(pool, &retiring, &was_live, SystemClock.now_ms())
+                        .await
+                {
+                    tracing::error!(
+                        %retiring, %restore,
+                        "the retired copilot session could not be restored; \
+                         the channel is left with no live session"
+                    );
+                }
+                tracing::error!(
+                    %retiring, %adapter, %error,
+                    "the copilot session was retired but its replacement could not be minted"
+                );
+                return Err(match error {
+                    crate::acp_session::EnsureError::Store(_) => internal(&error.to_string()),
+                    _ => invalid_params(&error.to_string()),
+                });
             }
-        })?;
+        };
         tracing::info!(
             retired = %retiring,
             session_key = %minted.session_key,
@@ -6069,8 +6092,7 @@ async fn handle_fleet_acp_session_create(
     use crate::acp_session::EnsureError;
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
-    let params: FleetAcpSessionCreateParams =
-        parse_params(req, "{ provider?, cwd, scope_key? }")?;
+    let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider?, cwd, scope_key? }")?;
     // `task:<id>` belongs to the task executor (`crate::acp_task`). A chat
     // session minted there would make that task's later run fail `ScopeHeld`
     // (terminal, `SpawnError`, no retry) and would make the pool stamp this
