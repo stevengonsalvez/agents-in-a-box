@@ -74,8 +74,87 @@ pub enum AttentionSource {
     Daemon,
 }
 
+/// Why a row cannot be answered from here.
+///
+/// Always carries a REASON. "Not answerable" rendered as a greyed chip with no
+/// explanation is the silent no-op the spec forbids: the operator is looking at
+/// something that needs them and has no way to learn why the surface will not
+/// take their answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unanswerable {
+    /// The row came from the daemon, and the daemon has since gone away, so the
+    /// `attention/answer` call that would deliver the answer is unavailable.
+    DaemonGone,
+    /// The session has no live pane to type into and no daemon row to answer
+    /// through — nothing to deliver an answer over at all.
+    NoTransport,
+    /// The state is informational. `DONE` and `ERR` are not questions; there is
+    /// nothing to answer.
+    NotAQuestion,
+}
+
+impl Unanswerable {
+    /// The sentence the `ask` tab shows in place of a composer.
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::DaemonGone => {
+                "the hangar daemon is not reachable, so attention/answer cannot deliver this"
+            }
+            Self::NoTransport => "this session has no live pane and no daemon route to answer over",
+            Self::NotAQuestion => "nothing is waiting on an answer here",
+        }
+    }
+}
+
+/// How an answer to this row would be delivered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answerable {
+    /// Through the daemon's `attention/answer`, targeting this attention id.
+    /// Unambiguous by construction: the id names exactly one open row, so the
+    /// cwd-ambiguity refusal the phone reply path needs does not apply here.
+    Daemon {
+        /// The `attention/answer` target.
+        attention_id: String,
+    },
+    /// By typing into the session's own tmux pane, through the one verified
+    /// send path. Works with the daemon down, which is the whole point.
+    Tmux {
+        /// The pane to send into.
+        tmux_session: String,
+    },
+    /// Not from here, and this is why.
+    No(Unanswerable),
+}
+
+impl Answerable {
+    /// Whether an answer can be delivered at all.
+    #[must_use]
+    pub const fn is_answerable(&self) -> bool {
+        !matches!(self, Self::No(_))
+    }
+
+    /// Why not, or `None` when it can be answered.
+    #[must_use]
+    pub const fn refusal(&self) -> Option<&'static str> {
+        match self {
+            Self::No(reason) => Some(reason.reason()),
+            _ => None,
+        }
+    }
+}
+
+/// One structured option an ASK offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionOption {
+    /// The label the operator picks and the text delivered as the answer.
+    pub label: String,
+    /// The option's own explanation, or empty.
+    pub description: String,
+}
+
 /// One live attention state on one session row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionAttention {
     /// What the session needs.
     pub kind: AttentionKind,
@@ -87,41 +166,132 @@ pub struct SessionAttention {
     pub since_ms: i64,
     /// Which producer this came from.
     pub source: AttentionSource,
+    /// The one-line question or reason the `ask` tab leads with, when the
+    /// producer supplied one.
+    pub detail: Option<String>,
+    /// Structured answer options. EMPTY unless the producer supplied a
+    /// structured request — a free-text composer, not a zero-option list.
+    pub options: Vec<AttentionOption>,
+    /// How an answer would be delivered, or why it cannot be.
+    pub answerable: Answerable,
 }
 
 impl SessionAttention {
-    /// A locally-observed state.
+    /// A locally-observed state, not yet routed.
+    ///
+    /// Answerability is resolved later, against the session the row lands on:
+    /// only the session row knows whether it has a live pane.
     #[must_use]
     pub const fn local(kind: AttentionKind, since_ms: i64) -> Self {
         Self {
             kind,
             since_ms,
             source: AttentionSource::Local,
+            detail: None,
+            options: Vec::new(),
+            answerable: Answerable::No(Unanswerable::NoTransport),
         }
     }
 
-    /// A daemon-observed state.
+    /// A daemon-observed state, answerable through its attention id.
     #[must_use]
-    pub const fn daemon(kind: AttentionKind, since_ms: i64) -> Self {
+    pub fn daemon(kind: AttentionKind, since_ms: i64, attention_id: String) -> Self {
         Self {
             kind,
             since_ms,
             source: AttentionSource::Daemon,
+            detail: None,
+            options: Vec::new(),
+            answerable: Answerable::Daemon { attention_id },
         }
+    }
+
+    /// Attach the one-line question the `ask` tab leads with.
+    #[must_use]
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        self.detail = (!detail.trim().is_empty()).then_some(detail);
+        self
+    }
+
+    /// Attach structured options.
+    #[must_use]
+    pub fn with_options(mut self, options: Vec<AttentionOption>) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Route this row over the session's own pane.
+    #[must_use]
+    pub fn over_tmux(mut self, tmux_session: impl Into<String>) -> Self {
+        self.answerable = Answerable::Tmux {
+            tmux_session: tmux_session.into(),
+        };
+        self
+    }
+
+    /// Refuse this row, with a reason.
+    #[must_use]
+    pub fn unanswerable(mut self, why: Unanswerable) -> Self {
+        self.answerable = Answerable::No(why);
+        self
     }
 }
 
-/// Sort a row's states into render precedence and drop duplicates of one kind,
-/// keeping the OLDEST occurrence of each.
+/// Sort a row's states into render precedence and collapse duplicates of one
+/// kind down to the single row that should represent it.
 ///
-/// Oldest wins because the age beside a chip answers "how long has this been
-/// waiting", and a producer that re-raises the same open state (notifyd
-/// re-classifying the same pane, the daemon re-listing an unanswered row) must
-/// not reset that clock back to zero every refresh.
+/// Two rules, in order:
+///
+/// 1. **The daemon wins while the daemon is up.** Both producers watch the same
+///    session, so an ASK usually arrives twice. The daemon's row is the one that
+///    carries an attention id, the structured options and the authoritative
+///    answered/open state, so it is the one an operator can act on. The local
+///    row is not merged into it (a half-daemon, half-local row would be a state
+///    neither producer ever reported) — it is dropped, and it comes back on its
+///    own the moment the daemon stops answering.
+/// 2. **Otherwise the oldest wins.** The age beside a chip answers "how long has
+///    this been waiting", so a producer re-raising the same still-open state
+///    (notifyd re-classifying an unchanged pane, the daemon re-listing an
+///    unanswered row) must not reset that clock to zero on every refresh.
 pub fn normalise(mut chips: Vec<SessionAttention>) -> Vec<SessionAttention> {
-    chips.sort_by(|a, b| a.kind.cmp(&b.kind).then(a.since_ms.cmp(&b.since_ms)));
-    chips.dedup_by_key(|chip| chip.kind);
+    chips.sort_by(|a, b| {
+        a.kind
+            .cmp(&b.kind)
+            // `Daemon` sorts before `Local` so `dedup_by_key` (which keeps the
+            // FIRST of each run) keeps the daemon row.
+            .then_with(|| daemon_first(a.source).cmp(&daemon_first(b.source)))
+            .then(a.since_ms.cmp(&b.since_ms))
+    });
+    chips.dedup_by(|a, b| a.kind == b.kind);
     chips
+}
+
+/// Sort key placing daemon rows ahead of local ones.
+const fn daemon_first(source: AttentionSource) -> u8 {
+    match source {
+        AttentionSource::Daemon => 0,
+        AttentionSource::Local => 1,
+    }
+}
+
+/// Map a daemon `attention` row's wire kind token to a chip.
+///
+/// Returns `None` for a token this build does not know, which is the additive
+/// case: a newer daemon raising a kind this TUI has never heard of must not
+/// render as a wrong chip, and dropping it is what the header's elsewhere count
+/// then reports honestly.
+#[must_use]
+pub fn chip_for_daemon_kind(kind: &str) -> Option<AttentionKind> {
+    Some(match kind {
+        // All three are "a human has to answer something".
+        "ask_user_question" | "waiting" | "codex_request_user" => AttentionKind::Ask,
+        "approval" => AttentionKind::Approve,
+        // An escalation is an error a human must see; it is not a question, so
+        // it does not go in the blocking count.
+        "error" | "escalation" => AttentionKind::Err,
+        _ => return None,
+    })
 }
 
 /// How many session rows are BLOCKING an agent — the header badge's number.
@@ -153,6 +323,110 @@ pub fn format_age(now_ms: i64, since_ms: i64) -> String {
     } else {
         format!("{}d", secs / 86_400)
     }
+}
+
+/// The merged attention picture the sessions screen renders.
+///
+/// One value, refreshed off the UI thread, holding both what the daemon said
+/// and whether it was reachable at all. The two travel together on purpose: a
+/// consumer that saw only the rows could not tell "the daemon says nothing is
+/// waiting" from "the daemon did not answer", and those need opposite chips.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DaemonAttention {
+    /// Open rows, keyed by the working directory they were raised in.
+    ///
+    /// Keyed by cwd because that is the only identity the host row and the
+    /// daemon row share: an ainb session knows its worktree path, and the
+    /// daemon's row carries the cwd the hook fired in. The daemon's
+    /// `session_id` is the PROVIDER's, which the host tree never learns.
+    pub by_cwd: std::collections::HashMap<String, Vec<SessionAttention>>,
+    /// `true` when the last poll reached the daemon, whatever it returned.
+    pub reachable: bool,
+    /// Why the last poll failed, for the one banner line the header shows.
+    pub error: Option<String>,
+}
+
+impl DaemonAttention {
+    /// The daemon answered, with these rows.
+    #[must_use]
+    pub fn up(by_cwd: std::collections::HashMap<String, Vec<SessionAttention>>) -> Self {
+        Self {
+            by_cwd,
+            reachable: true,
+            error: None,
+        }
+    }
+
+    /// The daemon did not answer.
+    ///
+    /// Rows are DROPPED, not retained: a stale row rendered as live is a chip
+    /// that invites an answer no transport can deliver. The local producer
+    /// carries the surface until the daemon comes back.
+    #[must_use]
+    pub fn down(error: String) -> Self {
+        Self {
+            by_cwd: std::collections::HashMap::new(),
+            reachable: false,
+            error: Some(error),
+        }
+    }
+
+    /// The daemon rows raised in `cwd`, trailing slash insensitive.
+    #[must_use]
+    pub fn rows_for(&self, cwd: &str) -> &[SessionAttention] {
+        self.by_cwd.get(cwd.trim_end_matches('/')).map_or(&[], Vec::as_slice)
+    }
+
+    /// Daemon rows whose cwd matched no session row on this screen.
+    ///
+    /// Reported rather than dropped: the sessions screen is the ONE attention
+    /// surface, so a request it cannot place still has to be counted somewhere
+    /// the operator can see. `claimed` is every cwd a row on screen consumed.
+    #[must_use]
+    pub fn elsewhere(&self, claimed: &std::collections::HashSet<String>) -> usize {
+        self.by_cwd
+            .iter()
+            .filter(|(cwd, _)| !claimed.contains(*cwd))
+            .map(|(_, rows)| rows.iter().filter(|row| row.kind.blocks()).count())
+            .sum()
+    }
+}
+
+/// Resolve how an answer to `chip` would be delivered, given the session it
+/// landed on and whether the daemon is up.
+///
+/// The four outcomes are the spec's edge table, in one place so the chip's grey
+/// and the `ask` tab's refusal sentence can never disagree about why:
+///
+/// * a DONE or an ERR is not a question, so nothing is answerable;
+/// * a daemon row keeps its attention id while the daemon is up;
+/// * a daemon row whose daemon has gone says exactly which call is unavailable;
+/// * a local row rides the session's own pane, which is what keeps the surface
+///   working with the daemon down — and says so when there is no pane either.
+#[must_use]
+pub fn route_answer(
+    chip: &SessionAttention,
+    tmux_session: Option<&str>,
+    daemon_reachable: bool,
+) -> Answerable {
+    if !chip.kind.blocks() {
+        return Answerable::No(Unanswerable::NotAQuestion);
+    }
+    if let Answerable::Daemon { attention_id } = &chip.answerable {
+        return if daemon_reachable {
+            Answerable::Daemon {
+                attention_id: attention_id.clone(),
+            }
+        } else {
+            Answerable::No(Unanswerable::DaemonGone)
+        };
+    }
+    tmux_session.map_or(
+        Answerable::No(Unanswerable::NoTransport),
+        |name| Answerable::Tmux {
+            tmux_session: name.to_string(),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -233,6 +507,134 @@ mod tests {
     #[test]
     fn a_future_timestamp_reads_as_zero_not_a_wrapped_age() {
         assert_eq!(format_age(0, 10_000), "0s");
+    }
+
+    #[test]
+    fn the_daemon_row_wins_while_the_daemon_is_up() {
+        // Both producers watch the same session, so one ASK arrives twice. The
+        // daemon's is the one carrying an id and options, so it is the one an
+        // operator can act on.
+        let local = SessionAttention::local(AttentionKind::Ask, 1_000);
+        let from_daemon = SessionAttention::daemon(AttentionKind::Ask, 5_000, "att-1".into())
+            .with_detail("Decide the sqlite path");
+        let merged = normalise(vec![local, from_daemon]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].source, AttentionSource::Daemon);
+        assert_eq!(merged[0].detail.as_deref(), Some("Decide the sqlite path"));
+        assert_eq!(
+            merged[0].answerable,
+            Answerable::Daemon {
+                attention_id: "att-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_daemon_row_is_never_half_merged_into_the_local_one() {
+        // The winning row keeps its OWN timestamp. Taking the local row's older
+        // one would produce a row neither producer ever reported: a daemon id
+        // with a local clock.
+        let merged = normalise(vec![
+            SessionAttention::local(AttentionKind::Ask, 1_000),
+            SessionAttention::daemon(AttentionKind::Ask, 5_000, "att-1".into()),
+        ]);
+        assert_eq!(merged[0].since_ms, 5_000);
+    }
+
+    #[test]
+    fn a_dropped_daemon_lets_the_local_row_resume() {
+        // A down daemon reports no rows at all, so the next merge sees only the
+        // local one and the surface keeps working. This is the third leg of the
+        // precedence sequence: local, then daemon wins, then local resumes.
+        let down = DaemonAttention::down("refused".into());
+        assert!(down.rows_for("/work/proj").is_empty());
+        let mut chips = vec![SessionAttention::local(AttentionKind::Ask, 1_000)];
+        chips.extend(down.rows_for("/work/proj").iter().cloned());
+        let merged = normalise(chips);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].source, AttentionSource::Local);
+    }
+
+    #[test]
+    fn different_kinds_from_different_producers_both_survive() {
+        let merged = normalise(vec![
+            SessionAttention::local(AttentionKind::Ask, 1_000),
+            SessionAttention::daemon(AttentionKind::Err, 2_000, "att-e".into()),
+        ]);
+        assert_eq!(
+            merged.iter().map(|c| c.kind).collect::<Vec<_>>(),
+            vec![AttentionKind::Ask, AttentionKind::Err]
+        );
+    }
+
+    #[test]
+    fn rows_for_ignores_a_trailing_slash_on_either_side() {
+        let mut by_cwd = std::collections::HashMap::new();
+        by_cwd.insert(
+            "/work/proj".to_string(),
+            vec![SessionAttention::daemon(AttentionKind::Ask, 1, "a".into())],
+        );
+        let up = DaemonAttention::up(by_cwd);
+        assert_eq!(up.rows_for("/work/proj/").len(), 1);
+        assert_eq!(up.rows_for("/work/proj").len(), 1);
+    }
+
+    #[test]
+    fn a_local_ask_rides_the_sessions_own_pane() {
+        let chip = SessionAttention::local(AttentionKind::Ask, 0);
+        assert_eq!(
+            route_answer(&chip, Some("tmux_proj"), false),
+            Answerable::Tmux {
+                tmux_session: "tmux_proj".into()
+            },
+            "the tmux route must survive the daemon being down — that is the point"
+        );
+    }
+
+    #[test]
+    fn a_daemon_ask_loses_its_route_when_the_daemon_goes_and_says_so() {
+        let chip = SessionAttention::daemon(AttentionKind::Ask, 0, "att-1".into());
+        let routed = route_answer(&chip, Some("tmux_proj"), false);
+        assert!(!routed.is_answerable());
+        let refusal = routed.refusal().expect("a refusal always carries a reason");
+        assert!(
+            refusal.contains("attention/answer"),
+            "the refusal must name the call that is unavailable: {refusal}"
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_pane_and_no_daemon_row_says_it_has_no_transport() {
+        let chip = SessionAttention::local(AttentionKind::Approve, 0);
+        let routed = route_answer(&chip, None, false);
+        assert!(!routed.is_answerable());
+        assert!(routed.refusal().is_some_and(|r| r.contains("no live pane")));
+    }
+
+    #[test]
+    fn an_err_or_a_done_is_never_answerable_because_it_is_not_a_question() {
+        for kind in [AttentionKind::Err, AttentionKind::Done] {
+            let chip = SessionAttention::local(kind, 0);
+            let routed = route_answer(&chip, Some("tmux_proj"), true);
+            assert!(!routed.is_answerable(), "{kind} must not offer a composer");
+            assert!(routed.refusal().is_some_and(|r| r.contains("nothing is waiting")));
+        }
+    }
+
+    #[test]
+    fn every_refusal_carries_a_sentence_not_an_empty_grey_chip() {
+        for why in [
+            Unanswerable::DaemonGone,
+            Unanswerable::NoTransport,
+            Unanswerable::NotAQuestion,
+        ] {
+            let reason = why.reason();
+            assert!(
+                reason.len() > 20 && reason.chars().any(char::is_whitespace),
+                "a greyed chip with no explanation is the silent no-op the spec \
+                 forbids: {reason:?}"
+            );
+        }
     }
 
     #[test]
