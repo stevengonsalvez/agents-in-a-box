@@ -10,10 +10,7 @@ use crate::app::{
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
-use ainb_plugin_hangar::screen::fleet::{
-    BroadcastReceipt, FleetAction, FleetEvent, FleetFilter, FleetIntent, FleetKey, ReceiptStatus,
-    selected_approval_action,
-};
+use ainb_plugin_hangar::screen::fleet::selected_approval_action;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 use tracing::info;
@@ -425,46 +422,18 @@ pub enum AppEvent {
     GoToRecovery,                        // Navigate to session recovery view
     GoToInbox,                           // Navigate to ainb-hooks notification inbox
     GoToDaemons,                         // Navigate to the daemon runtime-health view
-    GoToFleetPanel,                      // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,                    // Fleet panel: move row selection up
-    FleetPanelMoveDown,                  // Fleet panel: move row selection down
-    FleetPanelOptionNext,                // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,                // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer, // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast, // Fleet panel: broadcast a ping to the selected session (B)
-    FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
-    FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
-    FleetPanelRefresh, // Fleet panel: force-refresh request
-    /// Route one canonical reducer key through main ainb Fleet panel.
-    FleetPanelCanonicalKey(FleetKey),
-    /// Forward one click in the rendered structured-interview card stack.
-    FleetPanelAnswerCardClick {
-        column: u16,
-        row: u16,
-        area_width: u16,
-        area_height: u16,
-    },
-    /// Apply canonical Fleet roster filter.
-    FleetPanelSetFilter(FleetFilter),
-    /// Request canonical lifecycle or control action.
-    FleetPanelCanonicalAction(FleetAction),
-    FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
-    FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
-    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
-    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
-    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
-    PanelBack,                  // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,                 // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,                // Inbox: move selection up one row
-    InboxMoveDown,              // Inbox: move selection down one row
-    InboxPageUp,                // Inbox: jump 10 rows up
-    InboxPageDown,              // Inbox: jump 10 rows down
-    InboxOpenSelected,          // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,       // Inbox: dismiss selected row (d)
-    InboxDismissVisible,        // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,        // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,            // Inbox: cycle agent filter (p)
-    InboxRefresh,               // Inbox: force-refresh from store (r)
+    PanelBack,                           // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,                          // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,                         // Inbox: move selection up one row
+    InboxMoveDown,                       // Inbox: move selection down one row
+    InboxPageUp,                         // Inbox: jump 10 rows up
+    InboxPageDown,                       // Inbox: jump 10 rows down
+    InboxOpenSelected,                   // Inbox: mark selected row read (Enter)
+    InboxDismissSelected,                // Inbox: dismiss selected row (d)
+    InboxDismissVisible,                 // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived,                 // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,                     // Inbox: cycle agent filter (p)
+    InboxRefresh,                        // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,             // Return to home screen (Esc)
@@ -992,18 +961,6 @@ impl EventHandler {
                 None
             }
             AppEvent::MouseClick { x, y } => {
-                if state.current_screen == screen_ids::FLEET_PANEL
-                    && state.fleet_panel_state.canonical_modal_open()
-                {
-                    let (area_width, area_height) = crossterm::terminal::size().unwrap_or((80, 24));
-                    return Some(AppEvent::FleetPanelAnswerCardClick {
-                        column: x,
-                        row: y,
-                        area_width,
-                        area_height,
-                    });
-                }
-
                 if state.current_screen == screen_ids::HOME && !state.help_visible {
                     if state.home_screen_v2_state.begin_sidebar_resize(x, y) {
                         return None;
@@ -1381,22 +1338,30 @@ impl EventHandler {
     /// the sessions screen — `Tab` still moves the strip and the attach digits
     /// still attach, which is the contract the footer advertises on every tab.
     fn route_session_composer_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        use ainb_plugin_hangar::screen::fleet_chat::{ChatKey, ChatKeyOutcome, reduce_chat_key};
         use crate::components::session_tabs::SessionTab;
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatKey, ChatKeyOutcome, reduce_chat_key};
 
-        // `Tab` belongs to the strip, not the composer. Answered HERE rather
-        // than by falling through: the `in_text_input` short-circuit downstream
-        // swallows everything, so a bare `None` would trap the operator on a
-        // pane they could only leave with Esc.
-        match key_event.code {
-            KeyCode::Tab => return Some(AppEvent::SessionTabNext),
-            KeyCode::BackTab => return Some(AppEvent::SessionTabPrev),
-            _ => {}
+        // `Tab` belongs to the STRIP, `Shift+Tab` to the conversation's own
+        // focus toggle. They collided: the chat uses Tab to move between its
+        // composer and its card list, so leaving Tab to the chat made the strip
+        // unreachable from a conversation, and taking it for the strip made the
+        // card list unreachable — which is where a guardrail card is answered.
+        //
+        // The strip wins Tab because it is the surface-wide navigator and it
+        // WRAPS, so nothing is lost by giving up the reverse direction here.
+        // Answered before the reducer rather than by falling through: the
+        // `in_text_input` short-circuit downstream swallows everything, so a
+        // bare `None` would trap the operator on a pane they could only leave
+        // with Esc.
+        if key_event.code == KeyCode::Tab {
+            return Some(AppEvent::SessionTabNext);
         }
         // Attach digits ARE passed through to the composer — a digit typed into
         // a message is a digit, and stealing it would make the composer unable
         // to type "3". The footer stops advertising them here for that reason.
         let chat_key = match key_event.code {
+            // The conversation's own focus toggle, moved off `Tab`.
+            KeyCode::BackTab => ChatKey::Tab,
             KeyCode::Char(c) if c != ' ' => ChatKey::Char(c),
             KeyCode::Char(' ') => ChatKey::Space,
             KeyCode::Enter => ChatKey::Enter,
@@ -1406,8 +1371,7 @@ impl EventHandler {
             KeyCode::Down => ChatKey::Down,
             _ => return None,
         };
-        let tab = state.session_tab;
-        let host = match tab {
+        let host = match state.session_tab {
             SessionTab::Copilot => state.copilot_chat.as_mut(),
             SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Log => None,
@@ -1528,12 +1492,8 @@ impl EventHandler {
         // `?` / `H` / `W` shortcuts ate keys typed into all three. A live
         // tripwire caught it on the chat: typing "what is blocked?" opened the
         // help overlay on the `?` and the overlay then swallowed the Enter.
-        let fleet_panel_text_active = state.current_screen == screen_ids::FLEET_PANEL
-            && state.fleet_panel_state.canonical.is_capturing_text();
-
         new_session_text_active
             || plugin_capturing_text
-            || fleet_panel_text_active
             || onboarding_text_active
             || matches!(
                 state.current_screen.as_str(),
@@ -1850,12 +1810,6 @@ impl EventHandler {
         // GoToHomeScreen, which ignored the saved origin (L2).
         if state.current_screen == screen_ids::DAEMONS {
             return Self::handle_daemons_keys(key_event, state);
-        }
-
-        // Fleet control panel. Has its own list navigation + action keys; Esc/q
-        // pop back to the origin via PanelBack (same discipline as Daemons).
-        if state.current_screen == screen_ids::FLEET_PANEL {
-            return Self::handle_fleet_panel_keys(key_event, state);
         }
 
         // AINB 2.0: Handle agent selection view
@@ -2196,13 +2150,14 @@ impl EventHandler {
             };
         }
 
-        // A composer tab owns the keyboard. Routed BEFORE the `in_text_input`
-        // short-circuit below, which only suppresses the bare-char shortcuts —
-        // suppression alone would leave the operator typing into a pane that
-        // silently drops every character.
-        if state.current_screen == screen_ids::SESSION_LIST
-            && state.session_composer_captures_text()
-        {
+        // A conversation pane owns the keyboard — BOTH its halves. Gating this
+        // on text capture alone let `y` fall through to the session screen
+        // while a guardrail confirm card was waiting for it.
+        //
+        // Routed BEFORE the `in_text_input` short-circuit below, which only
+        // suppresses the bare-char shortcuts — suppression alone would leave
+        // the operator typing into a pane that drops every character.
+        if state.session_tab_owns_keys() {
             if let Some(event) = Self::route_session_composer_key(key_event, state) {
                 return Some(event);
             }
@@ -3306,129 +3261,6 @@ impl EventHandler {
         }
     }
 
-    /// Fleet control-panel key dispatcher. The panel browses the event-sourced
-    /// `current_state` (ASK/ERR/WAIT/IDLE per session) and acts on it:
-    ///
-    ///   - ↑/↓ · k/j        move the row selection
-    ///   - Tab / BackTab    move the ASK option cursor (when the row is an ASK)
-    ///   - Enter            answer the selected structured question
-    ///   - B                open broadcast composer for the current lens
-    ///   - 1 / 2 / 3 / 4 / 5 switch Needs input / Idle / Completed / Running / All
-    ///   - r                reconcile the selected Claude interview
-    ///   - R                restart the selected session after confirmation
-    ///   - q / Esc          back to the screen it was opened from (PanelBack)
-    ///
-    /// Routed through `PanelBack` so it pops the `previous_screen` that
-    /// `GoToFleetPanel` saved, instead of hardcoding home (mirrors Daemons L2).
-    fn handle_fleet_panel_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        // Name-prompt mode captures every key: chars build the name, Enter
-        // creates, Esc cancels. Nothing else (move/answer/back) fires while a
-        // create is being named.
-        if state.fleet_panel_state.is_naming_atc() {
-            return match key_event.code {
-                KeyCode::Esc => Some(AppEvent::FleetPanelNewAtcCancel),
-                KeyCode::Enter => Some(AppEvent::FleetPanelNewAtcSubmit),
-                KeyCode::Backspace => Some(AppEvent::FleetPanelNewAtcBackspace),
-                KeyCode::Char(c) => Some(AppEvent::FleetPanelNewAtcType(c)),
-                _ => None,
-            };
-        }
-        if state.fleet_panel_state.canonical_modal_open() {
-            let key = match key_event.code {
-                KeyCode::Esc => FleetKey::Esc,
-                KeyCode::Enter => FleetKey::Enter,
-                KeyCode::Backspace => FleetKey::Backspace,
-                KeyCode::Up => FleetKey::Up,
-                KeyCode::Down => FleetKey::Down,
-                KeyCode::Tab => FleetKey::Tab,
-                KeyCode::BackTab => FleetKey::BackTab,
-                KeyCode::Left => FleetKey::Left,
-                KeyCode::Right => FleetKey::Right,
-                KeyCode::Char(' ') => FleetKey::Space,
-                KeyCode::Char(character) => FleetKey::Char(character),
-                _ => return None,
-            };
-            return Some(AppEvent::FleetPanelCanonicalKey(key));
-        }
-        match key_event.code {
-            KeyCode::F(5) => Some(AppEvent::FleetPanelRefresh),
-            KeyCode::Char('r') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(AppEvent::FleetPanelRefresh)
-            }
-            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FleetPanelMoveUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FleetPanelMoveDown),
-            KeyCode::Tab => Some(AppEvent::FleetPanelOptionNext),
-            KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
-            KeyCode::Enter => Some(AppEvent::FleetPanelAnswer),
-            KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
-            KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
-            // `n` is claimed twice: deny (the y/n pair the APPROVE detail pane
-            // advertises) and new-ATC. Context decides: on an APPROVE row `n`
-            // denies; anywhere else it opens the new-ATC name prompt.
-            KeyCode::Char('n') => {
-                let canonical_approval = state
-                    .fleet_panel_state
-                    .canonical
-                    .selected_session()
-                    .map(|row| row.attention_state.eq_ignore_ascii_case("APPROVAL"));
-                if canonical_approval
-                    .unwrap_or_else(|| state.fleet_panel_state.selected_kind() == Some("APPROVE"))
-                {
-                    Some(AppEvent::FleetPanelDeny)
-                } else {
-                    Some(AppEvent::FleetPanelNewAtcOpen)
-                }
-            }
-            // `m` for messages: opens the copilot chat surface. Forwarded to
-            // the pane reducer, which owns the mode; once the chat is open the
-            // pane reports a modal and EVERY key routes above, so the composer
-            // gets its printable characters without a second key table here.
-            KeyCode::Char('m') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m'))),
-            // `M` is the same surface over the SELECTED session's own thread.
-            // Forwarded like `m`: once the chat is open the pane reports a
-            // modal and every key routes above it.
-            KeyCode::Char('M') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('M'))),
-            // `N` opens the broadcast-channel form (name, then members). Not
-            // lowercase `n`: that char is already this table's deny / new-ATC
-            // key, and the obvious `C` is a reserved hangar router char (#450).
-            // Forwarded like `m`/`M`; once the form is open the pane reports a
-            // modal and every key routes above.
-            KeyCode::Char('N') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N'))),
-            KeyCode::Char('r') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r'))),
-            KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
-            // Lowercase `s` belongs to the structured interview queue. Keep
-            // it reserved even if a concurrent snapshot just closed that
-            // queue: a stale key must never turn a submitted answer into Stop.
-            // Destructive stop remains available on uppercase `S`.
-            KeyCode::Char('S') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
-            KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
-            KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c'))),
-            KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
-            KeyCode::Char('!') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill)),
-            KeyCode::Char('#') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Archive)),
-            KeyCode::Char('t' | 'p' | 'a') | KeyCode::Right | KeyCode::Char('A') => {
-                let key = match key_event.code {
-                    KeyCode::Right => FleetKey::Right,
-                    // The pane reducer binds takeover-attach to lowercase `a`
-                    // (uppercase `A` is a reserved hangar router key, #450); the
-                    // host panel keeps its `A` shortcut and forwards onto it.
-                    KeyCode::Char('A') => FleetKey::Char('a'),
-                    KeyCode::Char(character) => FleetKey::Char(character),
-                    _ => unreachable!(),
-                };
-                Some(AppEvent::FleetPanelCanonicalKey(key))
-            }
-            KeyCode::Char('1') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput)),
-            KeyCode::Char('2') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle)),
-            KeyCode::Char('3') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed)),
-            KeyCode::Char('4') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running)),
-            KeyCode::Char('5') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::All)),
-            _ => None,
-        }
-    }
-
-    // AINB 2.0: Home screen key handling (V2 with sidebar and card grid)
     fn handle_home_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
         use crate::components::home_screen_v2::HomeScreenFocus;
 
@@ -3442,7 +3274,6 @@ impl EventHandler {
             KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
             // One daemon surface: health, hook status, and repair controls.
             KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
-            KeyCode::Char('f') => return Some(AppEvent::GoToFleetPanel),
             KeyCode::Char('o') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
@@ -3664,266 +3495,6 @@ impl EventHandler {
                     _ => None,
                 }
             }
-        }
-    }
-
-    fn reduce_fleet_event(state: &mut AppState, event: FleetEvent) {
-        let intent = state.fleet_panel_state.reduce_canonical(event);
-        if let Some(intent) = intent {
-            Self::dispatch_fleet_intent(state, intent);
-        }
-    }
-
-    fn dispatch_fleet_intent(state: &mut AppState, intent: FleetIntent) {
-        use ainb_hangar_proto::fleet::{
-            ActionReceiptStatus, ControlAction, FleetActionParams, FleetBroadcastParams,
-        };
-
-        match intent {
-            FleetIntent::Execute {
-                session_key,
-                expected_version,
-                action,
-            } => {
-                // An Offline daemon means the stream is down and cached rows are
-                // only good for "safe inspection" (see FleetDaemonHealth), which
-                // is exactly what the panel banner promises the user. Destructive
-                // and structured actions must not dispatch against that stale
-                // view. F5 / Ctrl-R force-refreshes back to Online, which is the
-                // intended way out of this state.
-                //
-                // Gated on Offline, not on `!online`: a merely Connecting
-                // subscription has not found anything wrong, and refusing there
-                // blocked every action on the first frame after opening Fleet.
-                // A genuinely dead daemon still fails loudly, the action RPC
-                // returns ActionFailed.
-                if action.is_high_risk() && state.fleet_panel_state.daemon_offline() {
-                    Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::ActionFailed {
-                            session_key,
-                            detail: "Fleet daemon offline, high-risk action disabled".into(),
-                        },
-                    );
-                    return;
-                }
-                let action_label = match &action {
-                    FleetAction::StructuredAnswer { .. } => "answered ask",
-                    FleetAction::DismissStructured { .. } => "rejected interview",
-                    FleetAction::ReleaseStructured { .. } => "opened Claude picker",
-                    FleetAction::ReconcileStructured { .. } => "reconciled interview",
-                    FleetAction::Approve { .. } => "approved request",
-                    FleetAction::Deny { .. } => "denied request",
-                    FleetAction::SendText { .. } => "sent prompt",
-                    FleetAction::VerifiedPicker { .. } => "routed picker",
-                    FleetAction::Continue => "continued turn",
-                    FleetAction::Retry => "retried turn",
-                    FleetAction::Interrupt => "interrupted turn",
-                    FleetAction::Stop => "stopped session",
-                    FleetAction::Restart => "restarted session",
-                    FleetAction::Kill => "killed session",
-                    FleetAction::Archive => "archived session",
-                };
-                let action = match action.into_control_action() {
-                    Ok(action) => action,
-                    Err(detail) => {
-                        Self::reduce_fleet_event(
-                            state,
-                            FleetEvent::ActionFailed {
-                                session_key,
-                                detail,
-                            },
-                        );
-                        return;
-                    }
-                };
-                let params = FleetActionParams {
-                    session_key: session_key.clone(),
-                    expected_version,
-                    request_id: format!("fleet-host-{}", uuid::Uuid::new_v4()),
-                    action,
-                };
-                let sink = state.fleet_panel_state.canonical_update_sink();
-                std::thread::spawn(move || {
-                    let events = match crate::fleet::control::execute_fleet_action_blocking(params)
-                    {
-                        Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => vec![
-                            FleetEvent::ActionSucceeded {
-                                session_key: session_key.clone(),
-                            },
-                            FleetEvent::Feedback(format!(
-                                "{action_label}: {:?}{}",
-                                receipt.status,
-                                receipt
-                                    .detail
-                                    .as_deref()
-                                    .map_or(String::new(), |detail| { format!(": {detail}") })
-                            )),
-                        ],
-                        Ok(receipt) => vec![FleetEvent::ActionFailed {
-                            session_key,
-                            detail: receipt
-                                .detail
-                                .unwrap_or_else(|| format!("delivery status {:?}", receipt.status)),
-                        }],
-                        Err(detail) => vec![FleetEvent::ActionFailed {
-                            session_key,
-                            detail,
-                        }],
-                    };
-                    if let Ok(mut updates) = sink.lock() {
-                        updates.extend(events);
-                    }
-                });
-            }
-            FleetIntent::Start {
-                provider,
-                cwd,
-                prompt,
-            } => {
-                if state.fleet_panel_state.daemon_offline() {
-                    Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::ActionFailed {
-                            session_key: "start:codex".into(),
-                            detail: "Fleet daemon offline, managed start disabled".into(),
-                        },
-                    );
-                    return;
-                }
-                let session_key = "start:codex".to_string();
-                let params = FleetActionParams {
-                    session_key: session_key.clone(),
-                    expected_version: 1,
-                    request_id: format!("fleet-host-start-{}", uuid::Uuid::new_v4()),
-                    action: ControlAction::Start {
-                        provider,
-                        cwd,
-                        prompt,
-                    },
-                };
-                let sink = state.fleet_panel_state.canonical_update_sink();
-                std::thread::spawn(move || {
-                    let event = match crate::fleet::control::execute_fleet_action_blocking(params) {
-                        Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => {
-                            FleetEvent::ActionSucceeded { session_key }
-                        }
-                        Ok(receipt) => FleetEvent::ActionFailed {
-                            session_key,
-                            detail: receipt
-                                .detail
-                                .unwrap_or_else(|| format!("delivery status {:?}", receipt.status)),
-                        },
-                        Err(detail) => FleetEvent::ActionFailed {
-                            session_key,
-                            detail,
-                        },
-                    };
-                    if let Ok(mut updates) = sink.lock() {
-                        updates.push(event);
-                    }
-                });
-            }
-            FleetIntent::Broadcast {
-                text,
-                recipient_keys,
-                idempotency_key,
-                max_parallel: _,
-                retry_failures_only: _,
-            } => {
-                let params = FleetBroadcastParams {
-                    target_keys: recipient_keys,
-                    text,
-                    idempotency_key,
-                };
-                let sink = state.fleet_panel_state.canonical_update_sink();
-                std::thread::spawn(move || {
-                    let event =
-                        match crate::fleet::control::execute_fleet_broadcast_blocking(params) {
-                            Ok(result) => FleetEvent::BroadcastReceipts(
-                                result
-                                    .receipts
-                                    .into_iter()
-                                    .map(|receipt| BroadcastReceipt {
-                                        session_key: receipt.session_key,
-                                        status: match receipt.status {
-                                            ActionReceiptStatus::Delivered => {
-                                                ReceiptStatus::Delivered
-                                            }
-                                            ActionReceiptStatus::Failed
-                                            | ActionReceiptStatus::Rejected => {
-                                                ReceiptStatus::Failed
-                                            }
-                                            ActionReceiptStatus::Pending
-                                            | ActionReceiptStatus::Unknown => {
-                                                ReceiptStatus::Unknown
-                                            }
-                                        },
-                                        detail: receipt.detail,
-                                    })
-                                    .collect(),
-                            ),
-                            Err(detail) => FleetEvent::BroadcastFailed { detail },
-                        };
-                    if let Ok(mut updates) = sink.lock() {
-                        updates.push(event);
-                    }
-                });
-            }
-            // The copilot chat's three RPCs, on the panel's own worker. One
-            // executor, two doors: this key path and the frame tick that polls
-            // for the reply.
-            FleetIntent::Chat(intent) => state.fleet_panel_state.dispatch_chat_intent(intent),
-            FleetIntent::AttachEmbedded {
-                session_key,
-                tmux_target,
-            } => {
-                if state.embed.is_some() {
-                    state.release_interactive_pane();
-                }
-                let (terminal_cols, terminal_rows) =
-                    crossterm::terminal::size().unwrap_or((160, 48));
-                match crate::tmux::EmbedClient::attach_target(
-                    &tmux_target,
-                    terminal_rows.saturating_sub(2),
-                    terminal_cols.saturating_div(2),
-                ) {
-                    Ok(client) => {
-                        state.embed = Some(client);
-                        state.embed_session = Some(tmux_target.clone());
-                        state.embed_pane_area = None;
-                        state.focused_pane = crate::app::state::FocusedPane::Preview;
-                        Self::reduce_fleet_event(
-                            state,
-                            FleetEvent::Feedback(format!(
-                                "embedded {session_key} at exact target {tmux_target}"
-                            )),
-                        );
-                    }
-                    Err(error) => Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::Feedback(format!("attach failed: {error}")),
-                    ),
-                }
-            }
-            FleetIntent::AttachFullscreen {
-                session_key,
-                tmux_target,
-            } => match Self::prepare_exact_fleet_attach(&tmux_target) {
-                Ok(session_name) => {
-                    state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session_name));
-                    Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::Feedback(format!(
-                            "attaching {session_key} at exact target {tmux_target}"
-                        )),
-                    );
-                }
-                Err(detail) => Self::reduce_fleet_event(
-                    state,
-                    FleetEvent::Feedback(format!("attach failed: {detail}")),
-                ),
-            },
         }
     }
 
@@ -4837,9 +4408,7 @@ impl EventHandler {
             AppEvent::SessionAskSend => {
                 let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
                 else {
-                    state.add_info_notification(
-                        "nothing is waiting on an answer here".to_string(),
-                    );
+                    state.add_info_notification("nothing is waiting on an answer here".to_string());
                     return;
                 };
                 // The row's own identity for the verified send: the provider
@@ -5494,10 +5063,6 @@ impl EventHandler {
                     SidebarItem::Daemons => {
                         // Same canonical-event routing as Inbox.
                         Self::process_event(AppEvent::GoToDaemons, state);
-                    }
-                    SidebarItem::Fleet => {
-                        // Same canonical-event routing as Inbox/Daemons.
-                        Self::process_event(AppEvent::GoToFleetPanel, state);
                     }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
@@ -6833,115 +6398,6 @@ impl EventHandler {
                         state.spawn_daemons_fetch();
                     }
                 }
-            }
-            AppEvent::GoToFleetPanel => {
-                tracing::info!("Navigating to Fleet panel");
-                if state.current_screen != screen_ids::FLEET_PANEL {
-                    state.previous_screen = Some(state.current_screen.clone());
-                }
-                state.current_screen = screen_ids::FLEET_PANEL.to_string();
-                // Open the read-only store + load current_state so the first
-                // frame is populated. A single indexed SELECT over a small table
-                // — cheap on the event loop, same as Inbox's refresh-on-entry.
-                state.fleet_panel_state.arm();
-            }
-            AppEvent::FleetPanelMoveUp => {
-                state.fleet_panel_state.move_up(1);
-            }
-            AppEvent::FleetPanelMoveDown => {
-                state.fleet_panel_state.move_down(1);
-            }
-            AppEvent::FleetPanelOptionNext => {
-                let canonical_ask = state
-                    .fleet_panel_state
-                    .canonical
-                    .selected_session()
-                    .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("ASK"));
-                if canonical_ask {
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Down));
-                } else {
-                    state.fleet_panel_state.option_next();
-                }
-            }
-            AppEvent::FleetPanelOptionPrev => {
-                let canonical_ask = state
-                    .fleet_panel_state
-                    .canonical
-                    .selected_session()
-                    .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("ASK"));
-                if canonical_ask {
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Up));
-                } else {
-                    state.fleet_panel_state.option_prev();
-                }
-            }
-            AppEvent::FleetPanelRefresh => state.fleet_panel_state.force_refresh(),
-            AppEvent::FleetPanelNewAtcOpen => state.fleet_panel_state.open_new_atc(),
-            AppEvent::FleetPanelNewAtcType(c) => state.fleet_panel_state.new_atc_type(c),
-            AppEvent::FleetPanelNewAtcBackspace => state.fleet_panel_state.new_atc_backspace(),
-            AppEvent::FleetPanelNewAtcCancel => state.fleet_panel_state.new_atc_cancel(),
-            AppEvent::FleetPanelNewAtcSubmit => state.fleet_panel_state.new_atc_submit(),
-            AppEvent::FleetPanelAnswer => {
-                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
-            }
-            AppEvent::FleetPanelBroadcast => {
-                // The pane reducer binds broadcast to lowercase `b` (uppercase `B`
-                // is a reserved hangar router key, #450); the host panel's `B`
-                // shortcut forwards onto it.
-                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('b')));
-            }
-            AppEvent::FleetPanelApprove => {
-                match selected_approval_action(&state.fleet_panel_state.canonical, true) {
-                    Ok(action) => {
-                        Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
-                    }
-                    Err(detail) => Self::reduce_fleet_event(state, FleetEvent::Feedback(detail)),
-                }
-            }
-            AppEvent::FleetPanelDeny => {
-                match selected_approval_action(&state.fleet_panel_state.canonical, false) {
-                    Ok(action) => {
-                        Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
-                    }
-                    Err(detail) => Self::reduce_fleet_event(state, FleetEvent::Feedback(detail)),
-                }
-            }
-            AppEvent::FleetPanelCanonicalKey(key) => {
-                Self::reduce_fleet_event(state, FleetEvent::Key(key));
-                // Every modal on this panel opens by routing a canonical key
-                // into the shared reducer, so "the key did nothing" and "the
-                // reducer never saw it" look identical from the outside. One
-                // line at the seam tells them apart, which black-box probing
-                // could not: run with `RUST_LOG=ainb=debug` and read the JSONL
-                // under `~/.agents-in-a-box/logs/`.
-                tracing::debug!(
-                    target: "ainb::app::events",
-                    ?key,
-                    modal_open = state.fleet_panel_state.canonical_modal_open(),
-                    "fleet canonical key reduced"
-                );
-            }
-            AppEvent::FleetPanelAnswerCardClick {
-                column,
-                row,
-                area_width,
-                area_height,
-            } => Self::reduce_fleet_event(
-                state,
-                FleetEvent::AnswerCardClick {
-                    column,
-                    row,
-                    area_width,
-                    area_height,
-                },
-            ),
-            AppEvent::FleetPanelSetFilter(filter) => {
-                Self::reduce_fleet_event(state, FleetEvent::SetFilter(filter));
-            }
-            AppEvent::FleetPanelCanonicalAction(action) => {
-                Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
@@ -9512,352 +8968,6 @@ mod panel_back_tests {
         assert_eq!(state.current_screen, ids::HOME);
     }
 
-    /// The overloaded `n` key resolves by selection context: deny on an
-    /// APPROVE row (pairing with the detail pane's y/n hint), the new-ATC
-    /// name prompt everywhere else. `y` approves only-and-always.
-    #[test]
-    fn fleet_panel_n_is_deny_on_approve_row_new_atc_elsewhere() {
-        use crossterm::event::{KeyCode, KeyEvent};
-        let mut state = AppState::default();
-        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
-        let row = |kind: &str| ainb_plugin_notifyd::StateRow {
-            session_id: "s-1".to_string(),
-            cwd: "/p".to_string(),
-            kind: kind.to_string(),
-            context: None,
-            parent: None,
-            last_event_ts: 1,
-            source: "hook".to_string(),
-        };
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-
-        state.fleet_panel_state.rows = vec![row("APPROVE")];
-        state.fleet_panel_state.selected = 0;
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('n')),
-            Some(AppEvent::FleetPanelDeny)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('y')),
-            Some(AppEvent::FleetPanelApprove)
-        ));
-
-        state.fleet_panel_state.rows = vec![row("ASK")];
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('n')),
-            Some(AppEvent::FleetPanelNewAtcOpen)
-        ));
-        // Empty panel: nothing to deny → n still opens the prompt.
-        state.fleet_panel_state.rows.clear();
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('n')),
-            Some(AppEvent::FleetPanelNewAtcOpen)
-        ));
-    }
-
-    /// Fleet control panel: navigating in saves the origin, and Esc/q route
-    /// through `PanelBack` to return there (same discipline as Daemons). Also
-    /// asserts the action keys map to their events so the panel is interactive,
-    /// not just a read-only view.
-    #[test]
-    fn fleet_panel_navigation_and_key_routing() {
-        use crossterm::event::{KeyCode, KeyEvent};
-
-        let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
-
-        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
-        assert_eq!(state.current_screen, ids::FLEET_PANEL);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
-
-        // Action + navigation keys resolve to the panel's events. (AppEvent has
-        // no PartialEq, so match each explicitly.)
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-        assert!(matches!(
-            route(&mut state, KeyCode::Down),
-            Some(AppEvent::FleetPanelMoveDown)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Up),
-            Some(AppEvent::FleetPanelMoveUp)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Tab),
-            Some(AppEvent::FleetPanelOptionNext)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::BackTab),
-            Some(AppEvent::FleetPanelOptionPrev)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Enter),
-            Some(AppEvent::FleetPanelAnswer)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('a')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('a')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('B')),
-            Some(AppEvent::FleetPanelBroadcast)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('r')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('c')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::F(5)),
-            Some(AppEvent::FleetPanelRefresh)
-        ));
-        assert!(matches!(
-            EventHandler::handle_key_event(
-                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
-                &mut state
-            ),
-            Some(AppEvent::FleetPanelRefresh)
-        ));
-
-        // Esc/q pop back to the saved origin, not hardcoded home.
-        let esc = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Esc), &mut state);
-        assert!(
-            matches!(esc, Some(AppEvent::PanelBack)),
-            "fleet panel Esc must resolve to PanelBack; got {esc:?}"
-        );
-        EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(
-            state.current_screen,
-            ids::SESSION_LIST,
-            "fleet panel must pop back to the screen it was opened from"
-        );
-    }
-
-    #[test]
-    fn fleet_panel_empty_roster_routes_start_filters_and_lifecycle_to_canonical_reducer() {
-        use crossterm::event::{KeyCode, KeyEvent};
-
-        let mut state = AppState::default();
-        state.current_screen = ids::FLEET_PANEL.to_string();
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-
-        let start = route(&mut state, KeyCode::Char('t'));
-        assert!(matches!(
-            start,
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('t')))
-        ));
-        EventHandler::process_event(start.unwrap(), &mut state);
-        assert!(state.fleet_panel_state.canonical_modal_open());
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('1')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('1')))
-        ));
-        EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
-        assert!(!state.fleet_panel_state.canonical_modal_open());
-
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('1')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('2')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('3')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('4')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('5')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
-        ));
-        for legacy in ['f', 'o', 'd', 'l', 'x', 'v'] {
-            assert!(
-                route(&mut state, KeyCode::Char(legacy)).is_none(),
-                "legacy Fleet filter key {legacy:?} must be unbound"
-            );
-        }
-        // `m` is the one legacy filter key deliberately re-bound: it opens the
-        // copilot chat, the sibling of `b` for broadcast. It is pinned here
-        // rather than dropped from the list, so re-using another old filter key
-        // still has to be an explicit decision rather than a silent one, and so
-        // the panel's help bar (which advertises `m chat`) cannot drift from
-        // what the router actually does.
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('m')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('R')),
-            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
-        ));
-        assert!(
-            route(&mut state, KeyCode::Char('s')).is_none(),
-            "lowercase s is reserved for structured-interview submit"
-        );
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('S')),
-            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('!')),
-            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill))
-        ));
-    }
-
-    /// #667: `N` on the Fleet panel is advertised in the help bar
-    /// (`N channel`) but was reported dead in a real tmux run — no form, no
-    /// feedback. Every layer looked correct on inspection (router arm,
-    /// shared reducer, renderer match), so this pins the mechanism at the
-    /// host boundary: routing THROUGH `process_event` into a real render
-    /// pass, not just checking which `AppEvent` the router returns.
-    ///
-    /// It also pins down the second reported symptom (subsequent keys, and
-    /// "chat needs two Escapes") as the SAME modal-capture behaviour, not a
-    /// separate bug: once `N` opens the channel-create form, the panel is
-    /// modal and every key — including the lens digits — routes into the
-    /// canonical reducer until a single Esc closes it.
-    #[test]
-    fn fleet_panel_shift_n_opens_and_renders_channel_create_modal() {
-        use crossterm::event::{KeyCode, KeyEvent};
-
-        let mut state = AppState::default();
-        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-
-        // Router arm: `N` must resolve to the canonical forward, matching
-        // the plugin's `FleetKey::Char('N')` arm (fleet.rs:1351).
-        let n = route(&mut state, KeyCode::Char('N'));
-        assert!(
-            matches!(
-                n,
-                Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N')))
-            ),
-            "`N` must route to FleetPanelCanonicalKey(Char('N')); got {n:?}"
-        );
-        EventHandler::process_event(n.unwrap(), &mut state);
-        assert!(
-            state.fleet_panel_state.canonical_modal_open(),
-            "`N` opened nothing at the host layer"
-        );
-
-        // Render pass: the modal must actually paint, not just flip a mode
-        // flag no renderer reaches.
-        let backend = ratatui::backend::TestBackend::new(100, 24);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                crate::components::fleet_panel::render(f, f.area(), &mut state.fleet_panel_state)
-            })
-            .unwrap();
-        let rendered: String =
-            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-        assert!(
-            rendered.contains("New channel"),
-            "channel-create modal did not render; got:\n{rendered}"
-        );
-
-        // Modal capture: while it is open, a lens digit must NOT fall
-        // through to FleetPanelSetFilter — it belongs to the canonical
-        // reducer, same as every other open Fleet mode.
-        let five = route(&mut state, KeyCode::Char('5'));
-        assert!(
-            matches!(five, Some(AppEvent::FleetPanelCanonicalKey(_))),
-            "with the channel-create modal open, '5' must route into the \
-             canonical reducer, not FleetPanelSetFilter; got {five:?}"
-        );
-
-        // One Esc closes it and routing returns to normal — pins that this
-        // form needs exactly one Esc, unlike the chat surface's reported two.
-        EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
-        assert!(!state.fleet_panel_state.canonical_modal_open());
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('5')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
-        ));
-    }
-
-    #[test]
-    fn fleet_embedded_attach_uses_exact_target_without_fullscreen_async_action() {
-        if std::process::Command::new("tmux").arg("-V").status().is_err() {
-            eprintln!("SKIP: tmux unavailable");
-            return;
-        }
-        let _registry = crate::tmux::pty_wrapper::lock_registry_for_test();
-        let session = format!("ainb-fleet-embed-{}", uuid::Uuid::new_v4().simple());
-        struct SessionGuard(String);
-        impl Drop for SessionGuard {
-            fn drop(&mut self) {
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &self.0])
-                    .status();
-            }
-        }
-        let guard = SessionGuard(session.clone());
-        let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &session, "-n", "fleet"])
-            .status()
-            .expect("create exact-target test session");
-        assert!(created.success());
-        let split = std::process::Command::new("tmux")
-            .args(["split-window", "-d", "-t", &format!("{session}:fleet")])
-            .status()
-            .expect("create second pane");
-        assert!(split.success());
-        let panes = std::process::Command::new("tmux")
-            .args([
-                "list-panes",
-                "-t",
-                &format!("{session}:fleet"),
-                "-F",
-                "#{pane_index}",
-            ])
-            .output()
-            .expect("list exact-target panes");
-        let pane = String::from_utf8_lossy(&panes.stdout)
-            .lines()
-            .last()
-            .expect("second pane index")
-            .to_string();
-        let target = format!("{session}:fleet.{pane}");
-
-        let mut state = AppState::default();
-        state.current_screen = ids::FLEET_PANEL.to_string();
-        EventHandler::dispatch_fleet_intent(
-            &mut state,
-            FleetIntent::AttachEmbedded {
-                session_key: "codex:thread-1".into(),
-                tmux_target: target.clone(),
-            },
-        );
-
-        assert!(state.embed.is_some(), "embedded client must be live");
-        assert_eq!(state.embed_session.as_deref(), Some(target.as_str()));
-        assert_eq!(state.focused_pane, crate::app::state::FocusedPane::Preview);
-        assert!(
-            state.pending_async_action.is_none(),
-            "embedded attach must not route through fullscreen AttachHandler"
-        );
-        let active = std::process::Command::new("tmux")
-            .args(["display-message", "-p", "-t", &target, "#{pane_active}"])
-            .output()
-            .expect("read exact pane state");
-        assert_eq!(String::from_utf8_lossy(&active.stdout).trim(), "1");
-
-        state.release_interactive_pane();
-        drop(guard);
-    }
-
     /// Learnings (memory) is a plugin screen — Esc on it resolves to
     /// `PanelBack` (and to the plugin's `ui.close_request` at its root
     /// view), so it must save its origin on entry like stats/skills/
@@ -10694,35 +9804,6 @@ mod slash_command_dispatch_tests {
 }
 
 #[cfg(test)]
-mod fleet_offline_action_tests {
-    use super::*;
-
-    #[test]
-    fn offline_daemon_refuses_high_risk_action_before_dispatch() {
-        let mut state = AppState::default();
-        assert!(!state.fleet_panel_state.daemon_online());
-
-        EventHandler::dispatch_fleet_intent(
-            &mut state,
-            FleetIntent::Execute {
-                session_key: "codex:thread-1".into(),
-                expected_version: 4,
-                action: FleetAction::Kill,
-            },
-        );
-
-        assert!(state.pending_async_action.is_none());
-        assert!(
-            state
-                .fleet_panel_state
-                .canonical
-                .feedback()
-                .is_some_and(|message| message.contains("high-risk action disabled"))
-        );
-    }
-}
-
-#[cfg(test)]
 mod configure_back_persist_tests {
     use super::worth_persisting_repo_defaults;
     use crate::config::session_defaults::SessionDefaults;
@@ -10997,7 +10078,10 @@ mod session_ask_key_tests {
         state.selected_workspace_index = Some(0);
         state.selected_session_index = Some(0);
         state.session_tab = SessionTab::Ask;
-        assert!(SessionTab::Ask.enabled(&state), "the fixture must open the ask tab");
+        assert!(
+            SessionTab::Ask.enabled(&state),
+            "the fixture must open the ask tab"
+        );
         state
     }
 

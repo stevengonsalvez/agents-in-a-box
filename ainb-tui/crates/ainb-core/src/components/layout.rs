@@ -116,10 +116,13 @@ impl LayoutComponent {
             .border_style(Style::default().fg(SUBDUED_BORDER))
             .style(Style::default().bg(PANEL_BG))
             .title(session_tabs::strip(state, active))
+            // The footer stops promising the attach digits whenever the pane
+            // owns keys, not only while text is being typed: on the card half
+            // of a conversation a `3` is still the chat's, not an attach.
             .title_bottom(session_tabs::footer(
                 state,
                 active,
-                state.session_composer_captures_text(),
+                state.session_tab_owns_keys(),
             ));
         let inner = block.inner(area);
         frame.render_widget(block, area);
