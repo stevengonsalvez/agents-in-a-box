@@ -216,7 +216,10 @@ mod tests {
                 session_key: "claude:abc".to_string()
             }
         );
-        assert_eq!(host.topic().scope_key().as_deref(), Some("session:claude:abc"));
+        assert_eq!(
+            host.topic().scope_key().as_deref(),
+            Some("session:claude:abc")
+        );
     }
 
     #[test]
@@ -243,7 +246,13 @@ mod tests {
         })));
         assert!(host.tick(0), "a landed outcome makes the frame dirty");
         assert_eq!(host.state().scope_key(), Some("session:claude:abc"));
-        assert!(!host.tick(0), "and an empty inbox does not");
+        // Deliberately NOT asserting that a second tick reports clean: `tick`
+        // also lets the surface dispatch its next refresh, and that worker can
+        // publish a failure back into the inbox before the next call. It did,
+        // on CI, and not on the machine this was written on. What must hold is
+        // that nothing landing leaves the surface where it was.
+        host.tick(0);
+        assert_eq!(host.state().scope_key(), Some("session:claude:abc"));
     }
 
     #[test]

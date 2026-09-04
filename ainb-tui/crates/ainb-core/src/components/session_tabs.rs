@@ -94,7 +94,18 @@ impl SessionTab {
                     None
                 }
             }
-            Self::Thread | Self::Log => (!has_session).then_some("select a session first"),
+            Self::Log => (!has_session).then_some("select a session first"),
+            Self::Thread => {
+                if !has_session {
+                    Some("select a session first")
+                } else if state.selected_session_chat_key().is_none() {
+                    // Opening it anyway would page a scope the daemon has never
+                    // heard of and render an empty timeline forever.
+                    Some("this session has not fired a hook yet, so its thread has no scope")
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -195,7 +206,9 @@ pub fn strip(state: &AppState, active: SessionTab) -> Line<'static> {
             spans.push(Span::styled(" │ ", Style::default().fg(SUBDUED_BORDER)));
         }
         let style = if *tab == active {
-            Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+            Style::default()
+                .fg(SELECTION_GREEN)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
         } else if tab.enabled(state) {
             Style::default().fg(GOLD)
         } else {
@@ -222,7 +235,10 @@ pub fn strip(state: &AppState, active: SessionTab) -> Line<'static> {
 pub fn footer(state: &AppState, active: SessionTab, capturing: bool) -> Line<'static> {
     let _ = state;
     let mut spans = vec![
-        Span::styled(" \u{21e5}", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " \u{21e5}",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" tab ", Style::default().fg(MUTED_GRAY)),
     ];
     let verb = active.enter_verb();
@@ -232,16 +248,25 @@ pub fn footer(state: &AppState, active: SessionTab, capturing: bool) -> Line<'st
             " Enter",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(format!(" {verb} "), Style::default().fg(MUTED_GRAY)));
+        spans.push(Span::styled(
+            format!(" {verb} "),
+            Style::default().fg(MUTED_GRAY),
+        ));
     }
     spans.push(Span::styled("│", Style::default().fg(SUBDUED_BORDER)));
     if capturing {
+        spans.push(Span::styled(
+            " \u{21e7}\u{21e5}",
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" focus ", Style::default().fg(MUTED_GRAY)));
+        spans.push(Span::styled("│", Style::default().fg(SUBDUED_BORDER)));
         spans.push(Span::styled(
             " Esc",
             Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            " leave composer (digits type) ",
+            " leave (digits type) ",
             Style::default().fg(MUTED_GRAY),
         ));
     } else {
@@ -252,7 +277,10 @@ pub fn footer(state: &AppState, active: SessionTab, capturing: bool) -> Line<'st
         // Spelled out on every tab because it is the one binding that is NOT
         // scoped: an operator who has learned that Enter changes meaning has
         // every reason to assume the digits do too.
-        spans.push(Span::styled(" attach (any tab) ", Style::default().fg(MUTED_GRAY)));
+        spans.push(Span::styled(
+            " attach (any tab) ",
+            Style::default().fg(MUTED_GRAY),
+        ));
     }
     Line::from(spans)
 }
@@ -326,7 +354,11 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
             ),
             Span::styled(
                 option.label.clone(),
-                Style::default().fg(if selected { SELECTION_GREEN } else { SOFT_WHITE }),
+                Style::default().fg(if selected {
+                    SELECTION_GREEN
+                } else {
+                    SOFT_WHITE
+                }),
             ),
         ]));
         if !option.description.is_empty() {
@@ -355,16 +387,17 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
             } else {
                 "other (type it)".to_string()
             },
-            Style::default().fg(if on_free_text { SELECTION_GREEN } else { MUTED_GRAY }),
+            Style::default().fg(if on_free_text {
+                SELECTION_GREEN
+            } else {
+                MUTED_GRAY
+            }),
         ),
     ]));
     if on_free_text {
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(
-                ask.free_text().to_string(),
-                Style::default().fg(SOFT_WHITE),
-            ),
+            Span::styled(ask.free_text().to_string(), Style::default().fg(SOFT_WHITE)),
             // A visible caret, so an empty composer reads as "type here" rather
             // than as a pane that is doing nothing.
             Span::styled("\u{2588}", Style::default().fg(SELECTION_GREEN)),
@@ -419,8 +452,13 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
 
 /// `①`-style option markers, falling back to a plain number past nine.
 fn circled(index: usize) -> String {
-    const CIRCLED: [&str; 9] = ["\u{2460}", "\u{2461}", "\u{2462}", "\u{2463}", "\u{2464}", "\u{2465}", "\u{2466}", "\u{2467}", "\u{2468}"];
-    CIRCLED.get(index).map_or_else(|| format!("{}.", index + 1), |glyph| (*glyph).to_string())
+    const CIRCLED: [&str; 9] = [
+        "\u{2460}", "\u{2461}", "\u{2462}", "\u{2463}", "\u{2464}", "\u{2465}", "\u{2466}",
+        "\u{2467}", "\u{2468}",
+    ];
+    CIRCLED
+        .get(index)
+        .map_or_else(|| format!("{}.", index + 1), |glyph| (*glyph).to_string())
 }
 
 /// Render the `log` pane: this session's own notification history.
@@ -445,7 +483,10 @@ pub fn render_log(frame: &mut Frame, area: Rect, rows: &[LogRow]) {
         .map(|row| {
             ListItem::new(Line::from(vec![
                 Span::styled(
-                    format!("{:>5} ", crate::fleet::attention::format_age(now_ms, row.ts)),
+                    format!(
+                        "{:>5} ",
+                        crate::fleet::attention::format_age(now_ms, row.ts)
+                    ),
                     Style::default().fg(MUTED_GRAY),
                 ),
                 Span::styled(
@@ -499,8 +540,7 @@ pub fn read_log(cwd: &str, agent: Option<&str>, limit: u32) -> Vec<LogRow> {
     };
     rows.into_iter()
         .filter(|row| {
-            row.cwd.trim_end_matches('/') == cwd
-                && agent.is_none_or(|agent| row.agent == agent)
+            row.cwd.trim_end_matches('/') == cwd && agent.is_none_or(|agent| row.agent == agent)
         })
         .take(limit as usize)
         .map(|row| LogRow {
@@ -559,11 +599,7 @@ fn wire_color(color: Option<ainb_plugin_protocol::wire_buffer::Color>) -> Color 
 }
 
 /// Render one chat conversation into the right pane.
-pub fn render_chat(
-    frame: &mut Frame,
-    area: Rect,
-    host: &crate::fleet::chat_host::ChatHost,
-) {
+pub fn render_chat(frame: &mut Frame, area: Rect, host: &crate::fleet::chat_host::ChatHost) {
     // Below this the chat renderer draws nothing at all rather than something
     // illegible, so say so instead of leaving a blank pane — a blank box with
     // no explanation is the symptom this screen exists to remove.
@@ -636,24 +672,57 @@ mod tests {
         for tab in [SessionTab::Thread, SessionTab::Log] {
             assert_eq!(tab.disabled_reason(&none), Some("select a session first"));
         }
-        let selected = state_with(Vec::new(), true);
-        for tab in [SessionTab::Thread, SessionTab::Log] {
-            assert!(tab.enabled(&selected), "{tab:?} with a session selected");
-        }
+        let mut selected = state_with(Vec::new(), true);
+        assert!(SessionTab::Log.enabled(&selected));
+        // The thread needs one thing more: the agent's own session id, which is
+        // what its scope is addressed by.
+        assert_eq!(
+            SessionTab::Thread.disabled_reason(&selected),
+            Some("this session has not fired a hook yet, so its thread has no scope"),
+        );
+        selected.workspaces[0].sessions[0].provider_session_id = Some("abc".to_string());
+        assert!(SessionTab::Thread.enabled(&selected));
+    }
+
+    #[test]
+    fn the_thread_scope_is_the_agents_session_id_never_the_tmux_name() {
+        // A scope composed from the tmux name addresses something the daemon
+        // has never heard of: an empty timeline forever against a real daemon,
+        // with every unit test still green.
+        let mut state = state_with(Vec::new(), true);
+        state.workspaces[0].sessions[0].tmux_session_name = Some("tmux_proj".to_string());
+        assert_eq!(state.selected_session_chat_key(), None);
+        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        assert_eq!(
+            state.selected_session_chat_key().as_deref(),
+            Some("claude:hook-sess-1")
+        );
     }
 
     #[test]
     fn cycling_skips_the_dimmed_tabs() {
         // Nothing selected: only preview and copilot are live.
         let state = state_with(Vec::new(), false);
-        assert_eq!(cycle(&state, SessionTab::Preview, true), SessionTab::Copilot);
-        assert_eq!(cycle(&state, SessionTab::Copilot, true), SessionTab::Preview);
-        assert_eq!(cycle(&state, SessionTab::Preview, false), SessionTab::Copilot);
+        assert_eq!(
+            cycle(&state, SessionTab::Preview, true),
+            SessionTab::Copilot
+        );
+        assert_eq!(
+            cycle(&state, SessionTab::Copilot, true),
+            SessionTab::Preview
+        );
+        assert_eq!(
+            cycle(&state, SessionTab::Preview, false),
+            SessionTab::Copilot
+        );
     }
 
     #[test]
     fn cycling_visits_every_tab_when_everything_is_available() {
-        let state = state_with(vec![SessionAttention::local(AttentionKind::Ask, 0)], true);
+        let mut state = state_with(vec![SessionAttention::local(AttentionKind::Ask, 0)], true);
+        // The thread needs a scope before it is reachable.
+        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        let state = state;
         let mut seen = vec![SessionTab::Preview];
         let mut at = SessionTab::Preview;
         for _ in 1..ALL_TABS.len() {
@@ -681,8 +750,11 @@ mod tests {
         // every time a session answers a question.
         for select in [true, false] {
             let state = state_with(Vec::new(), select);
-            let rendered: String =
-                strip(&state, SessionTab::Preview).spans.iter().map(|s| s.content.as_ref()).collect();
+            let rendered: String = strip(&state, SessionTab::Preview)
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
             for tab in ALL_TABS {
                 assert!(
                     rendered.contains(tab.label()),
@@ -732,5 +804,10 @@ mod tests {
         assert!(!rendered.contains("1-9"), "{rendered}");
         assert!(rendered.contains("digits type"), "{rendered}");
         assert!(rendered.contains("Esc"), "and name the way out: {rendered}");
+        assert!(
+            rendered.contains("focus"),
+            "and name the key that moves between the pane's two halves, since \
+             Tab now belongs to the strip: {rendered}"
+        );
     }
 }
