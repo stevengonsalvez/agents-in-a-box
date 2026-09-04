@@ -260,7 +260,6 @@ const FLEET_ACTION_REQ_ID: i64 = 59;
 /// Explicit-recipient Fleet broadcast.
 const FLEET_BROADCAST_REQ_ID: i64 = 60;
 /// Daemon-owned new Fleet session start.
-const FLEET_START_REQ_ID: i64 = 65;
 /// JSON-RPC id for a `hangar/skill_set_enabled` request (parity #24).
 const SKILL_SET_ENABLED_REQ_ID: i64 = 61;
 /// JSON-RPC id for a `hangar/agent_skills_list` request (parity #24). Fired
@@ -660,19 +659,6 @@ fn shell_quote(value: &str) -> String {
 
 fn fleet_request_id(kind: &str) -> String {
     format!("fleet-ui-{kind}-{}", uuid::Uuid::new_v4())
-}
-
-fn fleet_start_params(
-    provider: ainb_hangar_proto::fleet::FleetProvider,
-    cwd: String,
-    prompt: Option<String>,
-) -> ainb_hangar_proto::fleet::FleetStartParams {
-    ainb_hangar_proto::fleet::FleetStartParams {
-        request_id: fleet_request_id("start"),
-        provider,
-        cwd,
-        prompt,
-    }
 }
 
 impl Default for HangarPlugin {
@@ -1481,7 +1467,6 @@ impl HangarPlugin {
             RpcId::Number(FLEET_SUBSCRIBE_REQ_ID) => self.apply_fleet_subscription(resp),
             RpcId::Number(FLEET_ACTION_REQ_ID) => self.apply_fleet_action_result(resp),
             RpcId::Number(FLEET_BROADCAST_REQ_ID) => self.apply_fleet_broadcast_result(resp),
-            RpcId::Number(FLEET_START_REQ_ID) => self.apply_fleet_start_result(resp),
             RpcId::Number(SEARCH_REQ_ID) => self.apply_search(resp),
             // P5: the profile-editor roster + the per-selection detail/previews.
             RpcId::Number(PROFILE_LIST_REQ_ID) => self.apply_profiles(resp),
@@ -2527,37 +2512,6 @@ impl HangarPlugin {
         self.conn.on_event();
     }
 
-    fn apply_fleet_start_result(&mut self, resp: &RpcResponse) {
-        use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetStartResult};
-        let result = resp
-            .result
-            .as_ref()
-            .and_then(|value| serde_json::from_value::<FleetStartResult>(value.clone()).ok());
-        let event = match (result, &resp.error) {
-            (Some(result), _) if result.receipt.status == ActionReceiptStatus::Delivered => {
-                crate::screen::fleet::FleetEvent::ActionSucceeded {
-                    session_key: result.prospective_session_key,
-                }
-            }
-            (Some(result), _) => crate::screen::fleet::FleetEvent::ActionFailed {
-                session_key: result.prospective_session_key,
-                detail: result
-                    .receipt
-                    .detail
-                    .unwrap_or_else(|| format!("{:?}", result.receipt.status)),
-            },
-            (None, Some(error)) => crate::screen::fleet::FleetEvent::ActionFailed {
-                session_key: "start".into(),
-                detail: error.message.clone(),
-            },
-            (None, None) => return,
-        };
-        let out = crate::screen::fleet::reduce_fleet(&self.screens.fleet, event);
-        self.screens.fleet = out.state;
-        self.fleet_fetch_pending = true;
-        self.conn.on_event();
-    }
-
     fn apply_fleet_broadcast_result(&mut self, resp: &RpcResponse) {
         use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetBroadcastResult};
         if let Some(error) = &resp.error {
@@ -2951,21 +2905,6 @@ impl HangarPlugin {
                     daemon_methods::FLEET_BROADCAST,
                     params,
                     "broadcast",
-                )
-                .await;
-            }
-            FleetIntent::Start {
-                provider,
-                cwd,
-                prompt,
-            } => {
-                let params = fleet_start_params(provider, cwd, prompt);
-                self.send_fleet_rpc(
-                    host,
-                    FLEET_START_REQ_ID,
-                    daemon_methods::FLEET_START,
-                    params,
-                    "start",
                 )
                 .await;
             }
@@ -9991,21 +9930,6 @@ mod tests {
             retried.intent,
             Some(FleetIntent::Broadcast { .. })
         ));
-    }
-
-    #[test]
-    fn fleet_start_mapping_preserves_exact_global_params() {
-        use ainb_hangar_proto::fleet::FleetProvider;
-
-        let params = fleet_start_params(
-            FleetProvider::Codex,
-            "/work/new".into(),
-            Some("inspect failures".into()),
-        );
-        assert!(params.request_id.starts_with("fleet-ui-start-"));
-        assert_eq!(params.provider, FleetProvider::Codex);
-        assert_eq!(params.cwd, "/work/new");
-        assert_eq!(params.prompt.as_deref(), Some("inspect failures"));
     }
 
     #[test]

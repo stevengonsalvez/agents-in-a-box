@@ -699,7 +699,6 @@ enum FleetMode {
     Browse,
     Answer(AnswerQueue),
     AnswerDismissConfirm(AnswerQueue),
-    Start(StartState),
     Prompt {
         text: String,
     },
@@ -808,20 +807,6 @@ enum AnswerDelivery {
     AwaitingSessionResume,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartStage {
-    Cwd,
-    Prompt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StartState {
-    provider: ainb_hangar_proto::fleet::FleetProvider,
-    stage: StartStage,
-    cwd: String,
-    prompt: String,
-}
-
 /// Pure Fleet pane state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetPaneState {
@@ -882,7 +867,6 @@ impl FleetPaneState {
     pub fn is_capturing_text(&self) -> bool {
         match &self.mode {
             FleetMode::TypedConfirm { .. }
-            | FleetMode::Start(_)
             | FleetMode::Prompt { .. }
             | FleetMode::Broadcast(BroadcastState {
                 stage: BroadcastStage::Compose,
@@ -1083,11 +1067,6 @@ pub enum FleetIntent {
         session_key: String,
         expected_version: i64,
         action: FleetAction,
-    },
-    Start {
-        provider: ainb_hangar_proto::fleet::FleetProvider,
-        cwd: String,
-        prompt: Option<String>,
     },
     AttachEmbedded {
         session_key: String,
@@ -1306,7 +1285,6 @@ fn reduce_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> 
         FleetMode::Browse => reduce_browse_key(state, key),
         FleetMode::Answer(queue) => reduce_answer_key(state, queue, key),
         FleetMode::AnswerDismissConfirm(queue) => reduce_answer_dismiss_key(state, queue, key),
-        FleetMode::Start(start) => reduce_start_key(state, start, key),
         FleetMode::Prompt { text } => reduce_prompt_key(state, text, key),
         FleetMode::Broadcast(broadcast) => reduce_broadcast_key(state, broadcast, key),
         FleetMode::ChannelCreate(form) => reduce_channel_create_key(state, form, key),
@@ -1351,14 +1329,10 @@ pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Op
                 return request_action(state, FleetAction::Continue);
             }
         }
-        FleetKey::Char('t') => {
-            state.mode = FleetMode::Start(StartState {
-                provider: ainb_hangar_proto::fleet::FleetProvider::Codex,
-                stage: StartStage::Cwd,
-                cwd: String::new(),
-                prompt: String::new(),
-            });
-        }
+        // `t` was the Codex-only start form. Spawning is `ainb run` and the
+        // new-session flow, which know about worktrees, hooks and the session
+        // registry; a second spawn door that knew about none of them could only
+        // ever produce a session the rest of ainb could not see.
         FleetKey::Char('p') => {
             state.mode = FleetMode::Prompt {
                 text: String::new(),
@@ -1930,46 +1904,6 @@ fn submit_answer(
             answers,
         },
     })
-}
-
-fn reduce_start_key(
-    state: &mut FleetPaneState,
-    mut start: StartState,
-    key: FleetKey,
-) -> Option<FleetIntent> {
-    if key == FleetKey::Esc {
-        state.mode = FleetMode::Browse;
-        return None;
-    }
-    let field = match start.stage {
-        StartStage::Cwd => &mut start.cwd,
-        StartStage::Prompt => &mut start.prompt,
-    };
-    match key {
-        FleetKey::Backspace => {
-            field.pop();
-        }
-        FleetKey::Char(character) => field.push(character),
-        FleetKey::Space => field.push(' '),
-        FleetKey::Enter if start.stage == StartStage::Cwd && start.cwd.trim().is_empty() => {
-            state.feedback = Some("working directory required".into());
-        }
-        FleetKey::Enter if start.stage == StartStage::Cwd => {
-            start.cwd = start.cwd.trim().to_string();
-            start.stage = StartStage::Prompt;
-        }
-        FleetKey::Enter => {
-            state.mode = FleetMode::Browse;
-            return Some(FleetIntent::Start {
-                provider: start.provider,
-                cwd: start.cwd,
-                prompt: (!start.prompt.trim().is_empty()).then(|| start.prompt.trim().to_string()),
-            });
-        }
-        _ => {}
-    }
-    state.mode = FleetMode::Start(start);
-    None
 }
 
 fn reduce_prompt_key(
@@ -3351,28 +3285,6 @@ fn render_mode(
                 ),
                 "This returns a rejected result to Claude.".into(),
                 "Enter rejects, Esc returns to draft".into(),
-            ],
-        ),
-        FleetMode::Start(start) => render_modal(
-            buffer,
-            area_width,
-            top,
-            bottom,
-            "Start managed session",
-            &[
-                "Provider: Codex".into(),
-                match start.stage {
-                    StartStage::Cwd => format!("Working directory: > {}", start.cwd),
-                    StartStage::Prompt => format!("Working directory: {}", start.cwd),
-                },
-                match start.stage {
-                    StartStage::Cwd => "Enter continues to optional prompt".into(),
-                    StartStage::Prompt => format!("Optional prompt: > {}", start.prompt),
-                },
-                match start.stage {
-                    StartStage::Cwd => "Esc cancels".into(),
-                    StartStage::Prompt => "Enter starts, Esc cancels".into(),
-                },
             ],
         ),
         FleetMode::Prompt { text } => render_modal(
@@ -4897,39 +4809,19 @@ mod tests {
         );
     }
 
+    /// `t` is retired, and pressing it must not open a modal that no longer
+    /// exists nor fall through to some other verb.
+    ///
+    /// Spawning belongs to `ainb run` and the new-session flow, which know
+    /// about worktrees, hooks and the session registry. This form knew about
+    /// none of them, so the session it started was one the rest of ainb could
+    /// not see.
     #[test]
-    fn empty_roster_starts_managed_codex_with_exact_cwd_and_optional_prompt() {
-        let state = FleetPaneState::default();
-        let mut state = apply(&state, FleetEvent::Key(FleetKey::Char('t'))).state;
-        state = type_text(state, " /work/new ");
-        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
-        state = type_text(state, " inspect failures ");
-        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
-        assert_eq!(
-            submitted.intent,
-            Some(FleetIntent::Start {
-                provider: ainb_hangar_proto::fleet::FleetProvider::Codex,
-                cwd: "/work/new".into(),
-                prompt: Some("inspect failures".into()),
-            })
-        );
-
-        let mut state = apply(
-            &FleetPaneState::default(),
-            FleetEvent::Key(FleetKey::Char('t')),
-        )
-        .state;
-        state = type_text(state, "/work/no-prompt");
-        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
-        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
-        assert_eq!(
-            submitted.intent,
-            Some(FleetIntent::Start {
-                provider: ainb_hangar_proto::fleet::FleetProvider::Codex,
-                cwd: "/work/no-prompt".into(),
-                prompt: None,
-            })
-        );
+    fn the_retired_start_key_opens_nothing() {
+        let before = FleetPaneState::default();
+        let pressed = apply(&before, FleetEvent::Key(FleetKey::Char('t')));
+        assert_eq!(pressed.intent, None, "`t` must fire no intent");
+        assert!(!pressed.state.is_modal_open(), "`t` must not open a modal");
     }
 
     #[test]
