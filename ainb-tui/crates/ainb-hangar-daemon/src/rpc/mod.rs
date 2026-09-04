@@ -6091,9 +6091,20 @@ async fn handle_fleet_acp_session_create(
         EnsureError::Store(_) => internal(&error.to_string()),
         _ => invalid_params(&error.to_string()),
     })?;
+    // The turn deadline rides back on the mint because this is the ONE call a
+    // chat client makes before it can have a PENDING leg at all, and the value
+    // is otherwise daemon-private: a client reading `AINB_ACP_TURN_DEADLINE_MS`
+    // would be reading its own process, not the daemon that will cancel the
+    // turn. `None` when no pool is installed, which is the case in the store
+    // tests that mint sessions with no runtime behind them.
+    let turn_deadline_ms = match crate::acp_pool::active_handle().await {
+        Some(pool) => i64::try_from(pool.config().turn_deadline.as_millis()).ok(),
+        None => None,
+    };
     to_value(&FleetAcpSessionCreateResult {
         session_key: row.session_key,
         scope_key: row.scope_key,
+        turn_deadline_ms,
     })
 }
 

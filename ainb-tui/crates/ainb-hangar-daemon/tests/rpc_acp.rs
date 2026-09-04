@@ -234,6 +234,16 @@ impl Harness {
         }
         let created = client.call(methods::FLEET_ACP_SESSION_CREATE, params).await;
         assert!(created["error"].is_null(), "{created}");
+        // The mint is the ONLY call that carries the pool's turn ceiling to a
+        // client, and a chat surface cannot bound a PENDING leg's wait without
+        // it: `AINB_ACP_TURN_DEADLINE_MS` lives in the DAEMON's environment, so
+        // a client reading it would be reading its own process. Asserted on
+        // every create rather than in one test, because the field going missing
+        // is silent on the wire.
+        assert!(
+            created["result"]["turn_deadline_ms"].as_i64().is_some_and(|ms| ms > 0),
+            "the create does not carry the pool's turn deadline: {created}"
+        );
         (
             created["result"]["session_key"].as_str().expect("key").to_string(),
             created["result"]["scope_key"].as_str().expect("scope").to_string(),
@@ -533,6 +543,28 @@ async fn acp_session_create_is_gated_idempotent_and_transactional() {
         .await
         .expect("count");
     assert_eq!(sessions, 1, "one live session per scope");
+
+    // The turn deadline this harness's pool was built with, on the wire, to the
+    // millisecond. `create_session` only checks the field is there; this pins
+    // it to the value the pool actually enforces, so a handler reporting a
+    // hardcoded thirty minutes while the pool ran on something else would fail
+    // here rather than mislead a waiting operator. Read off the IDEMPOTENT
+    // replay above, so it mints nothing and the count still holds.
+    let replayed = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            serde_json::json!({
+                "provider": ainb_acp::config::CLAUDE_ADAPTER,
+                "cwd": harness.dir.to_string_lossy(),
+                "scope_key": "session:acp-fixed",
+            }),
+        )
+        .await;
+    assert_eq!(
+        replayed["result"]["turn_deadline_ms"].as_i64(),
+        i64::try_from(PoolConfig::default().turn_deadline.as_millis()).ok(),
+        "the create reports a deadline this pool does not enforce: {replayed}"
+    );
 
     // Idempotent only for the SAME adapter. Answering a `codex-acp` create with
     // the live CLAUDE key would hand the caller a session that prompts a

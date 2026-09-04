@@ -1465,6 +1465,21 @@ pub struct FleetAcpSessionCreateResult {
     pub session_key: String,
     /// Scope the session answers in.
     pub scope_key: String,
+    /// The pool's wall-clock ceiling on ONE turn, in milliseconds.
+    ///
+    /// The only door this value has onto a client. It lives on the daemon's
+    /// `PoolConfig` (30 minutes by default, moved by `AINB_ACP_TURN_DEADLINE_MS`
+    /// in the DAEMON's environment), so a client that read that variable itself
+    /// would be reading its own process and would be wrong for every daemon
+    /// launched with a different one. A chat pane showing a PENDING leg has to
+    /// be able to say how long it can stay that way before the pool cancels the
+    /// turn; without this the wait is unbounded as far as the operator can tell.
+    ///
+    /// Optional and skipped when absent, like [`FleetMessageDelivery::detail`]:
+    /// a daemon built before this simply omits it, and a client that gets `None`
+    /// says nothing about a deadline rather than inventing 30 minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_deadline_ms: Option<i64>,
 }
 
 /// Parameters for `fleet/message_send`.
@@ -2533,6 +2548,12 @@ mod tests {
         round_trip(&FleetAcpSessionCreateResult {
             session_key: "acp:01J0KEY".to_string(),
             scope_key: "session:acp:01J0KEY".to_string(),
+            turn_deadline_ms: None,
+        });
+        round_trip(&FleetAcpSessionCreateResult {
+            session_key: "acp:01J0KEY".to_string(),
+            scope_key: "session:acp:01J0KEY".to_string(),
+            turn_deadline_ms: Some(1_800_000),
         });
         round_trip(&FleetMessageSendParams {
             scope_key: None,
