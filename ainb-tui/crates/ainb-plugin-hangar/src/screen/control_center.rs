@@ -141,10 +141,29 @@ impl AttentionKind {
 /// One answer option on an ASK card (a label + an optional one-line description).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardOption {
-    /// The option label — the exact text delivered as the answer.
+    /// The option label, rendered beside the glyph.
     pub label: String,
     /// An optional descriptive sub-line.
     pub description: Option<String>,
+    /// What `attention/answer` carries when this option is picked, when that is
+    /// NOT the label: an ACP adapter's stable `optionId`.
+    ///
+    /// The label is display text and two options may share one. The daemon
+    /// refuses an ambiguous answer rather than guessing, so delivering a shared
+    /// label would leave the permission permanently unanswerable from here
+    /// while still answerable by id elsewhere. Delivering the id cannot be
+    /// ambiguous. `None` for a classifier ASK, whose options have no id and
+    /// whose label IS the answer.
+    pub answer: Option<String>,
+}
+
+impl CardOption {
+    /// What `attention/answer` carries when this option is picked: the id when
+    /// the option has one, else the label.
+    #[must_use]
+    pub fn delivered(&self) -> String {
+        self.answer.clone().unwrap_or_else(|| self.label.clone())
+    }
 }
 
 /// The rendered body of a card, parsed from the attention row's payload
@@ -393,6 +412,8 @@ fn parse_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
                             .get("description")
                             .and_then(serde_json::Value::as_str)
                             .map(str::to_string),
+                        // The classifier's options have no id; the label is the answer.
+                        answer: None,
                     })
                 })
                 .collect()
@@ -403,21 +424,31 @@ fn parse_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
 /// Parse an ACP permission's `options` array into [`CardOption`]s.
 ///
 /// The adapter's wire shape is `{optionId, name, kind}` (ACP `options_wire`),
-/// not the classifier's `{label, description}`, and the LABEL is what
-/// `attention/answer` carries back: the daemon resolves it to the option id by
-/// id, label or 1-based number, so the glyph the operator presses and the
-/// option the adapter is handed are the same row of the same list.
+/// not the classifier's `{label, description}`: `name` renders, `optionId` is
+/// what gets delivered.
+///
+/// BOTH fields are required, and one malformed entry voids the whole list
+/// rather than dropping a row. Dropping one would renumber every glyph below
+/// it, and the daemon reads a bare digit as a 1-based index into the options it
+/// holds, so the operator would press ③ and answer something else. The daemon
+/// voids the same payload for the same reason
+/// (`answer::acp_permission_from_payload`); an empty list here renders "this
+/// ASK carries no options", which is the truth about a payload neither side
+/// will act on.
 fn parse_acp_options(v: Option<&serde_json::Value>) -> Vec<CardOption> {
     v.and_then(serde_json::Value::as_array)
-        .map(|arr| {
+        .and_then(|arr| {
             arr.iter()
-                .filter_map(|o| {
+                .map(|o| {
                     Some(CardOption {
                         label: o.get("name").and_then(serde_json::Value::as_str)?.to_string(),
                         description: None,
+                        answer: Some(
+                            o.get("optionId").and_then(serde_json::Value::as_str)?.to_string(),
+                        ),
                     })
                 })
-                .collect()
+                .collect::<Option<Vec<_>>>()
         })
         .unwrap_or_default()
 }
@@ -595,25 +626,26 @@ impl ControlCenterState {
         self.cards.iter().filter(|c| c.kind.urgency_rank() == 0).count()
     }
 
-    /// The `(attention_id, answer_label)` the selected ASK's highlighted option
-    /// would deliver, if a card + option are selected. `None` for a non-ASK card
-    /// or an ASK with no options.
+    /// The `(attention_id, answer)` the selected ASK's highlighted option would
+    /// deliver, if a card + option are selected. `None` for a non-ASK card or an
+    /// ASK with no options.
     #[must_use]
     pub fn pending_answer(&self) -> Option<(String, String)> {
         let card = self.selected_card()?;
-        let label = card.options().get(self.option_cursor)?.label.clone();
-        Some((card.id.clone(), label))
+        Some((
+            card.id.clone(),
+            card.options().get(self.option_cursor)?.delivered(),
+        ))
     }
 
-    /// The `(attention_id, answer_label)` for a direct 1-based option pick on the
+    /// The `(attention_id, answer)` for a direct 1-based option pick on the
     /// selected ASK (the ①..⑨ number keys). `None` when the pick is out of range
     /// or the card is not an answerable ASK.
     #[must_use]
     pub fn answer_at(&self, one_based: usize) -> Option<(String, String)> {
         let card = self.selected_card()?;
         let idx = one_based.checked_sub(1)?;
-        let label = card.options().get(idx)?.label.clone();
-        Some((card.id.clone(), label))
+        Some((card.id.clone(), card.options().get(idx)?.delivered()))
     }
 }
 
@@ -1451,15 +1483,17 @@ mod tests {
         );
     }
 
-    /// An ACP adapter's parked permission is answerable inline, by the label
-    /// the daemon resolves back to the adapter's own option id.
+    /// An ACP adapter's parked permission is answerable inline, and delivers
+    /// the adapter's own option id.
     ///
     /// The payload is `acp_pool::raise_permission`'s, verbatim in shape: an
     /// `approval` row whose options are `{optionId, name, kind}`. Pressing `3`
-    /// must deliver `Reject`, the option in the third glyph. The wrong option
-    /// here is the defect-26 class (the store recording one pick while the
-    /// agent acts on another), and before this the row carried no options at
-    /// all and the digit fell through to the tab router.
+    /// must deliver the id `reject`, not the display name: two options may
+    /// share a name and the daemon refuses an ambiguous answer, which would
+    /// leave the row unanswerable from here. The wrong option here is the
+    /// defect-26 class (the store recording one pick while the agent acts on
+    /// another), and before this the row carried no options at all and the
+    /// digit fell through to the tab router.
     #[test]
     fn acp_permission_answers_by_the_adapters_own_option() {
         let payload = serde_json::json!({
@@ -1499,9 +1533,58 @@ mod tests {
             out.intent,
             Some(ControlCenterIntent::Answer {
                 attention_id: "perm".into(),
-                answer: "Reject".into(),
+                answer: "reject".into(),
+            }),
+            "the id is delivered, never the display name"
+        );
+    }
+
+    /// Two options sharing a display name still answer, because the id is what
+    /// travels: on the name the daemon would refuse as ambiguous and the row
+    /// would reopen unanswerable.
+    #[test]
+    fn acp_permission_with_twin_labels_still_delivers_a_distinct_id() {
+        let payload = serde_json::json!({
+            "kind": "acp_permission",
+            "sessionKey": "k",
+            "requestFingerprint": "f",
+            "options": [
+                { "optionId": "allow_always", "name": "Allow", "kind": "allow_always" },
+                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+            ],
+        })
+        .to_string();
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row("perm", "approval", 1, &payload)]);
+        let out = reduce_control_center(&state, ControlCenterEvent::Key('2'));
+        assert_eq!(
+            out.intent,
+            Some(ControlCenterIntent::Answer {
+                attention_id: "perm".into(),
+                answer: "allow".into(),
             })
         );
+    }
+
+    /// An option missing either field voids the WHOLE list rather than dropping
+    /// a row: dropping one renumbers every glyph below it, and the daemon reads
+    /// a bare digit as an index into the options IT holds.
+    #[test]
+    fn acp_permission_with_a_malformed_option_offers_none() {
+        let payload = serde_json::json!({
+            "kind": "acp_permission",
+            "sessionKey": "k",
+            "requestFingerprint": "f",
+            "options": [
+                { "name": "Always Allow", "kind": "allow_always" },
+                { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+            ],
+        })
+        .to_string();
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row("perm", "approval", 1, &payload)]);
+        assert!(state.selected_card().expect("card").options().is_empty());
+        assert_eq!(state.answer_at(1), None, "no glyph answers a voided list");
     }
 
     #[test]
