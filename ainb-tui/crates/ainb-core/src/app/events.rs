@@ -1384,6 +1384,46 @@ impl EventHandler {
                 return Some(AppEvent::Consumed);
             }
         }
+        // The broadcast composer, which replaces the thread's while rows are
+        // checked. Handled BEFORE the chat reducer because there is no chat
+        // host behind it — the pane is a composer and a receipt list, not a
+        // conversation, so there is nothing for `reduce_chat_key` to reduce.
+        if state.session_tab == SessionTab::Thread {
+            let targets = state.broadcast_targets();
+            if !targets.is_empty() {
+                let handled = match key_event.code {
+                    KeyCode::Enter => {
+                        // `send` refuses an empty message and an empty target
+                        // list, and says so by returning false, so a blank
+                        // Enter is a no-op rather than a receipt for nothing.
+                        state.broadcast.send(targets);
+                        true
+                    }
+                    KeyCode::Backspace => {
+                        state.broadcast.backspace();
+                        true
+                    }
+                    KeyCode::Esc => {
+                        // Out of the pane, not out of the multi-select: the
+                        // checkboxes are the left pane's and clearing them here
+                        // would undo work the operator did with Space.
+                        state.session_tab = SessionTab::Preview;
+                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        true
+                    }
+                    KeyCode::Char(ch) => {
+                        state.broadcast.push(ch);
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    state.ui_needs_refresh = true;
+                    return Some(AppEvent::Consumed);
+                }
+                return None;
+            }
+        }
         // Attach digits ARE passed through to the composer — a digit typed into
         // a message is a digit, and stealing it would make the composer unable
         // to type "3". The footer stops advertising them here for that reason.

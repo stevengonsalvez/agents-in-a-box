@@ -170,16 +170,35 @@ impl LayoutComponent {
                 session_tabs::render_copilot(frame, inner, header, host);
             }
             SessionTab::Thread => {
-                match state.chat_host_for(active) {
-                    Some(host) => session_tabs::render_chat(frame, inner, host),
-                    // Reachable only for `thread` with no session selected,
-                    // which the strip already dims — say it rather than paint
-                    // an empty box.
-                    None => frame.render_widget(
-                        Paragraph::new("select a session to open its thread")
-                            .style(Style::default().fg(MUTED_GRAY)),
+                // Checked rows win over the cursor, the same rule `Enter` and
+                // `r` follow on this screen: with a multi-select active this
+                // pane is a broadcast to the checked set, not one session's
+                // private thread. The strip label says which it currently is.
+                let targets = state.broadcast_targets();
+                if targets.is_empty() {
+                    match state.chat_host_for(active) {
+                        Some(host) => session_tabs::render_chat(frame, inner, host),
+                        // Reachable only for `thread` with no session selected,
+                        // which the strip already dims — say it rather than
+                        // paint an empty box.
+                        None => frame.render_widget(
+                            Paragraph::new("select a session to open its thread")
+                                .style(Style::default().fg(MUTED_GRAY)),
+                            inner,
+                        ),
+                    }
+                } else {
+                    if state.broadcast.tick() {
+                        state.ui_needs_refresh = true;
+                    }
+                    let unreachable = state.broadcast_unreachable();
+                    session_tabs::render_broadcast(
+                        frame,
                         inner,
-                    ),
+                        &state.broadcast,
+                        &targets,
+                        unreachable,
+                    );
                 }
             }
         }

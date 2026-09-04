@@ -3536,6 +3536,12 @@ pub struct AppState {
     /// open. It costs one `fleet/adapter_list` per session.
     pub copilot_dial: crate::fleet::copilot_dial::CopilotDial,
 
+    /// The broadcast composer, shown on `thread` while rows are checked.
+    ///
+    /// Survives a change of checkbox set on purpose: an operator who ticks a
+    /// fifth session halfway through typing must not lose what they typed.
+    pub broadcast: crate::fleet::broadcast::Broadcast,
+
     /// The selected session's own thread, rebuilt when the selection moves to a
     /// different session.
     ///
@@ -4046,6 +4052,7 @@ impl Default for AppState {
             session_tab: crate::components::session_tabs::SessionTab::default(),
             ask_state: crate::fleet::answer::AskState::default(),
             copilot_dial: crate::fleet::copilot_dial::CopilotDial::new(),
+            broadcast: crate::fleet::broadcast::Broadcast::default(),
             copilot_chat: None,
             session_chat: None,
         }
@@ -11649,7 +11656,11 @@ impl AppState {
         }
         match self.session_tab {
             SessionTab::Copilot => self.copilot_chat.is_some(),
-            SessionTab::Thread => self.session_chat.is_some(),
+            // A broadcast owns the keyboard whether or not a thread host has
+            // been opened: the composer is there the moment rows are checked.
+            SessionTab::Thread => {
+                self.session_chat.is_some() || !self.broadcast_targets().is_empty()
+            }
             SessionTab::Preview | SessionTab::Ask | SessionTab::Log => false,
         }
     }
@@ -11666,6 +11677,9 @@ impl AppState {
     #[must_use]
     pub fn session_composer_captures_text(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
+        if self.session_tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
+            return self.broadcast.capturing();
+        }
         let host = match self.session_tab {
             SessionTab::Copilot => self.copilot_chat.as_ref(),
             SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
@@ -11729,12 +11743,45 @@ impl AppState {
     /// with a reason instead of opening a conversation that can never load.
     #[must_use]
     pub fn selected_session_chat_key(&self) -> Option<String> {
-        let session = self.get_selected_session()?;
+        Self::session_chat_key(self.get_selected_session()?)
+    }
+
+    /// The chat keys of every CHECKED session, in list order.
+    ///
+    /// This is what makes the checkboxes mean something on the right pane: with
+    /// rows checked, `thread` stops being one session's conversation and
+    /// becomes a broadcast to the checked set. The same "checked rows win over
+    /// the cursor" rule `Enter` and `r` already follow on this screen, so the
+    /// checkbox has one meaning everywhere rather than one per verb.
+    ///
+    /// A checked session with no scope yet is SKIPPED, not faked: the daemon
+    /// keys delivery on `provider:<agent session>`, which only exists once the
+    /// session has fired a hook. [`AppState::broadcast_unreachable`] counts
+    /// them so the pane can say how many, rather than silently sending to
+    /// fewer sessions than the operator ticked.
+    #[must_use]
+    pub fn broadcast_targets(&self) -> Vec<String> {
+        self.checked_sessions().filter_map(Self::session_chat_key).collect()
+    }
+
+    /// How many checked sessions have no scope to deliver to.
+    #[must_use]
+    pub fn broadcast_unreachable(&self) -> usize {
+        self.checked_sessions().filter(|s| Self::session_chat_key(s).is_none()).count()
+    }
+
+    fn checked_sessions(&self) -> impl Iterator<Item = &crate::models::Session> {
+        self.workspaces
+            .iter()
+            .flat_map(|workspace| workspace.sessions.iter())
+            .filter(|session| self.selected_sessions.contains(&session.id))
+    }
+
+    /// One session's `provider:<agent session>` chat key, when it has one.
+    fn session_chat_key(session: &crate::models::Session) -> Option<String> {
         let provider = match session.agent_type {
             crate::models::SessionAgentType::Codex => "codex",
             crate::models::SessionAgentType::Copilot => "copilot",
-            // Everything else that can hold a conversation reports as claude to
-            // the fleet reducer today.
             _ => "claude",
         };
         session

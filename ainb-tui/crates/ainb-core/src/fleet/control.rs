@@ -1131,6 +1131,67 @@ fn publish(feedback: &Mutex<ActionFeedback>, message: String) {
 /// read an absent feed as an empty one.
 const RPC_METHOD_NOT_FOUND: i32 = -32601;
 
+/// The named BROADCAST channels, by name, in creation order.
+///
+/// Copilot channels are filtered out: there is exactly one and the pane the
+/// operator is reading IS it, so listing it would offer them the conversation
+/// they are already in.
+pub fn broadcast_channels_blocking() -> Result<Vec<String>, String> {
+    use ainb_hangar_proto::fleet::FleetChannelKind;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client
+            .channel_list()
+            .await
+            .map(|result| {
+                result
+                    .channels
+                    .into_iter()
+                    .filter(|channel| channel.kind == FleetChannelKind::Broadcast)
+                    .map(|channel| channel.name)
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// One message to N sessions, with a receipt per recipient.
+///
+/// `fleet/broadcast`, not N `fleet/message_send` calls: the daemon fans out
+/// under ONE idempotency key, so a retry cannot deliver a second copy to the
+/// recipients the first attempt already reached.
+pub fn broadcast_blocking(
+    target_keys: Vec<String>,
+    text: String,
+    idempotency_key: String,
+) -> Result<Vec<ainb_hangar_proto::fleet::FleetActionReceipt>, String> {
+    use ainb_hangar_proto::fleet::FleetBroadcastParams;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client
+            .fleet_broadcast(FleetBroadcastParams {
+                target_keys,
+                text,
+                idempotency_key,
+            })
+            .await
+            .map(|result| result.receipts)
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// The ACP adapters the daemon's registry can spawn, in name order.
 ///
 /// The engine picker's only source: a list compiled into the TUI would refuse

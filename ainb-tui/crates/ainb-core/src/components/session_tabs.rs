@@ -49,6 +49,28 @@ pub const ALL_TABS: [SessionTab; 5] = [
 ];
 
 impl SessionTab {
+    /// The strip label as it renders RIGHT NOW.
+    ///
+    /// Only `thread` is dynamic, and only because the checkboxes change what it
+    /// is: with rows checked it stops being one session's conversation and
+    /// becomes a broadcast to the checked set. The label has to say so, or the
+    /// operator sends a private message to four sessions believing it went to
+    /// one.
+    #[must_use]
+    pub fn label_in(self, state: &AppState) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Thread => {
+                let targets = state.broadcast_targets().len();
+                if targets == 0 {
+                    std::borrow::Cow::Borrowed("thread")
+                } else {
+                    std::borrow::Cow::Owned(format!("broadcast ({targets})"))
+                }
+            }
+            other => std::borrow::Cow::Borrowed(other.label()),
+        }
+    }
+
     /// The strip label. Lower case, because these are panes, not commands.
     #[must_use]
     pub const fn label(self) -> &'static str {
@@ -58,6 +80,23 @@ impl SessionTab {
             Self::Thread => "thread",
             Self::Copilot => "copilot",
             Self::Log => "log",
+        }
+    }
+
+    /// [`SessionTab::enter_verb`], with the broadcast recipient count spelled
+    /// out.
+    ///
+    /// "send message" is a dangerous thing for a footer to say when the message
+    /// is going to four sessions at once. The count is the confirmation step:
+    /// this pane has no modal, and a number in the footer is cheaper to read
+    /// than a dialog is to dismiss.
+    #[must_use]
+    pub fn enter_verb_in(self, state: &AppState) -> std::borrow::Cow<'static, str> {
+        let targets = state.broadcast_targets().len();
+        if self == Self::Thread && targets > 0 {
+            std::borrow::Cow::Owned(format!("broadcast to {targets}"))
+        } else {
+            std::borrow::Cow::Borrowed(self.enter_verb())
         }
     }
 
@@ -96,8 +135,16 @@ impl SessionTab {
             }
             Self::Log => (!has_session).then_some("select a session first"),
             Self::Thread => {
-                if !has_session {
+                // Checked rows win over the cursor, the same rule `Enter` and
+                // `r` follow on this screen. A broadcast is about the checked
+                // set, so it needs no cursor session at all.
+                if !state.broadcast_targets().is_empty() {
+                    None
+                } else if state.selected_sessions.is_empty() && !has_session {
                     Some("select a session first")
+                } else if !state.selected_sessions.is_empty() {
+                    // Rows ARE checked, but not one of them has a scope.
+                    Some("no checked session has fired a hook yet, so none can be reached")
                 } else if state.selected_session_chat_key().is_none() {
                     // Opening it anyway would page a scope the daemon has never
                     // heard of and render an empty timeline forever.
@@ -217,7 +264,7 @@ pub fn strip(state: &AppState, active: SessionTab) -> Line<'static> {
             // cursor is a strip nobody learns.
             Style::default().fg(MUTED_GRAY)
         };
-        spans.push(Span::styled(tab.label(), style));
+        spans.push(Span::styled(tab.label_in(state).into_owned(), style));
     }
     spans.push(Span::raw(" "));
     Line::from(spans)
@@ -233,7 +280,6 @@ pub fn strip(state: &AppState, active: SessionTab) -> Line<'static> {
 /// character instead.
 #[must_use]
 pub fn footer(state: &AppState, active: SessionTab, capturing: bool) -> Line<'static> {
-    let _ = state;
     let mut spans = vec![
         Span::styled(
             " \u{21e5}",
@@ -241,7 +287,7 @@ pub fn footer(state: &AppState, active: SessionTab, capturing: bool) -> Line<'st
         ),
         Span::styled(" tab ", Style::default().fg(MUTED_GRAY)),
     ];
-    let verb = active.enter_verb();
+    let verb = active.enter_verb_in(state);
     if !verb.is_empty() {
         spans.push(Span::styled("│", Style::default().fg(SUBDUED_BORDER)));
         spans.push(Span::styled(
@@ -676,6 +722,25 @@ pub fn copilot_header(dial: &crate::fleet::copilot_dial::CopilotDial) -> Vec<Lin
         ),
         dial_row("mode", dial.mode().as_str().to_string(), 'g', false),
     ];
+    // The named broadcast channels: durable conversations an operator can come
+    // back to, which is exactly what the checkbox broadcast is not. Listed
+    // rather than counted, because the name IS the way back to one.
+    let (channels, dim) = if !dial.channels().is_empty() {
+        (dial.channels().join(" \u{b7} "), false)
+    } else if dial.channels_listed() {
+        ("none yet".to_string(), true)
+    } else {
+        // Not "none": the read has not come back, and rendering an empty list
+        // as a fact is how an operator concludes their channels are gone.
+        ("\u{2026}".to_string(), true)
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" channels", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            format!("  {channels}"),
+            Style::default().fg(if dim { MUTED_GRAY } else { SOFT_WHITE }),
+        ),
+    ]));
     // `yolo` fires destructive fleet tools with no card. It gets a banner
     // because the whole point of the mode is that nothing else will stop and
     // ask, so the pane itself has to be the reminder.
@@ -719,6 +784,111 @@ pub fn copilot_header(dial: &crate::fleet::copilot_dial::CopilotDial) -> Vec<Lin
         Style::default().fg(SUBDUED_BORDER),
     )));
     lines
+}
+
+/// Render the broadcast pane: who it goes to, what has been typed, and what
+/// each recipient's leg did.
+///
+/// The recipient list is spelled out rather than counted. A count is enough for
+/// the tab label, where the operator is choosing a pane; it is not enough at
+/// the moment of sending, because the checkboxes are on the OTHER pane and may
+/// be scrolled off screen.
+pub fn render_broadcast(
+    frame: &mut Frame,
+    area: Rect,
+    broadcast: &crate::fleet::broadcast::Broadcast,
+    targets: &[String],
+    unreachable: usize,
+) {
+    use crate::fleet::broadcast::BroadcastPhase;
+    use ratatui::widgets::{Paragraph, Wrap};
+
+    let mut lines: Vec<Line<'static>> = vec![Line::from(vec![
+        Span::styled(" to  ", Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            targets.join(", "),
+            Style::default().fg(SOFT_WHITE).add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    if unreachable > 0 {
+        // Named, not silently dropped: the operator ticked these rows, and a
+        // send that quietly reached fewer sessions than were checked is the
+        // failure this line exists to prevent.
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {unreachable} checked session{} cannot be reached yet (no hook fired)",
+                if unreachable == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(ALERT_AMBER),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "\u{2500}".repeat(4),
+        Style::default().fg(SUBDUED_BORDER),
+    )));
+
+    match broadcast.phase() {
+        BroadcastPhase::Composing => lines.push(Line::from(vec![
+            Span::styled(" > ", Style::default().fg(GOLD)),
+            Span::styled(
+                broadcast.text().to_string(),
+                Style::default().fg(SOFT_WHITE),
+            ),
+            Span::styled("\u{2588}", Style::default().fg(SELECTION_GREEN)),
+        ])),
+        BroadcastPhase::Sending => lines.push(Line::from(Span::styled(
+            format!(" \u{25cf} sending to {}\u{2026}", targets.len()),
+            Style::default().fg(ALERT_AMBER),
+        ))),
+        BroadcastPhase::Failed(detail) => lines.push(Line::from(vec![
+            Span::styled(
+                " fleet/broadcast failed: ",
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(detail.clone(), Style::default().fg(SOFT_WHITE)),
+            // The text is still in the composer, and saying so is what stops
+            // an operator retyping a message the fleet never saw.
+            Span::styled(
+                " (your message is still here)",
+                Style::default().fg(MUTED_GRAY),
+            ),
+        ])),
+        BroadcastPhase::Sent(receipts) => {
+            let (delivered, total) = crate::fleet::broadcast::tally(receipts);
+            let all = delivered == total;
+            lines.push(Line::from(Span::styled(
+                format!(" delivered to {delivered} of {total}"),
+                Style::default()
+                    .fg(if all { SELECTION_GREEN } else { ALERT_AMBER })
+                    .add_modifier(Modifier::BOLD),
+            )));
+            // Every leg, always — including the ones that worked. A list of
+            // only the failures cannot be told apart from a list that failed
+            // to render.
+            for receipt in receipts {
+                let failed =
+                    receipt.status != ainb_hangar_proto::fleet::ActionReceiptStatus::Delivered;
+                let mut row = vec![
+                    Span::styled(
+                        format!("  {:<28}", receipt.session_key),
+                        Style::default().fg(SOFT_WHITE),
+                    ),
+                    Span::styled(
+                        ainb_hangar_proto::fleet::receipt_status_token(receipt.status).to_string(),
+                        Style::default().fg(if failed { ALERT_RED } else { SELECTION_GREEN }),
+                    ),
+                ];
+                if let Some(detail) = &receipt.detail {
+                    row.push(Span::styled(
+                        format!("  {detail}"),
+                        Style::default().fg(MUTED_GRAY),
+                    ));
+                }
+                lines.push(Line::from(row));
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 /// Render one chat conversation into the right pane.
