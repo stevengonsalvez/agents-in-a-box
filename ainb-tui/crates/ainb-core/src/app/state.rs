@@ -3574,6 +3574,14 @@ pub struct AppState {
     /// scope, and an operator who never opens the tab should never pay for it.
     pub copilot_chat: Option<crate::fleet::chat_host::ChatHost>,
 
+    /// The copilot pane's engine / model / guardrail header.
+    ///
+    /// NOT lazy like the conversation: the header is how an operator recovers
+    /// from an adapter that will not spawn, so it reads the registry the first
+    /// time the tab is rendered rather than waiting for a chat that may never
+    /// open. It costs one `fleet/adapter_list` per session.
+    pub copilot_dial: crate::fleet::copilot_dial::CopilotDial,
+
     /// The selected session's own thread, rebuilt when the selection moves to a
     /// different session.
     ///
@@ -4083,6 +4091,7 @@ impl Default for AppState {
             attention_elsewhere: 0,
             session_tab: crate::components::session_tabs::SessionTab::default(),
             ask_state: crate::fleet::answer::AskState::default(),
+            copilot_dial: crate::fleet::copilot_dial::CopilotDial::new(),
             copilot_chat: None,
             session_chat: None,
         }

@@ -151,10 +151,25 @@ impl LayoutComponent {
                 });
                 session_tabs::render_log(frame, inner, &rows);
             }
-            // Both are the same chat state machine over two topics, driven
-            // through one host, so the two conversations cannot drift in what
-            // they render or which failures they report.
-            SessionTab::Thread | SessionTab::Copilot => {
+            // The copilot carries a HEADER the thread does not: its engine,
+            // model and guardrail dial. The conversation under it is the same
+            // state machine either way, so the two cannot drift in what they
+            // render or which failures they report.
+            SessionTab::Copilot => {
+                // The dial ticks with the pane, so the registry read and any
+                // in-flight configure land without the operator pressing
+                // anything, exactly like the chat host's own tick.
+                if state.copilot_dial.tick() {
+                    state.ui_needs_refresh = true;
+                }
+                // Cloned rather than borrowed: `chat_host_for` needs `&mut
+                // state` to tick the conversation, and the header is three
+                // strings and a status.
+                let header = session_tabs::copilot_header(&state.copilot_dial);
+                let host = state.chat_host_for(active);
+                session_tabs::render_copilot(frame, inner, header, host);
+            }
+            SessionTab::Thread => {
                 match state.chat_host_for(active) {
                     Some(host) => session_tabs::render_chat(frame, inner, host),
                     // Reachable only for `thread` with no session selected,

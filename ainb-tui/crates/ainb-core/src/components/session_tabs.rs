@@ -598,6 +598,129 @@ fn wire_color(color: Option<ainb_plugin_protocol::wire_buffer::Color>) -> Color 
     color.map_or(Color::Reset, |color| Color::Rgb(color.r, color.g, color.b))
 }
 
+/// Render the copilot pane: the engine / model / mode header, then the
+/// conversation under it.
+///
+/// The header is drawn even when the conversation cannot be — a copilot with no
+/// live session still has an engine to pick and a registry to read, and the
+/// engine picker is how an operator RECOVERS from an adapter that will not
+/// spawn. Hiding it behind a working chat would put the fix behind the failure.
+pub fn render_copilot(
+    frame: &mut Frame,
+    area: Rect,
+    header: Vec<Line<'static>>,
+    host: Option<&crate::fleet::chat_host::ChatHost>,
+) {
+    let height = u16::try_from(header.len()).unwrap_or(u16::MAX).min(area.height);
+    let [head, rest] = Layout::vertical([
+        ratatui::layout::Constraint::Length(height),
+        ratatui::layout::Constraint::Min(0),
+    ])
+    .areas(area);
+    frame.render_widget(ratatui::widgets::Paragraph::new(header), head);
+    if rest.height == 0 {
+        return;
+    }
+    match host {
+        Some(host) => render_chat(frame, rest, host),
+        None => frame.render_widget(
+            ratatui::widgets::Paragraph::new("opening the copilot channel\u{2026}")
+                .style(Style::default().fg(MUTED_GRAY)),
+            rest,
+        ),
+    }
+}
+
+/// One setting row: label, value, and the key that cycles it.
+fn dial_row(label: &str, value: String, key: char, dim: bool) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {label:<7}"), Style::default().fg(MUTED_GRAY)),
+        Span::styled(
+            value,
+            Style::default().fg(if dim { MUTED_GRAY } else { SOFT_WHITE }),
+        ),
+        Span::styled("  \u{25c0} ", Style::default().fg(SUBDUED_BORDER)),
+        // The key sits NEXT TO the control it turns, not in a footer legend: a
+        // three-dial header with its bindings elsewhere is three things to
+        // remember instead of three things to read.
+        //
+        // ALT-modified, and shown that way. A bare letter is a letter to the
+        // composer below, which holds focus as soon as the conversation opens,
+        // so a bare binding would be advertised here and do nothing in the
+        // state an operator is usually in.
+        Span::styled(
+            format!("\u{2325}{key}"),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+#[must_use]
+pub fn copilot_header(dial: &crate::fleet::copilot_dial::CopilotDial) -> Vec<Line<'static>> {
+    use crate::fleet::copilot_dial::DialStatus;
+
+    let mut lines = vec![
+        dial_row(
+            "engine",
+            dial.engine().unwrap_or("\u{2026}").to_string(),
+            'e',
+            dial.engine().is_none(),
+        ),
+        dial_row(
+            "model",
+            // An adapter with no declared models runs its own default, and
+            // saying so beats an empty value that reads as a failed read.
+            dial.model().map_or_else(|| "adapter default".to_string(), ToString::to_string),
+            'o',
+            dial.model().is_none(),
+        ),
+        dial_row("mode", dial.mode().as_str().to_string(), 'g', false),
+    ];
+    // `yolo` fires destructive fleet tools with no card. It gets a banner
+    // because the whole point of the mode is that nothing else will stop and
+    // ask, so the pane itself has to be the reminder.
+    if dial.mode() == ainb_hangar_proto::fleet::FleetCopilotMode::Yolo {
+        lines.push(Line::from(Span::styled(
+            " yolo: writes fire with no confirm card (kill still asks)",
+            Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+        )));
+    }
+    if dial.session_replaced() {
+        lines.push(Line::from(Span::styled(
+            " engine swapped; this channel is on a new session",
+            Style::default().fg(SELECTION_GREEN),
+        )));
+    }
+    match dial.status() {
+        DialStatus::Idle => {}
+        DialStatus::Working(verb) => lines.push(Line::from(Span::styled(
+            format!(" \u{25cf} {verb}\u{2026}"),
+            Style::default().fg(ALERT_AMBER),
+        ))),
+        // The METHOD, then the detail, then the retry key: which call failed is
+        // the actionable half, and a failure with no way forward is the dead
+        // end this pane replaces.
+        DialStatus::Failed { call, detail } => lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {call} failed: "),
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(detail.clone(), Style::default().fg(SOFT_WHITE)),
+            Span::styled("  \u{25c0} ", Style::default().fg(SUBDUED_BORDER)),
+            Span::styled(
+                "\u{2325}r",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" retry", Style::default().fg(MUTED_GRAY)),
+        ])),
+    }
+    lines.push(Line::from(Span::styled(
+        "\u{2500}".repeat(4),
+        Style::default().fg(SUBDUED_BORDER),
+    )));
+    lines
+}
+
 /// Render one chat conversation into the right pane.
 pub fn render_chat(frame: &mut Frame, area: Rect, host: &crate::fleet::chat_host::ChatHost) {
     // Below this the chat renderer draws nothing at all rather than something
@@ -620,6 +743,130 @@ pub fn render_chat(frame: &mut Frame, area: Rect, host: &crate::fleet::chat_host
         host.state(),
     );
     blit_wire(frame, area, wire);
+}
+
+#[cfg(test)]
+mod copilot_header_tests {
+    use ainb_hangar_proto::fleet::{FleetAdapter, FleetCopilotMode};
+
+    use super::*;
+    use crate::fleet::copilot_dial::{CopilotDial, DialOutcome};
+
+    fn text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn dial(outcomes: Vec<DialOutcome>) -> CopilotDial {
+        let mut dial = CopilotDial::new();
+        dial.seed_for_test(outcomes);
+        dial
+    }
+
+    fn adapter(name: &str, models: &[&str]) -> FleetAdapter {
+        FleetAdapter {
+            name: name.to_string(),
+            command: name.to_string(),
+            permission_mode: "default".to_string(),
+            built_in: true,
+            models: models.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Every dial names the key that turns it, ON the row it turns. A header
+    /// whose bindings live in a footer legend is three things to remember.
+    #[test]
+    fn each_setting_carries_its_own_key() {
+        let rendered = text(&copilot_header(&dial(vec![DialOutcome::Adapters(vec![
+            adapter("claude-agent-acp", &["sonnet-5"]),
+        ])])));
+        for (label, key) in [("engine", "e"), ("model", "o"), ("mode", "g")] {
+            // Anchored on the padded label, not `contains`: "model" contains
+            // "mode", so a loose match hands the mode assertion the model row.
+            let row = rendered
+                .lines()
+                .find(|line| line.starts_with(&format!(" {label:<7}")))
+                .unwrap_or_else(|| panic!("no {label} row in:\n{rendered}"));
+            assert!(
+                row.contains(key),
+                "the {label} row does not name `{key}`: {row}"
+            );
+        }
+        assert!(rendered.contains("claude-agent-acp"));
+        assert!(rendered.contains("guarded"), "the dial defaults to guarded");
+    }
+
+    /// An adapter with no declared models runs its own default. Saying so beats
+    /// a blank value, which reads as a failed read.
+    #[test]
+    fn a_modelless_adapter_says_it_runs_its_own_default() {
+        let rendered = text(&copilot_header(&dial(vec![DialOutcome::Adapters(vec![
+            adapter("codex-acp", &[]),
+        ])])));
+        assert!(rendered.contains("adapter default"), "{rendered}");
+    }
+
+    /// `yolo` is the mode where nothing else stops to ask, so the pane itself
+    /// has to be the reminder — and it must still say `kill` is exempt.
+    #[test]
+    fn yolo_carries_its_banner_and_names_the_exemption() {
+        let rendered = text(&copilot_header(&dial(vec![
+            DialOutcome::Adapters(vec![adapter("claude-agent-acp", &[])]),
+            DialOutcome::Applied {
+                provider: "claude-agent-acp".to_string(),
+                mode: FleetCopilotMode::Yolo,
+                model: None,
+                replaced: false,
+            },
+        ])));
+        assert!(rendered.contains("yolo"), "{rendered}");
+        assert!(rendered.contains("no confirm card"), "{rendered}");
+        assert!(rendered.contains("kill still asks"), "{rendered}");
+
+        let guarded = text(&copilot_header(&dial(vec![DialOutcome::Adapters(vec![
+            adapter("claude-agent-acp", &[]),
+        ])])));
+        assert!(
+            !guarded.contains("no confirm card"),
+            "the banner must be yolo-only: {guarded}"
+        );
+    }
+
+    /// A swap changes which session the channel talks to. An operator who is
+    /// mid-conversation has to be told, or the empty timeline reads as a bug.
+    #[test]
+    fn a_replaced_session_is_announced() {
+        let rendered = text(&copilot_header(&dial(vec![
+            DialOutcome::Adapters(vec![
+                adapter("claude-agent-acp", &[]),
+                adapter("codex-acp", &[]),
+            ]),
+            DialOutcome::Applied {
+                provider: "codex-acp".to_string(),
+                mode: FleetCopilotMode::Guarded,
+                model: None,
+                replaced: true,
+            },
+        ])));
+        assert!(rendered.contains("engine swapped"), "{rendered}");
+        assert!(rendered.contains("new session"), "{rendered}");
+    }
+
+    /// The failure names the CALL and offers the way out. A dead end with no
+    /// retry is the symptom this pane replaces.
+    #[test]
+    fn a_failure_names_the_call_and_the_retry_key() {
+        let rendered = text(&copilot_header(&dial(vec![DialOutcome::Failed {
+            call: "fleet/adapter_list".to_string(),
+            detail: "daemon is not running".to_string(),
+        }])));
+        assert!(rendered.contains("fleet/adapter_list failed"), "{rendered}");
+        assert!(rendered.contains("daemon is not running"), "{rendered}");
+        assert!(rendered.contains("retry"), "{rendered}");
+    }
 }
 
 #[cfg(test)]

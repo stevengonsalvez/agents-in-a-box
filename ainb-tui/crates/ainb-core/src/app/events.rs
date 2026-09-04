@@ -1327,6 +1327,14 @@ impl EventHandler {
     /// the sessions screen — `Tab` still moves the strip and the attach digits
     /// still attach, which is the contract the footer advertises on every tab.
     fn route_session_composer_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        /// Which copilot header dial a key turned.
+        enum CopilotDialTurn {
+            Engine,
+            Model,
+            Mode,
+            Retry,
+        }
+
         use crate::components::session_tabs::SessionTab;
         use ainb_plugin_hangar::screen::fleet_chat::{ChatKey, ChatKeyOutcome, reduce_chat_key};
 
@@ -1344,6 +1352,42 @@ impl EventHandler {
         // with Esc.
         if key_event.code == KeyCode::Tab {
             return Some(AppEvent::SessionTabNext);
+        }
+        // The copilot header's dials, on ALT. Bare letters were the first shape
+        // and the tripwire killed it: the copilot composer holds focus as soon
+        // as the conversation opens, so `e` is an `e` in a half-typed message
+        // and the dials were unreachable in the steady state. Alt never types,
+        // so one binding works in both halves of the pane rather than a bare
+        // key that silently does nothing most of the time.
+        if state.session_tab == SessionTab::Copilot
+            && key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+        {
+            let turned = match key_event.code {
+                KeyCode::Char('e') => Some(CopilotDialTurn::Engine),
+                KeyCode::Char('o') => Some(CopilotDialTurn::Model),
+                KeyCode::Char('g') => Some(CopilotDialTurn::Mode),
+                // Retry is offered only where something failed, so it does not
+                // shadow anything while the header is healthy.
+                KeyCode::Char('r')
+                    if matches!(
+                        state.copilot_dial.status(),
+                        crate::fleet::copilot_dial::DialStatus::Failed { .. }
+                    ) =>
+                {
+                    Some(CopilotDialTurn::Retry)
+                }
+                _ => None,
+            };
+            if let Some(turn) = turned {
+                match turn {
+                    CopilotDialTurn::Engine => state.copilot_dial.cycle_engine(),
+                    CopilotDialTurn::Model => state.copilot_dial.cycle_model(),
+                    CopilotDialTurn::Mode => state.copilot_dial.cycle_mode(),
+                    CopilotDialTurn::Retry => state.copilot_dial.retry(),
+                }
+                state.ui_needs_refresh = true;
+                return Some(AppEvent::Consumed);
+            }
         }
         // Attach digits ARE passed through to the composer — a digit typed into
         // a message is a digit, and stealing it would make the composer unable
