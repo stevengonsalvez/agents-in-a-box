@@ -38,7 +38,7 @@ LAUNCH="HOME='$ISO' TMUX_TMPDIR='$ISO/tmux' AINB_PLUGIN_ROOT='$PLUGINS' AINB_BIN
 # Reads the five clauses out of the store and the worktree rather than the
 # screen. Lives in a helper so the tape's Type line carries no pattern that
 # would match its own echo.
-PROOF="$ISO/acp-proof/p3-acp-proof.sh"
+PROOF="$(cd "$(dirname "$0")" && pwd)/p3-acp-proof.sh"
 
 for t in vhs ffmpeg sqlite3; do command -v "$t" >/dev/null || { echo "missing: $t" >&2; exit 2; }; done
 [ -x "$BIN" ] || { echo "no ainb binary at $BIN" >&2; exit 2; }
@@ -120,7 +120,7 @@ Type "q"
 Sleep 2s
 Type "q"
 Sleep 4s
-Type "HOME='$ISO' bash $PROOF"
+Type "HOME='$ISO' bash $PROOF --latest"
 Enter
 Wait+Screen@30s /final message/
 Sleep 3s
@@ -148,7 +148,18 @@ fi
 gif_complete p3-acp-human-loop.gif || { echo "regenerated gif still truncated" >&2; exit 1; }
 
 for f in p3-acp-human-loop.mp4 p3-acp-4-ask-raised.png p3-acp-5-refusal-in-transcript.png \
-         p3-acp-7-transcript-proof.png p3-acp-8-ground-truth.png; do
+         p3-acp-6-answered-flip.png p3-acp-7-transcript-proof.png p3-acp-8-ground-truth.png; do
   [ -s "$f" ] || { echo "artifact missing or empty: $f" >&2; exit 1; }
 done
+
+# The tape TYPES the proof inside vhs, which records what it printed and
+# nothing else: `Wait+Screen /final message/` matches before the assertion line
+# is even written, so a FAILED proof would still record green. Run it again out
+# here, where the exit code is visible, and fail the recording on it.
+TASK=$(HOME="$ISO" sqlite3 "$ISO/.agents-in-a-box/hangar.db" \
+  "select id from agent_task_queue where session_id like 'acp:%' order by created_at desc limit 1;")
+HOME="$ISO" bash "$PROOF" "$TASK" || {
+  echo "the recorded run does not prove the criterion; artifacts kept for the post-mortem" >&2
+  exit 1
+}
 ls -la p3-acp-human-loop.gif p3-acp-human-loop.mp4 p3-acp-[0-9]-*.png
