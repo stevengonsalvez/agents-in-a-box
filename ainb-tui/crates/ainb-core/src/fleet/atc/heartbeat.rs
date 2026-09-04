@@ -18,9 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::fleet::read::{NeedsContext, NeedsRow};
 
-/// Maximum auto-`continue` attempts per session before ATC must escalate
-/// instead of retrying. Bounds the daemon's previously-unbounded behaviour.
-pub const DEFAULT_ERR_RETRY_CAP: u32 = 3;
+// The cap now lives in `ainb-hangar-core` and is re-exported here, unchanged,
+// at its original path. The daemon's LLM-free retry sweep enforces the SAME cap
+// without an ATC instance, and this crate sits above the daemon in the
+// dependency graph, so the one number both read has to be declared below both.
+pub use ainb_hangar_core::atc::DEFAULT_ERR_RETRY_CAP;
 
 /// The heartbeat process's own durable bookkeeping, persisted to
 /// `heartbeat-state.json` — a file written ONLY by the heartbeat process, never
