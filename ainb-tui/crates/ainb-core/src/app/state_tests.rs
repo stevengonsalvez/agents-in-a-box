@@ -1891,6 +1891,187 @@ mod tests {
         );
     }
 
+    // ========================================================================
+    // Attention merge: the daemon's rows landing on session rows
+    // ========================================================================
+
+    /// One workspace, one session, at `cwd`, with a live pane.
+    fn state_with_session_at(cwd: &str, tmux: Option<&str>) -> AppState {
+        use crate::models::{Session, SessionStatus, Workspace};
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        let mut workspace = Workspace::new("proj".to_string(), PathBuf::from(cwd));
+        let mut session = Session::new("proj".to_string(), cwd.to_string());
+        session.status = SessionStatus::Idle;
+        session.tmux_session_name = tmux.map(str::to_string);
+        workspace.add_session(session);
+        state.workspaces.push(workspace);
+        state
+    }
+
+    /// Install a daemon snapshot with one row at `cwd`.
+    fn install_daemon_row(
+        state: &AppState,
+        cwd: &str,
+        chip: crate::fleet::attention::SessionAttention,
+    ) {
+        use crate::fleet::attention::DaemonAttention;
+        let mut by_cwd = std::collections::HashMap::new();
+        by_cwd.insert(cwd.to_string(), vec![chip]);
+        *state.daemon_attention.lock().unwrap() = DaemonAttention::up(by_cwd);
+    }
+
+    #[test]
+    fn a_daemon_row_lands_on_its_session_even_with_no_notifications_store() {
+        use crate::fleet::attention::{AttentionKind, AttentionSource, SessionAttention};
+        // The local producer is the FLOOR, not a gate. A host that never ran
+        // notifyd has no notifications.db at all; before this the whole refresh
+        // returned early there and the daemon's rows never landed.
+        let cwd = "/work/daemon-only";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into())
+                .with_detail("Decide the sqlite path"),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        let chips = &state.workspaces[0].sessions[0].live_attention;
+        assert_eq!(chips.len(), 1, "the daemon row must land: {chips:?}");
+        assert_eq!(chips[0].kind, AttentionKind::Ask);
+        assert_eq!(chips[0].source, AttentionSource::Daemon);
+        assert_eq!(chips[0].detail.as_deref(), Some("Decide the sqlite path"));
+    }
+
+    #[test]
+    fn a_daemon_row_is_routed_through_the_daemon_while_it_is_up() {
+        use crate::fleet::attention::{Answerable, AttentionKind, SessionAttention};
+        let cwd = "/work/routed";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-9".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert_eq!(
+            state.workspaces[0].sessions[0].live_attention[0].answerable,
+            Answerable::Daemon {
+                attention_id: "att-9".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_daemon_row_greys_out_with_a_reason_once_the_daemon_goes() {
+        use crate::fleet::attention::{AttentionKind, DaemonAttention, SessionAttention};
+        let cwd = "/work/gone";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        // The row is present but the daemon is NOT reachable — the shape a
+        // client sees between a cached row and a failed poll.
+        let mut by_cwd = std::collections::HashMap::new();
+        by_cwd.insert(
+            cwd.to_string(),
+            vec![SessionAttention::daemon(
+                AttentionKind::Ask,
+                1_000,
+                "att-1".into(),
+            )],
+        );
+        *state.daemon_attention.lock().unwrap() = DaemonAttention {
+            by_cwd,
+            reachable: false,
+            error: Some("attention/list via /x/hangar.sock: refused".into()),
+        };
+
+        state.refresh_attention_markers(2_000);
+
+        let chip = &state.workspaces[0].sessions[0].live_attention[0];
+        assert!(
+            !chip.answerable.is_answerable(),
+            "an ACP-backed row with no daemon must not look answerable"
+        );
+        assert!(
+            chip.answerable.refusal().is_some_and(|r| r.contains("attention/answer")),
+            "and it must say which call is unavailable: {:?}",
+            chip.answerable
+        );
+    }
+
+    #[test]
+    fn a_daemon_row_for_a_cwd_on_no_row_is_counted_elsewhere() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let mut state = state_with_session_at("/work/on-screen", Some("tmux_proj"));
+        install_daemon_row(
+            &state,
+            "/work/somewhere-else",
+            SessionAttention::daemon(AttentionKind::Approve, 1_000, "att-x".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert!(state.workspaces[0].sessions[0].live_attention.is_empty());
+        assert_eq!(
+            state.attention_elsewhere, 1,
+            "a request the screen cannot place is still a request"
+        );
+    }
+
+    #[test]
+    fn an_attached_session_claims_its_cwd_so_it_is_not_reported_elsewhere() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/attached";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        state.workspaces[0].sessions[0].is_attached = true;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert!(
+            state.workspaces[0].sessions[0].live_attention.is_empty(),
+            "an attached session never nags — the operator is looking at it"
+        );
+        assert_eq!(
+            state.attention_elsewhere, 0,
+            "the session under the cursor must not be reported as waiting elsewhere"
+        );
+    }
+
+    #[test]
+    fn a_daemon_row_survives_a_generating_session() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        use crate::models::SessionStatus;
+        // The generating gate exists because the LOCAL producer infers waiting
+        // from a quiet pane, which is a guess. A daemon row is a request the
+        // agent actually raised, and an agent can be mid-turn and blocked on an
+        // approval at once — suppressing it there is how an operator ends up
+        // watching a spinner that is waiting on them.
+        let cwd = "/work/busy";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        state.workspaces[0].sessions[0].status = SessionStatus::Running;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Approve, 1_000, "att-1".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert_eq!(
+            state.workspaces[0].sessions[0].live_attention.len(),
+            1,
+            "a generating session can still be blocked on an approval"
+        );
+    }
+
     #[test]
     fn agent_hook_name_maps_supported_hook_agents() {
         assert_eq!(

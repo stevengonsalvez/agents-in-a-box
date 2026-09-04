@@ -3566,6 +3566,22 @@ pub struct AppState {
     /// activity that arrives after they look away.
     pub attention_baseline: HashMap<Uuid, i64>,
 
+    /// The daemon's half of the attention picture, refreshed by
+    /// [`crate::fleet::attention_poll`] on its own thread.
+    ///
+    /// Read on the render path, never dialled there: a wedged daemon socket
+    /// must cost a frame nothing.
+    pub daemon_attention: crate::fleet::attention_poll::Shared,
+
+    /// Whether the attention poller thread is alive, so the render loop can
+    /// start one without having to remember whether it already did.
+    pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Daemon attention rows whose cwd matched no row on this screen, counted
+    /// for the header so the ONE attention surface never silently swallows a
+    /// request it could not place.
+    pub attention_elsewhere: usize,
+
     /// Per-session instant (epoch ms) the ERR chip's failure was FIRST
     /// observed. `SessionStatus::Error` carries no timestamp of its own, so
     /// without this the chip's age would reset to `0s` on every refresh and an
@@ -4042,6 +4058,11 @@ impl Default for AppState {
             // Per-session attention markers, driven by ainb-hooks events.
             attention_baseline: HashMap::new(),
             attention_error_since: HashMap::new(),
+            daemon_attention: Arc::new(Mutex::new(
+                crate::fleet::attention::DaemonAttention::default(),
+            )),
+            attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            attention_elsewhere: 0,
         }
     }
 }
@@ -11619,15 +11640,31 @@ impl AppState {
     /// have their baseline advanced to "now", so re-marking only happens
     /// for activity that arrives after the user looks away.
     fn refresh_attention_markers(&mut self, now_ms: i64) {
-        let Some(recent) = self.recent_attention_events(now_ms) else {
-            return;
-        };
+        // The local producer is the FLOOR, not an optimisation: with no
+        // notifications store at all the daemon's rows must still land, so a
+        // missing store is an empty read, not an early return.
+        let recent = self.recent_attention_events(now_ms).unwrap_or_default();
+        // Snapshot the daemon's half once. Holding the lock across the whole
+        // loop would put the poller's 5-second write behind a render pass.
+        let daemon = self
+            .daemon_attention
+            .lock()
+            .map(|cell| cell.clone())
+            .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
+        // Every cwd a row on screen consumed, so the rows that matched nothing
+        // can be counted rather than dropped.
+        let mut claimed: HashSet<String> = HashSet::new();
 
         // Phase 1 — read-only compute (no mutable borrow of self).
         let mut marks: Vec<(Uuid, Vec<SessionAttention>, bool, bool)> = Vec::new();
         for ws in &self.workspaces {
             for s in &ws.sessions {
                 if s.is_attached {
+                    // An attached session never nags: the operator is looking
+                    // straight at it. Its cwd is still claimed, or the daemon
+                    // row for the session under the cursor would be reported as
+                    // waiting somewhere else.
+                    claimed.insert(s.workspace_path.trim_end_matches('/').to_string());
                     marks.push((s.id, Vec::new(), true, false));
                     continue;
                 }
@@ -11647,6 +11684,19 @@ impl AppState {
                 ) {
                     chips.push(chip);
                 }
+                // The daemon's rows for the same worktree. Added unconditionally,
+                // NOT gated on `generating`: the generating gate exists because
+                // the local producer infers "waiting" from a quiet pane, which is
+                // a guess. A daemon row is a request the agent actually raised,
+                // and an agent can be mid-turn and blocked on an approval at the
+                // same time — suppressing it there is how an operator ends up
+                // watching a spinner that is waiting on them.
+                let cwd = s.workspace_path.trim_end_matches('/').to_string();
+                let daemon_rows = daemon.rows_for(&cwd);
+                if !daemon_rows.is_empty() {
+                    claimed.insert(cwd.clone());
+                    chips.extend(daemon_rows.iter().cloned());
+                }
                 let failed = matches!(s.status, crate::models::SessionStatus::Error(_));
                 marks.push((s.id, chips, false, failed));
             }
@@ -11656,7 +11706,8 @@ impl AppState {
         // the ERR chip's first-observed instant, and writing the chips are
         // separate self borrows, taken in turn.
         let mut changed = false;
-        let live: std::collections::HashSet<Uuid> = marks.iter().map(|(id, ..)| *id).collect();
+        let reachable = daemon.reachable;
+        let live: HashSet<Uuid> = marks.iter().map(|(id, ..)| *id).collect();
         // A session that recovered (or vanished) must lose its ERR clock, or a
         // later failure would render with the age of the previous one.
         self.attention_error_since.retain(|id, _| live.contains(id));
@@ -11677,13 +11728,27 @@ impl AppState {
             } else {
                 self.attention_error_since.remove(&id);
             }
-            let chips = crate::fleet::attention::normalise(chips);
+            let mut chips = crate::fleet::attention::normalise(chips);
+            // Route each surviving chip against the session it landed on. Done
+            // here, after the merge, because only the session row knows whether
+            // there is a pane to type into — and only now is it settled which
+            // producer's row won.
+            let tmux = self.find_session(id).and_then(|s| s.tmux_session_name.clone());
+            for chip in &mut chips {
+                chip.answerable =
+                    crate::fleet::attention::route_answer(chip, tmux.as_deref(), reachable);
+            }
             if let Some(s) = self.find_session_mut(id) {
                 if s.live_attention != chips {
                     s.live_attention = chips;
                     changed = true;
                 }
             }
+        }
+        let elsewhere = daemon.elsewhere(&claimed);
+        if self.attention_elsewhere != elsewhere {
+            self.attention_elsewhere = elsewhere;
+            changed = true;
         }
         if changed {
             self.ui_needs_refresh = true;
@@ -11829,10 +11894,18 @@ impl AppState {
             self.ui_needs_refresh = true;
         }
 
-        // Now that per-session running/idle status is current, recompute
-        // each session's attention marker (`[!]`/`[?]`/`[✓]`) from recent
-        // ainb-hooks events. Independent of pane capture, so it also
+        // Now that per-session running/idle status is current, recompute each
+        // session's attention chips. Independent of pane capture, so it also
         // covers sessions with no live pane (stopped / never-captured).
+        //
+        // The daemon poller is started here rather than at construction: this
+        // is the first point at which the sessions surface is actually being
+        // rendered, so a `ainb` invocation that never opens the TUI never dials
+        // the socket. `spawn` is idempotent.
+        crate::fleet::attention_poll::spawn(
+            &self.daemon_attention,
+            &self.attention_poll_running,
+        );
         self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)
