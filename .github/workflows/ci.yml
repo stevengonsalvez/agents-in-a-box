@@ -496,6 +496,18 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test tripwire_sessions_copilot_engine_swap --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
+      # Named here for the same reason as the two above: the `Test` job filters
+      # `not binary(/^tripwire_/)`, so a tripwire nobody names is a tripwire
+      # nobody runs. Three CI-ungated ones were already red before this branch
+      # noticed, which is the failure mode this line exists to avoid.
+      - name: Tripwire — an answer's outcome stays on its own question
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: >-
+          cargo test -p ainb --test tripwire_sessions_answer_outcome_per_question
+          --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
       - name: Sandbox script safety guards (rm -rf belts)
         if: >-
           !cancelled() && (github.event_name != 'pull_request' ||
