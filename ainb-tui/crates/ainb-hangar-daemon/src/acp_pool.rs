@@ -181,6 +181,11 @@ struct AcpAdapterToml {
     command: Option<String>,
     #[serde(default)]
     permission_mode: Option<String>,
+    /// Model ids the engine picker cycles. Absent means the adapter runs
+    /// whatever it defaults to and the picker says so; see
+    /// [`ainb_acp::config::AdapterConfig::models`].
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 /// Read `[acp.adapters]` from `~/.agents-in-a-box/config/config.toml`.
@@ -321,6 +326,9 @@ impl PoolConfig {
             // that cannot spawn.
             if let Some(command) = adapter.command.filter(|c| !c.trim().is_empty()) {
                 entry.command = std::path::PathBuf::from(command);
+            }
+            if !adapter.models.is_empty() {
+                entry.models = adapter.models;
             }
             if let Some(mode) = adapter.permission_mode {
                 // Validated here, not just in the settings screen: the row's

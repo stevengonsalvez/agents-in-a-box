@@ -54,6 +54,14 @@ pub struct AdapterConfig {
     /// Empty by default: part 1 ships no configured model or reasoning value,
     /// only the mechanism that keeps one from being silently lost on resume.
     pub config_options: Vec<(String, String)>,
+    /// The model ids an operator has declared for this adapter, in the order
+    /// the picker cycles them.
+    ///
+    /// ACP has no model-discovery call, so there is no way to ASK an adapter
+    /// what it can run: this list is the only honest source, and an empty one
+    /// means the picker says the adapter has no models configured rather than
+    /// offering a guess that would silently fail at `session/set_config_option`.
+    pub models: Vec<String>,
 }
 
 impl AdapterConfig {
@@ -69,6 +77,7 @@ impl AdapterConfig {
             env_passthrough: Vec::new(),
             extra_env: Vec::new(),
             config_options: Vec::new(),
+            models: Vec::new(),
         }
     }
 
@@ -97,6 +106,13 @@ impl AdapterConfig {
     #[must_use]
     pub fn config_options(mut self, options: Vec<(String, String)>) -> Self {
         self.config_options = options;
+        self
+    }
+
+    /// Declare the model ids the picker may cycle for this adapter.
+    #[must_use]
+    pub fn models(mut self, models: Vec<String>) -> Self {
+        self.models = models;
         self
     }
 

@@ -1289,6 +1289,7 @@ async fn handle(
         methods::FLEET_CHANNEL_CREATE => handle_fleet_channel_create(pool, req).await,
         methods::FLEET_CHANNEL_LIST => handle_fleet_channel_list(pool, req).await,
         methods::FLEET_COPILOT_CONFIGURE => handle_fleet_copilot_configure(pool, req, events).await,
+        methods::FLEET_ADAPTER_LIST => handle_fleet_adapter_list(req).await,
         methods::FLEET_CONFIRM_LIST => handle_fleet_confirm_list(pool, req).await,
         methods::FLEET_CONFIRM_ANSWER => handle_fleet_confirm_answer(pool, req, events).await,
         methods::FLEET_ACTIVITY_LIST => handle_fleet_activity_list(pool, req).await,
@@ -2667,6 +2668,7 @@ async fn handle_fleet_channel_create(
         .to_string(),
         name,
         recipients,
+        copilot_mode: ainb_hangar_proto::fleet::FleetCopilotMode::default().as_str().to_string(),
         created_at: SystemClock.now_ms(),
     };
     let row = FleetChannelRepo::insert(pool, &row).await.map_err(|error| store_err(&error))?;
@@ -2741,7 +2743,7 @@ async fn handle_fleet_copilot_configure(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_proto::fleet::{
         FLEET_CAPABILITY_COPILOT_CONFIGURE, FLEET_COPILOT_PERSONA_MAX, FleetCopilotConfigureParams,
-        FleetCopilotConfigureResult, FleetCopilotProvider,
+        FleetCopilotConfigureResult, FleetCopilotMode,
     };
     use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionConfig, FleetAcpSessionRepo};
     use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
@@ -2757,12 +2759,22 @@ async fn handle_fleet_copilot_configure(
             }
         }
     }
-    let params: FleetCopilotConfigureParams =
-        parse_params(req, "{ provider, model?, reasoning_effort?, persona? }")?;
-    let adapter = match params.provider {
-        FleetCopilotProvider::Claude => "claude-agent-acp",
-        FleetCopilotProvider::Codex => "codex-acp",
-    };
+    let params: FleetCopilotConfigureParams = parse_params(
+        req,
+        "{ provider, copilot_mode?, model?, reasoning_effort?, persona? }",
+    )?;
+    // Validated against the LIVE adapter registry, the same one
+    // `fleet/acp_session_create` uses. That is what lets `provider` be a string:
+    // an operator's `[acp.adapters.*]` entry is selectable the moment it exists,
+    // and a name nobody configured is refused here rather than becoming a spawn
+    // attempt on an arbitrary program.
+    let acp = crate::acp_pool::active_handle().await;
+    let adapter = params.provider.trim();
+    if !adapter_is_known(adapter).await {
+        return Err(invalid_params(&format!(
+            "unknown adapter {adapter:?}; fleet/adapter_list names the ones this daemon can spawn"
+        )));
+    }
     let persona = params.persona.clone();
     if let Some(persona) = &persona {
         if persona.len() > FLEET_COPILOT_PERSONA_MAX {
@@ -2795,15 +2807,57 @@ async fn handle_fleet_copilot_configure(
                 channel.scope_key, channel.scope_key
             ))
         })?;
-    // A provider swap is a DIFFERENT adapter process and a different session;
-    // silently writing the new token onto the old row would leave a session
-    // whose stored provider and running adapter disagree.
-    if session.provider != adapter {
-        return Err(invalid_params(&format!(
-            "the copilot session runs {:?}; a provider change needs a new session on a new channel",
-            session.provider
-        )));
-    }
+    // The dial FIRST, and independently of the swap below: an operator turning
+    // the guardrail down to `help` while the engine picker is mid-swap must get
+    // the restriction applied even if the swap then fails.
+    let mode = match params.copilot_mode {
+        Some(mode) => {
+            FleetChannelRepo::set_mode(pool, &channel.scope_key, mode.as_str())
+                .await
+                .map_err(|error| store_err(&error))?;
+            mode
+        }
+        None => FleetCopilotMode::parse(&channel.copilot_mode).unwrap_or_default(),
+    };
+
+    // A provider swap is a DIFFERENT adapter process and a different agent, so
+    // the old session is RETIRED and a new one minted on the SAME channel
+    // scope. Writing the new token onto the old row would leave a session whose
+    // stored provider and running adapter disagree; refusing the swap outright
+    // (what this did before) left the operator with an engine picker whose only
+    // working move was to abandon the conversation and start another channel.
+    let (session, session_replaced) = if session.provider == adapter {
+        (session, false)
+    } else {
+        let retiring = session.session_key.clone();
+        if let Some(acp) = acp.as_ref() {
+            acp.teardown(&retiring, crate::acp_pool::ConvergeCause::OperatorStop).await;
+        }
+        // DEAD, not EVICTED: an eviction is a session the pool intends to bring
+        // back, and this one is never coming back under this adapter. It also
+        // takes the row out of `get_live_by_scope`, which is what frees the
+        // scope for the replacement below.
+        FleetAcpSessionRepo::set_state(pool, &retiring, "DEAD", SystemClock.now_ms())
+            .await
+            .map_err(|error| internal(&format!("retiring the copilot session: {error}")))?;
+        let (minted, _) = mint_acp_session(pool, events, adapter, &session.cwd, &channel.scope_key)
+            .await
+            .map_err(|error| {
+                tracing::error!(
+                    %retiring, %adapter, ?error,
+                    "the copilot session was retired but its replacement could not be minted"
+                );
+                error
+            })?;
+        tracing::info!(
+            retired = %retiring,
+            session_key = %minted.session_key,
+            scope_key = %channel.scope_key,
+            %adapter,
+            "copilot engine swapped; the channel kept its scope"
+        );
+        (minted, true)
+    };
 
     let config = FleetAcpSessionConfig {
         model: params.model.clone(),
@@ -2818,20 +2872,195 @@ async fn handle_fleet_copilot_configure(
     // TEXT is deliberately not in the row: this feed is readable by anyone with
     // `fleet.chat.read`, and the persona is gated behind a stronger capability.
     let detail = format!(
-        "provider={adapter} model={} reasoning={} persona={}",
+        "provider={adapter} mode={} model={} reasoning={} persona={}{}",
+        mode.as_str(),
         config.model.as_deref().unwrap_or("-"),
         config.reasoning_effort.as_deref().unwrap_or("-"),
-        if config.persona.is_some() { "set" } else { "-" }
+        if config.persona.is_some() { "set" } else { "-" },
+        if session_replaced {
+            " session=replaced"
+        } else {
+            ""
+        }
     );
     crate::copilot::record_configure(pool, events, &channel.scope_key, &detail).await;
 
     to_value(&FleetCopilotConfigureResult {
         session_key: session.session_key,
-        provider: params.provider,
+        provider: adapter.to_string(),
+        copilot_mode: mode,
+        session_replaced,
         model: config.model,
         reasoning_effort: config.reasoning_effort,
         persona_set: config.persona.is_some(),
     })
+}
+
+/// The registry as the daemon would spawn from it RIGHT NOW.
+///
+/// The pool's live config when there is a pool, and the CONFIG FILE when there
+/// is not — never the two-name built-in floor. That floor was the fallback on
+/// both validation paths and it disagreed with `fleet/adapter_list`, which
+/// already read config: the picker offered an operator's configured adapter and
+/// the configure call then refused it as unknown. One resolution, so a name the
+/// list offers is a name the write accepts.
+async fn adapter_registry() -> crate::acp_pool::PoolConfig {
+    crate::acp_pool::active_handle()
+        .await
+        .map_or_else(crate::acp_pool::PoolConfig::from_config, |pool| {
+            pool.config().clone()
+        })
+}
+
+/// Whether the registry can spawn `provider`. See [`adapter_registry`].
+async fn adapter_is_known(provider: &str) -> bool {
+    adapter_registry().await.knows(provider.trim())
+}
+
+/// Every adapter this daemon's registry can spawn, in name order.
+///
+/// The engine picker reads THIS rather than a list compiled into the client,
+/// which is the whole reason `provider` is a validated string: an adapter added
+/// to `[acp.adapters.*]` is selectable without a new build on either side.
+async fn handle_fleet_adapter_list(req: &RpcRequest) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_CHAT_READ, FleetAdapter, FleetAdapterListParams, FleetAdapterListResult,
+    };
+
+    require_fleet_capability(FLEET_CAPABILITY_CHAT_READ)?;
+    let _params: FleetAdapterListParams = parse_params(req, "{}")?;
+    let config = adapter_registry().await;
+    let mut adapters: Vec<FleetAdapter> = config
+        .adapters
+        .iter()
+        .map(|(name, adapter)| FleetAdapter {
+            name: name.clone(),
+            command: adapter.command.display().to_string(),
+            permission_mode: adapter.permission_mode.clone(),
+            built_in: ainb_acp::config::AdapterConfig::is_known_adapter(name),
+            models: adapter.models.clone(),
+        })
+        .collect();
+    adapters.sort_by(|left, right| left.name.cmp(&right.name));
+    to_value(&FleetAdapterListResult { adapters })
+}
+
+/// [`mint_acp_session`] onto the session's OWN `session:<key>` scope.
+///
+/// A separate entry point because the scope embeds the minted key, so it cannot
+/// be passed in: the caller does not know it yet.
+async fn mint_acp_session_on_own_scope(
+    pool: &SqlitePool,
+    events: &EventSink,
+    provider: &str,
+    cwd: &str,
+) -> Result<
+    (
+        ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRow,
+        String,
+    ),
+    RpcError,
+> {
+    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
+    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
+    let scope_key = format!("session:{session_key}");
+    mint_acp_session_with_key(pool, events, session_key, provider, cwd, &scope_key).await
+}
+
+/// Mint one `fleet_acp_session` row (plus its fleet session) on `scope_key`.
+///
+/// Shared by `fleet/acp_session_create` and the copilot engine swap so the two
+/// cannot drift: a session minted by one path and read by the other must carry
+/// the same capabilities, the same pinned permission mode, and the same
+/// `acp_session_created` event.
+async fn mint_acp_session(
+    pool: &SqlitePool,
+    events: &EventSink,
+    provider: &str,
+    cwd: &str,
+    scope_key: &str,
+) -> Result<
+    (
+        ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRow,
+        String,
+    ),
+    RpcError,
+> {
+    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
+    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
+    mint_acp_session_with_key(pool, events, session_key, provider, cwd, scope_key).await
+}
+
+async fn mint_acp_session_with_key(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session_key: String,
+    provider: &str,
+    cwd: &str,
+    scope_key: &str,
+) -> Result<
+    (
+        ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRow,
+        String,
+    ),
+    RpcError,
+> {
+    use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
+    use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionRepo, NewFleetAcpSession};
+
+    // From the SAME registry the name was validated against, so a config-only
+    // adapter gets its configured pin rather than the bare default.
+    let permission_mode = adapter_registry().await.permission_mode(provider);
+    let now = SystemClock.now_ms();
+    let event = NewFleetEvent {
+        event_id: format!("acp-session-create:{session_key}"),
+        session_key: session_key.clone(),
+        observed_at: now,
+        authority: ObservationAuthority::Authoritative,
+        event_type: "acp_session_created".to_string(),
+        payload: serde_json::json!({
+            "provider": provider,
+            "cwd": cwd,
+            "scopeKey": scope_key,
+            "permissionMode": permission_mode,
+        })
+        .to_string(),
+        patch: FleetSessionPatch {
+            provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
+            cwd: Some(cwd.to_string()),
+            display_name: crate::fleet::display_name_for_cwd(cwd),
+            management_state: Some("MANAGED".to_string()),
+            capabilities: Some(acp_capabilities()),
+            confidence: Some("HIGH".to_string()),
+            lifecycle_state: Some("IDLE".to_string()),
+            attention_state: Some("NONE".to_string()),
+            transport_health: Some("HEALTHY".to_string()),
+            ..FleetSessionPatch::default()
+        },
+    };
+    let (row, revision) = FleetAcpSessionRepo::insert_with_fleet_session(
+        pool,
+        &NewFleetAcpSession {
+            session_key: session_key.clone(),
+            scope_key: scope_key.to_string(),
+            provider: provider.to_string(),
+            cwd: cwd.to_string(),
+            permission_mode,
+            state: "IDLE".to_string(),
+            created_at: now,
+            last_active_at: now,
+        },
+        &event,
+    )
+    .await
+    .map_err(|error| internal(&format!("acp session create: {error}")))?;
+    if let Some(revision) = revision {
+        events.emit_fleet_revision(revision);
+    }
+    // The MINTED key comes back alongside the row so a caller can tell a fresh
+    // session from a replay onto a scope somebody else already holds: the
+    // insert answers a held scope with the HELD row, and the two keys differ.
+    Ok((row, session_key))
 }
 
 /// The open confirm cards awaiting an operator.
@@ -2928,7 +3157,7 @@ async fn handle_fleet_copilot_gate(
     events: &EventSink,
     caller: &auth::Caller,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_fleet_tools::guardrail::Guardrail;
+    use ainb_fleet_tools::guardrail::{CopilotMode, Guardrail};
     use ainb_hangar_proto::fleet::{
         FLEET_CAPABILITY_COPILOT_GATE, FleetCopilotGateParams, FleetCopilotGateResult,
         FleetGateVerdict,
@@ -2966,7 +3195,13 @@ async fn handle_fleet_copilot_gate(
     // ponytail: the pinned set is empty until phase B computes it from the
     // operator message that triggered the turn. Empty is the FAIL-CLOSED value,
     // not a stub: it makes every `answer_need` take a confirm card.
-    let guardrail = Guardrail::default();
+    //
+    // The DIAL is read from the channel row on every call, not cached for the
+    // session: an operator who turns the copilot down to `help` mid-turn means
+    // the write in flight behind it, and a mode pinned at session start would
+    // let that write through.
+    let guardrail = Guardrail::default()
+        .with_mode(CopilotMode::parse(&channel.copilot_mode).unwrap_or_default());
     let outcome = crate::copilot::gate(
         pool,
         events,
@@ -5822,8 +6057,6 @@ async fn handle_fleet_acp_session_create(
     use ainb_hangar_proto::fleet::{
         FLEET_CAPABILITY_ACP_SPAWN, FleetAcpSessionCreateParams, FleetAcpSessionCreateResult,
     };
-    use ainb_hangar_store::repo::fleet::{FleetSessionPatch, NewFleetEvent, ObservationAuthority};
-    use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionRepo, NewFleetAcpSession};
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
     let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
@@ -5836,72 +6069,23 @@ async fn handle_fleet_acp_session_create(
     // Validated against the ADAPTER REGISTRY, not the schema: the store only
     // length-checks `provider` so the next adapter needs no migration, which
     // makes this the one place an unknown token is refused.
-    let acp = crate::acp_pool::active_handle().await;
-    let known = acp.as_ref().map_or_else(
-        || ainb_acp::config::AdapterConfig::is_known_adapter(&params.provider),
-        |pool| pool.config().knows(&params.provider),
-    );
-    if !known {
+    if !adapter_is_known(&params.provider).await {
         return Err(invalid_params(&format!(
-            "unknown ACP provider {:?}; known adapters are {} and {}",
-            params.provider,
-            ainb_acp::config::CLAUDE_ADAPTER,
-            ainb_acp::config::CODEX_ADAPTER
+            "unknown ACP provider {:?}; fleet/adapter_list names the ones this daemon can spawn",
+            params.provider
         )));
     }
-    let permission_mode = acp.as_ref().map_or_else(
-        || "default".to_string(),
-        |pool| pool.config().permission_mode(&params.provider),
-    );
 
-    let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
-    let scope_key = params.scope_key.clone().unwrap_or_else(|| format!("session:{session_key}"));
-    let now = SystemClock.now_ms();
-    let event = NewFleetEvent {
-        event_id: format!("acp-session-create:{session_key}"),
-        session_key: session_key.clone(),
-        observed_at: now,
-        authority: ObservationAuthority::Authoritative,
-        event_type: "acp_session_created".to_string(),
-        payload: serde_json::json!({
-            "provider": params.provider,
-            "cwd": params.cwd,
-            "scopeKey": scope_key,
-            "permissionMode": permission_mode,
-        })
-        .to_string(),
-        patch: FleetSessionPatch {
-            // `acp` on the WIRE, with the concrete adapter in
-            // `fleet_acp_session.provider`. The snapshot maps this token to
-            // `FleetProvider::Acp`; anything else would render as Unknown.
-            provider: Some(crate::acp_pool::ACP_PROVIDER_TOKEN.to_string()),
-            cwd: Some(params.cwd.clone()),
-            display_name: crate::fleet::display_name_for_cwd(&params.cwd),
-            management_state: Some("MANAGED".to_string()),
-            capabilities: Some(acp_capabilities()),
-            confidence: Some("HIGH".to_string()),
-            lifecycle_state: Some("IDLE".to_string()),
-            attention_state: Some("NONE".to_string()),
-            transport_health: Some("HEALTHY".to_string()),
-            ..FleetSessionPatch::default()
-        },
+    // The scope defaults to the session's OWN, which embeds the key, so the two
+    // shapes are separate entry points rather than an `Option` the mint has to
+    // unpick.
+    let (row, session_key) = match params.scope_key.as_deref() {
+        Some(scope_key) => {
+            mint_acp_session(pool, events, &params.provider, &params.cwd, scope_key).await?
+        }
+        None => mint_acp_session_on_own_scope(pool, events, &params.provider, &params.cwd).await?,
     };
-    let (row, revision) = FleetAcpSessionRepo::insert_with_fleet_session(
-        pool,
-        &NewFleetAcpSession {
-            session_key: session_key.clone(),
-            scope_key,
-            provider: params.provider.clone(),
-            cwd: params.cwd.clone(),
-            permission_mode,
-            state: "IDLE".to_string(),
-            created_at: now,
-            last_active_at: now,
-        },
-        &event,
-    )
-    .await
-    .map_err(|error| internal(&format!("acp session create: {error}")))?;
+
     // The scope was ALREADY held by a live session, so this create replayed onto
     // it instead of minting the key above. Idempotent only while the caller
     // asked for the same SESSION: answering a `codex-acp` create with a live
@@ -5924,9 +6108,6 @@ async fn handle_fleet_acp_session_create(
                 row.scope_key
             )));
         }
-    }
-    if let Some(revision) = revision {
-        events.emit_fleet_revision(revision);
     }
     to_value(&FleetAcpSessionCreateResult {
         session_key: row.session_key,
@@ -12833,6 +13014,7 @@ mod tests {
             name: "ops".into(),
             scope_key: "channel:01J0CHAN".into(),
             recipients: vec!["claude:one".into()],
+            copilot_mode: "guarded".into(),
             created_at: 1,
         };
 

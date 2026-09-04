@@ -23,7 +23,7 @@ use ainb_hangar_proto::fleet::{
     FleetActivityOutcome, FleetChannelCreateParams, FleetChannelCreateResult, FleetChannelKind,
     FleetChannelListResult, FleetConfirmAnswer, FleetConfirmAnswerParams, FleetConfirmAnswerResult,
     FleetConfirmEventParams, FleetConfirmListResult, FleetConfirmState,
-    FleetCopilotConfigureParams, FleetCopilotConfigureResult, FleetCopilotProvider, FleetScope,
+    FleetCopilotConfigureParams, FleetCopilotConfigureResult, FleetCopilotMode, FleetScope,
 };
 
 /// Fixture directory, shared with the Swift contract suite.
@@ -86,7 +86,9 @@ fn channel_frames_round_trip_and_mint_a_channel_scope() {
 #[test]
 fn copilot_configure_frames_round_trip_and_carry_no_permission_mode() {
     let params: FleetCopilotConfigureParams = round_trip("copilot_configure_params.json");
-    assert_eq!(params.provider, FleetCopilotProvider::Claude);
+    // The registry KEY, not an enum token: `claude` would not name an adapter.
+    assert_eq!(params.provider, "claude-agent-acp");
+    assert_eq!(params.copilot_mode, Some(FleetCopilotMode::Guarded));
     assert!(params.persona.is_some());
 
     // The absence is the contract: a settable permission mode would be a
@@ -100,6 +102,9 @@ fn copilot_configure_frames_round_trip_and_carry_no_permission_mode() {
     }
 
     let result: FleetCopilotConfigureResult = round_trip("copilot_configure_result.json");
+    assert_eq!(result.provider, "claude-agent-acp");
+    assert_eq!(result.copilot_mode, FleetCopilotMode::Guarded);
+    assert!(!result.session_replaced);
     assert!(
         result.persona_set,
         "the result reports the persona, never echoes it"

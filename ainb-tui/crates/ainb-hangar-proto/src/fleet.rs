@@ -1809,14 +1809,95 @@ pub struct FleetChannelListResult {
     pub channels: Vec<FleetChannel>,
 }
 
-/// Adapter family backing the copilot session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// One adapter the daemon's registry knows how to spawn.
+///
+/// The registry is `[acp.adapters.*]` in the host config plus the built-in
+/// floor, so this list grows by editing config, not by shipping a new enum
+/// variant. That is why `provider` is a validated STRING everywhere it appears
+/// on the copilot wire: a two-variant enum could not name a third adapter an
+/// operator had already installed and configured.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetAdapter {
+    /// The registry key, and the `fleet_acp_session.provider` token.
+    pub name: String,
+    /// The program the daemon spawns, as configured.
+    pub command: String,
+    /// The permission mode pinned at `session/new`. Reported so an operator can
+    /// SEE it; it is not settable over this wire.
+    pub permission_mode: String,
+    /// Whether this adapter came from the built-in floor rather than config.
+    pub built_in: bool,
+    /// The model ids an operator declared for it, in picker order.
+    ///
+    /// Empty is the honest answer, not a missing one: ACP has no
+    /// model-discovery call, so an empty list means the adapter runs its own
+    /// default and the picker says so rather than offering a guess.
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
+/// Parameters for `fleet/adapter_list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetAdapterListParams {}
+
+/// Result for `fleet/adapter_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetAdapterListResult {
+    /// Every adapter the daemon can spawn, in name order.
+    pub adapters: Vec<FleetAdapter>,
+}
+
+/// The copilot channel's guardrail dial.
+///
+/// Distinct from, and no relation to, an adapter's `permission_mode`. This one
+/// moves the DAEMON-SIDE fleet-tool classifier: which of the copilot's own
+/// tools fire, which take a confirm card, and which are not offered at all. The
+/// adapter's permission mode stays pinned at `session/new` under every value
+/// here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FleetCopilotProvider {
-    /// `claude-agent-acp`.
-    Claude,
-    /// `codex-acp`.
-    Codex,
+pub enum FleetCopilotMode {
+    /// Read tools only; writes are refused, not confirmed.
+    Help,
+    /// The default: auto-writes fire, destructive tools take a card.
+    #[default]
+    Guarded,
+    /// Destructive tools fire without a card, except `kill`. Reset to
+    /// [`FleetCopilotMode::Guarded`] at every daemon start.
+    Yolo,
+}
+
+impl FleetCopilotMode {
+    /// The stored and wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Help => "help",
+            Self::Guarded => "guarded",
+            Self::Yolo => "yolo",
+        }
+    }
+
+    /// Parse a stored spelling; unknown is `None`.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "help" => Some(Self::Help),
+            "guarded" => Some(Self::Guarded),
+            "yolo" => Some(Self::Yolo),
+            _ => None,
+        }
+    }
+
+    /// The next value on the `g` dial, wrapping.
+    #[must_use]
+    pub const fn cycle(self) -> Self {
+        match self {
+            Self::Help => Self::Guarded,
+            Self::Guarded => Self::Yolo,
+            Self::Yolo => Self::Help,
+        }
+    }
 }
 
 /// Parameters for `fleet/copilot_configure`.
@@ -1828,8 +1909,22 @@ pub enum FleetCopilotProvider {
 /// holding [`FLEET_CAPABILITY_COPILOT_CONFIGURE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetCopilotConfigureParams {
-    /// Adapter family.
-    pub provider: FleetCopilotProvider,
+    /// An adapter name from `fleet/adapter_list`. A name the registry does not
+    /// know is refused, so this string is never a free-form spawn request.
+    ///
+    /// Changing it RETIRES the running copilot session and mints a new one on
+    /// the SAME channel: a different adapter is a different process and a
+    /// different agent, and writing the new token onto the old row would leave
+    /// a session whose stored provider and running adapter disagree.
+    pub provider: String,
+    /// The channel's guardrail dial. `None` leaves it where it is.
+    ///
+    /// Spelled `copilot_mode`, never `mode`: `mode` is one of the keys this
+    /// method REFUSES outright, because the setting an operator would most
+    /// plausibly try to send under that name is the adapter permission mode
+    /// this type's doc comment explains is not settable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot_mode: Option<FleetCopilotMode>,
     /// Adapter model id; `None` leaves the daemon's static config in place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1847,10 +1942,15 @@ pub struct FleetCopilotConfigureParams {
 /// second place it can leak from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetCopilotConfigureResult {
-    /// The copilot session the config was written to.
+    /// The copilot session the config was written to. A DIFFERENT key than the
+    /// caller's last one means the provider changed and this is the new session.
     pub session_key: String,
-    /// Adapter family now in force.
-    pub provider: FleetCopilotProvider,
+    /// Adapter now in force.
+    pub provider: String,
+    /// The channel's guardrail dial now in force.
+    pub copilot_mode: FleetCopilotMode,
+    /// Whether this call retired the previous session to swap the adapter.
+    pub session_replaced: bool,
     /// Model override now in force, when one is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
