@@ -663,6 +663,89 @@ fn agent_create_on_fresh_home_inserts_and_lists() {
     );
 }
 
+/// `--executor` records the per-agent task executor (migration 0095) and an
+/// unrecognised one is a clean error, the same shape `--provider` has.
+///
+/// The column is read at DISPATCH, so a value that is silently dropped here is
+/// invisible until a run takes the wrong executor. Asserted on the STORE, not on
+/// the ack: `agent list` renders no executor, so the printed line would look
+/// identical whether the flag landed or was parsed and discarded.
+#[test]
+fn agent_create_records_the_task_executor_and_rejects_an_unknown_one() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "acp-runner",
+            "--executor",
+            "ACP",
+        ],
+    );
+    assert!(ok, "agent create --executor should exit 0; out={out}");
+
+    // An agent that names nothing keeps a NULL column: the daemon-wide default
+    // stays in charge, which is what makes the flag additive.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "create", "--name", "inheritor"],
+    );
+    assert!(
+        ok,
+        "agent create without --executor should exit 0; out={out}"
+    );
+
+    let recorded = agent_executors(tmp.path());
+    assert_eq!(
+        recorded,
+        vec![
+            ("acp-runner".to_string(), Some("acp".to_string())),
+            ("inheritor".to_string(), None),
+        ],
+        "the flag must land normalised on the row, and its absence must stay NULL"
+    );
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "x",
+            "--executor",
+            "acpp",
+        ],
+    );
+    assert!(!ok, "an unsupported executor must fail; out={out}");
+    assert!(
+        out.contains("unsupported task executor"),
+        "missing executor error:\n{out}"
+    );
+}
+
+/// `(name, task_executor)` for every agent in the home, ordered by name.
+///
+/// `run` points `AINB_HANGAR_HOME` at the tempdir itself, so the database is
+/// `<home>/hangar.db` — not under a nested `.agents-in-a-box/`.
+fn agent_executors(home: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let db = home.join("hangar.db");
+    let conn = rusqlite::Connection::open(&db).expect("open the hangar db");
+    let mut stmt = conn
+        .prepare("SELECT name, task_executor FROM agent ORDER BY name")
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows");
+    rows
+}
+
 /// The user-visible proof for migration 0050 (multica gap #23): a description
 /// supplied at `agent create` survives into `agent list --format json`, and a
 /// SECOND create with the same name is REFUSED — a non-zero exit and a clear

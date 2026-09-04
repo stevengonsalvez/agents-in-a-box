@@ -1,0 +1,38 @@
+-- Hangar v1 schema, migration 0095: per-agent task EXECUTOR override (spine A8).
+--
+-- `HANGAR_TASK_EXECUTOR=acp|process` (A5) is daemon-wide: every task on the
+-- daemon takes the same executor. This column makes the choice per agent, so one
+-- agent runs its tasks over an ACP adapter while another spawns a provider CLI
+-- on the same daemon.
+--
+-- WHY NOT `agent.provider` (renovation PLAN.md open question 3). `provider`
+-- answers WHICH agent CLI runs the work, and three consumers depend on it being
+-- exactly one of `claude` / `codex` / `copilot`: the pull's `agent_kind`
+-- derivation (`pull.rs` PULL_SQL hard-codes that IN-list, and the value it
+-- writes is parsed by the closed `AgentKind` enum), `Backend::from_provider`
+-- (whose unknown-token branch silently resolves to Claude), and the daemon's
+-- `adapter_for`, which maps a provider ONTO its ACP adapter. Recording an
+-- adapter token in `provider` would therefore make a mis-set value
+-- indistinguishable from a correct one at all three, and it conflates two
+-- orthogonal questions — which CLI, and how it is run. They are separate
+-- columns because they are separate axes: `provider = codex` with
+-- `task_executor = acp` is a coherent request the single-column shape cannot
+-- express.
+--
+-- NULLABLE TEXT, no default and no backfill. NULL means "no per-agent override —
+-- take the daemon's `HANGAR_TASK_EXECUTOR`", so every pre-existing agent
+-- dispatches exactly as it does today. The recognised values are `process` and
+-- `acp`; the write paths (`hangar/agent_create`, `ainb hangar agent create`)
+-- reject anything else via `bootstrap::normalize_task_executor`, and the daemon
+-- treats an unrecognised stored value as "no override" with a warning rather
+-- than as a reason to strand the task.
+--
+-- Deliberately NOT a CHECK constraint: `agent.provider` (migration 0041) records
+-- its vocabulary the same way — validated at the write boundary, unconstrained
+-- in the schema — and adding a CHECK to an existing table means a full table
+-- rebuild in SQLite. Growth: one nullable TEXT column on a table with one row
+-- per agent (single digits on a real home), and `ALTER TABLE ADD COLUMN` with no
+-- default is metadata-only. No index: the value is read on the agent row that
+-- dispatch already selects by primary key, and is never itself a predicate.
+
+ALTER TABLE agent ADD COLUMN task_executor TEXT;

@@ -256,9 +256,9 @@ snapshot re-pull. Do not invert that.
 ### 2d. Executor selection
 
 ```
-┌────────────────┐  agent.provider ends in "-acp"?  ┌──────────────┐
+┌────────────────┐  agent.task_executor recognised? ┌──────────────┐
 │ resolve_dispatch│─────────── else ────────────────▶│ Executor     │
-│ run_loop:1160   │  HANGAR_TASK_EXECUTOR fallback   │ Process | Acp│
+│ run_loop        │  HANGAR_TASK_EXECUTOR fallback   │ Process | Acp│
 └────────────────┘                                   └──────┬───────┘
               ┌──────────────────────────────────────────────┴────────┐
    Process ───▼────────────────┐                     Acp ─────────────▼──────────┐
@@ -268,10 +268,21 @@ snapshot re-pull. Do not invert that.
    └───────────────────────────┘
 ```
 
-- **Per agent (durable):** reuse the existing `agent.provider` column
-  (`crates/ainb-hangar-store/src/repo/agent.rs:107`) with the values `claude-agent-acp` /
-  `codex-acp`, which are already the adapter registry tokens (`config.rs:11-13`).
-  **No migration.**
+- **Per agent (durable):** `agent.task_executor`, a nullable TEXT column carrying
+  `process` / `acp` (migration 0095). NULL means "no override", so every agent that
+  predates it dispatches exactly as before.
+
+  This REPLACES the original plan of reusing `agent.provider` with adapter tokens
+  (`claude-agent-acp` / `codex-acp`), which PLAN.md open question 3 left open until A5
+  shipped. Reading the consumers settled it: `agent.provider` is a closed
+  provider-backend vocabulary, not an open token space. `pull.rs` PULL_SQL hard-codes
+  `a.provider IN ('claude','codex','copilot')` to derive `agent_task_queue.agent_kind`,
+  and that value is parsed by the closed `AgentKind` enum, which has no adapter variant;
+  `Backend::from_provider` resolves ANY unrecognised token to Claude silently; and
+  `acp_task::adapter_for` maps a provider ONTO its adapter, so making the provider name
+  the adapter inverts a mapping the ACP path already depends on. The two are also
+  orthogonal: `provider = codex` with `task_executor = acp` is a coherent request the
+  single-column shape cannot express.
 - **Per task (resolved):** `ResolvedDispatch` gains `executor: Executor`
   (`run_loop.rs:2413-2436`), beside `mode`, for exactly the reason the doc comment there
   gives: it lives on the dispatch so the exec-path branch and the argv cannot disagree.
@@ -280,7 +291,9 @@ snapshot re-pull. Do not invert that.
   like `resolve_sandbox` (`run_loop.rs:278-284`) so precedence is testable without mutating
   process env. Unrecognised value falls back to `process` with a warning, matching the
   sandbox override's documented behaviour.
-- Precedence: agent > daemon default.
+- Precedence: agent > daemon default > `process`. An agent contributes an executor ONLY
+  when it names a recognised one — NULL, blank and a typo all inherit (the typo warns),
+  so no misconfiguration can strand a task.
 - A true per-task override that differs from its agent needs a column on
   `agent_task_queue`. **Deferred**, not designed around. Do NOT overload
   `agent_task_queue.mode` (`""|headless|interactive`, validated `rpc/mod.rs:9661-9669`):

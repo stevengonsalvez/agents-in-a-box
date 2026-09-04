@@ -605,17 +605,29 @@ mod migration_tests {
         // Dropped by the repair, then rebuilt by the renumbered 0094 in the
         // same boot. Its absence would mean 94 never applied.
         assert!(index_exists(store.pool(), "idx_fleet_provider_event_retention").await);
-        // On main this asserted the ABSENCE of a snapshot: the gate is numeric,
-        // read MAX(version) = 93 against an embedded max of 93, saw nothing
-        // pending and took none — which is what proved the repair cannot depend
-        // on one. This tree carries 0094, so 94 IS genuinely pending and the
-        // gate fires for that ordinary reason, naming the file after the
-        // applied max. The original property is unchanged and still pinned, by
-        // `a_database_that_ran_the_unmerged_0093_still_upgrades`: it drives
-        // `apply_migrations` directly and never reaches the backup path at all.
+        // NO snapshot, and that absence is the point: it is what proves the
+        // repair cannot depend on one. The gate is numeric and compares MAX
+        // applied against the embedded max, while the seed unwinds only 93 and
+        // 94 — so the HEAD migration is still recorded, the two maxima are
+        // equal, and nothing looks pending even though 94 is about to re-apply.
+        // (This assertion read `exists` for exactly as long as 0094 was the head
+        // migration and deleting it left a genuinely pending tail; adding any
+        // migration above it restores the original, and now stable, condition.)
+        //
+        // Read the DIRECTORY, never `pre-93.bak` by name: the snapshot is named
+        // `pre-{applied}` from `MAX(version)`, which this seed leaves at the head
+        // migration, so a named check for 93 is absent whether the gate fired or
+        // not and would go on passing forever.
+        let snapshots: Vec<String> = std::fs::read_dir(home.path())
+            .expect("read the hangar home")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("hangar.db.pre-"))
+            .collect();
         assert!(
-            home.path().join("hangar.db.pre-93.bak").exists(),
-            "94 is pending, so the ordinary pre-upgrade snapshot must be taken"
+            snapshots.is_empty(),
+            "the head migration is still applied, so the numeric gate must see \
+             nothing pending and take no snapshot; found {snapshots:?}"
         );
     }
 }

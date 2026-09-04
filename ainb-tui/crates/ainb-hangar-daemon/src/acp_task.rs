@@ -11,7 +11,7 @@
 //!            ▼
 //!   acp_session::ensure(scope_key = "task:<id>")  ── no spawn, one txn
 //!            ▼
-//!   acp_session::enqueue  ─▶  pool.submit_prompt  ─▶  the adapter's turn
+//!   acp_session::enqueue  ─▶  pool.submit_task_prompt  ─▶  the adapter's turn
 //!            ▼
 //!   POLL the delivery leg (the pool resolves it on EVERY path)
 //!            ▼
@@ -101,6 +101,17 @@ pub fn scope_key(task_id: &str) -> String {
     format!("{TASK_SCOPE_PREFIX}{task_id}")
 }
 
+/// Whether `scope` belongs to a task run.
+///
+/// Three places refuse or exempt a task's scope — the create door, the prompt
+/// guard and the deadline sweep — and they spelled the test three ways, one of
+/// them without the `trim_start`. Reading it here instead means the next site
+/// cannot be the lenient one.
+#[must_use]
+pub fn is_task_scope(scope: &str) -> bool {
+    scope.trim_start().starts_with(TASK_SCOPE_PREFIX)
+}
+
 /// The workspace an ACP session's scope belongs to, or `None` when the scope
 /// is not a task's.
 ///
@@ -109,7 +120,10 @@ pub fn scope_key(task_id: &str) -> String {
 /// unscoped without this, and a workspace-filtered inbox (which is every
 /// operator surface) never shows it.
 pub async fn workspace_for_scope(pool: &SqlitePool, scope: &str) -> Option<String> {
-    let task_id = scope.strip_prefix(TASK_SCOPE_PREFIX)?;
+    // `trim_start` before the strip, so this agrees with [`is_task_scope`]: a
+    // scope the predicate calls a task's must yield that task's id here, or the
+    // two readers of one convention disagree on the same string.
+    let task_id = scope.trim_start().strip_prefix(TASK_SCOPE_PREFIX)?;
     ainb_hangar_store::repo::task::TaskRepo::get_by_id(pool, task_id)
         .await
         .ok()
@@ -291,8 +305,9 @@ pub async fn run_acp(
     let message_id =
         crate::acp_session::enqueue(pool, &session_key, &scope, &dispatch.invocation.prompt)
             .await?;
-    if let SubmitOutcome::Rejected(detail) =
-        acp.submit_prompt(&session_key, &message_id, &dispatch.invocation.prompt).await
+    if let SubmitOutcome::Rejected(detail) = acp
+        .submit_task_prompt(&session_key, &message_id, &dispatch.invocation.prompt)
+        .await
     {
         tracing::warn!(task_id = %task.id, detail, "the acp pool refused the task's prompt");
         return Ok(outcome_for(
@@ -686,7 +701,14 @@ fn outcome_for_token(token: DeliveryToken, result: &RunnerResult) -> RunOutcome 
         DeliveryToken::SpawnFailed
         | DeliveryToken::ModeUnproven
         | DeliveryToken::TurnUnrecorded => failed(FailureReason::SpawnError),
-        DeliveryToken::SessionGone => failed(FailureReason::ProvisionError),
+        // Unreachable on this path by construction — a task prompts through
+        // `submit_task_prompt`, which is exempt — so reaching it means a task's
+        // leg was resolved by somebody else's refused chat prompt. Terminal for
+        // the same reason `SessionGone` is: the session is not usable for this
+        // prompt and a re-dispatch does not change that.
+        DeliveryToken::SessionGone | DeliveryToken::TaskScopeRefused => {
+            failed(FailureReason::ProvisionError)
+        }
         // Handled by the caller's stop-reason arm, which reads this token
         // POSITIONALLY. Reaching it here means it was not first, which the pool
         // never writes.
@@ -782,6 +804,12 @@ mod tests {
             adapter_key(ainb_acp::config::CLAUDE_ADAPTER, "t-1"),
             "claude-agent-acp#task:t-1"
         );
+        // The predicate the create door, the prompt guard and the deadline
+        // sweep all read. It tolerates leading whitespace, which is the one
+        // behaviour consolidating those three sites changed.
+        assert!(is_task_scope(scope_key("t-1").as_str()));
+        assert!(is_task_scope("  task:t-1"));
+        assert!(!is_task_scope("session:t-1"));
     }
 
     #[test]

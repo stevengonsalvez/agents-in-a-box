@@ -5425,6 +5425,7 @@ Options:
       --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
       --name <NAME>                  The new agent's name
       --provider <PROVIDER>          Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`
+      --executor <EXECUTOR>          Task executor to record (`process`/`acp`); omitted inherits the daemon's `HANGAR_TASK_EXECUTOR`
       --model <MODEL>                Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`)
       --instructions <INSTRUCTIONS>  Optional instructions / system prompt for the agent
       --description <DESCRIPTION>    Optional short blurb rendered beside the agent (≤255 characters)

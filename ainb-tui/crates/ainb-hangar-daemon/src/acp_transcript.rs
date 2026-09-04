@@ -81,7 +81,10 @@ pub(crate) async fn bind_task_stream(
     events: EventSink,
     scope_key: String,
 ) -> Option<RunStream> {
-    let task_id = scope_key.strip_prefix(crate::acp_task::TASK_SCOPE_PREFIX)?;
+    // `trim_start` before the strip, so this agrees with
+    // `acp_task::is_task_scope`: a scope the predicate calls a task's must yield
+    // that task's id here, or a run the guard protects streams to nobody.
+    let task_id = scope_key.trim_start().strip_prefix(crate::acp_task::TASK_SCOPE_PREFIX)?;
     let workspace_id = crate::acp_task::workspace_for_scope(&pool, &scope_key).await?;
     RunStream::bind(&events, &workspace_id, task_id)
 }

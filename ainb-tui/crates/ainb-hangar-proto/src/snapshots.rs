@@ -1622,6 +1622,15 @@ pub struct AgentCreateParams {
     /// advertised default (`claude`). Recorded on the agent row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Optional task EXECUTOR (`process`/`acp`); absent = the daemon's own
+    /// `HANGAR_TASK_EXECUTOR` (migration 0095).
+    ///
+    /// The other half of `provider`, not a variant of it: `provider` names which
+    /// agent CLI does the work, this names whether that work runs as a provider
+    /// subprocess or as one turn on an ACP adapter. Append-only field: an old
+    /// client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_executor: Option<String>,
     /// Optional free-form system prompt / instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -4499,6 +4508,7 @@ mod tests {
             workspace_id: Some("ws-1".into()),
             name: "reviewer".into(),
             provider: Some("codex".into()),
+            task_executor: Some("acp".into()),
             instructions: Some("be terse".into()),
             model: Some("gpt-5-codex".into()),
             token_budget: Some(250_000),
@@ -4514,6 +4524,9 @@ mod tests {
         assert_eq!(minimal.name, "claude");
         assert!(minimal.workspace_id.is_none());
         assert!(minimal.provider.is_none());
+        // Migration-0095's executor override: a payload written before it existed
+        // carries no key and still deserializes as "no override" (append-only).
+        assert!(minimal.task_executor.is_none());
         assert!(minimal.instructions.is_none());
         assert!(minimal.model.is_none());
         // Migration-0050 metadata: a PRE-0050 payload carries none of these keys

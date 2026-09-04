@@ -40,8 +40,9 @@ fn notify_rules() -> Vec<NotifyRuleWireRow> {
 fn notify_state() -> SettingsState {
     let mut s = state();
     s.set_notify_rules(notify_rules());
-    // Navigate Daemon → … → Notifications (six `j`s reach + clamp at the bottom).
-    for _ in 0..6 {
+    // Navigate Daemon → … → Notifications (five `j`s; a sixth would carry on to
+    // More screens, which crisp B5 §2.5 added below it).
+    for _ in 0..5 {
         s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     }
     assert_eq!(s.section(), SettingsSection::Notifications);
@@ -431,11 +432,13 @@ fn j_k_navigates_settings_sections() {
     assert_eq!(s.section(), SettingsSection::Members);
     let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     assert_eq!(s.section(), SettingsSection::Notifications);
-    // Clamps at the bottom (Notifications, tcp T5).
     let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
-    assert_eq!(s.section(), SettingsSection::Notifications);
+    assert_eq!(s.section(), SettingsSection::MoreScreens);
+    // Clamps at the bottom (More screens, crisp B5 §2.5).
+    let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
+    assert_eq!(s.section(), SettingsSection::MoreScreens);
     let s = reduce_settings(&s, SettingsEvent::Key('k')).state;
-    assert_eq!(s.section(), SettingsSection::Members);
+    assert_eq!(s.section(), SettingsSection::Notifications);
 }
 
 /// `n` on the keys section opens the key-entry modal.

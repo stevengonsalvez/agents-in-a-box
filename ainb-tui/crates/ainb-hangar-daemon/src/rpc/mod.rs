@@ -5962,11 +5962,7 @@ async fn handle_fleet_acp_session_create(
     // (terminal, `SpawnError`, no retry) and would make the pool stamp this
     // session's approvals with the task's workspace. Refused at the door, which
     // is the only untrusted caller of `acp_session::ensure`.
-    if params
-        .scope_key
-        .as_deref()
-        .is_some_and(|scope| scope.trim_start().starts_with(crate::acp_task::TASK_SCOPE_PREFIX))
-    {
+    if params.scope_key.as_deref().is_some_and(crate::acp_task::is_task_scope) {
         return Err(invalid_params(&format!(
             "scope_key {:?} is reserved for task runs",
             crate::acp_task::TASK_SCOPE_PREFIX
@@ -7985,6 +7981,11 @@ async fn handle_comment_mention_preview(
 /// `provider` is rejected with `INVALID_PARAMS`. The recorded provider is HONOURED
 /// at dispatch (the daemon spawns that backend per task), so a `codex` agent runs
 /// codex even though it binds the single `claude`-advertised runtime.
+///
+/// The optional `task_executor` (`process`/`acp`, migration 0095) is the second
+/// dispatch axis and is validated the same way: absent means the agent inherits
+/// whatever `HANGAR_TASK_EXECUTOR` the daemon was started with, so omitting it
+/// leaves behaviour exactly as it was before the column existed.
 async fn handle_agent_create(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -7993,8 +7994,8 @@ async fn handle_agent_create(
     // `agent_env` write channel, so it uses the same rule as agent_update.
     let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params_secret(
         req,
-        "{ workspace_id?, name, provider?, model?, instructions?, description?, avatar_url?, \
-         service_tier? }",
+        "{ workspace_id?, name, provider?, task_executor?, model?, instructions?, description?, \
+         avatar_url?, service_tier? }",
     )?;
     let name = params.name.trim();
     if name.is_empty() {
@@ -8003,6 +8004,9 @@ async fn handle_agent_create(
     let description = validate_description(params.description.as_deref())?.unwrap_or_default();
     let provider = ainb_hangar_store::bootstrap::normalize_provider(params.provider.as_deref())
         .map_err(|e| invalid_params(&e))?;
+    let task_executor =
+        ainb_hangar_store::bootstrap::normalize_task_executor(params.task_executor.as_deref())
+            .map_err(|e| invalid_params(&e))?;
     let wire = params.workspace_id.as_deref().unwrap_or("").trim();
     let ws = resolve_or_bootstrap_default(pool, wire).await?;
     let created = ainb_hangar_store::bootstrap::create_agent_from(
@@ -8011,6 +8015,7 @@ async fn handle_agent_create(
         ainb_hangar_store::bootstrap::AgentDraft {
             name: name.to_string(),
             provider,
+            task_executor,
             instructions: params.instructions,
             description,
             avatar_url: params.avatar_url,

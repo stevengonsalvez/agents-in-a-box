@@ -105,6 +105,19 @@ pub struct Agent {
     /// and the daemon spawns THIS provider's backend per task, so a `codex` agent
     /// runs codex.
     pub provider: Option<String>,
+    /// Optional per-agent task EXECUTOR override (`"process"`/`"acp"`, migration
+    /// 0095); `None` = fall back to the daemon's `HANGAR_TASK_EXECUTOR`.
+    ///
+    /// A DIFFERENT axis from [`provider`](Self::provider): `provider` names which
+    /// agent CLI does the work, this names how it is run — as a provider
+    /// subprocess, or as one turn on an ACP adapter. Both are needed, and both
+    /// are honoured at dispatch, so `provider = "codex"` with
+    /// `task_executor = "acp"` asks for codex over ACP.
+    ///
+    /// Free TEXT in the schema (as `provider` is): the create paths validate
+    /// against `bootstrap::SUPPORTED_TASK_EXECUTORS`, and the daemon reads an
+    /// unrecognised stored value as "no override" rather than stranding the task.
+    pub task_executor: Option<String>,
     /// Optional token budget (rtk/headroom) for this agent's runs; `None` =
     /// unlimited (migration 0042). Stored + surfaced only in this milestone —
     /// dispatch-time enforcement is a later feature.
@@ -164,6 +177,7 @@ impl Default for Agent {
             thinking: None,
             agent_env: AgentEnv::default(),
             provider: None,
+            task_executor: None,
             token_budget: None,
             description: String::new(),
             avatar_url: None,
@@ -326,9 +340,9 @@ impl AgentRepo {
             "INSERT INTO agent \
              (id, workspace_id, name, runtime_id, instructions, visibility, permission_mode, \
               owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
-              token_budget, description, avatar_url, kind, system_key, service_tier, \
-              disabled_runtime_skills) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              task_executor, token_budget, description, avatar_url, kind, system_key, \
+              service_tier, disabled_runtime_skills) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&agent.id)
         .bind(&agent.workspace_id)
@@ -345,6 +359,7 @@ impl AgentRepo {
         .bind(&agent.thinking)
         .bind(agent.agent_env.to_db_json())
         .bind(&agent.provider)
+        .bind(&agent.task_executor)
         .bind(agent.token_budget)
         .bind(&agent.description)
         .bind(&agent.avatar_url)
@@ -923,8 +938,8 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 /// single constant keeps the read queries in lockstep with the `FromRow` impl.
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
      permission_mode, owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, \
-     provider, token_budget, description, avatar_url, kind, system_key, service_tier, \
-     disabled_runtime_skills, archived_at, archived_by FROM agent";
+     provider, task_executor, token_budget, description, avatar_url, kind, system_key, \
+     service_tier, disabled_runtime_skills, archived_at, archived_by FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -1113,6 +1128,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             thinking: row.try_get("thinking")?,
             agent_env: env_from_json(&row.try_get::<String, _>("agent_env")?)?,
             provider: row.try_get("provider")?,
+            task_executor: row.try_get("task_executor")?,
             token_budget: row.try_get("token_budget")?,
             description: row.try_get("description")?,
             avatar_url: row.try_get("avatar_url")?,

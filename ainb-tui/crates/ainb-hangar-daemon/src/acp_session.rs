@@ -110,6 +110,17 @@ pub async fn ensure(
     );
 
     let session_key = FleetAcpSessionRepo::mint_session_key(&SystemIdGen);
+    // THE ONLY PRODUCTION WRITER of `fleet_acp_session.scope_key`. Nothing
+    // UPDATEs the column afterwards, and the two callers here are the create
+    // door (which refuses a `task:` scope outright) and `acp_task::scope_key`,
+    // which formats one. So no stored scope can carry leading whitespace before
+    // `task:`.
+    //
+    // That is load-bearing, not trivia: `acp_task::is_task_scope` trims before
+    // matching, and at the deadline sweep it gates an EXEMPTION — so a scope
+    // like `"  task:x"` would be skipped by the sweep with only the task's own
+    // poll left to bound it. Unreachable today because of the sentence above.
+    // A SECOND writer makes it reachable, and the sweep is where it would show.
     let scope_key = scope_key.map_or_else(|| format!("session:{session_key}"), str::to_string);
     let now = SystemClock.now_ms();
     let event = NewFleetEvent {
@@ -184,7 +195,8 @@ pub async fn ensure(
 ///
 /// One `user` message row in the session's own scope plus its PENDING delivery
 /// leg, in one transaction. Returns the message id the caller hands to
-/// `AcpPool::submit_prompt`.
+/// `AcpPool::submit_prompt` (or, for the run that owns a `task:` scope,
+/// `AcpPool::submit_task_prompt`).
 ///
 /// The leg is what the pool resolves at turn end, so a prompt that skipped
 /// this would have no receipt for anyone to read. `sender` names the door

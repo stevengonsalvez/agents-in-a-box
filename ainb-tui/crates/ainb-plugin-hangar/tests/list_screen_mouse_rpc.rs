@@ -27,6 +27,10 @@ use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "palette_nav_common.rs"]
+mod palette_nav;
+use palette_nav::nav_drain_rounds;
+
 const BUDGET: Duration = Duration::from_secs(20);
 
 /// A recorded daemon call: method + params.
@@ -336,13 +340,18 @@ struct Harness {
 }
 
 async fn boot(home: &std::path::Path, tag: &str) -> Harness {
-    std::env::set_var("AINB_HANGAR_HOME", home);
     let stream_id = format!("sock-{tag}-{}", std::process::id());
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
 
+    // Seed the `first_run` ack, THEN publish the home. `AINB_HANGAR_HOME` is
+    // process-global and this binary holds THREE tests, all through here, so a
+    // sibling's `set_var` can land between ours and this write; `on_init` reading
+    // in that window finds no acks and paints the danger-full-access modal over
+    // the board, where it swallows every key the test sends.
     let state = home.join("hangar").join("state.toml");
     std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
     std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+    std::env::set_var("AINB_HANGAR_HOME", home);
 
     let socket_path = home.join("hangar.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind daemon");
@@ -559,9 +568,26 @@ async fn autopilot_right_click_run_now_fires_autopilot() {
         let home = tempfile::tempdir().expect("home");
         let mut h = boot(home.path(), "ap-menu").await;
 
-        // Open the Autopilots screen (`4`), then render so the board layout is
-        // recorded for the autopilot card.
-        send_key(&mut h.host_write, KeyCode::Char { ch: '4' }).await;
+        // Open the Autopilots screen with `^P autopilots` (crisp B5 §2.5 demoted
+        // the `4` tab key), then render so the board layout is recorded for the
+        // autopilot card. `\u{10}` is the bare-DLE spelling of Ctrl+P.
+        send_key(&mut h.host_write, KeyCode::Char { ch: '\u{10}' }).await;
+        for ch in "autopilots".chars() {
+            send_key(&mut h.host_write, KeyCode::Char { ch }).await;
+        }
+        send_key(&mut h.host_write, KeyCode::Char { ch: '\n' }).await;
+        // Drain the walk's own traffic (a key delivery per char plus one
+        // `hangar/search` per query edit) so it does not come out of the
+        // `pump_until` budget the mouse assertion below spends.
+        //
+        // Through `pump_until`, whose per-round 20ms sleep is load-bearing here
+        // rather than waste: relaying the same rounds back to back instead makes
+        // the later right-click find no recorded board layout and
+        // `hangar/autopilot_fire_now` never fires (observed, not assumed). The
+        // gesture needs the Autopilots screen to have actually settled, and the
+        // sleeps are what yield to the runtime for that. A predicate that never
+        // matches makes this a plain bounded pump.
+        pump_until(&mut h, nav_drain_rounds("autopilots"), |_| false).await;
         relay_one_send_or_render(
             &mut h.host_write,
             &mut h.host_read,

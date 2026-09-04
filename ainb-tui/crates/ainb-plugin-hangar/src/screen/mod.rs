@@ -130,7 +130,10 @@ impl Screen {
             Self::ActivityTimeline(_) => "Activity",
             Self::SkillManager => "Skills",
             Self::Autopilots => "Autopilots",
-            Self::Kanban => "Kanban",
+            // `Runs` since crisp B5 §2.5: `Kanban` names the widget, this
+            // board is the only run-centric one, and the hotkey is unchanged so
+            // muscle memory survives the rename.
+            Self::Kanban => "Runs",
             Self::Boards => "Boards",
             Self::DaemonHealth => "Daemon",
             Self::Usage => "Usage",

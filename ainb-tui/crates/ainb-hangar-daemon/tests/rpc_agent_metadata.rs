@@ -399,3 +399,88 @@ async fn agent_update_edits_the_description() {
     let row = actor_row(&mut c, "agent:agent-1").await.expect("agent-1 present");
     assert_eq!(row["description"], "reviews every PR", "the edit persisted");
 }
+
+/// (e) A8: `task_executor` is recorded on the created agent, and an
+/// unrecognised one is `INVALID_PARAMS` with nothing written.
+///
+/// The column is read at DISPATCH, where a wrong value is invisible until a run
+/// takes the wrong executor, so the wire is where a typo has to be refused. The
+/// accepted case is read back from the STORE rather than the roster: the create
+/// reply renders no executor, so only the row proves the param reached the
+/// column rather than being parsed and dropped.
+#[tokio::test]
+async fn agent_create_records_a_task_executor_and_refuses_an_unknown_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_AGENT_CREATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "name": "acp-runner",
+                "task_executor": "ACP",
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "create must ack: {resp}");
+    let recorded: Option<String> =
+        sqlx::query_scalar("SELECT task_executor FROM agent WHERE name = ?")
+            .bind("acp-runner")
+            .fetch_one(store.pool())
+            .await
+            .expect("read the created agent");
+    assert_eq!(
+        recorded.as_deref(),
+        Some("acp"),
+        "the create must record the normalised executor on the agent row"
+    );
+
+    // An agent that names nothing keeps a NULL column: the daemon-wide default
+    // stays in charge, which is what makes this field additive.
+    let resp = c
+        .call(
+            methods::HANGAR_AGENT_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "inheritor" }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "create must ack: {resp}");
+    let inherited: Option<String> =
+        sqlx::query_scalar("SELECT task_executor FROM agent WHERE name = ?")
+            .bind("inheritor")
+            .fetch_one(store.pool())
+            .await
+            .expect("read the created agent");
+    assert_eq!(
+        inherited, None,
+        "omitting the field must leave the column NULL, not default it"
+    );
+
+    let resp = c
+        .call(
+            methods::HANGAR_AGENT_CREATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "name": "typo",
+                "task_executor": "acpp",
+            }),
+        )
+        .await;
+    let err = &resp["error"];
+    assert!(
+        !err.is_null(),
+        "an unknown executor must be refused: {resp}"
+    );
+    assert_eq!(err["code"], -32602, "the refusal is INVALID_PARAMS: {err}");
+    assert!(
+        err["message"].as_str().unwrap_or_default().contains("process, acp"),
+        "the message must name the executors it accepts: {err}"
+    );
+    assert_eq!(
+        count_named(&mut c, "typo").await,
+        0,
+        "the rejected create wrote no agent"
+    );
+}

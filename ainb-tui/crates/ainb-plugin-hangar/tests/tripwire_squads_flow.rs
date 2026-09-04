@@ -36,6 +36,10 @@ use ainb_plugin_sdk::Server;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "palette_nav_common.rs"]
+mod palette_nav;
+use palette_nav::nav_drain_rounds;
+
 const BUDGET: Duration = Duration::from_secs(30);
 
 /// A recorded daemon call: method + params.
@@ -391,6 +395,46 @@ async fn send_char<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: cha
     send_key(host_write, KeyCode::Char { ch }).await;
 }
 
+/// Walk the command palette to a screen crisp B5 §2.5 took off the tab strip:
+/// `^P`, the screen's word, Enter. `\u{10}` is the bare-DLE spelling of Ctrl+P
+/// the plugin accepts alongside the modifier flag (`plugin::is_ctrl_p`).
+///
+/// `squads` is the word with a `q` in it, which is why the palette had to stop
+/// letting the router eat its query first.
+///
+/// DRAINS its own traffic before returning: the walk costs one key delivery per
+/// character plus one `hangar/search` per query edit, and left in the pipe those
+/// come out of the caller's bounded relay budget rather than the nav's.
+async fn go_to_screen<W, R, DR, DW>(
+    host_write: &mut W,
+    host_read: &mut R,
+    daemon_reader: &mut DR,
+    daemon_write: &mut DW,
+    stream_id: &str,
+    word: &str,
+) where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
+    DR: tokio::io::AsyncBufRead + Unpin,
+    DW: tokio::io::AsyncWrite + Unpin,
+{
+    send_char(host_write, '\u{10}').await;
+    for ch in word.chars() {
+        send_char(host_write, ch).await;
+    }
+    send_char(host_write, '\n').await;
+    for _ in 0..nav_drain_rounds(word) {
+        let _ = render_capture(
+            host_write,
+            host_read,
+            daemon_reader,
+            daemon_write,
+            stream_id,
+        )
+        .await;
+    }
+}
+
 /// Boot the plugin + mock daemon, relay the connect handshake, and pump renders
 /// until BOTH the agents and squads snapshots have been fetched + folded (so the
 /// Squads screen has resolved rows). Returns the live handles + recorder.
@@ -406,9 +450,16 @@ async fn boot(
     tokio::net::unix::OwnedWriteHalf,
     tokio::task::JoinHandle<Result<(), ainb_plugin_sdk::SdkError>>,
 ) {
+    // Seed the `first_run` ack, THEN publish the home. `AINB_HANGAR_HOME` is
+    // process-global and this binary holds two tests, so a sibling's `set_var`
+    // can land between ours and this write; `on_init` reading in that window
+    // finds no acks and paints the danger-full-access modal over the board,
+    // where it swallows every key the test sends. Publishing here rather than at
+    // the call site keeps the two in one place, in this order.
     let state = home.join("hangar").join("state.toml");
     std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
     std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+    std::env::set_var("AINB_HANGAR_HOME", home);
 
     let socket_path = home.join("hangar.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind daemon");
@@ -462,7 +513,6 @@ async fn boot(
 async fn squads_screen_shows_leader_and_member_rows() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
-        std::env::set_var("AINB_HANGAR_HOME", home.path());
         let stream_id = format!("sock-squads-{}", std::process::id());
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let (mut hw, mut hr, mut dr, mut dw, server) =
@@ -475,8 +525,9 @@ async fn squads_screen_shows_leader_and_member_rows() {
             "the squad must not be on the landing screen:\n{pre}"
         );
 
-        // Press `S` to open the Squads screen, then render.
-        send_char(&mut hw, 'S').await;
+        // `^P squads` opens the Squads screen, then render. Was the `S` tab key
+        // until crisp B5 §2.5 demoted it.
+        go_to_screen(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, "squads").await;
         let mut post = String::new();
         for _ in 0..30 {
             post = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
@@ -508,14 +559,13 @@ async fn squads_screen_shows_leader_and_member_rows() {
 async fn create_and_assign_fire_the_squad_rpcs() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
-        std::env::set_var("AINB_HANGAR_HOME", home.path());
         let stream_id = format!("sock-squadrpc-{}", std::process::id());
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let (mut hw, mut hr, mut dr, mut dw, server) =
             boot(home.path(), &stream_id, seen.clone()).await;
 
-        // Open the Squads screen.
-        send_char(&mut hw, 'S').await;
+        // Open the Squads screen (crisp B5 §2.5 demoted the `S` tab key).
+        go_to_screen(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, "squads").await;
         let _ = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
 
         // Create a squad: `c`, type "qa", Enter.
