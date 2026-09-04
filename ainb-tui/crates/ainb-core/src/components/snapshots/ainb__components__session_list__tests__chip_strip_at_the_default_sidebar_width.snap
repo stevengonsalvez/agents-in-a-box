@@ -1,0 +1,14 @@
+---
+source: crates/ainb-core/src/components/session_list.rs
+assertion_line: 1312
+expression: "render_panel(&mut state, 42, 9)"
+---
+╭ Workspaces (1) · 2 need you ───────────╮
+│    ▼  agents-in-a-box (5)             │
+│▶ 1 ☐ ├─ ○    ✻   ainb/acp-c…  ASK 40s │
+│  2 ☐ ├─ ○   ✻  ainb/disk-c…  ERR 9m │
+│  3 ☐ ├─ ○   ✻  ainb/ap…  APPROVE 3m │
+│  4 ☐ ├─ ○   ✻  ainb/site-…  DONE 1m │
+│  5 ☐ └─ ○   ✻  ainb/quiet           │
+│                                        │
+╰────────────────────────────────────────╯
