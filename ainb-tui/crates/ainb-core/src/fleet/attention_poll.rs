@@ -10,7 +10,7 @@
 // into a shared cell the render loop reads. The render loop never dials a
 // socket: a daemon that has wedged must cost a frame nothing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -174,43 +174,10 @@ fn options_of(payload: &serde_json::Value) -> Vec<AttentionOption> {
         .unwrap_or_default()
 }
 
-/// tmux session names whose CURRENT PANE PATH is `cwd`.
-///
-/// The path crosses as an argv element into tmux's own `-f` filter and never
-/// through a parsed output field. That is deliberate: this repo has been bitten
-/// three times by a path splitting a delimited text channel, once deleting
-/// source. Only session names come back, one per line, and a tmux session name
-/// cannot contain a newline.
-#[must_use]
-pub fn tmux_sessions_at(cwd: &str) -> Vec<String> {
-    let Ok(output) = std::process::Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}",
-            "-f",
-            &format!("#{{==:#{{pane_current_path}},{cwd}}}"),
-        ])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::fleet::attention::{AttentionKind, AttentionSource, Answerable};
 
