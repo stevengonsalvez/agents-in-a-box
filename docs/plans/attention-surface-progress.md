@@ -314,7 +314,7 @@ this run.
 Open because the config's `protect_rule` says so in as many words: "Own
 open-source tooling explainers (ainb, reflect, hangar, popajob, career-ops,
 cerebro) stay public." Nothing on the page is not already in this public repo's
-commits. Source committed at `docs/explainers/attention-surface.html`.
+commits. Source committed at `explainers/attention-surface.html`.
 
 The recording it refers to is `docs/assets/screenshots/attention-surface.gif`,
 driven by `scripts/attention-surface-demo.sh` through
