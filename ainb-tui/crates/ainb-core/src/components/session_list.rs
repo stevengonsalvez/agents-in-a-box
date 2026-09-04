@@ -765,18 +765,12 @@ impl SessionListComponent {
                         "NAME_SPAN_INDEX must track the session-name span"
                     );
                     // The chip whose answer is still in flight, if it is on
-                    // THIS row. Identity is checked against the ask pane's own
-                    // request, so an answer sent on one session cannot render
-                    // every other session's chip as SENT.
-                    let sending = state
-                        .ask_state
-                        .in_flight()
-                        .then(|| {
-                            session_alert
-                                .iter()
-                                .find(|chip| state.ask_state.phase_for(chip).is_some())
-                        })
-                        .flatten();
+                    // THIS row. Asked per CHIP, so an answer sent on one
+                    // session cannot render every other session's chip as
+                    // SENT, and this one keeps reading SENT after the operator
+                    // has navigated to a different question.
+                    let sending =
+                        session_alert.iter().find(|chip| state.ask_state.is_sending(chip));
                     push_attention_chips(
                         &mut session_spans,
                         session_alert,

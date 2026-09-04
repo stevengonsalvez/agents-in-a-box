@@ -71,26 +71,30 @@ pub struct AskState {
     focus: AskFocus,
     cursor: usize,
     free_text: String,
-    phase: Option<AnswerPhase>,
-    /// The request the outstanding send belongs to, which is NOT always the one
-    /// on screen.
+    /// What each send did, keyed by the request it was answering.
     ///
-    /// `retarget` runs on every render of the `ask` tab, so navigating away
-    /// from a question and back used to reset the whole struct and clear the
-    /// double-send latch with it: answer A, tab to preview, move the cursor,
-    /// tab back, press Enter, and the same answer goes into the agent's picker
-    /// a second time. The daemon route survives that on first-answer-wins; the
-    /// tmux route has no dedupe and types the text straight in.
+    /// Per-REQUEST rather than per-view, because `retarget` runs on every
+    /// render of the `ask` tab and a send outlives the operator's cursor.
+    /// A single `phase` field got this wrong in both directions: it cleared on
+    /// retarget, so answering A and tabbing away dropped the double-send latch
+    /// and let the same answer go into the agent's picker twice; and it was
+    /// written by whichever outcome landed last, so A's failure painted itself
+    /// into B's pane while A, once returned to, showed nothing at all.
     ///
-    /// Keeping the id here means the latch belongs to the QUESTION rather than
-    /// to whatever the pane happens to be showing.
-    in_flight_request: Option<String>,
+    /// An entry is the latch as well as the view: `InFlight` here IS the
+    /// outstanding send, so the two can no longer disagree.
+    phases: Vec<(String, AnswerPhase)>,
     /// Shared with every send worker, and deliberately NOT replaced on
     /// retarget: a worker holding an `Arc` to a discarded inbox publishes its
     /// outcome into nothing, so a failed send would report as neither sent nor
-    /// failed.
-    inbox: Arc<Mutex<Vec<AnswerPhase>>>,
+    /// failed. Each entry names the request it belongs to, so an outcome
+    /// cannot be attributed to whatever question is on screen when it lands.
+    inbox: Arc<Mutex<Vec<(String, AnswerPhase)>>>,
 }
+
+/// How many requests keep an outcome. Bounds a session that answers questions
+/// all day; an in-flight send is never evicted.
+const MAX_TRACKED_PHASES: usize = 8;
 
 impl Default for AskState {
     fn default() -> Self {
@@ -99,8 +103,7 @@ impl Default for AskState {
             focus: AskFocus::Options,
             cursor: 0,
             free_text: String::new(),
-            phase: None,
-            in_flight_request: None,
+            phases: Vec::new(),
             inbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -141,11 +144,36 @@ impl AskState {
         };
         self.cursor = 0;
         self.free_text.clear();
-        // `phase` is per-VIEW and clears with the rest, but the latch and the
-        // inbox behind it are per-REQUEST and deliberately survive. This method
-        // runs on every render, so resetting them here is what let the operator
-        // navigate away from an in-flight answer and send it a second time.
-        self.phase = None;
+        // `phases` is deliberately untouched: it is keyed by request, so the
+        // question being shown selects its own outcome. This method runs on
+        // every render, and clearing here is what let the operator navigate
+        // away from an in-flight answer and send it a second time.
+    }
+
+    /// The outcome recorded for `request`, if one is.
+    fn phase_of(&self, request: &str) -> Option<&AnswerPhase> {
+        self.phases.iter().find(|(id, _)| id == request).map(|(_, phase)| phase)
+    }
+
+    /// Record `phase` against `request`, returning what it replaced.
+    fn set_phase(&mut self, request: &str, phase: AnswerPhase) -> Option<AnswerPhase> {
+        if let Some(slot) = self.phases.iter_mut().find(|(id, _)| id == request) {
+            return Some(std::mem::replace(&mut slot.1, phase));
+        }
+        // Evict settled outcomes only. Dropping an in-flight entry would drop
+        // the latch with it and re-open the double-send.
+        while self.phases.len() >= MAX_TRACKED_PHASES {
+            let Some(oldest) = self
+                .phases
+                .iter()
+                .position(|(_, phase)| !matches!(phase, AnswerPhase::InFlight { .. }))
+            else {
+                break;
+            };
+            self.phases.remove(oldest);
+        }
+        self.phases.push((request.to_string(), phase));
+        None
     }
 
     /// Which half of the pane the keyboard is driving.
@@ -166,10 +194,10 @@ impl AskState {
         &self.free_text
     }
 
-    /// What the last send did.
+    /// What the last send did to the request on screen.
     #[must_use]
-    pub const fn phase(&self) -> Option<&AnswerPhase> {
-        self.phase.as_ref()
+    pub fn phase(&self) -> Option<&AnswerPhase> {
+        self.phase_of(self.request.as_deref()?)
     }
 
     /// What the last send did TO THIS CHIP, or `None` when the phase belongs to
@@ -180,8 +208,17 @@ impl AskState {
     /// as `SENT`.
     #[must_use]
     pub fn phase_for(&self, chip: &SessionAttention) -> Option<&AnswerPhase> {
-        (self.request.as_deref() == Some(request_id(chip).as_str())).then_some(())?;
-        self.phase.as_ref()
+        self.phase_of(&request_id(chip))
+    }
+
+    /// Whether THIS chip's answer is still on the wire.
+    ///
+    /// Answers the question the chip strip actually asks, on every row at once,
+    /// so the `SENT` marker stays on the session it belongs to after the
+    /// operator has navigated somewhere else.
+    #[must_use]
+    pub fn is_sending(&self, chip: &SessionAttention) -> bool {
+        matches!(self.phase_for(chip), Some(AnswerPhase::InFlight { .. }))
     }
 
     /// Whether a send is still outstanding for the request now on screen.
@@ -191,13 +228,15 @@ impl AskState {
     /// away from and back to still has its answer in flight.
     #[must_use]
     pub fn in_flight(&self) -> bool {
-        self.in_flight_request.is_some() && self.in_flight_request == self.request
+        matches!(self.phase(), Some(AnswerPhase::InFlight { .. }))
     }
 
     /// Whether ANY send is outstanding, whichever question it belongs to.
     #[must_use]
-    pub const fn any_in_flight(&self) -> bool {
-        self.in_flight_request.is_some()
+    pub fn any_in_flight(&self) -> bool {
+        self.phases
+            .iter()
+            .any(|(_, phase)| matches!(phase, AnswerPhase::InFlight { .. }))
     }
 
     /// Move the option cursor, wrapping. A free-text row sits after the last
@@ -253,34 +292,34 @@ impl AskState {
     /// Fold in whatever the worker has reported. Returns `true` when something
     /// landed, so the caller can mark the frame dirty.
     pub fn tick(&mut self) -> bool {
-        let landed: Vec<AnswerPhase> = self
+        let landed: Vec<(String, AnswerPhase)> = self
             .inbox
             .lock()
             .map(|mut inbox| inbox.drain(..).collect())
             .unwrap_or_else(|poisoned| poisoned.into_inner().drain(..).collect());
         let changed = !landed.is_empty();
-        if changed {
-            // Whatever landed, the send is over. Cleared here rather than in
-            // each arm so a variant added later cannot leave the latch stuck,
-            // which would refuse every future answer to that question.
-            self.in_flight_request = None;
-        }
-        for phase in landed {
+        for (request, phase) in landed {
+            // Recorded against the request it answers, never against whatever
+            // the pane is showing. Overwriting the shown phase is how one
+            // question's failure came to be painted under another question.
+            let failed = matches!(phase, AnswerPhase::Failed { .. });
+            let previous = self.set_phase(&request, phase);
             // A failure puts a TYPED answer back, so nobody retypes what the
             // transport lost. A picked option is deliberately not restored: it
             // is still highlighted where the operator left it, and its label in
-            // the composer would read as an answer they wrote.
-            if let (
-                AnswerPhase::Failed { .. },
-                Some(AnswerPhase::InFlight {
-                    draft: Some(text), ..
-                }),
-            ) = (&phase, &self.phase)
+            // the composer would read as an answer they wrote. Only for the
+            // request on screen: text belonging to another question would
+            // appear in this one's composer as something the operator typed.
+            if !failed || self.request.as_deref() != Some(request.as_str()) {
+                continue;
+            }
+            if let Some(AnswerPhase::InFlight {
+                draft: Some(text), ..
+            }) = previous
             {
-                self.free_text.clone_from(text);
+                self.free_text = text;
                 self.focus = AskFocus::FreeText;
             }
-            self.phase = Some(phase);
         }
         changed
     }
@@ -310,6 +349,11 @@ impl AskState {
         // Only a typed answer is a draft worth restoring.
         let draft = (self.focus == AskFocus::FreeText).then(|| self.free_text.clone());
         let inbox = Arc::clone(&self.inbox);
+        // The identity of what is being answered, captured before the worker
+        // runs so its outcome lands against this question no matter where the
+        // operator has navigated by the time it does.
+        let request = request_id(chip);
+        let reply_to = request.clone();
         let route = chip.answerable.clone();
         let session_id = session_id.to_string();
         let cwd = cwd.to_string();
@@ -349,22 +393,27 @@ impl AskState {
                 Answerable::No(why) => Err(why.reason().to_string()),
             };
             if let Ok(mut inbox) = inbox.lock() {
-                inbox.push(match outcome {
-                    Ok(via) => AnswerPhase::Delivered { via },
-                    Err(reason) => AnswerPhase::Failed { reason },
-                });
+                inbox.push((
+                    reply_to,
+                    match outcome {
+                        Ok(via) => AnswerPhase::Delivered { via },
+                        Err(reason) => AnswerPhase::Failed { reason },
+                    },
+                ));
             }
         });
         match spawned {
             Ok(_) => {
-                // The latch is stamped with WHICH request is in flight, so it
-                // still refuses a second send after the operator navigates away
-                // and back. `phase` is the view; this is the fact.
-                self.in_flight_request.clone_from(&self.request);
-                self.phase = Some(AnswerPhase::InFlight {
-                    since: Instant::now(),
-                    draft,
-                });
+                // Filed under the request, so it still refuses a second send
+                // after the operator navigates away and back, and so the chip
+                // for THIS question keeps reading `SENT` from wherever they go.
+                self.set_phase(
+                    &request,
+                    AnswerPhase::InFlight {
+                        since: Instant::now(),
+                        draft,
+                    },
+                );
                 Ok(())
             }
             // The worker never ran, so there is nothing in flight to wait for.
@@ -377,7 +426,7 @@ impl AskState {
     /// How long the outstanding send has been going, for the pane to show.
     #[must_use]
     pub fn elapsed(&self) -> Option<Duration> {
-        match &self.phase {
+        match self.phase() {
             Some(AnswerPhase::InFlight { since, .. }) => Some(since.elapsed()),
             _ => None,
         }
@@ -399,6 +448,23 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// Put a send in flight against `chip`, as `send` does on success, without
+    /// spawning a worker at a daemon the test does not have.
+    fn latch(state: &mut AskState, chip: &SessionAttention, draft: Option<&str>) {
+        state.set_phase(
+            &request_id(chip),
+            AnswerPhase::InFlight {
+                since: Instant::now(),
+                draft: draft.map(str::to_string),
+            },
+        );
+    }
+
+    /// Publish a worker's outcome for `chip`, as the send thread does.
+    fn publish(state: &AskState, chip: &SessionAttention, phase: AnswerPhase) {
+        state.inbox.lock().unwrap().push((request_id(chip), phase));
     }
 
     #[test]
@@ -525,13 +591,9 @@ mod tests {
         let chip = ask_with_options(&["Focused"]);
         let mut state = AskState::default();
         state.retarget(&chip);
-        // The LATCH is what a send stamps, and what refuses the next one. It
-        // outlives `phase`, which the pane resets on every retarget.
-        state.in_flight_request.clone_from(&state.request);
-        state.phase = Some(AnswerPhase::InFlight {
-            since: Instant::now(),
-            draft: None,
-        });
+        // The in-flight entry IS the latch, and what refuses the next send. It
+        // is filed under the question, not under whatever the pane shows.
+        latch(&mut state, &chip, None);
         assert_eq!(
             state.send(&chip, "s", "/w"),
             Err("an answer is already in flight".to_string())
@@ -540,14 +602,17 @@ mod tests {
 
     #[test]
     fn a_failed_send_puts_the_operators_text_back() {
+        let chip = ask_with_options(&[]);
         let mut state = AskState::default();
-        state.phase = Some(AnswerPhase::InFlight {
-            since: Instant::now(),
-            draft: Some("the long answer they typed".to_string()),
-        });
-        state.inbox.lock().unwrap().push(AnswerPhase::Failed {
-            reason: "target_not_running".to_string(),
-        });
+        state.retarget(&chip);
+        latch(&mut state, &chip, Some("the long answer they typed"));
+        publish(
+            &state,
+            &chip,
+            AnswerPhase::Failed {
+                reason: "target_not_running".to_string(),
+            },
+        );
         assert!(state.tick());
         assert_eq!(
             state.free_text(),
@@ -569,13 +634,14 @@ mod tests {
         let mut state = AskState::default();
         state.retarget(&chip);
         state.move_cursor(&chip, 1);
-        state.phase = Some(AnswerPhase::InFlight {
-            since: Instant::now(),
-            draft: None,
-        });
-        state.inbox.lock().unwrap().push(AnswerPhase::Failed {
-            reason: "no live target".to_string(),
-        });
+        latch(&mut state, &chip, None);
+        publish(
+            &state,
+            &chip,
+            AnswerPhase::Failed {
+                reason: "no live target".to_string(),
+            },
+        );
         state.tick();
         assert_eq!(state.free_text(), "");
         assert_eq!(state.focus(), AskFocus::Options);
@@ -588,14 +654,17 @@ mod tests {
 
     #[test]
     fn a_delivered_send_leaves_the_draft_alone() {
+        let chip = ask_with_options(&["a"]);
         let mut state = AskState::default();
-        state.phase = Some(AnswerPhase::InFlight {
-            since: Instant::now(),
-            draft: None,
-        });
-        state.inbox.lock().unwrap().push(AnswerPhase::Delivered {
-            via: "tmux (tmux_proj)".to_string(),
-        });
+        state.retarget(&chip);
+        latch(&mut state, &chip, None);
+        publish(
+            &state,
+            &chip,
+            AnswerPhase::Delivered {
+                via: "tmux (tmux_proj)".to_string(),
+            },
+        );
         state.tick();
         assert_eq!(state.free_text(), "", "a delivered answer is not a draft");
         assert!(!state.in_flight());
@@ -603,12 +672,11 @@ mod tests {
 
     #[test]
     fn an_in_flight_send_reports_how_long_it_has_been_going() {
+        let chip = ask_with_options(&["a"]);
         let mut state = AskState::default();
+        state.retarget(&chip);
         assert!(state.elapsed().is_none());
-        state.phase = Some(AnswerPhase::InFlight {
-            since: Instant::now(),
-            draft: None,
-        });
+        latch(&mut state, &chip, None);
         assert!(
             state.elapsed().is_some(),
             "a spinner with no elapsed time says nothing"
@@ -623,10 +691,7 @@ mod tests {
         let theirs = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-other".into());
         let mut state = AskState::default();
         state.retarget(&mine);
-        state.phase = Some(AnswerPhase::InFlight {
-            since: Instant::now(),
-            draft: None,
-        });
+        latch(&mut state, &mine, None);
         assert!(state.phase_for(&mine).is_some());
         assert!(state.phase_for(&theirs).is_none());
     }
@@ -654,7 +719,7 @@ mod tests {
         state.retarget(&a);
         // Stand in for a landed send: this is what `send` stamps on success,
         // without spawning a worker at a daemon the test does not have.
-        state.in_flight_request.clone_from(&state.request);
+        latch(&mut state, &a, None);
         assert!(state.in_flight(), "the answer to A is out");
 
         // Away to another question, then back. Both are ordinary renders.
@@ -689,21 +754,120 @@ mod tests {
         let b = SessionAttention::daemon(AttentionKind::Ask, 3_000, "att-3".into());
         let mut state = AskState::default();
         state.retarget(&a);
-        state.in_flight_request.clone_from(&state.request);
+        latch(&mut state, &a, None);
         // The worker's handle, taken before the operator navigates.
         let worker_inbox = Arc::clone(&state.inbox);
 
         state.retarget(&b);
         state.retarget(&a);
 
-        worker_inbox.lock().unwrap().push(AnswerPhase::Failed {
-            reason: "target_not_running".to_string(),
-        });
+        worker_inbox.lock().unwrap().push((
+            request_id(&a),
+            AnswerPhase::Failed {
+                reason: "target_not_running".to_string(),
+            },
+        ));
         assert!(state.tick(), "the outcome must be observed");
         assert!(
             matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason }) if reason == "target_not_running"),
             "the failure must be shown against the question it belongs to"
         );
         assert!(!state.any_in_flight(), "and the latch is released");
+    }
+
+    /// An outcome belongs to the QUESTION it answers, never to whatever the
+    /// pane happens to be showing when it lands. A single shared `phase` field
+    /// was written by whichever worker finished last, so a failure on A was
+    /// painted under B's question, over B's own text, as if B had failed.
+    /// A surface that reports the wrong question is worse than one that is
+    /// silent about it.
+    #[test]
+    fn a_failure_on_one_question_is_never_shown_under_another() {
+        let a = ask_with_options(&["yes"]);
+        let b = SessionAttention::daemon(AttentionKind::Ask, 4_000, "att-4".into());
+        let mut state = AskState::default();
+        state.retarget(&a);
+        latch(&mut state, &a, Some("A's typed answer"));
+
+        // The operator moves to B while A is still on the wire, and starts
+        // typing an answer to B.
+        state.retarget(&b);
+        state.push_char('n');
+
+        publish(
+            &state,
+            &a,
+            AnswerPhase::Failed {
+                reason: "target_not_running".to_string(),
+            },
+        );
+        assert!(state.tick(), "the outcome must be observed");
+
+        assert!(
+            state.phase_for(&b).is_none(),
+            "B never sent anything, so B's pane must report nothing"
+        );
+        assert_eq!(
+            state.free_text(),
+            "n",
+            "and A's draft must not be restored over what they are typing at B"
+        );
+        assert!(
+            state.phase().is_none(),
+            "the pane is on B, and B has no outcome"
+        );
+
+        // Back to A: the failure is still there, against the question it
+        // belongs to. Clearing on retarget lost it entirely.
+        state.retarget(&a);
+        assert!(
+            matches!(state.phase_for(&a), Some(AnswerPhase::Failed { reason }) if reason == "target_not_running"),
+            "A's failure survives the round trip and is shown on A"
+        );
+    }
+
+    /// The chip strip paints every row, so `SENT` has to follow the question
+    /// rather than the cursor: an answer still on the wire for A stayed marked
+    /// only while the pane happened to be pointed at A.
+    #[test]
+    fn a_chip_keeps_reading_sent_after_the_operator_navigates_away() {
+        let a = ask_with_options(&["yes"]);
+        let b = SessionAttention::daemon(AttentionKind::Ask, 5_000, "att-5".into());
+        let mut state = AskState::default();
+        state.retarget(&a);
+        latch(&mut state, &a, None);
+
+        state.retarget(&b);
+        assert!(state.is_sending(&a), "A's answer is still out");
+        assert!(!state.is_sending(&b), "B has sent nothing");
+    }
+
+    /// The outcome store is bounded, and an in-flight send is never the entry
+    /// that gets dropped: evicting one would release the double-send latch.
+    #[test]
+    fn tracked_outcomes_are_bounded_and_never_evict_a_live_send() {
+        let live = ask_with_options(&["yes"]);
+        let mut state = AskState::default();
+        state.retarget(&live);
+        latch(&mut state, &live, None);
+
+        for since in 0..(MAX_TRACKED_PHASES as i64 * 3) {
+            let settled =
+                SessionAttention::daemon(AttentionKind::Ask, since, format!("settled-{since}"));
+            state.retarget(&settled);
+            state.set_phase(
+                &request_id(&settled),
+                AnswerPhase::Delivered { via: "tmux".into() },
+            );
+        }
+
+        assert!(
+            state.phases.len() <= MAX_TRACKED_PHASES,
+            "the store is bounded"
+        );
+        assert!(
+            state.is_sending(&live),
+            "and the outstanding send is still latched"
+        );
     }
 }
