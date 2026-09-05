@@ -316,6 +316,103 @@ open-source tooling explainers (ainb, reflect, hangar, popajob, career-ops,
 cerebro) stay public." Nothing on the page is not already in this public repo's
 commits. Source committed at `explainers/attention-surface.html`.
 
+Recordings, one per user-visible phase, all driven through a real `ainb tui`
+in tmux and read back off the pane:
+
+| Phase | Recording | Fixture |
+|---|---|---|
+| 1-2 chips | `attention-chips.gif` | no daemon |
+| 3 tab strip | `attention-tabs.gif` | no daemon |
+| 4 answering | `attention-answer.gif` | no daemon |
+| 5-6 deletions | `attention-deletions.gif` | no daemon, as absence in the help overlay |
+| 8 broadcast | `attention-broadcast.gif` | no daemon; the send refuses and says why |
+| 7 copilot | **none** | four takes, all ended on `preview` |
+| 9 sweep | **none possible** | no TUI surface |
+| 10 ACP chat | **none** | daemon-side; visible only as the chat page opening |
+
+All driven by `scripts/attention-surface-demo.sh` (`--daemon` when a verb is
+daemon-owned) through `docs/assets/screenshots/attention-*.tape`.
+
+### The demo runs against its own tmux server, and must
+
+The sessions screen lists every tmux session it cannot account for under
+"Other tmux". The first six recordings were therefore carrying the operator's
+REAL session names — including shotclubhouse ones, which this repo's own
+publishing rule locks — and one take fired `t` and rendered a full abtop
+screen of live sessions and prompts. Caught in frame review before anything
+was published; every gif was deleted and re-recorded.
+
+The fix is `TMUX_TMPDIR` on a private socket with `TMUX` unset, so a client
+cannot rejoin the host's server. Two details cost a take each: the socket path
+must be SHORT (the mktemp home exceeded the 104-byte unix socket limit, and
+tmux fails with "File name too long"), and the fixture sessions need the
+`tmux_` prefix or ainb lists them a second time as unmanaged.
+
+### Takes that were thrown away
+
+| Take | Discarded because |
+|---|---|
+| answer 1 | Seeded onboarding version was a hardcoded `0.0.0`, so the TUI ran the setup wizard |
+| answer 2 | Two Tabs from `preview` lands on `thread`; the answer went into the thread composer |
+| answer 3 | `Down` never moved the session: `thread` and `copilot` swallow the arrows |
+| answer 4 | The walk moved one row, which is the same worktree's other session — the same question |
+| broadcast 1 | Ran without a daemon before that was the deliberate choice; refused honestly but showed nothing working |
+| broadcast 2 | Daemon bring-up pushed the tape out of step; keys fired as session shortcuts and starred a workspace |
+| copilot 1-4 | With a daemon attached the pane stops taking tab-strip keys; every take ended on `preview` |
+| all of the above, again | Re-recorded from scratch once the tmux isolation landed |
+
+`Tab` is overloaded on this screen — it cycles the tab strip AND switches focus
+between list and pane — which is why blind Tab counts drift. The tapes now copy
+a key prefix proven to land where it says.
+
+## Open, and deliberately not fixed here
+
+| Item | Why it is left | What closing it needs |
+|---|---|---|
+| `chat_cancel_turns_blocking`'s version check is vacuous — it re-reads `fleet/snapshot` immediately before the write, which removes the staleness property optimistic concurrency exists for | Closing it means a new field on `FleetMessageDelivery` that the daemon populates when it builds the leg. That is a wire change on the message path at the end of the epic, and the exposure is now bounded to one turn deadline rather than the life of the pane | Carry the version the leg was CREATED at from the send through `ChatIntent::CancelTurn`, and pass that as `expected_version` instead of re-reading it |
+| The retry sweep is Claude-hook-only: a wire session's ERROR event type is the raw method (`turn/failed`, `thread/error`), none of which is in the allowlist, so Codex and ACP sessions always land in `skipped_opaque` | It fails CLOSED, which is the right direction for a gate that types at an unattended agent. Widening what auto-`continue` reaches is a deliberate behaviour change and needs its own verification, not a longer list | A predicate mirroring the state machine that set ERROR, landed with tests that prove which sessions newly qualify |
+| A tmux answer has no timeout of its own, so a wedged tmux server leaves a permanently `InFlight` entry that is un-evictable and refuses re-answering that question until the TUI restarts | Narrow, and it is the one state the per-request design cannot leave. The daemon route is bounded at 5s and the broker route by its own read timeout | A deadline on the tmux send, or an operator-visible way to clear a stuck entry |
+| A create with no `provider` racing a swap can read the pre-swap adapter and then be refused `ScopeHeld` | Self-clearing: the next page open succeeds, and the window is the swap itself | Resolving the adapter and minting under one transaction |
+
+## Suite status
+
+`cargo test --workspace`: **104 test binaries, 103 pass.**
+
+The one failure is `tripwire_new_session_agent_pills_visible`, and it is
+environmental rather than a code failure. The pane it captures shows the
+new-session dialog stuck on:
+
+```
+✖ Authentication failed - check your git credentials
+Launch is disabled — Esc to pick another repository
+```
+
+so the Agent row it asserts on is never reached. That message comes from
+`git/remote_repo_manager.rs`, which this branch does not touch; the test file
+is byte-identical to `origin/main`; and this branch changes no file under
+`crates/ainb-core/src/git/` or `components/new_session.rs`. No CI job runs the
+binary either — the `Test` job filters `not binary(/^tripwire_/)` and the
+named-tripwire steps do not include it — which is why it went unseen.
+
+Two OTHER tripwires in that same CI-ungated position were red for the same
+reason and are fixed here (`b4d9d7f2`): both demanded a `fleet daemon` row
+that `probe.rs` deliberately withholds while that daemon is stopped, a rule
+main pins in its own unit test. They now assert the contract that holds.
+
+The `ainb-plugin-cts-v2::real_plugin_axes` guard noted earlier did not trip on
+this run.
+
+## Published pages
+
+| Page | Where | Lock |
+|---|---|---|
+| The attention surface | <https://explainers.stevengonsalvez.com/attention-surface/> (also <https://fancy-temple-hw39.here.now/>) | open |
+
+Open because the config's `protect_rule` says so in as many words: "Own
+open-source tooling explainers (ainb, reflect, hangar, popajob, career-ops,
+cerebro) stay public." Nothing on the page is not already in this public repo's
+commits. Source committed at `explainers/attention-surface.html`.
+
 The recording it refers to is `docs/assets/screenshots/attention-surface.gif`,
 driven by `scripts/attention-surface-demo.sh` through
 `docs/assets/screenshots/attention-surface.tape`. FIVE takes were made and four
