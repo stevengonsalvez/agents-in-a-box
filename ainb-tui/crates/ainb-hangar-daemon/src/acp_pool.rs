@@ -358,10 +358,19 @@ pub async fn mintable_permission_mode(provider: &str, scope_key: Option<&str>) -
         if !owns_it {
             return None;
         }
-        return Some(match active_handle().await {
-            Some(pool) => pool.permission_mode(wanted),
-            None => DEFAULT_PERMISSION_MODE.to_string(),
-        });
+        // Looked UP, not defaulted. `permission_mode` answers `default` for a
+        // key it cannot find, which would mint a session whose stored mode and
+        // `acp_session_created` payload both record `default` while the child
+        // actually runs pinned — the spawn reads the live registry, so this
+        // never unconfines anything, but it writes an audit record that
+        // disagrees with the process. A key nobody registered is not mintable.
+        //
+        // `None` with no pool for the same reason: no pool is no registry, so
+        // no `#task:` key exists to be minted against.
+        return match active_handle().await {
+            Some(pool) => pool.adapter_config(wanted).ok().map(|config| config.permission_mode),
+            None => None,
+        };
     }
     chat_adapters()
         .await
@@ -3691,21 +3700,20 @@ fn permission_fingerprint(session_key: &str, permission: &PermissionRequest) -> 
 #[cfg(test)]
 mod tests {
 
-    /// A per-task adapter is mintable ONLY under its own task's scope.
+    /// A per-task adapter is refused under every scope but its own task's.
     ///
     /// `chat_adapters` hides `#task:` keys so no chat caller can point a
-    /// session at a task's sandboxed process, and validating every mint
-    /// through that list refused the task executor's own mints — which is
-    /// every ACP task run, with `spawn_error` and no delivery legs at all.
+    /// session at a task's sandboxed process, and validating every mint through
+    /// that list refused the task executor's own mints — which is every ACP
+    /// task run, with `spawn_error` and no delivery legs at all. The exception
+    /// is scoped, and these are the scopes it must NOT extend to.
+    ///
+    /// The accepting case needs a registered adapter behind a live pool, so it
+    /// is proven end to end by `tripwire_task_executor_flag` rather than here.
     #[tokio::test]
-    async fn a_task_adapter_is_mintable_only_under_its_own_scope() {
-        let infix = super::TASK_ADAPTER_INFIX;
-        let key = format!("claude-agent-acp{infix}t-42");
+    async fn a_task_adapter_is_refused_under_a_scope_that_is_not_its_own() {
+        let key = format!("claude-agent-acp{}t-42", super::TASK_ADAPTER_INFIX);
 
-        assert!(
-            super::mintable_permission_mode(&key, Some("task:t-42")).await.is_some(),
-            "the task executor mints against exactly this key"
-        );
         assert!(
             super::mintable_permission_mode(&key, Some("task:t-99")).await.is_none(),
             "another task's scope must not reach this task's confined adapter"
@@ -3717,6 +3725,22 @@ mod tests {
         assert!(
             super::mintable_permission_mode(&key, None).await.is_none(),
             "and neither may a caller that names no scope at all"
+        );
+    }
+
+    /// A task key nobody REGISTERED is not mintable either.
+    ///
+    /// It used to answer `Some("default")`, which minted a session whose stored
+    /// permission mode and `acp_session_created` payload both recorded
+    /// `default` while the child ran pinned — the spawn reads the live registry
+    /// and refuses an unknown key outright, so nothing was ever unconfined, but
+    /// the audit record disagreed with the process.
+    #[tokio::test]
+    async fn an_unregistered_task_key_is_not_mintable() {
+        let key = format!("claude-agent-acp{}t-77", super::TASK_ADAPTER_INFIX);
+        assert!(
+            super::mintable_permission_mode(&key, Some("task:t-77")).await.is_none(),
+            "the scope matches, but nothing registered this adapter"
         );
     }
 
