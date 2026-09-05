@@ -119,6 +119,12 @@ impl EmbedClient {
         Self::attach_target_with_mode(session_name, rows, cols, true)
     }
 
+    /// Read-only observation is safe only when this tmux can keep the preview
+    /// client's size out of the shared window-size calculation.
+    pub fn read_only_observer_supported() -> bool {
+        supports_ignore_size()
+    }
+
     /// Attach to an exact tmux target. Window and pane targets are selected
     /// before starting the embedded client, then the client attaches to the
     /// owning session without losing the exact target.

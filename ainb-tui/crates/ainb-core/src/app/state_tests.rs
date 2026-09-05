@@ -9,6 +9,7 @@ mod tests {
         AppState, MAX_OBSERVER_FAILURES, NewSessionState, NewSessionStep, SessionAgentOption,
     };
     use crate::models::{OtherTmuxSession, SessionAgentType, SessionMode};
+    use crate::tmux::pty_wrapper::lock_registry_for_test;
     use std::path::PathBuf;
 
     // ========================================================================
@@ -56,6 +57,7 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        let _registry_guard = lock_registry_for_test();
 
         let missing = format!("ainb-missing-observer-{}", std::process::id());
         let mut state = state_with_other_tmux_sessions(&[missing.as_str()]);
@@ -111,6 +113,7 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        let _registry_guard = lock_registry_for_test();
 
         let session = format!("ainb-observer-retry-reset-{}", std::process::id());
         let created = std::process::Command::new("tmux")
@@ -155,6 +158,7 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        let _registry_guard = lock_registry_for_test();
 
         let session = format!("ainb-observer-grace-{}", std::process::id());
         let created = std::process::Command::new("tmux")
@@ -181,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn ended_observed_session_stops_retry_without_failure_warning() {
+    fn retry_suppression_releases_the_previous_observer() {
         if std::process::Command::new("tmux")
             .arg("-V")
             .output()
@@ -190,45 +194,32 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        let _registry_guard = lock_registry_for_test();
 
-        let session = format!("ainb-observer-ended-{}", std::process::id());
+        let active = format!("ainb-observer-active-{}", std::process::id());
+        let blocked = format!("ainb-observer-blocked-{}", std::process::id());
         let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &session, "sh"])
+            .args(["new-session", "-d", "-s", &active, "sh"])
             .status()
             .map(|status| status.success())
             .unwrap_or(false);
         assert!(created, "failed to create tmux session");
 
-        let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
+        let mut state = state_with_other_tmux_sessions(&[active.as_str(), blocked.as_str()]);
         state.current_screen = "session_list".to_string();
         assert!(!state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80));
+
+        state.selected_other_tmux_index = Some(1);
+        state.observer_failed_target =
+            Some((blocked, std::time::Instant::now(), MAX_OBSERVER_FAILURES));
+        assert!(!state.sync_terminal_observer(24, 80));
+        assert!(state.embed.is_none());
+
         let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &format!("={session}")])
+            .args(["kill-session", "-t", &format!("={active}")])
             .status();
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !state.poll_embed_exit() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        assert_eq!(
-            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
-            Some(MAX_OBSERVER_FAILURES)
-        );
-        assert!(
-            state
-                .notifications
-                .iter()
-                .any(|notification| notification.message == "Live session ended, released")
-        );
-        assert!(
-            !state
-                .notifications
-                .iter()
-                .any(|notification| { notification.message.contains("Live preview unavailable") })
-        );
     }
 
     #[test]

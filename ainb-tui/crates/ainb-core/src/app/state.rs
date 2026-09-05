@@ -546,8 +546,17 @@ impl AppState {
             self.observer_pending = None;
             return false;
         }
+        if !crate::tmux::EmbedClient::read_only_observer_supported() {
+            self.release_interactive_pane();
+            self.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
+            self.add_warning_notification(
+                "Live preview requires tmux client ignore-size support".to_string(),
+            );
+            return false;
+        }
         if let Some((failed, retry_at, attempts)) = &self.observer_failed_target {
             if failed == &name && (*attempts >= MAX_OBSERVER_FAILURES || now < *retry_at) {
+                self.release_interactive_pane();
                 return false;
             }
         }
@@ -692,15 +701,7 @@ impl AppState {
                 self.add_info_notification("Live session ended, released".to_string());
             } else if exited {
                 if let Some(session) = session {
-                    if crate::tmux::session_alive(&session) == Some(false) {
-                        // A normally-ended session is not an observer fault.
-                        // Suppress reconnects until the user changes rows.
-                        self.observer_failed_target =
-                            Some((session, Instant::now(), MAX_OBSERVER_FAILURES));
-                        self.add_info_notification("Live session ended, released".to_string());
-                    } else {
-                        self.record_observer_failure(session);
-                    }
+                    self.record_observer_failure(session);
                 }
             }
             return true;
