@@ -518,6 +518,10 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        if !EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
+            return;
+        }
         let _g = lock_serial();
         let session = new_session("observe");
         let session_size = window_size(&session);

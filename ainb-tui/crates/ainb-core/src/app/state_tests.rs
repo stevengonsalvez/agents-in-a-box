@@ -57,6 +57,10 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        if !crate::tmux::EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
+            return;
+        }
         let _registry_guard = lock_registry_for_test();
 
         let missing = format!("ainb-missing-observer-{}", std::process::id());
@@ -113,6 +117,10 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        if !crate::tmux::EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
+            return;
+        }
         let _registry_guard = lock_registry_for_test();
 
         let session = format!("ainb-observer-retry-reset-{}", std::process::id());
@@ -158,6 +166,10 @@ mod tests {
             eprintln!("SKIP: tmux unavailable");
             return;
         }
+        if !crate::tmux::EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
+            return;
+        }
         let _registry_guard = lock_registry_for_test();
 
         let session = format!("ainb-observer-grace-{}", std::process::id());
@@ -192,6 +204,10 @@ mod tests {
             .map_or(true, |output| !output.status.success())
         {
             eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+        if !crate::tmux::EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
             return;
         }
         let _registry_guard = lock_registry_for_test();
