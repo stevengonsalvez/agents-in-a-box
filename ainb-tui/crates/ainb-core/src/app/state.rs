@@ -15,7 +15,7 @@ use crate::config::screen_model::{self, ConfigTreeNode};
 use crate::config::{AppConfig, SessionLabelStore, registry};
 use crate::credentials;
 use crate::docker::LogStreamingCoordinator;
-use crate::fleet::attention::{AttentionKind, SessionAttention};
+use crate::fleet::attention::{Answerable, AttentionKind, SessionAttention};
 // Phase 6 (new-session redesign): ParsedRepo / RemoteBranch / legacy
 // `RepoSource` import retired with the legacy remote-clone flow.
 use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
@@ -3577,6 +3577,22 @@ pub struct AppState {
     /// hour-old failure would read as brand new. Cleared the moment the session
     /// recovers or leaves the tree, so a later failure starts its own clock.
     pub attention_error_since: HashMap<Uuid, i64>,
+    /// When each LOCAL blocking chip was first observed, keyed by session and
+    /// chip kind.
+    ///
+    /// `attention_for_session` returns the newest QUALIFYING hook row, so a
+    /// producer that re-reports an unanswered question — which Claude Code
+    /// does, it re-emits `Notification` while a prompt stays open — hands back
+    /// a newer `ts` every time. Two things broke on that moving value: the
+    /// chip's age reset to `0s` on every repeat, defeating the oldest-wins rule
+    /// `attention::normalise` documents; and `request_id` is derived from
+    /// `since_ms`, so a landed answer outcome was filed under a key that then
+    /// changed underneath it and the `✗ not answered` line vanished from a
+    /// question that had genuinely failed.
+    ///
+    /// Same shape as [`Self::attention_error_since`]: stamped once, reused
+    /// while the chip stays that kind, dropped when it does not.
+    pub attention_local_since: HashMap<(Uuid, AttentionKind), i64>,
 }
 
 /// Result of background workspace loading
@@ -4044,6 +4060,7 @@ impl Default for AppState {
             // Per-session attention markers, driven by ainb-hooks events.
             attention_baseline: HashMap::new(),
             attention_error_since: HashMap::new(),
+            attention_local_since: HashMap::new(),
             daemon_attention: Arc::new(Mutex::new(
                 crate::fleet::attention::DaemonAttention::default(),
             )),
@@ -11803,6 +11820,31 @@ impl AppState {
             .map(|agent_session| format!("{provider}:{agent_session}"))
     }
 
+    /// Hold each LOCAL chip at the instant it was FIRST seen.
+    ///
+    /// `attention_for_session` returns the newest qualifying hook row, and an
+    /// agent re-reports an unanswered question — Claude Code re-emits
+    /// `Notification` while a prompt stays open — so its `ts` moves forward on
+    /// every refresh. Two things rode on that moving value: the chip's age
+    /// reset to `0s` on each repeat, which is the very thing
+    /// `attention::normalise` documents must not happen; and `request_id` is
+    /// built from `since_ms`, so an answer's outcome was filed under a key that
+    /// then changed underneath it and the `✗ not answered` line disappeared
+    /// from a question that really had failed.
+    ///
+    /// Daemon rows are left alone: their identity is the attention id, which
+    /// does not move.
+    fn stamp_local_since(&mut self, id: Uuid, chips: &mut [SessionAttention]) {
+        for chip in chips {
+            if matches!(chip.answerable, Answerable::Daemon { .. }) {
+                continue;
+            }
+            let first_seen =
+                *self.attention_local_since.entry((id, chip.kind)).or_insert(chip.since_ms);
+            chip.since_ms = first_seen;
+        }
+    }
+
     /// Recompute every session's attention marker (`[!]`/`[?]`/`[✓]`)
     /// from recent ainb-hooks events. Attached sessions never nag and
     /// have their baseline advanced to "now", so re-marking only happens
@@ -11879,10 +11921,25 @@ impl AppState {
         // A session that recovered (or vanished) must lose its ERR clock, or a
         // later failure would render with the age of the previous one.
         self.attention_error_since.retain(|id, _| live.contains(id));
+        self.attention_local_since.retain(|(id, _), _| live.contains(id));
+        // Every (session, kind) a LOCAL chip still claims this pass. Anything
+        // else loses its clock below, so a question that closed and a later one
+        // of the same kind do not share an instant.
+        let still_open: HashSet<(Uuid, AttentionKind)> = marks
+            .iter()
+            .flat_map(|(id, chips, ..)| {
+                chips
+                    .iter()
+                    .filter(|chip| !matches!(chip.answerable, Answerable::Daemon { .. }))
+                    .map(move |chip| (*id, chip.kind))
+            })
+            .collect();
+        self.attention_local_since.retain(|key, _| still_open.contains(key));
         for (id, mut chips, attached, failed) in marks {
             if attached {
                 self.attention_baseline.insert(id, now_ms);
             }
+            self.stamp_local_since(id, &mut chips);
             if failed {
                 // ERR is a SECOND, independent chip, not a competitor: a
                 // session that failed and then asked a question is both, and

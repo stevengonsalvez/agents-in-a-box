@@ -1949,6 +1949,63 @@ mod tests {
         *state.daemon_attention.lock().unwrap() = DaemonAttention::up(by_cwd);
     }
 
+    /// A question the agent RE-REPORTS keeps the instant it was first seen.
+    ///
+    /// `attention_for_session` hands back the newest qualifying hook row, and
+    /// Claude Code re-emits `Notification` while a prompt stays unanswered, so
+    /// the raw `ts` moves forward on every refresh. Two things rode on it. The
+    /// age reset to `0s`, which is exactly what `attention::normalise`
+    /// documents must not happen on a re-raise. And `request_id` is derived
+    /// from `since_ms`, so an answer already sent against that question had its
+    /// outcome filed under a key that then changed underneath it — the pane
+    /// went back to a bare composer with no `✗ not answered`, on a question
+    /// that genuinely had failed. That is the intermittent that took a CI run
+    /// to surface and could not be reproduced by waiting longer.
+    #[test]
+    fn a_re_reported_local_question_keeps_its_first_instant_and_its_id() {
+        use crate::fleet::answer::request_id;
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let mut state = state_with_session_at("/work/repeat", Some("tmux_proj"));
+        let id = state.workspaces[0].sessions[0].id;
+
+        let mut first = [SessionAttention::local(AttentionKind::Ask, 1_000)];
+        state.stamp_local_since(id, &mut first);
+        assert_eq!(first[0].since_ms, 1_000);
+        let key = request_id(&first[0]);
+
+        // The same question, re-reported four minutes later.
+        let mut again = [SessionAttention::local(AttentionKind::Ask, 241_000)];
+        state.stamp_local_since(id, &mut again);
+        assert_eq!(
+            again[0].since_ms, 1_000,
+            "a re-raise must not reset the clock the operator is reading"
+        );
+        assert_eq!(
+            request_id(&again[0]),
+            key,
+            "and must not move the key an answer's outcome was filed under"
+        );
+    }
+
+    /// A DAEMON row is identified by its attention id, so it is left alone.
+    #[test]
+    fn stamping_does_not_touch_a_daemon_row() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let mut state = state_with_session_at("/work/daemonrow", Some("tmux_proj"));
+        let id = state.workspaces[0].sessions[0].id;
+        let mut chips = [SessionAttention::daemon(
+            AttentionKind::Ask,
+            9_000,
+            "att-1".into(),
+        )];
+        state.stamp_local_since(id, &mut chips);
+        assert_eq!(chips[0].since_ms, 9_000);
+        assert!(
+            state.attention_local_since.is_empty(),
+            "a daemon row must not take a local clock"
+        );
+    }
+
     #[test]
     fn a_daemon_row_lands_on_its_session_even_with_no_notifications_store() {
         use crate::fleet::attention::{AttentionKind, AttentionSource, SessionAttention};
