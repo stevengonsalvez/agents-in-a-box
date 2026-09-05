@@ -602,9 +602,9 @@ async fn run_tui_loop(
 
                     use crossterm::event::KeyCode;
 
-                    // Ctrl+Q belongs to the terminal mode. Interactive mode
-                    // releases; read-only preview consumes it without letting
-                    // the host's plain `q` shortcut navigate home.
+                    // Ctrl+Q belongs to the terminal screen. Interactive mode
+                    // releases; every other session-list state consumes it so
+                    // the host's plain `q` shortcut is never timing-dependent.
                     {
                         use crossterm::event::KeyModifiers;
                         if key_event.code == KeyCode::Char('q')
@@ -612,9 +612,8 @@ async fn run_tui_loop(
                         {
                             if app.state.is_interactive_pane() {
                                 app.state.release_interactive_pane();
-                                continue;
                             }
-                            if app.state.is_observing_selected_terminal() {
+                            if app.state.current_screen == crate::app::screens::ids::SESSION_LIST {
                                 continue;
                             }
                         }
@@ -754,10 +753,7 @@ async fn run_tui_loop(
                             // Tmux preview scroll events
                             AppEvent::ScrollPreviewUp => {
                                 if app.state.is_observing_selected_terminal() {
-                                    app.state.add_info_notification(
-                                        "Live preview has no scrollback. Press A to interact."
-                                            .to_string(),
-                                    );
+                                    app.state.notify_live_preview_no_scrollback();
                                 } else {
                                     let preview = layout.tmux_preview_mut();
                                     if !preview.is_scroll_mode() {
@@ -768,10 +764,7 @@ async fn run_tui_loop(
                             }
                             AppEvent::ScrollPreviewDown => {
                                 if app.state.is_observing_selected_terminal() {
-                                    app.state.add_info_notification(
-                                        "Live preview has no scrollback. Press A to interact."
-                                            .to_string(),
-                                    );
+                                    app.state.notify_live_preview_no_scrollback();
                                 } else {
                                     let preview = layout.tmux_preview_mut();
                                     if !preview.is_scroll_mode() {
@@ -782,10 +775,7 @@ async fn run_tui_loop(
                             }
                             AppEvent::EnterScrollMode => {
                                 if app.state.is_observing_selected_terminal() {
-                                    app.state.add_info_notification(
-                                        "Live preview has no scrollback. Press A to interact."
-                                            .to_string(),
-                                    );
+                                    app.state.notify_live_preview_no_scrollback();
                                 } else {
                                     layout.tmux_preview_mut().enter_scroll_mode();
                                 }

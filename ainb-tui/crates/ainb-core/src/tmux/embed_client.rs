@@ -8,7 +8,7 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 use portable_pty::CommandBuilder;
@@ -62,6 +62,20 @@ fn apply_embed_env_from(
     if !term_seen {
         cmd.env("TERM", "xterm-256color");
     }
+}
+
+/// Whether this tmux understands the client flag used to keep a small preview
+/// PTY from resizing the shared window. The usage probe never attaches to or
+/// mutates a user session.
+fn supports_ignore_size() -> bool {
+    static SUPPORTS_IGNORE_SIZE: OnceLock<bool> = OnceLock::new();
+    *SUPPORTS_IGNORE_SIZE.get_or_init(|| {
+        std::process::Command::new("tmux")
+            .args(["attach-session", "-?"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stderr).contains("[-f flags]"))
+            .unwrap_or(false)
+    })
 }
 
 /// A live `tmux attach-session` client embedded in the preview pane.
@@ -136,9 +150,11 @@ impl EmbedClient {
         cmd.arg("attach-session");
         if read_only {
             cmd.arg("-r");
-            // Native tmux client flag: render this client, but never let its
-            // small preview PTY decide the shared window size.
-            cmd.args(["-f", "ignore-size"]);
+            if supports_ignore_size() {
+                // Native tmux client flag: render this client, but never let
+                // its small preview PTY decide the shared window size.
+                cmd.args(["-f", "ignore-size"]);
+            }
         }
         cmd.arg("-t");
         cmd.arg(session_name);

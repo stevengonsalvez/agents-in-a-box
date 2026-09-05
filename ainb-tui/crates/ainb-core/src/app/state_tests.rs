@@ -5,7 +5,9 @@ mod tests {
     use super::*;
     use crate::app::EventHandler;
     use crate::app::events::AppEvent;
-    use crate::app::state::{AppState, NewSessionState, NewSessionStep, SessionAgentOption};
+    use crate::app::state::{
+        AppState, MAX_OBSERVER_FAILURES, NewSessionState, NewSessionStep, SessionAgentOption,
+    };
     use crate::models::{OtherTmuxSession, SessionAgentType, SessionMode};
     use std::path::PathBuf;
 
@@ -100,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_observer_clears_prior_failure_count() {
+    fn observer_spawn_keeps_prior_failure_count_until_grace_period() {
         if std::process::Command::new("tmux")
             .arg("-V")
             .output()
@@ -124,12 +126,127 @@ mod tests {
         assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80), "observer starts");
+        assert_eq!(
+            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            Some(2),
+            "a spawned client can still fail asynchronously"
+        );
+
+        state.release_interactive_pane();
+        state.record_observer_failure(session.clone());
+        assert_eq!(
+            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            Some(3),
+            "a failed spawn must advance the existing retry count"
+        );
+
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={session}")])
+            .status();
+    }
+
+    #[test]
+    fn surviving_observer_clears_prior_failure_count_after_grace_period() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map_or(true, |output| !output.status.success())
+        {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+
+        let session = format!("ainb-observer-grace-{}", std::process::id());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "sh"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(created, "failed to create tmux session");
+
+        let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
+        state.current_screen = "session_list".to_string();
+        state.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
+        assert!(!state.sync_terminal_observer(24, 80));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(state.sync_terminal_observer(24, 80));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!state.poll_embed_exit());
         assert!(state.observer_failed_target.is_none());
 
         state.release_interactive_pane();
         let _ = std::process::Command::new("tmux")
             .args(["kill-session", "-t", &format!("={session}")])
             .status();
+    }
+
+    #[test]
+    fn ended_observed_session_stops_retry_without_failure_warning() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map_or(true, |output| !output.status.success())
+        {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+
+        let session = format!("ainb-observer-ended-{}", std::process::id());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "sh"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(created, "failed to create tmux session");
+
+        let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
+        state.current_screen = "session_list".to_string();
+        assert!(!state.sync_terminal_observer(24, 80));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(state.sync_terminal_observer(24, 80));
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={session}")])
+            .status();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !state.poll_embed_exit() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            Some(MAX_OBSERVER_FAILURES)
+        );
+        assert!(
+            state
+                .notifications
+                .iter()
+                .any(|notification| notification.message == "Live session ended, released")
+        );
+        assert!(
+            !state
+                .notifications
+                .iter()
+                .any(|notification| { notification.message.contains("Live preview unavailable") })
+        );
+    }
+
+    #[test]
+    fn live_preview_scrollback_notice_is_deduplicated() {
+        let mut state = AppState::new();
+        state.notify_live_preview_no_scrollback();
+        state.notify_live_preview_no_scrollback();
+
+        assert_eq!(
+            state
+                .notifications
+                .iter()
+                .filter(|notification| {
+                    notification.message == "Live preview has no scrollback. Press A to interact."
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]

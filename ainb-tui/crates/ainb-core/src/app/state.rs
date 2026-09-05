@@ -455,6 +455,7 @@ pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 const OBSERVER_SETTLE_DELAY: Duration = Duration::from_millis(250);
 const OBSERVER_RETRY_DELAY: Duration = Duration::from_secs(2);
+const OBSERVER_SUCCESS_GRACE: Duration = Duration::from_millis(250);
 const MAX_OBSERVER_FAILURES: u8 = 3;
 
 fn host_tmux_session_name() -> Option<&'static str> {
@@ -560,7 +561,11 @@ impl AppState {
             Ok(client) => {
                 self.embed = Some(client);
                 self.embed_session = Some(name);
-                self.observer_failed_target = None;
+                // `attach-session` can spawn successfully then immediately
+                // fail (for example, if tmux rejects a client flag). Keep a
+                // prior retry count until this client survives one grace
+                // period so failed spawns cannot reset the retry cap.
+                self.observer_started_at = Some(now);
                 true
             }
             Err(e) => {
@@ -626,6 +631,7 @@ impl AppState {
             client.shutdown();
         }
         self.embed_session = None;
+        self.observer_started_at = None;
         self.embed_pane_area = None;
         if self.focused_pane == FocusedPane::Preview {
             self.focused_pane = FocusedPane::Sessions;
@@ -686,10 +692,26 @@ impl AppState {
                 self.add_info_notification("Live session ended, released".to_string());
             } else if exited {
                 if let Some(session) = session {
-                    self.record_observer_failure(session);
+                    if crate::tmux::session_alive(&session) == Some(false) {
+                        // A normally-ended session is not an observer fault.
+                        // Suppress reconnects until the user changes rows.
+                        self.observer_failed_target =
+                            Some((session, Instant::now(), MAX_OBSERVER_FAILURES));
+                        self.add_info_notification("Live session ended, released".to_string());
+                    } else {
+                        self.record_observer_failure(session);
+                    }
                 }
             }
             return true;
+        }
+        if !interactive
+            && self
+                .observer_started_at
+                .is_some_and(|started| started.elapsed() >= OBSERVER_SUCCESS_GRACE)
+        {
+            self.observer_started_at = None;
+            self.observer_failed_target = None;
         }
         false
     }
@@ -3343,6 +3365,9 @@ pub struct AppState {
     observer_pending: Option<(String, Instant)>,
     // A read-only observer that dies waits before the next retry.
     observer_failed_target: Option<(String, Instant, u8)>,
+    // A spawned observer must survive briefly before it clears a prior retry
+    // count. `tmux attach-session` reports some startup failures asynchronously.
+    observer_started_at: Option<Instant>,
     // Interior screen rect (inside the border) the embed's PseudoTerminal
     // occupies, published by the interactive render branch each frame. Drives
     // mouse-coordinate translation into 1-based pane-local SGR sequences.
@@ -3982,6 +4007,7 @@ impl Default for AppState {
             embed_session: None,
             observer_pending: None,
             observer_failed_target: None,
+            observer_started_at: None,
             embed_pane_area: None,
             menu_bar_area: None,
             sessions_pane_state,
@@ -11501,6 +11527,15 @@ impl AppState {
     /// Add an info notification
     pub fn add_info_notification(&mut self, message: String) {
         self.add_notification(Notification::info(message));
+    }
+
+    /// Explain that a read-only preview cannot provide tmux copy-mode without
+    /// filling the notification queue while a scroll key repeats.
+    pub fn notify_live_preview_no_scrollback(&mut self) {
+        const MESSAGE: &str = "Live preview has no scrollback. Press A to interact.";
+        if !self.notifications.iter().any(|notification| notification.message == MESSAGE) {
+            self.add_info_notification(MESSAGE.to_string());
+        }
     }
 
     /// Add a warning notification
