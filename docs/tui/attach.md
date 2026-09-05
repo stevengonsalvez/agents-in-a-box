@@ -42,7 +42,7 @@ Use the in-pane attach for quick interventions — answer an agent's prompt, nud
 | | `a` full-screen | `A` in-pane |
 |---|---|---|
 | Surface | whole terminal (TUI suspends) | right pane (ainb chrome stays) |
-| Visual cue | tmux status bar fills the screen | `● INTERACTIVE — Ctrl+Q release` badge on the pane |
+| Visual cue | tmux status bar fills the screen | `● INTERACTIVE \| Ctrl+Q release` badge on the pane |
 | Leave with | `Ctrl+B` `d` (tmux detach) | `Ctrl+Q` |
 | Lands you | back in ainb, session still listed | read-only preview back |
 | tmux session | survives | survives |
@@ -56,12 +56,12 @@ Use the in-pane attach for quick interventions — answer an agent's prompt, nud
 | `Ctrl+B` `d` | Detach from a full-screen attach (standard tmux detach) |
 | `Ctrl+Q` | Release the in-pane embed (only key ainb intercepts while interactive) |
 | `1`–`9` | Quick-attach by the number badge next to each attachable row |
-| `B` | Toggle the sessions sidebar — collapse to the rail before `A` for a near-full-width embed |
+| `B` | Toggle the sessions sidebar, collapse to the rail before `A` for a near-full-width embed |
 | **Mouse** | Forwarded into the embed while interactive; wheel scrolls tmux scrollback/copy-mode |
 
 ## How it works
 
-The embed drives a real `tmux attach-session` inside a PTY sized to the pane interior: output is parsed by a vt100 screen and rendered in place, key events are encoded to the exact terminal byte sequences a terminal would send, and mouse events are translated into pane-local SGR (mode 1006) reports. The embed honors your sidebar layout — it takes whatever the pane gives it (collapse the sidebar with `B` first for near-full width). One sizing note: the embed is a real tmux client, and under tmux's default `window-size latest` the session's window adopts the newest client's size, so the embedded pane's dimensions become the session's dimensions until another client resizes it. The full-screen path is simpler still — the TUI suspends, hands the terminal to `tmux attach-session`, and resumes when the client detaches. In both modes the client is the only thing that dies on exit; the tmux session and whatever is running inside it are untouched.
+The in-pane attach drives a real `tmux attach-session` inside a PTY sized to the pane interior: output is parsed by a vt100 screen and rendered in place, key events are encoded to the exact terminal byte sequences a terminal would send, and mouse events are translated into pane-local SGR (mode 1006) reports. Its `● INTERACTIVE | Ctrl+Q release` badge marks a client that can affect the shared window size. The `● LIVE PREVIEW | A interact` observer is read-only and uses tmux's `ignore-size` flag, so highlighting a row never resizes its session. Preview has no scrollback; press `A` to interact when history navigation matters. The full-screen path is simpler still: the TUI suspends, hands the terminal to `tmux attach-session`, and resumes when the client detaches. In both modes the client is the only thing that dies on exit; the tmux session and whatever is running inside it are untouched.
 
 ## See also
 

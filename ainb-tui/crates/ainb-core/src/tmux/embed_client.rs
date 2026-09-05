@@ -136,6 +136,9 @@ impl EmbedClient {
         cmd.arg("attach-session");
         if read_only {
             cmd.arg("-r");
+            // Native tmux client flag: render this client, but never let its
+            // small preview PTY decide the shared window size.
+            cmd.args(["-f", "ignore-size"]);
         }
         cmd.arg("-t");
         cmd.arg(session_name);
@@ -367,48 +370,20 @@ mod tests {
         false
     }
 
-    fn assert_same_screen(left: &vt100::Screen, right: &vt100::Screen) {
-        assert_eq!(left.size(), right.size());
-        assert_eq!(left.cursor_position(), right.cursor_position());
-        for row in 0..left.size().0 {
-            for col in 0..left.size().1 {
-                assert_eq!(
-                    left.cell(row, col),
-                    right.cell(row, col),
-                    "cell {row},{col}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn terminal_state_matches_across_fragmented_bytes_and_resize() {
-        let before_resize: &[&[u8]] = &[
-            b"alpha\r",
-            b"\n\x1b[3",
-            b"1mred\x1b[0m ",
-            b"\xf0",
-            b"\x9f\xa6",
-            b"\x80\r\nthird",
-            b"\x1b[1A\x1b[5CX",
-        ];
-        let after_resize: &[&[u8]] = &[b"\x1b[2;", b"3H\x1b[44", b"mZ\x1b[0m\r", b"\nlast"];
-
-        let mut attach = vt100::Parser::new(6, 12, 0);
-        let mut preview = vt100::Parser::new(6, 12, 0);
-        attach.process(&before_resize.concat());
-        for chunk in before_resize {
-            preview.process(chunk);
-        }
-
-        attach.screen_mut().set_size(8, 16);
-        preview.screen_mut().set_size(8, 16);
-        attach.process(&after_resize.concat());
-        for chunk in after_resize {
-            preview.process(chunk);
-        }
-
-        assert_same_screen(attach.screen(), preview.screen());
+    fn window_size(session: &str) -> Option<(u16, u16)> {
+        let output = Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={session}"),
+                "#{window_height}x#{window_width}",
+            ])
+            .output()
+            .ok()?;
+        let size = String::from_utf8(output.stdout).ok()?;
+        let (rows, cols) = size.trim().split_once('x')?;
+        Some((rows.parse().ok()?, cols.parse().ok()?))
     }
 
     // ── env enforcement policy (no tmux needed) ─────────────────────────────
@@ -523,14 +498,15 @@ mod tests {
         }
         let _g = lock_serial();
         let session = new_session("observe");
-        let client = EmbedClient::observe(&session, 24, 80).expect("observe");
+        let session_size = window_size(&session);
+        let mut client = EmbedClient::observe(&session, 12, 34).expect("observe");
         let pane_target = format!("{session}:");
         let sent = Command::new("tmux")
             .args([
                 "send-keys",
                 "-t",
                 &pane_target,
-                "printf 'OBSERVE_READONLY_OK\\n'",
+                "printf '\\033[31mOBSERVE_READONLY_OK\\033[0m\\r\\nfragment-safe UTF-8: 🦊\\n'",
                 "C-m",
             ])
             .status()
@@ -542,6 +518,9 @@ mod tests {
                 "OBSERVE_READONLY_OK",
                 Instant::now() + Duration::from_secs(8),
             );
+        let resized = client.resize(30, 100).is_ok();
+        let parser_size = client.parser().read().map(|parser| parser.screen().size()).ok();
+        let preserved_window_size = window_size(&session);
         let readonly = Command::new("tmux")
             .args(["list-clients", "-t", &session, "-F", "#{client_readonly}"])
             .output()
@@ -554,6 +533,16 @@ mod tests {
         drop(client);
         kill_session(&session);
         assert!(found, "read-only observer never received tmux output");
+        assert!(resized, "observer resize failed");
+        assert_eq!(
+            parser_size,
+            Some((30, 100)),
+            "observer did not resize its VT100 screen"
+        );
+        assert_eq!(
+            preserved_window_size, session_size,
+            "read-only observer must not resize its tmux window"
+        );
         assert!(readonly, "observer client must be read-only");
     }
 

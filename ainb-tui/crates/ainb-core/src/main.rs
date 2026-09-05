@@ -753,7 +753,12 @@ async fn run_tui_loop(
                             }
                             // Tmux preview scroll events
                             AppEvent::ScrollPreviewUp => {
-                                if !app.state.is_observing_selected_terminal() {
+                                if app.state.is_observing_selected_terminal() {
+                                    app.state.add_info_notification(
+                                        "Live preview has no scrollback. Press A to interact."
+                                            .to_string(),
+                                    );
+                                } else {
                                     let preview = layout.tmux_preview_mut();
                                     if !preview.is_scroll_mode() {
                                         preview.enter_scroll_mode();
@@ -762,7 +767,12 @@ async fn run_tui_loop(
                                 }
                             }
                             AppEvent::ScrollPreviewDown => {
-                                if !app.state.is_observing_selected_terminal() {
+                                if app.state.is_observing_selected_terminal() {
+                                    app.state.add_info_notification(
+                                        "Live preview has no scrollback. Press A to interact."
+                                            .to_string(),
+                                    );
+                                } else {
                                     let preview = layout.tmux_preview_mut();
                                     if !preview.is_scroll_mode() {
                                         preview.enter_scroll_mode();
@@ -771,7 +781,12 @@ async fn run_tui_loop(
                                 }
                             }
                             AppEvent::EnterScrollMode => {
-                                if !app.state.is_observing_selected_terminal() {
+                                if app.state.is_observing_selected_terminal() {
+                                    app.state.add_info_notification(
+                                        "Live preview has no scrollback. Press A to interact."
+                                            .to_string(),
+                                    );
+                                } else {
                                     layout.tmux_preview_mut().enter_scroll_mode();
                                 }
                             }

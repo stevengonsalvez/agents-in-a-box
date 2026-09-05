@@ -69,7 +69,7 @@ mod tests {
         }
 
         assert_eq!(
-            state.observer_failed_target.as_deref(),
+            state.observer_failed_target.as_ref().map(|(target, _)| target.as_str()),
             Some(missing.as_str())
         );
         assert!(state.embed.is_none(), "dead observer must release");
