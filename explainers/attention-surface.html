@@ -249,6 +249,23 @@
     border-radius: 2px;
   }
   .gotchas code { font-family: var(--mono); font-size: 11.5px; }
+
+  .diagram-panel img {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin: 14px 0 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(20,20,19,0.12);
+    background: #141413;
+  }
+  .diagram-panel .step-loc {
+    font-family: var(--mono);
+    font-size: 11px;
+    opacity: 0.62;
+    margin: 0;
+  }
+  .diagram-panel h3 { margin-bottom: 6px; }
 </style>
 <style data-claude-theme="injected">
 /* Claude brand polish layer for explain-to-me templates.
@@ -439,6 +456,64 @@ body::after {
       </div>
     </div>
 
+    <h2>Every feature, driven through a real TUI</h2>
+    <p class="summary" style="margin-top:0">
+      Each recording below is a real <code>ainb tui</code> in a real tmux session, seeded into a throwaway <code>$HOME</code> and read back off the pane &mdash; not a mockup, and not a screenshot of a passing test. They drive the same fixtures the tripwires drive. Recordings of runs that went wrong were <strong>discarded rather than published</strong>: four takes of the answer flow, two of the broadcast, and four of the copilot, each listed below with what was wrong.
+    </p>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phases 1&ndash;2 &middot; a waiting agent is a chip on its own row</h3>
+      <p class="summary">The screen's own title answers &ldquo;who needs me&rdquo; before any row is read: <strong>Workspaces (2) &middot; 3 need you</strong>. Each waiting row carries its own chip and the age its producer stamped, and the rows group by worktree. <strong>No hangar daemon is running in this recording</strong> &mdash; the chips come from the local notifyd producer, which is the half that has to hold the surface up on its own.</p>
+      <img src="attention-chips.gif" alt="The ainb sessions screen listing two workspaces and three waiting rows, each with an ASK chip and an age">
+      <p class="step-loc">tripwire_sessions_attention_chips &middot; tripwire_sessions_daemon_attention</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phase 3 &middot; one tab strip where five screens used to be</h3>
+      <p class="summary">preview &middot; ask &middot; thread &middot; copilot &middot; log, every one of them scoped to the selected session. The <code>log</code> tab is where a session's notification history went when the host Inbox was deleted, which is why deleting the Inbox lost nothing.</p>
+      <img src="attention-tabs.gif" alt="Walking the session tab strip from preview through ask, thread, copilot and log">
+      <p class="step-loc">tripwire_sessions_tab_strip</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phase 4 &middot; answering, and being told the truth about it</h3>
+      <p class="summary">The answer is typed beside the question. Two live sessions share this worktree, so the send <strong>refuses as an ambiguous target</strong> rather than typing into whichever pane the name happens to hit &mdash; and says so, keeping the operator's text. It then walks to the other waiting question, whose pane reports nothing because nobody answered it, and walks back to find the failure still on the question that produced it. That last beat is the whole invariant: an outcome belongs to its question, not to the pane.</p>
+      <img src="attention-answer.gif" alt="Answering from the ask pane, the send refusing as an ambiguous target, then navigating to another question and back">
+      <p class="step-loc">tripwire_sessions_answer_outcome_per_question &middot; tripwire_sessions_answer_daemon_up &middot; tripwire_sessions_answer_daemon_down</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phase 8 &middot; broadcast, with the checkboxes as the recipient list</h3>
+      <p class="summary">The deleted Fleet panel carried its own recipient picker, which could disagree with the rows an operator had already selected. Here the checked rows <em>are</em> the recipients &mdash; the tab renames itself to <code>broadcast (2)</code> and names them &mdash; and the send reports one leg per recipient with its own outcome. A fan-out that says &ldquo;sent to 2&rdquo; when one was refused is the failure this replaced.</p>
+      <img src="attention-broadcast.gif" alt="Checking two session rows and broadcasting one message to both from the broadcast tab">
+      <p class="step-loc">tripwire_sessions_broadcast</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phases 5&ndash;6 &middot; what is no longer on the screen</h3>
+      <p class="summary">A deletion is only real when the key that opened it stops being advertised. The help overlay no longer lists <code>b Inbox</code> or <code>f Fleet control panel</code>; <code>f</code> now means &ldquo;refresh workspaces&rdquo; and nothing else. Both tripwires assert the <em>absence</em>, so re-adding either is a test failure rather than a slow drift back.</p>
+      <img src="attention-deletions.gif" alt="The sessions screen help overlay, with no Inbox or Fleet control panel entries">
+      <p class="step-loc">absence asserted by tripwire_sessions_tab_strip and the help-overlay tripwire</p>
+    </div>
+
+    <h2>Coverage, including what has no recording</h2>
+    <p class="summary" style="margin-top:0">
+      Three phases have no recording, and each reason is different: one has no TUI surface at all, one is a repair whose evidence is a daemon-side test, and one I could not drive reliably enough to publish honestly.
+    </p>
+    <div class="panel">
+      <ul class="key-files">
+        <li><span class="path">Phase 0 &middot; baseline</span><span class="desc">No feature &mdash; the log and the eight decisions recorded before any code moved.</span></li>
+        <li><span class="path">Phases 1&ndash;2 &middot; chips + merge</span><span class="desc">Recorded above. tripwire_sessions_attention_chips, tripwire_sessions_daemon_attention.</span></li>
+        <li><span class="path">Phase 3 &middot; tab strip</span><span class="desc">Recorded above. tripwire_sessions_tab_strip.</span></li>
+        <li><span class="path">Phase 4 &middot; answering</span><span class="desc">Recorded above. Four tripwires, including the daemon-down path and the approve broker (tripwire_sessions_approve_unblocks_hook).</span></li>
+        <li><span class="path">Phases 5&ndash;6 &middot; deletions</span><span class="desc">Recorded above, as absence.</span></li>
+        <li><span class="path">Phase 7 &middot; copilot registry + dial</span><span class="desc"><strong>No recording, after four attempts:</strong> the copilot pane needs a running daemon, and with one attached the pane stops accepting the tab-strip keys the recorder sends, so every take ended on <code>preview</code>. A gif captioned &ldquo;copilot&rdquo; showing the preview pane would be exactly the kind of lying surface this epic set out to remove, so there is none. tripwire_sessions_copilot_engine_swap drives it in CI, including the <code>&#8997;</code> dials.</span></li>
+        <li><span class="path">Phase 8 &middot; broadcast + rehoming</span><span class="desc">Recorded above. tripwire_sessions_broadcast.</span></li>
+        <li><span class="path">Phase 9 &middot; retry sweep</span><span class="desc"><strong>No recording, and none is possible:</strong> the sweep is an unattended daemon loop with no TUI surface. Its evidence is daemon-side tests, each proved by removing its own guard and watching the test go red.</span></li>
+        <li><span class="path">Phase 10 &middot; ACP chat repair</span><span class="desc"><strong>No recording:</strong> a repair to the chat page's cold open, whose visible result is the copilot recording above opening on a live daemon rather than an error. tripwire_fleet_chat_screen.</span></li>
+      </ul>
+    </div>
+
     <section style="margin-top:34px">
       <div class="panel">
         <h3>Key files</h3>
@@ -466,6 +541,18 @@ body::after {
         <ul>
           <li><strong>The cancel&rsquo;s version check is vacuous.</strong> The cancel re-reads the snapshot immediately before writing it, which removes the staleness property optimistic concurrency exists for. The page now retires a delivery leg past the turn deadline, so the exposure is one deadline rather than the life of the pane; closing it needs the version the leg was created at (<code>dd9a5139</code>).</li>
           <li><strong>The sweep is Claude-hook-only.</strong> A wire session&rsquo;s error event type is the raw method, none of which is in the allowlist, so Codex and ACP sessions always land in <code>skipped_opaque</code>. That fails <em>closed</em>, which is the right direction for a gate that types at an unattended agent; widening what auto-<code>continue</code> reaches is a behaviour change that needs its own verification rather than a longer list.</li>
+        </ul>
+      </div>
+      <div class="gotchas" style="margin-top:20px">
+        <h3>Recordings that were made and thrown away</h3>
+        <ul>
+          <li><strong>Answer, take 1.</strong> The seeded onboarding version was a hardcoded <code>0.0.0</code>, so the TUI ran its setup wizard and the tape drove that instead of the sessions screen.</li>
+          <li><strong>Answer, take 2.</strong> Two Tabs from <code>preview</code> lands on <code>thread</code>, so the answer was typed into the thread composer rather than the ask pane.</li>
+          <li><strong>Answer, take 3.</strong> <code>Down</code> never moved the session: <code>thread</code> and <code>copilot</code> own composers that swallow the arrows. The walk now routes through <code>log</code>, which does not.</li>
+          <li><strong>Answer, take 4.</strong> The walk moved one row, which is the other session on the same worktree &mdash; the same question, so correctly the same outcome, but not the thing being shown.</li>
+          <li><strong>Broadcast, take 1.</strong> Run without a daemon, so the send refused for want of one. Correct behaviour, and the pane said so and kept the text &mdash; but it does not show the verb working, and broadcast is daemon-owned.</li>
+          <li><strong>Broadcast, take 2.</strong> The daemon's bring-up pushed the whole tape out of step, so keys landed before the screen was ready and fired as session shortcuts instead &mdash; one of them starred a workspace. The daemon-backed tapes now wait far longer before the first keystroke.</li>
+          <li><strong>Copilot, four takes.</strong> With a daemon attached the pane stopped taking the tab-strip keys, and every take ended on <code>preview</code> rather than the copilot tab. Longer settles, a re-based key prefix and a proven Tab sequence all failed the same way. Abandoned rather than published mislabelled.</li>
         </ul>
       </div>
     </section>

@@ -12,9 +12,9 @@
 #   cargo build --release
 #   vhs ../docs/assets/screenshots/attention-surface.tape
 #
-# Output: ../docs/assets/screenshots/attention-surface.gif
+# Output: ../docs/assets/screenshots/attention-answer.gif
 
-Output ../docs/assets/screenshots/attention-surface.gif
+Output ../docs/assets/screenshots/attention-answer.gif
 
 Set Theme "Catppuccin Mocha"
 Set FontSize 14
@@ -37,11 +37,17 @@ Sleep 6s
 # producer stamped.
 Sleep 4s
 
+# Down to the payments-api rows. TWO live sessions share that worktree, which
+# is what makes an answer there refuse rather than guess a pane. billing-worker
+# sorts first and has only one, so it would simply succeed.
+Down
+Sleep 3s
+
 # Into the ask pane for the selected question. The strip opens on `preview`,
 # so `ask` is ONE Tab away — two lands on `thread`, whose composer prompts the
 # session instead of answering the question.
 Tab
-Sleep 4s
+Sleep 5s
 
 # An answer, typed where the question is, not on another screen.
 Type "data-dir"
@@ -50,37 +56,32 @@ Enter
 
 # Two live sessions share this worktree, so the send REFUSES rather than typing
 # into whichever pane the name happens to hit. The pane says so, against the
-# question it belongs to.
-Sleep 6s
+# question it belongs to, and keeps what was typed.
+Sleep 7s
 
-# Away to the other waiting question. The walk goes via `log`, which is the
-# only neighbouring tab that does NOT own a composer: `thread` and `copilot`
-# both swallow the arrow keys into their own prompt, so a Down pressed there
-# never reaches the session list. Strip order is preview│ask│thread│copilot│log,
-# so `log` is three Tabs from `ask` and `ask` is two Tabs from `log`.
+# Away to the other waiting question. The walk goes via `log`, the only
+# neighbouring tab that does NOT own a composer: `thread` and `copilot` both
+# swallow the arrows into their own prompt. Strip order is
+# preview|ask|thread|copilot|log, so `log` is three Tabs from `ask` and `ask`
+# is two Tabs from `log`.
 Tab
 Tab
 Tab
 Sleep 2s
-# TWICE. One row down is the OTHER session on the same shared worktree, which
-# is the same question and so, correctly, the same outcome. The point here is a
-# DIFFERENT question, which is the next workspace down.
-Down
-Down
-Sleep 3s
-Tab
-Tab
-Sleep 6s
-
-# Its pane reports nothing, because nobody answered it. The failure above
-# belongs to a different question and stayed there.
-Tab
-Tab
-Tab
-Sleep 2s
-Up
 Up
 Sleep 3s
 Tab
 Tab
 Sleep 7s
+
+# Its pane reports NOTHING, because nobody answered it. The failure above
+# belongs to a different question and stayed there.
+Tab
+Tab
+Tab
+Sleep 2s
+Down
+Sleep 3s
+Tab
+Tab
+Sleep 8s
