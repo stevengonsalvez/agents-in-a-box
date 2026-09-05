@@ -454,22 +454,13 @@ pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 
 impl AppState {
-    /// Enter interactive mode: attach a live embed client to the selected
-    /// session's tmux session and focus the preview pane. Returns false (no-op)
-    /// if the selection has no tmux session or the attach fails — the pane stays
-    /// on the read-only preview.
+    /// Enter interactive mode by replacing the selected read-only tmux client
+    /// with a writable client feeding the same terminal parser path.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
         if self.embed.is_some() {
-            if self.selected_tmux_name() == self.embed_session {
-                // Self-healing re-entry on the SAME row: a live embed with
-                // focus drifted off the preview pane is a leaked state —
-                // restore the mode invariant instead of silently no-opping.
-                self.focused_pane = FocusedPane::Preview;
+            if self.selected_tmux_name() == self.embed_session && self.is_interactive_pane() {
                 return true;
             }
-            // Different row: the user means "attach HERE" — release the stale
-            // client and fall through to a fresh attach, instead of
-            // refocusing an embed that renders some other session.
             self.release_interactive_pane();
         }
         let Some(name) = self.selected_tmux_name() else {
@@ -500,6 +491,37 @@ impl AppState {
         }
     }
 
+    /// Keep one read-only tmux client on the selected terminal. The observer
+    /// consumes the same PTY byte stream as interactive attach, but input stays
+    /// host-owned until [`Self::is_interactive_pane`] becomes true.
+    ///
+    /// Returns true when the observed target changes.
+    pub fn sync_terminal_observer(&mut self, rows: u16, cols: u16) -> bool {
+        let target = self.selected_tmux_name();
+        if self.embed_session == target && self.embed.is_some() {
+            if let Some(client) = self.embed.as_mut() {
+                let _ = client.resize(rows, cols);
+            }
+            return false;
+        }
+
+        self.release_interactive_pane();
+        let Some(name) = target else {
+            return false;
+        };
+        match crate::tmux::EmbedClient::observe(&name, rows, cols) {
+            Ok(client) => {
+                self.embed = Some(client);
+                self.embed_session = Some(name);
+                true
+            }
+            Err(e) => {
+                tracing::debug!("failed to observe terminal {name}: {e}");
+                false
+            }
+        }
+    }
+
     /// Whether the current selection's tmux session already has another client
     /// attached. Every kind that tracks attachment reports it (Claude and SSH
     /// rows via `is_attached`, other-tmux rows via tmux's attached flag);
@@ -516,8 +538,7 @@ impl AppState {
         }
     }
 
-    /// Release interactive mode: kill the ephemeral embed client (NEVER the tmux
-    /// session) and return focus to the session list.
+    /// Release the ephemeral client. Read-only preview reconnects next loop.
     pub fn release_interactive_pane(&mut self) {
         if let Some(mut client) = self.embed.take() {
             client.shutdown();
@@ -553,10 +574,8 @@ impl AppState {
         self.embed.is_some() && self.focused_pane == FocusedPane::Preview
     }
 
-    /// If the embed has ended (detach / session gone / EOF), auto-release so the
-    /// pane reverts to the read-only preview rather than a dead screen. Also
-    /// releases defensively when the current screen is no longer the session
-    /// list — keys must never be forwarded to an invisible PTY.
+    /// If the observer has ended or become invisible, stop it. Keys can never
+    /// be forwarded to an invisible PTY.
     ///
     /// Returns true when it released (the layout changed → repaint needed).
     pub fn poll_embed_exit(&mut self) -> bool {
@@ -568,7 +587,7 @@ impl AppState {
         if exited || invisible {
             self.release_interactive_pane();
             if exited {
-                self.add_info_notification("Live session ended — released".to_string());
+                self.add_info_notification("Live session ended, released".to_string());
             }
             return true;
         }
@@ -11630,12 +11649,10 @@ impl AppState {
 
             let is_selected = selected_session_id == Some(*session_id);
 
-            // While the interactive embed is live, the selected session's
-            // pane renders straight from the embed's vt100 screen — the full
-            // capture would be pure subprocess waste. Fall through to the
-            // cheap status-dot check instead (the collapsed rail still needs
-            // those for every session).
-            if is_selected && !self.is_interactive_pane() {
+            // The selected session renders from the observer's vt100 screen,
+            // so a parallel capture would waste work and rebuild terminal
+            // text through the lossy legacy path.
+            if is_selected && self.embed_session.as_deref() != Some(tmux_session.name()) {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {

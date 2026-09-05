@@ -491,6 +491,22 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
+        // Read-only preview is a real tmux client feeding the same vt100
+        // parser used after input focus is granted. Keep it aligned with the
+        // current selection and viewport before painting.
+        if app.state.current_screen == crate::app::screens::ids::SESSION_LIST
+            && !app.state.is_interactive_pane()
+        {
+            let sz = terminal.size().unwrap_or(ratatui::layout::Size {
+                width: 80,
+                height: 24,
+            });
+            let sidebar = app.state.sessions_pane_state.effective_width(sz.width);
+            let (rows, cols) =
+                crate::components::layout::interactive_embed_size(sz.width, sz.height, sidebar);
+            needs_redraw |= app.state.sync_terminal_observer(rows, cols);
+        }
+
         // Live embed output is the third repaint source alongside input and
         // plugin frames: the PTY reader thread marks the embed dirty as bytes
         // stream in, with no host input involved. Without this the dirty-gate
@@ -582,14 +598,12 @@ async fn run_tui_loop(
 
                     use crossterm::event::KeyCode;
 
-                    // Interactive embed escape hatch: Ctrl+Q releases focus and
-                    // kills the ephemeral tmux client. Keyed off the RESOURCE
-                    // (embed exists), never the mode flag, so the hatch works
-                    // even from a leaked state where the embed is alive but
-                    // focus drifted off the preview pane.
+                    // Interactive embed escape hatch. A read-only preview also
+                    // owns an embed client, so only interactive focus may
+                    // consume Ctrl+Q instead of the host UI.
                     {
                         use crossterm::event::KeyModifiers;
-                        if app.state.embed.is_some()
+                        if app.state.is_interactive_pane()
                             && key_event.code == KeyCode::Char('q')
                             && key_event.modifiers.contains(KeyModifiers::CONTROL)
                         {
@@ -1086,6 +1100,10 @@ async fn run_tui_loop(
                 match action {
                     AsyncAction::AttachToOtherTmux(session_name) => {
                         use crate::app::AttachHandler;
+
+                        // Fullscreen attach owns terminal size and input. Drop
+                        // preview client first so tmux has only one authority.
+                        app.state.release_interactive_pane();
 
                         info!(
                             "[ACTION] Handling AttachToOtherTmux for session '{}'",
@@ -1784,6 +1802,10 @@ async fn run_tui_loop(
                         };
 
                         if let Some(tmux_session_name) = tmux_session_name {
+                            // Fullscreen attach owns terminal size and input.
+                            // Preview reconnects after detach.
+                            app.state.release_interactive_pane();
+
                             // Mark session as attached
                             for workspace in &mut app.state.workspaces {
                                 for session in &mut workspace.sessions {

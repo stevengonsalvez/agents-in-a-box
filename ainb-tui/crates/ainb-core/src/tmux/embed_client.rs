@@ -97,13 +97,27 @@ impl EmbedClient {
     /// Attach to `session_name` at the given cell size and start streaming its
     /// output into a vt100 parser on a dedicated reader thread.
     pub fn attach(session_name: &str, rows: u16, cols: u16) -> Result<Self> {
-        Self::attach_target(session_name, rows, cols)
+        Self::attach_target_with_mode(session_name, rows, cols, false)
+    }
+
+    /// Observe `session_name` through tmux's native read-only client mode.
+    pub fn observe(session_name: &str, rows: u16, cols: u16) -> Result<Self> {
+        Self::attach_target_with_mode(session_name, rows, cols, true)
     }
 
     /// Attach to an exact tmux target. Window and pane targets are selected
     /// before starting the embedded client, then the client attaches to the
     /// owning session without losing the exact target.
     pub fn attach_target(target: &str, rows: u16, cols: u16) -> Result<Self> {
+        Self::attach_target_with_mode(target, rows, cols, false)
+    }
+
+    fn attach_target_with_mode(
+        target: &str,
+        rows: u16,
+        cols: u16,
+        read_only: bool,
+    ) -> Result<Self> {
         let session_name = target.split_once(':').map_or(target, |(session, _)| session).trim();
         anyhow::ensure!(!session_name.is_empty(), "tmux target has no session name");
         if target.contains(':') {
@@ -120,6 +134,9 @@ impl EmbedClient {
 
         let mut cmd = CommandBuilder::new("tmux");
         cmd.arg("attach-session");
+        if read_only {
+            cmd.arg("-r");
+        }
         cmd.arg("-t");
         cmd.arg(session_name);
         apply_embed_env(&mut cmd);
@@ -348,6 +365,50 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         false
+    }
+
+    fn assert_same_screen(left: &vt100::Screen, right: &vt100::Screen) {
+        assert_eq!(left.size(), right.size());
+        assert_eq!(left.cursor_position(), right.cursor_position());
+        for row in 0..left.size().0 {
+            for col in 0..left.size().1 {
+                assert_eq!(
+                    left.cell(row, col),
+                    right.cell(row, col),
+                    "cell {row},{col}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_state_matches_across_fragmented_bytes_and_resize() {
+        let before_resize: &[&[u8]] = &[
+            b"alpha\r",
+            b"\n\x1b[3",
+            b"1mred\x1b[0m ",
+            b"\xf0",
+            b"\x9f\xa6",
+            b"\x80\r\nthird",
+            b"\x1b[1A\x1b[5CX",
+        ];
+        let after_resize: &[&[u8]] = &[b"\x1b[2;", b"3H\x1b[44", b"mZ\x1b[0m\r", b"\nlast"];
+
+        let mut attach = vt100::Parser::new(6, 12, 0);
+        let mut preview = vt100::Parser::new(6, 12, 0);
+        attach.process(&before_resize.concat());
+        for chunk in before_resize {
+            preview.process(chunk);
+        }
+
+        attach.screen_mut().set_size(8, 16);
+        preview.screen_mut().set_size(8, 16);
+        attach.process(&after_resize.concat());
+        for chunk in after_resize {
+            preview.process(chunk);
+        }
+
+        assert_same_screen(attach.screen(), preview.screen());
     }
 
     // ── env enforcement policy (no tmux needed) ─────────────────────────────

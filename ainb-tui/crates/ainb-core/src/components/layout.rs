@@ -161,11 +161,8 @@ impl LayoutComponent {
 
         // Render tmux preview if selected session has tmux, otherwise show live logs
         // This includes both regular Claude sessions AND shell sessions
-        let selected_has_tmux = state
-            .get_selected_session()
-            .and_then(|s| s.tmux_session_name.as_ref())
-            .is_some()
-            || state.selected_shell_session().is_some();
+        let selected_tmux_name = state.selected_tmux_name();
+        let selected_has_tmux = selected_tmux_name.is_some();
 
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to
@@ -184,8 +181,24 @@ impl LayoutComponent {
             state.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
         } else if selected_has_tmux {
-            // Render tmux preview pane (read-only capture)
-            self.tmux_preview.render(frame, content_chunks[1], state);
+            let area = content_chunks[1];
+            let observing_selection =
+                state.embed.is_some() && state.embed_session == selected_tmux_name;
+            if observing_selection {
+                let inner = area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 1,
+                });
+                if let Some(observer) = state.embed.as_mut() {
+                    let _ = observer.resize(inner.height, inner.width);
+                }
+                state.embed_pane_area = None;
+                self.tmux_preview.render_observer(frame, area, state);
+            } else {
+                // Initial attach can take one frame. Keep the existing capture
+                // as a transient fallback, never as the steady-state renderer.
+                self.tmux_preview.render(frame, area, state);
+            }
         } else {
             // Render traditional live logs stream
             self.live_logs_stream.render(frame, content_chunks[1], state);
