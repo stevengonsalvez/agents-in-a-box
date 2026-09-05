@@ -28,6 +28,62 @@ mod tests {
     }
 
     #[test]
+    fn observer_waits_for_a_stable_selection() {
+        let mut state = AppState::new();
+        let now = std::time::Instant::now();
+
+        assert!(!state.observer_target_settled("stale", now));
+        assert!(
+            !state.observer_target_settled("stale", now + std::time::Duration::from_millis(100))
+        );
+        assert!(
+            state.observer_target_settled("stale", now + std::time::Duration::from_millis(250))
+        );
+        assert!(
+            !state.observer_target_settled("fresh", now + std::time::Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn dead_observer_stays_suppressed_until_selection_changes() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map_or(true, |output| !output.status.success())
+        {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+
+        let missing = format!("ainb-missing-observer-{}", std::process::id());
+        let mut state = state_with_other_tmux_sessions(&[missing.as_str()]);
+        state.current_screen = "session_list".to_string();
+
+        assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(state.sync_terminal_observer(24, 80), "starts observer once");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !state.poll_embed_exit() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            state.observer_failed_target.as_deref(),
+            Some(missing.as_str())
+        );
+        assert!(state.embed.is_none(), "dead observer must release");
+        assert!(
+            !state.sync_terminal_observer(24, 80),
+            "same stale selection must not respawn an observer"
+        );
+
+        state.selected_other_tmux_index = None;
+        assert!(!state.sync_terminal_observer(24, 80));
+        assert!(state.observer_failed_target.is_none());
+    }
+
+    #[test]
     fn test_toggle_select_other_tmux_session_supports_multiple_names() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
 

@@ -452,11 +452,15 @@ pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
 pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
+const OBSERVER_SETTLE_DELAY: Duration = Duration::from_millis(250);
 
 impl AppState {
     /// Enter interactive mode by replacing the selected read-only tmux client
     /// with a writable client feeding the same terminal parser path.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
+        let attached_elsewhere = self.selected_session_attached_elsewhere();
+        self.observer_pending = None;
+        self.observer_failed_target = None;
         if self.embed.is_some() {
             if self.selected_tmux_name() == self.embed_session && self.is_interactive_pane() {
                 return true;
@@ -470,7 +474,6 @@ impl AppState {
         // tmux mirrors a session to every attached client, but all clients
         // fight over its size — attaching alongside an existing client is the
         // user's call, so allow it and warn (never block).
-        let attached_elsewhere = self.selected_session_attached_elsewhere();
         match crate::tmux::EmbedClient::attach(&name, rows, cols) {
             Ok(client) => {
                 self.embed = Some(client);
@@ -498,17 +501,28 @@ impl AppState {
     /// Returns true when the observed target changes.
     pub fn sync_terminal_observer(&mut self, rows: u16, cols: u16) -> bool {
         let target = self.selected_tmux_name();
-        if self.embed_session == target && self.embed.is_some() {
-            if let Some(client) = self.embed.as_mut() {
-                let _ = client.resize(rows, cols);
-            }
+        let Some(name) = target else {
+            self.observer_pending = None;
+            self.observer_failed_target = None;
+            self.release_interactive_pane();
+            return false;
+        };
+        if self.observer_failed_target.as_deref() != Some(name.as_str()) {
+            self.observer_failed_target = None;
+        }
+        if self.embed_session.as_deref() == Some(name.as_str()) && self.embed.is_some() {
+            self.observer_pending = None;
+            return false;
+        }
+        if self.observer_failed_target.as_deref() == Some(name.as_str()) {
+            return false;
+        }
+        if !self.observer_target_settled(&name, Instant::now()) {
+            self.release_interactive_pane();
             return false;
         }
 
         self.release_interactive_pane();
-        let Some(name) = target else {
-            return false;
-        };
         match crate::tmux::EmbedClient::observe(&name, rows, cols) {
             Ok(client) => {
                 self.embed = Some(client);
@@ -517,6 +531,21 @@ impl AppState {
             }
             Err(e) => {
                 tracing::debug!("failed to observe terminal {name}: {e}");
+                self.observer_failed_target = Some(name);
+                false
+            }
+        }
+    }
+
+    fn observer_target_settled(&mut self, target: &str, now: Instant) -> bool {
+        match self.observer_pending.as_ref() {
+            Some((pending, ready_at)) if pending == target && now >= *ready_at => {
+                self.observer_pending = None;
+                true
+            }
+            Some((pending, _)) if pending == target => false,
+            _ => {
+                self.observer_pending = Some((target.to_string(), now + OBSERVER_SETTLE_DELAY));
                 false
             }
         }
@@ -574,6 +603,18 @@ impl AppState {
         self.embed.is_some() && self.focused_pane == FocusedPane::Preview
     }
 
+    /// True when the selected terminal has a read-only observer client.
+    pub fn is_observing_selected_terminal(&self) -> bool {
+        self.selected_tmux_name()
+            .is_some_and(|name| self.is_observing_tmux_session(&name))
+    }
+
+    fn is_observing_tmux_session(&self, session: &str) -> bool {
+        !self.is_interactive_pane()
+            && self.embed.is_some()
+            && self.embed_session.as_deref() == Some(session)
+    }
+
     /// If the observer has ended or become invisible, stop it. Keys can never
     /// be forwarded to an invisible PTY.
     ///
@@ -584,10 +625,16 @@ impl AppState {
         }
         let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
         let invisible = self.current_screen != screen_ids::SESSION_LIST;
+        let interactive = self.is_interactive_pane();
+        let session = self.embed_session.clone();
         if exited || invisible {
             self.release_interactive_pane();
-            if exited {
+            if exited && interactive {
                 self.add_info_notification("Live session ended, released".to_string());
+            } else if exited {
+                if let Some(session) = session {
+                    self.observer_failed_target = Some(session);
+                }
             }
             return true;
         }
@@ -3228,7 +3275,7 @@ pub struct AppState {
     // Enforced invariants (focus can drift, so none of these are assumed):
     //  - Input forwards to the PTY only while `is_interactive_pane()` holds
     //    (embed Some AND focused_pane == Preview).
-    //  - Ctrl+Q releases whenever the embed exists, regardless of focus/mode.
+    //  - Ctrl+Q releases only while interactive focus owns the terminal.
     //  - `poll_embed_exit` (run before every draw) releases on client death
     //    or when the session-list screen is no longer current, so keys are
     //    never forwarded to an invisible PTY.
@@ -3239,6 +3286,10 @@ pub struct AppState {
     // attaches to the new target instead of silently refocusing the stale
     // one (see `enter_interactive_pane`).
     pub embed_session: Option<String>,
+    // A changed selection must settle before starting a read-only client.
+    observer_pending: Option<(String, Instant)>,
+    // A read-only observer that dies stays suppressed until selection changes.
+    observer_failed_target: Option<String>,
     // Interior screen rect (inside the border) the embed's PseudoTerminal
     // occupies, published by the interactive render branch each frame. Drives
     // mouse-coordinate translation into 1-based pane-local SGR sequences.
@@ -3876,6 +3927,8 @@ impl Default for AppState {
             focused_pane: FocusedPane::Sessions,
             embed: None,
             embed_session: None,
+            observer_pending: None,
+            observer_failed_target: None,
             embed_pane_area: None,
             menu_bar_area: None,
             sessions_pane_state,
@@ -5856,7 +5909,9 @@ impl AppState {
                     continue;
                 }
 
-                let attached = parts[parts.len() - 2] == "1";
+                let attached_clients = parts[parts.len() - 2].parse::<usize>().unwrap_or(0);
+                let attached =
+                    attached_clients > usize::from(self.is_observing_tmux_session(name.as_str()));
                 let windows = parts[parts.len() - 1].parse().unwrap_or_else(|e| {
                     warn!(
                         "Failed to parse window count for tmux session '{}': {}. Defaulting to 1.",

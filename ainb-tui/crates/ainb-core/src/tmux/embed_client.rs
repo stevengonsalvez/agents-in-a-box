@@ -516,6 +516,48 @@ mod tests {
     }
 
     #[test]
+    fn observe_reads_output_through_a_read_only_tmux_client() {
+        if !tmux_available() {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+        let _g = lock_serial();
+        let session = new_session("observe");
+        let client = EmbedClient::observe(&session, 24, 80).expect("observe");
+        let pane_target = format!("{session}:");
+        let sent = Command::new("tmux")
+            .args([
+                "send-keys",
+                "-t",
+                &pane_target,
+                "printf 'OBSERVE_READONLY_OK\\n'",
+                "C-m",
+            ])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let found = sent
+            && screen_contains(
+                &client,
+                "OBSERVE_READONLY_OK",
+                Instant::now() + Duration::from_secs(8),
+            );
+        let readonly = Command::new("tmux")
+            .args(["list-clients", "-t", &session, "-F", "#{client_readonly}"])
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).lines().any(|line| line == "1")
+            })
+            .unwrap_or(false);
+
+        drop(client);
+        kill_session(&session);
+        assert!(found, "read-only observer never received tmux output");
+        assert!(readonly, "observer client must be read-only");
+    }
+
+    #[test]
     fn shutdown_does_not_kill_the_session() {
         if !tmux_available() {
             eprintln!("SKIP: tmux unavailable");

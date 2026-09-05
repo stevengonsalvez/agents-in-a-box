@@ -35,15 +35,24 @@ use crate::app::{
 /// the session twice back-to-back (attach size → layout size).
 ///
 /// Must mirror `render`'s split: vertical chrome is the status bar (3) +
-/// session info (3) + menu bar (6), and the pane border takes 2 more rows/
-/// cols off the interior. `sidebar_width` is the live
+/// session info (3) + current menu bar height, and the pane border takes 2
+/// more rows/cols off the interior. `sidebar_width` is the live
 /// `sessions_pane_state.effective_width(..)` for the same terminal width.
-pub fn interactive_embed_size(width: u16, height: u16, sidebar_width: u16) -> (u16, u16) {
-    const VERTICAL_CHROME: u16 = 3 + 3 + 6; // status bar + session info + menu bar
+pub fn interactive_embed_size(
+    width: u16,
+    height: u16,
+    sidebar_width: u16,
+    show_menu_bar: bool,
+) -> (u16, u16) {
     const PANE_BORDERS: u16 = 2;
-    let rows = height.saturating_sub(VERTICAL_CHROME + PANE_BORDERS).max(1);
+    let vertical_chrome = 3 + 3 + session_menu_bar_height(show_menu_bar);
+    let rows = height.saturating_sub(vertical_chrome + PANE_BORDERS).max(1);
     let cols = width.saturating_sub(sidebar_width.saturating_add(PANE_BORDERS)).max(1);
     (rows, cols)
+}
+
+fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
+    if show_menu_bar { 6 } else { 1 }
 }
 
 pub struct LayoutComponent {
@@ -119,11 +128,8 @@ impl LayoutComponent {
 
         // The bottom keymap legend can be hidden (⇧M) to give the session list
         // more room; hidden it collapses to a single hint row.
-        let menu_bar_h = if state.app_config.ui_preferences.show_session_menu_bar {
-            6 // full legend: 4 lines + borders
-        } else {
-            1 // collapsed hint row
-        };
+        let menu_bar_h =
+            session_menu_bar_height(state.app_config.ui_preferences.show_session_menu_bar);
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -159,10 +165,15 @@ impl LayoutComponent {
             self.session_list.render(frame, content_chunks[0], state);
         }
 
-        // Render tmux preview if selected session has tmux, otherwise show live logs
-        // This includes both regular Claude sessions AND shell sessions
-        let selected_tmux_name = state.selected_tmux_name();
-        let selected_has_tmux = selected_tmux_name.is_some();
+        // The legacy capture renderer supports regular sessions and shells.
+        // A live observer can also render SSH and other-tmux sessions, but its
+        // initial and failed states must retain those rows' live-logs fallback.
+        let selected_has_legacy_preview = state
+            .get_selected_session()
+            .and_then(|session| session.tmux_session_name.as_ref())
+            .is_some()
+            || state.selected_shell_session().is_some();
+        let observing_selection = state.is_observing_selected_terminal();
 
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to
@@ -180,25 +191,21 @@ impl LayoutComponent {
             // 1-based pane-local SGR coordinates (see encode_mouse_event).
             state.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
-        } else if selected_has_tmux {
+        } else if observing_selection {
             let area = content_chunks[1];
-            let observing_selection =
-                state.embed.is_some() && state.embed_session == selected_tmux_name;
-            if observing_selection {
-                let inner = area.inner(Margin {
-                    vertical: 1,
-                    horizontal: 1,
-                });
-                if let Some(observer) = state.embed.as_mut() {
-                    let _ = observer.resize(inner.height, inner.width);
-                }
-                state.embed_pane_area = None;
-                self.tmux_preview.render_observer(frame, area, state);
-            } else {
-                // Initial attach can take one frame. Keep the existing capture
-                // as a transient fallback, never as the steady-state renderer.
-                self.tmux_preview.render(frame, area, state);
+            let inner = area.inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
+            if let Some(observer) = state.embed.as_mut() {
+                let _ = observer.resize(inner.height, inner.width);
             }
+            state.embed_pane_area = None;
+            self.tmux_preview.render_observer(frame, area, state);
+        } else if selected_has_legacy_preview {
+            // Initial attach can take one frame. Keep the existing capture as
+            // a transient fallback, never as the steady-state renderer.
+            self.tmux_preview.render(frame, content_chunks[1], state);
         } else {
             // Render traditional live logs stream
             self.live_logs_stream.render(frame, content_chunks[1], state);
@@ -1724,14 +1731,15 @@ mod interactive_embed_size_tests {
         // plus the border (2) → 78; pre-collapsed to the 5-col rail → 113.
         // Must equal what the first interactive frame resizes the embed to
         // (the tripwire drives the real render path against this).
-        assert_eq!(interactive_embed_size(120, 30, 40), (16, 78));
-        assert_eq!(interactive_embed_size(120, 30, 5), (16, 113));
-        assert_eq!(interactive_embed_size(80, 24, 5), (10, 73));
+        assert_eq!(interactive_embed_size(120, 30, 40, true), (16, 78));
+        assert_eq!(interactive_embed_size(120, 30, 5, true), (16, 113));
+        assert_eq!(interactive_embed_size(80, 24, 5, true), (10, 73));
+        assert_eq!(interactive_embed_size(120, 30, 40, false), (21, 78));
     }
 
     #[test]
     fn never_returns_zero_cells() {
-        assert_eq!(interactive_embed_size(0, 0, 5), (1, 1));
-        assert_eq!(interactive_embed_size(7, 14, 40), (1, 1));
+        assert_eq!(interactive_embed_size(0, 0, 5, true), (1, 1));
+        assert_eq!(interactive_embed_size(7, 14, 40, true), (1, 1));
     }
 }

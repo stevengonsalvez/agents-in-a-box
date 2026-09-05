@@ -502,8 +502,12 @@ async fn run_tui_loop(
                 height: 24,
             });
             let sidebar = app.state.sessions_pane_state.effective_width(sz.width);
-            let (rows, cols) =
-                crate::components::layout::interactive_embed_size(sz.width, sz.height, sidebar);
+            let (rows, cols) = crate::components::layout::interactive_embed_size(
+                sz.width,
+                sz.height,
+                sidebar,
+                app.state.app_config.ui_preferences.show_session_menu_bar,
+            );
             needs_redraw |= app.state.sync_terminal_observer(rows, cols);
         }
 
@@ -598,17 +602,21 @@ async fn run_tui_loop(
 
                     use crossterm::event::KeyCode;
 
-                    // Interactive embed escape hatch. A read-only preview also
-                    // owns an embed client, so only interactive focus may
-                    // consume Ctrl+Q instead of the host UI.
+                    // Ctrl+Q belongs to the terminal mode. Interactive mode
+                    // releases; read-only preview consumes it without letting
+                    // the host's plain `q` shortcut navigate home.
                     {
                         use crossterm::event::KeyModifiers;
-                        if app.state.is_interactive_pane()
-                            && key_event.code == KeyCode::Char('q')
+                        if key_event.code == KeyCode::Char('q')
                             && key_event.modifiers.contains(KeyModifiers::CONTROL)
                         {
-                            app.state.release_interactive_pane();
-                            continue;
+                            if app.state.is_interactive_pane() {
+                                app.state.release_interactive_pane();
+                                continue;
+                            }
+                            if app.state.is_observing_selected_terminal() {
+                                continue;
+                            }
                         }
                     }
 
@@ -686,9 +694,13 @@ async fn run_tui_loop(
                         continue;
                     }
 
-                    // Intercept keys when tmux preview is in scroll mode
+                    // A read-only terminal uses tmux's own scrollback; host
+                    // preview scroll mode would swallow navigation invisibly.
+                    let observing_terminal = app.state.is_observing_selected_terminal();
                     let preview = layout.tmux_preview_mut();
-                    if preview.is_scroll_mode() {
+                    if observing_terminal {
+                        preview.exit_scroll_mode();
+                    } else if preview.is_scroll_mode() {
                         match key_event.code {
                             KeyCode::Esc => {
                                 preview.exit_scroll_mode();
@@ -741,21 +753,27 @@ async fn run_tui_loop(
                             }
                             // Tmux preview scroll events
                             AppEvent::ScrollPreviewUp => {
-                                let preview = layout.tmux_preview_mut();
-                                if !preview.is_scroll_mode() {
-                                    preview.enter_scroll_mode();
+                                if !app.state.is_observing_selected_terminal() {
+                                    let preview = layout.tmux_preview_mut();
+                                    if !preview.is_scroll_mode() {
+                                        preview.enter_scroll_mode();
+                                    }
+                                    preview.scroll_up();
                                 }
-                                preview.scroll_up();
                             }
                             AppEvent::ScrollPreviewDown => {
-                                let preview = layout.tmux_preview_mut();
-                                if !preview.is_scroll_mode() {
-                                    preview.enter_scroll_mode();
+                                if !app.state.is_observing_selected_terminal() {
+                                    let preview = layout.tmux_preview_mut();
+                                    if !preview.is_scroll_mode() {
+                                        preview.enter_scroll_mode();
+                                    }
+                                    preview.scroll_down();
                                 }
-                                preview.scroll_down();
                             }
                             AppEvent::EnterScrollMode => {
-                                layout.tmux_preview_mut().enter_scroll_mode();
+                                if !app.state.is_observing_selected_terminal() {
+                                    layout.tmux_preview_mut().enter_scroll_mode();
+                                }
                             }
                             AppEvent::ExitScrollMode => {
                                 layout.tmux_preview_mut().exit_scroll_mode();
@@ -775,7 +793,10 @@ async fn run_tui_loop(
                                     app.state.sessions_pane_state.effective_width(sz.width);
                                 let (rows, cols) =
                                     crate::components::layout::interactive_embed_size(
-                                        sz.width, sz.height, sidebar,
+                                        sz.width,
+                                        sz.height,
+                                        sidebar,
+                                        app.state.app_config.ui_preferences.show_session_menu_bar,
                                     );
                                 // Failure (no tmux session on the row / attach
                                 // error) surfaces as a notification from
