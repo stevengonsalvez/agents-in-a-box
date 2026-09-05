@@ -95,8 +95,8 @@
 
 | Field class | Owner | Examples |
 |-------------|-------|----------|
-| navigation | renderer | list selection, scroll offset, pane focus, Rect map, hover |
-| flow | core section | wizard step + `LaunchSpec`, open modal, filter text, pending answer draft, active screen |
+| navigation | renderer | scroll offset, auto-scroll, pane focus, Rect map, plugin geometry, hover, needs_redraw |
+| flow | core section | list selection (it is the argument commands act on), wizard step + `LaunchSpec`, open modal, filter text, pending answer draft, active screen |
 | terminal | renderer host | attached tabs, xterm buffers, cap enforcement |
 
 ## Extraction plan
