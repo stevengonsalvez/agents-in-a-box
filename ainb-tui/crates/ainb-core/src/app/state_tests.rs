@@ -45,7 +45,7 @@ mod tests {
     }
 
     #[test]
-    fn dead_observer_stays_suppressed_until_selection_changes() {
+    fn dead_observer_stays_suppressed_for_the_retry_window() {
         if std::process::Command::new("tmux")
             .arg("-V")
             .output()
@@ -69,7 +69,7 @@ mod tests {
         }
 
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(target, _)| target.as_str()),
+            state.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
             Some(missing.as_str())
         );
         assert!(state.embed.is_none(), "dead observer must release");
@@ -81,6 +81,22 @@ mod tests {
         state.selected_other_tmux_index = None;
         assert!(!state.sync_terminal_observer(24, 80));
         assert!(state.observer_failed_target.is_none());
+    }
+
+    #[test]
+    fn observer_failure_stops_after_three_attempts() {
+        let mut state = AppState::new();
+        for _ in 0..3 {
+            state.record_observer_failure("stale".to_string());
+        }
+
+        assert_eq!(
+            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            Some(3)
+        );
+        assert!(state.notifications.iter().any(|notification| {
+            notification.message.contains("Live preview unavailable for 'stale'")
+        }));
     }
 
     #[test]

@@ -20,6 +20,7 @@ use crate::docker::LogStreamingCoordinator;
 use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use chrono;
@@ -454,6 +455,26 @@ pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 const OBSERVER_SETTLE_DELAY: Duration = Duration::from_millis(250);
 const OBSERVER_RETRY_DELAY: Duration = Duration::from_secs(2);
+const MAX_OBSERVER_FAILURES: u8 = 3;
+
+fn host_tmux_session_name() -> Option<&'static str> {
+    static HOST_TMUX_SESSION: OnceLock<Option<String>> = OnceLock::new();
+    HOST_TMUX_SESSION
+        .get_or_init(|| {
+            std::env::var_os("TMUX")?;
+            let output = std::process::Command::new("tmux")
+                .args(["display-message", "-p", "#{session_name}"])
+                .output()
+                .ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8(output.stdout).ok())
+                .flatten()
+                .map(|name| name.trim().to_string())
+        })
+        .as_deref()
+}
 
 impl AppState {
     /// Enter interactive mode by replacing the selected read-only tmux client
@@ -508,19 +529,26 @@ impl AppState {
             self.release_interactive_pane();
             return false;
         };
+        if host_tmux_session_name() == Some(name.as_str()) {
+            self.release_interactive_pane();
+            return false;
+        }
         let now = Instant::now();
-        if self.observer_failed_target.as_ref().is_some_and(|(failed, _)| failed != &name) {
+        if self
+            .observer_failed_target
+            .as_ref()
+            .is_some_and(|(failed, _, _)| failed != &name)
+        {
             self.observer_failed_target = None;
         }
         if self.embed_session.as_deref() == Some(name.as_str()) && self.embed.is_some() {
             self.observer_pending = None;
             return false;
         }
-        if let Some((failed, retry_at)) = &self.observer_failed_target {
-            if failed == &name && now < *retry_at {
+        if let Some((failed, retry_at, attempts)) = &self.observer_failed_target {
+            if failed == &name && (*attempts >= MAX_OBSERVER_FAILURES || now < *retry_at) {
                 return false;
             }
-            self.observer_failed_target = None;
         }
         if !self.observer_target_settled(&name, now) {
             self.release_interactive_pane();
@@ -536,9 +564,28 @@ impl AppState {
             }
             Err(e) => {
                 tracing::debug!("failed to observe terminal {name}: {e}");
-                self.observer_failed_target = Some((name, now + OBSERVER_RETRY_DELAY));
+                self.record_observer_failure(name);
                 false
             }
+        }
+    }
+
+    fn record_observer_failure(&mut self, session: String) {
+        let attempts = self
+            .observer_failed_target
+            .as_ref()
+            .filter(|(failed, _, _)| failed == &session)
+            .map_or(1, |(_, _, attempts)| attempts.saturating_add(1))
+            .min(MAX_OBSERVER_FAILURES);
+        self.observer_failed_target = Some((
+            session.clone(),
+            Instant::now() + OBSERVER_RETRY_DELAY.saturating_mul(attempts.into()),
+            attempts,
+        ));
+        if attempts == MAX_OBSERVER_FAILURES {
+            self.add_warning_notification(format!(
+                "Live preview unavailable for '{session}'. Select another row to retry."
+            ));
         }
     }
 
@@ -638,8 +685,7 @@ impl AppState {
                 self.add_info_notification("Live session ended, released".to_string());
             } else if exited {
                 if let Some(session) = session {
-                    self.observer_failed_target =
-                        Some((session, Instant::now() + OBSERVER_RETRY_DELAY));
+                    self.record_observer_failure(session);
                 }
             }
             return true;
@@ -3295,7 +3341,7 @@ pub struct AppState {
     // A changed selection must settle before starting a read-only client.
     observer_pending: Option<(String, Instant)>,
     // A read-only observer that dies waits before the next retry.
-    observer_failed_target: Option<(String, Instant)>,
+    observer_failed_target: Option<(String, Instant, u8)>,
     // Interior screen rect (inside the border) the embed's PseudoTerminal
     // occupies, published by the interactive render branch each frame. Drives
     // mouse-coordinate translation into 1-based pane-local SGR sequences.
@@ -5897,19 +5943,6 @@ impl AppState {
             .filter_map(|s| s.tmux_session_name.as_deref())
             .collect();
 
-        let current_tmux_session = if std::env::var_os("TMUX").is_some() {
-            Command::new("tmux")
-                .args(["display-message", "-p", "#{session_name}"])
-                .output()
-                .await
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .map(|session| session.trim().to_string())
-        } else {
-            None
-        };
-
         let sessions_output = String::from_utf8_lossy(&output.stdout);
         let mut other_sessions = Vec::new();
         let mut ssh_sessions = Vec::new();
@@ -5919,12 +5952,6 @@ impl AppState {
             if parts.len() >= 3 {
                 // Session name may contain colons, so reconstruct from all parts except last two
                 let name = parts[..parts.len() - 2].join(":");
-
-                // A live observer of ainb's own tmux client would consume each
-                // repaint and trigger another repaint forever.
-                if current_tmux_session.as_deref() == Some(name.as_str()) {
-                    continue;
-                }
 
                 // Skip shell sessions (ainb-ws-*, ainb-sh-*, ainb-shell-*)
                 if name.starts_with("ainb-ws-")
