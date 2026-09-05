@@ -491,6 +491,26 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
+        // Read-only preview is a real tmux client feeding the same vt100
+        // parser used after input focus is granted. Keep it aligned with the
+        // current selection and viewport before painting.
+        if app.state.current_screen == crate::app::screens::ids::SESSION_LIST
+            && !app.state.is_interactive_pane()
+        {
+            let sz = terminal.size().unwrap_or(ratatui::layout::Size {
+                width: 80,
+                height: 24,
+            });
+            let sidebar = app.state.sessions_pane_state.effective_width(sz.width);
+            let (rows, cols) = crate::components::layout::interactive_embed_size(
+                sz.width,
+                sz.height,
+                sidebar,
+                app.state.app_config.ui_preferences.show_session_menu_bar,
+            );
+            needs_redraw |= app.state.sync_terminal_observer(rows, cols);
+        }
+
         // Live embed output is the third repaint source alongside input and
         // plugin frames: the PTY reader thread marks the embed dirty as bytes
         // stream in, with no host input involved. Without this the dirty-gate
@@ -582,19 +602,20 @@ async fn run_tui_loop(
 
                     use crossterm::event::KeyCode;
 
-                    // Interactive embed escape hatch: Ctrl+Q releases focus and
-                    // kills the ephemeral tmux client. Keyed off the RESOURCE
-                    // (embed exists), never the mode flag, so the hatch works
-                    // even from a leaked state where the embed is alive but
-                    // focus drifted off the preview pane.
+                    // Ctrl+Q belongs to the terminal screen. Interactive mode
+                    // releases; every other session-list state consumes it so
+                    // the host's plain `q` shortcut is never timing-dependent.
                     {
                         use crossterm::event::KeyModifiers;
-                        if app.state.embed.is_some()
-                            && key_event.code == KeyCode::Char('q')
+                        if key_event.code == KeyCode::Char('q')
                             && key_event.modifiers.contains(KeyModifiers::CONTROL)
                         {
-                            app.state.release_interactive_pane();
-                            continue;
+                            if app.state.is_interactive_pane() {
+                                app.state.release_interactive_pane();
+                            }
+                            if app.state.current_screen == crate::app::screens::ids::SESSION_LIST {
+                                continue;
+                            }
                         }
                     }
 
@@ -672,9 +693,13 @@ async fn run_tui_loop(
                         continue;
                     }
 
-                    // Intercept keys when tmux preview is in scroll mode
+                    // A read-only terminal uses tmux's own scrollback; host
+                    // preview scroll mode would swallow navigation invisibly.
+                    let observing_terminal = app.state.is_observing_selected_terminal();
                     let preview = layout.tmux_preview_mut();
-                    if preview.is_scroll_mode() {
+                    if observing_terminal {
+                        preview.exit_scroll_mode();
+                    } else if preview.is_scroll_mode() {
                         match key_event.code {
                             KeyCode::Esc => {
                                 preview.exit_scroll_mode();
@@ -727,21 +752,33 @@ async fn run_tui_loop(
                             }
                             // Tmux preview scroll events
                             AppEvent::ScrollPreviewUp => {
-                                let preview = layout.tmux_preview_mut();
-                                if !preview.is_scroll_mode() {
-                                    preview.enter_scroll_mode();
+                                if app.state.is_observing_selected_terminal() {
+                                    app.state.notify_live_preview_no_scrollback();
+                                } else {
+                                    let preview = layout.tmux_preview_mut();
+                                    if !preview.is_scroll_mode() {
+                                        preview.enter_scroll_mode();
+                                    }
+                                    preview.scroll_up();
                                 }
-                                preview.scroll_up();
                             }
                             AppEvent::ScrollPreviewDown => {
-                                let preview = layout.tmux_preview_mut();
-                                if !preview.is_scroll_mode() {
-                                    preview.enter_scroll_mode();
+                                if app.state.is_observing_selected_terminal() {
+                                    app.state.notify_live_preview_no_scrollback();
+                                } else {
+                                    let preview = layout.tmux_preview_mut();
+                                    if !preview.is_scroll_mode() {
+                                        preview.enter_scroll_mode();
+                                    }
+                                    preview.scroll_down();
                                 }
-                                preview.scroll_down();
                             }
                             AppEvent::EnterScrollMode => {
-                                layout.tmux_preview_mut().enter_scroll_mode();
+                                if app.state.is_observing_selected_terminal() {
+                                    app.state.notify_live_preview_no_scrollback();
+                                } else {
+                                    layout.tmux_preview_mut().enter_scroll_mode();
+                                }
                             }
                             AppEvent::ExitScrollMode => {
                                 layout.tmux_preview_mut().exit_scroll_mode();
@@ -761,7 +798,10 @@ async fn run_tui_loop(
                                     app.state.sessions_pane_state.effective_width(sz.width);
                                 let (rows, cols) =
                                     crate::components::layout::interactive_embed_size(
-                                        sz.width, sz.height, sidebar,
+                                        sz.width,
+                                        sz.height,
+                                        sidebar,
+                                        app.state.app_config.ui_preferences.show_session_menu_bar,
                                     );
                                 // Failure (no tmux session on the row / attach
                                 // error) surfaces as a notification from
@@ -1086,6 +1126,10 @@ async fn run_tui_loop(
                 match action {
                     AsyncAction::AttachToOtherTmux(session_name) => {
                         use crate::app::AttachHandler;
+
+                        // Fullscreen attach owns terminal size and input. Drop
+                        // preview client first so tmux has only one authority.
+                        app.state.release_interactive_pane();
 
                         info!(
                             "[ACTION] Handling AttachToOtherTmux for session '{}'",
@@ -1784,6 +1828,10 @@ async fn run_tui_loop(
                         };
 
                         if let Some(tmux_session_name) = tmux_session_name {
+                            // Fullscreen attach owns terminal size and input.
+                            // Preview reconnects after detach.
+                            app.state.release_interactive_pane();
+
                             // Mark session as attached
                             for workspace in &mut app.state.workspaces {
                                 for session in &mut workspace.sessions {
