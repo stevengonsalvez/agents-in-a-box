@@ -560,6 +560,7 @@ impl AppState {
             Ok(client) => {
                 self.embed = Some(client);
                 self.embed_session = Some(name);
+                self.observer_failed_target = None;
                 true
             }
             Err(e) => {

@@ -100,6 +100,39 @@ mod tests {
     }
 
     #[test]
+    fn successful_observer_clears_prior_failure_count() {
+        if std::process::Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map_or(true, |output| !output.status.success())
+        {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+
+        let session = format!("ainb-observer-retry-reset-{}", std::process::id());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "sh"])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(created, "failed to create tmux session");
+
+        let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
+        state.current_screen = "session_list".to_string();
+        state.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
+        assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(state.sync_terminal_observer(24, 80), "observer starts");
+        assert!(state.observer_failed_target.is_none());
+
+        state.release_interactive_pane();
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &format!("={session}")])
+            .status();
+    }
+
+    #[test]
     fn test_toggle_select_other_tmux_session_supports_multiple_names() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
 
