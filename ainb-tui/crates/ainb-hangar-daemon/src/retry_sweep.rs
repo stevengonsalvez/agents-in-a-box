@@ -99,7 +99,13 @@ const RECENT_EVENT_SCAN: i64 = 20;
 /// is closed by reading a named field; see [`failure_text`].
 ///
 /// SCOPE, stated because the list understates it: this makes the sweep
-/// Claude-hook-only. A wire session's ERROR comes from `fleet.rs` matching any
+/// Claude-hook-only, and widening the TYPE filter alone would not change that.
+/// A wire payload is `{requestId, method, params}`, so it has no `payload` key
+/// and its error detail sits under `/params/...` — none of the pointers
+/// [`failure_text`] reads reaches it. Restoring Codex and ACP coverage needs
+/// both the wider predicate and pointers shaped for that payload; with
+/// `failure_text` in place the widening is safe, but without the pointers it
+/// is inert. A wire session's ERROR comes from `fleet.rs` matching any
 /// method containing `error` or `failed`, and it stores that raw method as the
 /// event type (`turn/failed`, `thread/error`, ...), none of which is named
 /// here — so Codex and ACP sessions never qualify and always land in
@@ -365,12 +371,40 @@ async fn transient_pattern(pool: &SqlitePool, session: &FleetSessionRow) -> Opti
         Vec::new()
     });
     payloads.iter().find_map(|payload| {
-        let reported = failure_text(payload)?;
+        let Some(reported) = failure_text(payload) else {
+            // The pointer list below is a GUESS: every payload in this module's
+            // tests is synthetic and was written to match the code that reads
+            // it, so the suite can only tell us the two are self-consistent.
+            // If a real `StopFailure` puts its reason somewhere else, the gate
+            // reads nothing, every ERR is opaque and the sweep silently does
+            // nothing at all — with no test red and nothing in the log saying
+            // so. One live run against a real fleet turns that into an answer.
+            tracing::debug!(
+                session = %session_key,
+                keys = ?payload_keys(payload),
+                "retry sweep: no failure field found; the reason may sit somewhere \
+                 `failure_text` does not read"
+            );
+            return None;
+        };
         detect_error_signals(&reported, 0).into_iter().find_map(|signal| match signal {
             Signal::ApiError { pattern, .. } => Some(pattern),
             _ => None,
         })
     })
+}
+
+/// The top-level keys of an event payload, for the log above.
+///
+/// Keys only, never values: the values are the operator's prompts and the
+/// agent's output, which is the content this gate was tightened to stop
+/// reading in the first place.
+fn payload_keys(payload: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return Vec::new();
+    };
+    let body = value.get("payload").unwrap_or(&value);
+    body.as_object().map(|map| map.keys().cloned().collect()).unwrap_or_default()
 }
 
 /// What the event says FAILED, from a named field, never the whole record.
