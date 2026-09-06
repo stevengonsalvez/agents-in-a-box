@@ -737,6 +737,13 @@ pub struct ChatSnapshot {
     pub turn_deadline_ms: Option<i64>,
 }
 
+/// The ceiling used when the daemon never told us its turn deadline.
+///
+/// The pool's own default is 30 minutes; this matches it rather than inventing
+/// a second number, so a leg with an unknown deadline retires on the same
+/// schedule as one with a known default.
+const UNKNOWN_TURN_DEADLINE_MS: i64 = 30 * 60 * 1_000;
+
 /// The Fleet chat surface's whole state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatState {
@@ -1078,10 +1085,14 @@ impl ChatState {
         // refused as stale instead of interrupted (see
         // `chat_cancel_turns_blocking`, which re-reads the version it is
         // supposed to be checking against).
-        let expired = match (self.receipts_elapsed_ms(), self.turn_deadline_ms) {
-            (Some(elapsed), Some(deadline)) => elapsed > deadline,
-            _ => false,
-        };
+        // `turn_deadline_ms` rides back on the MINT, so it is absent whenever
+        // the mint failed, the daemon predates the field, or the page has not
+        // opened successfully yet — which are precisely the states where a leg
+        // is most likely to be stale. Treating absence as "never expires" put
+        // the unbounded behaviour back exactly there, so an unknown deadline
+        // falls back to a fixed ceiling rather than to forever.
+        let deadline = self.turn_deadline_ms.unwrap_or(UNKNOWN_TURN_DEADLINE_MS);
+        let expired = self.receipts_elapsed_ms().is_some_and(|elapsed| elapsed > deadline);
         self.receipts.iter().filter(move |leg| {
             !expired
                 && matches!(
@@ -3756,6 +3767,37 @@ mod tests {
             reduce_chat_key(&mut state, ChatKey::Cancel),
             ChatKeyOutcome::Handled,
             "and the key must report there is nothing to cancel"
+        );
+    }
+
+    /// A leg retires even when the daemon never reported a turn deadline.
+    ///
+    /// `turn_deadline_ms` rides back on the mint, so it is absent when the mint
+    /// failed, when the daemon predates the field, or before the first
+    /// successful open — the very states where a leg is most likely stale. The
+    /// bound has to hold there too, or the unbounded behaviour returns exactly
+    /// where it hurts.
+    #[test]
+    fn a_leg_retires_even_with_no_reported_turn_deadline() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        assert!(state.turn_deadline_ms.is_none(), "the daemon reported none");
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![leg("claude:two", ActionReceiptStatus::Pending, None)]);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            1,
+            "inside the ceiling it is live"
+        );
+
+        chat_tick(&mut state, 1_000 + super::UNKNOWN_TURN_DEADLINE_MS + 1);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            0,
+            "an unknown deadline must fall back to a ceiling, not to forever"
         );
     }
 
