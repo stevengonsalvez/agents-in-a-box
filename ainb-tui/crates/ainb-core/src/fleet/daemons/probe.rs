@@ -1344,23 +1344,52 @@ pub fn collect_in(ainb_home: &Path, notifyd_base: &Path, now_ms: i64) -> Vec<Dae
     // the one where a tidy screen would be a lie.
     let mut fleet_daemon = probe_heartbeat_daemon(ainb_home, DaemonKind::FleetDaemon, now_ms);
     if fleet_daemon_is_visible(&fleet_daemon) {
-        // Say WHY it is on screen. A bare "running" row next to a running ATC
-        // reads as two healthy daemons; it is actually the double-supervision
-        // both of them refuse by default, and it needs to read as a fault.
-        if rows
-            .iter()
-            .any(|r| r.kind == DaemonKind::Atc && r.state != DaemonState::Stopped)
-        {
+        // Say WHY it is on screen. A bare "running" row next to another
+        // supervisor reads as two healthy daemons; it is actually the
+        // double-supervision they refuse by default, and it needs to read as a
+        // fault.
+        //
+        // BOTH supervisors count. ATC was the original pairing, but the hangar
+        // daemon's retry sweep auto-continues the same panes, and that is now
+        // the common one: most hosts run no ATC at all while the hangar daemon
+        // is always up. The sweep already stands down against this daemon from
+        // the other side (`retry_sweep::watcher_holding_the_fleet`), so the two
+        // guards have to agree on what a race is — otherwise the screen an
+        // operator reads to find out who is driving the fleet shows the more
+        // likely race as an ordinary healthy row.
+        let racing = racing_supervisors(&rows);
+        if !racing.is_empty() {
             fleet_daemon.state = DaemonState::Degraded;
             fleet_daemon.reason = format!(
-                "RACING ATC — both are auto-continuing the same panes, and ATC's per-session \
+                "RACING {} — both are auto-continuing the same panes, and the per-session \
 retry cap cannot hold while this is up. {}",
+                racing.join(" and "),
                 fleet_daemon.reason
             );
         }
         rows.push(fleet_daemon);
     }
     rows
+}
+
+/// The OTHER auto-continue supervisors currently up, named for the row's reason.
+///
+/// Both count. ATC was the original pairing, but the hangar daemon's retry
+/// sweep auto-continues the same panes, and that is now the common one: most
+/// hosts run no ATC at all while the hangar daemon is always up. The sweep
+/// already stands down against the legacy watcher from the other side
+/// (`retry_sweep::watcher_holding_the_fleet`), so the two guards have to agree
+/// on what a race is — otherwise the screen an operator reads to find out who
+/// is driving the fleet shows the likelier race as an ordinary healthy row.
+fn racing_supervisors(rows: &[DaemonStatus]) -> Vec<&'static str> {
+    rows.iter()
+        .filter(|row| row.state != DaemonState::Stopped)
+        .filter_map(|row| match row.kind {
+            DaemonKind::Atc => Some("ATC"),
+            DaemonKind::HangarDaemon => Some("the hangar daemon's retry sweep"),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Does the standalone fleet daemon deserve a row?
@@ -2756,6 +2785,52 @@ mod tests {
             fleet.reason.contains("RACING ATC"),
             "the row must say why it is here: {}",
             fleet.reason
+        );
+    }
+
+    /// The hangar daemon counts as a racing supervisor too.
+    ///
+    /// ATC was the original pairing, but the hangar daemon's retry sweep
+    /// auto-continues the same panes and is the far MORE likely one: most hosts
+    /// run no ATC at all while the hangar daemon is always up. The sweep
+    /// already stands down against this daemon from the other side
+    /// (`retry_sweep::watcher_holding_the_fleet`), so a screen that showed the
+    /// pairing as an ordinary healthy row disagreed with the guard actually
+    /// enforcing it.
+    #[test]
+    fn both_supervisors_count_as_a_race_and_a_stopped_one_does_not() {
+        let row = |kind: DaemonKind, state: DaemonState| DaemonStatus {
+            kind,
+            state,
+            ..DaemonStatus::stopped(kind, String::new())
+        };
+
+        assert_eq!(
+            racing_supervisors(&[row(DaemonKind::Atc, DaemonState::Running)]),
+            vec!["ATC"]
+        );
+        assert_eq!(
+            racing_supervisors(&[row(DaemonKind::HangarDaemon, DaemonState::Running)]),
+            vec!["the hangar daemon's retry sweep"],
+            "the hangar sweep races the legacy watcher exactly as ATC does"
+        );
+        assert_eq!(
+            racing_supervisors(&[
+                row(DaemonKind::Atc, DaemonState::Running),
+                row(DaemonKind::HangarDaemon, DaemonState::Running),
+            ])
+            .len(),
+            2,
+            "both up is named as both"
+        );
+        assert!(
+            racing_supervisors(&[
+                row(DaemonKind::Atc, DaemonState::Stopped),
+                row(DaemonKind::HangarDaemon, DaemonState::Stopped),
+                row(DaemonKind::Notifyd, DaemonState::Running),
+            ])
+            .is_empty(),
+            "a stopped supervisor is not racing anything, and notifyd never was"
         );
     }
 
