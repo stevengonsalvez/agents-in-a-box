@@ -4,9 +4,14 @@
 //! redraw to a dirty-gated one (draw only on input, a fresh plugin frame, or
 //! the 250 ms app-tick animation floor). The regression risk is a frozen /
 //! stale screen — a keystroke that does not trigger a repaint. This drives the
-//! real `ainb tui` binary in tmux and asserts that navigating Home → Inbox →
+//! real `ainb tui` binary in tmux and asserts that navigating Home → Daemons →
 //! Home actually changes the rendered pane each time. If the dirty-gate failed
 //! to mark a repaint, a poll below would time out and the test would fail.
+//!
+//! The vehicle used to be the Inbox screen, which no longer exists. The CLAIM
+//! is unchanged and has nothing to do with which screen it drives — any
+//! Esc-closing panel proves the same repaint. Daemons is the closest
+//! equivalent: one keypress from Home, one Esc back.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -129,29 +134,30 @@ fn render_gate_repaints_on_input() {
         panic!("HomeScreen never rendered:\n{}", session.capture());
     });
     assert!(
-        home_cap.contains("Inbox") && home_cap.contains("[b]"),
-        "Home sidebar missing Inbox [b] tile:\n{home_cap}"
+        home_cap.contains("Daemons") && home_cap.contains("[d]"),
+        "Home sidebar missing Daemons [d] tile:\n{home_cap}"
     );
 
-    // 2) Press `b` for Inbox. With the dirty-gate, the keystroke must mark a
-    //    repaint; the pane should change to the Inbox screen (its title line
-    //    `📥 Inbox · …` uses a single space, distinct from the sidebar tile).
+    // 2) Press `d` for Daemons. With the dirty-gate, the keystroke must mark a
+    //    repaint; the pane should change to the Daemons screen, whose title
+    //    carries "runtime health" — a string the sidebar tile does not, so a
+    //    match cannot be the Home screen still showing.
     thread::sleep(Duration::from_millis(500));
     let deadline = Instant::now() + Duration::from_secs(15);
-    let mut inbox = None;
+    let mut panel = None;
     while Instant::now() < deadline {
-        session.send_keys(&["b"]);
+        session.send_keys(&["d"]);
         if let Some(cap) = session.poll(Instant::now() + Duration::from_secs(2), |c| {
-            c.contains("📥 Inbox ·")
+            c.contains("runtime health")
         }) {
-            inbox = Some(cap);
+            panel = Some(cap);
             break;
         }
         thread::sleep(Duration::from_millis(300));
     }
     assert!(
-        inbox.is_some(),
-        "Inbox did not render after pressing 'b' — dirty-gate may have dropped \
+        panel.is_some(),
+        "Daemons did not render after pressing 'd' — dirty-gate may have dropped \
          the repaint. Last capture:\n{}",
         session.capture()
     );
@@ -161,7 +167,7 @@ fn render_gate_repaints_on_input() {
     //    not a perf assertion.)
     session.send_keys(&["Escape"]);
     let back_home = session.poll(Instant::now() + Duration::from_secs(15), |c| {
-        c.contains("Stats") && c.contains("[i]") && !c.contains("📥 Inbox ·")
+        c.contains("Stats") && c.contains("[i]") && !c.contains("runtime health")
     });
     assert!(
         back_home.is_some(),

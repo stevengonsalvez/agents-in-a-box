@@ -13,9 +13,10 @@
 //! the macOS client honest about the same contract.
 
 use ainb_hangar_proto::fleet::{
-    FleetActivityListParams, FleetActivityListResult, FleetChannelCreateParams,
-    FleetChannelCreateResult, FleetChannelListResult, FleetConfirmAnswerParams,
-    FleetConfirmAnswerResult, FleetConfirmListParams, FleetConfirmListResult,
+    FleetActivityListParams, FleetActivityListResult, FleetAdapterListResult,
+    FleetChannelCreateParams, FleetChannelCreateResult, FleetChannelListResult,
+    FleetConfirmAnswerParams, FleetConfirmAnswerResult, FleetConfirmListParams,
+    FleetConfirmListResult, FleetCopilotConfigureParams, FleetCopilotConfigureResult,
 };
 use ainb_hangar_proto::methods;
 use serde_json::json;
@@ -26,6 +27,30 @@ impl DaemonClient {
     /// List the chat channels, in creation order.
     pub async fn channel_list(&self) -> Result<FleetChannelListResult, DaemonError> {
         let result = self.call(methods::FLEET_CHANNEL_LIST, json!({})).await?;
+        serde_json::from_value(result).map_err(|error| DaemonError::Decode(error.to_string()))
+    }
+
+    /// The ACP adapters this daemon's registry can spawn.
+    ///
+    /// The engine picker's ONLY source. A list compiled into the client would
+    /// refuse an adapter an operator has already configured, which is the
+    /// closed-enum failure this call exists to remove.
+    pub async fn adapter_list(&self) -> Result<FleetAdapterListResult, DaemonError> {
+        let result = self.call(methods::FLEET_ADAPTER_LIST, json!({})).await?;
+        serde_json::from_value(result).map_err(|error| DaemonError::Decode(error.to_string()))
+    }
+
+    /// Set the copilot's adapter, guardrail dial, model, reasoning and persona.
+    ///
+    /// A changed `provider` RETIRES the running session and mints a new one on
+    /// the same channel, so the result's `session_key` may differ from the one
+    /// the caller was holding; `session_replaced` says when it did.
+    pub async fn copilot_configure(
+        &self,
+        params: FleetCopilotConfigureParams,
+    ) -> Result<FleetCopilotConfigureResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("FleetCopilotConfigureParams serializes");
+        let result = self.call(methods::FLEET_COPILOT_CONFIGURE, value).await?;
         serde_json::from_value(result).map_err(|error| DaemonError::Decode(error.to_string()))
     }
 

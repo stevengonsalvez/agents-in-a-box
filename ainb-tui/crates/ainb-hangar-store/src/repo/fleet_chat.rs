@@ -33,6 +33,11 @@ pub struct FleetChannelRow {
     pub scope_key: String,
     /// Member session keys.
     pub recipients: Vec<String>,
+    /// The channel's guardrail dial: `help`, `guarded` or `yolo`.
+    ///
+    /// A `copilot` channel's only. A `broadcast` channel carries the default and
+    /// nothing reads it.
+    pub copilot_mode: String,
     /// Creation time in epoch milliseconds.
     pub created_at: i64,
 }
@@ -53,13 +58,14 @@ impl FleetChannelRepo {
     ) -> Result<FleetChannelRow, sqlx::Error> {
         let mut tx = pool.begin().await?;
         sqlx::query(
-            "INSERT INTO fleet_channel (id, kind, name, scope_key, created_at) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO fleet_channel (id, kind, name, scope_key, copilot_mode, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(&channel.id)
         .bind(&channel.kind)
         .bind(&channel.name)
         .bind(&channel.scope_key)
+        .bind(&channel.copilot_mode)
         .bind(channel.created_at)
         .execute(&mut *tx)
         .await?;
@@ -80,7 +86,7 @@ impl FleetChannelRepo {
     /// Every channel in creation order, each with its membership.
     pub async fn list(pool: &SqlitePool) -> Result<Vec<FleetChannelRow>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, kind, name, scope_key, created_at FROM fleet_channel \
+            "SELECT id, kind, name, scope_key, copilot_mode, created_at FROM fleet_channel \
              ORDER BY created_at ASC, id ASC",
         )
         .fetch_all(pool)
@@ -93,6 +99,7 @@ impl FleetChannelRepo {
                 kind: row.try_get("kind")?,
                 name: row.try_get("name")?,
                 scope_key: row.try_get("scope_key")?,
+                copilot_mode: row.try_get("copilot_mode")?,
                 created_at: row.try_get("created_at")?,
                 recipients,
                 id,
@@ -108,7 +115,8 @@ impl FleetChannelRepo {
         scope_key: &str,
     ) -> Result<Option<FleetChannelRow>, sqlx::Error> {
         let Some(row) = sqlx::query(
-            "SELECT id, kind, name, scope_key, created_at FROM fleet_channel WHERE scope_key = ?",
+            "SELECT id, kind, name, scope_key, copilot_mode, created_at FROM fleet_channel \
+             WHERE scope_key = ?",
         )
         .bind(scope_key)
         .fetch_optional(pool)
@@ -122,6 +130,7 @@ impl FleetChannelRepo {
             kind: row.try_get("kind")?,
             name: row.try_get("name")?,
             scope_key: row.try_get("scope_key")?,
+            copilot_mode: row.try_get("copilot_mode")?,
             created_at: row.try_get("created_at")?,
             recipients,
             id,
@@ -144,6 +153,39 @@ impl FleetChannelRepo {
             Some(scope) => Self::by_scope(pool, &scope).await,
             None => Ok(None),
         }
+    }
+
+    /// Turn one channel's guardrail dial.
+    ///
+    /// Returns `false` when the scope names no channel, so a dial turned against
+    /// a deleted channel reads as a miss rather than a silent success.
+    pub async fn set_mode(
+        pool: &SqlitePool,
+        scope_key: &str,
+        mode: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("UPDATE fleet_channel SET copilot_mode = ? WHERE scope_key = ?")
+            .bind(mode)
+            .bind(scope_key)
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Drop every channel out of `yolo` back to `guarded`. Called once at daemon
+    /// start.
+    ///
+    /// `yolo` is a dial an operator holds down for a stretch of work, not a
+    /// setting: a daemon that came back up still armed would be firing
+    /// destructive tools on behalf of a session nobody is watching. Returns how
+    /// many channels were reset, which is what the boot log reports.
+    pub async fn reset_yolo(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE fleet_channel SET copilot_mode = 'guarded' WHERE copilot_mode = 'yolo'",
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     async fn members(pool: &SqlitePool, channel_id: &str) -> Result<Vec<String>, sqlx::Error> {
@@ -525,6 +567,98 @@ mod tests {
             expires_at,
             answered_at: None,
         }
+    }
+
+    fn channel(id: &str, mode: &str) -> FleetChannelRow {
+        FleetChannelRow {
+            id: id.to_string(),
+            kind: "copilot".to_string(),
+            name: format!("channel {id}"),
+            scope_key: format!("channel:{id}"),
+            recipients: vec![],
+            copilot_mode: mode.to_string(),
+            created_at: 1_000,
+        }
+    }
+
+    /// `yolo` is a dial an operator holds down, not a setting they leave on.
+    /// A daemon that came back up still armed would be firing destructive tools
+    /// on behalf of a session nobody is watching.
+    #[tokio::test]
+    async fn boot_drops_yolo_back_to_guarded_and_leaves_the_other_dials_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        for (id, mode) in [("ARMED", "yolo"), ("SAFE", "guarded"), ("READONLY", "help")] {
+            FleetChannelRepo::insert(pool, &channel(id, mode)).await.unwrap();
+        }
+
+        assert_eq!(FleetChannelRepo::reset_yolo(pool).await.unwrap(), 1);
+        let modes: Vec<(String, String)> = FleetChannelRepo::list(pool)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.id, row.copilot_mode))
+            .collect();
+        assert_eq!(
+            modes,
+            vec![
+                ("ARMED".to_string(), "guarded".to_string()),
+                ("READONLY".to_string(), "help".to_string()),
+                ("SAFE".to_string(), "guarded".to_string()),
+            ],
+            "`help` is a deliberate restriction and must survive a restart; only `yolo` resets"
+        );
+        assert_eq!(
+            FleetChannelRepo::reset_yolo(pool).await.unwrap(),
+            0,
+            "the boot reset is not idempotent"
+        );
+    }
+
+    /// A dial turned against a channel that no longer exists must read as a
+    /// miss, so the pane can say so instead of showing a mode nothing enforces.
+    #[tokio::test]
+    async fn turning_the_dial_reports_whether_it_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        FleetChannelRepo::insert(pool, &channel("LIVE", "guarded")).await.unwrap();
+
+        assert!(FleetChannelRepo::set_mode(pool, "channel:LIVE", "yolo").await.unwrap());
+        assert_eq!(
+            FleetChannelRepo::by_scope(pool, "channel:LIVE")
+                .await
+                .unwrap()
+                .unwrap()
+                .copilot_mode,
+            "yolo"
+        );
+        assert!(!FleetChannelRepo::set_mode(pool, "channel:GONE", "yolo").await.unwrap());
+    }
+
+    /// A channel written before 0093 has no stored dial, and the one it
+    /// migrates to must be the safe one.
+    #[tokio::test]
+    async fn a_channel_inserted_without_a_dial_defaults_to_guarded() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        sqlx::query(
+            "INSERT INTO fleet_channel (id, kind, name, scope_key, created_at) \
+             VALUES ('OLD', 'copilot', 'old', 'channel:OLD', 1000)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            FleetChannelRepo::by_scope(pool, "channel:OLD")
+                .await
+                .unwrap()
+                .unwrap()
+                .copilot_mode,
+            "guarded"
+        );
     }
 
     /// The TTL is a property of the ROW, so it survives the process that minted

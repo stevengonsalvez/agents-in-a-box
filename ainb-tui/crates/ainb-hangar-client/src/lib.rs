@@ -375,6 +375,19 @@ impl DaemonClient {
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
     }
 
+    /// One instance's retry ledger, defaulting to the daemon's own retry sweep.
+    ///
+    /// The sweep runs with no ATC instance behind it, so this is the only way
+    /// to see which sessions it has continued and which it escalated at the cap.
+    pub async fn atc_retry_list(
+        &self,
+        params: ainb_hangar_proto::snapshots::AtcRetryListParams,
+    ) -> Result<ainb_hangar_proto::snapshots::AtcRetryListResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("AtcRetryListParams serializes");
+        let result = self.call(methods::ATC_RETRY_LIST, value).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
     /// Disable a registered ATC instance's heartbeat cron (`atc/unregister`, spec
     /// P9 D12) — the daemon-native counterpart to `ainb fleet atc teardown`'s
     /// timer removal. Clears `enabled` + `next_tick_at` so the daemon-owned

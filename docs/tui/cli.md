@@ -2055,6 +2055,7 @@ Commands:
   transcript     Page or follow one session's full execution transcript
   channel        Chat channels: a named scope with a recipient set
   copilot        The fleet copilot session's per-session adapter config
+  adapter        The ACP adapters this daemon's registry can spawn
   confirm        Guardrail confirm cards: copilot tool calls held for a human
   activity       The append-only copilot activity feed
   sequence       Ordered prompts with ack between steps
@@ -2528,7 +2529,9 @@ Options:
       --format <format>
           Output format [default: text] [possible values: text, json, csv, markdown]
       --provider <provider>
-          Adapter family [possible values: claude, codex]
+          Adapter name from `ainb fleet adapter list`
+      --copilot-mode <copilot-mode>
+          The channel's guardrail dial: which of the copilot's OWN fleet tools fire, take a confirm card, or are not offered [possible values: help, guarded, yolo]
       --model <model>
           Adapter model id
       --reasoning-effort <reasoning-effort>
@@ -2539,6 +2542,40 @@ Options:
           Print help
 
 There is no permission-mode flag. The mode is daemon config, pinned at session/new and re-asserted after load; a per-session override would be a remote off-switch for the whole permission surface.
+```
+
+### `ainb fleet adapter`
+
+The ACP adapters this daemon's registry can spawn
+
+```console
+$ ainb fleet adapter --help
+The ACP adapters this daemon's registry can spawn
+
+Usage: ainb fleet adapter [OPTIONS] <COMMAND>
+
+Commands:
+  list  List the adapters, their commands and pinned modes
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb fleet adapter list`
+
+List the adapters, their commands and pinned modes
+
+```console
+$ ainb fleet adapter list --help
+List the adapters, their commands and pinned modes
+
+Usage: ainb fleet adapter list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
 ```
 
 ### `ainb fleet confirm`
@@ -2800,8 +2837,8 @@ Commands:
   teardown  Remove an ATC instance's heartbeat timer + session
   status    Report one ATC instance (meta + timer + session liveness)
   repair    Re-assert an existing instance's heartbeat scheduler from its meta.json (never rewrites config)
-  mode      Report or switch the supervisor mode (lite | full) — exactly one owner per fleet
   list      List all provisioned ATC instances
+  retries   Retry budget spent per session, and which sessions were escalated
   inbox     Inspect / drain / commit a parent's durable completion inbox
   help      Print this message or the help of the given subcommand(s)
 
@@ -2830,7 +2867,6 @@ Options:
       --no-heartbeat             Provision without installing the OS heartbeat timer
       --no-spawn                 Provision files + timer but do not spawn the ainb session
       --no-hooks                 Skip installing the event-driven lifecycle hooks into ~/.claude/settings.json (poll-mode only)
-      --mode <mode>              Supervisor mode (default: keep an existing instance's mode, else full). lite runs no LLM; full schedules a heartbeat into a brain session [possible values: lite, full]
       --provider <provider>      Full-mode brain (claude | codex; default claude)
   -h, --help                     Print help
 ```
@@ -2912,48 +2948,6 @@ Options:
           Print help (see a summary with '-h')
 ```
 
-#### `ainb fleet atc mode`
-
-One ATC supervisor owns a fleet, in exactly one mode.
-
-```console
-$ ainb fleet atc mode --help
-One ATC supervisor owns a fleet, in exactly one mode.
-
-lite — no LLM. A deterministic scan of the same LLM-free `fleet needs` read, auto-continuing only known transient errors, inside the same per-session retry cap. It never answers an ASK and never resolves an ambiguous session: those are reported, not decided.
-
-full — the scheduled heartbeat wakes an LLM session that triages the ambiguous work and coordinates the fleet. It spends tokens every beat and needs a provider ainb can actually drive.
-
-Both modes share ONE safety ledger, so switching never hands a permanently-broken session a fresh set of retries. Without --set this verb only reports; switching a fleet's controller is not something to do by accident while looking.
-
-Usage: ainb fleet atc mode [OPTIONS] <name>
-
-Arguments:
-  <name>
-          Instance name
-
-Options:
-      --format <format>
-          Output format
-          
-          [default: text]
-          [possible values: text, json, csv, markdown]
-
-      --set <set>
-          Switch the mode. Stops the outgoing controller before starting the incoming one
-          
-          [possible values: lite, full]
-
-      --provider <provider>
-          Full-mode brain (claude | codex). Remembered across a switch to lite, which runs no brain. A provider ainb cannot drive is refused, not faked
-
-      --no-reconcile
-          Persist the mode without starting or stopping either controller. The old one still stands down on its next action
-
-  -h, --help
-          Print help (see a summary with '-h')
-```
-
 #### `ainb fleet atc list`
 
 List all provisioned ATC instances
@@ -2967,6 +2961,34 @@ Usage: ainb fleet atc list [OPTIONS]
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb fleet atc retries`
+
+Reads the durable `atc_retry` ledger.
+
+```console
+$ ainb fleet atc retries --help
+Reads the durable `atc_retry` ledger.
+
+With no --instance this reports the HANGAR DAEMON'S OWN retry sweep, which auto-continues transient API errors on every session with no ATC instance behind it. That sweep has no `atc status` to ask, so this is the only way to see what it has done.
+
+A row at the cap has been escalated to you as an attention row; it is not being retried any more. A session that recovers and stays recovered ages out of the ledger and gets its budget back.
+
+Usage: ainb fleet atc retries [OPTIONS]
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --instance <instance>
+          Read a named ATC instance's ledger instead of the sweep's
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb fleet atc inbox`
@@ -3442,8 +3464,6 @@ Commands:
   stop           Take it down
   provision      Provision the instance and bring it up, creating it if absent
   remove-orphan  Remove a heartbeat timer whose instance does not exist
-  mode-lite      Switch the supervisor to lite mode (no LLM, deterministic scan)
-  mode-full      Switch the supervisor to full mode (scheduled LLM heartbeat)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3520,36 +3540,6 @@ $ ainb daemon atc remove-orphan --help
 Remove a heartbeat timer whose instance does not exist
 
 Usage: ainb daemon atc remove-orphan [OPTIONS]
-
-Options:
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -h, --help             Print help
-```
-
-#### `ainb daemon atc mode-lite`
-
-Switch the supervisor to lite mode (no LLM, deterministic scan)
-
-```console
-$ ainb daemon atc mode-lite --help
-Switch the supervisor to lite mode (no LLM, deterministic scan)
-
-Usage: ainb daemon atc mode-lite [OPTIONS]
-
-Options:
-      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
-  -h, --help             Print help
-```
-
-#### `ainb daemon atc mode-full`
-
-Switch the supervisor to full mode (scheduled LLM heartbeat)
-
-```console
-$ ainb daemon atc mode-full --help
-Switch the supervisor to full mode (scheduled LLM heartbeat)
-
-Usage: ainb daemon atc mode-full [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]

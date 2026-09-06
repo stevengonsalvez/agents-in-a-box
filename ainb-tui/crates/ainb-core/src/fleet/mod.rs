@@ -18,9 +18,15 @@
 
 #![allow(missing_docs)]
 
+pub mod answer;
 pub mod atc;
+pub mod attention;
+pub mod attention_poll;
 pub mod bridge;
+pub mod broadcast;
+pub mod chat_host;
 pub mod control;
+pub mod copilot_dial;
 pub mod daemons;
 pub mod plumbing;
 pub mod read;

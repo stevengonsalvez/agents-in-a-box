@@ -22,13 +22,11 @@ pub mod supervisor;
 pub mod timer;
 
 pub use heartbeat::{
-    DEFAULT_ERR_RETRY_CAP, HeartbeatState, RetryLedger, build_heartbeat,
-    build_heartbeat_enforcing_cap, build_heartbeat_with_ledger, should_pause_for_idle,
+    DEFAULT_ERR_RETRY_CAP, HeartbeatState, build_heartbeat_enforcing_cap, should_pause_for_idle,
 };
 pub use meta::AtcMeta;
 pub use paths::{AtcPaths, instance_name_for_cwd_in, sanitize_instance_name};
 pub use render::render_claude_md;
 pub use supervisor::{
-    Controller, DEFAULT_PROVIDER, SupervisorMode, lite_heartbeat_id, may_act, mode_help,
-    provider_control, resolve_full_provider, stand_down_reason, supported_full_providers,
+    DEFAULT_PROVIDER, mode_help, provider_control, resolve_full_provider, supported_full_providers,
 };

@@ -226,11 +226,13 @@ async fn the_six_part_two_arms_answer_against_a_real_store() {
     );
 
     // And `copilot_configure` reaches its own arm rather than -32601, even with
-    // no copilot channel to configure.
+    // no copilot channel to configure. The adapter must be a REAL registry name:
+    // an unknown one is refused before the channel lookup, which would prove the
+    // wrong refusal.
     let configured = client
         .call(
             methods::FLEET_COPILOT_CONFIGURE,
-            json!({ "provider": "claude" }),
+            json!({ "provider": "claude-agent-acp" }),
         )
         .await;
     assert_eq!(configured["error"]["code"], -32602, "{configured}");
@@ -598,7 +600,7 @@ async fn copilot_configure_writes_the_columns_and_refuses_a_permission_mode() {
         .call(
             methods::FLEET_COPILOT_CONFIGURE,
             json!({
-                "provider": "claude",
+                "provider": "claude-agent-acp",
                 "model": "claude-sonnet-4-5",
                 "reasoning_effort": "high",
                 "persona": "you are the fleet copilot",
@@ -645,7 +647,7 @@ async fn copilot_configure_writes_the_columns_and_refuses_a_permission_mode() {
         let refused = client
             .call(
                 methods::FLEET_COPILOT_CONFIGURE,
-                json!({ "provider": "claude", spelling: "bypassPermissions" }),
+                json!({ "provider": "claude-agent-acp", spelling: "bypassPermissions" }),
             )
             .await;
         assert_eq!(refused["error"]["code"], -32602, "{spelling}: {refused}");
@@ -668,6 +670,207 @@ async fn copilot_configure_writes_the_columns_and_refuses_a_permission_mode() {
         mode, "bypassPermissions",
         "the pinned mode must be untouched"
     );
+}
+
+/// `provider` is validated against the ADAPTER REGISTRY, and a name the daemon
+/// cannot spawn is refused rather than written onto the row.
+///
+/// The enum this replaced could not name a third adapter at all: an operator
+/// who added one to `[acp.adapters]` had a working daemon and an unusable
+/// picker. A string with a registry check keeps the refusal and drops the
+/// ceiling.
+#[tokio::test]
+async fn an_adapter_the_registry_does_not_know_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let listed = client.call(methods::FLEET_ADAPTER_LIST, json!({})).await;
+    assert!(listed["error"].is_null(), "{listed}");
+    let names: Vec<&str> = listed["result"]["adapters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|adapter| adapter["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"claude-agent-acp"), "{listed}");
+    assert!(names.contains(&"codex-acp"), "{listed}");
+    // The permission mode is REPORTED so an operator can see what is pinned; it
+    // is still not settable over this wire.
+    assert!(
+        listed["result"]["adapters"][0]["permission_mode"].is_string(),
+        "{listed}"
+    );
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({ "kind": "copilot", "name": "#copilot" }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "claude-agent-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+
+    let refused = client
+        .call(
+            methods::FLEET_COPILOT_CONFIGURE,
+            json!({ "provider": "definitely-not-an-adapter" }),
+        )
+        .await;
+    assert_eq!(refused["error"]["code"], -32602, "{refused}");
+    assert!(
+        refused["error"]["message"].as_str().unwrap().contains("unknown adapter"),
+        "{refused}"
+    );
+}
+
+/// A provider swap RETIRES the running session and mints a new one on the SAME
+/// channel.
+///
+/// This is what the enum could not do. Before it, a swap was refused with "a
+/// provider change needs a new session on a new channel", which meant the
+/// engine picker's only working move was to abandon the conversation: the
+/// channel scope is what every message, confirm card and activity row is keyed
+/// on, so a new channel is a new history.
+#[tokio::test]
+async fn swapping_the_engine_retires_the_old_session_on_the_same_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({ "kind": "copilot", "name": "#copilot" }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    let first = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "claude-agent-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    let old_key = first["result"]["session_key"].as_str().unwrap().to_string();
+
+    let swapped = client
+        .call(
+            methods::FLEET_COPILOT_CONFIGURE,
+            json!({ "provider": "codex-acp", "model": "gpt-5" }),
+        )
+        .await;
+    assert!(swapped["error"].is_null(), "{swapped}");
+    assert_eq!(swapped["result"]["session_replaced"], true, "{swapped}");
+    assert_eq!(swapped["result"]["provider"], "codex-acp", "{swapped}");
+    let new_key = swapped["result"]["session_key"].as_str().unwrap().to_string();
+    assert_ne!(new_key, old_key, "a swap must mint a new session");
+
+    // The CHANNEL is untouched: same scope, so the conversation, its confirm
+    // cards and its activity feed all survive the engine change.
+    let live: (String, String) = sqlx::query_as(
+        "SELECT session_key, provider FROM fleet_acp_session \
+         WHERE scope_key = ? AND state IN ('ACTIVE','IDLE')",
+    )
+    .bind(&scope)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(live.0, new_key);
+    assert_eq!(live.1, "codex-acp");
+
+    // The old row is DEAD, not merely relabelled: a row whose stored provider
+    // and running adapter disagree is the thing this swap exists to avoid.
+    let retired: String =
+        sqlx::query_scalar("SELECT state FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&old_key)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(retired, "DEAD", "the retired session is still live");
+
+    // Configuring the SAME provider again is not a swap.
+    let same = client
+        .call(
+            methods::FLEET_COPILOT_CONFIGURE,
+            json!({ "provider": "codex-acp", "model": "gpt-5-codex" }),
+        )
+        .await;
+    assert_eq!(same["result"]["session_replaced"], false, "{same}");
+    assert_eq!(same["result"]["session_key"], new_key, "{same}");
+}
+
+/// The guardrail dial is per-channel, persists, and is spelled `copilot_mode`
+/// so it cannot be confused with the adapter `permission_mode` this method
+/// still refuses.
+#[tokio::test]
+async fn the_guardrail_dial_persists_and_is_not_the_permission_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({ "kind": "copilot", "name": "#copilot" }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "claude-agent-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+
+    // A new channel starts guarded.
+    let stored: String =
+        sqlx::query_scalar("SELECT copilot_mode FROM fleet_channel WHERE scope_key = ?")
+            .bind(&scope)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, "guarded");
+
+    let armed = client
+        .call(
+            methods::FLEET_COPILOT_CONFIGURE,
+            json!({ "provider": "claude-agent-acp", "copilot_mode": "yolo" }),
+        )
+        .await;
+    assert!(armed["error"].is_null(), "{armed}");
+    assert_eq!(armed["result"]["copilot_mode"], "yolo", "{armed}");
+    let stored: String =
+        sqlx::query_scalar("SELECT copilot_mode FROM fleet_channel WHERE scope_key = ?")
+            .bind(&scope)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(stored, "yolo", "the dial must be durable, not per-turn");
+
+    // The ADAPTER's mode is untouched by the dial. These are two different
+    // settings and the whole design rests on them staying that way.
+    let pinned: String =
+        sqlx::query_scalar("SELECT permission_mode FROM fleet_acp_session WHERE scope_key = ?")
+            .bind(&scope)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_ne!(pinned, "yolo");
+    assert_ne!(pinned, "bypassPermissions");
+
+    // An omitted dial leaves it alone rather than resetting it.
+    let untouched = client
+        .call(
+            methods::FLEET_COPILOT_CONFIGURE,
+            json!({ "provider": "claude-agent-acp", "model": "sonnet-5" }),
+        )
+        .await;
+    assert_eq!(untouched["result"]["copilot_mode"], "yolo", "{untouched}");
 }
 
 /// A confirm-class tool call PARKS, announces itself, and resumes on the
@@ -938,4 +1141,183 @@ async fn a_copilot_write_persists_the_copilot_as_its_author() {
         sender, "copilot",
         "a copilot write must not wear the operator's name"
     );
+}
+
+/// A create that names no provider means "THE session on this scope", and must
+/// answer with the adapter the scope already runs.
+///
+/// The chat page opens the copilot with a get-or-create. Naming a guessed
+/// adapter there did not merely revert an engine the operator had swapped: a
+/// live scope held by a different adapter makes `ensure` refuse with
+/// `ScopeHeld`, so opening the chat page after a swap failed outright.
+#[tokio::test]
+async fn a_create_with_no_provider_keeps_the_scopes_own_adapter() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({ "kind": "copilot", "name": "#copilot" }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    // The scope runs something OTHER than the adapter the chat page used to
+    // guess, which is the whole point.
+    let session = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "codex-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    assert!(session["error"].is_null(), "{session}");
+    let session_key = session["result"]["session_key"].as_str().unwrap().to_string();
+
+    let reopened = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    assert!(reopened["error"].is_null(), "{reopened}");
+    assert_eq!(
+        reopened["result"]["session_key"], session_key,
+        "an unnamed provider must attach to the standing session"
+    );
+    let provider: String =
+        sqlx::query_scalar("SELECT provider FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        provider, "codex-acp",
+        "and keep the adapter the operator chose"
+    );
+
+    // What the guess did instead, kept as the reason the parameter is optional.
+    let guessed = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "claude-agent-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    assert!(
+        guessed["error"]["message"].as_str().unwrap_or_default().contains("codex-acp"),
+        "naming the wrong adapter is still refused, and says which one holds it: {guessed}"
+    );
+}
+
+/// A swap whose replacement cannot be minted must leave the channel where it
+/// started, not with no live session at all.
+///
+/// The retire has to come first, because a live session holds the scope the
+/// replacement needs. That makes the engine picker — whose entire job is
+/// swapping adapters — the thing that could end the conversation.
+#[tokio::test]
+async fn a_swap_that_cannot_mint_its_replacement_leaves_the_session_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::authed(dir.path(), &socket).await;
+
+    let created = client
+        .call(
+            methods::FLEET_CHANNEL_CREATE,
+            json!({ "kind": "copilot", "name": "#copilot" }),
+        )
+        .await;
+    let scope = created["result"]["channel"]["scope_key"].as_str().unwrap().to_string();
+    let session = client
+        .call(
+            methods::FLEET_ACP_SESSION_CREATE,
+            json!({ "provider": "claude-agent-acp", "cwd": "/work", "scope_key": scope }),
+        )
+        .await;
+    let session_key = session["result"]["session_key"].as_str().unwrap().to_string();
+
+    // The mint failure, injected where the swap reads it: `ensure` refuses a
+    // blank cwd, and the replacement is minted from the retiring session's own.
+    // ACTIVE with a turn open, which is the state the restore must NOT put
+    // back: the adapter is torn down before the mint is attempted, so a
+    // restored ACTIVE would claim a turn on a process that no longer exists.
+    sqlx::query(
+        "UPDATE fleet_acp_session \
+         SET cwd = '', state = 'ACTIVE', open_turn_id = 'turn-1' \
+         WHERE session_key = ?",
+    )
+    .bind(&session_key)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // The swap ALSO loosens the guardrail, which is the direction that must not
+    // survive a failure.
+    let swapped = client
+        .call(
+            methods::FLEET_COPILOT_CONFIGURE,
+            json!({ "provider": "codex-acp", "copilot_mode": "yolo" }),
+        )
+        .await;
+    assert!(
+        !swapped["error"].is_null(),
+        "the swap could not complete and must say so: {swapped}"
+    );
+
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert!(
+        matches!(state.as_str(), "ACTIVE" | "IDLE"),
+        "a failed swap must leave the session live, not DEAD: {state}"
+    );
+    assert_eq!(
+        state, "IDLE",
+        "and IDLE rather than ACTIVE: nothing can be in flight on an adapter \
+         that has been torn down"
+    );
+
+    // THE guardrail assertion. The client only adopts a mode from an `Applied`
+    // outcome, so a `yolo` that survived this failure would be armed underneath
+    // a header still reading `guarded` — and `spawn_session`, `interrupt` and
+    // `archive` would then fire with no confirm card in front of an operator
+    // who believes they take one.
+    let mode: String =
+        sqlx::query_scalar("SELECT copilot_mode FROM fleet_channel WHERE scope_key = ?")
+            .bind(&scope)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        mode, "guarded",
+        "a configure that failed must leave the guardrail where the operator \
+         can still see it"
+    );
+
+    // Nothing is left claiming a turn on the adapter that was torn down.
+    let open_turn: Option<String> =
+        sqlx::query_scalar("SELECT open_turn_id FROM fleet_acp_session WHERE session_key = ?")
+            .bind(&session_key)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        open_turn, None,
+        "the restored session must not keep an open turn: teardown only signals, \
+         and does nothing at all when the session had no live handle"
+    );
+
+    // Which is the same thing the channel asks: is there anyone to talk to.
+    let live: Option<String> = sqlx::query_scalar(
+        "SELECT session_key FROM fleet_acp_session \
+         WHERE scope_key = ? AND state IN ('ACTIVE','IDLE')",
+    )
+    .bind(&scope)
+    .fetch_optional(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(live.as_deref(), Some(session_key.as_str()));
 }

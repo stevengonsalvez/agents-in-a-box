@@ -50,18 +50,12 @@ pub mod ids {
     pub const SESSION_RECOVERY: &str = "session_recovery";
     pub const SKILLS: &str = "skills";
     pub const SKILL_MANAGER: &str = "skill_manager";
-    pub const INBOX: &str = "inbox";
     /// Hangar managed-agents control plane — a plugin-owned screen rendered by
     /// the `hangar-tui` subprocess plugin (P4.10). Reached from home with `g`.
     pub const HANGAR: &str = "hangar";
     /// Daemons runtime-health and repair screen for phone bridge, notifyd,
     /// ATC, and fleet daemons. Reached from home with `d`.
     pub const DAEMONS: &str = "daemons";
-    /// Fleet control panel — the interactive "who-needs-you" looking-glass.
-    /// Reads the event-sourced `current_state` (ASK/ERR/WAIT/IDLE per session)
-    /// and lets the human answer interviews + broadcast. Reached from home with
-    /// `f`.
-    pub const FLEET_PANEL: &str = "fleet_panel";
 }
 
 /// Outcome of a screen-handled event.
@@ -133,7 +127,6 @@ mod tests {
             ids::SESSION_RECOVERY,
             ids::SKILLS,
             ids::SKILL_MANAGER,
-            ids::INBOX,
         ];
         let mut sorted = all.to_vec();
         sorted.sort();

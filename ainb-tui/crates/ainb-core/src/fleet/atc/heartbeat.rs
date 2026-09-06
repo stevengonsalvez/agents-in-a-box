@@ -18,9 +18,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::fleet::read::{NeedsContext, NeedsRow};
 
-/// Maximum auto-`continue` attempts per session before ATC must escalate
-/// instead of retrying. Bounds the daemon's previously-unbounded behaviour.
-pub const DEFAULT_ERR_RETRY_CAP: u32 = 3;
+// The cap now lives in `ainb-hangar-core` and is re-exported here, unchanged,
+// at its original path. The daemon's LLM-free retry sweep enforces the SAME cap
+// without an ATC instance, and this crate sits above the daemon in the
+// dependency graph, so the one number both read has to be declared below both.
+pub use ainb_hangar_core::atc::DEFAULT_ERR_RETRY_CAP;
 
 /// The heartbeat process's own durable bookkeeping, persisted to
 /// `heartbeat-state.json` — a file written ONLY by the heartbeat process, never
@@ -145,82 +147,6 @@ fn kind_glyph(ctx: &NeedsContext) -> &'static str {
         NeedsContext::Idle(_) => "IDLE",
         NeedsContext::Wait(_) => "WAIT",
     }
-}
-
-/// Build the `[HEARTBEAT]` nudge text from the current `fleet needs` rows.
-///
-/// The body is deterministic and compact: a header with per-kind counts, then
-/// one line per blocked session (kind + name + a short context excerpt). When
-/// nothing needs attention it returns a single quiet line so ATC can no-op
-/// cheaply. The trailing instruction reminds ATC to apply its CLAUDE.md policy
-/// (auto-clear safe, escalate uncertain).
-#[must_use]
-pub fn build_heartbeat(rows: &[NeedsRow], now_ms: i64) -> String {
-    build_heartbeat_with_ledger(rows, now_ms, None)
-}
-
-/// Build the `[HEARTBEAT]` nudge, optionally consulting a [`RetryLedger`] so any
-/// ERR row whose session has already exhausted its auto-`continue` budget is
-/// machine-flagged `ESCALATE (retry cap)` rather than left to the model's
-/// judgement. This is how the daemon's previously-unbounded auto-continue gains
-/// a hard cap.
-#[must_use]
-pub fn build_heartbeat_with_ledger(
-    rows: &[NeedsRow],
-    now_ms: i64,
-    ledger: Option<&RetryLedger>,
-) -> String {
-    if rows.is_empty() {
-        return format!(
-            "[HEARTBEAT {}] fleet quiet — 0 sessions need attention. \
-No action required; update state.json last-check and stand by.",
-            stamp(now_ms)
-        );
-    }
-
-    let (mut ask, mut err, mut idle, mut wait) = (0u32, 0u32, 0u32, 0u32);
-    for r in rows {
-        match r.context {
-            NeedsContext::Ask(_) => ask += 1,
-            NeedsContext::Err(_) => err += 1,
-            NeedsContext::Idle(_) => idle += 1,
-            NeedsContext::Wait(_) => wait += 1,
-        }
-    }
-
-    let mut out = format!(
-        "[HEARTBEAT {}] {} session(s) need attention — \
-ERR {err} · ASK {ask} · IDLE {idle} · WAIT {wait}\n",
-        stamp(now_ms),
-        rows.len()
-    );
-
-    for r in rows {
-        let name = row_label(r);
-        let kind = kind_glyph(&r.context);
-        let excerpt = match &r.context {
-            NeedsContext::Ask(aq) => excerpt(&aq.question, 120),
-            NeedsContext::Err(e) => format!("{}: {}", e.pattern, excerpt(&e.snippet, 80)),
-            NeedsContext::Idle(i) => format!("idle {}m", i.idle_minutes),
-            NeedsContext::Wait(w) => format!("{} {}", w.marker, excerpt(&w.text, 80)),
-        };
-        // On ERR, if the ledger says this session is out of retries, mark it for
-        // escalation so the model does not auto-continue past the cap.
-        let suffix = match (&r.context, ledger) {
-            (NeedsContext::Err(_), Some(l)) if l.is_exhausted(&r.session.id) => {
-                " — ⚠ ESCALATE (retry cap reached; do not auto-continue)"
-            }
-            _ => "",
-        };
-        out.push_str(&format!("- [{kind}] {name} — {excerpt}{suffix}\n"));
-    }
-
-    out.push_str(
-        "Apply ATC policy: auto-clear the safe cases (confident ASK → broadcast; \
-ERR → continue within retry cap), escalate the uncertain ones to the phone bridge. \
-Then persist state.json + task-log.md.",
-    );
-    out
 }
 
 /// Build the `[HEARTBEAT]` nudge with a **code-enforced** ERR retry cap.
@@ -355,56 +281,6 @@ fn excerpt(s: &str, max: usize) -> String {
     }
 }
 
-/// Per-session auto-continue retry accounting — the cap the standalone daemon
-/// lacks. ATC records a `continue` send here; once a session reaches the cap it
-/// must escalate instead of retrying.
-#[derive(Debug, Default)]
-pub struct RetryLedger {
-    cap: u32,
-    counts: HashMap<String, u32>,
-}
-
-impl RetryLedger {
-    /// New ledger with the given per-session cap (`0` is clamped to 1).
-    #[must_use]
-    pub fn new(cap: u32) -> Self {
-        Self {
-            cap: cap.max(1),
-            counts: HashMap::new(),
-        }
-    }
-
-    /// New ledger with the default cap.
-    #[must_use]
-    pub fn with_default_cap() -> Self {
-        Self::new(DEFAULT_ERR_RETRY_CAP)
-    }
-
-    /// Whether another auto-`continue` is permitted for `session_id`.
-    #[must_use]
-    pub fn may_retry(&self, session_id: &str) -> bool {
-        self.counts.get(session_id).copied().unwrap_or(0) < self.cap
-    }
-
-    /// Record a `continue` send; returns the new attempt count.
-    pub fn record(&mut self, session_id: &str) -> u32 {
-        let n = self.counts.entry(session_id.to_string()).or_insert(0);
-        *n += 1;
-        *n
-    }
-
-    /// Whether `session_id` has exhausted its retries and must be escalated.
-    #[must_use]
-    pub fn is_exhausted(&self, session_id: &str) -> bool {
-        self.counts.get(session_id).copied().unwrap_or(0) >= self.cap
-    }
-
-    /// Clear a session's counter — call when the session recovers (no longer ERR).
-    pub fn clear(&mut self, session_id: &str) {
-        self.counts.remove(session_id);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,19 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_rows_produce_quiet_heartbeat() {
-        let msg = build_heartbeat(&[], 1000);
-        // The tag renders wall-clock, not the raw epoch. Asserted structurally:
-        // pinning a formatted string would fail CI in another timezone.
-        assert!(msg.contains("[HEARTBEAT "), "{msg}");
-        assert!(!msg.contains("[HEARTBEAT 1000]"), "raw epoch leaked: {msg}");
-        assert!(msg.contains("fleet quiet"));
-        assert!(msg.contains("0 sessions"));
-        // Quiet body must not nag ATC into spending tokens.
-        assert!(!msg.contains("Apply ATC policy"));
-    }
-
-    #[test]
     fn stamp_renders_wall_clock_and_never_the_raw_epoch() {
         let out = stamp(1_786_106_681_993);
         assert_ne!(out, "1786106681993", "must not echo the epoch");
@@ -491,43 +354,6 @@ mod tests {
     #[test]
     fn stamp_falls_back_to_the_epoch_when_it_cannot_render() {
         assert_eq!(stamp(i64::MAX), i64::MAX.to_string());
-    }
-
-    #[test]
-    fn heartbeat_summarizes_counts_and_lists_rows() {
-        let rows = vec![
-            err_row("s1", "tmux_a", "overloaded"),
-            idle_row("s2", "tmux_b", 12),
-        ];
-        let msg = build_heartbeat(&rows, 42);
-        assert!(msg.contains("[HEARTBEAT "), "{msg}");
-        assert!(!msg.contains("[HEARTBEAT 42]"), "raw epoch leaked: {msg}");
-        assert!(msg.contains("2 session(s) need attention"));
-        assert!(msg.contains("ERR 1"));
-        assert!(msg.contains("IDLE 1"));
-        assert!(msg.contains("[ERR] tmux_a — overloaded"));
-        assert!(msg.contains("[IDLE] tmux_b — idle 12m"));
-        assert!(msg.contains("Apply ATC policy"));
-    }
-
-    #[test]
-    fn ledger_flags_exhausted_err_for_escalation() {
-        let rows = vec![err_row("s1", "tmux_a", "overloaded")];
-        let mut ledger = RetryLedger::new(1);
-        ledger.record("s1"); // s1 now at cap
-        let msg = build_heartbeat_with_ledger(&rows, 7, Some(&ledger));
-        assert!(
-            msg.contains("ESCALATE (retry cap reached"),
-            "exhausted ERR not flagged: {msg}"
-        );
-    }
-
-    #[test]
-    fn ledger_under_cap_does_not_flag() {
-        let rows = vec![err_row("s1", "tmux_a", "overloaded")];
-        let ledger = RetryLedger::new(3); // no records → under cap
-        let msg = build_heartbeat_with_ledger(&rows, 7, Some(&ledger));
-        assert!(!msg.contains("retry cap reached"));
     }
 
     #[test]
@@ -553,38 +379,6 @@ mod tests {
     #[test]
     fn idle_pause_conservative_on_unknown_activity() {
         assert!(!should_pause_for_idle(0, None, 60, 999_999_999));
-    }
-
-    #[test]
-    fn retry_ledger_caps_then_exhausts() {
-        let mut ledger = RetryLedger::new(2);
-        assert!(ledger.may_retry("s1"));
-        assert_eq!(ledger.record("s1"), 1);
-        assert!(ledger.may_retry("s1"));
-        assert_eq!(ledger.record("s1"), 2);
-        assert!(!ledger.may_retry("s1"), "cap reached");
-        assert!(ledger.is_exhausted("s1"));
-        // A different session is independent.
-        assert!(ledger.may_retry("s2"));
-    }
-
-    #[test]
-    fn retry_ledger_clear_resets_after_recovery() {
-        let mut ledger = RetryLedger::new(1);
-        ledger.record("s1");
-        assert!(ledger.is_exhausted("s1"));
-        ledger.clear("s1");
-        assert!(ledger.may_retry("s1"));
-        assert!(!ledger.is_exhausted("s1"));
-    }
-
-    #[test]
-    fn retry_ledger_cap_zero_clamped_to_one() {
-        let ledger = RetryLedger::new(0);
-        assert!(ledger.may_retry("s1"));
-        let mut ledger = ledger;
-        ledger.record("s1");
-        assert!(!ledger.may_retry("s1"));
     }
 
     fn ask_row(id: &str, tmux: &str, question: &str) -> NeedsRow {
@@ -658,7 +452,7 @@ mod tests {
         // counter must be cleared so a fresh error gets a fresh budget.
         let err = vec![err_row("s1", "tmux_a", "overloaded")];
         let mut state = HeartbeatState::default();
-        build_heartbeat_enforcing_cap(&err, 1, 1, &mut state);
+        let _ = build_heartbeat_enforcing_cap(&err, 1, 1, &mut state);
         assert!(state.continue_counts.contains_key("s1"));
 
         // Quiet fleet → counter cleared.

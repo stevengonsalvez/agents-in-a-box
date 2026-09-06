@@ -477,21 +477,36 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb-plugin-notifyd --test end_to_end --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
-      - name: Tripwire — Inbox screen open + render
+      # The Inbox and Fleet-panel tripwires stood here. Both screens are gone
+      # and their claims moved rather than lapsed: a session's notification
+      # history is the sessions screen's `log` tab, asserted by
+      # `tripwire_sessions_tab_strip`, and the ACP provider label belongs to
+      # the hangar plugin's own `F` tab, whose reducer test is exhaustive over
+      # `FleetProvider` so a new variant is a compile error rather than a
+      # silent UNKNOWN.
+      - name: Tripwire — the sessions tab strip, ask pane and log tab
         if: >-
           !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
-        run: cargo test -p ainb --test tripwire_inbox_opens_and_renders --no-fail-fast
+        run: cargo test -p ainb --test tripwire_sessions_tab_strip --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
-      - name: Tripwire — Fleet panel renders an ACP session
-        # The TUI is the operating surface. The chat bus shipped a daemon and a
-        # CLI, and the panel maps the ACP wire token in ONE place, falling back
-        # to `unknown` in silence. Without this, that line has no coverage on
-        # the screen an operator actually looks at.
+      - name: Tripwire — the copilot engine picker and guardrail dial
         if: >-
           !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
-        run: cargo test -p ainb --test tripwire_fleet_panel_shows_acp_session --no-fail-fast
+        run: cargo test -p ainb --test tripwire_sessions_copilot_engine_swap --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
+      # Named here for the same reason as the two above: the `Test` job filters
+      # `not binary(/^tripwire_/)`, so a tripwire nobody names is a tripwire
+      # nobody runs. Three CI-ungated ones were already red before this branch
+      # noticed, which is the failure mode this line exists to avoid.
+      - name: Tripwire — an answer's outcome stays on its own question
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: >-
+          cargo test -p ainb --test tripwire_sessions_answer_outcome_per_question
+          --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
       - name: Sandbox script safety guards (rm -rf belts)
         if: >-

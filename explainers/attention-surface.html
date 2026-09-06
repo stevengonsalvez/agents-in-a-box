@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>The attention surface — five surfaces became one</title>
+<style>
+  :root {
+    --ivory: #FAF9F5;
+    --slate: #141413;
+    --clay: #D97757;
+    --oat: #E3DACC;
+    --olive: #788C5D;
+    --rust: #B04A3F;
+    --gray-150: #F0EEE6;
+    --gray-300: #D1CFC5;
+    --gray-500: #87867F;
+    --gray-700: #3D3D3A;
+    --serif: ui-serif, Georgia, 'Times New Roman', serif;
+    --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    --mono: ui-monospace, 'SF Mono', Menlo, Monaco, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--ivory);
+    color: var(--gray-700);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.65;
+    padding: 48px 24px 80px;
+  }
+
+  .page {
+    max-width: 1080px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 40px;
+  }
+
+  @media (max-width: 960px) {
+    .page { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- Header ---------- */
+  header {
+    grid-column: 1 / -1;
+    margin-bottom: 8px;
+  }
+
+  .repo-line {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--gray-500);
+    margin-bottom: 10px;
+  }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 32px;
+    line-height: 1.25;
+    color: var(--slate);
+    margin-bottom: 16px;
+  }
+
+  .summary {
+    max-width: 760px;
+    font-size: 15.5px;
+  }
+  .summary code { font-family: var(--mono); font-size: 13px; }
+
+  h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 22px;
+    color: var(--slate);
+    margin: 36px 0 16px;
+  }
+
+  /* ---------- Diagram ---------- */
+  .diagram-panel {
+    border: 1.5px solid var(--gray-300);
+    border-radius: 12px;
+    background: #fff;
+    padding: 20px;
+    overflow-x: auto;
+  }
+
+  svg.flow { display: block; max-width: 100%; }
+  .flow text {
+    font-family: var(--mono);
+    font-size: 12px;
+    fill: var(--slate);
+  }
+  .flow .sub { font-size: 10px; fill: var(--gray-500); }
+  .flow .box { fill: #fff; stroke: var(--gray-300); stroke-width: 1.5; }
+  .flow .box.hot { fill: rgba(217,119,87,0.10); stroke: var(--clay); }
+  .flow .arrow { stroke: var(--gray-500); stroke-width: 1.5; fill: none; }
+
+  /* ---------- Walkthrough ---------- */
+  .step {
+    display: grid;
+    grid-template-columns: 44px 1fr;
+    gap: 18px;
+    padding: 20px 0;
+    border-bottom: 1.5px solid var(--gray-150);
+  }
+  .step:last-of-type { border-bottom: none; }
+
+  .badge {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    background: var(--oat);
+    border: 1.5px solid var(--gray-300);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-weight: 600;
+    color: var(--slate);
+    font-size: 14px;
+  }
+  .step.hot .badge {
+    background: rgba(217,119,87,0.14);
+    border-color: var(--clay);
+    color: var(--clay);
+  }
+
+  .step-loc {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--slate);
+    margin-bottom: 6px;
+  }
+  .step-loc .range { color: var(--gray-500); }
+
+  .step-body p { margin-bottom: 10px; }
+
+  details.snippet { margin-top: 6px; }
+  details.snippet summary {
+    list-style: none;
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--gray-500);
+    font-family: var(--mono);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    user-select: none;
+  }
+  details.snippet summary::-webkit-details-marker { display: none; }
+  details.snippet summary::before {
+    content: "▸";
+    font-size: 10px;
+    transition: transform 0.15s ease;
+  }
+  details.snippet[open] summary::before { transform: rotate(90deg); }
+
+  pre.code {
+    background: var(--slate);
+    color: #E8E6DC;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.7;
+    border-radius: 8px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin-top: 10px;
+  }
+  pre.code .dim { color: var(--gray-500); }
+  pre.code .kw  { color: #C9B98A; }
+  pre.code .str { color: #A8BC8C; }
+
+  /* ---------- Sidebar ---------- */
+  aside {
+    position: sticky;
+    top: 24px;
+    align-self: start;
+  }
+
+  .panel {
+    border: 1.5px solid var(--gray-300);
+    border-radius: 12px;
+    background: #fff;
+    padding: 18px 20px;
+    margin-bottom: 20px;
+  }
+
+  .panel h3 {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--gray-500);
+    margin-bottom: 12px;
+  }
+
+  .key-files { list-style: none; padding: 0; }
+  .key-files li { margin-bottom: 12px; }
+  .key-files li:last-child { margin-bottom: 0; }
+  .key-files .path {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--slate);
+    display: block;
+    margin-bottom: 2px;
+    word-break: break-all;
+  }
+  .key-files .desc {
+    font-size: 12.5px;
+    color: var(--gray-500);
+    line-height: 1.45;
+  }
+
+  .gotchas {
+    border: 1.5px solid var(--clay);
+    border-radius: 12px;
+    background: rgba(217,119,87,0.06);
+    padding: 18px 20px;
+  }
+  .gotchas h3 {
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--clay);
+    margin-bottom: 10px;
+  }
+  .gotchas ul { list-style: none; padding: 0; }
+  .gotchas li {
+    position: relative;
+    padding-left: 16px;
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+  .gotchas li::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 8px;
+    width: 5px; height: 5px;
+    background: var(--clay);
+    border-radius: 2px;
+  }
+  .gotchas code { font-family: var(--mono); font-size: 11.5px; }
+
+  .diagram-panel img {
+    display: block;
+    width: 100%;
+    height: auto;
+    margin: 14px 0 10px;
+    border-radius: 8px;
+    border: 1px solid rgba(20,20,19,0.12);
+    background: #141413;
+  }
+  .diagram-panel .step-loc {
+    font-family: var(--mono);
+    font-size: 11px;
+    opacity: 0.62;
+    margin: 0;
+  }
+  .diagram-panel h3 { margin-bottom: 6px; }
+</style>
+<style data-claude-theme="injected">
+/* Claude brand polish layer for explain-to-me templates.
+ * Inject as a second <style> block AFTER the template's own <style>.
+ * Templates already use Claude's palette (ivory/slate/clay/oat/olive);
+ * this layer adds:
+ *   - Söhne-like sans stack (matches claude.ai)
+ *   - Tiempos Headline–like serif fallback for headings
+ *   - Subtle paper texture on body
+ *   - Brand badge (bottom-right)
+ *   - Clay focus ring
+ * Layout-safe: only touches typography, surface, and decoration.
+ */
+
+:root {
+  /* Re-affirm tokens in case template scoped them. */
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+
+  /* claude.ai font stacks. Web fonts (Söhne, Tiempos) are licensed; the
+   * stack falls back to high-quality system fonts that read as similar. */
+  --sans:  "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "Tiempos Headline", "Tiempos Text", "Source Serif Pro", "Iowan Old Style", "Charter", Georgia, serif;
+  --mono:  "Söhne Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background-image:
+    radial-gradient(rgba(20, 20, 19, 0.018) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.012em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+pre, code {
+  font-feature-settings: "ss01", "cv11", "calt";
+}
+pre {
+  background: var(--gray-150) !important;
+  border: 1px solid var(--gray-300);
+}
+
+body::after {
+  content: "claude · explainer";
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 999;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  background: rgba(250, 249, 245, 0.92);
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--clay);
+  padding: 6px 10px 6px 12px;
+  border-radius: 4px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+@media print {
+  body::after { display: none; }
+  body { background-image: none; }
+}
+
+@media (max-width: 640px) {
+  body::after { display: none; }
+}
+
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header>
+    <div class="repo-line">stevengonsalvez/agents-in-a-box · ainb-tui · PR #864</div>
+    <h1>Five surfaces asked &ldquo;does an agent need me?&rdquo;. Now one answers it.</h1>
+    <p class="summary">
+      ainb had five places that could tell you an agent was waiting: a Fleet control panel, a host Inbox, ATC lite, the notification store, and the session rows themselves. Each knew part of the truth and none reconciled with the others, so the honest answer to &ldquo;who needs me right now&rdquo; was &ldquo;check all five, then guess&rdquo;. This epic collapsed them into the <strong>sessions screen</strong>, where a waiting agent is a chip on its own row and the answer is typed in a tab beside the question. The load-bearing rule underneath it: an answer&rsquo;s outcome belongs to the <em>question</em> it answered, never to whatever the pane happens to be showing when it lands.
+    </p>
+  </header>
+
+  <main>
+    <h2 style="margin-top:0">What replaced what</h2>
+    <div class="diagram-panel">
+      <svg class="flow" viewBox="0 0 720 300" width="720" height="300" role="img" aria-label="Five surfaces collapsing into the sessions screen">
+        <defs>
+          <marker id="arrowHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#87867F"></path>
+          </marker>
+        </defs>
+
+        <g><rect class="box" x="20" y="20" width="150" height="44" rx="10"></rect>
+          <text x="95" y="40" text-anchor="middle">Fleet panel</text>
+          <text class="sub" x="95" y="55" text-anchor="middle">deleted</text></g>
+        <g><rect class="box" x="20" y="74" width="150" height="44" rx="10"></rect>
+          <text x="95" y="94" text-anchor="middle">host Inbox</text>
+          <text class="sub" x="95" y="109" text-anchor="middle">deleted</text></g>
+        <g><rect class="box" x="20" y="128" width="150" height="44" rx="10"></rect>
+          <text x="95" y="148" text-anchor="middle">ATC lite</text>
+          <text class="sub" x="95" y="163" text-anchor="middle">deleted</text></g>
+        <g><rect class="box" x="20" y="182" width="150" height="44" rx="10"></rect>
+          <text x="95" y="202" text-anchor="middle">notifyd store</text>
+          <text class="sub" x="95" y="217" text-anchor="middle">now a producer</text></g>
+        <g><rect class="box" x="20" y="236" width="150" height="44" rx="10"></rect>
+          <text x="95" y="256" text-anchor="middle">hangar daemon</text>
+          <text class="sub" x="95" y="271" text-anchor="middle">now a producer</text></g>
+
+        <line x1="176" y1="150" x2="270" y2="150" stroke="#87867F" stroke-width="1.5" marker-end="url(#arrowHead)"></line>
+
+        <g><rect class="box hot" x="278" y="104" width="180" height="92" rx="10"></rect>
+          <text x="368" y="140" text-anchor="middle">sessions screen</text>
+          <text class="sub" x="368" y="158" text-anchor="middle">one chip per waiting row</text>
+          <text class="sub" x="368" y="174" text-anchor="middle">&ldquo;N need you&rdquo; in the title</text></g>
+
+        <line x1="464" y1="150" x2="540" y2="150" stroke="#87867F" stroke-width="1.5" marker-end="url(#arrowHead)"></line>
+
+        <g><rect class="box" x="548" y="60" width="150" height="52" rx="10"></rect>
+          <text x="623" y="82" text-anchor="middle">ask tab</text>
+          <text class="sub" x="623" y="98" text-anchor="middle">answer, in place</text></g>
+        <g><rect class="box" x="548" y="124" width="150" height="52" rx="10"></rect>
+          <text x="623" y="146" text-anchor="middle">thread &middot; copilot</text>
+          <text class="sub" x="623" y="162" text-anchor="middle">rehomed verbs</text></g>
+        <g><rect class="box" x="548" y="188" width="150" height="52" rx="10"></rect>
+          <text x="623" y="210" text-anchor="middle">log tab</text>
+          <text class="sub" x="623" y="226" text-anchor="middle">this session only</text></g>
+      </svg>
+      <p class="summary" style="margin:14px 0 0">
+        Both producers survive; only the <em>surfaces</em> were removed. That matters because the daemon can be down: with no hangar daemon running at all, the local notifyd producer still raises the chip and the answer still travels the tmux send path. The recording that ships with this branch is taken with no daemon running.
+      </p>
+    </div>
+
+    <h2>How one answer travels</h2>
+
+    <div class="step">
+      <div class="badge">1</div>
+      <div class="step-body">
+        <div class="step-loc">crates/ainb-core/src/fleet/attention.rs<span class="range"> &mdash; route_answer</span></div>
+        <p>Every chip is routed against the session it landed on, <em>after</em> the producers are merged, because only the session row knows whether there is a pane to type into. Four outcomes in one place, so the chip&rsquo;s grey and the ask tab&rsquo;s refusal sentence can never disagree about why: not a question; a daemon row while the daemon is up; a local permission request, which goes to the approve broker and never to the pane; or the session&rsquo;s own tmux pane.</p>
+      </div>
+    </div>
+
+    <div class="step hot">
+      <div class="badge">2</div>
+      <div class="step-body">
+        <div class="step-loc">crates/ainb-core/src/fleet/answer.rs<span class="range"> &mdash; AskState</span></div>
+        <p>The outcome is keyed by <strong>request</strong>, not by the pane. The in-flight entry doubles as the double-send latch, so the view and the fact cannot disagree, and a failure carries the draft that was typed when it went out.</p>
+        <div class="snippet"><pre class="code"><span class="kw">pub struct</span> AskState {
+    request: Option&lt;String&gt;,
+    <span class="dim">// What each send did, keyed by the request it was answering.</span>
+    phases: Vec&lt;(String, AnswerPhase)&gt;,
+    <span class="dim">// Each entry names the request it belongs to.</span>
+    inbox: Arc&lt;Mutex&lt;Vec&lt;(String, AnswerPhase)&gt;&gt;&gt;,
+}</pre></div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="badge">3</div>
+      <div class="step-body">
+        <div class="step-loc">crates/ainb-core/src/fleet/control.rs<span class="range"> &mdash; resolve_and_send_typed</span></div>
+        <p>The send re-resolves the target pane from the session&rsquo;s identity and cwd rather than trusting a name captured when the chip was built, and <strong>refuses an ambiguous match</strong> instead of typing an answer into whichever pane the name happens to hit now. Two live sessions in one worktree is a refusal, not a coin flip.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="badge">4</div>
+      <div class="step-body">
+        <div class="step-loc">crates/ainb-core/src/components/session_tabs.rs<span class="range"> &mdash; the ask pane</span></div>
+        <p>All three states are visible &mdash; sending, delivered, and <code>&#10007; not answered: &lt;reason&gt;</code> &mdash; because an answer that vanished into a worker with no feedback is the failure this pane exists to remove. The chip strip asks per chip whether <em>its own</em> answer is still on the wire, so the marker stays on the session it belongs to after the operator navigates away.</p>
+      </div>
+    </div>
+
+    <h2>Every feature, driven through a real TUI</h2>
+    <p class="summary" style="margin-top:0">
+      Each recording below is a real <code>ainb tui</code> in a real tmux session, seeded into a throwaway <code>$HOME</code> and read back off the pane &mdash; not a mockup, and not a screenshot of a passing test. They drive the same fixtures the tripwires drive. Recordings of runs that went wrong were <strong>discarded rather than published</strong>: four takes of the answer flow, two of the broadcast, and four of the copilot, each listed below with what was wrong.
+    </p>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phases 1&ndash;2 &middot; a waiting agent is a chip on its own row</h3>
+      <p class="summary">The screen's own title answers &ldquo;who needs me&rdquo; before any row is read: <strong>Workspaces (2) &middot; 3 need you</strong>. Each waiting row carries its own chip and the age its producer stamped, and the rows group by worktree. <strong>No hangar daemon is running in this recording</strong> &mdash; the chips come from the local notifyd producer, which is the half that has to hold the surface up on its own.</p>
+      <img src="attention-chips.gif" alt="The ainb sessions screen listing two workspaces and three waiting rows, each with an ASK chip and an age">
+      <p class="step-loc">tripwire_sessions_attention_chips &middot; tripwire_sessions_daemon_attention</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phase 3 &middot; one tab strip where five screens used to be</h3>
+      <p class="summary">preview &middot; ask &middot; thread &middot; copilot &middot; log, every one of them scoped to the selected session. The <code>log</code> tab is where a session's notification history went when the host Inbox was deleted, which is why deleting the Inbox lost nothing.</p>
+      <img src="attention-tabs.gif" alt="Walking the session tab strip from preview through ask, thread, copilot and log">
+      <p class="step-loc">tripwire_sessions_tab_strip</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phase 4 &middot; answering, and being told the truth about it</h3>
+      <p class="summary">The answer is typed beside the question. Two live sessions share this worktree, so the send <strong>refuses as an ambiguous target</strong> rather than typing into whichever pane the name happens to hit &mdash; and says so, keeping the operator's text. It then walks to the other waiting question, whose pane reports nothing because nobody answered it, and walks back to find the failure still on the question that produced it. That last beat is the whole invariant: an outcome belongs to its question, not to the pane.</p>
+      <img src="attention-answer.gif" alt="Answering from the ask pane, the send refusing as an ambiguous target, then navigating to another question and back">
+      <p class="step-loc">tripwire_sessions_answer_outcome_per_question &middot; tripwire_sessions_answer_daemon_up &middot; tripwire_sessions_answer_daemon_down</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phase 8 &middot; broadcast, with the checkboxes as the recipient list</h3>
+      <p class="summary">The deleted Fleet panel carried its own recipient picker, which could disagree with the rows an operator had already selected. Here the checked rows <em>are</em> the recipients &mdash; the tab renames itself to <code>broadcast (2)</code> and names them &mdash; and the send reports one leg per recipient with its own outcome. A fan-out that says &ldquo;sent to 2&rdquo; when one was refused is the failure this replaced.</p>
+      <img src="attention-broadcast.gif" alt="Checking two session rows and broadcasting one message to both from the broadcast tab">
+      <p class="step-loc">tripwire_sessions_broadcast</p>
+    </div>
+
+    <div class="diagram-panel">
+      <h3 style="margin-top:0">Phases 5&ndash;6 &middot; what is no longer on the screen</h3>
+      <p class="summary">A deletion is only real when the key that opened it stops being advertised. The help overlay no longer lists <code>b Inbox</code> or <code>f Fleet control panel</code>; <code>f</code> now means &ldquo;refresh workspaces&rdquo; and nothing else. Both tripwires assert the <em>absence</em>, so re-adding either is a test failure rather than a slow drift back.</p>
+      <img src="attention-deletions.gif" alt="The sessions screen help overlay, with no Inbox or Fleet control panel entries">
+      <p class="step-loc">absence asserted by tripwire_sessions_tab_strip and the help-overlay tripwire</p>
+    </div>
+
+    <h2>Coverage, including what has no recording</h2>
+    <p class="summary" style="margin-top:0">
+      Three phases have no recording, and each reason is different: one has no TUI surface at all, one is a repair whose evidence is a daemon-side test, and one I could not drive reliably enough to publish honestly.
+    </p>
+    <div class="panel">
+      <ul class="key-files">
+        <li><span class="path">Phase 0 &middot; baseline</span><span class="desc">No feature &mdash; the log and the eight decisions recorded before any code moved.</span></li>
+        <li><span class="path">Phases 1&ndash;2 &middot; chips + merge</span><span class="desc">Recorded above. tripwire_sessions_attention_chips, tripwire_sessions_daemon_attention.</span></li>
+        <li><span class="path">Phase 3 &middot; tab strip</span><span class="desc">Recorded above. tripwire_sessions_tab_strip.</span></li>
+        <li><span class="path">Phase 4 &middot; answering</span><span class="desc">Recorded above. Four tripwires, including the daemon-down path and the approve broker (tripwire_sessions_approve_unblocks_hook).</span></li>
+        <li><span class="path">Phases 5&ndash;6 &middot; deletions</span><span class="desc">Recorded above, as absence.</span></li>
+        <li><span class="path">Phase 7 &middot; copilot registry + dial</span><span class="desc"><strong>No recording, after four attempts:</strong> the copilot pane needs a running daemon, and with one attached the pane stops accepting the tab-strip keys the recorder sends, so every take ended on <code>preview</code>. A gif captioned &ldquo;copilot&rdquo; showing the preview pane would be exactly the kind of lying surface this epic set out to remove, so there is none. tripwire_sessions_copilot_engine_swap drives it in CI, including the <code>&#8997;</code> dials.</span></li>
+        <li><span class="path">Phase 8 &middot; broadcast + rehoming</span><span class="desc">Recorded above. tripwire_sessions_broadcast.</span></li>
+        <li><span class="path">Phase 9 &middot; retry sweep</span><span class="desc"><strong>No recording, and none is possible:</strong> the sweep is an unattended daemon loop with no TUI surface. Its evidence is daemon-side tests, each proved by removing its own guard and watching the test go red.</span></li>
+        <li><span class="path">Phase 10 &middot; ACP chat repair</span><span class="desc"><strong>No recording:</strong> a repair to the chat page's cold open, whose visible result is the copilot recording above opening on a live daemon rather than an error. tripwire_fleet_chat_screen.</span></li>
+      </ul>
+    </div>
+
+    <section style="margin-top:34px">
+      <div class="panel">
+        <h3>Key files</h3>
+        <ul class="key-files">
+          <li><span class="path">crates/ainb-core/src/fleet/answer.rs</span><span class="desc">The ask pane&rsquo;s state. Outcomes keyed by request; the in-flight entry is the double-send latch.</span></li>
+          <li><span class="path">crates/ainb-core/src/fleet/attention.rs</span><span class="desc"><code>route_answer</code> &mdash; the one place that decides how an answer would be delivered.</span></li>
+          <li><span class="path">crates/ainb-core/src/components/session_tabs.rs</span><span class="desc">The tab strip that replaced five screens: preview &middot; ask &middot; thread &middot; copilot &middot; log.</span></li>
+          <li><span class="path">crates/ainb-hangar-daemon/src/retry_sweep.rs</span><span class="desc">The unattended auto-<code>continue</code> sweep, and the gate that decides an error is transient.</span></li>
+          <li><span class="path">crates/ainb-core/tests/tripwire_sessions_answer_outcome_per_question.rs</span><span class="desc">Drives the real TUI in tmux: answer fails, walk to another question, walk back.</span></li>
+        </ul>
+      </div>
+
+      <div class="gotchas">
+        <h3>Four defects adversarial review found after the phases landed</h3>
+        <ul>
+          <li><strong>The surface lied about which question failed.</strong> A single shared phase field was written by whichever send worker landed last, so answering A and moving to B painted A&rsquo;s failure under B&rsquo;s question, and returning to A showed nothing at all. Keying the outcome by request closed it (<code>ba0c863b</code>). A surface that reports the wrong question is worse than one that is silent about it.</li>
+          <li><strong>A failed swap left the guardrail loosened.</strong> The copilot dial was written before the engine swap and left there when the swap failed. The client only adopts a mode from an applied outcome, so a configure that loosened to <code>yolo</code> and then failed armed it underneath a header still reading <code>guarded</code> &mdash; destructive tools reaching auto with no confirm card. A failed configure now changes nothing, in either direction (<code>17ee6a6b</code>).</li>
+          <li><strong>The auto-continue gate could be armed by a branch name.</strong> The sweep scanned the whole stored event, and the event carries the session&rsquo;s own <code>cwd</code>. The patterns are word-boundary matches and both <code>-</code> and <code>/</code> are non-word characters, so a worktree called <code>econnreset-repro</code> matched on its path &mdash; which is exactly what someone debugging this class of failure calls a branch. It now reads one named field (<code>d5735835</code>).</li>
+          <li><strong>Every ACP task run was refused.</strong> Unifying the adapter registry pointed every mint at the chat list, which deliberately hides <code>#task:</code> keys so no chat caller can reach a task&rsquo;s sandboxed process &mdash; but the task executor mints against exactly such a key. Tasks died as <code>spawn_error</code> with no delivery legs, and the task&rsquo;s pinned permission mode was lost with it. One scope-aware lookup answers both (<code>8e779d3c</code>).</li>
+        </ul>
+      </div>
+
+      <div class="gotchas" style="margin-top:20px">
+        <h3>Known, and deliberately left open</h3>
+        <ul>
+          <li><strong>The cancel&rsquo;s version check is vacuous.</strong> The cancel re-reads the snapshot immediately before writing it, which removes the staleness property optimistic concurrency exists for. The page now retires a delivery leg past the turn deadline, so the exposure is one deadline rather than the life of the pane; closing it needs the version the leg was created at (<code>dd9a5139</code>).</li>
+          <li><strong>The sweep is Claude-hook-only.</strong> A wire session&rsquo;s error event type is the raw method, none of which is in the allowlist, so Codex and ACP sessions always land in <code>skipped_opaque</code>. That fails <em>closed</em>, which is the right direction for a gate that types at an unattended agent; widening what auto-<code>continue</code> reaches is a behaviour change that needs its own verification rather than a longer list.</li>
+        </ul>
+      </div>
+      <div class="gotchas" style="margin-top:20px">
+        <h3>Recordings that were made and thrown away</h3>
+        <ul>
+          <li><strong>Answer, take 1.</strong> The seeded onboarding version was a hardcoded <code>0.0.0</code>, so the TUI ran its setup wizard and the tape drove that instead of the sessions screen.</li>
+          <li><strong>Answer, take 2.</strong> Two Tabs from <code>preview</code> lands on <code>thread</code>, so the answer was typed into the thread composer rather than the ask pane.</li>
+          <li><strong>Answer, take 3.</strong> <code>Down</code> never moved the session: <code>thread</code> and <code>copilot</code> own composers that swallow the arrows. The walk now routes through <code>log</code>, which does not.</li>
+          <li><strong>Answer, take 4.</strong> The walk moved one row, which is the other session on the same worktree &mdash; the same question, so correctly the same outcome, but not the thing being shown.</li>
+          <li><strong>Broadcast, take 1.</strong> Run without a daemon, so the send refused for want of one. Correct behaviour, and the pane said so and kept the text &mdash; but it does not show the verb working, and broadcast is daemon-owned.</li>
+          <li><strong>Broadcast, take 2.</strong> The daemon's bring-up pushed the whole tape out of step, so keys landed before the screen was ready and fired as session shortcuts instead &mdash; one of them starred a workspace. The daemon-backed tapes now wait far longer before the first keystroke.</li>
+          <li><strong>Copilot, four takes.</strong> With a daemon attached the pane stopped taking the tab-strip keys, and every take ended on <code>preview</code> rather than the copilot tab. Longer settles, a re-based key prefix and a proven Tab sequence all failed the same way. Abandoned rather than published mislabelled.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+  // Keep at most one snippet open at a time so the walkthrough stays scannable.
+  var snippets = document.querySelectorAll('details.snippet');
+  snippets.forEach(function (d) {
+    d.addEventListener('toggle', function () {
+      if (!d.open) return;
+      snippets.forEach(function (other) {
+        if (other !== d) other.open = false;
+      });
+    });
+  });
+</script>
+</body>
+</html>

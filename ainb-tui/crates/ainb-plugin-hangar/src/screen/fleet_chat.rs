@@ -570,15 +570,106 @@ pub fn receipt_line(delivery: &FleetMessageDelivery) -> String {
     }
 }
 
+/// One step of the sequence that turns a cold pane into a live conversation.
+///
+/// The copilot channel is not read, it is BUILT: the scope has to be resolved
+/// or minted, an ACP session has to be created against it, and only then is
+/// there a timeline to page. Four calls, any of which can fail, and until this
+/// existed all four failed into one unlabelled "UNAVAILABLE" — which is how a
+/// fresh install reads as a pane that simply does not work.
+///
+/// Each variant carries the RPC it issues, so the pane names the call rather
+/// than describing it. `fleet/channel_create` is a thing an operator can grep
+/// the daemon log for; "could not set up the channel" is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatOpenStep {
+    /// Dialling the daemon socket, before any RPC.
+    Connecting,
+    /// `fleet/channel_list`, looking for an existing copilot channel.
+    ListingChannels,
+    /// `fleet/channel_create`, minting one because there was none.
+    ///
+    /// The step a fresh install spends time in, and the one the spec calls out
+    /// by name: the pane must show the create as work in progress rather than
+    /// as an empty composer.
+    CreatingChannel,
+    /// `fleet/acp_session_create`, minting the session that ANSWERS on the
+    /// scope. Until this lands the channel exists and has nobody in it.
+    CreatingSession,
+    /// `fleet/message_list`, paging the timeline itself.
+    LoadingMessages,
+}
+
+impl ChatOpenStep {
+    /// The RPC method this step issues, as the daemon logs it.
+    ///
+    /// Wildcard-free, like every other display mapping in this file: a new step
+    /// must name its call here rather than inherit the last arm written.
+    #[must_use]
+    pub const fn call(self) -> &'static str {
+        match self {
+            Self::Connecting => "hangar socket",
+            Self::ListingChannels => "fleet/channel_list",
+            Self::CreatingChannel => "fleet/channel_create",
+            Self::CreatingSession => "fleet/acp_session_create",
+            Self::LoadingMessages => "fleet/message_list",
+        }
+    }
+
+    /// What the step is doing, for an operator who does not read RPC names.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Connecting => "dialling the hangar daemon",
+            Self::ListingChannels => "looking for the copilot channel",
+            Self::CreatingChannel => "creating the copilot channel",
+            Self::CreatingSession => "starting the copilot session",
+            Self::LoadingMessages => "loading the conversation",
+        }
+    }
+}
+
+/// The key that re-runs the open sequence, as the pane advertises it.
+///
+/// A CONSTANT because the label and the binding live in two crates: the plugin
+/// paints it, `ainb-core`'s key router binds it, and a hint for a key nothing
+/// listens to is the exact class of lie this pane exists to remove.
+///
+/// Alt-modified for the reason the copilot header's dials are: the composer
+/// holds focus as soon as the conversation opens, so a bare letter is a letter
+/// in a half-typed message. `p` for "page", not `r`: the copilot header already
+/// owns Alt-r for the engine dial's own retry, and two retries on one pane that
+/// mean different things must not share a key.
+pub const CHAT_RETRY_HINT: &str = "\u{2325}p";
+
+/// The key that cancels the turns this pane is still waiting on.
+///
+/// Same contract as [`CHAT_RETRY_HINT`]: painted here, bound in `ainb-core`.
+pub const CHAT_CANCEL_HINT: &str = "\u{2325}c";
+
 /// What the surface is currently able to show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStatus {
-    /// The first load has not answered yet.
-    Loading,
+    /// The open sequence is still walking; the step says where it is.
+    ///
+    /// Not a bare "loading": the four calls behind a cold copilot pane take
+    /// visibly different amounts of time, and an operator watching a spinner
+    /// cannot tell a slow `channel_create` from a daemon that is not answering.
+    Opening(ChatOpenStep),
     /// The daemon answered; the timeline is live.
     Live,
-    /// The daemon could not answer; the detail is the operator's explanation.
-    Unavailable(String),
+    /// The daemon could not answer.
+    ///
+    /// The step is which call failed, and it is what the pane prints first.
+    /// `None` only where the caller genuinely has no call to name (the hangar
+    /// plugin's own refusal, which never issued one).
+    Unavailable {
+        /// The call that failed, when the failure came from the open sequence.
+        step: Option<ChatOpenStep>,
+        /// The daemon's own words. Never replaced by a friendlier summary: its
+        /// wording is the only actionable half.
+        detail: String,
+    },
 }
 
 /// Which half of the surface the keyboard is driving.
@@ -636,7 +727,22 @@ pub struct ChatSnapshot {
     pub session_detail: Option<String>,
     /// Copilot activity rows in ascending commit order.
     pub activity: Vec<FleetActivityRow>,
+    /// The ACP pool's ceiling on one turn, as `fleet/acp_session_create`
+    /// reported it.
+    ///
+    /// `None` on a topic that has no ACP session behind it (a tmux thread), and
+    /// on a daemon built before the field existed. Either way the pane says
+    /// nothing about a deadline rather than printing the 30-minute default as
+    /// though it had been told it.
+    pub turn_deadline_ms: Option<i64>,
 }
+
+/// The ceiling used when the daemon never told us its turn deadline.
+///
+/// The pool's own default is 30 minutes; this matches it rather than inventing
+/// a second number, so a leg with an unknown deadline retires on the same
+/// schedule as one with a known default.
+const UNKNOWN_TURN_DEADLINE_MS: i64 = 30 * 60 * 1_000;
 
 /// The Fleet chat surface's whole state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -671,6 +777,21 @@ pub struct ChatState {
     feedback: Option<String>,
     in_flight: bool,
     last_poll_ms: i64,
+    /// The ACP pool's turn ceiling, once a session mint has reported one.
+    turn_deadline_ms: Option<i64>,
+    /// The clock the tick last handed this surface.
+    ///
+    /// Carried on the state rather than passed to [`render_chat`] because the
+    /// renderer is called from two crates and neither of them has a reason to
+    /// know the time; the tick already does, on the same frame.
+    now_ms: i64,
+    /// When the current legs were recorded, for the elapsed a PENDING leg
+    /// prints.
+    ///
+    /// `None` until a send lands legs on a surface that has actually been
+    /// ticked. A surface whose clock is still zero has no anchor to measure
+    /// from, and `now - 0` renders as a wait of fifty-seven years.
+    receipts_at_ms: Option<i64>,
 }
 
 impl ChatState {
@@ -719,10 +840,13 @@ impl ChatState {
             edit: None,
             focus: ChatFocus::Composer,
             selected_id: None,
-            status: ChatStatus::Loading,
+            status: ChatStatus::Opening(ChatOpenStep::Connecting),
             feedback: None,
             in_flight: true,
             last_poll_ms: 0,
+            turn_deadline_ms: None,
+            now_ms: 0,
+            receipts_at_ms: None,
         }
     }
 
@@ -835,6 +959,13 @@ impl ChatState {
         self.confirms_detail = snapshot.confirms_detail;
         self.session_detail = snapshot.session_detail;
         self.activity = snapshot.activity;
+        // Kept when the page did not carry one, exactly like the scope and the
+        // recipient above: a page whose session mint was refused reports no
+        // deadline, and forgetting the one the last successful mint gave us
+        // would blank the only bound a waiting operator has.
+        if snapshot.turn_deadline_ms.is_some() {
+            self.turn_deadline_ms = snapshot.turn_deadline_ms;
+        }
         // Selection survives a refresh ONLY by identity, and a poll NEVER makes
         // one. A selected card that this page no longer lists (answered from the
         // CLI, from the macOS client, or expired by the daemon) leaves the
@@ -846,10 +977,29 @@ impl ChatState {
         // first approve always follows a deliberate keypress.
     }
 
-    /// Record that the host's fetch failed.
-    pub fn apply_failure(&mut self, detail: String) {
+    /// Record which step of the open sequence the host is on.
+    ///
+    /// Only ever overwrites another [`ChatStatus::Opening`], for two reasons: a
+    /// live pane polls every second and would otherwise strobe through four
+    /// step labels forever, and a pane showing a named failure must keep
+    /// showing it rather than flickering back to "connecting" on each retry.
+    /// The step is progress reporting for the FIRST load, which is the only
+    /// load that has nothing else to show.
+    pub fn apply_step(&mut self, step: ChatOpenStep) {
+        if matches!(self.status, ChatStatus::Opening(_)) {
+            self.status = ChatStatus::Opening(step);
+        }
+    }
+
+    /// Record that the host's fetch failed, and which call failed.
+    ///
+    /// `step` is `None` only where the caller issued no call to name. Naming it
+    /// is the whole point: "UNAVAILABLE · connection refused" is four different
+    /// bugs, and "fleet/acp_session_create failed: scope_key is already held by
+    /// a session whose cwd is X" is one an operator can act on.
+    pub fn apply_failure(&mut self, step: Option<ChatOpenStep>, detail: String) {
         self.in_flight = false;
-        self.status = ChatStatus::Unavailable(detail);
+        self.status = ChatStatus::Unavailable { step, detail };
     }
 
     /// Record that a send failed, keeping the operator's text.
@@ -860,6 +1010,7 @@ impl ChatState {
         // it. Leaving the previous receipts up would show four DELIVERED rows
         // under a message that never left the client.
         self.receipts.clear();
+        self.receipts_at_ms = None;
     }
 
     /// Fold one send's per-recipient legs in.
@@ -868,20 +1019,143 @@ impl ChatState {
     /// number an operator scans for. A partial failure is the normal case for a
     /// fan-out and it must never read as success.
     pub fn apply_receipts(&mut self, deliveries: Vec<FleetMessageDelivery>) {
+        // The send's request has come back, which is the end of it — the same
+        // thing `apply_send_failure` records for the other outcome. Only the
+        // failure path cleared this, so a SUCCESSFUL send left the surface
+        // marked busy until the next poll happened to clear it.
+        self.in_flight = false;
         let total = deliveries.len();
         let delivered = deliveries
             .iter()
             .filter(|leg| leg.state == ActionReceiptStatus::Delivered)
             .count();
+        let waiting = deliveries
+            .iter()
+            .filter(|leg| {
+                matches!(
+                    leg.state,
+                    ActionReceiptStatus::Pending | ActionReceiptStatus::Unknown
+                )
+            })
+            .count();
         self.receipts = deliveries;
-        self.feedback = Some(if delivered == total {
-            format!("delivered to {delivered}/{total}")
-        } else {
-            format!(
-                "delivered to {delivered}/{total} · {} not delivered",
-                total.saturating_sub(delivered)
-            )
-        });
+        // Anchored to the tick's clock, and only when there IS one: this is the
+        // zero of the "waiting 1m04s" a PENDING leg prints, and a surface that
+        // has never been ticked would date the wait to the epoch.
+        self.receipts_at_ms = (self.now_ms != 0).then_some(self.now_ms);
+        // Three separate numbers, because collapsing them lies in both
+        // directions. A leg still WAITING is not a leg that failed, and the old
+        // wording reported the copilot's one pending turn as "1 not delivered"
+        // one row under a header that correctly said it was still waiting.
+        let refused = total.saturating_sub(delivered).saturating_sub(waiting);
+        let mut line = format!("delivered to {delivered}/{total}");
+        if waiting > 0 {
+            line.push_str(&format!(" · {waiting} waiting"));
+        }
+        if refused > 0 {
+            line.push_str(&format!(" · {refused} not delivered"));
+        }
+        self.feedback = Some(line);
+    }
+
+    /// The ACP pool's turn ceiling, once a session mint has reported one.
+    #[must_use]
+    pub const fn turn_deadline_ms(&self) -> Option<i64> {
+        self.turn_deadline_ms
+    }
+
+    /// Every leg of the last send that has not resolved either way.
+    ///
+    /// PENDING and UNKNOWN, and nothing else. Both mean "the daemon cannot tell
+    /// you yet", which is precisely the state that today renders identically to
+    /// a send that never happened. FAILED and REJECTED are answers, however
+    /// unwelcome, and DELIVERED is an answer; none of them is still waiting.
+    pub fn unresolved_legs(&self) -> impl Iterator<Item = &FleetMessageDelivery> {
+        // A leg leaves PENDING daemon-side, at turn end, and NOTHING the page
+        // reads brings that back: `receipts` is written only by a send, and a
+        // snapshot carries no deliveries. So a leg that is never retired keeps
+        // advertising `⌥c` for the rest of the pane's life — and on the
+        // copilot, a singleton, that is the whole TUI session — aiming an
+        // interrupt at whatever the session happens to be running hours later.
+        //
+        // Past the pool's own ceiling on a turn, the turn this leg belonged to
+        // is over by construction, so the leg is retired rather than offered.
+        // This BOUNDS the window; it does not close it. Closing it needs the
+        // version the leg was created at, so a turn that has since moved on is
+        // refused as stale instead of interrupted (see
+        // `chat_cancel_turns_blocking`, which re-reads the version it is
+        // supposed to be checking against).
+        // `turn_deadline_ms` rides back on the MINT, so it is absent whenever
+        // the mint failed, the daemon predates the field, or the page has not
+        // opened successfully yet — which are precisely the states where a leg
+        // is most likely to be stale. Treating absence as "never expires" put
+        // the unbounded behaviour back exactly there, so an unknown deadline
+        // falls back to a fixed ceiling rather than to forever.
+        let deadline = self.turn_deadline_ms.unwrap_or(UNKNOWN_TURN_DEADLINE_MS);
+        let expired = self.receipts_elapsed_ms().is_some_and(|elapsed| elapsed > deadline);
+        self.receipts.iter().filter(move |leg| {
+            !expired
+                && matches!(
+                    leg.state,
+                    ActionReceiptStatus::Pending | ActionReceiptStatus::Unknown
+                )
+        })
+    }
+
+    /// How long the current legs have been on screen, when there is a clock to
+    /// measure against.
+    #[must_use]
+    pub fn receipts_elapsed_ms(&self) -> Option<i64> {
+        let anchor = self.receipts_at_ms?;
+        let elapsed = self.now_ms.saturating_sub(anchor);
+        (elapsed >= 0).then_some(elapsed)
+    }
+
+    /// Why a send from this surface cannot go, or `None` when it can.
+    ///
+    /// The ONE answer to that question, so the composer's prefix, the empty
+    /// timeline's hint and the refusal `Enter` prints can never disagree. They
+    /// did: `Enter` said "no copilot channel yet" while the pane above it drew
+    /// a perfectly ordinary composer, which is symptom 1 stated exactly.
+    ///
+    /// Ordered by what an operator can do about it. A missing scope is the open
+    /// sequence still running or having failed, and the STEP is the useful
+    /// half; a missing recipient is a channel that exists with nobody answering
+    /// on it, and there the daemon's own refusal is.
+    #[must_use]
+    pub fn send_block(&self) -> Option<String> {
+        if self.scope_key.is_none() {
+            return Some(match &self.status {
+                ChatStatus::Opening(step) => format!("{} ({})", step.describe(), step.call()),
+                ChatStatus::Unavailable {
+                    step: Some(step),
+                    detail,
+                } => format!("{} failed: {detail}", step.call()),
+                ChatStatus::Unavailable { step: None, detail } => detail.clone(),
+                // A page that came back LIVE with no scope means the daemon
+                // answered and simply has no channel. Rare, and it must not
+                // read as "still loading".
+                ChatStatus::Live => "the daemon reported no copilot channel".to_string(),
+            });
+        }
+        let refusal = self.topic.send_targets(self.target_session_key.as_deref()).err()?;
+        Some(
+            self.session_detail
+                .as_deref()
+                .map_or_else(|| refusal.clone(), |detail| format!("{refusal} · {detail}")),
+        )
+    }
+
+    /// Whether re-running the open sequence could clear the current block.
+    ///
+    /// It resolves or mints the scope and mints the session that answers on it,
+    /// so it can clear anything a cold open left missing. It cannot add members
+    /// to a broadcast channel: that list is fixed at `fleet/channel_create`, and
+    /// advertising the key on a memberless channel would be a dead end dressed
+    /// as a recovery, which is the thing this phase removes rather than adds.
+    #[must_use]
+    pub const fn retry_can_unblock(&self) -> bool {
+        !matches!(self.topic, ChatTopic::Channel { .. })
     }
 }
 
@@ -950,6 +1224,18 @@ pub enum ChatIntent {
     /// SECOND channel and splits the thread. The picker is what makes the
     /// channel surface readable as well as writable.
     ListChannels,
+    /// Cancel the turns this surface is still waiting on: `fleet/action` with
+    /// [`ainb_hangar_proto::fleet::ControlAction::Interrupt`], one per leg.
+    ///
+    /// A LIST, for the same reason [`ChatIntent::Send`] carries one: a fan-out
+    /// can be waiting on several recipients at once, and cancelling only the
+    /// first would leave the others pending with the pane claiming they were
+    /// cancelled. The pane says how many it will cancel before the key is
+    /// pressed, so the blast radius is read, not discovered.
+    CancelTurn {
+        /// Every recipient whose leg has not resolved.
+        session_keys: Vec<String>,
+    },
 }
 
 /// What one key press did to the surface.
@@ -985,11 +1271,30 @@ pub enum ChatKey {
     Down,
     /// A literal space.
     Space,
+    /// Re-run the open sequence after a named failure ([`CHAT_RETRY_HINT`]).
+    ///
+    /// A variant rather than a `Char`, because the composer owns every
+    /// printable key: the host binds a modified key and translates it here, so
+    /// this works while the operator is mid-message, which is the state the
+    /// pane is almost always in.
+    Retry,
+    /// Cancel the turns this surface is waiting on ([`CHAT_CANCEL_HINT`]).
+    Cancel,
 }
 
 /// Fold one key into the chat surface.
 pub fn reduce_chat_key(state: &mut ChatState, key: ChatKey) -> ChatKeyOutcome {
     state.feedback = None;
+    // Both are PANE-level, so they are answered before focus and before the
+    // argument editor. A retry that only worked from the composer would be
+    // unreachable from the one place an operator lands after reading a failed
+    // card, and a cancel that the editor swallowed would strand the very turn
+    // whose card is being answered.
+    match key {
+        ChatKey::Retry => return retry_open(state),
+        ChatKey::Cancel => return cancel_open_turns(state),
+        _ => {}
+    }
     if state.edit.is_some() {
         return reduce_edit_key(state, key);
     }
@@ -1019,8 +1324,55 @@ fn reduce_composer_key(state: &mut ChatState, key: ChatKey) -> ChatKeyOutcome {
             ChatKeyOutcome::Handled
         }
         ChatKey::Enter => submit_composer(state),
-        ChatKey::Up | ChatKey::Down => ChatKeyOutcome::Handled,
+        // Answered by `reduce_chat_key` before focus is consulted; listed
+        // wildcard-free so a new pane-level key cannot silently fall in here
+        // and become a character in someone's message.
+        ChatKey::Up | ChatKey::Down | ChatKey::Retry | ChatKey::Cancel => ChatKeyOutcome::Handled,
     }
+}
+
+/// Re-run the open sequence now, rather than waiting out the poll interval.
+///
+/// The poll already retries on its own cadence, so this is not what makes a
+/// failure recoverable; what it does is make the recovery VISIBLE. A pane that
+/// names a failed call and offers no key reads as a dead end, and an operator
+/// who has just started the daemon has no way to say "try again" except to
+/// guess how long to wait.
+///
+/// The status goes back to [`ChatStatus::Opening`] so the step labels are live
+/// again: without it the pane keeps painting the old failure while the retry it
+/// just asked for is running.
+fn retry_open(state: &mut ChatState) -> ChatKeyOutcome {
+    state.in_flight = true;
+    state.status = ChatStatus::Opening(ChatOpenStep::Connecting);
+    ChatKeyOutcome::Intent(ChatIntent::Refresh {
+        topic: state.topic.clone(),
+        scope_key: state.scope_key.clone(),
+    })
+}
+
+/// Cancel every leg still waiting, or refuse and say there is nothing to cancel.
+///
+/// Refusing out loud matters more here than usual: the key is advertised only
+/// while a leg is unresolved, so a press that lands one frame after the reply
+/// arrived would otherwise do nothing at all and read as a cancel that failed
+/// silently.
+fn cancel_open_turns(state: &mut ChatState) -> ChatKeyOutcome {
+    // `Cancel` is dispatched ahead of the focus routing, so key-repeat would
+    // otherwise fire a second `CancelTurn` with a fresh uuid while the first is
+    // still out. Gated the way the composer gates a send.
+    if state.in_flight {
+        state.feedback = Some("a cancel is already in flight".into());
+        return ChatKeyOutcome::Handled;
+    }
+    let session_keys: Vec<String> =
+        state.unresolved_legs().map(|leg| leg.session_key.clone()).collect();
+    if session_keys.is_empty() {
+        state.feedback = Some("nothing is waiting on a reply, there is no turn to cancel".into());
+        return ChatKeyOutcome::Handled;
+    }
+    state.in_flight = true;
+    ChatKeyOutcome::Intent(ChatIntent::CancelTurn { session_keys })
 }
 
 fn submit_composer(state: &mut ChatState) -> ChatKeyOutcome {
@@ -1039,7 +1391,13 @@ fn submit_composer(state: &mut ChatState) -> ChatKeyOutcome {
         }
     };
     let Some(scope_key) = state.scope_key.clone() else {
-        state.feedback = Some("no copilot channel yet, nothing to send to".into());
+        // The SAME sentence the pane is already painting, from the same
+        // function, so pressing Enter can never contradict what the composer
+        // says about itself.
+        state.feedback = state
+            .send_block()
+            .map(|reason| format!("cannot send: {reason}"))
+            .or_else(|| Some("no copilot channel yet, nothing to send to".into()));
         return ChatKeyOutcome::Handled;
     };
     // UNIQUE PER COMPOSITION, not per screen-open. `insert_message_with_deliveries`
@@ -1162,7 +1520,9 @@ fn reduce_edit_key(state: &mut ChatState, key: ChatKey) -> ChatKeyOutcome {
             ChatKeyOutcome::Handled
         }
         ChatKey::Enter => submit_edit(state),
-        ChatKey::Tab | ChatKey::Up | ChatKey::Down => ChatKeyOutcome::Handled,
+        ChatKey::Tab | ChatKey::Up | ChatKey::Down | ChatKey::Retry | ChatKey::Cancel => {
+            ChatKeyOutcome::Handled
+        }
     }
 }
 
@@ -1213,6 +1573,10 @@ fn submit_edit(state: &mut ChatState) -> ChatKeyOutcome {
 /// The in-flight latch is what keeps this off the render loop's back: the pane
 /// ticks on every frame, and without it every frame would spawn a fetch.
 pub fn chat_tick(state: &mut ChatState, now_ms: i64) -> Option<ChatIntent> {
+    // Stamped BEFORE every early return: this is the clock a PENDING leg's
+    // elapsed time is measured against, and a surface with a poll in flight is
+    // exactly the surface that has a leg to age.
+    state.now_ms = now_ms;
     if state.in_flight && state.last_poll_ms != 0 {
         return None;
     }
@@ -1258,7 +1622,14 @@ pub fn render_chat(
     );
     row = row.saturating_add(1);
     let (status_text, status_color) = match &state.status {
-        ChatStatus::Loading => ("LOADING".to_string(), MUTED),
+        // The CALL, then what it is doing. A cold copilot pane spends real time
+        // in `fleet/channel_create` and `fleet/acp_session_create`, and a bare
+        // "LOADING" there is indistinguishable from a daemon that is not
+        // answering at all.
+        ChatStatus::Opening(step) => (
+            format!("OPENING · {} · {}", step.call(), step.describe()),
+            GOLD,
+        ),
         ChatStatus::Live => (
             format!(
                 "LIVE · {} messages · {}",
@@ -1294,7 +1665,30 @@ pub fn render_chat(
             ),
             GREEN,
         ),
-        ChatStatus::Unavailable(detail) => (format!("UNAVAILABLE · {detail}"), ALERT),
+        // The failed CALL first, then the way out, then the daemon's words.
+        // Same shape as the copilot header's dial failure, deliberately: the
+        // two sit three rows apart and must read the same way.
+        //
+        // The key sits BEFORE the detail, and that ordering is load-bearing: a
+        // real refusal runs well past 80 columns ("scope_key ... is already
+        // held by a session whose cwd is ..."), and a hint printed after it is
+        // truncated away on exactly the pane that needs it most. The detail is
+        // repeated at full width under the timeline, so it is the safe half to
+        // lose here.
+        ChatStatus::Unavailable {
+            step: Some(step),
+            detail,
+        } => (
+            format!(
+                "UNAVAILABLE · {} failed · {CHAT_RETRY_HINT} retries · {detail}",
+                step.call()
+            ),
+            ALERT,
+        ),
+        ChatStatus::Unavailable { step: None, detail } => (
+            format!("UNAVAILABLE · {CHAT_RETRY_HINT} retries · {detail}"),
+            ALERT,
+        ),
     };
     put_str(buffer, 1, row, &status_text, status_color, right);
     row = row.saturating_add(2);
@@ -1303,32 +1697,49 @@ pub fn render_chat(
     let composer_row = bottom.saturating_sub(3);
     let help_row = bottom.saturating_sub(2);
     let feedback_row = bottom.saturating_sub(1);
-    // Cards and receipts are mutually exclusive by topic (the copilot channel
-    // has guardrail cards, a broadcast channel has delivery legs), so they
-    // share one reserved band under the timeline and each renders nothing on
-    // the other's topic.
-    let block_height = cards_block_height(state).saturating_add(receipts_block_height(state));
+    // Cards and receipts STACK rather than share a band. They used to be
+    // mutually exclusive by topic, but an unresolved delivery leg now shows on
+    // every topic (that is the whole of symptom 2: a PENDING copilot leg was
+    // invisible because the copilot topic draws no receipts block), so on the
+    // copilot channel both can be live at once and one would paint over the
+    // other.
+    let receipts_height = receipts_block_height(state);
+    let cards_height = cards_block_height(state);
+    let block_height = cards_height.saturating_add(receipts_height);
     let timeline_bottom = composer_row.saturating_sub(block_height).saturating_sub(1);
+    // Receipts sit directly under the timeline, above the cards: a leg that is
+    // still waiting is the thing an operator came back to the pane to check.
+    let receipts_top = timeline_bottom.saturating_add(1);
+    let cards_top = receipts_top.saturating_add(receipts_height);
 
-    row = render_timeline(buffer, row, timeline_bottom, right, state);
+    // The ONE question this pane answers about itself: can it send. Resolved
+    // once and threaded to the three places that render it, so the timeline's
+    // hint, the composer's prefix and the help row can never disagree about
+    // whether the operator is looking at a working composer. A pane that cannot
+    // send must never draw the same `>` as one that can, which is symptom 1 in
+    // a single character.
+    let blocked = state.send_block();
+
+    row = render_timeline(
+        buffer,
+        row,
+        timeline_bottom,
+        right,
+        state,
+        blocked.as_deref(),
+    );
     let _ = row;
-    render_cards(
-        buffer,
-        timeline_bottom.saturating_add(1),
-        composer_row,
-        right,
-        state,
-    );
-    render_receipts(
-        buffer,
-        timeline_bottom.saturating_add(1),
-        composer_row,
-        right,
-        state,
-    );
+    render_receipts(buffer, receipts_top, cards_top, right, state);
+    render_cards(buffer, cards_top, composer_row, right, state);
 
     let composer = state.edit.as_ref().map_or_else(
-        || format!("> {}", state.composer),
+        || {
+            format!(
+                "{} {}",
+                if blocked.is_some() { "⊘" } else { ">" },
+                state.composer
+            )
+        },
         |edit| format!("args[{}]> {}", edit.confirm_id, edit.buffer),
     );
     let composer_color = if state.edit.is_some() || state.focus == ChatFocus::Composer {
@@ -1345,20 +1756,34 @@ pub fn render_chat(
         right,
     );
     let help = if state.edit.is_some() {
-        "Enter answers with the edited arguments · Esc cancels the edit"
+        "Enter answers with the edited arguments · Esc cancels the edit".to_string()
+    } else if blocked.is_some() {
+        // The reason is painted where the eye already is (the empty timeline);
+        // this row is the way OUT of it. A named failure with no advertised
+        // recovery is the dead end this phase exists to remove, and a key
+        // offered where it cannot help is the same dead end with extra steps.
+        if state.retry_can_unblock() {
+            format!("cannot send yet · {CHAT_RETRY_HINT} retries · Esc back to the Fleet panel")
+        } else {
+            "cannot send yet · Esc back to the Fleet panel".to_string()
+        }
     } else {
         match state.focus {
             // A thread advertises no card key: there are no cards on it, and a
             // footer that promises one is the same lie as an action hint the
             // reducer declines.
             ChatFocus::Composer if !state.topic.shows_copilot_feeds() => {
-                "Enter sends · Esc back to the Fleet panel"
+                "Enter sends · Esc back to the Fleet panel".to_string()
             }
-            ChatFocus::Composer => "Enter sends · Tab confirm cards · Esc back to the Fleet panel",
-            ChatFocus::Cards => "↑↓ card · y approve · n deny · e answer · Tab composer",
+            ChatFocus::Composer => {
+                "Enter sends · Tab confirm cards · Esc back to the Fleet panel".to_string()
+            }
+            ChatFocus::Cards => {
+                "↑↓ card · y approve · n deny · e answer · Tab composer".to_string()
+            }
         }
     };
-    put_str(buffer, 1, help_row, help, MUTED, right);
+    put_str(buffer, 1, help_row, &help, MUTED, right);
     if let Some(feedback) = state.feedback.as_deref() {
         put_str(buffer, 1, feedback_row, feedback, GOLD, right);
     }
@@ -1367,13 +1792,76 @@ pub fn render_chat(
 /// How many receipt rows the block paints before it starts summarising.
 pub const RECEIPTS_VISIBLE: usize = 6;
 
+/// Whether the delivery block is worth a band of the screen.
+///
+/// Two independent reasons, and the second is symptom 2's fix. A fan-out always
+/// shows its legs, because "sent to 4" is a lie about the one that was refused.
+/// Any topic shows them while a leg is UNRESOLVED, because a send whose leg
+/// never resolves is otherwise indistinguishable from a send that never
+/// happened: the copilot's own reply is the only thing that would ever appear,
+/// and it is exactly what has not arrived.
+///
+/// A single leg that RESOLVED still shows nothing on the copilot channel and on
+/// a thread, which is the original rule and still the right one: the timeline
+/// row is its receipt.
+fn shows_delivery_block(state: &ChatState) -> bool {
+    state.topic.shows_receipts() || state.unresolved_legs().next().is_some()
+}
+
 fn receipts_block_height(state: &ChatState) -> u16 {
-    if !state.topic.shows_receipts() || state.receipts.is_empty() {
+    if state.receipts.is_empty() || !shows_delivery_block(state) {
         return 0;
     }
     let rows = state.receipts.len().min(RECEIPTS_VISIBLE) as u16;
     // header + rows + the "N more" row when any leg is off the window.
     1 + rows + u16::from(state.receipts.len() > RECEIPTS_VISIBLE)
+}
+
+/// A wall-clock span an operator reads at a glance, never raw milliseconds.
+///
+/// Coarse on purpose. The two numbers this prints side by side are a wait of
+/// seconds and a deadline of half an hour, and seconds of precision on the
+/// second one would only make the pair harder to compare.
+#[must_use]
+pub fn format_span_ms(ms: i64) -> String {
+    let seconds = ms.max(0) / 1_000;
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3_600 {
+        return format!("{}m{:02}s", seconds / 60, seconds % 60);
+    }
+    format!("{}h{:02}m", seconds / 3_600, (seconds % 3_600) / 60)
+}
+
+/// What a leg still waiting has to say for itself: how long, until when, and
+/// that there is a way to stop it.
+///
+/// All three or none. "PENDING" alone is the symptom; an elapsed with no
+/// deadline leaves the wait unbounded as far as the operator can tell; and a
+/// bound with no cancel is a thing to watch rather than a thing to act on.
+///
+/// The deadline clause is dropped when the daemon did not report one rather
+/// than defaulted to thirty minutes: a pane that invents the number is worse
+/// than one that omits it, because an operator will believe it.
+fn waiting_suffix(state: &ChatState, unresolved: usize) -> String {
+    let mut parts = Vec::new();
+    if let Some(elapsed) = state.receipts_elapsed_ms() {
+        parts.push(match state.turn_deadline_ms() {
+            Some(deadline) => format!(
+                "waiting {} of {}",
+                format_span_ms(elapsed),
+                format_span_ms(deadline)
+            ),
+            None => format!("waiting {}", format_span_ms(elapsed)),
+        });
+    }
+    parts.push(if unresolved > 1 {
+        format!("{CHAT_CANCEL_HINT} cancels all {unresolved} turns")
+    } else {
+        format!("{CHAT_CANCEL_HINT} cancels the turn")
+    });
+    format!(" · {}", parts.join(" · "))
 }
 
 /// Paint one row per recipient of the last send.
@@ -1384,7 +1872,7 @@ fn receipts_block_height(state: &ChatState) -> u16 {
 /// Rejected legs are painted FIRST, so the ones an operator has to act on are
 /// the ones that survive the window.
 fn render_receipts(buffer: &mut WireBuffer, top: u16, bottom: u16, right: u16, state: &ChatState) {
-    if bottom <= top || !state.topic.shows_receipts() || state.receipts.is_empty() {
+    if bottom <= top || state.receipts.is_empty() || !shows_delivery_block(state) {
         return;
     }
     let mut row = top;
@@ -1394,12 +1882,28 @@ fn render_receipts(buffer: &mut WireBuffer, top: u16, bottom: u16, right: u16, s
         .filter(|leg| leg.state == ActionReceiptStatus::Delivered)
         .count();
     let total = state.receipts.len();
+    let unresolved = state.unresolved_legs().count();
+    // A waiting send is not a failed one, and "0/1 delivered" in red says it
+    // is. While anything is unresolved the header COUNTS THE WAIT instead, in
+    // gold, and only once every leg has an answer does it go back to the
+    // delivered tally that a fan-out is read by.
+    let (header, header_color) = if unresolved > 0 {
+        (
+            format!("DELIVERY RECEIPTS · {unresolved} of {total} still waiting"),
+            GOLD,
+        )
+    } else {
+        (
+            format!("DELIVERY RECEIPTS · {delivered}/{total} delivered"),
+            if delivered == total { GREEN } else { ALERT },
+        )
+    };
     put_str_styled(
         buffer,
         1,
         row,
-        &format!("DELIVERY RECEIPTS · {delivered}/{total} delivered"),
-        if delivered == total { GREEN } else { ALERT },
+        &header,
+        header_color,
         Some(SURFACE),
         1,
         right,
@@ -1408,15 +1912,27 @@ fn render_receipts(buffer: &mut WireBuffer, top: u16, bottom: u16, right: u16, s
     let mut ordered: Vec<&FleetMessageDelivery> = state.receipts.iter().collect();
     ordered.sort_by_key(|leg| u8::from(leg.state == ActionReceiptStatus::Delivered));
     let shown = ordered.len().min(RECEIPTS_VISIBLE);
+    let waiting = waiting_suffix(state, unresolved);
     for leg in ordered.iter().take(RECEIPTS_VISIBLE) {
         if row >= bottom {
             return;
+        }
+        // The elapsed, the deadline and the cancel ride on the LEG'S OWN ROW.
+        // A summary line above the list would be right for one leg and wrong
+        // for a fan-out where only some are still waiting, and the row is where
+        // an operator is already reading the word PENDING.
+        let mut line = receipt_line(leg);
+        if matches!(
+            leg.state,
+            ActionReceiptStatus::Pending | ActionReceiptStatus::Unknown
+        ) {
+            line.push_str(&waiting);
         }
         put_str(
             buffer,
             1,
             row,
-            &truncate_ellipsis(&receipt_line(leg), usize::from(right.saturating_sub(2))),
+            &truncate_ellipsis(&line, usize::from(right.saturating_sub(2))),
             delivery_state_color(leg.state),
             right,
         );
@@ -1458,6 +1974,7 @@ fn render_timeline(
     bottom: u16,
     right: u16,
     state: &ChatState,
+    blocked: Option<&str>,
 ) -> u16 {
     if bottom <= top {
         return top;
@@ -1466,7 +1983,19 @@ fn render_timeline(
     let skip = state.messages.len().saturating_sub(capacity);
     let mut row = top;
     if state.messages.is_empty() {
-        put_str(buffer, 1, row, state.topic.empty_hint(), MUTED, right);
+        // "type below to ask the copilot" is an INSTRUCTION, and on a pane that
+        // cannot send it is an instruction to do something that will not work:
+        // symptom 1 in its own words. Where the surface is blocked, the middle
+        // of the pane says which step is running or which call failed instead,
+        // because that is where the eye lands on an empty conversation.
+        put_str(
+            buffer,
+            1,
+            row,
+            blocked.unwrap_or_else(|| state.topic.empty_hint()),
+            MUTED,
+            right,
+        );
         return row.saturating_add(1);
     }
     for message in state.messages.iter().skip(skip) {
@@ -1688,6 +2217,7 @@ mod tests {
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            turn_deadline_ms: None,
         });
         state
     }
@@ -1724,6 +2254,7 @@ mod tests {
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            turn_deadline_ms: None,
         });
         // The OPERATOR's first cursor move, which a poll deliberately does not
         // make for them (see `a_fresh_page_of_cards_selects_nothing`). Every
@@ -1752,6 +2283,7 @@ mod tests {
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            turn_deadline_ms: None,
         });
         assert_eq!(state.confirms().len(), 2);
         assert!(
@@ -2181,10 +2713,16 @@ mod tests {
     #[test]
     fn a_failed_fetch_says_so_instead_of_rendering_an_empty_channel() {
         let mut state = ChatState::opening();
-        state.apply_failure("connection refused".into());
+        state.apply_failure(
+            Some(ChatOpenStep::ListingChannels),
+            "connection refused".into(),
+        );
         assert_eq!(
             state.status(),
-            &ChatStatus::Unavailable("connection refused".into())
+            &ChatStatus::Unavailable {
+                step: Some(ChatOpenStep::ListingChannels),
+                detail: "connection refused".into()
+            }
         );
         // And the next tick retries rather than latching forever.
         assert!(chat_tick(&mut state, 10_000).is_some());
@@ -2204,6 +2742,7 @@ mod tests {
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            turn_deadline_ms: None,
         });
         assert_eq!(state.messages().len(), CHAT_TIMELINE_MAX);
         assert_eq!(
@@ -2237,6 +2776,7 @@ mod tests {
                 detail: None,
                 created_at: 1_700_000_000_000,
             }],
+            turn_deadline_ms: None,
         });
         let text = render_to_text(&state, 100, 30);
         let rows: Vec<&str> = text.lines().collect();
@@ -2318,6 +2858,7 @@ mod tests {
             confirms_detail: None,
             session_detail: None,
             activity: Vec::new(),
+            turn_deadline_ms: None,
         });
 
         // Enter must NOT answer CARD-RMRF with arguments written for CARD-KILL.
@@ -2878,6 +3419,606 @@ mod tests {
         assert!(
             !text.contains("DELIVERY RECEIPTS"),
             "receipts were painted before anything was sent:\n{text}"
+        );
+    }
+
+    // -------------------------------------------------- the cold open sequence
+
+    /// Every step names the RPC it issues and what it is doing.
+    ///
+    /// Exhaustive on purpose, in the shape of
+    /// `every_wire_delivery_state_renders_a_label_operators_can_read`: a new
+    /// step must name its own call here rather than inherit the arm written
+    /// last, and neither half may be blank, which is how a "progress" label
+    /// becomes an empty box with a different shape.
+    #[test]
+    fn every_open_step_names_the_rpc_it_issues_and_what_it_is_doing() {
+        fn issues_an_rpc(step: ChatOpenStep) -> bool {
+            match step {
+                ChatOpenStep::Connecting => false,
+                ChatOpenStep::ListingChannels
+                | ChatOpenStep::CreatingChannel
+                | ChatOpenStep::CreatingSession
+                | ChatOpenStep::LoadingMessages => true,
+            }
+        }
+        for step in [
+            ChatOpenStep::Connecting,
+            ChatOpenStep::ListingChannels,
+            ChatOpenStep::CreatingChannel,
+            ChatOpenStep::CreatingSession,
+            ChatOpenStep::LoadingMessages,
+        ] {
+            assert!(!step.call().is_empty(), "{step:?} names no call");
+            assert!(!step.describe().is_empty(), "{step:?} describes nothing");
+            assert_ne!(
+                step.call(),
+                step.describe(),
+                "{step:?} says the same thing twice"
+            );
+            assert_eq!(
+                step.call().starts_with("fleet/"),
+                issues_an_rpc(step),
+                "{step:?} disagrees with itself about whether it is an RPC"
+            );
+        }
+    }
+
+    /// A fresh install opening the copilot tab sees the CREATE, not a composer.
+    ///
+    /// The spec's symptom 1, asserted on the rendered text: the pane must name
+    /// the step, must not draw the ordinary send prompt, and must not tell the
+    /// operator to type a message it cannot send.
+    #[test]
+    fn a_cold_open_shows_the_create_step_instead_of_an_empty_composer() {
+        let mut state = ChatState::opening();
+        state.apply_step(ChatOpenStep::CreatingChannel);
+
+        let text = render_to_text(&state, 100, 30);
+        assert!(
+            text.lines().any(|row| row.contains("fleet/channel_create")
+                && row.contains("creating the copilot channel")),
+            "the pane does not name the create step:\n{text}"
+        );
+        assert!(
+            text.lines().any(|row| row.trim_start().starts_with("⊘")),
+            "a pane that cannot send drew the ordinary send prompt:\n{text}"
+        );
+        assert!(
+            !text.contains("type below to ask the copilot"),
+            "the pane told the operator to type into a composer that cannot send:\n{text}"
+        );
+        assert_eq!(
+            state.send_block().as_deref(),
+            Some("creating the copilot channel (fleet/channel_create)"),
+            "the composer does not agree with the pane about why it is blocked"
+        );
+    }
+
+    /// The step reporting is for the FIRST load only.
+    ///
+    /// A live pane polls every second and re-walks the same four calls; letting
+    /// their labels through would strobe a working conversation through
+    /// "connecting / listing / creating / loading" forever.
+    #[test]
+    fn a_poll_never_pushes_a_live_pane_back_onto_the_open_sequence() {
+        let mut state = loaded(Vec::new());
+        assert_eq!(state.status(), &ChatStatus::Live);
+        state.apply_step(ChatOpenStep::ListingChannels);
+        assert_eq!(
+            state.status(),
+            &ChatStatus::Live,
+            "a poll's progress label overwrote a live conversation"
+        );
+        assert_eq!(state.send_block(), None, "a live pane refused to send");
+    }
+
+    /// A named failure survives the retry that follows it.
+    ///
+    /// The poll retries on its own cadence, so without this rule the pane would
+    /// alternate between the failure and "dialling the hangar daemon" once a
+    /// second and an operator would never finish reading either.
+    #[test]
+    fn a_progress_step_never_overwrites_a_named_failure() {
+        let mut state = ChatState::opening();
+        state.apply_failure(
+            Some(ChatOpenStep::CreatingSession),
+            "scope_key is already held by a session whose cwd is /elsewhere".into(),
+        );
+        state.apply_step(ChatOpenStep::ListingChannels);
+        assert!(
+            matches!(
+                state.status(),
+                ChatStatus::Unavailable {
+                    step: Some(ChatOpenStep::CreatingSession),
+                    ..
+                }
+            ),
+            "the retry's progress label buried the failure: {:?}",
+            state.status()
+        );
+    }
+
+    /// A failed call is named on the pane, with the daemon's words and a key.
+    ///
+    /// The spec's error row: "`channel_list` / `acp_session_create` fails →
+    /// copilot pane names the failed call → retry key on the pane". All three
+    /// asserted on one rendered row, so this cannot pass on a pane that
+    /// mentions them in three unrelated places.
+    #[test]
+    fn a_failed_open_step_names_the_call_and_advertises_the_retry() {
+        let mut state = ChatState::opening();
+        state.apply_failure(
+            Some(ChatOpenStep::ListingChannels),
+            "connection refused".into(),
+        );
+
+        let text = render_to_text(&state, 120, 30);
+        let row = text
+            .lines()
+            .find(|row| row.contains("UNAVAILABLE"))
+            .unwrap_or_else(|| panic!("no failure row:\n{text}"));
+        assert!(
+            row.contains("fleet/channel_list"),
+            "the failure does not name the call that failed: {row}"
+        );
+        assert!(
+            row.contains("connection refused"),
+            "the failure does not carry the daemon's words: {row}"
+        );
+        assert!(
+            row.contains(CHAT_RETRY_HINT),
+            "a named failure offers no way forward: {row}"
+        );
+        assert!(
+            text.lines()
+                .any(|row| row.contains("cannot send yet") && row.contains(CHAT_RETRY_HINT)),
+            "the composer does not say it cannot send, or how to fix it:\n{text}"
+        );
+    }
+
+    /// The retry key re-pages and puts the pane back on the open sequence.
+    #[test]
+    fn the_retry_key_re_pages_and_clears_the_stale_failure() {
+        let mut state = ChatState::opening();
+        state.apply_failure(Some(ChatOpenStep::ListingChannels), "socket refused".into());
+
+        let outcome = reduce_chat_key(&mut state, ChatKey::Retry);
+        assert_eq!(
+            outcome,
+            ChatKeyOutcome::Intent(ChatIntent::Refresh {
+                topic: ChatTopic::Copilot,
+                scope_key: None
+            }),
+            "the retry key did not ask for a new page"
+        );
+        assert_eq!(
+            state.status(),
+            &ChatStatus::Opening(ChatOpenStep::Connecting),
+            "the pane kept painting the failure the retry is already fixing"
+        );
+    }
+
+    /// The retry works from the card list and from inside the argument editor.
+    ///
+    /// Pane-level, not composer-level: an operator who has just read a failed
+    /// card is on the OTHER focus, and a key that only worked in one of them
+    /// would be advertised on a pane where it does nothing.
+    #[test]
+    fn the_pane_keys_answer_from_every_focus() {
+        for prepare in [
+            |state: &mut ChatState| {
+                state.focus = ChatFocus::Cards;
+            },
+            |state: &mut ChatState| {
+                state.edit = Some(CardEdit {
+                    confirm_id: "cf-1".into(),
+                    buffer: "{}".into(),
+                });
+            },
+        ] {
+            let mut state = ChatState::opening();
+            state.apply_failure(Some(ChatOpenStep::CreatingChannel), "nope".into());
+            prepare(&mut state);
+            assert!(
+                matches!(
+                    reduce_chat_key(&mut state, ChatKey::Retry),
+                    ChatKeyOutcome::Intent(ChatIntent::Refresh { .. })
+                ),
+                "the retry key was swallowed by the focused half of the pane"
+            );
+        }
+    }
+
+    // ------------------------------------------------------ the unresolved leg
+
+    /// A copilot state with one leg that has not resolved, and a clock.
+    fn waiting_on_one_leg(deadline_ms: Option<i64>) -> ChatState {
+        let mut state = loaded(Vec::new());
+        state.apply_snapshot(ChatSnapshot {
+            scope_key: Some(MINTED_SCOPE.into()),
+            target_session_key: Some("acp:01J0COPILOT".into()),
+            turn_deadline_ms: deadline_ms,
+            ..ChatSnapshot::default()
+        });
+        // The tick is what gives the surface a clock; the legs are anchored to
+        // it, and the second tick is the wait the pane then prints.
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![leg(
+            "acp:01J0COPILOT",
+            ActionReceiptStatus::Pending,
+            None,
+        )]);
+        chat_tick(&mut state, 65_000);
+        state
+    }
+
+    /// The spec's symptom 2, asserted on one rendered row.
+    ///
+    /// A leg that never resolves used to render exactly like a send that never
+    /// happened: the copilot channel draws no receipts block, and the only
+    /// other evidence would have been the reply that has not arrived. The row
+    /// has to carry all three of the wait, the bound on it, and the way out.
+    #[test]
+    fn a_pending_leg_shows_its_wait_the_deadline_and_the_cancel() {
+        let state = waiting_on_one_leg(Some(1_800_000));
+
+        let text = render_to_text(&state, 120, 30);
+        let row = text
+            .lines()
+            .find(|row| row.contains("PENDING"))
+            .unwrap_or_else(|| panic!("a pending leg is not on the pane at all:\n{text}"));
+        assert!(
+            row.contains("waiting 1m04s"),
+            "the pending leg does not say how long it has waited: {row}"
+        );
+        assert!(
+            row.contains("of 30m00s"),
+            "the pending leg does not say what bounds the wait: {row}"
+        );
+        assert!(
+            row.contains(CHAT_CANCEL_HINT) && row.contains("cancels the turn"),
+            "the pending leg offers no cancel: {row}"
+        );
+        assert!(
+            text.lines().any(|row| row.contains("1 of 1 still waiting")),
+            "the receipts header reads as a delivery failure rather than a wait:\n{text}"
+        );
+    }
+
+    /// A deadline nobody reported is never invented.
+    ///
+    /// An older daemon omits the field, and a pane that filled in the 30-minute
+    /// default would be stating as fact a number it was never told, against a
+    /// daemon that may well have been launched with a different one.
+    #[test]
+    fn a_pending_leg_with_no_reported_deadline_claims_none() {
+        let state = waiting_on_one_leg(None);
+
+        let text = render_to_text(&state, 120, 30);
+        let row = text.lines().find(|row| row.contains("PENDING")).expect("pending row");
+        assert!(
+            row.contains("waiting 1m04s"),
+            "the wait itself is still knowable without a deadline: {row}"
+        );
+        assert!(
+            !row.contains(" of "),
+            "the pane invented a deadline the daemon never reported: {row}"
+        );
+        assert!(
+            row.contains(CHAT_CANCEL_HINT),
+            "the cancel is available with or without a deadline: {row}"
+        );
+    }
+
+    /// A leg that ANSWERED still keeps the copilot pane quiet.
+    ///
+    /// The original rule and still the right one: a single-recipient send whose
+    /// leg delivered has the timeline row as its receipt, and a permanent
+    /// "1/1 delivered" block under every message is noise. Only the UNRESOLVED
+    /// case earns the band.
+    #[test]
+    fn a_resolved_single_leg_paints_no_receipts_block() {
+        let mut state = waiting_on_one_leg(Some(1_800_000));
+        state.apply_receipts(vec![leg(
+            "acp:01J0COPILOT",
+            ActionReceiptStatus::Delivered,
+            None,
+        )]);
+
+        let text = render_to_text(&state, 120, 30);
+        assert!(
+            !text.contains("DELIVERY RECEIPTS"),
+            "a resolved single leg painted a receipts block:\n{text}"
+        );
+    }
+
+    /// A leg past the pool's turn ceiling stops advertising a cancel.
+    ///
+    /// Nothing the page reads retires a PENDING leg: `receipts` is written only
+    /// by a send, and a snapshot carries no deliveries. So an unretired leg
+    /// kept offering `⌥c` for the life of the pane — and on the copilot, a
+    /// singleton, that is the whole TUI session — aiming an interrupt at
+    /// whatever that session was running hours later.
+    #[test]
+    fn a_leg_past_the_turn_deadline_no_longer_offers_a_cancel() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        state.turn_deadline_ms = Some(30_000);
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![leg("claude:two", ActionReceiptStatus::Pending, None)]);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            1,
+            "inside the deadline the leg is still live"
+        );
+
+        // Past the ceiling the turn this leg belonged to is over.
+        chat_tick(&mut state, 1_000 + 30_001);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            0,
+            "a leg older than the turn deadline must not be cancellable"
+        );
+        assert_eq!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Handled,
+            "and the key must report there is nothing to cancel"
+        );
+    }
+
+    /// A leg retires even when the daemon never reported a turn deadline.
+    ///
+    /// `turn_deadline_ms` rides back on the mint, so it is absent when the mint
+    /// failed, when the daemon predates the field, or before the first
+    /// successful open — the very states where a leg is most likely stale. The
+    /// bound has to hold there too, or the unbounded behaviour returns exactly
+    /// where it hurts.
+    #[test]
+    fn a_leg_retires_even_with_no_reported_turn_deadline() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        assert!(state.turn_deadline_ms.is_none(), "the daemon reported none");
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![leg("claude:two", ActionReceiptStatus::Pending, None)]);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            1,
+            "inside the ceiling it is live"
+        );
+
+        chat_tick(&mut state, 1_000 + super::UNKNOWN_TURN_DEADLINE_MS + 1);
+        assert_eq!(
+            state.unresolved_legs().count(),
+            0,
+            "an unknown deadline must fall back to a ceiling, not to forever"
+        );
+    }
+
+    /// Key-repeat on the cancel key fires one request, not one per press.
+    #[test]
+    fn a_second_cancel_does_not_fire_while_the_first_is_out() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![leg("claude:two", ActionReceiptStatus::Pending, None)]);
+
+        assert!(matches!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Intent(ChatIntent::CancelTurn { .. })
+        ));
+        assert_eq!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Handled,
+            "a second press while the first is out must not mint another cancel"
+        );
+    }
+
+    /// The cancel key addresses every leg still waiting, and only those.
+    #[test]
+    fn the_cancel_key_addresses_every_leg_still_waiting() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        chat_tick(&mut state, 1_000);
+        state.apply_receipts(vec![
+            leg("claude:one", ActionReceiptStatus::Delivered, None),
+            leg("claude:two", ActionReceiptStatus::Pending, None),
+            leg("codex:three", ActionReceiptStatus::Unknown, None),
+            leg(
+                "claude:gone",
+                ActionReceiptStatus::Rejected,
+                Some("target_not_running"),
+            ),
+        ]);
+
+        assert_eq!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Intent(ChatIntent::CancelTurn {
+                session_keys: vec!["claude:two".into(), "codex:three".into()]
+            }),
+            "the cancel reached a leg that already had an answer, or missed one that did not"
+        );
+        // The blast radius is READ, not discovered: two turns, and the row says
+        // so before the key is pressed.
+        let text = render_to_text(&state, 120, 30);
+        assert!(
+            text.lines().any(|row| row.contains("cancels all 2 turns")),
+            "the pane does not say how many turns the cancel would stop:\n{text}"
+        );
+    }
+
+    /// Pressing cancel with nothing waiting refuses out loud.
+    ///
+    /// The key is advertised only while a leg is unresolved, so a press that
+    /// lands one frame after the reply arrived would otherwise do nothing at
+    /// all and read as a cancel that failed silently.
+    #[test]
+    fn cancelling_with_nothing_waiting_refuses_out_loud() {
+        let mut state = loaded(Vec::new());
+        assert_eq!(
+            reduce_chat_key(&mut state, ChatKey::Cancel),
+            ChatKeyOutcome::Handled
+        );
+        assert!(
+            state.feedback().is_some_and(|line| line.contains("no turn to cancel")),
+            "a cancel with nothing to cancel said nothing: {:?}",
+            state.feedback()
+        );
+    }
+
+    /// A surface that has never been ticked has no clock, so it dates nothing.
+    ///
+    /// `now - 0` is a wait of fifty-seven years, which is the shape of bug that
+    /// makes an operator distrust every number on the pane.
+    #[test]
+    fn an_unticked_surface_reports_no_elapsed_rather_than_the_epoch() {
+        let mut state = ChatState::opening();
+        state.apply_receipts(vec![leg(
+            "acp:01J0COPILOT",
+            ActionReceiptStatus::Pending,
+            None,
+        )]);
+        assert_eq!(state.receipts_elapsed_ms(), None);
+
+        let text = render_to_text(&state, 120, 30);
+        let row = text.lines().find(|row| row.contains("PENDING")).expect("pending row");
+        assert!(
+            !row.contains("waiting"),
+            "an unticked surface printed an elapsed it cannot know: {row}"
+        );
+        assert!(
+            row.contains(CHAT_CANCEL_HINT),
+            "the cancel is offered even where the elapsed is unknown: {row}"
+        );
+    }
+
+    /// Spans read as seconds, minutes or hours, never as milliseconds.
+    #[test]
+    fn a_span_renders_at_the_scale_an_operator_reads() {
+        assert_eq!(format_span_ms(0), "0s");
+        assert_eq!(
+            format_span_ms(-5),
+            "0s",
+            "a clock that went backwards is not negative time"
+        );
+        assert_eq!(format_span_ms(59_999), "59s");
+        assert_eq!(format_span_ms(64_000), "1m04s");
+        assert_eq!(format_span_ms(1_800_000), "30m00s");
+        assert_eq!(format_span_ms(9_000_000), "2h30m");
+    }
+
+    /// The deadline the daemon reported survives a page that could not report
+    /// one.
+    ///
+    /// A poll whose session mint is refused carries no deadline, and forgetting
+    /// the last one would blank the only bound a waiting operator has.
+    #[test]
+    fn a_reported_deadline_survives_a_page_that_carries_none() {
+        let mut state = waiting_on_one_leg(Some(1_800_000));
+        state.apply_snapshot(ChatSnapshot {
+            scope_key: Some(MINTED_SCOPE.into()),
+            session_detail: Some("adapter refused to spawn".into()),
+            ..ChatSnapshot::default()
+        });
+        assert_eq!(state.turn_deadline_ms(), Some(1_800_000));
+    }
+
+    /// The retry is offered only where re-paging could actually clear the block.
+    ///
+    /// A memberless broadcast channel is blocked by a membership `channel_list`
+    /// and `channel_create` cannot change, so the key would do nothing but
+    /// re-read the same rows. The reason is still on the pane; the false
+    /// recovery is not.
+    #[test]
+    fn a_block_no_re_page_can_clear_offers_no_retry_key() {
+        let state = ChatState::channel(CHANNEL_SCOPE.to_string(), "#empty".to_string(), Vec::new());
+        assert!(!state.retry_can_unblock());
+
+        let text = render_to_text(&state, 120, 30);
+        assert!(
+            text.lines().any(|row| row.contains("no members")),
+            "the pane does not say why it cannot send:\n{text}"
+        );
+        let help = text
+            .lines()
+            .find(|row| row.contains("cannot send yet"))
+            .unwrap_or_else(|| panic!("no help row:\n{text}"));
+        assert!(
+            !help.contains(CHAT_RETRY_HINT),
+            "a retry was offered for a block it cannot clear: {help}"
+        );
+    }
+
+    /// A leg still waiting is never counted as one that failed.
+    ///
+    /// The feedback row used to report the copilot's single PENDING turn as
+    /// "1 not delivered", one row under a header that correctly called it a
+    /// wait. Two numbers about the same send disagreeing is how an operator
+    /// stops believing either.
+    #[test]
+    fn a_waiting_leg_is_counted_as_waiting_and_not_as_a_failure() {
+        let mut state = ChatState::channel(
+            CHANNEL_SCOPE.to_string(),
+            "#ops".to_string(),
+            channel_members(),
+        );
+        state.apply_receipts(vec![
+            leg("claude:one", ActionReceiptStatus::Delivered, None),
+            leg("claude:two", ActionReceiptStatus::Pending, None),
+            leg("codex:three", ActionReceiptStatus::Unknown, None),
+            leg(
+                "claude:gone",
+                ActionReceiptStatus::Rejected,
+                Some("target_not_running"),
+            ),
+        ]);
+        assert_eq!(
+            state.feedback(),
+            Some("delivered to 1/4 · 2 waiting · 1 not delivered")
+        );
+
+        // And the all-waiting case, which is the copilot's own: nothing has
+        // failed, so the line must not say anything did.
+        let mut copilot = loaded(Vec::new());
+        copilot.apply_receipts(vec![leg(
+            "acp:01J0COPILOT",
+            ActionReceiptStatus::Pending,
+            None,
+        )]);
+        assert_eq!(copilot.feedback(), Some("delivered to 0/1 · 1 waiting"));
+    }
+
+    /// The retry key survives a refusal too long for the pane.
+    ///
+    /// A real `acp_session_create` refusal runs well past 80 columns, and a hint
+    /// printed after it is truncated away on exactly the pane that needs it.
+    #[test]
+    fn a_long_refusal_never_truncates_the_retry_key_off_the_pane() {
+        let mut state = ChatState::opening();
+        state.apply_failure(
+            Some(ChatOpenStep::CreatingSession),
+            "scope_key \"channel:01J0CHANNEL\" is already held by a session whose cwd is \
+             /Users/somebody/a/very/long/worktree/path, not /Users/somebody/elsewhere"
+                .into(),
+        );
+
+        let text = render_to_text(&state, 80, 30);
+        let row = text.lines().find(|row| row.contains("UNAVAILABLE")).expect("failure row");
+        assert!(
+            row.contains("fleet/acp_session_create") && row.contains(CHAT_RETRY_HINT),
+            "the call or the key was truncated off an 80-column pane: {row}"
         );
     }
 

@@ -156,6 +156,9 @@ fn bad_arguments(tool: &str, refusal: &Refusal) -> ToolFailure {
         detail: match refusal {
             Refusal::UnknownTool(name) => format!("unknown tool `{name}`"),
             Refusal::BadArguments(detail) => detail.clone(),
+            Refusal::ModeForbids { tool, mode } => {
+                format!("`{tool}` is not available in {} mode", mode.as_str())
+            }
         },
     }
 }

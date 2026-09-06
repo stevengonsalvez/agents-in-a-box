@@ -852,6 +852,78 @@ impl FleetRepo {
         rows.iter().map(session_from_row).collect()
     }
 
+    /// The ERR roster: every visible, still-running session the read model
+    /// currently projects as `attention_state = 'ERROR'`, key-ordered.
+    ///
+    /// `lifecycle_state != 'EXITED'` belongs in the predicate rather than in
+    /// each caller, because an exited session's error is history: its pane is
+    /// gone, so nothing can be typed into it and nothing about it will change
+    /// again. Handing it to the daemon's retry sweep would spend that session's
+    /// continue budget on sends that cannot land and end in an escalation
+    /// naming a session the operator can no longer open.
+    ///
+    /// Deliberately unindexed. `attention_state` holds five values over a
+    /// roster the archiver keeps in the low thousands, so a periodic scan is
+    /// cheaper than an index every hook write would have to maintain.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` read failure.
+    pub async fn list_attention_error(
+        pool: &SqlitePool,
+    ) -> Result<Vec<FleetSessionRow>, sqlx::Error> {
+        let rows = sqlx::query(SESSION_SELECT_ERRORING).fetch_all(pool).await?;
+        rows.iter().map(session_from_row).collect()
+    }
+
+    /// The newest `limit` durable event payloads for one session, newest first.
+    ///
+    /// [`Self::events_for_session`] returns the WHOLE history, which is the
+    /// right shape for a projection replay and the wrong one for a periodic
+    /// scanner: `fleet_event` has been measured at 1.1M rows on a real host, so
+    /// a caller that only needs "what did this session just say" would drag the
+    /// entire log through memory every tick. Ordering by `revision DESC` walks
+    /// `idx_fleet_event_session_revision` backwards, so the read touches `limit`
+    /// index entries however long the session has been alive.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` read failure.
+    pub async fn recent_event_payloads(
+        pool: &SqlitePool,
+        session_key: &str,
+        event_types: &[&str],
+        since_ms: i64,
+        limit: i64,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        // Two bounds, and both are load-bearing rather than tuning.
+        //
+        // A `fleet_event` payload is the WHOLE hook envelope: `notify.sh` builds
+        // it as `payload: .` over the hook's stdin, and `UserPromptSubmit`,
+        // `PreToolUse` and `PostToolUse` are all registered. So an operator's
+        // prompt, a tool's input and a tool's output all land in this column
+        // verbatim. Anything scanning it for an error signature is scanning
+        // agent- and user-authored text, and a caller that reads every recent
+        // event is asking whatever the agent last printed to decide.
+        //
+        // `event_types` keeps the scan to the events that can actually carry a
+        // provider failure, and `since_ms` keeps it to the ones that produced
+        // the CURRENT state rather than a resolved incident still sitting in
+        // the window.
+        if event_types.is_empty() {
+            return Ok(Vec::new());
+        }
+        let slots = std::iter::repeat_n("?", event_types.len()).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT payload FROM fleet_event \
+             WHERE session_key = ? AND observed_at >= ? AND event_type IN ({slots}) \
+             ORDER BY revision DESC LIMIT ?"
+        );
+        let mut query = sqlx::query_scalar(&sql).bind(session_key).bind(since_ms);
+        for event_type in event_types {
+            query = query.bind(*event_type);
+        }
+        query.bind(limit.max(0)).fetch_all(pool).await
+    }
+
     /// Fetch one canonical session by stable key.
     pub async fn get_session(
         pool: &SqlitePool,
@@ -1192,6 +1264,20 @@ const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
     model, reasoning_effort, model_updated_at, model_authority \
     FROM fleet_session WHERE visible = 1 ORDER BY session_key ASC";
+
+/// The ERR roster, read by [`FleetRepo::list_attention_error`]. Same column
+/// list and same `visible = 1` gate as [`SESSION_SELECT_ALL`]: a superseded or
+/// archived row is not a session anything may act on.
+const SESSION_SELECT_ERRORING: &str = "SELECT session_key, provider, provider_session_id, \
+    tmux_target, process_start_fingerprint, cwd, display_name, lifecycle_state, \
+    attention_state, current_request_fingerprint, management_state, transport_health, capabilities, provenance, \
+    confidence, discovered_at, last_observed_at, metadata_updated_at, \
+    metadata_authority, lifecycle_updated_at, lifecycle_authority, \
+    attention_updated_at, attention_authority, transport_updated_at, \
+    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
+    model, reasoning_effort, model_updated_at, model_authority \
+    FROM fleet_session WHERE visible = 1 AND attention_state = 'ERROR' \
+    AND lifecycle_state != 'EXITED' ORDER BY session_key ASC";
 
 /// The archived roster: hidden by [`FleetRepo::archive_session`], NOT by
 /// supersession. `superseded_by IS NULL` is the whole discriminator — the only

@@ -10,10 +10,6 @@ use crate::app::{
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
-use ainb_plugin_hangar::screen::fleet::{
-    BroadcastReceipt, FleetAction, FleetEvent, FleetFilter, FleetIntent, FleetKey, ReceiptStatus,
-    selected_approval_action,
-};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 use tracing::info;
@@ -85,6 +81,17 @@ pub enum AppEvent {
     GoToBottom,
     // Pane focus management
     SwitchPaneFocus,
+    /// The key was consumed by a surface that handled it in place. Emitted so
+    /// the caller stops looking for another handler; the reducer does nothing.
+    Consumed,
+    /// Move to the next available right-pane tab (`Tab`).
+    SessionTabNext,
+    /// Move to the previous available right-pane tab (`Shift+Tab`).
+    SessionTabPrev,
+    /// `Enter` on the `ask` tab: send the selected answer.
+    SessionAskSend,
+    /// `Enter` on a composer tab (`thread` / `copilot`): send the message.
+    SessionTabComposerSend,
     /// Toggle the sessions sidebar between full width and the thin rail —
     /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
     ToggleSessionsSidebar,
@@ -407,48 +414,9 @@ pub enum AppEvent {
     SkillManagerSourceRemoveConfirm,     // Enter — execute the chosen removal
     SkillManagerSourceRemoveCancel,      // Esc — dismiss, remove nothing
     GoToRecovery,                        // Navigate to session recovery view
-    GoToInbox,                           // Navigate to ainb-hooks notification inbox
     GoToDaemons,                         // Navigate to the daemon runtime-health view
-    GoToFleetPanel,                      // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,                    // Fleet panel: move row selection up
-    FleetPanelMoveDown,                  // Fleet panel: move row selection down
-    FleetPanelOptionNext,                // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,                // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer, // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast, // Fleet panel: broadcast a ping to the selected session (B)
-    FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
-    FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
-    FleetPanelRefresh, // Fleet panel: force-refresh request
-    /// Route one canonical reducer key through main ainb Fleet panel.
-    FleetPanelCanonicalKey(FleetKey),
-    /// Forward one click in the rendered structured-interview card stack.
-    FleetPanelAnswerCardClick {
-        column: u16,
-        row: u16,
-        area_width: u16,
-        area_height: u16,
-    },
-    /// Apply canonical Fleet roster filter.
-    FleetPanelSetFilter(FleetFilter),
-    /// Request canonical lifecycle or control action.
-    FleetPanelCanonicalAction(FleetAction),
-    FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
-    FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
-    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
-    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
-    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
-    PanelBack,                  // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,                 // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,                // Inbox: move selection up one row
-    InboxMoveDown,              // Inbox: move selection down one row
-    InboxPageUp,                // Inbox: jump 10 rows up
-    InboxPageDown,              // Inbox: jump 10 rows down
-    InboxOpenSelected,          // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,       // Inbox: dismiss selected row (d)
-    InboxDismissVisible,        // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,        // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,            // Inbox: cycle agent filter (p)
-    InboxRefresh,               // Inbox: force-refresh from store (r)
+    PanelBack,                           // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,                          // Navigate to the Hangar control plane (plugin screen)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,             // Return to home screen (Esc)
@@ -976,18 +944,6 @@ impl EventHandler {
                 None
             }
             AppEvent::MouseClick { x, y } => {
-                if state.current_screen == screen_ids::FLEET_PANEL
-                    && state.fleet_panel_state.canonical_modal_open()
-                {
-                    let (area_width, area_height) = crossterm::terminal::size().unwrap_or((80, 24));
-                    return Some(AppEvent::FleetPanelAnswerCardClick {
-                        column: x,
-                        row: y,
-                        area_width,
-                        area_height,
-                    });
-                }
-
                 if state.current_screen == screen_ids::HOME && !state.help_visible {
                     if state.home_screen_v2_state.begin_sidebar_resize(x, y) {
                         return None;
@@ -1324,6 +1280,234 @@ impl EventHandler {
         Self::is_text_input_context(state)
     }
 
+    /// Fold one key into the `ask` pane.
+    ///
+    /// Returns `None` for keys the pane does not claim, so `Tab` still walks
+    /// the strip and `q`/`Esc` still leave — an answer pane the operator cannot
+    /// escape is worse than one they cannot type into.
+    fn route_session_ask_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
+        state.ask_state.retarget(&chip);
+        match key_event.code {
+            KeyCode::Up => state.ask_state.move_cursor(&chip, -1),
+            KeyCode::Down => state.ask_state.move_cursor(&chip, 1),
+            KeyCode::Enter => return Some(AppEvent::SessionAskSend),
+            KeyCode::Backspace => state.ask_state.backspace(),
+            // Left to the strip and the screen: an answer pane the operator
+            // cannot leave is a trap.
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc => return None,
+            // Printable keys type into the free-text answer. `j`/`k` are NOT
+            // stolen for navigation here: they are letters, and an answer that
+            // cannot contain the word "just" is not an answer field.
+            KeyCode::Char(c) => {
+                // Only once the composer row is selected, so the option list
+                // still answers plain typing with nothing rather than silently
+                // filling a buffer the operator cannot see.
+                if state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText {
+                    state.ask_state.push_char(c);
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        state.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
+    /// Fold one key into the active composer tab's chat surface.
+    ///
+    /// Returns `None` for a key the chat does not claim, so it falls through to
+    /// the sessions screen — `Tab` still moves the strip and the attach digits
+    /// still attach, which is the contract the footer advertises on every tab.
+    fn route_session_composer_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+        /// Which copilot header dial a key turned.
+        enum CopilotDialTurn {
+            Engine,
+            Model,
+            Mode,
+            Retry,
+        }
+
+        use crate::components::session_tabs::SessionTab;
+        use ainb_plugin_hangar::screen::fleet_chat::ChatKey;
+
+        // `Tab` belongs to the STRIP, `Shift+Tab` to the conversation's own
+        // focus toggle. They collided: the chat uses Tab to move between its
+        // composer and its card list, so leaving Tab to the chat made the strip
+        // unreachable from a conversation, and taking it for the strip made the
+        // card list unreachable — which is where a guardrail card is answered.
+        //
+        // The strip wins Tab because it is the surface-wide navigator and it
+        // WRAPS, so nothing is lost by giving up the reverse direction here.
+        // Answered before the reducer rather than by falling through: the
+        // `in_text_input` short-circuit downstream swallows everything, so a
+        // bare `None` would trap the operator on a pane they could only leave
+        // with Esc.
+        if key_event.code == KeyCode::Tab {
+            return Some(AppEvent::SessionTabNext);
+        }
+        // The copilot header's dials, on ALT. Bare letters were the first shape
+        // and the tripwire killed it: the copilot composer holds focus as soon
+        // as the conversation opens, so `e` is an `e` in a half-typed message
+        // and the dials were unreachable in the steady state. Alt never types,
+        // so one binding works in both halves of the pane rather than a bare
+        // key that silently does nothing most of the time.
+        if state.session_tab == SessionTab::Copilot
+            && key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+        {
+            let turned = match key_event.code {
+                KeyCode::Char('e') => Some(CopilotDialTurn::Engine),
+                KeyCode::Char('o') => Some(CopilotDialTurn::Model),
+                KeyCode::Char('g') => Some(CopilotDialTurn::Mode),
+                // Retry is offered only where something failed, so it does not
+                // shadow anything while the header is healthy.
+                KeyCode::Char('r')
+                    if matches!(
+                        state.copilot_dial.status(),
+                        crate::fleet::copilot_dial::DialStatus::Failed { .. }
+                    ) =>
+                {
+                    Some(CopilotDialTurn::Retry)
+                }
+                _ => None,
+            };
+            if let Some(turn) = turned {
+                match turn {
+                    CopilotDialTurn::Engine => state.copilot_dial.cycle_engine(),
+                    CopilotDialTurn::Model => state.copilot_dial.cycle_model(),
+                    CopilotDialTurn::Mode => state.copilot_dial.cycle_mode(),
+                    CopilotDialTurn::Retry => state.copilot_dial.retry(),
+                }
+                state.ui_needs_refresh = true;
+                return Some(AppEvent::Consumed);
+            }
+        }
+        // The broadcast composer, which replaces the thread's while rows are
+        // checked. Handled BEFORE the chat reducer because there is no chat
+        // host behind it — the pane is a composer and a receipt list, not a
+        // conversation, so there is nothing for `reduce_chat_key` to reduce.
+        if state.session_tab == SessionTab::Thread {
+            let targets = state.broadcast_targets();
+            if !targets.is_empty() {
+                let handled = match key_event.code {
+                    KeyCode::Enter => {
+                        // `send` refuses an empty message and an empty target
+                        // list, and says so by returning false, so a blank
+                        // Enter is a no-op rather than a receipt for nothing.
+                        state.broadcast.send(targets);
+                        true
+                    }
+                    KeyCode::Backspace => {
+                        state.broadcast.backspace();
+                        true
+                    }
+                    KeyCode::Esc => {
+                        // Out of the pane, not out of the multi-select: the
+                        // checkboxes are the left pane's and clearing them here
+                        // would undo work the operator did with Space.
+                        state.session_tab = SessionTab::Preview;
+                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        true
+                    }
+                    KeyCode::Char(ch) => {
+                        state.broadcast.push(ch);
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    state.ui_needs_refresh = true;
+                    return Some(AppEvent::Consumed);
+                }
+                return None;
+            }
+        }
+        // The conversation's OWN pane keys, on ALT for the same reason the
+        // header's dials are: the composer holds focus as soon as a
+        // conversation opens, so a bare `p` is a `p` in a half-typed message
+        // and the binding would be advertised on the pane and do nothing in the
+        // state an operator is usually in.
+        //
+        // Bound HERE rather than in the copilot-only block above so they work
+        // on the `thread` tab too: the chat surface is one state machine over
+        // two tabs, and a retry that only existed on one of them would be the
+        // drift `fleet_chat`'s header warns about. `p` and `c`, because the
+        // copilot header already owns Alt-r for the engine dial's own retry
+        // (`copilot_dial::DialStatus::Failed`) and the two mean different
+        // things three rows apart. The LABELS live beside the reducer
+        // (`CHAT_RETRY_HINT`, `CHAT_CANCEL_HINT`), so the key a pane advertises
+        // and the key bound here cannot drift.
+        if key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+            let pane_key = match key_event.code {
+                KeyCode::Char('p') => Some(ChatKey::Retry),
+                KeyCode::Char('c') => Some(ChatKey::Cancel),
+                _ => None,
+            };
+            if let Some(pane_key) = pane_key {
+                return Self::apply_chat_key(pane_key, state);
+            }
+            // Every other Alt-modified key falls through to the sessions
+            // screen rather than into the composer: an Alt-modified letter is a
+            // binding an operator meant for a pane, never a character they
+            // meant to type.
+            return None;
+        }
+        // Attach digits ARE passed through to the composer — a digit typed into
+        // a message is a digit, and stealing it would make the composer unable
+        // to type "3". The footer stops advertising them here for that reason.
+        let chat_key = match key_event.code {
+            // The conversation's own focus toggle, moved off `Tab`.
+            KeyCode::BackTab => ChatKey::Tab,
+            KeyCode::Char(c) if c != ' ' => ChatKey::Char(c),
+            KeyCode::Char(' ') => ChatKey::Space,
+            KeyCode::Enter => ChatKey::Enter,
+            KeyCode::Esc => ChatKey::Esc,
+            KeyCode::Backspace => ChatKey::Backspace,
+            KeyCode::Up => ChatKey::Up,
+            KeyCode::Down => ChatKey::Down,
+            _ => return None,
+        };
+        Self::apply_chat_key(chat_key, state)
+    }
+
+    /// Fold one already-translated key into whichever conversation is open.
+    ///
+    /// Split out so the pane-level Alt bindings and the composer's own keys
+    /// reach the reducer through ONE path: two copies of "find the host,
+    /// reduce, dispatch the intent" is how a key ends up handled on one tab and
+    /// silently dropped on the other.
+    fn apply_chat_key(
+        chat_key: ainb_plugin_hangar::screen::fleet_chat::ChatKey,
+        state: &mut AppState,
+    ) -> Option<AppEvent> {
+        use crate::components::session_tabs::SessionTab;
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatKeyOutcome, reduce_chat_key};
+
+        let host = match state.session_tab {
+            SessionTab::Copilot => state.copilot_chat.as_mut(),
+            SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Log => None,
+        }?;
+        let outcome = reduce_chat_key(host.state_mut(), chat_key);
+        state.ui_needs_refresh = true;
+        match outcome {
+            ChatKeyOutcome::Handled => Some(AppEvent::Consumed),
+            // Esc out of the conversation returns to the pane that is never
+            // disabled, rather than leaving the operator on a composer they
+            // have just closed.
+            ChatKeyOutcome::Close => {
+                state.session_tab = SessionTab::Preview;
+                state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                Some(AppEvent::Consumed)
+            }
+            ChatKeyOutcome::Intent(intent) => {
+                host.dispatch(intent);
+                Some(AppEvent::Consumed)
+            }
+        }
+    }
+
     fn is_text_input_context(state: &AppState) -> bool {
         use crate::app::screens::ids as screen_ids;
         use crate::app::state::NewSessionStep;
@@ -1361,6 +1545,12 @@ impl EventHandler {
         // typed into a plugin overlay (8hx), not just the boards card title.
         let plugin_capturing_text =
             crate::app::screens::builtin::focused_plugin_captures_text(state);
+        // A composer tab on the sessions screen owns every printable key. The
+        // sessions screen binds bare `d` to delete-session and bare `q` to
+        // leave, so without this a message typed into the thread composer would
+        // fire session shortcuts one character at a time.
+        let session_composer_active = state.current_screen == screen_ids::SESSION_LIST
+            && state.session_composer_captures_text();
         let skills_text_active =
             state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
         // SkillManager add-source / search prompt — when its input
@@ -1415,12 +1605,8 @@ impl EventHandler {
         // `?` / `H` / `W` shortcuts ate keys typed into all three. A live
         // tripwire caught it on the chat: typing "what is blocked?" opened the
         // help overlay on the `?` and the overlay then swallowed the Enter.
-        let fleet_panel_text_active = state.current_screen == screen_ids::FLEET_PANEL
-            && state.fleet_panel_state.canonical.is_capturing_text();
-
         new_session_text_active
             || plugin_capturing_text
-            || fleet_panel_text_active
             || onboarding_text_active
             || matches!(
                 state.current_screen.as_str(),
@@ -1434,6 +1620,7 @@ impl EventHandler {
             || skills_text_active
             || skill_manager_input_active
             || git_view_text_active
+            || session_composer_active
     }
 
     /// Pure decision logic shared between the production global-`W`
@@ -1720,23 +1907,12 @@ impl EventHandler {
             return Self::handle_home_screen_keys(key_event, state);
         }
 
-        // ainb-hooks Inbox screen
-        if state.current_screen == screen_ids::INBOX {
-            return Self::handle_inbox_keys(key_event, state);
-        }
-
         // Daemons runtime-health screen. Esc/q must pop back to the
         // origin `GoToDaemons` saved in `previous_screen`, NOT hardcode home —
         // the generic fallthrough below treats this non-plugin screen as
         // GoToHomeScreen, which ignored the saved origin (L2).
         if state.current_screen == screen_ids::DAEMONS {
             return Self::handle_daemons_keys(key_event, state);
-        }
-
-        // Fleet control panel. Has its own list navigation + action keys; Esc/q
-        // pop back to the origin via PanelBack (same discipline as Daemons).
-        if state.current_screen == screen_ids::FLEET_PANEL {
-            return Self::handle_fleet_panel_keys(key_event, state);
         }
 
         // AINB 2.0: Handle agent selection view
@@ -2077,6 +2253,31 @@ impl EventHandler {
             };
         }
 
+        // A conversation pane owns the keyboard — BOTH its halves. Gating this
+        // on text capture alone let `y` fall through to the session screen
+        // while a guardrail confirm card was waiting for it.
+        //
+        // Routed BEFORE the `in_text_input` short-circuit below, which only
+        // suppresses the bare-char shortcuts — suppression alone would leave
+        // the operator typing into a pane that drops every character.
+        if state.session_tab_owns_keys() {
+            if let Some(event) = Self::route_session_composer_key(key_event, state) {
+                return Some(event);
+            }
+        }
+
+        // The `ask` pane owns the arrows, the printable keys and Enter while it
+        // is open, for the same reason: an answer typed into it must not fire
+        // session shortcuts a character at a time.
+        if state.current_screen == screen_ids::SESSION_LIST
+            && crate::components::session_tabs::resolve(state, state.session_tab)
+                == crate::components::session_tabs::SessionTab::Ask
+        {
+            if let Some(event) = Self::route_session_ask_key(key_event, state) {
+                return Some(event);
+            }
+        }
+
         // Handle session recovery view
         if state.current_screen == screen_ids::SESSION_RECOVERY {
             tracing::debug!("In session recovery view, handling session recovery keys");
@@ -2114,13 +2315,15 @@ impl EventHandler {
                     Some(AppEvent::GoToHomeScreen)
                 }
             }
-            KeyCode::Tab => {
-                tracing::debug!(
-                    "Tab key pressed, current focused_pane: {:?}",
-                    state.focused_pane
-                );
-                Some(AppEvent::SwitchPaneFocus)
-            }
+            // Tab cycles the right pane's tab strip; Shift+Tab walks it back.
+            //
+            // This REPLACES `SwitchPaneFocus`, which toggled Sessions <-> right
+            // pane. Nothing is lost: focus is now implied by which tab is open
+            // (the composer tabs take input, `preview` and `log` do not), so the
+            // one thing Tab used to buy is now a consequence of the same key.
+            // Two keys for one concept is the ambiguity the strip removes.
+            KeyCode::Tab => Some(AppEvent::SessionTabNext),
+            KeyCode::BackTab => Some(AppEvent::SessionTabPrev),
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(AppEvent::Quit)
             }
@@ -2178,6 +2381,24 @@ impl EventHandler {
                 }
             }
             KeyCode::Enter => {
+                // Enter is SCOPED TO THE ACTIVE TAB. It meant "attach"
+                // everywhere, which is the wrong verb on four of the five panes
+                // the strip now offers — on `ask` it has to send the answer.
+                // Each tab declares its own verb in `session_tabs`, and the
+                // footer prints it, so the operator never has to guess which
+                // one is about to fire.
+                use crate::components::session_tabs::SessionTab;
+                match crate::components::session_tabs::resolve(state, state.session_tab) {
+                    SessionTab::Preview => {}
+                    SessionTab::Ask => return Some(AppEvent::SessionAskSend),
+                    SessionTab::Thread | SessionTab::Copilot => {
+                        return Some(AppEvent::SessionTabComposerSend);
+                    }
+                    // Deliberately nothing: a history pane has no verb, and
+                    // silently attaching from it is the surprise this scoping
+                    // exists to stop.
+                    SessionTab::Log => return None,
+                }
                 // Enter on a Stopped interactive session = resume it.
                 // Enter on a Running session = attach (mirrors 'a').
                 // Other selection types fall through to None to preserve prior behaviour.
@@ -2246,11 +2467,6 @@ impl EventHandler {
             KeyCode::Char('o') => Some(AppEvent::OpenInEditor), // Open in editor
             KeyCode::Char('E') => Some(AppEvent::ToggleExpandAll), // Toggle expand/collapse all workspaces
             KeyCode::Char('$') => Some(AppEvent::OpenQuickShell), // Quick shell in current workspace/session
-            // Inbox is advertised on the session-list menu bar (`b inbox`), so
-            // the key must work in this view too — not only on the home screen
-            // where `handle_home_screen_keys` also binds it. Without this arm
-            // the menu hint pointed at a dead key.
-            KeyCode::Char('b') => Some(AppEvent::GoToInbox),
             // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
             // 'B' is its keyboard twin. Hinted next to the glyph itself.
             KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
@@ -3041,41 +3257,6 @@ impl EventHandler {
         }
     }
 
-    /// Inbox screen key dispatcher. Keys follow the spec:
-    ///
-    ///   - ↑/↓ k/j         move selection
-    ///   - PageUp/PageDown jump 10 rows
-    ///   - Enter           open + mark read
-    ///   - d               dismiss selected
-    ///   - C               dismiss every visible row (Shift+C)
-    ///   - a               toggle archived filter
-    ///   - p               cycle agent filter
-    ///   - r               refresh
-    ///   - q / Esc         back to previous screen (home if none)
-    fn handle_inbox_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::InboxMoveUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::InboxMoveDown),
-            KeyCode::PageUp => Some(AppEvent::InboxPageUp),
-            KeyCode::PageDown => Some(AppEvent::InboxPageDown),
-            KeyCode::Enter => Some(AppEvent::InboxOpenSelected),
-            KeyCode::Char('d') => Some(AppEvent::InboxDismissSelected),
-            KeyCode::Char('C') => Some(AppEvent::InboxDismissVisible),
-            KeyCode::Char('a') => Some(AppEvent::InboxToggleArchived),
-            KeyCode::Char('p') => Some(AppEvent::InboxCycleAgent),
-            KeyCode::Char('r') => Some(AppEvent::InboxRefresh),
-            _ => None,
-        }
-    }
-
-    /// Daemons screen key dispatcher. Runtime actions reuse the same
-    /// background workers that previously lived in the system overlay:
-    ///
-    ///   - q / Esc   back to the screen it was opened from (home if none)
-    ///
-    /// Routed through `PanelBack` so it pops the `previous_screen` that
-    /// `GoToDaemons` saved, instead of hardcoding home (L2).
     fn handle_daemons_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
         let daemons = &mut state.daemons_state;
         // Selection and the action menu are pure in-memory state, so they are
@@ -3145,129 +3326,6 @@ impl EventHandler {
         }
     }
 
-    /// Fleet control-panel key dispatcher. The panel browses the event-sourced
-    /// `current_state` (ASK/ERR/WAIT/IDLE per session) and acts on it:
-    ///
-    ///   - ↑/↓ · k/j        move the row selection
-    ///   - Tab / BackTab    move the ASK option cursor (when the row is an ASK)
-    ///   - Enter            answer the selected structured question
-    ///   - B                open broadcast composer for the current lens
-    ///   - 1 / 2 / 3 / 4 / 5 switch Needs input / Idle / Completed / Running / All
-    ///   - r                reconcile the selected Claude interview
-    ///   - R                restart the selected session after confirmation
-    ///   - q / Esc          back to the screen it was opened from (PanelBack)
-    ///
-    /// Routed through `PanelBack` so it pops the `previous_screen` that
-    /// `GoToFleetPanel` saved, instead of hardcoding home (mirrors Daemons L2).
-    fn handle_fleet_panel_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        // Name-prompt mode captures every key: chars build the name, Enter
-        // creates, Esc cancels. Nothing else (move/answer/back) fires while a
-        // create is being named.
-        if state.fleet_panel_state.is_naming_atc() {
-            return match key_event.code {
-                KeyCode::Esc => Some(AppEvent::FleetPanelNewAtcCancel),
-                KeyCode::Enter => Some(AppEvent::FleetPanelNewAtcSubmit),
-                KeyCode::Backspace => Some(AppEvent::FleetPanelNewAtcBackspace),
-                KeyCode::Char(c) => Some(AppEvent::FleetPanelNewAtcType(c)),
-                _ => None,
-            };
-        }
-        if state.fleet_panel_state.canonical_modal_open() {
-            let key = match key_event.code {
-                KeyCode::Esc => FleetKey::Esc,
-                KeyCode::Enter => FleetKey::Enter,
-                KeyCode::Backspace => FleetKey::Backspace,
-                KeyCode::Up => FleetKey::Up,
-                KeyCode::Down => FleetKey::Down,
-                KeyCode::Tab => FleetKey::Tab,
-                KeyCode::BackTab => FleetKey::BackTab,
-                KeyCode::Left => FleetKey::Left,
-                KeyCode::Right => FleetKey::Right,
-                KeyCode::Char(' ') => FleetKey::Space,
-                KeyCode::Char(character) => FleetKey::Char(character),
-                _ => return None,
-            };
-            return Some(AppEvent::FleetPanelCanonicalKey(key));
-        }
-        match key_event.code {
-            KeyCode::F(5) => Some(AppEvent::FleetPanelRefresh),
-            KeyCode::Char('r') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(AppEvent::FleetPanelRefresh)
-            }
-            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FleetPanelMoveUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FleetPanelMoveDown),
-            KeyCode::Tab => Some(AppEvent::FleetPanelOptionNext),
-            KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
-            KeyCode::Enter => Some(AppEvent::FleetPanelAnswer),
-            KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
-            KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
-            // `n` is claimed twice: deny (the y/n pair the APPROVE detail pane
-            // advertises) and new-ATC. Context decides: on an APPROVE row `n`
-            // denies; anywhere else it opens the new-ATC name prompt.
-            KeyCode::Char('n') => {
-                let canonical_approval = state
-                    .fleet_panel_state
-                    .canonical
-                    .selected_session()
-                    .map(|row| row.attention_state.eq_ignore_ascii_case("APPROVAL"));
-                if canonical_approval
-                    .unwrap_or_else(|| state.fleet_panel_state.selected_kind() == Some("APPROVE"))
-                {
-                    Some(AppEvent::FleetPanelDeny)
-                } else {
-                    Some(AppEvent::FleetPanelNewAtcOpen)
-                }
-            }
-            // `m` for messages: opens the copilot chat surface. Forwarded to
-            // the pane reducer, which owns the mode; once the chat is open the
-            // pane reports a modal and EVERY key routes above, so the composer
-            // gets its printable characters without a second key table here.
-            KeyCode::Char('m') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m'))),
-            // `M` is the same surface over the SELECTED session's own thread.
-            // Forwarded like `m`: once the chat is open the pane reports a
-            // modal and every key routes above it.
-            KeyCode::Char('M') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('M'))),
-            // `N` opens the broadcast-channel form (name, then members). Not
-            // lowercase `n`: that char is already this table's deny / new-ATC
-            // key, and the obvious `C` is a reserved hangar router char (#450).
-            // Forwarded like `m`/`M`; once the form is open the pane reports a
-            // modal and every key routes above.
-            KeyCode::Char('N') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N'))),
-            KeyCode::Char('r') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r'))),
-            KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
-            // Lowercase `s` belongs to the structured interview queue. Keep
-            // it reserved even if a concurrent snapshot just closed that
-            // queue: a stale key must never turn a submitted answer into Stop.
-            // Destructive stop remains available on uppercase `S`.
-            KeyCode::Char('S') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
-            KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
-            KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c'))),
-            KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
-            KeyCode::Char('!') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill)),
-            KeyCode::Char('#') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Archive)),
-            KeyCode::Char('t' | 'p' | 'a') | KeyCode::Right | KeyCode::Char('A') => {
-                let key = match key_event.code {
-                    KeyCode::Right => FleetKey::Right,
-                    // The pane reducer binds takeover-attach to lowercase `a`
-                    // (uppercase `A` is a reserved hangar router key, #450); the
-                    // host panel keeps its `A` shortcut and forwards onto it.
-                    KeyCode::Char('A') => FleetKey::Char('a'),
-                    KeyCode::Char(character) => FleetKey::Char(character),
-                    _ => unreachable!(),
-                };
-                Some(AppEvent::FleetPanelCanonicalKey(key))
-            }
-            KeyCode::Char('1') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput)),
-            KeyCode::Char('2') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle)),
-            KeyCode::Char('3') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed)),
-            KeyCode::Char('4') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running)),
-            KeyCode::Char('5') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::All)),
-            _ => None,
-        }
-    }
-
-    // AINB 2.0: Home screen key handling (V2 with sidebar and card grid)
     fn handle_home_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
         use crate::components::home_screen_v2::HomeScreenFocus;
 
@@ -3278,10 +3336,8 @@ impl EventHandler {
         // i/I case-pair confusion with Stats ('i'). 'b' is otherwise
         // unused across every screen handler.
         match key_event.code {
-            KeyCode::Char('b') => return Some(AppEvent::GoToInbox),
             // One daemon surface: health, hook status, and repair controls.
             KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
-            KeyCode::Char('f') => return Some(AppEvent::GoToFleetPanel),
             KeyCode::Char('o') => return Some(AppEvent::GoToConfig),
             KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
             KeyCode::Char('i') => return Some(AppEvent::GoToStats),
@@ -3503,266 +3559,6 @@ impl EventHandler {
                     _ => None,
                 }
             }
-        }
-    }
-
-    fn reduce_fleet_event(state: &mut AppState, event: FleetEvent) {
-        let intent = state.fleet_panel_state.reduce_canonical(event);
-        if let Some(intent) = intent {
-            Self::dispatch_fleet_intent(state, intent);
-        }
-    }
-
-    fn dispatch_fleet_intent(state: &mut AppState, intent: FleetIntent) {
-        use ainb_hangar_proto::fleet::{
-            ActionReceiptStatus, ControlAction, FleetActionParams, FleetBroadcastParams,
-        };
-
-        match intent {
-            FleetIntent::Execute {
-                session_key,
-                expected_version,
-                action,
-            } => {
-                // An Offline daemon means the stream is down and cached rows are
-                // only good for "safe inspection" (see FleetDaemonHealth), which
-                // is exactly what the panel banner promises the user. Destructive
-                // and structured actions must not dispatch against that stale
-                // view. F5 / Ctrl-R force-refreshes back to Online, which is the
-                // intended way out of this state.
-                //
-                // Gated on Offline, not on `!online`: a merely Connecting
-                // subscription has not found anything wrong, and refusing there
-                // blocked every action on the first frame after opening Fleet.
-                // A genuinely dead daemon still fails loudly, the action RPC
-                // returns ActionFailed.
-                if action.is_high_risk() && state.fleet_panel_state.daemon_offline() {
-                    Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::ActionFailed {
-                            session_key,
-                            detail: "Fleet daemon offline, high-risk action disabled".into(),
-                        },
-                    );
-                    return;
-                }
-                let action_label = match &action {
-                    FleetAction::StructuredAnswer { .. } => "answered ask",
-                    FleetAction::DismissStructured { .. } => "rejected interview",
-                    FleetAction::ReleaseStructured { .. } => "opened Claude picker",
-                    FleetAction::ReconcileStructured { .. } => "reconciled interview",
-                    FleetAction::Approve { .. } => "approved request",
-                    FleetAction::Deny { .. } => "denied request",
-                    FleetAction::SendText { .. } => "sent prompt",
-                    FleetAction::VerifiedPicker { .. } => "routed picker",
-                    FleetAction::Continue => "continued turn",
-                    FleetAction::Retry => "retried turn",
-                    FleetAction::Interrupt => "interrupted turn",
-                    FleetAction::Stop => "stopped session",
-                    FleetAction::Restart => "restarted session",
-                    FleetAction::Kill => "killed session",
-                    FleetAction::Archive => "archived session",
-                };
-                let action = match action.into_control_action() {
-                    Ok(action) => action,
-                    Err(detail) => {
-                        Self::reduce_fleet_event(
-                            state,
-                            FleetEvent::ActionFailed {
-                                session_key,
-                                detail,
-                            },
-                        );
-                        return;
-                    }
-                };
-                let params = FleetActionParams {
-                    session_key: session_key.clone(),
-                    expected_version,
-                    request_id: format!("fleet-host-{}", uuid::Uuid::new_v4()),
-                    action,
-                };
-                let sink = state.fleet_panel_state.canonical_update_sink();
-                std::thread::spawn(move || {
-                    let events = match crate::fleet::control::execute_fleet_action_blocking(params)
-                    {
-                        Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => vec![
-                            FleetEvent::ActionSucceeded {
-                                session_key: session_key.clone(),
-                            },
-                            FleetEvent::Feedback(format!(
-                                "{action_label}: {:?}{}",
-                                receipt.status,
-                                receipt
-                                    .detail
-                                    .as_deref()
-                                    .map_or(String::new(), |detail| { format!(": {detail}") })
-                            )),
-                        ],
-                        Ok(receipt) => vec![FleetEvent::ActionFailed {
-                            session_key,
-                            detail: receipt
-                                .detail
-                                .unwrap_or_else(|| format!("delivery status {:?}", receipt.status)),
-                        }],
-                        Err(detail) => vec![FleetEvent::ActionFailed {
-                            session_key,
-                            detail,
-                        }],
-                    };
-                    if let Ok(mut updates) = sink.lock() {
-                        updates.extend(events);
-                    }
-                });
-            }
-            FleetIntent::Start {
-                provider,
-                cwd,
-                prompt,
-            } => {
-                if state.fleet_panel_state.daemon_offline() {
-                    Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::ActionFailed {
-                            session_key: "start:codex".into(),
-                            detail: "Fleet daemon offline, managed start disabled".into(),
-                        },
-                    );
-                    return;
-                }
-                let session_key = "start:codex".to_string();
-                let params = FleetActionParams {
-                    session_key: session_key.clone(),
-                    expected_version: 1,
-                    request_id: format!("fleet-host-start-{}", uuid::Uuid::new_v4()),
-                    action: ControlAction::Start {
-                        provider,
-                        cwd,
-                        prompt,
-                    },
-                };
-                let sink = state.fleet_panel_state.canonical_update_sink();
-                std::thread::spawn(move || {
-                    let event = match crate::fleet::control::execute_fleet_action_blocking(params) {
-                        Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => {
-                            FleetEvent::ActionSucceeded { session_key }
-                        }
-                        Ok(receipt) => FleetEvent::ActionFailed {
-                            session_key,
-                            detail: receipt
-                                .detail
-                                .unwrap_or_else(|| format!("delivery status {:?}", receipt.status)),
-                        },
-                        Err(detail) => FleetEvent::ActionFailed {
-                            session_key,
-                            detail,
-                        },
-                    };
-                    if let Ok(mut updates) = sink.lock() {
-                        updates.push(event);
-                    }
-                });
-            }
-            FleetIntent::Broadcast {
-                text,
-                recipient_keys,
-                idempotency_key,
-                max_parallel: _,
-                retry_failures_only: _,
-            } => {
-                let params = FleetBroadcastParams {
-                    target_keys: recipient_keys,
-                    text,
-                    idempotency_key,
-                };
-                let sink = state.fleet_panel_state.canonical_update_sink();
-                std::thread::spawn(move || {
-                    let event =
-                        match crate::fleet::control::execute_fleet_broadcast_blocking(params) {
-                            Ok(result) => FleetEvent::BroadcastReceipts(
-                                result
-                                    .receipts
-                                    .into_iter()
-                                    .map(|receipt| BroadcastReceipt {
-                                        session_key: receipt.session_key,
-                                        status: match receipt.status {
-                                            ActionReceiptStatus::Delivered => {
-                                                ReceiptStatus::Delivered
-                                            }
-                                            ActionReceiptStatus::Failed
-                                            | ActionReceiptStatus::Rejected => {
-                                                ReceiptStatus::Failed
-                                            }
-                                            ActionReceiptStatus::Pending
-                                            | ActionReceiptStatus::Unknown => {
-                                                ReceiptStatus::Unknown
-                                            }
-                                        },
-                                        detail: receipt.detail,
-                                    })
-                                    .collect(),
-                            ),
-                            Err(detail) => FleetEvent::BroadcastFailed { detail },
-                        };
-                    if let Ok(mut updates) = sink.lock() {
-                        updates.push(event);
-                    }
-                });
-            }
-            // The copilot chat's three RPCs, on the panel's own worker. One
-            // executor, two doors: this key path and the frame tick that polls
-            // for the reply.
-            FleetIntent::Chat(intent) => state.fleet_panel_state.dispatch_chat_intent(intent),
-            FleetIntent::AttachEmbedded {
-                session_key,
-                tmux_target,
-            } => {
-                if state.embed.is_some() {
-                    state.release_interactive_pane();
-                }
-                let (terminal_cols, terminal_rows) =
-                    crossterm::terminal::size().unwrap_or((160, 48));
-                match crate::tmux::EmbedClient::attach_target(
-                    &tmux_target,
-                    terminal_rows.saturating_sub(2),
-                    terminal_cols.saturating_div(2),
-                ) {
-                    Ok(client) => {
-                        state.embed = Some(client);
-                        state.embed_session = Some(tmux_target.clone());
-                        state.embed_pane_area = None;
-                        state.focused_pane = crate::app::state::FocusedPane::Preview;
-                        Self::reduce_fleet_event(
-                            state,
-                            FleetEvent::Feedback(format!(
-                                "embedded {session_key} at exact target {tmux_target}"
-                            )),
-                        );
-                    }
-                    Err(error) => Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::Feedback(format!("attach failed: {error}")),
-                    ),
-                }
-            }
-            FleetIntent::AttachFullscreen {
-                session_key,
-                tmux_target,
-            } => match Self::prepare_exact_fleet_attach(&tmux_target) {
-                Ok(session_name) => {
-                    state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session_name));
-                    Self::reduce_fleet_event(
-                        state,
-                        FleetEvent::Feedback(format!(
-                            "attaching {session_key} at exact target {tmux_target}"
-                        )),
-                    );
-                }
-                Err(detail) => Self::reduce_fleet_event(
-                    state,
-                    FleetEvent::Feedback(format!("attach failed: {detail}")),
-                ),
-            },
         }
     }
 
@@ -4616,6 +4412,61 @@ impl EventHandler {
             AppEvent::SwitchToTerminal => {
                 // TODO: Implement terminal view
             }
+            // The surface already folded the key in; nothing left to reduce.
+            AppEvent::Consumed => {}
+            AppEvent::SessionTabNext | AppEvent::SessionTabPrev => {
+                use crate::app::state::FocusedPane;
+                use crate::components::session_tabs::{SessionTab, cycle, resolve};
+                let forward = matches!(event, AppEvent::SessionTabNext);
+                let from = resolve(state, state.session_tab);
+                state.session_tab = cycle(state, from, forward);
+                // Focus follows the tab. The composer tabs take typed input, so
+                // the right pane owns the keyboard there; `preview` and `log`
+                // do not, so the list keeps it. This is the whole of what
+                // `SwitchPaneFocus` used to provide, now derived rather than
+                // toggled by a second key.
+                state.focused_pane = match state.session_tab {
+                    SessionTab::Ask | SessionTab::Thread | SessionTab::Copilot => {
+                        FocusedPane::LiveLogs
+                    }
+                    SessionTab::Preview | SessionTab::Log => FocusedPane::Sessions,
+                };
+                state.ui_needs_refresh = true;
+            }
+            AppEvent::SessionAskSend => {
+                let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
+                else {
+                    state.add_info_notification("nothing is waiting on an answer here".to_string());
+                    return;
+                };
+                // The row's own identity for the verified send: the provider
+                // session id is not knowable here, so the tmux name is the
+                // identity the send path correlates on, with the worktree as
+                // the cwd its ambiguity guard checks.
+                let (session_id, cwd) = state.get_selected_session().map_or_else(
+                    || (String::new(), String::new()),
+                    |session| {
+                        (
+                            session.tmux_session_name.clone().unwrap_or_default(),
+                            session.workspace_path.clone(),
+                        )
+                    },
+                );
+                state.ask_state.retarget(&chip);
+                if let Err(refusal) = state.ask_state.send(&chip, &session_id, &cwd) {
+                    // Refusals are shown, never swallowed: a send that silently
+                    // does nothing is the failure mode this screen exists to
+                    // remove.
+                    state.add_info_notification(refusal);
+                }
+                state.ui_needs_refresh = true;
+            }
+            // The composer tabs fire their own send through the chat reducer,
+            // which is reached by the key routing above. Reaching here means
+            // Enter was pressed with no composer open.
+            AppEvent::SessionTabComposerSend => {
+                state.add_info_notification("open a conversation first".to_string());
+            }
             AppEvent::SwitchPaneFocus => {
                 use crate::app::state::FocusedPane;
                 let old_pane = state.focused_pane.clone();
@@ -5257,19 +5108,9 @@ impl EventHandler {
                     SidebarItem::Sessions => {
                         state.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
-                    SidebarItem::Inbox => {
-                        // Route through the canonical event so the
-                        // origin-save (and its self-clobber guard) has
-                        // exactly one code path.
-                        Self::process_event(AppEvent::GoToInbox, state);
-                    }
                     SidebarItem::Daemons => {
                         // Same canonical-event routing as Inbox.
                         Self::process_event(AppEvent::GoToDaemons, state);
-                    }
-                    SidebarItem::Fleet => {
-                        // Same canonical-event routing as Inbox/Daemons.
-                        Self::process_event(AppEvent::GoToFleetPanel, state);
                     }
                     SidebarItem::Recovery => {
                         state.session_recovery_state.refresh();
@@ -6577,14 +6418,6 @@ impl EventHandler {
                     }
                 }
             }
-            AppEvent::GoToInbox => {
-                tracing::info!("Navigating to Inbox");
-                if state.current_screen != screen_ids::INBOX {
-                    state.previous_screen = Some(state.current_screen.clone());
-                }
-                state.current_screen = screen_ids::INBOX.to_string();
-                state.inbox_state.refresh();
-            }
             AppEvent::GoToDaemons => {
                 tracing::info!("Navigating to Daemons");
                 if state.current_screen != screen_ids::DAEMONS {
@@ -6597,115 +6430,6 @@ impl EventHandler {
                 // MCP, Headroom, Hangar and notifyd are rows in that same
                 // collect, so there is nothing else to arm.
                 state.daemons_state.arm();
-            }
-            AppEvent::GoToFleetPanel => {
-                tracing::info!("Navigating to Fleet panel");
-                if state.current_screen != screen_ids::FLEET_PANEL {
-                    state.previous_screen = Some(state.current_screen.clone());
-                }
-                state.current_screen = screen_ids::FLEET_PANEL.to_string();
-                // Open the read-only store + load current_state so the first
-                // frame is populated. A single indexed SELECT over a small table
-                // — cheap on the event loop, same as Inbox's refresh-on-entry.
-                state.fleet_panel_state.arm();
-            }
-            AppEvent::FleetPanelMoveUp => {
-                state.fleet_panel_state.move_up(1);
-            }
-            AppEvent::FleetPanelMoveDown => {
-                state.fleet_panel_state.move_down(1);
-            }
-            AppEvent::FleetPanelOptionNext => {
-                let canonical_ask = state
-                    .fleet_panel_state
-                    .canonical
-                    .selected_session()
-                    .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("ASK"));
-                if canonical_ask {
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Down));
-                } else {
-                    state.fleet_panel_state.option_next();
-                }
-            }
-            AppEvent::FleetPanelOptionPrev => {
-                let canonical_ask = state
-                    .fleet_panel_state
-                    .canonical
-                    .selected_session()
-                    .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("ASK"));
-                if canonical_ask {
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
-                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Up));
-                } else {
-                    state.fleet_panel_state.option_prev();
-                }
-            }
-            AppEvent::FleetPanelRefresh => state.fleet_panel_state.force_refresh(),
-            AppEvent::FleetPanelNewAtcOpen => state.fleet_panel_state.open_new_atc(),
-            AppEvent::FleetPanelNewAtcType(c) => state.fleet_panel_state.new_atc_type(c),
-            AppEvent::FleetPanelNewAtcBackspace => state.fleet_panel_state.new_atc_backspace(),
-            AppEvent::FleetPanelNewAtcCancel => state.fleet_panel_state.new_atc_cancel(),
-            AppEvent::FleetPanelNewAtcSubmit => state.fleet_panel_state.new_atc_submit(),
-            AppEvent::FleetPanelAnswer => {
-                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
-            }
-            AppEvent::FleetPanelBroadcast => {
-                // The pane reducer binds broadcast to lowercase `b` (uppercase `B`
-                // is a reserved hangar router key, #450); the host panel's `B`
-                // shortcut forwards onto it.
-                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('b')));
-            }
-            AppEvent::FleetPanelApprove => {
-                match selected_approval_action(&state.fleet_panel_state.canonical, true) {
-                    Ok(action) => {
-                        Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
-                    }
-                    Err(detail) => Self::reduce_fleet_event(state, FleetEvent::Feedback(detail)),
-                }
-            }
-            AppEvent::FleetPanelDeny => {
-                match selected_approval_action(&state.fleet_panel_state.canonical, false) {
-                    Ok(action) => {
-                        Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
-                    }
-                    Err(detail) => Self::reduce_fleet_event(state, FleetEvent::Feedback(detail)),
-                }
-            }
-            AppEvent::FleetPanelCanonicalKey(key) => {
-                Self::reduce_fleet_event(state, FleetEvent::Key(key));
-                // Every modal on this panel opens by routing a canonical key
-                // into the shared reducer, so "the key did nothing" and "the
-                // reducer never saw it" look identical from the outside. One
-                // line at the seam tells them apart, which black-box probing
-                // could not: run with `RUST_LOG=ainb=debug` and read the JSONL
-                // under `~/.agents-in-a-box/logs/`.
-                tracing::debug!(
-                    target: "ainb::app::events",
-                    ?key,
-                    modal_open = state.fleet_panel_state.canonical_modal_open(),
-                    "fleet canonical key reduced"
-                );
-            }
-            AppEvent::FleetPanelAnswerCardClick {
-                column,
-                row,
-                area_width,
-                area_height,
-            } => Self::reduce_fleet_event(
-                state,
-                FleetEvent::AnswerCardClick {
-                    column,
-                    row,
-                    area_width,
-                    area_height,
-                },
-            ),
-            AppEvent::FleetPanelSetFilter(filter) => {
-                Self::reduce_fleet_event(state, FleetEvent::SetFilter(filter));
-            }
-            AppEvent::FleetPanelCanonicalAction(action) => {
-                Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
@@ -6720,63 +6444,6 @@ impl EventHandler {
                 }
                 state.current_screen = screen_ids::HANGAR.to_string();
             }
-            AppEvent::InboxMoveUp => state.inbox_state.move_up(1),
-            AppEvent::InboxMoveDown => state.inbox_state.move_down(1),
-            AppEvent::InboxPageUp => state.inbox_state.move_up(10),
-            AppEvent::InboxPageDown => state.inbox_state.move_down(10),
-            AppEvent::InboxOpenSelected => {
-                // Capture the cwd before mark_selected_read invalidates
-                // selection ordering on refresh.
-                let row_cwd =
-                    state.inbox_state.selected_row().map(|r| r.cwd.clone()).unwrap_or_default();
-                state.inbox_state.mark_selected_read();
-                // cwd-based jump-to-tmux: find the ainb session whose
-                // workspace_path matches the notification's cwd (exact
-                // or prefix). If found, surface its tmux session name
-                // for the existing AttachToOtherTmux async action so
-                // ainb's tmux subsystem owns the attach itself.
-                if !row_cwd.is_empty() {
-                    let target = state
-                        .workspaces
-                        .iter()
-                        .find(|ws| {
-                            let p = ws.path.to_string_lossy().to_string();
-                            row_cwd == p || row_cwd.starts_with(&format!("{p}/"))
-                        })
-                        .and_then(|ws| {
-                            // Prefer a non-shell session (an agent-running
-                            // one) since hook events come from agents,
-                            // not shells. Fall back to the workspace
-                            // shell if no agent session has tmux.
-                            ws.sessions.iter().find_map(|s| s.tmux_session_name.clone()).or_else(
-                                || ws.shell_session.as_ref().map(|s| s.tmux_session_name.clone()),
-                            )
-                        });
-                    if let Some(tmux_name) = target {
-                        tracing::info!(
-                            cwd = %row_cwd,
-                            tmux = %tmux_name,
-                            "inbox: jumping to tmux session"
-                        );
-                        state.pending_async_action =
-                            Some(crate::app::state::AsyncAction::AttachToOtherTmux(tmux_name));
-                    } else {
-                        state.add_info_notification(format!(
-                            "no ainb session matches cwd {row_cwd}"
-                        ));
-                    }
-                }
-            }
-            AppEvent::InboxDismissSelected => {
-                state.inbox_state.dismiss_selected();
-            }
-            AppEvent::InboxDismissVisible => {
-                let n = state.inbox_state.dismiss_visible();
-                state.add_info_notification(format!("dismissed {n} row(s)"));
-            }
-            AppEvent::InboxToggleArchived => state.inbox_state.toggle_archived(),
-            AppEvent::InboxCycleAgent => state.inbox_state.cycle_agent_filter(),
-            AppEvent::InboxRefresh => state.inbox_state.refresh(),
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
                 state.session_recovery_state.refresh();
@@ -8872,19 +8539,6 @@ mod panel_back_tests {
         );
     }
 
-    #[test]
-    fn go_to_inbox_saves_origin_and_panel_back_returns_there() {
-        let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
-
-        EventHandler::process_event(AppEvent::GoToInbox, &mut state);
-        assert_eq!(state.current_screen, ids::INBOX);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
-
-        EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
-    }
-
     /// A click anywhere on the published menu-bar rect toggles the legend
     /// (the mouse twin of ⇧M); a click above it does not.
     #[test]
@@ -9186,357 +8840,11 @@ mod panel_back_tests {
     #[test]
     fn panel_back_falls_back_to_home_when_no_origin() {
         let mut state = AppState::default();
-        state.current_screen = ids::INBOX.to_string();
+        state.current_screen = ids::DAEMONS.to_string();
         state.previous_screen = None;
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::HOME);
-    }
-
-    /// The overloaded `n` key resolves by selection context: deny on an
-    /// APPROVE row (pairing with the detail pane's y/n hint), the new-ATC
-    /// name prompt everywhere else. `y` approves only-and-always.
-    #[test]
-    fn fleet_panel_n_is_deny_on_approve_row_new_atc_elsewhere() {
-        use crossterm::event::{KeyCode, KeyEvent};
-        let mut state = AppState::default();
-        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
-        let row = |kind: &str| ainb_plugin_notifyd::StateRow {
-            session_id: "s-1".to_string(),
-            cwd: "/p".to_string(),
-            kind: kind.to_string(),
-            context: None,
-            parent: None,
-            last_event_ts: 1,
-            source: "hook".to_string(),
-        };
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-
-        state.fleet_panel_state.rows = vec![row("APPROVE")];
-        state.fleet_panel_state.selected = 0;
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('n')),
-            Some(AppEvent::FleetPanelDeny)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('y')),
-            Some(AppEvent::FleetPanelApprove)
-        ));
-
-        state.fleet_panel_state.rows = vec![row("ASK")];
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('n')),
-            Some(AppEvent::FleetPanelNewAtcOpen)
-        ));
-        // Empty panel: nothing to deny → n still opens the prompt.
-        state.fleet_panel_state.rows.clear();
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('n')),
-            Some(AppEvent::FleetPanelNewAtcOpen)
-        ));
-    }
-
-    /// Fleet control panel: navigating in saves the origin, and Esc/q route
-    /// through `PanelBack` to return there (same discipline as Daemons). Also
-    /// asserts the action keys map to their events so the panel is interactive,
-    /// not just a read-only view.
-    #[test]
-    fn fleet_panel_navigation_and_key_routing() {
-        use crossterm::event::{KeyCode, KeyEvent};
-
-        let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
-
-        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
-        assert_eq!(state.current_screen, ids::FLEET_PANEL);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
-
-        // Action + navigation keys resolve to the panel's events. (AppEvent has
-        // no PartialEq, so match each explicitly.)
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-        assert!(matches!(
-            route(&mut state, KeyCode::Down),
-            Some(AppEvent::FleetPanelMoveDown)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Up),
-            Some(AppEvent::FleetPanelMoveUp)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Tab),
-            Some(AppEvent::FleetPanelOptionNext)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::BackTab),
-            Some(AppEvent::FleetPanelOptionPrev)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Enter),
-            Some(AppEvent::FleetPanelAnswer)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('a')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('a')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('B')),
-            Some(AppEvent::FleetPanelBroadcast)
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('r')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('r')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('c')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('c')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::F(5)),
-            Some(AppEvent::FleetPanelRefresh)
-        ));
-        assert!(matches!(
-            EventHandler::handle_key_event(
-                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL),
-                &mut state
-            ),
-            Some(AppEvent::FleetPanelRefresh)
-        ));
-
-        // Esc/q pop back to the saved origin, not hardcoded home.
-        let esc = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Esc), &mut state);
-        assert!(
-            matches!(esc, Some(AppEvent::PanelBack)),
-            "fleet panel Esc must resolve to PanelBack; got {esc:?}"
-        );
-        EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(
-            state.current_screen,
-            ids::SESSION_LIST,
-            "fleet panel must pop back to the screen it was opened from"
-        );
-    }
-
-    #[test]
-    fn fleet_panel_empty_roster_routes_start_filters_and_lifecycle_to_canonical_reducer() {
-        use crossterm::event::{KeyCode, KeyEvent};
-
-        let mut state = AppState::default();
-        state.current_screen = ids::FLEET_PANEL.to_string();
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-
-        let start = route(&mut state, KeyCode::Char('t'));
-        assert!(matches!(
-            start,
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('t')))
-        ));
-        EventHandler::process_event(start.unwrap(), &mut state);
-        assert!(state.fleet_panel_state.canonical_modal_open());
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('1')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('1')))
-        ));
-        EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
-        assert!(!state.fleet_panel_state.canonical_modal_open());
-
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('1')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('2')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('3')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('4')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('5')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
-        ));
-        for legacy in ['f', 'o', 'd', 'l', 'x', 'v'] {
-            assert!(
-                route(&mut state, KeyCode::Char(legacy)).is_none(),
-                "legacy Fleet filter key {legacy:?} must be unbound"
-            );
-        }
-        // `m` is the one legacy filter key deliberately re-bound: it opens the
-        // copilot chat, the sibling of `b` for broadcast. It is pinned here
-        // rather than dropped from the list, so re-using another old filter key
-        // still has to be an explicit decision rather than a silent one, and so
-        // the panel's help bar (which advertises `m chat`) cannot drift from
-        // what the router actually does.
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('m')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('m')))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('R')),
-            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
-        ));
-        assert!(
-            route(&mut state, KeyCode::Char('s')).is_none(),
-            "lowercase s is reserved for structured-interview submit"
-        );
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('S')),
-            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop))
-        ));
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('!')),
-            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill))
-        ));
-    }
-
-    /// #667: `N` on the Fleet panel is advertised in the help bar
-    /// (`N channel`) but was reported dead in a real tmux run — no form, no
-    /// feedback. Every layer looked correct on inspection (router arm,
-    /// shared reducer, renderer match), so this pins the mechanism at the
-    /// host boundary: routing THROUGH `process_event` into a real render
-    /// pass, not just checking which `AppEvent` the router returns.
-    ///
-    /// It also pins down the second reported symptom (subsequent keys, and
-    /// "chat needs two Escapes") as the SAME modal-capture behaviour, not a
-    /// separate bug: once `N` opens the channel-create form, the panel is
-    /// modal and every key — including the lens digits — routes into the
-    /// canonical reducer until a single Esc closes it.
-    #[test]
-    fn fleet_panel_shift_n_opens_and_renders_channel_create_modal() {
-        use crossterm::event::{KeyCode, KeyEvent};
-
-        let mut state = AppState::default();
-        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
-
-        // Router arm: `N` must resolve to the canonical forward, matching
-        // the plugin's `FleetKey::Char('N')` arm (fleet.rs:1351).
-        let n = route(&mut state, KeyCode::Char('N'));
-        assert!(
-            matches!(
-                n,
-                Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('N')))
-            ),
-            "`N` must route to FleetPanelCanonicalKey(Char('N')); got {n:?}"
-        );
-        EventHandler::process_event(n.unwrap(), &mut state);
-        assert!(
-            state.fleet_panel_state.canonical_modal_open(),
-            "`N` opened nothing at the host layer"
-        );
-
-        // Render pass: the modal must actually paint, not just flip a mode
-        // flag no renderer reaches.
-        let backend = ratatui::backend::TestBackend::new(100, 24);
-        let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        terminal
-            .draw(|f| {
-                crate::components::fleet_panel::render(f, f.area(), &mut state.fleet_panel_state)
-            })
-            .unwrap();
-        let rendered: String =
-            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-        assert!(
-            rendered.contains("New channel"),
-            "channel-create modal did not render; got:\n{rendered}"
-        );
-
-        // Modal capture: while it is open, a lens digit must NOT fall
-        // through to FleetPanelSetFilter — it belongs to the canonical
-        // reducer, same as every other open Fleet mode.
-        let five = route(&mut state, KeyCode::Char('5'));
-        assert!(
-            matches!(five, Some(AppEvent::FleetPanelCanonicalKey(_))),
-            "with the channel-create modal open, '5' must route into the \
-             canonical reducer, not FleetPanelSetFilter; got {five:?}"
-        );
-
-        // One Esc closes it and routing returns to normal — pins that this
-        // form needs exactly one Esc, unlike the chat surface's reported two.
-        EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
-        assert!(!state.fleet_panel_state.canonical_modal_open());
-        assert!(matches!(
-            route(&mut state, KeyCode::Char('5')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
-        ));
-    }
-
-    #[test]
-    fn fleet_embedded_attach_uses_exact_target_without_fullscreen_async_action() {
-        if std::process::Command::new("tmux").arg("-V").status().is_err() {
-            eprintln!("SKIP: tmux unavailable");
-            return;
-        }
-        let _registry = crate::tmux::pty_wrapper::lock_registry_for_test();
-        let session = format!("ainb-fleet-embed-{}", uuid::Uuid::new_v4().simple());
-        struct SessionGuard(String);
-        impl Drop for SessionGuard {
-            fn drop(&mut self) {
-                let _ = std::process::Command::new("tmux")
-                    .args(["kill-session", "-t", &format!("={}", self.0)])
-                    .status();
-            }
-        }
-        let guard = SessionGuard(session.clone());
-        let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &session, "-n", "fleet"])
-            .status()
-            .expect("create exact-target test session");
-        assert!(created.success());
-        let split = std::process::Command::new("tmux")
-            .args(["split-window", "-d", "-t", &format!("{session}:fleet")])
-            .status()
-            .expect("create second pane");
-        assert!(split.success());
-        let panes = std::process::Command::new("tmux")
-            .args([
-                "list-panes",
-                "-t",
-                &format!("{session}:fleet"),
-                "-F",
-                "#{pane_index}",
-            ])
-            .output()
-            .expect("list exact-target panes");
-        let pane = String::from_utf8_lossy(&panes.stdout)
-            .lines()
-            .last()
-            .expect("second pane index")
-            .to_string();
-        let target = format!("{session}:fleet.{pane}");
-
-        let mut state = AppState::default();
-        state.current_screen = ids::FLEET_PANEL.to_string();
-        EventHandler::dispatch_fleet_intent(
-            &mut state,
-            FleetIntent::AttachEmbedded {
-                session_key: "codex:thread-1".into(),
-                tmux_target: target.clone(),
-            },
-        );
-
-        assert!(state.embed.is_some(), "embedded client must be live");
-        assert_eq!(state.embed_session.as_deref(), Some(target.as_str()));
-        assert_eq!(state.focused_pane, crate::app::state::FocusedPane::Preview);
-        assert!(
-            state.pending_async_action.is_none(),
-            "embedded attach must not route through fullscreen AttachHandler"
-        );
-        let active = std::process::Command::new("tmux")
-            .args(["display-message", "-p", "-t", &target, "#{pane_active}"])
-            .output()
-            .expect("read exact pane state");
-        assert_eq!(String::from_utf8_lossy(&active.stdout).trim(), "1");
-
-        state.release_interactive_pane();
-        drop(guard);
     }
 
     /// Learnings (memory) is a plugin screen — Esc on it resolves to
@@ -10402,35 +9710,6 @@ mod slash_command_dispatch_tests {
 }
 
 #[cfg(test)]
-mod fleet_offline_action_tests {
-    use super::*;
-
-    #[test]
-    fn offline_daemon_refuses_high_risk_action_before_dispatch() {
-        let mut state = AppState::default();
-        assert!(!state.fleet_panel_state.daemon_online());
-
-        EventHandler::dispatch_fleet_intent(
-            &mut state,
-            FleetIntent::Execute {
-                session_key: "codex:thread-1".into(),
-                expected_version: 4,
-                action: FleetAction::Kill,
-            },
-        );
-
-        assert!(state.pending_async_action.is_none());
-        assert!(
-            state
-                .fleet_panel_state
-                .canonical
-                .feedback()
-                .is_some_and(|message| message.contains("high-risk action disabled"))
-        );
-    }
-}
-
-#[cfg(test)]
 mod configure_back_persist_tests {
     use super::worth_persisting_repo_defaults;
     use crate::config::session_defaults::SessionDefaults;
@@ -10566,5 +9845,215 @@ mod hangar_daemon_persist_tests {
             );
             assert!(PersistOutcome::default().message().is_none());
         });
+    }
+}
+
+#[cfg(test)]
+mod session_composer_key_tests {
+    use super::*;
+    use crate::app::screens::ids;
+    use crate::components::session_tabs::SessionTab;
+    use crate::fleet::chat_host::ChatHost;
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn press(state: &mut AppState, code: KeyCode) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), state)
+    }
+
+    /// The sessions screen with a LIVE copilot composer.
+    fn composing() -> AppState {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state.session_tab = SessionTab::Copilot;
+        state.copilot_chat = Some(ChatHost::copilot());
+        assert!(
+            state.session_composer_captures_text(),
+            "the fixture must actually be capturing, or every assertion below is vacuous"
+        );
+        state
+    }
+
+    /// THE safety test. The sessions screen binds bare `d` to delete-session,
+    /// `D` to delete-marked and `q` to leave. A message typed into a composer
+    /// must not fire any of them, one character at a time.
+    #[test]
+    fn typing_into_a_composer_never_fires_a_session_shortcut() {
+        for code in [
+            KeyCode::Char('d'),
+            KeyCode::Char('D'),
+            KeyCode::Char('x'),
+            KeyCode::Char('e'),
+            KeyCode::Char('n'),
+            KeyCode::Char('q'),
+            KeyCode::Char(' '),
+        ] {
+            let mut state = composing();
+            let event = press(&mut state, code);
+            assert!(
+                matches!(event, Some(AppEvent::Consumed)),
+                "{code:?} in a composer produced {event:?}"
+            );
+        }
+    }
+
+    /// And the same keys still work the moment the composer is not capturing.
+    /// Without this the test above passes for a handler that eats everything
+    /// forever.
+    #[test]
+    fn the_same_keys_still_work_with_no_composer_open() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        assert!(matches!(
+            press(&mut state, KeyCode::Char('d')),
+            Some(AppEvent::DeleteSession)
+        ));
+    }
+
+    /// `Tab` belongs to the strip even while composing, or the operator is
+    /// trapped on a pane they cannot leave except by Esc.
+    #[test]
+    fn tab_still_moves_the_strip_from_inside_a_composer() {
+        let mut state = composing();
+        assert!(matches!(
+            press(&mut state, KeyCode::Tab),
+            Some(AppEvent::SessionTabNext)
+        ));
+    }
+
+    /// A digit typed into a message is a digit. The footer stops advertising
+    /// the attach digits here for exactly this reason.
+    #[test]
+    fn a_digit_types_rather_than_attaching_while_composing() {
+        let mut state = composing();
+        let event = press(&mut state, KeyCode::Char('3'));
+        assert!(
+            matches!(event, Some(AppEvent::Consumed)),
+            "a digit must reach the composer, not attach: {event:?}"
+        );
+    }
+
+    /// Esc closes the conversation and lands on the tab that is never disabled.
+    #[test]
+    fn esc_leaves_the_composer_for_a_pane_that_is_always_live() {
+        let mut state = composing();
+        press(&mut state, KeyCode::Esc);
+        assert_eq!(state.session_tab, SessionTab::Preview);
+    }
+}
+
+#[cfg(test)]
+mod session_ask_key_tests {
+    use super::*;
+    use crate::app::screens::ids;
+    use crate::components::session_tabs::SessionTab;
+    use crate::fleet::answer::AskFocus;
+    use crate::fleet::attention::{AttentionKind, AttentionOption, SessionAttention};
+    use crate::models::{Session, SessionStatus, Workspace};
+    use crossterm::event::{KeyEvent, KeyModifiers};
+
+    fn press(state: &mut AppState, code: KeyCode) -> Option<AppEvent> {
+        EventHandler::handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), state)
+    }
+
+    /// The sessions screen on the `ask` tab, with a structured ASK selected.
+    fn asking() -> AppState {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state.workspaces.clear();
+        let mut workspace = Workspace::new("proj".to_string(), "/work/proj".into());
+        let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
+        session.status = SessionStatus::Idle;
+        session.tmux_session_name = Some("tmux_proj".to_string());
+        session.live_attention = vec![
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into())
+                .with_detail("Decide the sqlite path")
+                .with_options(vec![
+                    AttentionOption {
+                        label: "data/box.db".to_string(),
+                        description: String::new(),
+                    },
+                    AttentionOption {
+                        label: "api/src/db.sqlite".to_string(),
+                        description: String::new(),
+                    },
+                ])
+                .over_tmux(),
+        ];
+        workspace.add_session(session);
+        state.workspaces.push(workspace);
+        state.selected_workspace_index = Some(0);
+        state.selected_session_index = Some(0);
+        state.session_tab = SessionTab::Ask;
+        assert!(
+            SessionTab::Ask.enabled(&state),
+            "the fixture must open the ask tab"
+        );
+        state
+    }
+
+    /// THE safety test for this pane. Typing a free-text answer must not fire
+    /// the session shortcuts the same letters are bound to.
+    #[test]
+    fn typing_an_answer_never_fires_a_session_shortcut() {
+        let mut state = asking();
+        // Reach the composer row.
+        press(&mut state, KeyCode::Down);
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+        for c in ['d', 'D', 'x', 'e', 'n', 'q'] {
+            let event = press(&mut state, KeyCode::Char(c));
+            assert!(
+                matches!(event, Some(AppEvent::Consumed)),
+                "`{c}` in the answer composer produced {event:?}"
+            );
+        }
+        assert_eq!(state.ask_state.free_text(), "dDxenq");
+    }
+
+    /// On the OPTION rows a bare letter is not swallowed: the operator has not
+    /// chosen to type, and a buffer they cannot see filling up is worse than a
+    /// shortcut firing.
+    #[test]
+    fn a_letter_on_the_option_list_falls_through_to_the_screen() {
+        let mut state = asking();
+        assert_eq!(state.ask_state.focus(), AskFocus::Options);
+        assert!(matches!(
+            press(&mut state, KeyCode::Char('d')),
+            Some(AppEvent::DeleteSession)
+        ));
+    }
+
+    #[test]
+    fn the_arrows_walk_the_options_and_reach_the_composer() {
+        let mut state = asking();
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.ask_state.cursor(), 1);
+        press(&mut state, KeyCode::Down);
+        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+    }
+
+    #[test]
+    fn enter_sends_rather_than_attaching() {
+        let mut state = asking();
+        assert!(matches!(
+            press(&mut state, KeyCode::Enter),
+            Some(AppEvent::SessionAskSend)
+        ));
+    }
+
+    /// Tab and Esc are left to the strip and the screen. An answer pane the
+    /// operator cannot leave is worse than one they cannot type into.
+    #[test]
+    fn the_ask_pane_can_always_be_left() {
+        let mut state = asking();
+        assert!(matches!(
+            press(&mut state, KeyCode::Tab),
+            Some(AppEvent::SessionTabNext)
+        ));
+        let mut state = asking();
+        assert!(
+            press(&mut state, KeyCode::Esc).is_some(),
+            "Esc must still do something"
+        );
     }
 }

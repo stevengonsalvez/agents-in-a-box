@@ -504,6 +504,16 @@ pub const FLEET_CHANNEL_LIST: &str = "fleet/channel_list";
 /// because a remotely settable mode is a remote off-switch for the whole
 /// permission surface.
 pub const FLEET_COPILOT_CONFIGURE: &str = "fleet/copilot_configure";
+/// List the ACP adapters the daemon's registry can spawn.
+///
+/// Params: [`crate::fleet::FleetAdapterListParams`]; result:
+/// [`crate::fleet::FleetAdapterListResult`]. Gated by `fleet.chat.read`.
+///
+/// This is what makes `provider` on [`FLEET_COPILOT_CONFIGURE`] a validated
+/// string rather than a closed enum: the engine picker reads the live registry
+/// instead of a list compiled into the client, so an adapter an operator added
+/// to `[acp.adapters.*]` is selectable without a new build on either side.
+pub const FLEET_ADAPTER_LIST: &str = "fleet/adapter_list";
 /// List the copilot guardrail confirm cards awaiting an operator.
 ///
 /// Params: [`crate::fleet::FleetConfirmListParams`]; result:
@@ -1537,6 +1547,16 @@ pub const ATC_REGISTER: &str = "atc/register";
 /// Result: [`crate::snapshots::AtcListResult`]. A read (host-wide, since ATC is
 /// not workspace-partitioned).
 pub const ATC_LIST: &str = "atc/list";
+/// Read one instance's retry ledger: continue budget spent per session, and
+/// which sessions were escalated at the cap.
+///
+/// Params: [`crate::snapshots::AtcRetryListParams`]; result:
+/// [`crate::snapshots::AtcRetryListResult`].
+///
+/// Exists for the DAEMON'S OWN retry sweep above all. The sweep auto-continues
+/// transient API errors with no ATC instance behind it, so there is no
+/// `atc status` to ask and nothing else that can answer "what did it do".
+pub const ATC_RETRY_LIST: &str = "atc/retry_list";
 
 /// `atc/escalate` — raise an ATC escalation as an `escalation` attention row
 /// (spec P9, D12). Params: [`crate::snapshots::AtcEscalateParams`]. Result:
@@ -1850,6 +1870,10 @@ pub const ALL_METHODS: &[&str] = &[
     // Failed Interactive Codex launch cleanup is appended to preserve the
     // existing wire catalogue order.
     CODEX_SESSION_DISCARD,
+    // The adapter registry is appended for the same reason: the catalogue is
+    // ordered and append-only, so a new method goes at the tail.
+    FLEET_ADAPTER_LIST,
+    ATC_RETRY_LIST,
 ];
 
 #[cfg(test)]
@@ -2165,6 +2189,8 @@ mod tests {
             FLEET_ACTIVITY_LIST,
             FLEET_COPILOT_GATE,
             CODEX_SESSION_DISCARD,
+            FLEET_ADAPTER_LIST,
+            ATC_RETRY_LIST,
         ];
         for m in declared {
             assert!(

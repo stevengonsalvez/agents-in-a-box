@@ -28,18 +28,6 @@ const SCAN_INTERVAL_SECS: u64 = 5;
 /// The instance name is reported because a bare refusal is unactionable on a
 /// host running many sessions.
 fn atc_holding_the_fleet() -> Option<String> {
-    // A fleet in LITE mode is already running this exact loop, inside the ATC
-    // retry cap. The probe below reads liveness, which is the right question for
-    // full mode but the wrong one here: a lite scanner that has not started yet
-    // still OWNS the fleet, and letting an uncapped daemon take the gap is how
-    // you get two controllers a minute apart.
-    if let Some((name, _)) = crate::cli::daemon::atc_named_mode()
-        .filter(|(_, mode)| *mode == crate::fleet::atc::SupervisorMode::Lite)
-    {
-        // The NAME, like every other branch here: the doc-comment above promises
-        // it because a bare refusal is unactionable on a busy host.
-        return Some(format!("{name} (lite)"));
-    }
     let home = crate::fleet::plumbing::paths::ainb_home().ok()?;
     let status =
         crate::fleet::daemons::probe::probe_atc(&home, crate::fleet::daemons::heartbeat::now_ms());
@@ -61,6 +49,29 @@ fn atc_holding_the_fleet() -> Option<String> {
     Some(status.channel.unwrap_or_else(|| "unnamed".to_string()))
 }
 
+/// Whether the hangar daemon is up, and therefore its retry sweep with it.
+///
+/// The SAME double-supervision [`atc_holding_the_fleet`] refuses, from the
+/// other direction. The daemon's sweep auto-continues transient API errors on
+/// its own 30-second tick, inside the per-session retry cap; this watcher does
+/// the same job uncapped. Between them they would send every continue twice
+/// and defeat the cap, which is exactly what the ATC guard exists to stop.
+///
+/// The gap it closes: the sweep stands down while a live ATC exists, and this
+/// watcher refuses while a live ATC exists, so with NO ATC anywhere both used
+/// to run. One controller was replaced by two.
+///
+/// Asked of the SOCKET rather than a config flag: the sweep is part of the
+/// running daemon, so "is the daemon serving" is the same question as "is the
+/// sweep ticking", and a flag could say yes about a process that had died.
+fn hangar_sweep_holding_the_fleet() -> bool {
+    matches!(
+        crate::fleet::daemons::probe::probe_hangar_daemon().state,
+        crate::fleet::daemons::probe::DaemonState::Running
+            | crate::fleet::daemons::probe::DaemonState::Degraded
+    )
+}
+
 pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Result<()> {
     let verbose = matches.get_flag("verbose");
 
@@ -69,9 +80,17 @@ pub async fn execute(matches: &clap::ArgMatches, _format: OutputFormat) -> Resul
             anyhow::bail!(
                 "ATC '{owner}' is supervising this fleet; running the daemon alongside it \
                  sends every auto-continue twice and defeats ATC's per-session retry cap.\n\
-                 This watcher is superseded by the ATC supervisor: `ainb fleet atc mode <name>` \
-                 shows which mode owns the fleet, and lite mode IS this loop, capped.\n\
                  Use ATC, or pass --force-race to run both deliberately."
+            );
+        }
+        if hangar_sweep_holding_the_fleet() {
+            anyhow::bail!(
+                "the hangar daemon is running, and its retry sweep already auto-continues \
+                 transient API errors on every session, inside the per-session retry cap \
+                 this watcher has never had.\n\
+                 Running both sends every continue twice, and a session that keeps failing \
+                 is retried forever here instead of being escalated to you.\n\
+                 Stop the hangar daemon, or pass --force-race to run both deliberately."
             );
         }
     }

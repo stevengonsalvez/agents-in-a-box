@@ -270,7 +270,9 @@ final class FleetDaemonContractTests: XCTestCase {
 
     func testCopilotConfigureFixturesCarryNoPermissionMode() throws {
         let params = try assertFixtureRoundTrips("copilot_configure_params.json", as: FleetCopilotConfigureParams.self)
-        XCTAssertEqual(params.provider, .claude)
+        // The registry KEY, not an enum token: `claude` would not name an adapter.
+        XCTAssertEqual(params.provider, "claude-agent-acp")
+        XCTAssertEqual(params.copilotMode, .guarded)
         XCTAssertEqual(params.reasoningEffort, "medium")
 
         // The absence is the contract: a settable permission mode would be a
@@ -281,6 +283,9 @@ final class FleetDaemonContractTests: XCTestCase {
         }
 
         let result = try assertFixtureRoundTrips("copilot_configure_result.json", as: FleetCopilotConfigureResult.self)
+        XCTAssertEqual(result.provider, "claude-agent-acp")
+        XCTAssertEqual(result.copilotMode, .guarded)
+        XCTAssertFalse(result.sessionReplaced)
         XCTAssertTrue(result.personaSet)
     }
 
@@ -332,7 +337,9 @@ final class FleetDaemonContractTests: XCTestCase {
         }
         XCTAssertEqual(try decode("copilot", as: FleetChannelKind.self), .copilot)
         XCTAssertEqual(try decode("some-future-kind", as: FleetChannelKind.self), .unknown)
-        XCTAssertEqual(try decode("some-future-provider", as: FleetCopilotProvider.self), .unknown)
+        // The provider is a registry STRING now, so there is no token to fall
+        // back on; the dial is the enum that has to stay tolerant.
+        XCTAssertEqual(try decode("some-future-mode", as: FleetCopilotMode.self), .unknown)
         XCTAssertEqual(try decode("some-future-state", as: FleetConfirmState.self), .unknown)
         XCTAssertEqual(try decode("some-future-class", as: FleetActivityClass.self), .unknown)
         XCTAssertEqual(try decode("some-future-outcome", as: FleetActivityOutcome.self), .unknown)

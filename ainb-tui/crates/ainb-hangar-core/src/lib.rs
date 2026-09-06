@@ -28,6 +28,9 @@ pub mod agent_env;
 pub mod agent_kind;
 /// Polymorphic assignee crosswalk between Hangar actors and `bd` strings (P2.3).
 pub mod assignee_crosswalk;
+/// The ATC auto-`continue` cap, shared by the `ainb` heartbeat and the daemon's
+/// retry sweep so both enforcers bound retries at the same number.
+pub mod atc;
 /// Cron-scheduled autopilots (P7): the IO-free cron parser + next-tick math.
 pub mod autopilot;
 /// Notification channels + the per-kind channel SET a routed attention lands on

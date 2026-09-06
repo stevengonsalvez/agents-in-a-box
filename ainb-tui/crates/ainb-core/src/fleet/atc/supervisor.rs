@@ -1,42 +1,24 @@
-// ABOUTME: The ATC supervisor — one operator-visible controller per fleet, in
-// exactly one mode at a time.
+// ABOUTME: The ATC supervisor's provider gate — which agents can actually host
+// a heartbeat brain, and the refusal when one cannot.
 //
-// Before this module there were two independent watchers that both auto-continued
-// into the same panes: `ainb fleet daemon` (deterministic pane scan, uncapped)
-// and ATC's LLM heartbeat (capped, but only when it was the one running). The
-// only thing keeping them apart was a start-time refusal in the daemon, which a
-// `--force-race` — or simply starting the daemon first — walked straight past.
+// This module used to own a MODE as well: two controllers, `LiteScanner` and
+// `FullHeartbeat`, with a persisted `AtcMeta::mode` and a `may_act` gate
+// consulted before every send, because both auto-continued into the same panes
+// and the only thing keeping them apart had been a start-time refusal a race
+// could walk past.
 //
-// The replacement is a single persisted fact, `AtcMeta::mode`, and one rule:
+// Lite is gone, so there is one controller and nothing to gate. What lite did —
+// LLM-free auto-continue of known transient API errors, inside a per-session
+// retry cap — is now the hangar daemon's own retry sweep. That sweep needs no
+// ATC instance at all and excludes any session an instance owns, checked every
+// tick, so the exclusivity this module enforced is now a property of the
+// sweep's roster rather than a mode an operator has to hold correct.
 //
-//   mode  ──▶  owner  ──▶  the ONLY controller allowed to send an action
-//
-//   ┌──────────────┐        ┌──────────────────────────────────────────┐
-//   │ mode = Lite  │ ──────▶│ LiteScanner  (no LLM, deterministic)     │
-//   └──────────────┘        └──────────────────────────────────────────┘
-//   ┌──────────────┐        ┌──────────────────────────────────────────┐
-//   │ mode = Full  │ ──────▶│ FullHeartbeat (LLM session, triage)      │
-//   └──────────────┘        └──────────────────────────────────────────┘
-//
-// Both controllers consult [`may_act`] immediately before every send, against the
-// mode re-read from disk. A mode flip therefore silences the losing controller on
-// its next action, without needing the flip to win a race against a process that
-// is already mid-tick. Neither controller is trusted to remember which mode it
-// started in.
-//
-// Both modes spend ONE safety ledger — the code-owned `continue_counts` in
-// `heartbeat-state.json` ([`super::HeartbeatState`]) — so the ERR retry cap is
-// spent from the same budget whichever controller is holding the fleet.
-//
-// ONE EXCEPTION, handled explicitly rather than papered over: while the hangar
-// daemon schedules the beat it also owns the ledger, in its durable `atc_retry`
-// table, and the beat is told to count nothing locally. `continue_counts` is
-// then empty even though real budget has been spent. There is no client RPC to
-// read that table, so a switch away from a daemon-owned ledger cannot copy the
-// real counts. It instead hands over FAIL-CLOSED — every currently-erroring
-// session is sealed at the cap — so the switch can cost a session its remaining
-// retries but can never resurrect one the daemon had already escalated. See
-// `cli::fleet::atc_supervisor::seal_ledger_for_handoff`.
+// The ledger moved with it. Both modes used to spend the code-owned
+// `continue_counts` in `heartbeat-state.json`, with a fail-closed handover
+// whenever the hangar daemon owned the durable `atc_retry` table instead. The
+// sweep spends `atc_retry` directly, under its own reserved instance, so there
+// is one ledger and no handover to get wrong.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,134 +29,18 @@ use crate::providers::{AtcControl, ProviderRegistry};
 /// behaving exactly as it did.
 pub const DEFAULT_PROVIDER: &str = "claude";
 
-/// Which supervisor is driving this fleet. Exactly one is active per instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SupervisorMode {
-    /// No LLM at all. A deterministic scan of the same LLM-free `fleet needs`
-    /// read, auto-continuing only *known* transient errors, inside the same
-    /// per-session retry cap. It never reasons about an ambiguous session: an
-    /// ASK / WAIT / IDLE row is reported, never answered.
-    Lite,
-
-    /// The existing ATC: a scheduled heartbeat wakes an LLM session that triages
-    /// the ambiguous work and coordinates the fleet.
-    ///
-    /// `Default` on purpose — an instance provisioned before modes existed has
-    /// no `mode` field, and it was a full LLM ATC. Deserializing it as anything
-    /// else would silently downgrade a running fleet.
-    #[default]
-    Full,
-}
-
-impl SupervisorMode {
-    /// Stable CLI / JSON spelling.
-    #[must_use]
-    pub const fn id(self) -> &'static str {
-        match self {
-            Self::Lite => "lite",
-            Self::Full => "full",
-        }
-    }
-
-    /// Short display label for the Daemons row and CLI text output.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Lite => "LITE",
-            Self::Full => "FULL",
-        }
-    }
-
-    /// Parse a CLI value.
-    #[must_use]
-    pub fn from_id(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "lite" => Some(Self::Lite),
-            "full" => Some(Self::Full),
-            _ => None,
-        }
-    }
-
-    /// The other mode — what a toggle switches to.
-    #[must_use]
-    pub const fn other(self) -> Self {
-        match self {
-            Self::Lite => Self::Full,
-            Self::Full => Self::Lite,
-        }
-    }
-
-    /// The controller that owns the fleet in this mode.
-    #[must_use]
-    pub const fn owner(self) -> Controller {
-        match self {
-            Self::Lite => Controller::LiteScanner,
-            Self::Full => Controller::FullHeartbeat,
-        }
-    }
-}
-
-/// One of the two things that can send an action to a monitored session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Controller {
-    /// `ainb fleet atc supervise` — the LLM-free scan loop.
-    LiteScanner,
-    /// `ainb fleet atc heartbeat` — the beat that wakes the LLM session. This is
-    /// the single verb BOTH schedulers (the local launchd/systemd timer and the
-    /// daemon cron) invoke, so gating it gates every full-mode action path.
-    FullHeartbeat,
-}
-
-impl Controller {
-    /// Human name used in refusals and in the Daemons help text.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::LiteScanner => "lite scanner",
-            Self::FullHeartbeat => "full heartbeat",
-        }
-    }
-}
-
-/// **The exclusivity rule.** May `controller` send an action, given the mode
-/// persisted in `meta.json` right now?
-///
-/// Called immediately before every send by both controllers. That is what makes
-/// concurrency impossible rather than merely unlikely: a lite supervisor left
-/// running after a switch to full, or a timer still firing after a switch to
-/// lite, reads the current mode and declines instead of doubling up on the
-/// pane.
-#[must_use]
-pub const fn may_act(mode: SupervisorMode, controller: Controller) -> bool {
-    matches!(
-        (mode, controller),
-        (SupervisorMode::Lite, Controller::LiteScanner)
-            | (SupervisorMode::Full, Controller::FullHeartbeat)
-    )
-}
-
-/// The refusal a stood-down controller prints — it names the owner, so an
-/// operator reading a log knows which half to look at.
-#[must_use]
-pub fn stand_down_reason(mode: SupervisorMode, controller: Controller) -> String {
-    format!(
-        "{} is standing down: this fleet is in {} mode, owned by the {}. \
-Exactly one controller sends actions; switch with `ainb fleet atc mode <name> --set {}`.",
-        controller.label(),
-        mode.id(),
-        mode.owner().label(),
-        controller_mode(controller).id(),
-    )
-}
-
-/// The mode under which `controller` would be the owner.
-const fn controller_mode(controller: Controller) -> SupervisorMode {
-    match controller {
-        Controller::LiteScanner => SupervisorMode::Lite,
-        Controller::FullHeartbeat => SupervisorMode::Full,
-    }
-}
+// SupervisorMode, Controller, `may_act` and `stand_down_reason` stood here.
+//
+// All four existed for ONE reason: to keep two controllers from sending actions
+// to the same fleet, because lite mode's scanner and full mode's heartbeat both
+// typed into the same panes. With lite deleted there is one controller, so an
+// exclusivity gate has nothing to exclude and a "mode" with a single value is a
+// setting that cannot be set.
+//
+// What lite did is now the hangar daemon's own retry sweep. It shares no pane
+// with the heartbeat: it acts on sessions no ATC instance owns, checked every
+// tick, so the invariant these types enforced is now a property of the sweep's
+// roster rather than a mode an operator has to hold correct.
 
 // ── Provider capability gate ────────────────────────────────────────────────
 
@@ -234,61 +100,34 @@ const fn missing_capability(control: AtcControl) -> &'static str {
     }
 }
 
-// ── Lite controller identity ────────────────────────────────────────────────
-
-/// The daemon-heartbeat filename the lite controller records its pid under.
-///
-/// Per-instance and path-sanitised, so stopping "the lite scanner" always means
-/// exactly the process this instance started — never a pattern match on a
-/// command line that would happily signal another checkout's scanner.
-#[must_use]
-pub fn lite_heartbeat_id(name: &str) -> String {
-    format!("atc-lite-{}", super::paths::sanitize_instance_name(name))
-}
-
 // ── Operator-facing help ────────────────────────────────────────────────────
 
-/// The concise inline help shown beside the mode toggle: what each mode does,
-/// what it will NOT do, and who owns the fleet right now.
+/// The concise inline help shown beside an instance: what the heartbeat does,
+/// and what it costs.
 ///
 /// Returned as lines rather than one blob so the TUI can style them and the CLI
-/// can print them unchanged — the two surfaces must never describe the modes
+/// can print them unchanged — the two surfaces must never describe an instance
 /// differently.
 #[must_use]
-pub fn mode_help(mode: SupervisorMode, provider: &str) -> Vec<String> {
-    let mut lines = vec![
-        format!(
-            "owner: {} ({} mode){}",
-            mode.owner().label(),
-            mode.id(),
-            match mode {
-                SupervisorMode::Full => format!(" · brain: {provider}"),
-                SupervisorMode::Lite => String::new(),
-            }
-        ),
-        "lite — no LLM. Scans, auto-continues known transient errors within the \
-retry cap, reports everything else."
-            .to_string(),
-        "     limits: never answers an ASK, never resolves an ambiguous session, \
-no fleet coordination."
-            .to_string(),
-        "full — scheduled heartbeat wakes an LLM session that triages the \
-ambiguous work and coordinates the fleet."
+pub fn mode_help(provider: &str) -> Vec<String> {
+    vec![
+        format!("brain: {provider}"),
+        "scheduled heartbeat wakes an LLM session that triages the ambiguous \
+work and coordinates the fleet."
             .to_string(),
         format!(
             "     limits: spends tokens every beat; needs a provider ainb can \
 drive ({}).",
             supported_full_providers().join(" / ")
         ),
-        "one owner at a time — switching stops the other controller before the \
-new one sends anything."
+        // Named here because an operator reading this help is deciding whether
+        // they need an instance at all: transient-error auto-continue no longer
+        // requires one, and provisioning an LLM brain to get it would be paying
+        // tokens for what the daemon already does for free.
+        "transient API errors are auto-continued by the hangar daemon's retry \
+sweep, with no instance and no LLM."
             .to_string(),
-    ];
-    lines.push(format!(
-        "switch: `ainb fleet atc mode <name> --set {}`",
-        mode.other().id()
-    ));
-    lines
+    ]
 }
 
 #[cfg(test)]
@@ -297,74 +136,7 @@ mod tests {
 
     // ── Exclusivity ─────────────────────────────────────────────────────────
 
-    #[test]
-    fn exactly_one_controller_may_act_in_each_mode() {
-        // The load-bearing property: for every mode, precisely one of the two
-        // controllers is permitted. Never both, never neither.
-        for mode in [SupervisorMode::Lite, SupervisorMode::Full] {
-            let permitted: Vec<Controller> = [Controller::LiteScanner, Controller::FullHeartbeat]
-                .into_iter()
-                .filter(|c| may_act(mode, *c))
-                .collect();
-            assert_eq!(
-                permitted.len(),
-                1,
-                "{} mode permitted {permitted:?}, expected exactly one owner",
-                mode.id()
-            );
-            assert_eq!(permitted[0], mode.owner());
-        }
-    }
-
-    #[test]
-    fn a_controller_from_the_other_mode_is_refused() {
-        assert!(!may_act(SupervisorMode::Lite, Controller::FullHeartbeat));
-        assert!(!may_act(SupervisorMode::Full, Controller::LiteScanner));
-    }
-
-    #[test]
-    fn stand_down_reason_names_the_owner_and_the_flag_that_would_fix_it() {
-        let msg = stand_down_reason(SupervisorMode::Lite, Controller::FullHeartbeat);
-        assert!(msg.contains("lite scanner"), "must name the owner: {msg}");
-        assert!(msg.contains("--set full"), "must name the fix: {msg}");
-    }
-
-    #[test]
-    fn other_round_trips_and_owners_differ() {
-        assert_eq!(SupervisorMode::Lite.other(), SupervisorMode::Full);
-        assert_eq!(SupervisorMode::Full.other(), SupervisorMode::Lite);
-        assert_ne!(SupervisorMode::Lite.owner(), SupervisorMode::Full.owner());
-    }
-
     // ── Persistence / parsing ───────────────────────────────────────────────
-
-    #[test]
-    fn default_mode_is_full_so_existing_instances_are_not_downgraded() {
-        assert_eq!(SupervisorMode::default(), SupervisorMode::Full);
-    }
-
-    #[test]
-    fn mode_ids_round_trip() {
-        for mode in [SupervisorMode::Lite, SupervisorMode::Full] {
-            assert_eq!(SupervisorMode::from_id(mode.id()), Some(mode));
-        }
-        assert_eq!(SupervisorMode::from_id("FULL"), Some(SupervisorMode::Full));
-        assert_eq!(
-            SupervisorMode::from_id(" lite "),
-            Some(SupervisorMode::Lite)
-        );
-        assert_eq!(SupervisorMode::from_id("hybrid"), None);
-    }
-
-    #[test]
-    fn mode_serializes_as_its_stable_id() {
-        // The JSON spelling is the wire format in meta.json; it must match the
-        // CLI value so a hand-edited file and a `--set` agree.
-        let json = serde_json::to_string(&SupervisorMode::Lite).unwrap();
-        assert_eq!(json, "\"lite\"");
-        let back: SupervisorMode = serde_json::from_str("\"full\"").unwrap();
-        assert_eq!(back, SupervisorMode::Full);
-    }
 
     // ── Provider capability gating ──────────────────────────────────────────
 
@@ -438,29 +210,4 @@ mod tests {
     }
 
     // ── Help text ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn the_lite_heartbeat_id_is_per_instance_and_path_safe() {
-        assert_eq!(lite_heartbeat_id("tower"), "atc-lite-tower");
-        let id = lite_heartbeat_id("../evil");
-        assert!(!id.contains('/'), "{id}");
-        assert!(!id.contains('.'), "{id}");
-    }
-
-    #[test]
-    fn help_names_the_current_owner_both_behaviours_and_both_limits() {
-        let help = mode_help(SupervisorMode::Full, "claude").join("\n");
-        assert!(help.contains("full heartbeat"), "current owner: {help}");
-        assert!(help.contains("brain: claude"), "current provider: {help}");
-        assert!(help.contains("no LLM"), "lite behaviour: {help}");
-        assert!(help.contains("never answers an ASK"), "lite limits: {help}");
-        assert!(help.contains("spends tokens"), "full limits: {help}");
-        assert!(help.contains("--set lite"), "the switch: {help}");
-
-        let lite = mode_help(SupervisorMode::Lite, "claude").join("\n");
-        assert!(lite.contains("lite scanner"), "current owner: {lite}");
-        assert!(lite.contains("--set full"), "the switch: {lite}");
-        // Lite runs no brain, so naming a provider there would be misleading.
-        assert!(!lite.contains("brain:"), "{lite}");
-    }
 }

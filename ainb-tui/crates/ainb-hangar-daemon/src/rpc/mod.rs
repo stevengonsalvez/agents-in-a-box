@@ -1417,6 +1417,7 @@ async fn handle(
         methods::FLEET_CHANNEL_CREATE => handle_fleet_channel_create(pool, req).await,
         methods::FLEET_CHANNEL_LIST => handle_fleet_channel_list(pool, req).await,
         methods::FLEET_COPILOT_CONFIGURE => handle_fleet_copilot_configure(pool, req, events).await,
+        methods::FLEET_ADAPTER_LIST => handle_fleet_adapter_list(req).await,
         methods::FLEET_CONFIRM_LIST => handle_fleet_confirm_list(pool, req).await,
         methods::FLEET_CONFIRM_ANSWER => handle_fleet_confirm_answer(pool, req, events).await,
         methods::FLEET_ACTIVITY_LIST => handle_fleet_activity_list(pool, req).await,
@@ -1433,6 +1434,7 @@ async fn handle(
         methods::ATTENTION_ANSWER => handle_attention_answer(pool, req, events).await,
         methods::ATC_REGISTER => handle_atc_register(pool, req).await,
         methods::ATC_LIST => handle_atc_list(pool).await,
+        methods::ATC_RETRY_LIST => handle_atc_retry_list(pool, req).await,
         methods::ATC_ESCALATE => handle_atc_escalate(pool, req, events).await,
         methods::ATC_UNREGISTER => handle_atc_unregister(pool, req).await,
         methods::PROFILE_LIST => handle_profile_list(pool).await,
@@ -2795,6 +2797,7 @@ async fn handle_fleet_channel_create(
         .to_string(),
         name,
         recipients,
+        copilot_mode: ainb_hangar_proto::fleet::FleetCopilotMode::default().as_str().to_string(),
         created_at: SystemClock.now_ms(),
     };
     let row = FleetChannelRepo::insert(pool, &row).await.map_err(|error| store_err(&error))?;
@@ -2869,7 +2872,7 @@ async fn handle_fleet_copilot_configure(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_proto::fleet::{
         FLEET_CAPABILITY_COPILOT_CONFIGURE, FLEET_COPILOT_PERSONA_MAX, FleetCopilotConfigureParams,
-        FleetCopilotConfigureResult, FleetCopilotProvider,
+        FleetCopilotConfigureResult, FleetCopilotMode,
     };
     use ainb_hangar_store::repo::fleet_acp_session::{FleetAcpSessionConfig, FleetAcpSessionRepo};
     use ainb_hangar_store::repo::fleet_chat::FleetChannelRepo;
@@ -2885,12 +2888,22 @@ async fn handle_fleet_copilot_configure(
             }
         }
     }
-    let params: FleetCopilotConfigureParams =
-        parse_params(req, "{ provider, model?, reasoning_effort?, persona? }")?;
-    let adapter = match params.provider {
-        FleetCopilotProvider::Claude => "claude-agent-acp",
-        FleetCopilotProvider::Codex => "codex-acp",
-    };
+    let params: FleetCopilotConfigureParams = parse_params(
+        req,
+        "{ provider, copilot_mode?, model?, reasoning_effort?, persona? }",
+    )?;
+    // Validated against the LIVE adapter registry, the same one
+    // `fleet/acp_session_create` uses. That is what lets `provider` be a string:
+    // an operator's `[acp.adapters.*]` entry is selectable the moment it exists,
+    // and a name nobody configured is refused here rather than becoming a spawn
+    // attempt on an arbitrary program.
+    let acp = crate::acp_pool::active_handle().await;
+    let adapter = params.provider.trim();
+    if !crate::acp_pool::adapter_is_known(adapter).await {
+        return Err(invalid_params(&format!(
+            "unknown adapter {adapter:?}; fleet/adapter_list names the ones this daemon can spawn"
+        )));
+    }
     let persona = params.persona.clone();
     if let Some(persona) = &persona {
         if persona.len() > FLEET_COPILOT_PERSONA_MAX {
@@ -2923,43 +2936,226 @@ async fn handle_fleet_copilot_configure(
                 channel.scope_key, channel.scope_key
             ))
         })?;
-    // A provider swap is a DIFFERENT adapter process and a different session;
-    // silently writing the new token onto the old row would leave a session
-    // whose stored provider and running adapter disagree.
-    if session.provider != adapter {
-        return Err(invalid_params(&format!(
-            "the copilot session runs {:?}; a provider change needs a new session on a new channel",
-            session.provider
-        )));
-    }
+    // The dial goes in first so a tightening lands even if the swap then fails.
+    // It is ROLLED BACK on that failure, and the direction is why: `help`
+    // surviving a failed swap is the safe outcome, `yolo` surviving one is not.
+    // A configure that returns an error must leave the guardrail where the
+    // operator can see it — the client only adopts a mode from an `Applied`
+    // outcome, so a mode that survived a failure armed `yolo` underneath a
+    // header still reading `guarded`, and `spawn_session`, `interrupt` and
+    // `archive` then fired with no confirm card.
+    let previous_mode = FleetCopilotMode::parse(&channel.copilot_mode).unwrap_or_default();
+    let mode = match params.copilot_mode {
+        Some(mode) => {
+            // The miss is not discarded: a dial turned against a channel that
+            // has since been deleted must read as a miss, not a silent success.
+            let hit = FleetChannelRepo::set_mode(pool, &channel.scope_key, mode.as_str())
+                .await
+                .map_err(|error| store_err(&error))?;
+            if !hit {
+                return Err(invalid_params(&format!(
+                    "copilot channel {:?} no longer exists",
+                    channel.scope_key
+                )));
+            }
+            mode
+        }
+        None => previous_mode,
+    };
+
+    // Undo the dial. Defined ONCE and called from every error exit below,
+    // because a configure that returns an error must not leave the guardrail
+    // where it put it: the client only adopts a mode from an `Applied`
+    // outcome, so a surviving `yolo` is armed underneath a header still
+    // reading `guarded`. The mint-failure arm is not the only exit — the
+    // `set_config` write below fails the same way on a store fault, with a
+    // same-adapter configure that never reaches the swap at all.
+    let roll_back_mode = async |pool: &SqlitePool| {
+        if params.copilot_mode.is_none() {
+            return;
+        }
+        if let Err(rollback) =
+            FleetChannelRepo::set_mode(pool, &channel.scope_key, previous_mode.as_str()).await
+        {
+            tracing::error!(
+                scope_key = %channel.scope_key, %rollback,
+                "the copilot guardrail could not be rolled back after a failed configure; \
+                 it may be looser than the operator's screen reports"
+            );
+        }
+    };
+
+    // A provider swap is a DIFFERENT adapter process and a different agent, so
+    // the old session is RETIRED and a new one minted on the SAME channel
+    // scope. Writing the new token onto the old row would leave a session whose
+    // stored provider and running adapter disagree; refusing the swap outright
+    // (what this did before) left the operator with an engine picker whose only
+    // working move was to abandon the conversation and start another channel.
+    let (session, session_replaced) = if session.provider == adapter {
+        (session, false)
+    } else {
+        let retiring = session.session_key.clone();
+        // `IDLE`, not the state it was in. `get_live_by_scope` only ever hands
+        // back `ACTIVE` or `IDLE`, and by the time a restore runs the adapter
+        // has been torn down — so `ACTIVE`, which means a turn is in flight,
+        // would be a claim about a process that no longer exists. `teardown`
+        // sends its cancel asynchronously and does nothing at all when the
+        // session was not in the pool, so it cannot be relied on to have
+        // settled the turn either. `IDLE` is both true and live, and a stale
+        // `open_turn_id` is left to the deadline sweep, which is the same net
+        // that covers an adapter that crashed.
+        const RESTORED_STATE: &str = "IDLE";
+        if let Some(acp) = acp.as_ref() {
+            acp.teardown(&retiring, crate::acp_pool::ConvergeCause::OperatorStop).await;
+        }
+        // DEAD, not EVICTED: an eviction is a session the pool intends to bring
+        // back, and this one is never coming back under this adapter. It also
+        // takes the row out of `get_live_by_scope`, which is what frees the
+        // scope for the replacement below.
+        FleetAcpSessionRepo::set_state(pool, &retiring, "DEAD", SystemClock.now_ms())
+            .await
+            .map_err(|error| internal(&format!("retiring the copilot session: {error}")))?;
+        let minted = match crate::acp_session::ensure(
+            pool,
+            events,
+            adapter,
+            &session.cwd,
+            Some(&channel.scope_key),
+        )
+        .await
+        {
+            Ok(minted) => minted,
+            Err(error) => {
+                // The retire has to come first, because a live session holds
+                // the scope the replacement needs. So a mint that fails leaves
+                // the channel with NO live session and no way back: the engine
+                // picker, whose whole job is swapping adapters, would be the
+                // thing that ends the conversation. A failed configure changes
+                // nothing — the session goes back, and so does the dial.
+                if let Err(restore) = FleetAcpSessionRepo::set_state(
+                    pool,
+                    &retiring,
+                    RESTORED_STATE,
+                    SystemClock.now_ms(),
+                )
+                .await
+                {
+                    tracing::error!(
+                        %retiring, %restore,
+                        "the retired copilot session could not be restored; \
+                         the channel is left with no live session"
+                    );
+                }
+                // The teardown above only SIGNALS, and does not even do that
+                // when the session had no live handle in the pool — which is
+                // the ordinary state for a copilot nobody has prompted lately.
+                // Nothing has resolved the turn or the delivery legs behind it.
+                // Convergence is the shared routine that does, it is
+                // idempotent, and it runs AFTER the restore because its own
+                // ACTIVE-to-IDLE flip is guarded on a state this has already
+                // written.
+                if let Err(converge) = crate::acp_pool::converge_dirty_session(
+                    pool,
+                    events,
+                    &retiring,
+                    crate::acp_pool::ConvergeCause::OperatorStop,
+                )
+                .await
+                {
+                    tracing::error!(
+                        %retiring, %converge,
+                        "the restored copilot session could not be converged"
+                    );
+                }
+                roll_back_mode(pool).await;
+                tracing::error!(
+                    %retiring, %adapter, %error,
+                    "the copilot session was retired but its replacement could not be minted"
+                );
+                return Err(match error {
+                    crate::acp_session::EnsureError::Store(_) => internal(&error.to_string()),
+                    _ => invalid_params(&error.to_string()),
+                });
+            }
+        };
+        tracing::info!(
+            retired = %retiring,
+            session_key = %minted.session_key,
+            scope_key = %channel.scope_key,
+            %adapter,
+            "copilot engine swapped; the channel kept its scope"
+        );
+        (minted, true)
+    };
 
     let config = FleetAcpSessionConfig {
         model: params.model.clone(),
         reasoning_effort: params.reasoning_effort.clone(),
         persona,
     };
-    FleetAcpSessionRepo::set_config(pool, &session.session_key, &config, SystemClock.now_ms())
-        .await
-        .map_err(|error| internal(&format!("store error: {error}")))?;
+    if let Err(error) =
+        FleetAcpSessionRepo::set_config(pool, &session.session_key, &config, SystemClock.now_ms())
+            .await
+    {
+        // Same arming, narrower path: a same-adapter configure that loosens the
+        // dial and then hits a store fault here never reaches the swap block,
+        // so the mint-failure rollback would not have run.
+        roll_back_mode(pool).await;
+        return Err(internal(&format!("store error: {error}")));
+    }
     // The persona is a system prompt for an agent holding destructive tools, so
     // every change is logged where an operator reviews copilot behaviour. The
     // TEXT is deliberately not in the row: this feed is readable by anyone with
     // `fleet.chat.read`, and the persona is gated behind a stronger capability.
     let detail = format!(
-        "provider={adapter} model={} reasoning={} persona={}",
+        "provider={adapter} mode={} model={} reasoning={} persona={}{}",
+        mode.as_str(),
         config.model.as_deref().unwrap_or("-"),
         config.reasoning_effort.as_deref().unwrap_or("-"),
-        if config.persona.is_some() { "set" } else { "-" }
+        if config.persona.is_some() { "set" } else { "-" },
+        if session_replaced {
+            " session=replaced"
+        } else {
+            ""
+        }
     );
     crate::copilot::record_configure(pool, events, &channel.scope_key, &detail).await;
 
     to_value(&FleetCopilotConfigureResult {
         session_key: session.session_key,
-        provider: params.provider,
+        provider: adapter.to_string(),
+        copilot_mode: mode,
+        session_replaced,
         model: config.model,
         reasoning_effort: config.reasoning_effort,
         persona_set: config.persona.is_some(),
     })
+}
+
+/// Every adapter this daemon's registry can spawn, in name order.
+///
+/// The engine picker reads THIS rather than a list compiled into the client,
+/// which is the whole reason `provider` is a validated string: an adapter added
+/// to `[acp.adapters.*]` is selectable without a new build on either side.
+async fn handle_fleet_adapter_list(req: &RpcRequest) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_CAPABILITY_CHAT_READ, FleetAdapter, FleetAdapterListParams, FleetAdapterListResult,
+    };
+
+    require_fleet_capability(FLEET_CAPABILITY_CHAT_READ)?;
+    let _params: FleetAdapterListParams = parse_params(req, "{}")?;
+    let adapters: Vec<FleetAdapter> = crate::acp_pool::chat_adapters()
+        .await
+        .into_iter()
+        .map(|(name, adapter)| FleetAdapter {
+            built_in: ainb_acp::config::AdapterConfig::is_known_adapter(&name),
+            name,
+            command: adapter.command.display().to_string(),
+            permission_mode: adapter.permission_mode,
+            models: adapter.models,
+        })
+        .collect();
+    to_value(&FleetAdapterListResult { adapters })
 }
 
 /// The open confirm cards awaiting an operator.
@@ -3056,7 +3252,7 @@ async fn handle_fleet_copilot_gate(
     events: &EventSink,
     caller: &auth::Caller,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_fleet_tools::guardrail::Guardrail;
+    use ainb_fleet_tools::guardrail::{CopilotMode, Guardrail};
     use ainb_hangar_proto::fleet::{
         FLEET_CAPABILITY_COPILOT_GATE, FleetCopilotGateParams, FleetCopilotGateResult,
         FleetGateVerdict,
@@ -3094,7 +3290,13 @@ async fn handle_fleet_copilot_gate(
     // ponytail: the pinned set is empty until phase B computes it from the
     // operator message that triggered the turn. Empty is the FAIL-CLOSED value,
     // not a stub: it makes every `answer_need` take a confirm card.
-    let guardrail = Guardrail::default();
+    //
+    // The DIAL is read from the channel row on every call, not cached for the
+    // session: an operator who turns the copilot down to `help` mid-turn means
+    // the write in flight behind it, and a mode pinned at session start would
+    // let that write through.
+    let guardrail = Guardrail::default()
+        .with_mode(CopilotMode::parse(&channel.copilot_mode).unwrap_or_default());
     let outcome = crate::copilot::gate(
         pool,
         events,
@@ -3905,7 +4107,14 @@ async fn rejected_broadcast_receipt(
     Ok(action_receipt_wire(&row))
 }
 
-async fn execute_fleet_action(
+/// Execute one Fleet action end to end: idempotency claim, optimistic-version
+/// and request-fingerprint validation, capability gate, provider delivery, and
+/// the durable receipt.
+///
+/// `pub(crate)` for the daemon's own senders (the message bus legs, the retry
+/// sweep). Every guard above lives here, so a second send path inside the
+/// daemon is a second, weaker set of guards.
+pub(crate) async fn execute_fleet_action(
     pool: &SqlitePool,
     params: ainb_hangar_proto::fleet::FleetActionParams,
     idempotency_key: Option<String>,
@@ -5953,10 +6162,12 @@ async fn handle_fleet_acp_session_create(
         FLEET_CAPABILITY_ACP_SPAWN, FleetAcpSessionCreateParams, FleetAcpSessionCreateResult,
     };
 
+    use ainb_hangar_store::repo::fleet_acp_session::FleetAcpSessionRepo;
+
     use crate::acp_session::EnsureError;
 
     require_fleet_capability(FLEET_CAPABILITY_ACP_SPAWN)?;
-    let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider, cwd, scope_key? }")?;
+    let params: FleetAcpSessionCreateParams = parse_params(req, "{ provider?, cwd, scope_key? }")?;
     // `task:<id>` belongs to the task executor (`crate::acp_task`). A chat
     // session minted there would make that task's later run fail `ScopeHeld`
     // (terminal, `SpawnError`, no retry) and would make the pool stamp this
@@ -5968,10 +6179,27 @@ async fn handle_fleet_acp_session_create(
             crate::acp_task::TASK_SCOPE_PREFIX
         )));
     }
+    // An omitted provider means "whatever this scope already runs". Resolved
+    // here because only the daemon can answer it: a client that guessed reverted
+    // a swapped engine, and `ensure` refuses a live scope whose adapter differs
+    // from the one asked for, so the guess did not even fail quietly.
+    let provider = match params.provider.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
+        Some(named) => named.to_string(),
+        None => {
+            let held = match params.scope_key.as_deref() {
+                Some(scope) => FleetAcpSessionRepo::get_live_by_scope(pool, scope)
+                    .await
+                    .map_err(|error| store_err(&error))?
+                    .map(|row| row.provider),
+                None => None,
+            };
+            held.unwrap_or_else(|| ainb_acp::config::CLAUDE_ADAPTER.to_string())
+        }
+    };
     let row = crate::acp_session::ensure(
         pool,
         events,
-        &params.provider,
+        &provider,
         &params.cwd,
         params.scope_key.as_deref(),
     )
@@ -5980,9 +6208,20 @@ async fn handle_fleet_acp_session_create(
         EnsureError::Store(_) => internal(&error.to_string()),
         _ => invalid_params(&error.to_string()),
     })?;
+    // The turn deadline rides back on the mint because this is the ONE call a
+    // chat client makes before it can have a PENDING leg at all, and the value
+    // is otherwise daemon-private: a client reading `AINB_ACP_TURN_DEADLINE_MS`
+    // would be reading its own process, not the daemon that will cancel the
+    // turn. `None` when no pool is installed, which is the case in the store
+    // tests that mint sessions with no runtime behind them.
+    let turn_deadline_ms = match crate::acp_pool::active_handle().await {
+        Some(pool) => i64::try_from(pool.config().turn_deadline.as_millis()).ok(),
+        None => None,
+    };
     to_value(&FleetAcpSessionCreateResult {
         session_key: row.session_key,
         scope_key: row.scope_key,
+        turn_deadline_ms,
     })
 }
 
@@ -12352,6 +12591,53 @@ async fn handle_atc_register(
 /// Dispatch `atc/list` (spec P9, D12): list every registered ATC instance,
 /// name-ordered. A read (ATC is host-wide, not workspace-partitioned). Split out
 /// of [`handle`] to keep that dispatcher within the line cap.
+/// One instance's retry ledger, defaulting to the daemon's own sweep.
+///
+/// The sweep is the reason this method exists. It auto-continues transient API
+/// errors with no ATC instance behind it, so an operator has no `atc status` to
+/// ask and, before this, no way at all to see which sessions it had continued
+/// or escalated. ATC lite mode had `supervise --once --dry-run` for exactly
+/// that; deleting lite without replacing the view would have traded a visible
+/// loop for an invisible one.
+async fn handle_atc_retry_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::snapshots::{AtcRetryListParams, AtcRetryListResult, AtcRetryWire};
+    use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
+
+    let params: AtcRetryListParams = parse_params(req, "{ instance? }")?;
+    let instance = params
+        .instance
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| crate::retry_sweep::SWEEP_INSTANCE.to_string());
+    // The cap comes from the instance ROW, not the constant: an operator can
+    // tune a real ATC's cap, and reporting the default beside a ledger spending
+    // a different one would misread every row.
+    let row = AtcInstanceRepo::get(pool, &instance)
+        .await
+        .map_err(|error| store_err(&error))?
+        .ok_or_else(|| invalid_params(&format!("no ATC instance named {instance:?}")))?;
+    let retries = AtcInstanceRepo::retry_list(pool, &instance)
+        .await
+        .map_err(|error| store_err(&error))?
+        .into_iter()
+        .map(|retry| AtcRetryWire {
+            session_id: retry.session_id,
+            continue_count: retry.continue_count,
+            escalated: retry.escalated,
+            note: retry.note,
+            updated_at: retry.updated_at,
+        })
+        .collect();
+    to_value(&AtcRetryListResult {
+        instance,
+        err_retry_cap: row.err_retry_cap,
+        retries,
+    })
+}
+
 async fn handle_atc_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
 
@@ -12359,6 +12645,12 @@ async fn handle_atc_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcErro
         .await
         .map_err(|e| store_err(&e))?
         .into_iter()
+        // The retry sweep books its ledger against a reserved row in this same
+        // table (`atc_retry` has a foreign key onto it). It is not an ATC an
+        // operator set up, has no instance directory on disk, and every `atc`
+        // verb aimed at it would fail on the missing `meta.json`, so the
+        // registry an operator reads must not offer it as one.
+        .filter(|r| r.name != crate::retry_sweep::SWEEP_INSTANCE)
         .map(|r| ainb_hangar_proto::snapshots::AtcInstanceWire {
             name: r.name,
             cwd: r.cwd,
@@ -12991,6 +13283,7 @@ mod tests {
             name: "ops".into(),
             scope_key: "channel:01J0CHAN".into(),
             recipients: vec!["claude:one".into()],
+            copilot_mode: "guarded".into(),
             created_at: 1,
         };
 

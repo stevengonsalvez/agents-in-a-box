@@ -939,8 +939,16 @@ enum FleetChannelKind: String, Encodable, Equatable, CaseIterable { case copilot
 // timeline, so it stays listed rather than vanishing from the sidebar.
 extension FleetChannelKind: TolerantWireEnum { static var wireFallback: Self { .unknown } }
 
-enum FleetCopilotProvider: String, Encodable, Equatable, CaseIterable { case claude, codex, unknown }
-extension FleetCopilotProvider: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+/// The copilot channel's guardrail dial.
+///
+/// NOT the adapter's permission mode, and no relation to it. This one moves the
+/// daemon-side fleet-tool classifier: which of the copilot's own tools fire,
+/// which take a confirm card, and which are not offered at all. The adapter's
+/// permission mode stays pinned at `session/new` under every value here.
+enum FleetCopilotMode: String, Encodable, Equatable, CaseIterable {
+    case help, guarded, yolo, unknown
+}
+extension FleetCopilotMode: TolerantWireEnum { static var wireFallback: Self { .unknown } }
 
 enum FleetConfirmState: String, Encodable, Equatable, CaseIterable { case open, approved, denied, expired, unknown }
 // NOT `.open`: a card in a state this build cannot name must never render as
@@ -1142,20 +1150,36 @@ struct FleetChannelListResult: Codable, Equatable {
 /// There is deliberately no permission-mode field: the mode is daemon config
 /// and a settable one would be a remote off-switch for the guardrails.
 struct FleetCopilotConfigureParams: Codable, Equatable {
-    let provider: FleetCopilotProvider
+    /// An adapter name from `fleet/adapter_list`.
+    ///
+    /// A STRING, not an enum: the registry is `[acp.adapters.*]` plus the
+    /// built-in floor, so a closed enum here could not name an adapter the
+    /// daemon can already spawn. The daemon validates it.
+    let provider: String
+    /// The channel's guardrail dial; `nil` leaves it where it is.
+    ///
+    /// Spelled `copilot_mode`, never `mode`: `mode` is one of the keys this
+    /// method refuses outright, because the setting an operator would most
+    /// plausibly send under that name is the adapter permission mode.
+    let copilotMode: FleetCopilotMode?
     let model: String?
     let reasoningEffort: String?
     let persona: String?
 
     private enum CodingKeys: String, CodingKey {
         case provider, model, persona
+        case copilotMode = "copilot_mode"
         case reasoningEffort = "reasoning_effort"
     }
 }
 
 struct FleetCopilotConfigureResult: Codable, Equatable {
     let sessionKey: String
-    let provider: FleetCopilotProvider
+    let provider: String
+    let copilotMode: FleetCopilotMode
+    /// Whether this call retired the previous session to swap the adapter. A
+    /// caller holding the old `sessionKey` is holding a dead session.
+    let sessionReplaced: Bool
     let model: String?
     let reasoningEffort: String?
     let personaSet: Bool
@@ -1163,6 +1187,8 @@ struct FleetCopilotConfigureResult: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case provider, model
         case sessionKey = "session_key"
+        case copilotMode = "copilot_mode"
+        case sessionReplaced = "session_replaced"
         case reasoningEffort = "reasoning_effort"
         case personaSet = "persona_set"
     }

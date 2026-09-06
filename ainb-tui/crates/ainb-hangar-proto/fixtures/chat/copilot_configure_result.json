@@ -1,6 +1,8 @@
 {
   "session_key": "acp:01J0COPILOT",
-  "provider": "claude",
+  "provider": "claude-agent-acp",
+  "copilot_mode": "guarded",
+  "session_replaced": false,
   "model": "claude-sonnet-4-5",
   "reasoning_effort": "medium",
   "persona_set": true

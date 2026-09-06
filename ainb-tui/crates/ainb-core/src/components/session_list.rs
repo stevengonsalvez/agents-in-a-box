@@ -19,10 +19,11 @@ const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
-// ainb-hooks per-session attention markers: `[?]` waiting on a user
-// answer, `[!]` blocked on permission/approval, `[✓]` finished.
+// Attention chips (`ASK` `APPROVE` `ERR` `DONE`). One colour per state,
+// shared with the age that trails it so a chip reads as one object.
 const ALERT_WAITING_AMBER: Color = Color::Rgb(230, 180, 80);
 const ALERT_PERMISSION_RED: Color = Color::Rgb(220, 90, 90);
+const ALERT_ERROR_RED: Color = Color::Rgb(230, 100, 100);
 
 // Per-agent brand colors for the coding-agent pill chip. The chip is a
 // filled block in these colors so the agent is identifiable at a glance —
@@ -40,7 +41,7 @@ const BRAND_SSH: Color = Color::Rgb(255, 165, 0); // amber
 const PILL_LEFT: &str = "\u{e0b6}"; //
 const PILL_RIGHT: &str = "\u{e0b4}"; //
 
-use ainb_plugin_notifyd::AlertKind;
+use crate::fleet::attention::{AttentionKind, SessionAttention, format_age, needs_you_count};
 
 use crate::app::{
     AppState,
@@ -56,6 +57,16 @@ const BADGE_SLOT_WIDTH: usize = 2;
 
 /// Highest attach-shortcut index that fits in a single keystroke.
 const MAX_BADGE: usize = 9;
+
+/// The marker the `List` prepends to the selected row (and pads on the others).
+const HIGHLIGHT_SYMBOL: &str = "\u{25b6} ";
+
+/// Gap between the row content and the chip strip, and between two chips.
+const CHIP_GAP: usize = 2;
+
+/// Cells kept clear to the right of the chip strip so it never touches the
+/// panel border.
+const CHIP_RIGHT_MARGIN: usize = 1;
 
 /// Empty slot for non-attachable rows (workspace headers, separators,
 /// section headers) and for attachable rows past `MAX_BADGE`.
@@ -75,6 +86,132 @@ fn next_badge(attach_no: &mut usize) -> Span<'static> {
         )
     } else {
         empty_badge()
+    }
+}
+
+/// The colour a chip and its age share.
+const fn chip_color(kind: AttentionKind) -> Color {
+    match kind {
+        AttentionKind::Ask => ALERT_WAITING_AMBER,
+        AttentionKind::Approve => ALERT_PERMISSION_RED,
+        AttentionKind::Err => ALERT_ERROR_RED,
+        AttentionKind::Done => SELECTION_GREEN,
+    }
+}
+
+/// The word a chip renders as: its kind, or `SENT` while an answer to it is
+/// still in flight.
+///
+/// In-flight is a state of the ANSWER, not of the request, so it lives beside
+/// the chip rather than in it: the producers keep reporting the row as open
+/// until the agent moves on, and rewriting their row would make the surface
+/// disagree with what it just read.
+fn chip_label(chip: &SessionAttention, sending: Option<&SessionAttention>) -> &'static str {
+    if sending.is_some_and(|target| std::ptr::eq(target, chip)) {
+        "SENT"
+    } else {
+        chip.kind.label()
+    }
+}
+
+/// Cell width of the chip strip for `chips`, including the leading gap.
+fn chip_strip_width(
+    chips: &[SessionAttention],
+    now_ms: i64,
+    sending: Option<&SessionAttention>,
+) -> usize {
+    if chips.is_empty() {
+        return 0;
+    }
+    chips
+        .iter()
+        .map(|chip| {
+            CHIP_GAP + chip_label(chip, sending).len() + 1 + format_age(now_ms, chip.since_ms).len()
+        })
+        .sum()
+}
+
+/// Append the row's attention chips, RIGHT-ALIGNED against `row_width`.
+///
+/// Right-aligned because the strip is a column an operator scans down: chips
+/// that trail a variable-length branch name land at a different column on every
+/// row, which is exactly the scan the four-word vocabulary exists to make fast.
+///
+/// Width is measured with `Span::width` (unicode-width), never byte length —
+/// the row already carries a Nerd Font agent pill and a status glyph whose byte
+/// counts have nothing to do with their cell counts.
+///
+/// When the row is too narrow, the SESSION NAME at `name_index` gives way, not
+/// the chips: a truncated name still identifies the row (the tree, the agent
+/// pill and the attach digit are all still there), while a truncated `APPROVE`
+/// reading `APPRO` is a word the operator has to decode. This is the spec's
+/// 80-column rule — chip words never abbreviate.
+fn push_attention_chips(
+    spans: &mut Vec<Span<'static>>,
+    chips: &[SessionAttention],
+    now_ms: i64,
+    row_width: usize,
+    name_index: usize,
+    sending: Option<&SessionAttention>,
+) {
+    if chips.is_empty() {
+        return;
+    }
+    let strip = chip_strip_width(chips, now_ms, sending);
+    let mut used: usize = spans.iter().map(Span::width).sum();
+    // The gap belongs in the BUDGET, not in the padding: applied afterwards as
+    // a floor it pushes the strip past the row's right edge on exactly the
+    // narrow rows the budget was computed to protect, and the widget then clips
+    // the age off the end.
+    let budget = row_width.saturating_sub(strip + CHIP_GAP + CHIP_RIGHT_MARGIN);
+    if used > budget {
+        if let Some(name) = spans.get_mut(name_index) {
+            let over = used - budget;
+            let keep = name.width().saturating_sub(over.saturating_add(1));
+            let truncated: String =
+                name.content.chars().take(keep).chain(std::iter::once('…')).collect();
+            used -= name.width();
+            name.content = truncated.into();
+            used += name.width();
+        }
+    }
+    let pad = row_width.saturating_sub(used + strip + CHIP_RIGHT_MARGIN).max(CHIP_GAP);
+    spans.push(Span::raw(" ".repeat(pad)));
+    for (index, chip) in chips.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" ".repeat(CHIP_GAP)));
+        }
+        // A chip nothing can answer renders DIMMED, never hidden. Hidden is
+        // the silent no-op: the operator would have no idea a session was
+        // blocked. Dimmed says "this needs you and this surface currently
+        // cannot take your answer", and the `ask` tab carries the reason.
+        //
+        // ERR and DONE are never dimmed on this account: they are not
+        // questions, so "cannot be answered" is their normal state, and greying
+        // every one of them would make the dimming meaningless where it matters.
+        let unroutable = chip.kind.blocks() && !chip.answerable.is_answerable();
+        let label = chip_label(chip, sending);
+        let in_flight = label == "SENT";
+        let color = if in_flight {
+            GOLD
+        } else if unroutable {
+            MUTED_GRAY
+        } else {
+            chip_color(chip.kind)
+        };
+        let weight = if unroutable && !in_flight {
+            Modifier::empty()
+        } else {
+            Modifier::BOLD
+        };
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(color).add_modifier(weight),
+        ));
+        spans.push(Span::styled(
+            format!(" {}", format_age(now_ms, chip.since_ms)),
+            Style::default().fg(color),
+        ));
     }
 }
 
@@ -125,7 +262,13 @@ impl SessionListComponent {
         self.update_selection(state);
         state.sessions_pane_state.set_list_scroll_offset(self.list_state.offset());
 
-        let items = SessionListComponent::build_list_items_static(state);
+        // Width a row's own spans may occupy. `List` already takes its
+        // highlight symbol out of the item area before the row is laid out, so
+        // this is the panel interior and nothing further comes off it —
+        // measured, not assumed (`every_chip_strip_ends_one_cell_clear_of_the_border`).
+        let row_width = usize::from(area.width.saturating_sub(2));
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let items = SessionListComponent::build_list_items_static(state, row_width, now_ms);
 
         // Show focus indicator with premium colors
         use crate::app::state::FocusedPane;
@@ -151,6 +294,23 @@ impl SessionListComponent {
             })
             .count();
 
+        // The badge is "what is BLOCKING an agent", deliberately not "what is
+        // open": an ERR or a DONE row is open and blocks nobody, so counting it
+        // here would tell the operator there is more waiting on them than there
+        // is. Counts ROWS, so a session with both an ASK and an APPROVE is one
+        // session needing one human.
+        let needs_you = needs_you_count(state.workspaces.iter().flat_map(|w| {
+            w.sessions
+                .iter()
+                .filter(|s| state.session_passes_filter(s))
+                .map(|s| s.live_attention.as_slice())
+        }));
+        let needs_you_label = match needs_you {
+            0 => String::new(),
+            1 => " · 1 needs you".to_string(),
+            n => format!(" · {n} need you"),
+        };
+
         let mut title_spans = vec![
             Span::styled(" \u{f07b} ", Style::default().fg(GOLD)),
             Span::styled(
@@ -167,9 +327,14 @@ impl SessionListComponent {
                     })
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled(
+                needs_you_label.clone(),
+                Style::default().fg(ALERT_WAITING_AMBER).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(if needs_you_label.is_empty() { "" } else { " " }),
         ];
         let filter_label = format!("F [{}]", state.session_filter.label());
-        let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}) ");
+        let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}){needs_you_label} ");
         state.sessions_pane_state.set_filter_toggle_area(Rect::new(
             area.x.saturating_add(1 + title_prefix.chars().count() as u16),
             area.y,
@@ -289,7 +454,7 @@ impl SessionListComponent {
                     ),
             )
             .highlight_style(Style::default().bg(LIST_HIGHLIGHT_BG))
-            .highlight_symbol("▶ ");
+            .highlight_symbol(HIGHLIGHT_SYMBOL);
 
         frame.render_stateful_widget(list, area, &mut self.list_state);
 
@@ -365,7 +530,18 @@ impl SessionListComponent {
         }
     }
 
-    fn build_list_items_static(state: &AppState) -> Vec<ListItem<'static>> {
+    /// Build every row.
+    ///
+    /// `row_width` is the list's INTERIOR width (the panel minus its borders);
+    /// the attention chip strip right-aligns against it. `now_ms` is passed in
+    /// rather than read here so the chip ages in a snapshot test are
+    /// deterministic.
+    fn build_list_items_static(
+        state: &AppState,
+        row_width: usize,
+        now_ms: i64,
+    ) -> Vec<ListItem<'static>> {
+        let elsewhere = state.attention_elsewhere;
         let mut items = Vec::new();
 
         // Favorite status is precomputed off the render path into
@@ -543,14 +719,12 @@ impl SessionListComponent {
 
                     let checkbox = ballot_checkbox(is_multi_selected);
 
-                    // ainb-hooks attention marker for this session row.
-                    // Live "needs you" marker, recomputed from the
-                    // session's generating-state each refresh (NOT
-                    // notification history): amber `[?]` on any session
-                    // that is not actively generating (idle / turn-ended /
-                    // at a prompt) and is therefore waiting on the user.
-                    // Clears the instant generation resumes.
-                    let session_alert = session.live_attention;
+                    // The row's live attention chips, already in precedence
+                    // order (ASK, APPROVE, ERR, DONE). Recomputed each refresh
+                    // from the hook events and the session's own status; empty
+                    // while the agent is generating, because nothing is waiting
+                    // on a human then.
+                    let session_alert = session.live_attention.as_slice();
 
                     let mut session_spans = vec![
                         next_badge(&mut attach_no),
@@ -580,18 +754,31 @@ impl SessionListComponent {
                         ),
                         Span::styled(changes_text, Style::default().fg(WARNING_ORANGE)),
                     ];
-                    if let Some(kind) = session_alert {
-                        let (tag, color) = match kind {
-                            AlertKind::NeedsPermission => ("[!]", ALERT_PERMISSION_RED),
-                            AlertKind::WaitingOnUser => ("[?]", ALERT_WAITING_AMBER),
-                            AlertKind::Finished => ("[✓]", SELECTION_GREEN),
-                        };
-                        session_spans.push(Span::raw("  "));
-                        session_spans.push(Span::styled(
-                            tag.to_string(),
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ));
-                    }
+                    // The name is the span that gives way when the chip strip
+                    // needs the room. Its index is captured rather than searched
+                    // for, so reordering the row above can never silently
+                    // truncate the branch decoration instead.
+                    const NAME_SPAN_INDEX: usize = 9;
+                    debug_assert_eq!(
+                        session_spans[NAME_SPAN_INDEX].content,
+                        session_list_name(session),
+                        "NAME_SPAN_INDEX must track the session-name span"
+                    );
+                    // The chip whose answer is still in flight, if it is on
+                    // THIS row. Asked per CHIP, so an answer sent on one
+                    // session cannot render every other session's chip as
+                    // SENT, and this one keeps reading SENT after the operator
+                    // has navigated to a different question.
+                    let sending =
+                        session_alert.iter().find(|chip| state.ask_state.is_sending(chip));
+                    push_attention_chips(
+                        &mut session_spans,
+                        session_alert,
+                        now_ms,
+                        row_width,
+                        NAME_SPAN_INDEX,
+                        sending,
+                    );
                     let session_line = Line::from(session_spans);
 
                     items.push(ListItem::new(session_line));
@@ -899,6 +1086,26 @@ impl SessionListComponent {
             items.push(ListItem::new(empty_line));
         }
 
+        // Daemon rows whose cwd matched no row above. Counted, never dropped:
+        // the sessions screen is the ONE attention surface, so a request it
+        // cannot place is still a request, and an operator who saw no chip
+        // anywhere would conclude the fleet is quiet.
+        //
+        // Its own row rather than a second badge in the title: the title
+        // already carries the workspace count, the needs-you badge, the filter
+        // control and the collapse glyph, and at the default sidebar width a
+        // fourth item truncated mid-word to `1 el`. A row is full width and
+        // cannot be clipped by a title that is competing for the same cells.
+        if elsewhere > 0 {
+            items.push(ListItem::new(Line::from(vec![
+                empty_badge(),
+                Span::styled(
+                    format!("  \u{f0e0} {elsewhere} waiting elsewhere"),
+                    Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+                ),
+            ])));
+        }
+
         items
     }
 
@@ -907,7 +1114,9 @@ impl SessionListComponent {
             self.list_state.select(None);
             return;
         };
-        let item_count = Self::build_list_items_static(state).len();
+        // Row COUNT is width-independent (every branch pushes exactly one
+        // item), so the selection index does not need the real width.
+        let item_count = Self::build_list_items_static(state, 0, 0).len();
         let selected_index =
             (0..item_count).find(|&index| state.session_list_row_target(index) == Some(selected));
         self.list_state.select(selected_index);
@@ -1032,6 +1241,291 @@ mod tests {
     use super::*;
     use crate::app::state::SessionFilter;
     use crate::models::{Session, SessionStatus};
+
+    /// Render the whole sessions panel into a fixed-size buffer and return it
+    /// as plain text, one line per row.
+    ///
+    /// The chip strip right-aligns against the panel interior, so its column
+    /// depends on the panel width. A test that asserted on span structure would
+    /// pass while the strip rendered off the right edge; only the painted
+    /// buffer proves where the chips actually land.
+    fn render_panel(state: &mut AppState, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
+        let mut list = SessionListComponent::new();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let row_width = usize::from(area.width.saturating_sub(2));
+                let items =
+                    SessionListComponent::build_list_items_static(state, row_width, CHIP_NOW);
+                // Mirror `render`'s block so the snapshot carries the real
+                // border, title and badge, not just the rows.
+                list.update_selection(state);
+                let widget = List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .title(panel_title_for_test(state)),
+                    )
+                    .highlight_symbol(HIGHLIGHT_SYMBOL);
+                frame.render_stateful_widget(widget, area, &mut list.list_state);
+            })
+            .expect("draw sessions panel");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.cell((x, y)).map_or(" ", ratatui::buffer::Cell::symbol))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Fixed clock so the snapshot ages are deterministic.
+    const CHIP_NOW: i64 = 1_000_000_000;
+
+    /// The title line the snapshot needs: workspace count plus the needs-you
+    /// badge, without the mouse-hit-area bookkeeping `render` also does.
+    fn panel_title_for_test(state: &AppState) -> String {
+        let workspaces = state
+            .workspaces
+            .iter()
+            .filter(|w| {
+                w.sessions.iter().any(|s| state.session_passes_filter(s))
+                    || w.shell_session.is_some()
+            })
+            .count();
+        let needs_you = needs_you_count(state.workspaces.iter().flat_map(|w| {
+            w.sessions
+                .iter()
+                .filter(|s| state.session_passes_filter(s))
+                .map(|s| s.live_attention.as_slice())
+        }));
+        match needs_you {
+            0 => format!(" Workspaces ({workspaces}) "),
+            1 => format!(" Workspaces ({workspaces}) · 1 needs you "),
+            n => format!(" Workspaces ({workspaces}) · {n} need you "),
+        }
+    }
+
+    /// One workspace carrying the spec's own left-pane example: an ASK, an ERR,
+    /// an APPROVE, a DONE, and a quiet row.
+    fn chip_state() -> AppState {
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        state.expand_all_workspaces = true;
+        let mut workspace = Workspace::new("agents-in-a-box".to_string(), "/tmp/aib".into());
+        let rows: [(&str, Vec<SessionAttention>); 5] = [
+            (
+                "ACP-chat",
+                vec![SessionAttention::local(
+                    AttentionKind::Ask,
+                    CHIP_NOW - 40_000,
+                )],
+            ),
+            (
+                "disk-clean",
+                vec![SessionAttention::local(
+                    AttentionKind::Err,
+                    CHIP_NOW - 9 * 60_000,
+                )],
+            ),
+            (
+                "api-stats",
+                vec![SessionAttention::local(
+                    AttentionKind::Approve,
+                    CHIP_NOW - 3 * 60_000,
+                )],
+            ),
+            (
+                "site-build",
+                vec![SessionAttention::local(
+                    AttentionKind::Done,
+                    CHIP_NOW - 60_000,
+                )],
+            ),
+            ("quiet", Vec::new()),
+        ];
+        for (name, chips) in rows {
+            let mut session = Session::new(name.to_string(), "/tmp/aib".to_string());
+            session.status = SessionStatus::Idle;
+            session.live_attention = chips;
+            workspace.add_session(session);
+        }
+        state.workspaces.push(workspace);
+        state.selected_workspace_index = Some(0);
+        state.selected_session_index = Some(0);
+        state
+    }
+
+    #[test]
+    fn chip_strip_at_100_columns() {
+        let mut state = chip_state();
+        insta::assert_snapshot!(render_panel(&mut state, 100, 9));
+    }
+
+    #[test]
+    fn chip_strip_at_80_columns() {
+        let mut state = chip_state();
+        insta::assert_snapshot!(render_panel(&mut state, 80, 9));
+    }
+
+    /// The sidebar's real default width. The chip strip has to survive here,
+    /// because this is the width the panel actually renders at.
+    #[test]
+    fn chip_strip_at_the_default_sidebar_width() {
+        let mut state = chip_state();
+        insta::assert_snapshot!(render_panel(&mut state, 42, 9));
+    }
+
+    #[test]
+    fn a_row_with_both_an_ask_and_an_err_paints_the_ask_first() {
+        let mut state = chip_state();
+        state.workspaces[0].sessions[1].live_attention = crate::fleet::attention::normalise(vec![
+            SessionAttention::local(AttentionKind::Err, CHIP_NOW - 9 * 60_000),
+            SessionAttention::local(AttentionKind::Ask, CHIP_NOW - 40_000),
+        ]);
+        let rendered = render_panel(&mut state, 100, 9);
+        let row = rendered
+            .lines()
+            .find(|line| line.contains("disk-clean"))
+            .expect("the two-chip row renders");
+        let ask = row.find("ASK").expect("ASK chip painted");
+        let err = row.find("ERR").expect("ERR chip painted");
+        assert!(ask < err, "ASK must paint before ERR on one row: {row}");
+        // And the badge counts that row once, not twice.
+        assert!(
+            rendered.contains("3 need you"),
+            "one row blocking twice counts once: {rendered}"
+        );
+    }
+
+    /// The invariant the three snapshots exist to protect, asserted directly:
+    /// every chip strip ends in the SAME column, one cell clear of the border,
+    /// at every width. This is the test that catches a byte-length-for-cell-
+    /// width slip; a snapshot only catches it if a human reads the diff.
+    #[test]
+    fn every_chip_strip_ends_one_cell_clear_of_the_border() {
+        for width in [42_u16, 60, 80, 100, 140] {
+            let mut state = chip_state();
+            let rendered = render_panel(&mut state, width, 9);
+            // Cells between the last age character and the right border. The
+            // line length itself proves nothing (`List` pads every row to the
+            // full width), so measure the gap the operator actually sees.
+            let gaps: Vec<usize> = rendered
+                .lines()
+                .filter_map(|line| {
+                    let chars: Vec<char> = line.chars().collect();
+                    let border = chars.len().checked_sub(1)?;
+                    let last_age =
+                        chars.iter().take(border).rposition(|c| c.is_ascii_alphanumeric())?;
+                    ["ASK", "ERR", "APPROVE", "DONE"]
+                        .iter()
+                        .any(|chip| line.contains(chip))
+                        .then_some(border - last_age - 1)
+                })
+                .collect();
+            assert_eq!(
+                gaps.len(),
+                4,
+                "four chipped rows at width {width}: {rendered}"
+            );
+            assert!(
+                gaps.iter().all(|gap| *gap == CHIP_RIGHT_MARGIN),
+                "every chip strip must sit {CHIP_RIGHT_MARGIN} cell(s) clear of the border \
+                 at width {width}, saw {gaps:?}: {rendered}"
+            );
+        }
+    }
+
+    /// Chip words are never abbreviated, at any width the panel can be dragged
+    /// to. The session NAME is what gives way.
+    #[test]
+    fn chip_words_survive_a_width_the_name_does_not() {
+        let mut state = chip_state();
+        let rendered = render_panel(&mut state, 42, 9);
+        for word in ["ASK 40s", "ERR 9m", "APPROVE 3m", "DONE 1m"] {
+            assert!(
+                rendered.contains(word),
+                "`{word}` must survive whole at 42 columns: {rendered}"
+            );
+        }
+        assert!(
+            rendered.contains('\u{2026}'),
+            "the session name is what truncates instead: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_request_the_screen_cannot_place_gets_its_own_row_not_a_truncated_badge() {
+        let mut state = chip_state();
+        state.attention_elsewhere = 1;
+        let rendered = render_panel(&mut state, 42, 11);
+        assert!(
+            rendered.contains("1 waiting elsewhere"),
+            "the whole phrase must survive the narrow sidebar that clipped the \
+             title badge to `1 el`: {rendered}"
+        );
+        // And it stays out of the blocking badge, which counts rows on screen.
+        assert!(rendered.contains("2 need you"), "{rendered}");
+    }
+
+    #[test]
+    fn no_elsewhere_row_when_every_request_found_its_session() {
+        let mut state = chip_state();
+        state.attention_elsewhere = 0;
+        let rendered = render_panel(&mut state, 42, 11);
+        assert!(
+            !rendered.contains("elsewhere"),
+            "the row must be absent, not zero: {rendered}"
+        );
+    }
+
+    #[test]
+    fn the_elsewhere_row_takes_no_attach_digit() {
+        // It is not attachable, and a digit spent on it would shift every real
+        // session's shortcut by one — the exact lockstep
+        // `attachable_items_in_order` exists to hold.
+        let mut with_row = chip_state();
+        with_row.attention_elsewhere = 3;
+        let mut without = chip_state();
+        without.attention_elsewhere = 0;
+        let digits = |state: &mut AppState| -> Vec<String> {
+            render_panel(state, 100, 12)
+                .lines()
+                .filter_map(|line| {
+                    let trimmed = line.trim_start_matches(['│', '▶', ' ']);
+                    trimmed.chars().next().filter(char::is_ascii_digit).map(|d| {
+                        format!(
+                            "{d}{}",
+                            trimmed.split_whitespace().nth(2).unwrap_or_default()
+                        )
+                    })
+                })
+                .collect()
+        };
+        assert_eq!(digits(&mut with_row), digits(&mut without));
+    }
+
+    #[test]
+    fn a_quiet_fleet_shows_no_badge() {
+        let mut state = chip_state();
+        for session in &mut state.workspaces[0].sessions {
+            session.live_attention.clear();
+        }
+        let rendered = render_panel(&mut state, 100, 9);
+        assert!(
+            !rendered.contains("need you") && !rendered.contains("needs you"),
+            "the badge must be absent, not zero: {rendered}"
+        );
+    }
 
     #[test]
     fn selection_uses_visible_row_when_stopped_sessions_are_filtered() {

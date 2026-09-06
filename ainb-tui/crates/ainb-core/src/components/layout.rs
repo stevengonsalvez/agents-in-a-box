@@ -87,6 +87,132 @@ impl LayoutComponent {
         }
     }
 
+    /// Paint the tab strip and the footer onto a pane's border.
+    ///
+    /// Drawn as a title on the existing block rather than as a row of its own:
+    /// five words in a dedicated row costs the content a line on every screen,
+    /// and the preview pane is the one that can least afford it.
+    fn render_tab_strip(
+        frame: &mut Frame,
+        area: Rect,
+        state: &AppState,
+        active: crate::components::session_tabs::SessionTab,
+    ) {
+        use crate::components::session_tabs;
+        let block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(SUBDUED_BORDER))
+            .title(session_tabs::strip(state, active))
+            .title_bottom(session_tabs::footer(state, active, false));
+        // Only the border cells are painted, so whatever the pane already drew
+        // inside stays exactly as it was.
+        frame.render_widget(block, area);
+    }
+
+    /// Render one non-preview tab into the right pane.
+    fn render_session_tab(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut AppState,
+        active: crate::components::session_tabs::SessionTab,
+    ) {
+        use crate::components::session_tabs::{self, SessionTab};
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(SUBDUED_BORDER))
+            .style(Style::default().bg(PANEL_BG))
+            .title(session_tabs::strip(state, active))
+            // The footer stops promising the attach digits whenever the pane
+            // owns keys, not only while text is being typed: on the card half
+            // of a conversation a `3` is still the chat's, not an attach.
+            .title_bottom(session_tabs::footer(
+                state,
+                active,
+                state.session_tab_owns_keys(),
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        match active {
+            // Handled by the caller, which keeps the tmux mirror it always had.
+            SessionTab::Preview => {}
+            SessionTab::Ask => {
+                // Point the pane at the request it is showing BEFORE painting.
+                // Without this the focus is only initialised by the first key
+                // press, so a request with no options opens with the composer
+                // unfocused — no cursor, no caret, and the operator's first
+                // characters fall through to the session shortcuts.
+                if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
+                    state.ask_state.retarget(&chip);
+                }
+                session_tabs::render_ask(frame, inner, state);
+            }
+            SessionTab::Log => {
+                let rows = state.get_selected_session().map_or_else(Vec::new, |session| {
+                    session_tabs::read_log(
+                        &session.workspace_path,
+                        AppState::agent_hook_name(session.agent_type),
+                        200,
+                    )
+                });
+                session_tabs::render_log(frame, inner, &rows);
+            }
+            // The copilot carries a HEADER the thread does not: its engine,
+            // model and guardrail dial. The conversation under it is the same
+            // state machine either way, so the two cannot drift in what they
+            // render or which failures they report.
+            SessionTab::Copilot => {
+                // The dial ticks with the pane, so the registry read and any
+                // in-flight configure land without the operator pressing
+                // anything, exactly like the chat host's own tick.
+                if state.copilot_dial.tick() {
+                    state.ui_needs_refresh = true;
+                }
+                // Cloned rather than borrowed: `chat_host_for` needs `&mut
+                // state` to tick the conversation, and the header is three
+                // strings and a status.
+                let header = session_tabs::copilot_header(&state.copilot_dial);
+                let host = state.chat_host_for(active);
+                session_tabs::render_copilot(frame, inner, header, host);
+            }
+            SessionTab::Thread => {
+                // Checked rows win over the cursor, the same rule `Enter` and
+                // `r` follow on this screen: with a multi-select active this
+                // pane is a broadcast to the checked set, not one session's
+                // private thread. The strip label says which it currently is.
+                let targets = state.broadcast_targets();
+                if targets.is_empty() {
+                    match state.chat_host_for(active) {
+                        Some(host) => session_tabs::render_chat(frame, inner, host),
+                        // Reachable only for `thread` with no session selected,
+                        // which the strip already dims — say it rather than
+                        // paint an empty box.
+                        None => frame.render_widget(
+                            Paragraph::new("select a session to open its thread")
+                                .style(Style::default().fg(MUTED_GRAY)),
+                            inner,
+                        ),
+                    }
+                } else {
+                    if state.broadcast.tick() {
+                        state.ui_needs_refresh = true;
+                    }
+                    let unreachable = state.broadcast_unreachable();
+                    session_tabs::render_broadcast(
+                        frame,
+                        inner,
+                        &state.broadcast,
+                        &targets,
+                        unreachable,
+                    );
+                }
+            }
+        }
+    }
+
     pub fn render(&mut self, frame: &mut Frame, state: &mut AppState) {
         // Full-screen views go through the screen registry. Each Screen impl
         // owns its component(s) and renders any screen-specific overlays
@@ -175,10 +301,29 @@ impl LayoutComponent {
             || state.selected_shell_session().is_some();
         let observing_selection = state.is_observing_selected_terminal();
 
+        // The active tab, reconciled against what is actually available: a tab
+        // can go dead under the operator (the ASK is answered, the cursor moves
+        // off a session row) and leaving them on a stale pane shows a question
+        // they can no longer act on.
+        let active_tab = crate::components::session_tabs::resolve(state, state.session_tab);
+        state.session_tab = active_tab;
+
+        // Fold in whatever the answer worker reported. EVERY frame, not only on
+        // the `ask` tab: the row's `SENT` chip is painted by the session list,
+        // so an operator who sends and then switches tabs would otherwise watch
+        // that chip stay SENT forever.
+        if state.ask_state.tick() {
+            state.ui_needs_refresh = true;
+        }
+
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to
             // the pane interior (minus the border) so the inner program reflows,
             // then render the live terminal in place of the read-only preview.
+            //
+            // The embed OUTRANKS the strip: an attached terminal owns every
+            // keystroke, so painting a tab strip over it would advertise
+            // controls the pane cannot receive.
             let area = content_chunks[1];
             let inner = area.inner(Margin {
                 vertical: 1,
@@ -191,24 +336,43 @@ impl LayoutComponent {
             // 1-based pane-local SGR coordinates (see encode_mouse_event).
             state.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
-        } else if observing_selection {
-            let area = content_chunks[1];
-            let inner = area.inner(Margin {
-                vertical: 1,
-                horizontal: 1,
-            });
-            if let Some(observer) = state.embed.as_mut() {
-                let _ = observer.resize(inner.height, inner.width);
+        } else if active_tab == crate::components::session_tabs::SessionTab::Preview {
+            // The observer is not a branch of its own: it is what `preview`
+            // SHOWS when one is running, a live mirror in place of the
+            // read-only capture. Gating it on the tab matters — an
+            // `observing_selection` arm that outranked the strip made every
+            // other tab unreachable while the state machine still advanced
+            // through them, so `ask` could not be opened on the very session
+            // whose chip sent the operator looking, and keys routed to a chat
+            // surface that was not on screen.
+            if observing_selection {
+                let area = content_chunks[1];
+                let inner = area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 1,
+                });
+                if let Some(observer) = state.embed.as_mut() {
+                    let _ = observer.resize(inner.height, inner.width);
+                }
+                state.embed_pane_area = None;
+                self.tmux_preview.render_observer(frame, area, state);
+            } else if selected_has_legacy_preview {
+                // Read-only tmux capture. Initial attach can take one frame, so
+                // this stays the transient fallback rather than the
+                // steady-state renderer.
+                self.tmux_preview.render(frame, content_chunks[1], state);
+            } else {
+                // Render traditional live logs stream
+                self.live_logs_stream.render(frame, content_chunks[1], state);
             }
-            state.embed_pane_area = None;
-            self.tmux_preview.render_observer(frame, area, state);
-        } else if selected_has_legacy_preview {
-            // Initial attach can take one frame. Keep the existing capture as
-            // a transient fallback, never as the steady-state renderer.
-            self.tmux_preview.render(frame, content_chunks[1], state);
+            // Painted for the observer too. Unlike the interactive embed above,
+            // an observer never receives keys — `is_observing_tmux_session`
+            // requires `!is_interactive_pane()` — so the strip advertises
+            // nothing the pane cannot do, and without it the operator loses the
+            // only affordance saying the other tabs exist.
+            Self::render_tab_strip(frame, content_chunks[1], state, active_tab);
         } else {
-            // Render traditional live logs stream
-            self.live_logs_stream.render(frame, content_chunks[1], state);
+            self.render_session_tab(frame, content_chunks[1], state, active_tab);
         }
 
         // Render bottom logs area (traditional logs viewer)
@@ -424,28 +588,13 @@ impl LayoutComponent {
 
         // Line 4: Panels + System. Every panel screen mirrors its
         // home-menu letter here (the session-list key handler binds the
-        // same set), and closing a panel returns to this screen. The
-        // inbox hint is always shown so users can discover the Inbox
-        // screen even on a fresh install with zero events. When the
-        // store reports unread + non-dismissed rows, a `● N` glyph is
-        // rendered alongside the `b inbox` hint, capped at `99+` so a
-        // large backlog can't widen the bar unbounded.
-        let inbox_unread = state
-            .inbox_state
-            .store
-            .as_ref()
-            .and_then(|s| s.unread_count().ok())
-            .unwrap_or(0);
+        // same set), and closing a panel returns to this screen.
+        //
+        // The `b inbox` hint and its unread badge are gone with the Inbox
+        // screen: a session's notification history is the `log` tab on this
+        // screen now, and the fleet-wide view is the hangar plugin's own.
         let mut line4_spans = Vec::new();
-        if let Some(badge) = inbox_unread_badge(inbox_unread) {
-            line4_spans.push(Span::styled(
-                badge,
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ));
-        }
         line4_spans.extend([
-            key("b", GOLD),
-            desc(" inbox "),
             key("i", GOLD),
             desc(" stats "),
             key("w", GOLD),
@@ -538,24 +687,8 @@ impl LayoutComponent {
         ];
 
         // ── Right column: panels, views & navigation ─────────────────────
-        // The inbox unread badge keeps its place ahead of `b inbox`, capped at
-        // `99+` so a backlog can't widen the column past the divider.
-        let inbox_unread = state
-            .inbox_state
-            .store
-            .as_ref()
-            .and_then(|s| s.unread_count().ok())
-            .unwrap_or(0);
         let mut row1 = Vec::new();
-        if let Some(badge) = inbox_unread_badge(inbox_unread) {
-            row1.push(Span::styled(
-                badge,
-                Style::default().fg(WARNING_ORANGE).add_modifier(Modifier::BOLD),
-            ));
-        }
         row1.extend([
-            key("b", GOLD),
-            desc(" inbox  "),
             key("i", GOLD),
             desc(" stats  "),
             key("w", GOLD),
@@ -862,32 +995,6 @@ impl LayoutComponent {
         .alignment(Alignment::Center)
         .style(Style::default().bg(PANEL_BG));
         frame.render_widget(help_bar, inner_layout[1]);
-    }
-}
-
-/// Pick the right restart-shaped affordance to show on the bottom menu
-/// bar for the currently-highlighted session.
-///
-/// `r` resumes a Stopped Interactive (tmux) session in-place — the
-/// recoverable escape hatch added with the soft-stop feature. `e`
-/// recreates a Boss/Docker session in a fresh container.
-///
-/// The label deliberately reads `recreate` (not the generic `restart`)
-/// so it is obvious this is the Docker/Boss path — `e` tears down the
-/// old container and spins up a new one. Showing it for a stopped
-/// Interactive session would point users at the wrong key — pressing
-/// `e` triggers Docker logic that doesn't apply, while `r` is what
-/// actually resumes the tmux pane and relaunches the embedded CLI.
-/// Format the inbox unread badge for the menu bar, or `None` when there is
-/// nothing unread. The count is capped at `99+` so a large backlog can't
-/// widen line 1 of the bar past the 80-col minimum (the badge is the only
-/// variable-width token on that line). The widest possible badge is
-/// `"● 99+ "` (6 columns).
-fn inbox_unread_badge(unread: u64) -> Option<String> {
-    match unread {
-        0 => None,
-        1..=99 => Some(format!("● {unread} ")),
-        _ => Some("● 99+ ".to_string()),
     }
 }
 
@@ -1470,231 +1577,6 @@ mod live_widget_tests {
         ];
         for c in cases {
             assert!(!format_reset_at(c).is_empty(), "non-empty for {c}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod menu_bar_tests {
-    use super::inbox_unread_badge;
-
-    #[test]
-    fn inbox_badge_hidden_when_zero() {
-        assert_eq!(inbox_unread_badge(0), None);
-    }
-
-    #[test]
-    fn inbox_badge_shows_exact_count_up_to_99() {
-        assert_eq!(inbox_unread_badge(1).as_deref(), Some("● 1 "));
-        assert_eq!(inbox_unread_badge(99).as_deref(), Some("● 99 "));
-    }
-
-    #[test]
-    fn inbox_badge_caps_at_99_plus_and_bounds_width() {
-        // Beyond 99 the count is clamped so a huge backlog can't widen the
-        // bar. The widest badge must stay at 6 columns ("● 99+ ").
-        assert_eq!(inbox_unread_badge(100).as_deref(), Some("● 99+ "));
-        for n in [100u64, 655, 9_999, u64::MAX] {
-            let badge = inbox_unread_badge(n).expect("badge present");
-            assert_eq!(badge, "● 99+ ");
-            assert!(badge.chars().count() <= 6, "badge too wide: {badge:?}");
-        }
-    }
-
-    /// Render the menu bar at the conventional 80-column minimum and assert
-    /// every advertised key token survives — i.e. nothing is silently
-    /// truncated off either end of the centered four-line bar. This guards
-    /// the regression where adding keys (filter, 1-9, Space, F2, del-sel,
-    /// inbox) overflowed 80 cols and clipped the inbox shortcut.
-    #[test]
-    fn menu_bar_keys_not_truncated_at_80_cols() {
-        use crate::app::state::AppState;
-        use crate::components::layout::LayoutComponent;
-        use ratatui::{Terminal, backend::TestBackend};
-
-        let layout = LayoutComponent::new();
-        let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = true;
-        let mut terminal = Terminal::new(TestBackend::new(80, 6)).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.size();
-                layout.render_menu_bar(f, area, &state);
-            })
-            .unwrap();
-
-        let rendered: String =
-            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-
-        // The restart slot shows `r resume`.
-        for token in [
-            "ew",    // new
-            "xpand", // expand
-            "focus", // Tab focus
-            "ttach", // attach
-            "Pane attach",
-            "1-9",     // quick attach
-            "Space",   // multi-select
-            "tar",     // star
-            "resume",  // r — resume a stopped tmux session
-            "del-sel", // D bulk delete
-            "editor",  // o
-            "shell",   // $
-            "F2",      // rename
-            "git",     // g (rendered as g + "it")
-            "commit",  // p
-            "laude",   // c claude
-            "refresh", // f
-            "filter",  // F  ← the key that was missing before
-            "re-auth", // u (moved off A for in-pane attach)
-            "?/H",     // help
-            "home",    // q
-            "inbox",   // b
-            "stats",   // i — analytics panel
-            "witr",    // w — process-causality browser
-            "skills",  // k — skills browser
-            "memory",  // m — learnings KB browser
-            "abtop",   // t — top-for-agents monitor
-        ] {
-            assert!(
-                rendered.contains(token),
-                "menu token {token:?} truncated at 80 cols.\nRendered:\n{rendered}"
-            );
-        }
-
-        // Stronger guard: the centered Paragraph truncates from both ends when
-        // a line is wider than the inner area. Each of the 4 content rows
-        // (rows 1..=4; rows 0 and 5 are the rounded border) must therefore
-        // keep at least one space of padding against both inner edges — if a
-        // row filled edge-to-edge it would mean content was clipped.
-        let buf = terminal.backend().buffer();
-        for y in 1..=4u16 {
-            let left = buf.get(1, y).symbol().to_string();
-            let right = buf.get(78, y).symbol().to_string();
-            assert!(
-                left == " " && right == " ",
-                "menu row {y} fills the bar edge-to-edge (clipped). \
-                 left={left:?} right={right:?}"
-            );
-        }
-    }
-
-    /// On a wide terminal the legend switches to the two-column split. Assert
-    /// the divider and both section headers render (proving we took the split
-    /// path, not the stacked fallback) and that every advertised key survives
-    /// — the wide analogue of `menu_bar_keys_not_truncated_at_80_cols`.
-    #[test]
-    fn menu_bar_two_col_keeps_every_key_and_draws_divider() {
-        use crate::app::state::AppState;
-        use crate::components::layout::LayoutComponent;
-        use ratatui::{Terminal, backend::TestBackend};
-
-        let layout = LayoutComponent::new();
-        let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = true;
-        // Comfortably above TWO_COL_MIN_WIDTH so the split path renders.
-        let mut terminal = Terminal::new(TestBackend::new(140, 6)).unwrap();
-        terminal
-            .draw(|f| {
-                let area = f.size();
-                layout.render_menu_bar(f, area, &state);
-            })
-            .unwrap();
-
-        let rendered: String =
-            terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-
-        // Vertical divider proves the two-column path (stacked has none).
-        assert!(
-            rendered.contains('│'),
-            "two-column divider missing:\n{rendered}"
-        );
-        // Section headers ride the top border.
-        assert!(
-            rendered.contains("Session actions"),
-            "left header missing:\n{rendered}"
-        );
-        assert!(
-            rendered.contains("Panels & views"),
-            "right header missing:\n{rendered}"
-        );
-
-        for token in [
-            "ew",    // new
-            "ttach", // attach
-            "Pane attach",
-            "1-9",     // quick attach
-            "Space",   // multi-select
-            "tar",     // star
-            "resume",  // r — resume a stopped tmux session
-            "del-sel", // D bulk delete
-            "editor",  // o
-            "shell",   // $
-            "F2",      // rename
-            "commit",  // p
-            "refresh", // f
-            "filter",  // F
-            "re-auth", // u
-            "inbox",   // b
-            "stats",   // i
-            "witr",    // w
-            "skills",  // k
-            "memory",  // m
-            "abtop",   // t
-            "git",     // g
-            "claude",  // c
-            "xpand",   // E expand
-            "focus",   // Tab focus
-            "?/H",     // help
-            "home",    // q
-        ] {
-            assert!(
-                rendered.contains(token),
-                "menu token {token:?} missing in two-col legend.\nRendered:\n{rendered}"
-            );
-        }
-    }
-
-    /// The two-column split first engages at exactly `TWO_COL_MIN_WIDTH` (110),
-    /// which is also where its columns are narrowest and clipping would first
-    /// bite. Render at the boundary and assert the longest token in each column
-    /// (`re-auth` on the left, `home`/`abtop` on the right) survives and the
-    /// content rows keep their edge padding — the centred Paragraphs would eat
-    /// both ends if a line overflowed its half.
-    #[test]
-    fn menu_bar_two_col_no_clip_at_threshold_width() {
-        use crate::app::state::AppState;
-        use crate::components::layout::LayoutComponent;
-        use ratatui::{Terminal, backend::TestBackend};
-
-        let layout = LayoutComponent::new();
-        let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = true;
-        let mut terminal = Terminal::new(TestBackend::new(110, 6)).unwrap();
-        terminal.draw(|f| layout.render_menu_bar(f, f.size(), &state)).unwrap();
-
-        let buf = terminal.backend().buffer();
-        let rendered: String = buf.content().iter().map(|c| c.symbol()).collect();
-
-        // Took the split path, not the stacked fallback.
-        assert!(
-            rendered.contains('│'),
-            "no divider at threshold:\n{rendered}"
-        );
-        for token in ["re-auth", "resume", "del-sel", "abtop", "home", "witr"] {
-            assert!(
-                rendered.contains(token),
-                "token {token:?} clipped at threshold width 110:\nRendered:\n{rendered}"
-            );
-        }
-        // Inner edges (cols 1 and 108) must stay blank on every content row.
-        for y in 1..=4u16 {
-            let left = buf.get(1, y).symbol().to_string();
-            let right = buf.get(108, y).symbol().to_string();
-            assert!(
-                left == " " && right == " ",
-                "menu row {y} clipped to the edge at width 110. left={left:?} right={right:?}"
-            );
         }
     }
 }

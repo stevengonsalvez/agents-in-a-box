@@ -519,14 +519,14 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
-        // The copilot chat is the fourth repaint source, and for the same
-        // reason as the embed: its content arrives from the daemon with no host
-        // input involved. The chat polls on the Fleet pane's frame tick, so
-        // under the dirty-gate an open chat would fetch once, at open, and then
-        // sit still while the copilot answered into a socket nobody read. The
-        // chat's own in-flight latch keeps that to one fetch per interval, not
-        // one per frame.
-        if app.state.fleet_panel_state.chat_open() {
+        // A conversation is the fourth repaint source, and for the same reason
+        // as the embed: its content arrives from the daemon with no host input
+        // involved. The chat polls on the frame tick, so under the dirty-gate
+        // an open conversation would fetch once, at open, and then sit still
+        // while the copilot answered into a socket nobody read. The chat's own
+        // in-flight latch keeps that to one fetch per interval, not one per
+        // frame.
+        if app.state.session_chat_open() {
             needs_redraw = true;
         }
 

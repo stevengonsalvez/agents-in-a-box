@@ -880,6 +880,43 @@ pub struct AtcRegisterResult {
     pub scheduler_ownership: AtcSchedulerOwnership,
 }
 
+/// One row of an instance's retry ledger: how much continue budget a session
+/// has spent, and whether it has been escalated to a human.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcRetryWire {
+    /// The session the budget belongs to.
+    pub session_id: String,
+    /// Auto-`continue` attempts spent against the cap.
+    pub continue_count: i64,
+    /// Whether the cap was reached and a human was pulled in.
+    pub escalated: bool,
+    /// Free-text note, when one was recorded.
+    pub note: Option<String>,
+    /// When the row last moved, epoch-ms. Recovery is measured from here.
+    pub updated_at: i64,
+}
+
+/// Parameters for `atc/retry_list`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcRetryListParams {
+    /// Whose ledger to read. `None` means the daemon's own retry sweep, which
+    /// is the one an operator has no other way to see: it runs with no ATC
+    /// instance, so there is no `atc status` to ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+}
+
+/// Result for `atc/retry_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AtcRetryListResult {
+    /// The instance the rows belong to, resolved.
+    pub instance: String,
+    /// The cap every row is spending against.
+    pub err_retry_cap: i64,
+    /// Ledger rows, ordered by session id.
+    pub retries: Vec<AtcRetryWire>,
+}
+
 /// One registered ATC instance in the [`crate::methods::ATC_LIST`] result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtcInstanceWire {

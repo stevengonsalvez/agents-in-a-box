@@ -422,6 +422,11 @@ fn task_adapter(
         env_passthrough: base.env_passthrough.clone(),
         extra_env,
         config_options: base.config_options.clone(),
+        // Inherited, though nothing reads it here: this recipe never reaches an
+        // engine picker (its key carries `#task:`, which `chat_adapters`
+        // excludes), and carrying the base's list keeps the two in step if it
+        // ever does.
+        models: base.models.clone(),
         sandbox: None,
     };
     if sandbox {

@@ -64,9 +64,13 @@ impl HelpComponent {
             row("c", "Toggle Claude chat"),
             ListItem::new(""),
             head("Panels (closing returns here):"),
-            row("b", "Inbox (Esc closes)"),
+            // `b Inbox` and `f Fleet control panel` were here. Both screens are
+            // gone, and the help must go with them: a documented key that opens
+            // nothing is worse than an undocumented one, because the operator
+            // presses it, nothing happens, and they stop trusting the page.
+            // What replaced both is the sessions screen's own right pane.
+            row("Tab", "Sessions: preview / ask / thread / copilot / log"),
             row("d", "Daemons: health, hooks, and repair (Esc closes)"),
-            row("f", "Fleet control panel (Esc closes)"),
             row("i", "Stats / usage analytics (Esc closes)"),
             row("w", "Witr process browser (quit witr to return)"),
             row("c / k", "Skills catalogue (Esc closes)"),

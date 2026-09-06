@@ -1994,49 +1994,97 @@ mod tests {
     const NOW: i64 = 1_000_000_000;
     const CWD: &str = "/work/feat-x";
 
+    /// The chip kind `attention_for_session` produced, dropping the timestamp
+    /// the age-specific tests below assert on separately.
+    fn kind_of(
+        cwd: &str,
+        agent: Option<&str>,
+        generating: bool,
+        baseline: i64,
+        now: i64,
+        recent: &[ainb_plugin_notifyd::NotificationRecord],
+    ) -> Option<crate::fleet::attention::AttentionKind> {
+        AppState::attention_for_session(cwd, agent, generating, baseline, now, recent)
+            .map(|chip| chip.kind)
+    }
+
     #[test]
     fn attention_permission_event_marks_needs_permission() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::NeedsPermission),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Approve),
+        );
+    }
+
+    #[test]
+    fn a_local_chip_carries_the_hooks_own_message() {
+        // Without this the `ask` pane opens on a locally-produced row saying
+        // "the request carried no question text" while the producer plainly had
+        // one — which is the daemon-down journey's whole opening line.
+        let mut record = rec("claude", CWD, "Notification:idle_prompt", NOW - 1000);
+        record.payload_json = r#"{"message":"Which sqlite path?"}"#.to_string();
+        let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[record])
+            .expect("the notification marks the row");
+        assert_eq!(chip.detail.as_deref(), Some("Which sqlite path?"));
+    }
+
+    #[test]
+    fn a_payload_with_no_message_invents_nothing() {
+        let record = rec("claude", CWD, "Notification:idle_prompt", NOW - 1000);
+        let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[record])
+            .expect("the notification marks the row");
+        assert_eq!(
+            chip.detail, None,
+            "a manufactured question reads as the agent's own"
+        );
+    }
+
+    #[test]
+    fn a_chip_ages_from_the_hooks_instant_not_from_now() {
+        // The whole point of carrying `rec.ts`: restarting the TUI must not
+        // reset a nine-minute-old question back to `0s`.
+        let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 9 * 60 * 1000)];
+        let chip = AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent)
+            .expect("permission event marks the row");
+        assert_eq!(chip.since_ms, NOW - 9 * 60 * 1000);
+        assert_eq!(
+            crate::fleet::attention::format_age(NOW, chip.since_ms),
+            "9m"
         );
     }
 
     #[test]
     fn attention_notification_event_marks_waiting() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", CWD, "Notification:idle_prompt", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::WaitingOnUser),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Ask),
         );
     }
 
     #[test]
     fn attention_fresh_stop_marks_finished_stale_stop_clears() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let fresh = vec![rec("claude", CWD, "Stop", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &fresh),
-            Some(AlertKind::Finished),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &fresh),
+            Some(AttentionKind::Done),
         );
-        // Older than the 5-minute Finished TTL → retired, no marker.
+        // Older than the 5-minute DONE TTL → retired, no chip.
         let stale = vec![rec("claude", CWD, "Stop", NOW - 6 * 60 * 1000)];
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &stale),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 0, NOW, &stale), None);
     }
 
     #[test]
     fn attention_suppressed_while_generating() {
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), true, 0, NOW, &recent),
+            kind_of(CWD, Some("claude"), true, 0, NOW, &recent),
             None,
-            "a generating session shows the busy dot, not an attention marker",
+            "a generating session shows the busy dot, not an attention chip",
         );
     }
 
@@ -2044,41 +2092,32 @@ mod tests {
     fn attention_blank_without_a_matching_event() {
         // No events at all → blank (this is the common idle case the old
         // "[?] on everything" behaviour got wrong).
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &[]),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 0, NOW, &[]), None);
         // Events exist, but for a different cwd or a different agent —
         // must not bleed across sessions.
         let other = vec![
             rec("codex", CWD, "Notification", NOW - 50),
             rec("claude", "/work/other", "Notification", NOW - 100),
         ];
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &other),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 0, NOW, &other), None);
     }
 
     #[test]
     fn attention_ignores_events_at_or_before_baseline() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", CWD, "Notification", 500)];
         // Baseline at/after the event (e.g. user just attached) → cleared.
-        assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 500, NOW, &recent),
-            None,
-        );
+        assert_eq!(kind_of(CWD, Some("claude"), false, 500, NOW, &recent), None);
         // Baseline just before the event → still marks.
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 499, NOW, &recent),
-            Some(AlertKind::WaitingOnUser),
+            kind_of(CWD, Some("claude"), false, 499, NOW, &recent),
+            Some(AttentionKind::Ask),
         );
     }
 
     #[test]
     fn attention_newest_event_wins() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         // Question asked, then the turn finished — newest (Stop) supersedes
         // the older Notification.
         let recent = vec![
@@ -2086,8 +2125,8 @@ mod tests {
             rec("claude", CWD, "Notification", NOW - 5000),
         ];
         assert_eq!(
-            AppState::attention_for_session(CWD, Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::Finished),
+            kind_of(CWD, Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Done),
         );
     }
 
@@ -2096,19 +2135,254 @@ mod tests {
         // Shell / SSH session (no hook agent) → never a marker, even with
         // a permission event sitting in the same cwd.
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
-        assert_eq!(
-            AppState::attention_for_session(CWD, None, false, 0, NOW, &recent),
-            None,
-        );
+        assert_eq!(kind_of(CWD, None, false, 0, NOW, &recent), None);
     }
 
     #[test]
     fn attention_matches_cwd_ignoring_trailing_slash() {
-        use ainb_plugin_notifyd::AlertKind;
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", "/work/feat-x/", "Notification", NOW - 100)];
         assert_eq!(
-            AppState::attention_for_session("/work/feat-x", Some("claude"), false, 0, NOW, &recent),
-            Some(AlertKind::WaitingOnUser),
+            kind_of("/work/feat-x", Some("claude"), false, 0, NOW, &recent),
+            Some(AttentionKind::Ask),
+        );
+    }
+
+    // ========================================================================
+    // Attention merge: the daemon's rows landing on session rows
+    // ========================================================================
+
+    /// One workspace, one session, at `cwd`, with a live pane.
+    fn state_with_session_at(cwd: &str, tmux: Option<&str>) -> AppState {
+        use crate::models::{Session, SessionStatus, Workspace};
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        let mut workspace = Workspace::new("proj".to_string(), PathBuf::from(cwd));
+        let mut session = Session::new("proj".to_string(), cwd.to_string());
+        session.status = SessionStatus::Idle;
+        session.tmux_session_name = tmux.map(str::to_string);
+        workspace.add_session(session);
+        state.workspaces.push(workspace);
+        state
+    }
+
+    /// Install a daemon snapshot with one row at `cwd`.
+    fn install_daemon_row(
+        state: &AppState,
+        cwd: &str,
+        chip: crate::fleet::attention::SessionAttention,
+    ) {
+        use crate::fleet::attention::DaemonAttention;
+        let mut by_cwd = std::collections::HashMap::new();
+        by_cwd.insert(cwd.to_string(), vec![chip]);
+        *state.daemon_attention.lock().unwrap() = DaemonAttention::up(by_cwd);
+    }
+
+    /// A question the agent RE-REPORTS keeps the instant it was first seen.
+    ///
+    /// `attention_for_session` hands back the newest qualifying hook row, and
+    /// Claude Code re-emits `Notification` while a prompt stays unanswered, so
+    /// the raw `ts` moves forward on every refresh. Two things rode on it. The
+    /// age reset to `0s`, which is exactly what `attention::normalise`
+    /// documents must not happen on a re-raise. And `request_id` is derived
+    /// from `since_ms`, so an answer already sent against that question had its
+    /// outcome filed under a key that then changed underneath it — the pane
+    /// went back to a bare composer with no `✗ not answered`, on a question
+    /// that genuinely had failed. That is the intermittent that took a CI run
+    /// to surface and could not be reproduced by waiting longer.
+    #[test]
+    fn a_re_reported_local_question_keeps_its_first_instant_and_its_id() {
+        use crate::fleet::answer::request_id;
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let mut state = state_with_session_at("/work/repeat", Some("tmux_proj"));
+        let id = state.workspaces[0].sessions[0].id;
+
+        let mut first = [SessionAttention::local(AttentionKind::Ask, 1_000)];
+        state.stamp_local_since(id, &mut first);
+        assert_eq!(first[0].since_ms, 1_000);
+        let key = request_id(&first[0]);
+
+        // The same question, re-reported four minutes later.
+        let mut again = [SessionAttention::local(AttentionKind::Ask, 241_000)];
+        state.stamp_local_since(id, &mut again);
+        assert_eq!(
+            again[0].since_ms, 1_000,
+            "a re-raise must not reset the clock the operator is reading"
+        );
+        assert_eq!(
+            request_id(&again[0]),
+            key,
+            "and must not move the key an answer's outcome was filed under"
+        );
+    }
+
+    /// A DAEMON row is identified by its attention id, so it is left alone.
+    #[test]
+    fn stamping_does_not_touch_a_daemon_row() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let mut state = state_with_session_at("/work/daemonrow", Some("tmux_proj"));
+        let id = state.workspaces[0].sessions[0].id;
+        let mut chips = [SessionAttention::daemon(
+            AttentionKind::Ask,
+            9_000,
+            "att-1".into(),
+        )];
+        state.stamp_local_since(id, &mut chips);
+        assert_eq!(chips[0].since_ms, 9_000);
+        assert!(
+            state.attention_local_since.is_empty(),
+            "a daemon row must not take a local clock"
+        );
+    }
+
+    #[test]
+    fn a_daemon_row_lands_on_its_session_even_with_no_notifications_store() {
+        use crate::fleet::attention::{AttentionKind, AttentionSource, SessionAttention};
+        // The local producer is the FLOOR, not a gate. A host that never ran
+        // notifyd has no notifications.db at all; before this the whole refresh
+        // returned early there and the daemon's rows never landed.
+        let cwd = "/work/daemon-only";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into())
+                .with_detail("Decide the sqlite path"),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        let chips = &state.workspaces[0].sessions[0].live_attention;
+        assert_eq!(chips.len(), 1, "the daemon row must land: {chips:?}");
+        assert_eq!(chips[0].kind, AttentionKind::Ask);
+        assert_eq!(chips[0].source, AttentionSource::Daemon);
+        assert_eq!(chips[0].detail.as_deref(), Some("Decide the sqlite path"));
+    }
+
+    #[test]
+    fn a_daemon_row_is_routed_through_the_daemon_while_it_is_up() {
+        use crate::fleet::attention::{Answerable, AttentionKind, SessionAttention};
+        let cwd = "/work/routed";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-9".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert_eq!(
+            state.workspaces[0].sessions[0].live_attention[0].answerable,
+            Answerable::Daemon {
+                attention_id: "att-9".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_daemon_row_greys_out_with_a_reason_once_the_daemon_goes() {
+        use crate::fleet::attention::{AttentionKind, DaemonAttention, SessionAttention};
+        let cwd = "/work/gone";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        // The row is present but the daemon is NOT reachable — the shape a
+        // client sees between a cached row and a failed poll.
+        let mut by_cwd = std::collections::HashMap::new();
+        by_cwd.insert(
+            cwd.to_string(),
+            vec![SessionAttention::daemon(
+                AttentionKind::Ask,
+                1_000,
+                "att-1".into(),
+            )],
+        );
+        *state.daemon_attention.lock().unwrap() = DaemonAttention {
+            by_cwd,
+            reachable: false,
+            error: Some("attention/list via /x/hangar.sock: refused".into()),
+        };
+
+        state.refresh_attention_markers(2_000);
+
+        let chip = &state.workspaces[0].sessions[0].live_attention[0];
+        assert!(
+            !chip.answerable.is_answerable(),
+            "an ACP-backed row with no daemon must not look answerable"
+        );
+        assert!(
+            chip.answerable.refusal().is_some_and(|r| r.contains("attention/answer")),
+            "and it must say which call is unavailable: {:?}",
+            chip.answerable
+        );
+    }
+
+    #[test]
+    fn a_daemon_row_for_a_cwd_on_no_row_is_counted_elsewhere() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let mut state = state_with_session_at("/work/on-screen", Some("tmux_proj"));
+        install_daemon_row(
+            &state,
+            "/work/somewhere-else",
+            SessionAttention::daemon(AttentionKind::Approve, 1_000, "att-x".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert!(state.workspaces[0].sessions[0].live_attention.is_empty());
+        assert_eq!(
+            state.attention_elsewhere, 1,
+            "a request the screen cannot place is still a request"
+        );
+    }
+
+    #[test]
+    fn an_attached_session_claims_its_cwd_so_it_is_not_reported_elsewhere() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/attached";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        state.workspaces[0].sessions[0].is_attached = true;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-1".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert!(
+            state.workspaces[0].sessions[0].live_attention.is_empty(),
+            "an attached session never nags — the operator is looking at it"
+        );
+        assert_eq!(
+            state.attention_elsewhere, 0,
+            "the session under the cursor must not be reported as waiting elsewhere"
+        );
+    }
+
+    #[test]
+    fn a_daemon_row_survives_a_generating_session() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        use crate::models::SessionStatus;
+        // The generating gate exists because the LOCAL producer infers waiting
+        // from a quiet pane, which is a guess. A daemon row is a request the
+        // agent actually raised, and an agent can be mid-turn and blocked on an
+        // approval at once — suppressing it there is how an operator ends up
+        // watching a spinner that is waiting on them.
+        let cwd = "/work/busy";
+        let mut state = state_with_session_at(cwd, Some("tmux_proj"));
+        state.workspaces[0].sessions[0].status = SessionStatus::Running;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Approve, 1_000, "att-1".into()),
+        );
+
+        state.refresh_attention_markers(2_000);
+
+        assert_eq!(
+            state.workspaces[0].sessions[0].live_attention.len(),
+            1,
+            "a generating session can still be blocked on an approval"
         );
     }
 
@@ -3151,7 +3425,16 @@ mod tests {
             }
             for id in &ids {
                 let session = state.find_session(*id).expect("session still registered");
-                assert!(matches!(session.status, SessionStatus::Stopped));
+                // The notification carries WHY when a stop failed. Without it
+                // this assertion says only "not Stopped", which on a machine
+                // whose tmux answers differently than the developer's is a
+                // failure with nothing to act on.
+                assert!(
+                    matches!(session.status, SessionStatus::Stopped),
+                    "session {id} is {:?}, not Stopped. Notifications: {:?}",
+                    session.status,
+                    state.notifications.iter().map(|n| &n.message).collect::<Vec<_>>()
+                );
             }
         })
         .await;

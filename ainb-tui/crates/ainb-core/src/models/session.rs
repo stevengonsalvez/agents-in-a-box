@@ -652,13 +652,30 @@ pub struct Session {
     pub preview_content: Option<String>,   // Cached preview content for display
     pub is_attached: bool,                 // Whether user is currently attached to the session
 
-    /// Live "needs you" marker, recomputed every preview refresh:
-    /// `Some(WaitingOnUser)` whenever the agent is **not generating**
-    /// (turn ended / idle / parked at a prompt), `None` while it is
-    /// actively generating. Drives the amber `[?]` in the session list.
-    /// Transient — never persisted; set in `AppState::update_tmux_previews`.
+    /// Live "needs you" chips, recomputed every preview refresh and rendered
+    /// in precedence order (ASK, APPROVE, ERR, DONE) on the session's row.
+    ///
+    /// A row can carry MORE THAN ONE: an ASK arriving while an ERR is still
+    /// open shows both, and only the ASK is counted in the header badge (see
+    /// [`crate::fleet::attention::needs_you_count`]). Empty while the agent is
+    /// actively generating — nothing is waiting on a human then.
+    ///
+    /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
     #[serde(skip)]
-    pub live_attention: Option<ainb_plugin_notifyd::AlertKind>,
+    pub live_attention: Vec<crate::fleet::attention::SessionAttention>,
+
+    /// The agent's OWN session id, as its hooks report it.
+    ///
+    /// Not ainb's `id` and not the tmux name: this is the identity the daemon
+    /// and the approve broker file everything under, so it is what a
+    /// `session:<key>` chat scope and a parked permission waiter are addressed
+    /// by. Learned from the notifyd hook rows (agent + cwd), which is the only
+    /// place the host sees it — a session that has never fired a hook has none,
+    /// and the surfaces that need it say so rather than guessing.
+    ///
+    /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
+    #[serde(skip)]
+    pub provider_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -884,7 +901,8 @@ impl Session {
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,
-            live_attention: None,
+            live_attention: Vec::new(),
+            provider_session_id: None,
         }
     }
 
@@ -913,7 +931,8 @@ impl Session {
             tmux_session_name: None,
             preview_content: None,
             is_attached: false,
-            live_attention: None,
+            live_attention: Vec::new(),
+            provider_session_id: None,
         }
     }
 

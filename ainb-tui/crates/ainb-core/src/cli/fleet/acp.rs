@@ -44,7 +44,7 @@ async fn create(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
 
     let result = client()
         .acp_session_create(FleetAcpSessionCreateParams {
-            provider,
+            provider: Some(provider),
             cwd,
             scope_key: matches.get_one::<String>("scope").cloned(),
         })

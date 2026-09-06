@@ -765,22 +765,6 @@ impl Screen for SessionRecoveryScreen {
     }
 }
 
-/// Inbox screen — surfaces ainb-hooks notifications from
-/// `~/.agents-in-a-box/notifications.db`. The screen pulls its
-/// per-session state from `AppState::inbox_state` so selection +
-/// filters survive cross-screen navigation.
-#[derive(Default)]
-pub struct InboxScreen;
-
-impl Screen for InboxScreen {
-    fn id(&self) -> &str {
-        ids::INBOX
-    }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        crate::components::inbox::render(frame, area, &mut state.inbox_state);
-    }
-}
-
 /// Daemons screen — runtime health and repair controls for every long-running ainb daemon
 /// (phone bridge / notifyd / ATC / fleet daemon). Renders from
 /// `fleet::daemons::collect` via the shared component, refreshing live on the
@@ -795,42 +779,6 @@ impl Screen for DaemonsScreen {
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
         crate::components::daemons::render(frame, area, &mut state.daemons_state);
-    }
-}
-
-/// Fleet control panel — the interactive "who-needs-you" looking-glass. Reads
-/// the event-sourced `current_state` (ASK/ERR/WAIT/IDLE per session) via the
-/// shared component, refreshing on the render tick, and acts (answer
-/// interviews / broadcast) through the existing fleet send path. State lives on
-/// `AppState::fleet_panel_state` so selection survives cross-screen navigation.
-#[derive(Default)]
-pub struct FleetPanelScreen;
-
-impl Screen for FleetPanelScreen {
-    fn id(&self) -> &str {
-        ids::FLEET_PANEL
-    }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        if state.is_interactive_pane() {
-            use ratatui::layout::{Constraint, Direction, Layout, Margin};
-            let panes = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(area);
-            crate::components::fleet_panel::render(frame, panes[0], &mut state.fleet_panel_state);
-            let inner = panes[1].inner(Margin {
-                vertical: 1,
-                horizontal: 1,
-            });
-            if let Some(embed) = state.embed.as_mut() {
-                let _ = embed.resize(inner.height, inner.width);
-            }
-            state.embed_pane_area = Some(inner);
-            crate::components::TmuxPreviewPane::new().render_interactive(frame, panes[1], state);
-        } else {
-            state.embed_pane_area = None;
-            crate::components::fleet_panel::render(frame, area, &mut state.fleet_panel_state);
-        }
     }
 }
 
@@ -1095,9 +1043,7 @@ pub fn register_builtins(registry: &mut ScreenRegistry) {
     registry.register(Box::new(SetupMenuScreen::new()));
     registry.register(Box::new(AuthSetupScreen::new()));
     registry.register(Box::new(AttachedTerminalScreen::new()));
-    registry.register(Box::new(InboxScreen));
     registry.register(Box::new(DaemonsScreen));
-    registry.register(Box::new(FleetPanelScreen));
 }
 
 #[cfg(test)]
@@ -1160,9 +1106,7 @@ mod tests {
             ids::SETUP_MENU,
             ids::AUTH_SETUP,
             ids::ATTACHED_TERMINAL,
-            ids::INBOX,
             ids::DAEMONS,
-            ids::FLEET_PANEL,
         ] {
             assert!(r.contains(id), "registry missing built-in screen {id}");
         }
