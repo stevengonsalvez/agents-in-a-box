@@ -63,31 +63,39 @@ impl TmuxPreviewPane {
         }
     }
 
-    /// Render the live interactive embed (the pane that IS the tmux session).
-    /// Draws the embedded vt100 screen via tui-term inside a focus-cued block
-    /// (distinct border + `● INTERACTIVE — Ctrl+Q release` badge). Falls back to
-    /// a placeholder if the embed/screen is momentarily unavailable.
+    /// Render the live interactive terminal observer with input focus.
     pub fn render_interactive(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        self.render_terminal(frame, area, state, true);
+    }
+
+    /// Render the same terminal observer without granting it input ownership.
+    pub fn render_observer(&self, frame: &mut Frame, area: Rect, state: &AppState) {
+        self.render_terminal(frame, area, state, false);
+    }
+
+    fn render_terminal(&self, frame: &mut Frame, area: Rect, state: &AppState, interactive: bool) {
+        let (badge, badge_color, hint) = if interactive {
+            ("INTERACTIVE", SELECTION_GREEN, "Ctrl+Q release")
+        } else {
+            ("LIVE PREVIEW", GOLD, "A interact")
+        };
         let title = Line::from(vec![
             Span::styled(
                 " ● ",
-                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+                Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "INTERACTIVE ",
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                format!("{badge} "),
+                Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("— ", Style::default().fg(MUTED_GRAY)),
-            Span::styled(
-                "Ctrl+Q",
-                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" release ", Style::default().fg(MUTED_GRAY)),
+            Span::styled("| ", Style::default().fg(MUTED_GRAY)),
+            Span::styled(hint, Style::default().fg(MUTED_GRAY)),
+            Span::raw(" "),
         ]);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(SELECTION_GREEN))
+            .border_style(Style::default().fg(badge_color))
             .style(Style::default().bg(DARK_BG))
             .title(title);
 

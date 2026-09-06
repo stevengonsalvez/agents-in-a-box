@@ -8,7 +8,7 @@
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Context, Result};
 use portable_pty::CommandBuilder;
@@ -64,6 +64,20 @@ fn apply_embed_env_from(
     }
 }
 
+/// Whether this tmux understands the client flag used to keep a small preview
+/// PTY from resizing the shared window. The usage probe never attaches to or
+/// mutates a user session.
+fn supports_ignore_size() -> bool {
+    static SUPPORTS_IGNORE_SIZE: OnceLock<bool> = OnceLock::new();
+    *SUPPORTS_IGNORE_SIZE.get_or_init(|| {
+        std::process::Command::new("tmux")
+            .args(["attach-session", "-?"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stderr).contains("[-f flags]"))
+            .unwrap_or(false)
+    })
+}
+
 /// A live `tmux attach-session` client embedded in the preview pane.
 pub struct EmbedClient {
     pty: PtyWrapper,
@@ -97,13 +111,33 @@ impl EmbedClient {
     /// Attach to `session_name` at the given cell size and start streaming its
     /// output into a vt100 parser on a dedicated reader thread.
     pub fn attach(session_name: &str, rows: u16, cols: u16) -> Result<Self> {
-        Self::attach_target(session_name, rows, cols)
+        Self::attach_target_with_mode(session_name, rows, cols, false)
+    }
+
+    /// Observe `session_name` through tmux's native read-only client mode.
+    pub fn observe(session_name: &str, rows: u16, cols: u16) -> Result<Self> {
+        Self::attach_target_with_mode(session_name, rows, cols, true)
+    }
+
+    /// Read-only observation is safe only when this tmux can keep the preview
+    /// client's size out of the shared window-size calculation.
+    pub fn read_only_observer_supported() -> bool {
+        supports_ignore_size()
     }
 
     /// Attach to an exact tmux target. Window and pane targets are selected
     /// before starting the embedded client, then the client attaches to the
     /// owning session without losing the exact target.
     pub fn attach_target(target: &str, rows: u16, cols: u16) -> Result<Self> {
+        Self::attach_target_with_mode(target, rows, cols, false)
+    }
+
+    fn attach_target_with_mode(
+        target: &str,
+        rows: u16,
+        cols: u16,
+        read_only: bool,
+    ) -> Result<Self> {
         let session_name = target.split_once(':').map_or(target, |(session, _)| session).trim();
         anyhow::ensure!(!session_name.is_empty(), "tmux target has no session name");
         if target.contains(':') {
@@ -120,6 +154,14 @@ impl EmbedClient {
 
         let mut cmd = CommandBuilder::new("tmux");
         cmd.arg("attach-session");
+        if read_only {
+            cmd.arg("-r");
+            if supports_ignore_size() {
+                // Native tmux client flag: render this client, but never let
+                // its small preview PTY decide the shared window size.
+                cmd.args(["-f", "ignore-size"]);
+            }
+        }
         cmd.arg("-t");
         cmd.arg(session_name);
         apply_embed_env(&mut cmd);
@@ -350,6 +392,22 @@ mod tests {
         false
     }
 
+    fn window_size(session: &str) -> Option<(u16, u16)> {
+        let output = Command::new("tmux")
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={session}"),
+                "#{window_height}x#{window_width}",
+            ])
+            .output()
+            .ok()?;
+        let size = String::from_utf8(output.stdout).ok()?;
+        let (rows, cols) = size.trim().split_once('x')?;
+        Some((rows.parse().ok()?, cols.parse().ok()?))
+    }
+
     // ── env enforcement policy (no tmux needed) ─────────────────────────────
     // env_clear() first: CommandBuilder::new seeds the FULL parent env
     // (portable-pty 0.9 get_base_env), so the helper's behaviour is only
@@ -452,6 +510,66 @@ mod tests {
         drop(client);
         kill_session(&session);
         assert!(found, "forwarded input never reached the session");
+    }
+
+    #[test]
+    fn observe_reads_output_through_a_read_only_tmux_client() {
+        if !tmux_available() {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+        if !EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
+            return;
+        }
+        let _g = lock_serial();
+        let session = new_session("observe");
+        let session_size = window_size(&session);
+        let mut client = EmbedClient::observe(&session, 12, 34).expect("observe");
+        let pane_target = format!("{session}:");
+        let sent = Command::new("tmux")
+            .args([
+                "send-keys",
+                "-t",
+                &pane_target,
+                "printf '\\033[31mOBSERVE_READONLY_OK\\033[0m\\r\\nfragment-safe UTF-8: 🦊\\n'",
+                "C-m",
+            ])
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let found = sent
+            && screen_contains(
+                &client,
+                "OBSERVE_READONLY_OK",
+                Instant::now() + Duration::from_secs(8),
+            );
+        let resized = client.resize(30, 100).is_ok();
+        let parser_size = client.parser().read().map(|parser| parser.screen().size()).ok();
+        let preserved_window_size = window_size(&session);
+        let readonly = Command::new("tmux")
+            .args(["list-clients", "-t", &session, "-F", "#{client_readonly}"])
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).lines().any(|line| line == "1")
+            })
+            .unwrap_or(false);
+
+        drop(client);
+        kill_session(&session);
+        assert!(found, "read-only observer never received tmux output");
+        assert!(resized, "observer resize failed");
+        assert_eq!(
+            parser_size,
+            Some((30, 100)),
+            "observer did not resize its VT100 screen"
+        );
+        assert_eq!(
+            preserved_window_size, session_size,
+            "read-only observer must not resize its tmux window"
+        );
+        assert!(readonly, "observer client must be read-only");
     }
 
     #[test]

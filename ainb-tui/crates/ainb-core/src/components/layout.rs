@@ -35,15 +35,24 @@ use crate::app::{
 /// the session twice back-to-back (attach size → layout size).
 ///
 /// Must mirror `render`'s split: vertical chrome is the status bar (3) +
-/// session info (3) + menu bar (6), and the pane border takes 2 more rows/
-/// cols off the interior. `sidebar_width` is the live
+/// session info (3) + current menu bar height, and the pane border takes 2
+/// more rows/cols off the interior. `sidebar_width` is the live
 /// `sessions_pane_state.effective_width(..)` for the same terminal width.
-pub fn interactive_embed_size(width: u16, height: u16, sidebar_width: u16) -> (u16, u16) {
-    const VERTICAL_CHROME: u16 = 3 + 3 + 6; // status bar + session info + menu bar
+pub fn interactive_embed_size(
+    width: u16,
+    height: u16,
+    sidebar_width: u16,
+    show_menu_bar: bool,
+) -> (u16, u16) {
     const PANE_BORDERS: u16 = 2;
-    let rows = height.saturating_sub(VERTICAL_CHROME + PANE_BORDERS).max(1);
+    let vertical_chrome = 3 + 3 + session_menu_bar_height(show_menu_bar);
+    let rows = height.saturating_sub(vertical_chrome + PANE_BORDERS).max(1);
     let cols = width.saturating_sub(sidebar_width.saturating_add(PANE_BORDERS)).max(1);
     (rows, cols)
+}
+
+fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
+    if show_menu_bar { 6 } else { 1 }
 }
 
 pub struct LayoutComponent {
@@ -245,11 +254,8 @@ impl LayoutComponent {
 
         // The bottom keymap legend can be hidden (⇧M) to give the session list
         // more room; hidden it collapses to a single hint row.
-        let menu_bar_h = if state.app_config.ui_preferences.show_session_menu_bar {
-            6 // full legend: 4 lines + borders
-        } else {
-            1 // collapsed hint row
-        };
+        let menu_bar_h =
+            session_menu_bar_height(state.app_config.ui_preferences.show_session_menu_bar);
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -285,13 +291,15 @@ impl LayoutComponent {
             self.session_list.render(frame, content_chunks[0], state);
         }
 
-        // Render tmux preview if selected session has tmux, otherwise show live logs
-        // This includes both regular Claude sessions AND shell sessions
-        let selected_has_tmux = state
+        // The legacy capture renderer supports regular sessions and shells.
+        // A live observer can also render SSH and other-tmux sessions, but its
+        // initial and failed states must retain those rows' live-logs fallback.
+        let selected_has_legacy_preview = state
             .get_selected_session()
-            .and_then(|s| s.tmux_session_name.as_ref())
+            .and_then(|session| session.tmux_session_name.as_ref())
             .is_some()
             || state.selected_shell_session().is_some();
+        let observing_selection = state.is_observing_selected_terminal();
 
         // The active tab, reconciled against what is actually available: a tab
         // can go dead under the operator (the ASK is answered, the cursor moves
@@ -329,15 +337,39 @@ impl LayoutComponent {
             state.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
         } else if active_tab == crate::components::session_tabs::SessionTab::Preview {
-            if selected_has_tmux {
-                // Render tmux preview pane (read-only capture)
+            // The observer is not a branch of its own: it is what `preview`
+            // SHOWS when one is running, a live mirror in place of the
+            // read-only capture. Gating it on the tab matters — an
+            // `observing_selection` arm that outranked the strip made every
+            // other tab unreachable while the state machine still advanced
+            // through them, so `ask` could not be opened on the very session
+            // whose chip sent the operator looking, and keys routed to a chat
+            // surface that was not on screen.
+            if observing_selection {
+                let area = content_chunks[1];
+                let inner = area.inner(Margin {
+                    vertical: 1,
+                    horizontal: 1,
+                });
+                if let Some(observer) = state.embed.as_mut() {
+                    let _ = observer.resize(inner.height, inner.width);
+                }
+                state.embed_pane_area = None;
+                self.tmux_preview.render_observer(frame, area, state);
+            } else if selected_has_legacy_preview {
+                // Read-only tmux capture. Initial attach can take one frame, so
+                // this stays the transient fallback rather than the
+                // steady-state renderer.
                 self.tmux_preview.render(frame, content_chunks[1], state);
             } else {
                 // Render traditional live logs stream
                 self.live_logs_stream.render(frame, content_chunks[1], state);
             }
-            // The strip is painted OVER the pane's own title, so `preview`
-            // keeps the pane it always had and simply gains the switchboard.
+            // Painted for the observer too. Unlike the interactive embed above,
+            // an observer never receives keys — `is_observing_tmux_session`
+            // requires `!is_interactive_pane()` — so the strip advertises
+            // nothing the pane cannot do, and without it the operator loses the
+            // only affordance saying the other tabs exist.
             Self::render_tab_strip(frame, content_chunks[1], state, active_tab);
         } else {
             self.render_session_tab(frame, content_chunks[1], state, active_tab);
@@ -1581,14 +1613,15 @@ mod interactive_embed_size_tests {
         // plus the border (2) → 78; pre-collapsed to the 5-col rail → 113.
         // Must equal what the first interactive frame resizes the embed to
         // (the tripwire drives the real render path against this).
-        assert_eq!(interactive_embed_size(120, 30, 40), (16, 78));
-        assert_eq!(interactive_embed_size(120, 30, 5), (16, 113));
-        assert_eq!(interactive_embed_size(80, 24, 5), (10, 73));
+        assert_eq!(interactive_embed_size(120, 30, 40, true), (16, 78));
+        assert_eq!(interactive_embed_size(120, 30, 5, true), (16, 113));
+        assert_eq!(interactive_embed_size(80, 24, 5, true), (10, 73));
+        assert_eq!(interactive_embed_size(120, 30, 40, false), (21, 78));
     }
 
     #[test]
     fn never_returns_zero_cells() {
-        assert_eq!(interactive_embed_size(0, 0, 5), (1, 1));
-        assert_eq!(interactive_embed_size(7, 14, 40), (1, 1));
+        assert_eq!(interactive_embed_size(0, 0, 5, true), (1, 1));
+        assert_eq!(interactive_embed_size(7, 14, 40, true), (1, 1));
     }
 }
