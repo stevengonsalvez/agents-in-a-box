@@ -2963,6 +2963,28 @@ async fn handle_fleet_copilot_configure(
         None => previous_mode,
     };
 
+    // Undo the dial. Defined ONCE and called from every error exit below,
+    // because a configure that returns an error must not leave the guardrail
+    // where it put it: the client only adopts a mode from an `Applied`
+    // outcome, so a surviving `yolo` is armed underneath a header still
+    // reading `guarded`. The mint-failure arm is not the only exit — the
+    // `set_config` write below fails the same way on a store fault, with a
+    // same-adapter configure that never reaches the swap at all.
+    let roll_back_mode = async |pool: &SqlitePool| {
+        if params.copilot_mode.is_none() {
+            return;
+        }
+        if let Err(rollback) =
+            FleetChannelRepo::set_mode(pool, &channel.scope_key, previous_mode.as_str()).await
+        {
+            tracing::error!(
+                scope_key = %channel.scope_key, %rollback,
+                "the copilot guardrail could not be rolled back after a failed configure; \
+                 it may be looser than the operator's screen reports"
+            );
+        }
+    };
+
     // A provider swap is a DIFFERENT adapter process and a different agent, so
     // the old session is RETIRED and a new one minted on the SAME channel
     // scope. Writing the new token onto the old row would leave a session whose
@@ -3045,25 +3067,7 @@ async fn handle_fleet_copilot_configure(
                         "the restored copilot session could not be converged"
                     );
                 }
-                // The dial goes back too. Leaving a loosened guardrail behind a
-                // failed configure arms `yolo` under a header the client never
-                // updated, because it only adopts a mode from an `Applied`
-                // outcome.
-                let rolled_back = match params.copilot_mode {
-                    Some(_) => {
-                        FleetChannelRepo::set_mode(pool, &channel.scope_key, previous_mode.as_str())
-                            .await
-                            .err()
-                    }
-                    None => None,
-                };
-                if let Some(rollback) = rolled_back {
-                    tracing::error!(
-                        scope_key = %channel.scope_key, %rollback,
-                        "the copilot guardrail could not be rolled back after a failed swap; \
-                         it may be looser than the operator's screen reports"
-                    );
-                }
+                roll_back_mode(pool).await;
                 tracing::error!(
                     %retiring, %adapter, %error,
                     "the copilot session was retired but its replacement could not be minted"
@@ -3089,9 +3093,16 @@ async fn handle_fleet_copilot_configure(
         reasoning_effort: params.reasoning_effort.clone(),
         persona,
     };
-    FleetAcpSessionRepo::set_config(pool, &session.session_key, &config, SystemClock.now_ms())
-        .await
-        .map_err(|error| internal(&format!("store error: {error}")))?;
+    if let Err(error) =
+        FleetAcpSessionRepo::set_config(pool, &session.session_key, &config, SystemClock.now_ms())
+            .await
+    {
+        // Same arming, narrower path: a same-adapter configure that loosens the
+        // dial and then hits a store fault here never reaches the swap block,
+        // so the mint-failure rollback would not have run.
+        roll_back_mode(pool).await;
+        return Err(internal(&format!("store error: {error}")));
+    }
     // The persona is a system prompt for an agent holding destructive tools, so
     // every change is logged where an operator reviews copilot behaviour. The
     // TEXT is deliberately not in the row: this feed is readable by anyone with
