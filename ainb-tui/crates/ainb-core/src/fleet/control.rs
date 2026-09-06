@@ -738,7 +738,13 @@ const LEGACY_DAEMON_ADAPTER: &str = "claude-agent-acp";
 /// made the field optional.
 fn names_the_provider_field(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
-    error.contains("provider") && (error.contains("missing") || error.contains("invalid type"))
+    // `missing` only. The field is `skip_serializing_if = "Option::is_none"`,
+    // so an omitted provider is absent from the frame rather than `null`, and
+    // an older daemon reports it as a MISSING field. An `invalid type` arm was
+    // unreachable from this call site and could only have masked a genuine
+    // client bug — a caller sending a number — by retrying it against the
+    // built-in adapter.
+    error.contains("provider") && error.contains("missing")
 }
 
 #[cfg(test)]
@@ -754,9 +760,13 @@ mod tests {
         assert!(names_the_provider_field(
             "invalid params: missing field `provider`"
         ));
-        assert!(names_the_provider_field(
-            "invalid params: invalid type: null, expected a string at provider"
-        ));
+        assert!(
+            !names_the_provider_field(
+                "invalid params: invalid type: number, expected a string at provider"
+            ),
+            "a caller sending the wrong type is a client bug, not a daemon skew, \
+             and must not be retried against a different adapter"
+        );
         assert!(
             !names_the_provider_field(
                 "unknown adapter \"gemini-acp\"; fleet/adapter_list names the ones this daemon can spawn"
