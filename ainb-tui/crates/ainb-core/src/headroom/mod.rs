@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::time::Duration;
+use std::{io::Read, io::Write};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -96,7 +97,7 @@ pub async fn is_healthy() -> bool {
 /// 2. Spawns `headroom proxy --port <N>` detached into its own process group,
 ///    stdout+stderr → `~/.agents-in-a-box/headroom/proxy.log`.
 /// 3. Writes the child PID to `proxy.pid`.
-/// 4. Polls `is_healthy()` for up to 5 s (50 × 100ms); returns `Ok` when live.
+/// 4. Polls `/health` for up to 5 s (50 × 100ms); returns `Ok` when live.
 pub async fn ensure_proxy_running() -> Result<()> {
     if is_healthy().await {
         return Ok(());
@@ -109,24 +110,36 @@ pub async fn ensure_proxy_running() -> Result<()> {
     // `proxy.pid` (below), orphaning the real proxy from `stop()`/idle-reap.
     let _spawn_guard = SPAWN_LOCK.lock().await;
 
-    // Re-check under the lock: a racing caller may have brought the proxy up
-    // while we waited for the guard, in which case there is nothing to do.
-    if is_healthy().await {
+    // flock can block for the full 5s startup window, so keep all filesystem
+    // and health-poll work off the Tokio worker thread.
+    tokio::task::spawn_blocking(ensure_proxy_running_under_process_lock)
+        .await
+        .context("headroom proxy startup task panicked")?
+}
+
+/// Run the complete probe/spawn/health sequence while holding `proxy.pid.lock`.
+/// A second ainb process waits here instead of racing a failed bind and
+/// overwriting the first process's PID file.
+fn ensure_proxy_running_under_process_lock() -> Result<()> {
+    let dir = headroom_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create headroom dir {}", dir.display()))?;
+
+    let pid_path = pid_file();
+    let _process_lock = crate::config::lock::lock_for(&pid_path)
+        .with_context(|| format!("lock headroom pid file {}", pid_path.display()))?;
+
+    let port = proxy_port();
+    if is_healthy_blocking(port) {
         return Ok(());
     }
 
-    // Locate binary — descriptive error if not on PATH.
     let headroom_bin = which::which("headroom").map_err(|_| {
         anyhow::anyhow!(
             "headroom binary not found on PATH — install it with:\n  \
              uv tool install 'headroom-ai[proxy]'"
         )
     })?;
-
-    let dir = headroom_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create headroom dir {}", dir.display()))?;
-
     let log_path = log_file();
     let log = std::fs::OpenOptions::new()
         .create(true)
@@ -134,38 +147,31 @@ pub async fn ensure_proxy_running() -> Result<()> {
         .open(&log_path)
         .with_context(|| format!("open headroom log {}", log_path.display()))?;
 
-    let port = proxy_port();
     let mut cmd = std::process::Command::new(&headroom_bin);
     cmd.args(["proxy", "--port", &port.to_string()])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log.try_clone()?))
         .stderr(std::process::Stdio::from(log));
-
-    // Detach into its own process group so terminal signals (ctrl-c aimed at
-    // the spawning CLI/TUI) never reach the proxy.
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
 
-    let child = cmd.spawn().context("spawn headroom proxy")?;
+    let mut child = cmd.spawn().context("spawn headroom proxy")?;
     let pid = child.id();
-
-    // Persist PID for stop() to use.
-    std::fs::write(pid_file(), pid.to_string())
-        .with_context(|| format!("write pid file {}", pid_file().display()))?;
-
-    info!(
-        "spawned headroom proxy (pid={pid}, port={port}, log={})",
-        log_path.display()
-    );
-
-    // Poll up to ~5 s for the health endpoint. Async sleep so we yield the
-    // tokio worker instead of blocking it during session creation.
     for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if is_healthy().await {
-            info!("headroom proxy is healthy on port {port}");
+        std::thread::sleep(Duration::from_millis(100));
+        if is_healthy_blocking(port) {
+            // Do not write a PID for a child that lost its bind race. A live
+            // incumbent owns the port, and stop() must never target it.
+            if child.try_wait()?.is_none() {
+                std::fs::write(&pid_path, pid.to_string())
+                    .with_context(|| format!("write pid file {}", pid_path.display()))?;
+                info!(
+                    "spawned headroom proxy (pid={pid}, port={port}, log={})",
+                    log_path.display()
+                );
+            }
             return Ok(());
         }
     }
@@ -174,6 +180,30 @@ pub async fn ensure_proxy_running() -> Result<()> {
         "headroom proxy did not come up within 5s (see {})",
         log_path.display()
     )
+}
+
+/// Synchronous `/health` probe for the blocking startup critical section.
+fn is_healthy_blocking(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500))
+    else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = [0_u8; 32];
+    match stream.read(&mut response) {
+        Ok(n) => {
+            response[..n].starts_with(b"HTTP/1.1 2") || response[..n].starts_with(b"HTTP/1.0 2")
+        }
+        Err(_) => false,
+    }
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
