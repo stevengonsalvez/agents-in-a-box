@@ -238,6 +238,7 @@ Spikes 1, 4, 7, 8 and 9 done. Remaining: 2 (control-mode emulator fidelity, befo
 
 - `hangar/health` gains counters: connections by scope and transport; resyncs and `SnapshotReset` by reason; `data_gap` by reason; ops by disposition; receipts in `unknown`; tier-0 silence seconds per session (p50, max); emulator RSS total; `status_unknown_event{provider,name}`.
 - Retention from day one: ledger (`fleet_action_receipt`) 7 d; `attention` rows 30 d after close; status events 30 d or the existing `fleet_retention` byte ceiling with payload eviction made rate-aware (spike 8: 10/s at the 8.3 KB corpus mean fills the 1 GB payload ceiling within hours, well inside the 48 h eviction window); device registry unbounded with `last_seen_at` shown; revoked rows kept 90 d for audit. Spike 8 measured `fleet_action_receipt` and `attention` as the only growing tables; neither had a delete path.
+- SQLite settings stay as shipped: WAL, `synchronous=NORMAL`, `busy_timeout` 10 s, no `auto_vacuum`; after a large retention drain run one `VACUUM INTO` a sibling file and swap, never a periodic `VACUUM`. Under NORMAL the D18 receipt written in the apply transaction survives a daemon crash but not a power loss; a receipt found in `writing` after power loss is handled by the same `unknown{effects_ambiguous}` path, so no setting change is needed.
 - `ainb doctor` reports the tmux version floor (`allow-passthrough` needs 3.3; `ignore-size` and `pause-after` need 3.2) and degrades tier 2 with a warning below it.
 
 ## Edge cases
