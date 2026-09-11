@@ -226,6 +226,20 @@ impl TmuxSession {
             .status()
             .await?;
 
+        // Prefer the most recently attached client size. A user-level
+        // `window-size manual` otherwise leaves sessions fixed at the first
+        // launch geometry when a different surface attaches later.
+        Command::new("tmux")
+            .args([
+                "set-option",
+                "-t",
+                &self.sanitized_name,
+                "window-size",
+                "latest",
+            ])
+            .status()
+            .await?;
+
         // Enable mouse scrolling
         Command::new("tmux")
             .args(["set-option", "-t", &self.sanitized_name, "mouse", "on"])
