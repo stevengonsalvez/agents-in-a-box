@@ -391,6 +391,7 @@ dependencies = [
  "dirs",
  "fs2",
  "futures-util",
+ "gethostname 0.4.3",
  "nix 0.27.1",
  "notify",
  "opentelemetry",
@@ -502,6 +503,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "fs2",
  "libc",
  "nucleo-matcher",
  "ratatui 0.26.3",
@@ -2619,6 +2621,16 @@ dependencies = [
  "typenum",
  "version_check",
  "zeroize",
+]
+
+[[package]]
+name = "gethostname"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0176e0459c2e4a1fe232f984bca6890e681076abb9934f6cea7c326f3fc47818"
+dependencies = [
+ "libc",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -8120,7 +8132,7 @@ version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9993aa5be5a26815fe2c3eacfc1fde061fc1a1f094bf1ad2a18bf9c495dd7414"
 dependencies = [
- "gethostname",
+ "gethostname 1.1.0",
  "rustix 1.1.4",
  "x11rb-protocol",
 ]
