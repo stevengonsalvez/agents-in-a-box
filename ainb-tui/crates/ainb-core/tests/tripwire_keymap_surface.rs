@@ -5,6 +5,16 @@
 //! session uses the ignored `ainb-sh-` prefix. That makes selection stable and
 //! lets the captures prove the exact terminal the user reached.
 
+use ainb::app::{
+    AppState,
+    events::{AppEvent, EventHandler},
+    screens::ids as screen_ids,
+};
+use ainb::models::{
+    OtherTmuxSession, Session, SessionAgentType, SessionMode, SessionStatus, ShellSession,
+    Workspace,
+};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -23,11 +33,13 @@ fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
 
-fn tmux_available() -> bool {
-    Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|output| output.status.success())
+fn require_tmux() {
+    let output = Command::new("tmux").arg("-V").output().expect("tripwire requires tmux on PATH");
+    assert!(
+        output.status.success(),
+        "tripwire requires working tmux: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Private tmux server with exact-name cleanup for every session it creates.
@@ -244,12 +256,75 @@ fn assert_stays_on_session_list(harness: &TmuxHarness, tui: &str, deadline: Inst
     last
 }
 
+fn state_with_selected_stopped_managed_session() -> AppState {
+    let mut managed = Session::new("stopped-managed".to_string(), "/tmp/workspace".to_string());
+    managed.mode = SessionMode::Interactive;
+    managed.agent_type = SessionAgentType::Claude;
+    managed.status = SessionStatus::Stopped;
+    let selected_id = managed.id;
+
+    let mut workspace = Workspace::new("workspace".to_string(), PathBuf::from("/tmp/workspace"));
+    workspace.add_session(managed);
+
+    let mut state = AppState::new();
+    state.current_screen = screen_ids::SESSION_LIST.to_string();
+    state.workspaces.push(workspace);
+    state.selected_sessions.insert(selected_id);
+    state
+}
+
+fn enter_event(state: &mut AppState) -> Option<AppEvent> {
+    EventHandler::handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), state)
+}
+
+fn is_bulk_resume_on_enter(event: Option<AppEvent>) -> bool {
+    matches!(
+        event,
+        Some(AppEvent::ResumeSelectedSessions(trigger)) if trigger == "Enter"
+    )
+}
+
+#[test]
+fn selected_managed_sessions_resume_after_cursor_moves_to_attachable_rows() {
+    let mut terminal = state_with_selected_stopped_managed_session();
+    terminal.other_tmux_sessions.push(OtherTmuxSession::new(
+        "external-terminal".to_string(),
+        false,
+        1,
+    ));
+    terminal.selected_other_tmux_index = Some(0);
+    assert!(
+        is_bulk_resume_on_enter(enter_event(&mut terminal)),
+        "selected managed sessions must resume before an Other tmux cursor attaches"
+    );
+
+    let mut ssh = state_with_selected_stopped_managed_session();
+    let mut ssh_session = Session::new("remote".to_string(), "/tmp/remote".to_string());
+    ssh_session.agent_type = SessionAgentType::Ssh;
+    ssh.ssh_sessions.push(ssh_session);
+    ssh.selected_ssh_session_index = Some(0);
+    assert!(
+        is_bulk_resume_on_enter(enter_event(&mut ssh)),
+        "selected managed sessions must resume before an SSH cursor attaches"
+    );
+
+    let mut shell = state_with_selected_stopped_managed_session();
+    shell.workspaces[0].set_shell_session(ShellSession::new_workspace_shell(
+        PathBuf::from("/tmp/workspace"),
+        "workspace",
+    ));
+    shell.selected_workspace_index = Some(0);
+    shell.selected_session_index = None;
+    shell.shell_selected = true;
+    assert!(
+        is_bulk_resume_on_enter(enter_event(&mut shell)),
+        "selected managed sessions must resume before a shell cursor attaches"
+    );
+}
+
 #[test]
 fn table_override_attaches_only_on_o_then_returns_to_the_session_list() {
-    if !tmux_available() {
-        eprintln!("SKIP: tmux unavailable");
-        return;
-    }
+    require_tmux();
     let _lock = TRIPWIRE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let home = tempfile::tempdir().expect("home tempdir");
@@ -330,10 +405,7 @@ fn table_override_attaches_only_on_o_then_returns_to_the_session_list() {
 
 #[test]
 fn ctrl_c_reaches_the_interactive_embed_and_ctrl_q_returns_to_tui() {
-    if !tmux_available() {
-        eprintln!("SKIP: tmux unavailable");
-        return;
-    }
+    require_tmux();
     let _lock = TRIPWIRE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let home = tempfile::tempdir().expect("home tempdir");
