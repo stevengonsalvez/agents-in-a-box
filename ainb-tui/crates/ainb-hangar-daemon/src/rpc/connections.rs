@@ -79,6 +79,32 @@ impl ConnectionRegistry {
     /// A missing tmux binary, no server, or a failed command preserves the last
     /// successful snapshot and emits nothing.
     pub async fn refresh_tmux_clients(&self) -> bool {
+        self.refresh_tmux_clients_with(Self::probe_tmux_clients).await
+    }
+
+    async fn refresh_tmux_clients_with<Probe, ProbeFuture>(&self, probe: Probe) -> bool
+    where
+        Probe: FnOnce() -> ProbeFuture,
+        ProbeFuture: std::future::Future<Output = Option<Vec<String>>>,
+    {
+        if self.state.lock().await.rows.is_empty() {
+            return false;
+        }
+
+        let Some(clients) = probe().await else {
+            return false;
+        };
+        let mut state = self.state.lock().await;
+        let changed = state.rows.values().any(|row| row.tmux_clients != clients);
+        if changed {
+            for row in state.rows.values_mut() {
+                row.tmux_clients.clone_from(&clients);
+            }
+        }
+        changed
+    }
+
+    async fn probe_tmux_clients() -> Option<Vec<String>> {
         let output = match tokio::process::Command::new("tmux")
             .args([
                 "list-clients",
@@ -89,27 +115,44 @@ impl ConnectionRegistry {
             .await
         {
             Ok(output) if output.status.success() => output,
-            Ok(_) | Err(_) => return false,
+            Ok(_) | Err(_) => return None,
         };
-        let clients: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect();
-        let mut state = self.state.lock().await;
-        let changed = state.rows.values().any(|row| row.tmux_clients != clients);
-        if changed {
-            for row in state.rows.values_mut() {
-                row.tmux_clients.clone_from(&clients);
-            }
-        }
-        changed
+        Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect(),
+        )
     }
 }
 
 impl Default for ConnectionRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::ConnectionRegistry;
+
+    #[tokio::test]
+    async fn empty_registry_skips_tmux_probe() {
+        let registry = ConnectionRegistry::new();
+        let probe_calls = AtomicUsize::new(0);
+
+        let changed = registry
+            .refresh_tmux_clients_with(|| {
+                probe_calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Some(vec!["session /dev/ttys001 80x24".to_string()]))
+            })
+            .await;
+
+        assert!(!changed);
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 0);
     }
 }
