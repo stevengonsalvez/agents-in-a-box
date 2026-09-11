@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.2] - 2026-09-11
+### Added
+- **fleet-macos**: add signed Sparkle updates
+- clarify sidebar session state
+
+### Fixed
+- **fleet**: verify updates before extraction
+- **release**: ad-hoc sign Fleet archives
+
+### Documentation
+- **plan**: drop the desktop handover from the repo
+- **plan**: handover for the desktop shared-core work
+- **release**: document Fleet distribution
+- **release**: document unsigned Fleet install
+
+
 ## [1.28.1] - 2026-09-11
 ### Added
 - label session lifecycle
