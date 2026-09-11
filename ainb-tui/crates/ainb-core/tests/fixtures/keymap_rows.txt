@@ -1,492 +1,495 @@
-# context | chord | event
-confirm_dialog | left | previous
-confirm_dialog | right | toggle
-confirm_dialog | tab | toggle_tab
-confirm_dialog | enter | confirm
-confirm_dialog | esc | cancel
-mcp_overlay | esc | close
-mcp_overlay | q | close_q
-mcp_overlay | p | close_p
-mcp_overlay | up | previous
-mcp_overlay | k | previous_k
-mcp_overlay | down | next
-mcp_overlay | j | next_j
-mcp_overlay | r | refresh
-mcp_overlay | s | stop_server
-mcp_overlay | X | stop_daemon
-mcp_overlay | i | import
-session_context_menu | up | previous
-session_context_menu | k | previous_k
-session_context_menu | down | next
-session_context_menu | j | next_j
-session_context_menu | enter | activate
-session_context_menu | esc | cancel
-quick_commit | enter | confirm
-quick_commit | esc | cancel
-quick_commit | backspace | backspace
-quick_commit | left | cursor_left
-quick_commit | right | cursor_right
-preview_scroll | esc | exit
-preview_scroll | up | up
-preview_scroll | k | up_k
-preview_scroll | down | down
-preview_scroll | j | down_j
-preview_scroll | pageup | page_up
-preview_scroll | pagedown | page_down
-embed_interactive | ctrl+q | detach
-session_list | enter | attach
-session_list | $ | quick_shell
-session_list | n | new_session
-session_list | x | cleanup
-session_list | r | restart
-session_list | down | next
-session_list | up | previous
-home | d | daemons
-home | o | config
-home | s | sessions
-home | i | stats
-home | w | witr
-home | m | learnings
-home | t | abtop
-home | c | skills
-home | u | setup
-home | l | logs
-home | z | skill_manager
-home | g | hangar
-home | r | recovery
-home | p | mcp_pool
-home | v | changelog
-home | n | new_session
-home | tab | toggle_focus
-daemons | esc | back
-daemons | q | back_q
-daemons | r | refresh
-daemons | I | repair_hooks
-daemons | B | pin_hooks
-global | ? | help
-global | H | help_h
-notifications.visible | ctrl+x | dismiss_notifications
-global | q | go_home
-global | esc | go_home_escape
-global | ctrl+c | quit_ctrl
-global | W | wire_statusline
-global | : | open_slash_palette
-other_tmux_rename | enter | confirm
-other_tmux_rename | esc | cancel
-other_tmux_rename | backspace | backspace
-ssh_rename | enter | confirm
-ssh_rename | esc | cancel
-ssh_rename | backspace | backspace
-session_rename | enter | confirm
-session_rename | esc | cancel
-session_rename | backspace | backspace
-auth_setup.picker | c | show_command
-auth_setup.input | enter | select
-auth_setup.input | backspace | backspace
-auth_setup.input | esc | clear
-session_list.sessions_pane | home | top
-session_list.sessions_pane | end | bottom
-session_list.logs_pane | up | up
-session_list.logs_pane | down | down
-session_list.logs_pane | home | top
-session_list.logs_pane | end | bottom
-session_list.logs_pane | space | toggle_auto_scroll
-session_list.preview_pane | up | up
-session_list.preview_pane | down | down
-session_list.preview_pane | home | top
-session_list.preview_pane | end | bottom
-session_list.preview_pane | space | toggle_auto_scroll
-search_workspace | esc | cancel
-skill_manager.browse_query | backspace | backspace
-onboarding.dependency_agent | c | claude
-onboarding.dependency_agent | C | claude_upper
-onboarding.dependency_agent | x | codex
-onboarding.dependency_agent | X | codex_upper
-onboarding.dependency_agent | a | antigravity
-onboarding.dependency_agent | A | antigravity_upper
-onboarding.dependency_agent | p | copilot
-onboarding.dependency_agent | P | copilot_upper
-onboarding.dependency_agent | esc | cancel
-onboarding.auth_key | enter | select
-onboarding.auth_key | esc | cancel
-onboarding.auth_key | backspace | backspace
-onboarding.auth_method | up | up
-onboarding.auth_method | down | down
-onboarding.auth_method | enter | select
-onboarding.auth_method | esc | cancel
-onboarding.auth_agents | up | up
-onboarding.auth_agents | down | down
-onboarding.auth_agents | enter | select
-onboarding.auth_agents | right | next
-onboarding.auth_agents | esc | menu
-onboarding.auth_agents | left | back
-onboarding.auth_agents | backspace | backspace
-onboarding.otel | tab | next_field
-onboarding.otel | shift+tab | previous_field
-onboarding.otel | backspace | backspace
-onboarding.otel | esc | menu
-skill_manager | q | back
-skill_manager | tab | tab
-skill_manager | shift+tab | backtab
-skill_manager | [ | shrink_sources
-skill_manager | ] | grow_sources
-skill_manager | i | add_source
-skill_manager | u | update
-skill_manager | c | check
-skill_manager | b | browse
-skill_manager | l | library
-skill_manager | / | search
-skill_manager | m | discovery
-skill_manager | up | select_prev
-skill_manager | k | select_prev_k
-skill_manager | down | select_next
-skill_manager | j | select_next_j
-skill_manager | home | select_first
-skill_manager | g | select_first_g
-skill_manager | end | select_last
-skill_manager | G | select_last_g
-skill_manager | s | sync_or_conflict
-skill_manager | r | remove_or_source
-skill_manager | o | open_unit
-skill_manager | y | copy_unit
-skill_manager | esc | back_or_clear_filter
-help_visible | esc | close_escape
-help_visible | ? | close_help
-help_visible | H | close_help_upper
-help.text | esc | close_escape
-plugin.owned | esc | back
-plugin.owned | q | back_q
-skill_manager.sync_confirm | up | previous
-skill_manager.sync_confirm | k | previous_k
-skill_manager.sync_confirm | down | next
-skill_manager.sync_confirm | j | next_j
-skill_manager.sync_confirm | enter | confirm
-skill_manager.sync_confirm | esc | cancel
-skill_manager.sync_confirm | q | cancel_q
-skill_manager.preview | up | previous
-skill_manager.preview | k | previous_k
-skill_manager.preview | down | next
-skill_manager.preview | j | next_j
-skill_manager.preview | space | toggle
-skill_manager.preview | a | all
-skill_manager.preview | n | none
-skill_manager.preview | 1 | tool_one
-skill_manager.preview | 2 | tool_two
-skill_manager.preview | 3 | tool_three
-skill_manager.preview | 4 | tool_four
-skill_manager.preview | enter | confirm
-skill_manager.preview | esc | close
-skill_manager.preview | q | close_q
-skill_manager.source_remove | up | previous
-skill_manager.source_remove | k | previous_k
-skill_manager.source_remove | down | next
-skill_manager.source_remove | j | next_j
-skill_manager.source_remove | enter | confirm
-skill_manager.source_remove | esc | cancel
-skill_manager.source_remove | q | cancel_q
-git_view | esc | back
-git_view | tab | switch_tab
-git_view | p | start_commit
-git_view.review | n | next_hunk
-git_view.review | N | previous_hunk
-git_view.review | ] | next_file
-git_view.review | [ | previous_file
-git_view.review | space | toggle
-git_view.review | enter | toggle_enter
-git_view.review | z | context
-git_view.review | e | expand
-git_view.review | E | collapse
-git_view.review | j | scroll_down
-git_view.review | down | scroll_down_arrow
-git_view.review | k | scroll_up
-git_view.review | up | scroll_up_arrow
-log_history | esc | back
-log_history | f | cycle_filter
-log_history | r | refresh
-log_history | y | copy
-log_history | c | cleanup
-log_history | C | cleanup_upper
-log_history | tab | toggle_focus
-log_history | home | home
-log_history.sessions | up | previous
-log_history.sessions | k | previous_k
-log_history.sessions | down | next
-log_history.sessions | j | next_j
-log_history.sessions | enter | select
-log_history.logs | up | up
-log_history.logs | k | up_k
-log_history.logs | down | down
-log_history.logs | j | down_j
-log_history.logs | pageup | page_up
-log_history.logs | pagedown | page_down
-log_history.logs | left | left
-log_history.logs | h | left_h
-log_history.logs | right | right
-log_history.logs | l | right_l
-skills | esc | back
-skills | right | next_provider
-skills | l | next_provider_l
-skills | left | previous_provider
-skills | h | previous_provider_h
-skills | tab | next_tab
-skills | shift+tab | previous_tab
-skills | up | scroll_up
-skills | k | scroll_up_k
-skills | down | scroll_down
-skills | j | scroll_down_j
-skills | pageup | page_up
-skills | pagedown | page_down
-skills | g | top
-skills | G | bottom
-skills | r | refresh
-skills | / | search
-changelog | esc | back
-changelog | up | up
-changelog | k | up_k
-changelog | down | down
-changelog | j | down_j
-changelog | pageup | page_up
-changelog | pagedown | page_down
-changelog | g | top
-changelog | G | bottom
-session_recovery | esc | back
-session_recovery | up | previous
-session_recovery | k | previous_k
-session_recovery | down | next
-session_recovery | j | next_j
-session_recovery | r | resume
-session_recovery | d | archive
-session_recovery | R | refresh
-session_recovery | tab | toggle_view
-session_recovery | A | recover_all
-session_recovery | space | toggle
-session_recovery | D | delete
-session_recovery | / | search
-config | esc | back
-config | tab | switch_pane
-config | / | search
-config | ctrl+k | secret
-config | up | up
-config | k | up_k
-config | down | down
-config | j | down_j
-config | left | left
-config | h | left_h
-config | right | right
-config | l | right_l
-config | space | toggle_expand
-config | s | save_all
-config | S | save_all_upper
-auth_provider_popup | esc | close
-auth_provider_popup | up | previous
-auth_provider_popup | k | previous_k
-auth_provider_popup | down | next
-auth_provider_popup | j | next_j
-auth_provider_popup | enter | select
-auth_provider_popup | d | delete
-auth_provider_popup | D | delete_upper
-config_popup | esc | cancel
-config_popup | up | up
-config_popup | k | up_k
-config_popup | down | down
-config_popup | j | down_j
-config_popup | enter | confirm
-config_popup | backspace | backspace
-config_popup | delete | delete
-config_popup | left | left
-config_popup | right | right
-config_popup | home | home
-config_popup | end | end
-config_popup | ctrl+v | paste
-session_list | esc | back
-session_list | q | back_q
-session_list | tab | tab_next
-session_list | shift+tab | tab_previous
-session_list | c | toggle_chat
-session_list | f | refresh
-session_list | F | cycle_filter
-session_list | s | star
-session_list | S | star_upper
-session_list | a | attach_tmux
-session_list | A | attach_interactive
-session_list | u | reauthenticate
-session_list | e | restart
-session_list | space | toggle_selected
-session_list | D | delete_selected
-session_list | d | delete
-session_list | ctrl+x | cleanup_ctrl
-session_list | g | git
-session_list | p | quick_commit
-session_list | o | editor
-session_list | E | expand
-session_list | B | sidebar
-session_list | M | menu_bar
-session_list | i | stats
-session_list | w | witr
-session_list | k | skills
-session_list | m | learnings
-session_list | t | abtop
-session_list | shift+up | preview_up
-session_list | shift+down | preview_down
-session_list | f2 | rename
-session_list | H | headroom_or_help
-session_list | 1 | attach_one
-session_list | 2 | attach_two
-session_list | 3 | attach_three
-session_list | 4 | attach_four
-session_list | 5 | attach_five
-session_list | 6 | attach_six
-session_list | 7 | attach_seven
-session_list | 8 | attach_eight
-session_list | 9 | attach_nine
-home.sidebar | up | up
-home.sidebar | down | down
-home.sidebar | enter | select
-home.content | up | up
-home.content | down | down
-home.content | pageup | page_up
-home.content | pagedown | page_down
-home.content | y | copy
-config.editing | enter | save
-config.editing | esc | cancel
-config.editing | backspace | backspace
-config.api_key | enter | save
-config.api_key | esc | cancel
-config.api_key | backspace | backspace
-config.search | esc | cancel
-config.search | up | previous
-config.search | down | next
-config.search | enter | edit
-config.search | backspace | backspace
-config.search | ctrl+k | secret
-auth_provider_popup.input | enter | select
-auth_provider_popup.input | esc | close
-auth_provider_popup.input | backspace | backspace
-skills.search | esc | close
-skills.search | enter | close_enter
-skills.search | backspace | backspace
-session_recovery.search | esc | cancel
-session_recovery.search | enter | close
-session_recovery.search | backspace | backspace
-session_recovery.search | up | previous
-session_recovery.search | down | next
-git_view.commit | esc | cancel
-git_view.commit | enter | confirm
-git_view.commit | backspace | backspace
-git_view.commit | left | left
-git_view.commit | right | right
-skill_manager.input | enter | submit
-skill_manager.input | esc | cancel
-skill_manager.input | backspace | backspace
-skill_manager.browse_query | tab | catalog
-skill_manager.browse_query | shift+tab | catalog_back
-skill_manager.browse_query | enter | search
-skill_manager.browse_query | esc | close
-skill_manager.browse_results | up | previous
-skill_manager.browse_results | k | previous_k
-skill_manager.browse_results | down | next
-skill_manager.browse_results | j | next_j
-skill_manager.browse_results | tab | catalog
-skill_manager.browse_results | enter | install
-skill_manager.browse_results | / | query
-skill_manager.library | up | previous
-skill_manager.library | k | previous_k
-skill_manager.library | down | next
-skill_manager.library | j | next_j
-skill_manager.library | enter | enter
-skill_manager.library | esc | close
-skill_manager.discovery | enter | import
-skill_manager.discovery | d | details
-skill_manager.discovery | s | skip
-skill_manager.discovery | esc | back
-skill_manager.sources | up | previous
-skill_manager.sources | k | previous_k
-skill_manager.sources | down | next
-skill_manager.sources | j | next_j
-skill_manager.sources | enter | preview
-skill_manager.sources | f | filter
-auth_setup.picker | esc | cancel
-auth_setup.picker | up | previous
-auth_setup.picker | k | previous_k
-auth_setup.picker | down | next
-auth_setup.picker | j | next_j
-auth_setup.picker | enter | select
-auth_setup.picker | r | refresh
-onboarding.git_directories | enter | next
-onboarding.git_directories | esc | menu
-onboarding.git_directories | up | back
-onboarding.git_directories | backspace | backspace
-onboarding.git_directories | delete | delete
-onboarding.git_directories | left | left
-onboarding.git_directories | right | right
-onboarding.git_directories | home | home
-onboarding.git_directories | end | end
-onboarding.questions | enter | next
-onboarding.questions | right | next_right
-onboarding.questions | esc | menu
-onboarding.questions | left | back
-onboarding.questions | backspace | backspace
-onboarding.questions | up | previous
-onboarding.questions | k | previous_k
-onboarding.questions | down | next_question
-onboarding.questions | j | next_question_j
-onboarding.dependency | enter | enter
-onboarding.dependency | esc | back
-onboarding.dependency | up | up
-onboarding.dependency | left | left
-onboarding.dependency | down | down
-onboarding.dependency | right | right
-onboarding.dependency | r | check
-onboarding.dependency | i | install
-onboarding.dependency | t | install_config
-onboarding.dependency | g | script
-onboarding.dependency | G | script_upper
-onboarding.dependency | I | install_upper
-onboarding.dependency | T | config_upper
-setup_menu.menu | esc | back
-setup_menu.menu | up | previous
-setup_menu.menu | k | previous_k
-setup_menu.menu | down | next
-setup_menu.menu | j | next_j
-setup_menu.menu | enter | select
-setup_menu.confirm | y | yes
-setup_menu.confirm | Y | yes_upper
-setup_menu.confirm | enter | confirm
-attached_terminal | d | detach
-attached_terminal | q | detach_q
-attached_terminal | k | kill
-non_git_notification | q | home
-non_git_notification | esc | home_escape
-claude_chat | esc | close
-daemons.overlay | esc | close
-daemons.overlay | q | close_q
-daemons.overlay | enter | confirm
-daemons.overlay | up | previous
-daemons.overlay | k | previous_k
-daemons.overlay | down | next
-daemons.overlay | j | next_j
-daemons.list | enter | open
-daemons.list | up | previous
-daemons.list | k | previous_k
-daemons.list | down | next
-daemons.list | j | next_j
-session_list.sessions_pane | down | next
-session_list.sessions_pane | up | previous
-session_list.sessions_pane | right | interactive
-session_list.composer | enter | enter
-session_list.composer | backspace | backspace
-session_list.composer | esc | escape
-session_list.composer | up | up
-session_list.composer | down | down
-session_list.composer | shift+tab | focus_toggle
-session_list.composer | alt+p | retry
-session_list.composer | alt+c | cancel
-session_list.composer | alt+e | engine
-session_list.composer | alt+o | model
-session_list.composer | alt+g | mode
-session_list.composer | alt+r | dial_retry
-session_list.ask | enter | enter
-session_list.ask | up | previous
-session_list.ask | down | next
-session_list.ask | backspace | backspace
-session_recovery.filtered | esc | clear
+{
+  "bindings": [
+    {"context":"confirm_dialog","chord":"left","action":"App(ConfirmationPrev)"},
+    {"context":"confirm_dialog","chord":"right","action":"App(ConfirmationToggle)"},
+    {"context":"confirm_dialog","chord":"tab","action":"App(ConfirmationToggle)"},
+    {"context":"confirm_dialog","chord":"enter","action":"App(ConfirmationConfirm)"},
+    {"context":"confirm_dialog","chord":"esc","action":"App(ConfirmationCancel)"},
+    {"context":"mcp_overlay","chord":"esc","action":"App(McpOverlayClose)"},
+    {"context":"mcp_overlay","chord":"q","action":"App(McpOverlayClose)"},
+    {"context":"mcp_overlay","chord":"p","action":"App(McpOverlayClose)"},
+    {"context":"mcp_overlay","chord":"up","action":"App(McpOverlayPrev)"},
+    {"context":"mcp_overlay","chord":"k","action":"App(McpOverlayPrev)"},
+    {"context":"mcp_overlay","chord":"down","action":"App(McpOverlayNext)"},
+    {"context":"mcp_overlay","chord":"j","action":"App(McpOverlayNext)"},
+    {"context":"mcp_overlay","chord":"r","action":"App(McpOverlayRefresh)"},
+    {"context":"mcp_overlay","chord":"s","action":"App(McpOverlayStopServer)"},
+    {"context":"mcp_overlay","chord":"X","action":"App(McpOverlayStopDaemon)"},
+    {"context":"mcp_overlay","chord":"i","action":"App(McpOverlayImport)"},
+    {"context":"session_context_menu","chord":"up","action":"App(SessionContextPrev)"},
+    {"context":"session_context_menu","chord":"k","action":"App(SessionContextPrev)"},
+    {"context":"session_context_menu","chord":"down","action":"App(SessionContextNext)"},
+    {"context":"session_context_menu","chord":"j","action":"App(SessionContextNext)"},
+    {"context":"session_context_menu","chord":"enter","action":"App(SessionContextActivate)"},
+    {"context":"session_context_menu","chord":"esc","action":"App(SessionContextCancel)"},
+    {"context":"quick_commit","chord":"enter","action":"App(QuickCommitConfirm)"},
+    {"context":"quick_commit","chord":"esc","action":"App(QuickCommitCancel)"},
+    {"context":"quick_commit","chord":"backspace","action":"App(QuickCommitBackspace)"},
+    {"context":"quick_commit","chord":"left","action":"App(QuickCommitCursorLeft)"},
+    {"context":"quick_commit","chord":"right","action":"App(QuickCommitCursorRight)"},
+    {"context":"preview_scroll","chord":"esc","action":"Ui(PreviewExitScroll)"},
+    {"context":"preview_scroll","chord":"up","action":"Ui(PreviewScrollUp)"},
+    {"context":"preview_scroll","chord":"k","action":"Ui(PreviewScrollUp)"},
+    {"context":"preview_scroll","chord":"down","action":"Ui(PreviewScrollDown)"},
+    {"context":"preview_scroll","chord":"j","action":"Ui(PreviewScrollDown)"},
+    {"context":"preview_scroll","chord":"pageup","action":"Ui(PreviewPageUp)"},
+    {"context":"preview_scroll","chord":"pagedown","action":"Ui(PreviewPageDown)"},
+    {"context":"embed_interactive","chord":"ctrl+q","action":"App(DetachSession)"},
+    {"context":"session_list","chord":"enter","action":"Ui(SessionActivateSelected)"},
+    {"context":"session_list","chord":"$","action":"App(OpenQuickShell)"},
+    {"context":"session_list","chord":"n","action":"App(NewSession)"},
+    {"context":"session_list","chord":"x","action":"App(CleanupOrphaned)"},
+    {"context":"session_list","chord":"r","action":"Ui(SessionResumeSelected)"},
+    {"context":"session_list","chord":"down","action":"App(NextSession)"},
+    {"context":"session_list","chord":"up","action":"App(PreviousSession)"},
+    {"context":"home","chord":"d","action":"App(GoToDaemons)"},
+    {"context":"home","chord":"o","action":"App(GoToConfig)"},
+    {"context":"home","chord":"s","action":"App(GoToSessionList)"},
+    {"context":"home","chord":"i","action":"App(GoToStats)"},
+    {"context":"home","chord":"w","action":"App(GoToWitr)"},
+    {"context":"home","chord":"m","action":"App(GoToLearnings)"},
+    {"context":"home","chord":"t","action":"App(GoToAbtop)"},
+    {"context":"home","chord":"c","action":"App(GoToSkills)"},
+    {"context":"home","chord":"u","action":"App(GoToSetupMenu)"},
+    {"context":"home","chord":"l","action":"App(GoToLogHistory)"},
+    {"context":"home","chord":"z","action":"App(GoToSkillManager)"},
+    {"context":"home","chord":"g","action":"App(GoToHangar)"},
+    {"context":"home","chord":"r","action":"App(GoToRecovery)"},
+    {"context":"home","chord":"p","action":"App(McpOverlayOpen)"},
+    {"context":"home","chord":"v","action":"App(ShowChangelog)"},
+    {"context":"home","chord":"n","action":"App(NewSession)"},
+    {"context":"home","chord":"tab","action":"App(HomeScreenToggleFocus)"},
+    {"context":"daemons","chord":"esc","action":"App(PanelBack)"},
+    {"context":"daemons","chord":"q","action":"App(PanelBack)"},
+    {"context":"daemons","chord":"r","action":"App(DaemonsRefresh)"},
+    {"context":"daemons","chord":"I","action":"App(DaemonsRepairHooks)"},
+    {"context":"daemons","chord":"B","action":"App(DaemonsPinHookBinary)"},
+    {"context":"global","chord":"?","action":"App(ToggleHelp)"},
+    {"context":"global","chord":"H","action":"App(ToggleHelp)"},
+    {"context":"notifications.visible","chord":"ctrl+x","action":"App(DismissNotifications)"},
+    {"context":"global","chord":"q","action":"App(GoToHomeScreen)"},
+    {"context":"global","chord":"esc","action":"App(GoToHomeScreen)"},
+    {"context":"global","chord":"ctrl+c","action":"App(Quit)"},
+    {"context":"global","chord":"W","action":"Ui(UsageWireStatusline)"},
+    {"context":"global","chord":":","action":"OpenSlashPalette"},
+    {"context":"other_tmux_rename","chord":"enter","action":"App(OtherTmuxConfirmRename)"},
+    {"context":"other_tmux_rename","chord":"esc","action":"App(OtherTmuxCancelRename)"},
+    {"context":"other_tmux_rename","chord":"backspace","action":"App(OtherTmuxRenameBackspace)"},
+    {"context":"ssh_rename","chord":"enter","action":"App(SshSessionConfirmRename)"},
+    {"context":"ssh_rename","chord":"esc","action":"App(SshSessionCancelRename)"},
+    {"context":"ssh_rename","chord":"backspace","action":"App(SshSessionRenameBackspace)"},
+    {"context":"session_rename","chord":"enter","action":"App(SessionLabelConfirmRename)"},
+    {"context":"session_rename","chord":"esc","action":"App(SessionLabelCancelRename)"},
+    {"context":"session_rename","chord":"backspace","action":"App(SessionLabelRenameBackspace)"},
+    {"context":"auth_setup.picker","chord":"c","action":"App(AuthSetupShowCommand)"},
+    {"context":"auth_setup.input","chord":"enter","action":"App(AuthSetupSelect)"},
+    {"context":"auth_setup.input","chord":"backspace","action":"App(AuthSetupBackspace)"},
+    {"context":"auth_setup.input","chord":"esc","action":"App(AuthSetupBackspace)"},
+    {"context":"session_list.sessions_pane","chord":"home","action":"App(GoToTop)"},
+    {"context":"session_list.sessions_pane","chord":"end","action":"App(GoToBottom)"},
+    {"context":"session_list.logs_pane","chord":"up","action":"App(ScrollLogsUp)"},
+    {"context":"session_list.logs_pane","chord":"down","action":"App(ScrollLogsDown)"},
+    {"context":"session_list.logs_pane","chord":"home","action":"App(ScrollLogsToTop)"},
+    {"context":"session_list.logs_pane","chord":"end","action":"App(ScrollLogsToBottom)"},
+    {"context":"session_list.logs_pane","chord":"space","action":"App(ToggleAutoScroll)"},
+    {"context":"session_list.preview_pane","chord":"up","action":"App(ScrollLogsUp)"},
+    {"context":"session_list.preview_pane","chord":"down","action":"App(ScrollLogsDown)"},
+    {"context":"session_list.preview_pane","chord":"home","action":"App(ScrollLogsToTop)"},
+    {"context":"session_list.preview_pane","chord":"end","action":"App(ScrollLogsToBottom)"},
+    {"context":"session_list.preview_pane","chord":"space","action":"App(ToggleAutoScroll)"},
+    {"context":"search_workspace","chord":"esc","action":"App(NewSessionCancel)"},
+    {"context":"skill_manager.browse_query","chord":"backspace","action":"App(SkillManagerBrowseInputBackspace)"},
+    {"context":"onboarding.dependency_agent","chord":"c","action":"App(OnboardingGenerateScript(Claude))"},
+    {"context":"onboarding.dependency_agent","chord":"C","action":"App(OnboardingGenerateScript(Claude))"},
+    {"context":"onboarding.dependency_agent","chord":"x","action":"App(OnboardingGenerateScript(Codex))"},
+    {"context":"onboarding.dependency_agent","chord":"X","action":"App(OnboardingGenerateScript(Codex))"},
+    {"context":"onboarding.dependency_agent","chord":"a","action":"App(OnboardingGenerateScript(Antigravity))"},
+    {"context":"onboarding.dependency_agent","chord":"A","action":"App(OnboardingGenerateScript(Antigravity))"},
+    {"context":"onboarding.dependency_agent","chord":"p","action":"App(OnboardingGenerateScript(Copilot))"},
+    {"context":"onboarding.dependency_agent","chord":"P","action":"App(OnboardingGenerateScript(Copilot))"},
+    {"context":"onboarding.dependency_agent","chord":"esc","action":"App(OnboardingCancelScriptPrompt)"},
+    {"context":"onboarding.auth_key","chord":"enter","action":"App(OnboardingAuthSelect)"},
+    {"context":"onboarding.auth_key","chord":"esc","action":"App(OnboardingAuthCancel)"},
+    {"context":"onboarding.auth_key","chord":"backspace","action":"App(OnboardingAuthKeyBackspace)"},
+    {"context":"onboarding.auth_method","chord":"up","action":"App(OnboardingAuthUp)"},
+    {"context":"onboarding.auth_method","chord":"down","action":"App(OnboardingAuthDown)"},
+    {"context":"onboarding.auth_method","chord":"enter","action":"App(OnboardingAuthSelect)"},
+    {"context":"onboarding.auth_method","chord":"esc","action":"App(OnboardingAuthCancel)"},
+    {"context":"onboarding.auth_agents","chord":"up","action":"App(OnboardingAuthUp)"},
+    {"context":"onboarding.auth_agents","chord":"down","action":"App(OnboardingAuthDown)"},
+    {"context":"onboarding.auth_agents","chord":"enter","action":"App(OnboardingAuthSelect)"},
+    {"context":"onboarding.auth_agents","chord":"right","action":"App(OnboardingNext)"},
+    {"context":"onboarding.auth_agents","chord":"esc","action":"App(OnboardingToMenu)"},
+    {"context":"onboarding.auth_agents","chord":"left","action":"App(OnboardingBack)"},
+    {"context":"onboarding.auth_agents","chord":"backspace","action":"App(OnboardingBack)"},
+    {"context":"onboarding.otel","chord":"tab","action":"App(OnboardingOtelNextField)"},
+    {"context":"onboarding.otel","chord":"shift+tab","action":"App(OnboardingOtelPrevField)"},
+    {"context":"onboarding.otel","chord":"backspace","action":"App(OnboardingOtelBackspace)"},
+    {"context":"onboarding.otel","chord":"esc","action":"App(OnboardingToMenu)"},
+    {"context":"skill_manager","chord":"q","action":"App(SkillManagerBack)"},
+    {"context":"skill_manager","chord":"tab","action":"App(SkillManagerToggleFocus)"},
+    {"context":"skill_manager","chord":"shift+tab","action":"App(SkillManagerToggleFocus)"},
+    {"context":"skill_manager","chord":"[","action":"App(SkillManagerShrinkSources)"},
+    {"context":"skill_manager","chord":"]","action":"App(SkillManagerGrowSources)"},
+    {"context":"skill_manager","chord":"i","action":"App(SkillManagerOpenAddSource)"},
+    {"context":"skill_manager","chord":"u","action":"App(SkillManagerUpdate)"},
+    {"context":"skill_manager","chord":"c","action":"App(SkillManagerCheck)"},
+    {"context":"skill_manager","chord":"b","action":"App(SkillManagerOpenBrowse)"},
+    {"context":"skill_manager","chord":"l","action":"App(SkillManagerOpenLibrary)"},
+    {"context":"skill_manager","chord":"/","action":"App(SkillManagerOpenSearch)"},
+    {"context":"skill_manager","chord":"m","action":"App(SkillManagerRefreshDiscovery)"},
+    {"context":"skill_manager","chord":"up","action":"App(SkillManagerSelectPrev)"},
+    {"context":"skill_manager","chord":"k","action":"App(SkillManagerSelectPrev)"},
+    {"context":"skill_manager","chord":"down","action":"App(SkillManagerSelectNext)"},
+    {"context":"skill_manager","chord":"j","action":"App(SkillManagerSelectNext)"},
+    {"context":"skill_manager","chord":"home","action":"App(SkillManagerSelectFirst)"},
+    {"context":"skill_manager","chord":"g","action":"App(SkillManagerSelectFirst)"},
+    {"context":"skill_manager","chord":"end","action":"App(SkillManagerSelectLast)"},
+    {"context":"skill_manager","chord":"G","action":"App(SkillManagerSelectLast)"},
+    {"context":"skill_manager","chord":"s","action":"Ui(SkillManagerSyncOrConflict)"},
+    {"context":"skill_manager","chord":"r","action":"Ui(SkillManagerRemoveOrSource)"},
+    {"context":"skill_manager","chord":"o","action":"Ui(SkillManagerOpenUnitIfFocused)"},
+    {"context":"skill_manager","chord":"y","action":"Ui(SkillManagerCopyToLibraryIfFocused)"},
+    {"context":"skill_manager","chord":"esc","action":"Ui(SkillManagerBackOrClearFilter)"},
+    {"context":"help_visible","chord":"esc","action":"App(ToggleHelp)"},
+    {"context":"help_visible","chord":"?","action":"App(ToggleHelp)"},
+    {"context":"help_visible","chord":"H","action":"App(ToggleHelp)"},
+    {"context":"help.text","chord":"esc","action":"App(ToggleHelp)"},
+    {"context":"plugin.owned","chord":"esc","action":"App(PanelBack)"},
+    {"context":"plugin.owned","chord":"q","action":"App(PanelBack)"},
+    {"context":"skill_manager.sync_confirm","chord":"up","action":"App(SkillManagerSyncScroll(-1))"},
+    {"context":"skill_manager.sync_confirm","chord":"k","action":"App(SkillManagerSyncScroll(-1))"},
+    {"context":"skill_manager.sync_confirm","chord":"down","action":"App(SkillManagerSyncScroll(1))"},
+    {"context":"skill_manager.sync_confirm","chord":"j","action":"App(SkillManagerSyncScroll(1))"},
+    {"context":"skill_manager.sync_confirm","chord":"enter","action":"App(SkillManagerSyncConfirm)"},
+    {"context":"skill_manager.sync_confirm","chord":"esc","action":"App(SkillManagerSyncCancel)"},
+    {"context":"skill_manager.sync_confirm","chord":"q","action":"App(SkillManagerSyncCancel)"},
+    {"context":"skill_manager.preview","chord":"up","action":"App(SkillManagerPreviewUp)"},
+    {"context":"skill_manager.preview","chord":"k","action":"App(SkillManagerPreviewUp)"},
+    {"context":"skill_manager.preview","chord":"down","action":"App(SkillManagerPreviewDown)"},
+    {"context":"skill_manager.preview","chord":"j","action":"App(SkillManagerPreviewDown)"},
+    {"context":"skill_manager.preview","chord":"space","action":"App(SkillManagerPreviewToggle)"},
+    {"context":"skill_manager.preview","chord":"a","action":"App(SkillManagerPreviewAll)"},
+    {"context":"skill_manager.preview","chord":"n","action":"App(SkillManagerPreviewNone)"},
+    {"context":"skill_manager.preview","chord":"1","action":"App(SkillManagerPreviewTool(0))"},
+    {"context":"skill_manager.preview","chord":"2","action":"App(SkillManagerPreviewTool(1))"},
+    {"context":"skill_manager.preview","chord":"3","action":"App(SkillManagerPreviewTool(2))"},
+    {"context":"skill_manager.preview","chord":"4","action":"App(SkillManagerPreviewTool(3))"},
+    {"context":"skill_manager.preview","chord":"enter","action":"App(SkillManagerPreviewConfirm)"},
+    {"context":"skill_manager.preview","chord":"esc","action":"App(SkillManagerPreviewClose)"},
+    {"context":"skill_manager.preview","chord":"q","action":"App(SkillManagerPreviewClose)"},
+    {"context":"skill_manager.source_remove","chord":"up","action":"App(SkillManagerSourceRemoveMove(-1))"},
+    {"context":"skill_manager.source_remove","chord":"k","action":"App(SkillManagerSourceRemoveMove(-1))"},
+    {"context":"skill_manager.source_remove","chord":"down","action":"App(SkillManagerSourceRemoveMove(1))"},
+    {"context":"skill_manager.source_remove","chord":"j","action":"App(SkillManagerSourceRemoveMove(1))"},
+    {"context":"skill_manager.source_remove","chord":"enter","action":"App(SkillManagerSourceRemoveConfirm)"},
+    {"context":"skill_manager.source_remove","chord":"esc","action":"App(SkillManagerSourceRemoveCancel)"},
+    {"context":"skill_manager.source_remove","chord":"q","action":"App(SkillManagerSourceRemoveCancel)"},
+    {"context":"git_view","chord":"esc","action":"App(GitViewBack)"},
+    {"context":"git_view","chord":"tab","action":"App(GitViewSwitchTab)"},
+    {"context":"git_view","chord":"p","action":"App(GitViewStartCommit)"},
+    {"context":"git_view.review","chord":"n","action":"App(GitReviewNextHunk)"},
+    {"context":"git_view.review","chord":"N","action":"App(GitReviewPrevHunk)"},
+    {"context":"git_view.review","chord":"]","action":"App(GitReviewNextReviewFile)"},
+    {"context":"git_view.review","chord":"[","action":"App(GitReviewPrevReviewFile)"},
+    {"context":"git_view.review","chord":"space","action":"App(GitReviewToggleCollapse)"},
+    {"context":"git_view.review","chord":"enter","action":"App(GitReviewToggleCollapse)"},
+    {"context":"git_view.review","chord":"z","action":"App(GitReviewExpandContext)"},
+    {"context":"git_view.review","chord":"e","action":"App(GitReviewExpandAllFolders)"},
+    {"context":"git_view.review","chord":"E","action":"App(GitReviewCollapseAllFolders)"},
+    {"context":"git_view.review","chord":"j","action":"App(GitViewScrollDown)"},
+    {"context":"git_view.review","chord":"down","action":"App(GitViewScrollDown)"},
+    {"context":"git_view.review","chord":"k","action":"App(GitViewScrollUp)"},
+    {"context":"git_view.review","chord":"up","action":"App(GitViewScrollUp)"},
+    {"context":"log_history","chord":"esc","action":"App(LogHistoryBack)"},
+    {"context":"log_history","chord":"f","action":"App(LogHistoryCycleFilter)"},
+    {"context":"log_history","chord":"r","action":"App(LogHistoryRefresh)"},
+    {"context":"log_history","chord":"y","action":"App(LogHistoryCopySelection)"},
+    {"context":"log_history","chord":"c","action":"App(LogHistoryCleanup)"},
+    {"context":"log_history","chord":"C","action":"App(LogHistoryCleanup)"},
+    {"context":"log_history","chord":"tab","action":"App(LogHistoryToggleFocus)"},
+    {"context":"log_history","chord":"home","action":"App(LogHistoryScrollHome)"},
+    {"context":"log_history.sessions","chord":"up","action":"App(LogHistoryPrevSession)"},
+    {"context":"log_history.sessions","chord":"k","action":"App(LogHistoryPrevSession)"},
+    {"context":"log_history.sessions","chord":"down","action":"App(LogHistoryNextSession)"},
+    {"context":"log_history.sessions","chord":"j","action":"App(LogHistoryNextSession)"},
+    {"context":"log_history.sessions","chord":"enter","action":"App(LogHistorySelectSession)"},
+    {"context":"log_history.logs","chord":"up","action":"App(LogHistoryScrollUp)"},
+    {"context":"log_history.logs","chord":"k","action":"App(LogHistoryScrollUp)"},
+    {"context":"log_history.logs","chord":"down","action":"App(LogHistoryScrollDown)"},
+    {"context":"log_history.logs","chord":"j","action":"App(LogHistoryScrollDown)"},
+    {"context":"log_history.logs","chord":"pageup","action":"App(LogHistoryPageUp)"},
+    {"context":"log_history.logs","chord":"pagedown","action":"App(LogHistoryPageDown)"},
+    {"context":"log_history.logs","chord":"left","action":"App(LogHistoryScrollLeft)"},
+    {"context":"log_history.logs","chord":"h","action":"App(LogHistoryScrollLeft)"},
+    {"context":"log_history.logs","chord":"right","action":"App(LogHistoryScrollRight)"},
+    {"context":"log_history.logs","chord":"l","action":"App(LogHistoryScrollRight)"},
+    {"context":"skills","chord":"esc","action":"App(SkillsBack)"},
+    {"context":"skills","chord":"right","action":"App(SkillsNextProvider)"},
+    {"context":"skills","chord":"l","action":"App(SkillsNextProvider)"},
+    {"context":"skills","chord":"left","action":"App(SkillsPrevProvider)"},
+    {"context":"skills","chord":"h","action":"App(SkillsPrevProvider)"},
+    {"context":"skills","chord":"tab","action":"App(SkillsNextTab)"},
+    {"context":"skills","chord":"shift+tab","action":"App(SkillsPrevTab)"},
+    {"context":"skills","chord":"up","action":"App(SkillsScrollUp)"},
+    {"context":"skills","chord":"k","action":"App(SkillsScrollUp)"},
+    {"context":"skills","chord":"down","action":"App(SkillsScrollDown)"},
+    {"context":"skills","chord":"j","action":"App(SkillsScrollDown)"},
+    {"context":"skills","chord":"pageup","action":"App(SkillsPageUp)"},
+    {"context":"skills","chord":"pagedown","action":"App(SkillsPageDown)"},
+    {"context":"skills","chord":"g","action":"App(SkillsToTop)"},
+    {"context":"skills","chord":"G","action":"App(SkillsToBottom)"},
+    {"context":"skills","chord":"r","action":"App(SkillsRefresh)"},
+    {"context":"skills","chord":"/","action":"App(SkillsSearchStart)"},
+    {"context":"changelog","chord":"esc","action":"App(ChangelogBack)"},
+    {"context":"changelog","chord":"up","action":"App(ChangelogScrollUp)"},
+    {"context":"changelog","chord":"k","action":"App(ChangelogScrollUp)"},
+    {"context":"changelog","chord":"down","action":"App(ChangelogScrollDown)"},
+    {"context":"changelog","chord":"j","action":"App(ChangelogScrollDown)"},
+    {"context":"changelog","chord":"pageup","action":"App(ChangelogPageUp)"},
+    {"context":"changelog","chord":"pagedown","action":"App(ChangelogPageDown)"},
+    {"context":"changelog","chord":"g","action":"App(ChangelogToTop)"},
+    {"context":"changelog","chord":"G","action":"App(ChangelogToBottom)"},
+    {"context":"session_recovery","chord":"esc","action":"App(SessionRecoveryBack)"},
+    {"context":"session_recovery","chord":"up","action":"App(SessionRecoveryPrev)"},
+    {"context":"session_recovery","chord":"k","action":"App(SessionRecoveryPrev)"},
+    {"context":"session_recovery","chord":"down","action":"App(SessionRecoveryNext)"},
+    {"context":"session_recovery","chord":"j","action":"App(SessionRecoveryNext)"},
+    {"context":"session_recovery","chord":"r","action":"App(SessionRecoveryResume)"},
+    {"context":"session_recovery","chord":"d","action":"App(SessionRecoveryArchive)"},
+    {"context":"session_recovery","chord":"R","action":"App(SessionRecoveryRefresh)"},
+    {"context":"session_recovery","chord":"tab","action":"App(SessionRecoveryToggleView)"},
+    {"context":"session_recovery","chord":"A","action":"App(SessionRecoveryRecoverAll)"},
+    {"context":"session_recovery","chord":"space","action":"App(SessionRecoveryToggleSelect)"},
+    {"context":"session_recovery","chord":"D","action":"App(SessionRecoveryDeleteSelected)"},
+    {"context":"session_recovery","chord":"/","action":"App(SessionRecoverySearchStart)"},
+    {"context":"config","chord":"esc","action":"App(ConfigBack)"},
+    {"context":"config","chord":"tab","action":"App(ConfigSwitchPane)"},
+    {"context":"config","chord":"/","action":"App(ConfigSearchStart)"},
+    {"context":"config","chord":"ctrl+k","action":"App(ConfigSecretToKeychain)"},
+    {"context":"config","chord":"up","action":"App(ConfigNavigateUp)"},
+    {"context":"config","chord":"k","action":"App(ConfigNavigateUp)"},
+    {"context":"config","chord":"down","action":"App(ConfigNavigateDown)"},
+    {"context":"config","chord":"j","action":"App(ConfigNavigateDown)"},
+    {"context":"config","chord":"left","action":"App(ConfigFocusCategories)"},
+    {"context":"config","chord":"h","action":"App(ConfigFocusCategories)"},
+    {"context":"config","chord":"right","action":"App(ConfigFocusSettings)"},
+    {"context":"config","chord":"l","action":"App(ConfigFocusSettings)"},
+    {"context":"config","chord":"space","action":"App(ConfigToggleExpand)"},
+    {"context":"config","chord":"s","action":"App(ConfigSaveAll)"},
+    {"context":"config","chord":"S","action":"App(ConfigSaveAll)"},
+    {"context":"auth_provider_popup","chord":"esc","action":"App(AuthProviderPopupClose)"},
+    {"context":"auth_provider_popup","chord":"up","action":"App(AuthProviderPopupPrev)"},
+    {"context":"auth_provider_popup","chord":"k","action":"App(AuthProviderPopupPrev)"},
+    {"context":"auth_provider_popup","chord":"down","action":"App(AuthProviderPopupNext)"},
+    {"context":"auth_provider_popup","chord":"j","action":"App(AuthProviderPopupNext)"},
+    {"context":"auth_provider_popup","chord":"enter","action":"App(AuthProviderPopupSelect)"},
+    {"context":"auth_provider_popup","chord":"d","action":"App(AuthProviderPopupDeleteKey)"},
+    {"context":"auth_provider_popup","chord":"D","action":"App(AuthProviderPopupDeleteKey)"},
+    {"context":"config_popup","chord":"esc","action":"App(ConfigPopupCancel)"},
+    {"context":"config_popup","chord":"up","action":"App(ConfigPopupNavigateUp)"},
+    {"context":"config_popup","chord":"k","action":"App(ConfigPopupNavigateUp)"},
+    {"context":"config_popup","chord":"down","action":"App(ConfigPopupNavigateDown)"},
+    {"context":"config_popup","chord":"j","action":"App(ConfigPopupNavigateDown)"},
+    {"context":"config_popup","chord":"enter","action":"App(ConfigPopupConfirm)"},
+    {"context":"config_popup","chord":"backspace","action":"App(ConfigPopupBackspace)"},
+    {"context":"config_popup","chord":"delete","action":"App(ConfigPopupDelete)"},
+    {"context":"config_popup","chord":"left","action":"App(ConfigPopupCursorLeft)"},
+    {"context":"config_popup","chord":"right","action":"App(ConfigPopupCursorRight)"},
+    {"context":"config_popup","chord":"home","action":"App(ConfigPopupCursorHome)"},
+    {"context":"config_popup","chord":"end","action":"App(ConfigPopupCursorEnd)"},
+    {"context":"config_popup","chord":"ctrl+v","action":"App(ConfigPopupPasteClipboard)"},
+    {"context":"session_list","chord":"esc","action":"App(GoToHomeScreen)"},
+    {"context":"session_list","chord":"q","action":"App(GoToHomeScreen)"},
+    {"context":"session_list","chord":"tab","action":"App(SessionTabNext)"},
+    {"context":"session_list","chord":"shift+tab","action":"App(SessionTabPrev)"},
+    {"context":"session_list","chord":"c","action":"App(ToggleClaudeChat)"},
+    {"context":"session_list","chord":"f","action":"App(RefreshWorkspaces)"},
+    {"context":"session_list","chord":"F","action":"App(CycleSessionFilter)"},
+    {"context":"session_list","chord":"s","action":"App(StarSelectedWorkspace)"},
+    {"context":"session_list","chord":"S","action":"App(StarSelectedWorkspace)"},
+    {"context":"session_list","chord":"a","action":"App(AttachTmuxSession)"},
+    {"context":"session_list","chord":"A","action":"App(EnterInteractivePane)"},
+    {"context":"session_list","chord":"u","action":"App(ReauthenticateCredentials)"},
+    {"context":"session_list","chord":"e","action":"App(RestartSession)"},
+    {"context":"session_list","chord":"space","action":"App(ToggleSelectSession)"},
+    {"context":"session_list","chord":"D","action":"App(DeleteSelectedSessions)"},
+    {"context":"session_list","chord":"d","action":"App(DeleteSession)"},
+    {"context":"session_list","chord":"ctrl+x","action":"App(CleanupOrphaned)"},
+    {"context":"session_list","chord":"g","action":"App(ShowGitView)"},
+    {"context":"session_list","chord":"p","action":"App(QuickCommitStart)"},
+    {"context":"session_list","chord":"o","action":"App(OpenInEditor)"},
+    {"context":"session_list","chord":"E","action":"App(ToggleExpandAll)"},
+    {"context":"session_list","chord":"B","action":"App(ToggleSessionsSidebar)"},
+    {"context":"session_list","chord":"M","action":"App(ToggleSessionMenuBar)"},
+    {"context":"session_list","chord":"i","action":"App(GoToStats)"},
+    {"context":"session_list","chord":"w","action":"App(GoToWitr)"},
+    {"context":"session_list","chord":"k","action":"App(GoToSkills)"},
+    {"context":"session_list","chord":"m","action":"App(GoToLearnings)"},
+    {"context":"session_list","chord":"t","action":"App(GoToAbtop)"},
+    {"context":"session_list","chord":"shift+up","action":"App(ScrollPreviewUp)"},
+    {"context":"session_list","chord":"shift+down","action":"App(ScrollPreviewDown)"},
+    {"context":"session_list","chord":"f2","action":"Ui(SessionStartRename)"},
+    {"context":"session_list","chord":"H","action":"Ui(SessionHeadroomOrHelp)"},
+    {"context":"session_list","chord":"1","action":"Ui(AttachSessionByPosition(1))"},
+    {"context":"session_list","chord":"2","action":"Ui(AttachSessionByPosition(2))"},
+    {"context":"session_list","chord":"3","action":"Ui(AttachSessionByPosition(3))"},
+    {"context":"session_list","chord":"4","action":"Ui(AttachSessionByPosition(4))"},
+    {"context":"session_list","chord":"5","action":"Ui(AttachSessionByPosition(5))"},
+    {"context":"session_list","chord":"6","action":"Ui(AttachSessionByPosition(6))"},
+    {"context":"session_list","chord":"7","action":"Ui(AttachSessionByPosition(7))"},
+    {"context":"session_list","chord":"8","action":"Ui(AttachSessionByPosition(8))"},
+    {"context":"session_list","chord":"9","action":"Ui(AttachSessionByPosition(9))"},
+    {"context":"home.sidebar","chord":"up","action":"App(HomeScreenSidebarUp)"},
+    {"context":"home.sidebar","chord":"down","action":"App(HomeScreenSidebarDown)"},
+    {"context":"home.sidebar","chord":"enter","action":"App(HomeScreenSidebarSelect)"},
+    {"context":"home.content","chord":"up","action":"App(WelcomePanelScrollUp)"},
+    {"context":"home.content","chord":"down","action":"App(WelcomePanelScrollDown)"},
+    {"context":"home.content","chord":"pageup","action":"App(WelcomePanelPageUp)"},
+    {"context":"home.content","chord":"pagedown","action":"App(WelcomePanelPageDown)"},
+    {"context":"home.content","chord":"y","action":"App(WelcomePanelCopyContent)"},
+    {"context":"config.editing","chord":"enter","action":"App(ConfigSaveEdit)"},
+    {"context":"config.editing","chord":"esc","action":"App(ConfigCancelEdit)"},
+    {"context":"config.editing","chord":"backspace","action":"App(ConfigEditBackspace)"},
+    {"context":"config.api_key","chord":"enter","action":"App(ConfigApiKeySave)"},
+    {"context":"config.api_key","chord":"esc","action":"App(ConfigCancelEdit)"},
+    {"context":"config.api_key","chord":"backspace","action":"App(ConfigEditBackspace)"},
+    {"context":"config.search","chord":"esc","action":"App(ConfigSearchCancel)"},
+    {"context":"config.search","chord":"up","action":"App(ConfigPrevSetting)"},
+    {"context":"config.search","chord":"down","action":"App(ConfigNextSetting)"},
+    {"context":"config.search","chord":"enter","action":"App(ConfigEditSetting)"},
+    {"context":"config.search","chord":"backspace","action":"App(ConfigSearchBackspace)"},
+    {"context":"config.search","chord":"ctrl+k","action":"App(ConfigSecretToKeychain)"},
+    {"context":"auth_provider_popup.input","chord":"enter","action":"App(AuthProviderPopupSelect)"},
+    {"context":"auth_provider_popup.input","chord":"esc","action":"App(AuthProviderPopupClose)"},
+    {"context":"auth_provider_popup.input","chord":"backspace","action":"App(AuthProviderPopupBackspace)"},
+    {"context":"skills.search","chord":"esc","action":"App(SkillsSearchClose)"},
+    {"context":"skills.search","chord":"enter","action":"App(SkillsSearchClose)"},
+    {"context":"skills.search","chord":"backspace","action":"App(SkillsSearchBackspace)"},
+    {"context":"session_recovery.search","chord":"esc","action":"App(SessionRecoverySearchCancel)"},
+    {"context":"session_recovery.search","chord":"enter","action":"App(SessionRecoverySearchClose)"},
+    {"context":"session_recovery.search","chord":"backspace","action":"App(SessionRecoverySearchBackspace)"},
+    {"context":"session_recovery.search","chord":"up","action":"App(SessionRecoveryPrev)"},
+    {"context":"session_recovery.search","chord":"down","action":"App(SessionRecoveryNext)"},
+    {"context":"git_view.commit","chord":"esc","action":"App(GitViewCommitCancel)"},
+    {"context":"git_view.commit","chord":"enter","action":"App(GitViewCommitConfirm)"},
+    {"context":"git_view.commit","chord":"backspace","action":"App(GitViewCommitBackspace)"},
+    {"context":"git_view.commit","chord":"left","action":"App(GitViewCommitCursorLeft)"},
+    {"context":"git_view.commit","chord":"right","action":"App(GitViewCommitCursorRight)"},
+    {"context":"skill_manager.input","chord":"enter","action":"App(SkillManagerInputSubmit)"},
+    {"context":"skill_manager.input","chord":"esc","action":"App(SkillManagerInputCancel)"},
+    {"context":"skill_manager.input","chord":"backspace","action":"App(SkillManagerInputBackspace)"},
+    {"context":"skill_manager.browse_query","chord":"tab","action":"App(SkillManagerBrowseToggleCatalog)"},
+    {"context":"skill_manager.browse_query","chord":"shift+tab","action":"App(SkillManagerBrowseToggleCatalog)"},
+    {"context":"skill_manager.browse_query","chord":"enter","action":"App(SkillManagerBrowseSearch)"},
+    {"context":"skill_manager.browse_query","chord":"esc","action":"App(SkillManagerBrowseClose)"},
+    {"context":"skill_manager.browse_results","chord":"up","action":"App(SkillManagerBrowseSelectPrev)"},
+    {"context":"skill_manager.browse_results","chord":"k","action":"App(SkillManagerBrowseSelectPrev)"},
+    {"context":"skill_manager.browse_results","chord":"down","action":"App(SkillManagerBrowseSelectNext)"},
+    {"context":"skill_manager.browse_results","chord":"j","action":"App(SkillManagerBrowseSelectNext)"},
+    {"context":"skill_manager.browse_results","chord":"tab","action":"App(SkillManagerBrowseToggleCatalog)"},
+    {"context":"skill_manager.browse_results","chord":"enter","action":"App(SkillManagerBrowseInstall)"},
+    {"context":"skill_manager.browse_results","chord":"/","action":"App(SkillManagerBrowseEditQuery)"},
+    {"context":"skill_manager.library","chord":"up","action":"App(SkillManagerLibrarySelectPrev)"},
+    {"context":"skill_manager.library","chord":"k","action":"App(SkillManagerLibrarySelectPrev)"},
+    {"context":"skill_manager.library","chord":"down","action":"App(SkillManagerLibrarySelectNext)"},
+    {"context":"skill_manager.library","chord":"j","action":"App(SkillManagerLibrarySelectNext)"},
+    {"context":"skill_manager.library","chord":"enter","action":"App(SkillManagerLibraryEnter)"},
+    {"context":"skill_manager.library","chord":"esc","action":"App(SkillManagerLibraryClose)"},
+    {"context":"skill_manager.discovery","chord":"enter","action":"App(SkillManagerDiscoveryImport)"},
+    {"context":"skill_manager.discovery","chord":"d","action":"App(SkillManagerDiscoveryToggleDetails)"},
+    {"context":"skill_manager.discovery","chord":"s","action":"App(SkillManagerDiscoverySkip)"},
+    {"context":"skill_manager.discovery","chord":"esc","action":"App(SkillManagerBack)"},
+    {"context":"skill_manager.sources","chord":"up","action":"App(SkillManagerSourceSelectPrev)"},
+    {"context":"skill_manager.sources","chord":"k","action":"App(SkillManagerSourceSelectPrev)"},
+    {"context":"skill_manager.sources","chord":"down","action":"App(SkillManagerSourceSelectNext)"},
+    {"context":"skill_manager.sources","chord":"j","action":"App(SkillManagerSourceSelectNext)"},
+    {"context":"skill_manager.sources","chord":"enter","action":"App(SkillManagerPreviewSource)"},
+    {"context":"skill_manager.sources","chord":"f","action":"App(SkillManagerApplySourceFilterKey)"},
+    {"context":"auth_setup.picker","chord":"esc","action":"App(AuthSetupCancel)"},
+    {"context":"auth_setup.picker","chord":"up","action":"App(AuthSetupPrevious)"},
+    {"context":"auth_setup.picker","chord":"k","action":"App(AuthSetupPrevious)"},
+    {"context":"auth_setup.picker","chord":"down","action":"App(AuthSetupNext)"},
+    {"context":"auth_setup.picker","chord":"j","action":"App(AuthSetupNext)"},
+    {"context":"auth_setup.picker","chord":"enter","action":"App(AuthSetupSelect)"},
+    {"context":"auth_setup.picker","chord":"r","action":"App(AuthSetupRefresh)"},
+    {"context":"onboarding.git_directories","chord":"enter","action":"App(OnboardingNext)"},
+    {"context":"onboarding.git_directories","chord":"esc","action":"App(OnboardingToMenu)"},
+    {"context":"onboarding.git_directories","chord":"up","action":"App(OnboardingBack)"},
+    {"context":"onboarding.git_directories","chord":"backspace","action":"App(OnboardingBackspace)"},
+    {"context":"onboarding.git_directories","chord":"delete","action":"App(OnboardingDelete)"},
+    {"context":"onboarding.git_directories","chord":"left","action":"App(OnboardingCursorLeft)"},
+    {"context":"onboarding.git_directories","chord":"right","action":"App(OnboardingCursorRight)"},
+    {"context":"onboarding.git_directories","chord":"home","action":"App(OnboardingCursorHome)"},
+    {"context":"onboarding.git_directories","chord":"end","action":"App(OnboardingCursorEnd)"},
+    {"context":"onboarding.questions","chord":"enter","action":"App(OnboardingNext)"},
+    {"context":"onboarding.questions","chord":"right","action":"App(OnboardingNext)"},
+    {"context":"onboarding.questions","chord":"esc","action":"App(OnboardingToMenu)"},
+    {"context":"onboarding.questions","chord":"left","action":"App(OnboardingBack)"},
+    {"context":"onboarding.questions","chord":"backspace","action":"App(OnboardingBack)"},
+    {"context":"onboarding.questions","chord":"up","action":"App(OnboardingQuestionUp)"},
+    {"context":"onboarding.questions","chord":"k","action":"App(OnboardingQuestionUp)"},
+    {"context":"onboarding.questions","chord":"down","action":"App(OnboardingQuestionDown)"},
+    {"context":"onboarding.questions","chord":"j","action":"App(OnboardingQuestionDown)"},
+    {"context":"onboarding.dependency","chord":"enter","action":"App(OnboardingCheckDeps)"},
+    {"context":"onboarding.dependency","chord":"esc","action":"App(OnboardingBack)"},
+    {"context":"onboarding.dependency","chord":"up","action":"App(OnboardingDepCursorUp)"},
+    {"context":"onboarding.dependency","chord":"left","action":"App(OnboardingDepCursorUp)"},
+    {"context":"onboarding.dependency","chord":"down","action":"App(OnboardingDepCursorDown)"},
+    {"context":"onboarding.dependency","chord":"right","action":"App(OnboardingDepCursorDown)"},
+    {"context":"onboarding.dependency","chord":"r","action":"App(OnboardingCheckDeps)"},
+    {"context":"onboarding.dependency","chord":"i","action":"App(OnboardingInstallFocusedDep)"},
+    {"context":"onboarding.dependency","chord":"t","action":"App(OnboardingInstallConfig)"},
+    {"context":"onboarding.dependency","chord":"g","action":"App(OnboardingScriptPrompt)"},
+    {"context":"onboarding.dependency","chord":"G","action":"App(OnboardingScriptPrompt)"},
+    {"context":"onboarding.dependency","chord":"I","action":"App(OnboardingInstallFocusedDep)"},
+    {"context":"onboarding.dependency","chord":"T","action":"App(OnboardingInstallConfig)"},
+    {"context":"setup_menu.menu","chord":"esc","action":"App(SetupMenuBack)"},
+    {"context":"setup_menu.menu","chord":"up","action":"App(SetupMenuUp)"},
+    {"context":"setup_menu.menu","chord":"k","action":"App(SetupMenuUp)"},
+    {"context":"setup_menu.menu","chord":"down","action":"App(SetupMenuDown)"},
+    {"context":"setup_menu.menu","chord":"j","action":"App(SetupMenuDown)"},
+    {"context":"setup_menu.menu","chord":"enter","action":"App(SetupMenuSelect)"},
+    {"context":"setup_menu.confirm","chord":"y","action":"App(SetupMenuSelect)"},
+    {"context":"setup_menu.confirm","chord":"Y","action":"App(SetupMenuSelect)"},
+    {"context":"setup_menu.confirm","chord":"enter","action":"App(SetupMenuSelect)"},
+    {"context":"attached_terminal","chord":"d","action":"App(DetachSession)"},
+    {"context":"attached_terminal","chord":"q","action":"App(DetachSession)"},
+    {"context":"attached_terminal","chord":"k","action":"App(KillContainer)"},
+    {"context":"non_git_notification","chord":"q","action":"App(GoToHomeScreen)"},
+    {"context":"non_git_notification","chord":"esc","action":"App(GoToHomeScreen)"},
+    {"context":"claude_chat","chord":"esc","action":"App(ToggleClaudeChat)"},
+    {"context":"daemons.overlay","chord":"esc","action":"Ui(DaemonsCloseOverlay)"},
+    {"context":"daemons.overlay","chord":"q","action":"Ui(DaemonsCloseAndBack)"},
+    {"context":"daemons.overlay","chord":"enter","action":"Ui(DaemonsConfirmMenu)"},
+    {"context":"daemons.overlay","chord":"up","action":"Ui(DaemonsMoveOverlay(-1))"},
+    {"context":"daemons.overlay","chord":"k","action":"Ui(DaemonsMoveOverlay(-1))"},
+    {"context":"daemons.overlay","chord":"down","action":"Ui(DaemonsMoveOverlay(1))"},
+    {"context":"daemons.overlay","chord":"j","action":"Ui(DaemonsMoveOverlay(1))"},
+    {"context":"daemons.list","chord":"enter","action":"Ui(DaemonsOpenMenu)"},
+    {"context":"daemons.list","chord":"up","action":"Ui(DaemonsMoveSelection(-1))"},
+    {"context":"daemons.list","chord":"k","action":"Ui(DaemonsMoveSelection(-1))"},
+    {"context":"daemons.list","chord":"down","action":"Ui(DaemonsMoveSelection(1))"},
+    {"context":"daemons.list","chord":"j","action":"Ui(DaemonsMoveSelection(1))"},
+    {"context":"session_list.sessions_pane","chord":"down","action":"App(NextSession)"},
+    {"context":"session_list.sessions_pane","chord":"up","action":"App(PreviousSession)"},
+    {"context":"session_list.sessions_pane","chord":"right","action":"App(EnterInteractivePane)"},
+    {"context":"session_list.composer","chord":"enter","action":"Ui(SessionComposerEnter)"},
+    {"context":"session_list.composer","chord":"backspace","action":"Ui(SessionComposerBackspace)"},
+    {"context":"session_list.composer","chord":"esc","action":"Ui(SessionComposerEscape)"},
+    {"context":"session_list.composer","chord":"up","action":"Ui(SessionComposerUp)"},
+    {"context":"session_list.composer","chord":"down","action":"Ui(SessionComposerDown)"},
+    {"context":"session_list.composer","chord":"shift+tab","action":"Ui(SessionComposerFocusToggle)"},
+    {"context":"session_list.composer","chord":"alt+p","action":"Ui(SessionComposerRetry)"},
+    {"context":"session_list.composer","chord":"alt+c","action":"Ui(SessionComposerCancel)"},
+    {"context":"session_list.composer","chord":"alt+e","action":"Ui(PalCycleEngine)"},
+    {"context":"session_list.composer","chord":"alt+o","action":"Ui(PalCycleModel)"},
+    {"context":"session_list.composer","chord":"alt+g","action":"Ui(PalCycleMode)"},
+    {"context":"session_list.composer","chord":"alt+r","action":"Ui(PalRetry)"},
+    {"context":"session_list.ask","chord":"enter","action":"App(SessionAskSend)"},
+    {"context":"session_list.ask","chord":"up","action":"Ui(SessionAskPrevious)"},
+    {"context":"session_list.ask","chord":"down","action":"Ui(SessionAskNext)"},
+    {"context":"session_list.ask","chord":"backspace","action":"Ui(SessionAskBackspace)"},
+    {"context":"session_recovery.filtered","chord":"esc","action":"App(SessionRecoverySearchCancel)"}
+  ]
+}
