@@ -78,6 +78,10 @@ pub async fn serve(config: WebConfig, data: Arc<dyn DataSource>) -> Result<(), S
     config.check_bind_security()?;
 
     let addr = config.listen;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|source| ServeError::Listen { addr, source })?;
+
     // A real authenticated socket owns the daemon's Web registry row for the
     // full server lifetime. It reconnects independently of request handling,
     // so an idle dashboard remains discoverable and daemon recovery never
@@ -106,10 +110,6 @@ pub async fn serve(config: WebConfig, data: Arc<dyn DataSource>) -> Result<(), S
     }
 
     let app = router(state);
-
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|source| ServeError::Listen { addr, source })?;
 
     tracing::info!(%addr, "ainb web dashboard listening");
     axum::serve(listener, app).await.map_err(ServeError::Server)
