@@ -10,12 +10,13 @@
 //!
 //! This module owns the socket transport: dial `{hangar_home}/hangar.sock`,
 //! send the mandatory `auth/hello` first frame, then one request/response over
-//! the Content-Length-framed JSON-RPC the daemon speaks. It is deliberately
-//! stateless (a fresh connection per call): the daemon may restart, the token
-//! may only appear once it boots, and the web surface's read/answer volume is
-//! low, so a persistent multiplexed connection would be complexity with no
-//! payoff. The frame shapes come from the pure `ainb-hangar-proto` crate so the
-//! wire contract can never drift from the daemon.
+//! the Content-Length-framed JSON-RPC the daemon speaks. Individual read and
+//! answer RPCs stay deliberately stateless (a fresh connection per call), so
+//! they recover independently of a daemon restart. Separately, [`WebPresence`]
+//! owns one authenticated socket for the web server lifetime, making the live
+//! surface registry truthful while the process is running. The frame shapes
+//! come from the pure `ainb-hangar-proto` crate so the wire contract can never
+//! drift from the daemon.
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -31,12 +32,23 @@ use ainb_hangar_proto::{RpcId, RpcRequest, RpcResponse, methods};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::net::unix::OwnedReadHalf;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::task::JoinHandle;
 
 /// How long a single dial + round-trip may take before the web surface gives up
 /// and degrades (needs → empty, answer → error). The daemon is a local unix
 /// socket, so this is generous; it only guards against a wedged daemon.
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Interval between presence pings. This stays well inside the daemon's
+/// request/response idle timeout, so a quiet dashboard retains its truthful
+/// connection row without needing an unrelated event subscription.
+const PRESENCE_HEARTBEAT: Duration = Duration::from_secs(60);
+/// First retry delay for a daemon that is absent or rotating its token.
+const PRESENCE_RETRY_INITIAL: Duration = Duration::from_millis(100);
+/// Bounded retry ceiling, avoiding both a restart hot loop and a long
+/// undiscoverable gap after the daemon returns.
+const PRESENCE_RETRY_MAX: Duration = Duration::from_secs(5);
 
 /// A failure talking to the hangar daemon. Every variant is non-fatal to the
 /// web surface: `needs` degrades to an empty list and `/api/answer` returns a
@@ -100,10 +112,7 @@ impl DaemonClient {
     pub fn from_env() -> Result<Self, DaemonError> {
         let socket = socket_path().ok_or(DaemonError::NoHome)?;
         let token_path = auth::default_token_file().ok_or(DaemonError::NoHome)?;
-        let token = std::fs::read_to_string(&token_path)
-            .map_err(|e| DaemonError::Token(e.to_string()))?
-            .trim()
-            .to_string();
+        let token = read_token(&token_path)?;
         Ok(Self { socket, token })
     }
 
@@ -147,6 +156,25 @@ impl DaemonClient {
     }
 
     async fn call_inner(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
+        let (mut reader, mut writer) = self.open_authenticated().await?;
+
+        // The real call.
+        write_frame(&mut writer, method, params, 2).await?;
+        let resp = read_response(&mut reader).await?;
+        if let Some(err) = resp.error {
+            return Err(DaemonError::Rpc {
+                code: err.code,
+                message: err.message,
+            });
+        }
+        Ok(resp.result.unwrap_or(Value::Null))
+    }
+
+    /// Dial and complete the mandatory `auth/hello` frame, leaving the stream
+    /// available to either a one-shot RPC or the web server's lifetime owner.
+    async fn open_authenticated(
+        &self,
+    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
         let stream =
             UnixStream::connect(&self.socket).await.map_err(|source| DaemonError::Connect {
                 path: self.socket.display().to_string(),
@@ -173,18 +201,134 @@ impl DaemonClient {
                 message: err.message,
             });
         }
-
-        // The real call.
-        write_frame(&mut writer, method, params, 2).await?;
-        let resp = read_response(&mut reader).await?;
-        if let Some(err) = resp.error {
-            return Err(DaemonError::Rpc {
-                code: err.code,
-                message: err.message,
-            });
-        }
-        Ok(resp.result.unwrap_or(Value::Null))
+        Ok((reader, writer))
     }
+}
+
+/// An authenticated connection held for the complete web-server lifetime.
+///
+/// This guard owns a task rather than an artificial registry lease. Each task
+/// connection completes a real `auth/hello`, sends bounded pings while idle,
+/// and is dropped on guard destruction, so daemon EOF remains the sole source
+/// of truth for row removal.
+#[derive(Debug)]
+pub(crate) struct WebPresence {
+    task: JoinHandle<()>,
+}
+
+impl WebPresence {
+    /// Begin the web server's reconnecting daemon-presence task.
+    ///
+    /// Home, socket, and token locations are resolved again for every attempt.
+    /// A server may therefore start before the daemon, then recover through a
+    /// daemon restart or token rotation without affecting one-shot web RPCs.
+    #[must_use]
+    pub(crate) fn spawn() -> Self {
+        Self::spawn_with_connector(|| Some((socket_path()?, auth::default_token_file()?)))
+    }
+
+    fn spawn_with_connector<F>(connector: F) -> Self
+    where
+        F: FnMut() -> Option<(PathBuf, PathBuf)> + Send + 'static,
+    {
+        Self {
+            task: tokio::spawn(maintain_web_presence(connector)),
+        }
+    }
+}
+
+impl Drop for WebPresence {
+    fn drop(&mut self) {
+        // A JoinHandle drop detaches by default. Aborting here makes the guard
+        // exactly match the web server lifetime and drops its UnixStream now.
+        self.task.abort();
+    }
+}
+
+/// Reconnect a real authenticated web socket until its owner drops the task.
+async fn maintain_web_presence<F>(mut connector: F)
+where
+    F: FnMut() -> Option<(PathBuf, PathBuf)> + Send + 'static,
+{
+    let mut backoff = PRESENCE_RETRY_INITIAL;
+    loop {
+        let Some((socket, token_file)) = connector() else {
+            tracing::debug!("web presence has no resolvable Hangar home; retrying");
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(PRESENCE_RETRY_MAX);
+            continue;
+        };
+        let client = match read_token(&token_file) {
+            Ok(token) => DaemonClient::with_parts(socket, token),
+            Err(error) => {
+                tracing::debug!(error = %error, "web presence token unavailable; retrying");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(PRESENCE_RETRY_MAX);
+                continue;
+            }
+        };
+        match PresenceConnection::connect(&client).await {
+            Ok(connection) => {
+                // One successful hello proves this retry sequence recovered.
+                // A later EOF starts from the short delay again.
+                backoff = PRESENCE_RETRY_INITIAL;
+                if let Err(error) = connection.heartbeat_until_closed().await {
+                    tracing::debug!(error = %error, "web presence disconnected; reconnecting");
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "web presence connect failed; retrying");
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(PRESENCE_RETRY_MAX);
+    }
+}
+
+/// One authenticated presence socket, held until EOF or one failed heartbeat.
+struct PresenceConnection {
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+    next_id: i64,
+}
+
+impl PresenceConnection {
+    async fn connect(client: &DaemonClient) -> Result<Self, DaemonError> {
+        let (reader, writer) = client.open_authenticated().await?;
+        Ok(Self {
+            reader,
+            writer,
+            next_id: 2,
+        })
+    }
+
+    async fn heartbeat_until_closed(mut self) -> Result<(), DaemonError> {
+        let mut heartbeat = tokio::time::interval(PRESENCE_HEARTBEAT);
+        // `interval` fires immediately. Consume that tick: the hello already
+        // established presence, and pings start only after one quiet interval.
+        heartbeat.tick().await;
+        loop {
+            heartbeat.tick().await;
+            write_frame(&mut self.writer, methods::PING, json!({}), self.next_id).await?;
+            self.next_id = self.next_id.saturating_add(1);
+            let response = tokio::time::timeout(RPC_TIMEOUT, read_response(&mut self.reader))
+                .await
+                .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))??;
+            if let Some(error) = response.error {
+                return Err(DaemonError::Rpc {
+                    code: error.code,
+                    message: error.message,
+                });
+            }
+        }
+    }
+}
+
+/// Read a trimmed plaintext token from its `0600` daemon token file.
+fn read_token(token_path: &std::path::Path) -> Result<String, DaemonError> {
+    std::fs::read_to_string(token_path)
+        .map_err(|e| DaemonError::Token(e.to_string()))
+        .map(|token| token.trim().to_string())
 }
 
 /// Write one Content-Length-framed JSON-RPC request.
