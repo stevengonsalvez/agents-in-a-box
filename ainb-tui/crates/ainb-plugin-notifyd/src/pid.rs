@@ -24,8 +24,8 @@ pub struct PidFile {
 
 impl PidFile {
     /// Write the current process PID to `path`, truncating any
-    /// existing content. Fails if the file is locked by another
-    /// running daemon (see [`is_running`]).
+    /// existing content. Startup ownership is enforced before this point by
+    /// [`crate::listener::StartupLock`], not by the PID file itself.
     pub fn write_current(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
