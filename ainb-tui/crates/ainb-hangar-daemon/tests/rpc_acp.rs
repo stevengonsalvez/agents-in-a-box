@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use ainb_hangar_daemon::acp_pool::{AcpPool, PoolConfig};
 use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
+use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
@@ -386,6 +387,10 @@ struct Client {
 
 impl Client {
     async fn authed(dir: &Path, socket: &Path) -> Self {
+        Self::authed_as(dir, socket, None).await
+    }
+
+    async fn authed_as(dir: &Path, socket: &Path, surface: Option<SurfaceInfo>) -> Self {
         let deadline = Instant::now() + Duration::from_secs(5);
         let stream = loop {
             match UnixStream::connect(socket).await {
@@ -404,12 +409,11 @@ impl Client {
         };
         let token =
             std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(dir)).expect("token");
-        let response = client
-            .call(
-                methods::AUTH_HELLO,
-                serde_json::json!({ "token": token.trim() }),
-            )
-            .await;
+        let mut params = serde_json::json!({ "token": token.trim() });
+        if let Some(surface) = surface {
+            params["surface"] = serde_json::json!(surface);
+        }
+        let response = client.call(methods::AUTH_HELLO, params).await;
         assert!(
             response["error"].is_null(),
             "auth/hello must ack: {response}"
@@ -1047,7 +1051,15 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         |_| {},
     )
     .await;
-    let mut client = harness.client().await;
+    let mut client = Client::authed_as(
+        &harness.dir,
+        &harness.socket,
+        Some(SurfaceInfo {
+            kind: SurfaceKind::Tui,
+            pid: std::process::id(),
+        }),
+    )
+    .await;
     let (session_key, _scope) = harness.create_session(&mut client, None).await;
 
     let sent = client
@@ -1080,7 +1092,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "looks fine to me",
-                "answered_by": "tui",
+                "answered_by": "web",
             }),
         )
         .await;
@@ -1103,7 +1115,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "Reject",
-                "answered_by": "tui",
+                "answered_by": "web",
             }),
         )
         .await;
@@ -1143,8 +1155,8 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         "and it was a selection: {permissions:?}"
     );
 
-    // The row names the surface that answered, not a generic operator, and the
-    // Fleet session no longer advertises the ask.
+    // The daemon stamps the authenticated TUI surface and host, never the
+    // request's spoofed web surface, and Fleet no longer advertises the ask.
     let (state, answered_by, answer): (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT state, answered_by, answer FROM attention WHERE id = ?")
             .bind(&attention_id)
@@ -1152,7 +1164,18 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             .await
             .expect("attention row");
     assert_eq!(state, "answered");
-    assert_eq!(answered_by.as_deref(), Some("tui"));
+    let stamped_answered_by = answered_by.expect("daemon-stamped provenance");
+    let stamped_host = stamped_answered_by
+        .strip_prefix("tui@")
+        .expect("daemon stamps the authenticated TUI surface");
+    assert!(
+        !stamped_host.is_empty(),
+        "daemon stamps a nonempty host: {stamped_answered_by}"
+    );
+    assert_ne!(
+        stamped_answered_by, "web",
+        "daemon ignores request-supplied answered_by"
+    );
     assert_eq!(answer.as_deref(), Some("Reject"));
     let (attention_state, current): (String, Option<String>) = sqlx::query_as(
         "SELECT attention_state, current_request_fingerprint FROM fleet_session \
@@ -1165,7 +1188,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
     assert_eq!(attention_state, "NONE");
     assert_eq!(current, None);
 
-    // First-answer-wins: a second surface is told who won and nothing is
+    // First-answer-wins: a late answer request is told who won and nothing is
     // delivered again (the log still holds one permission line).
     let late = client
         .call(
@@ -1178,7 +1201,11 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         )
         .await;
     assert_eq!(late["result"]["outcome"], "already_answered", "{late}");
-    assert_eq!(late["result"]["by"], "tui", "{late}");
+    assert_eq!(
+        late["result"]["by"].as_str(),
+        Some(stamped_answered_by.as_str()),
+        "{late}"
+    );
     assert_eq!(
         std::fs::read_to_string(&log)
             .expect("rpc log")
@@ -1228,7 +1255,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
                 serde_json::json!({
                     "attention_id": row_id,
                     "answer": "Reject",
-                    "answered_by": "tui",
+                    "answered_by": "web",
                 }),
             )
             .await;
@@ -1244,7 +1271,11 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
                 .await
                 .expect("attention row");
         assert_eq!(state, "answered", "{row_id}: a spent ask is not reopened");
-        assert_eq!(answered_by.as_deref(), Some("tui"), "{row_id}");
+        assert_eq!(
+            answered_by.as_deref(),
+            Some(stamped_answered_by.as_str()),
+            "{row_id}"
+        );
     }
     assert_eq!(
         std::fs::read_to_string(&log)
@@ -1303,7 +1334,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": "drifted-options",
                 "answer": "Bogus",
-                "answered_by": "tui",
+                "answered_by": "web",
             }),
         )
         .await;
@@ -1329,7 +1360,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": second_id,
                 "answer": "deny",
-                "answered_by": "tui",
+                "answered_by": "web",
             }),
         )
         .await;
