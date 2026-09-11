@@ -70,6 +70,58 @@ passthrough = "ctrl+c"
 }
 
 #[test]
+fn payload_bearing_actions_cannot_be_overridden() {
+    let payload_rows = [
+        ("onboarding.dependency_agent", "claude"),
+        ("onboarding.dependency_agent", "claude_upper"),
+        ("onboarding.dependency_agent", "codex"),
+        ("onboarding.dependency_agent", "codex_upper"),
+        ("onboarding.dependency_agent", "antigravity"),
+        ("onboarding.dependency_agent", "antigravity_upper"),
+        ("onboarding.dependency_agent", "copilot"),
+        ("onboarding.dependency_agent", "copilot_upper"),
+        ("skill_manager.sync_confirm", "previous"),
+        ("skill_manager.sync_confirm", "previous_k"),
+        ("skill_manager.sync_confirm", "next"),
+        ("skill_manager.sync_confirm", "next_j"),
+        ("skill_manager.preview", "tool_one"),
+        ("skill_manager.preview", "tool_two"),
+        ("skill_manager.preview", "tool_three"),
+        ("skill_manager.preview", "tool_four"),
+        ("skill_manager.source_remove", "previous"),
+        ("skill_manager.source_remove", "previous_k"),
+        ("skill_manager.source_remove", "next"),
+        ("skill_manager.source_remove", "next_j"),
+        ("session_list", "attach_one"),
+        ("session_list", "attach_two"),
+        ("session_list", "attach_three"),
+        ("session_list", "attach_four"),
+        ("session_list", "attach_five"),
+        ("session_list", "attach_six"),
+        ("session_list", "attach_seven"),
+        ("session_list", "attach_eight"),
+        ("session_list", "attach_nine"),
+        ("daemons.overlay", "previous"),
+        ("daemons.overlay", "previous_k"),
+        ("daemons.overlay", "next"),
+        ("daemons.overlay", "next_j"),
+        ("daemons.list", "previous"),
+        ("daemons.list", "previous_k"),
+        ("daemons.list", "next"),
+        ("daemons.list", "next_j"),
+    ];
+
+    for (context, event) in payload_rows {
+        let overrides =
+            KeymapOverrides::parse(&format!("[\"{context}\"]\n{event} = \"f12\"")).unwrap();
+        assert!(
+            Keymap::defaults().with_overrides(&overrides).is_err(),
+            "{context}.{event} carries a payload and must not be overridden",
+        );
+    }
+}
+
+#[test]
 fn unknown_event_is_ignored_without_disabling_other_overrides() {
     let overrides = KeymapOverrides::parse(
         r#"
