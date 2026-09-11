@@ -97,6 +97,7 @@ jobs:
               # would have caught the edit.
               - 'docs/man/**'
               - 'docs/tui/cli.md'
+              - 'docs/tui/keyboard-shortcuts.md'
             # Coupled lane. A store change (a migration especially) can break
             # the ACP writer without touching one line of ainb-acp, so the
             # store fires this lane too; so does the daemon, which hosts the
@@ -178,6 +179,20 @@ jobs:
             echo "::error::docs/tui/cli.md is stale: run ainb-tui/scripts/gen-cli-reference.sh and commit the result." >&2
             exit 1
           fi
+      - name: Regenerate keyboard shortcuts from the keymap
+        run: AINB_BIN=target/debug/ainb bash scripts/gen-keymap-docs.sh
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Assert docs/tui/keyboard-shortcuts.md is up to date
+        run: |
+          if ! git ls-files --error-unmatch docs/tui/keyboard-shortcuts.md > /dev/null 2>&1; then
+            echo "::error::docs/tui/keyboard-shortcuts.md is not tracked by git: generate it and commit the result." >&2
+            exit 1
+          fi
+          if ! git diff --exit-code -- docs/tui/keyboard-shortcuts.md; then
+            echo "::error::docs/tui/keyboard-shortcuts.md is stale: run ainb-tui/scripts/gen-keymap-docs.sh and commit the result." >&2
+            exit 1
+          fi
+        working-directory: ${{ github.workspace }}
       - name: Regenerate the man page from the binary
         run: AINB_BIN=target/debug/ainb bash scripts/gen-man.sh
         working-directory: ${{ env.WORKING_DIR }}
