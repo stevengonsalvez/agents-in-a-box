@@ -37,7 +37,9 @@ pub fn execute(command: KeymapCommands, format: OutputFormat) -> Result<()> {
         KeymapCommands::List => print_list(match format {
             OutputFormat::Json => KeymapFormat::Json,
             OutputFormat::Text | OutputFormat::Markdown => KeymapFormat::Md,
-            OutputFormat::Csv => anyhow::bail!("ainb keymap list supports only --format md or json"),
+            OutputFormat::Csv => {
+                anyhow::bail!("ainb keymap list supports only --format md or json")
+            }
         }),
     }
 }
