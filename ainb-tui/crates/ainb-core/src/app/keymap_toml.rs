@@ -27,18 +27,30 @@ impl KeymapOverrides {
             let entries = entries
                 .as_table()
                 .ok_or_else(|| format!("[{context}] must contain event = \"chord\" entries"))?;
-            for (event, chord) in entries {
-                let chord = chord
-                    .as_str()
-                    .ok_or_else(|| format!("{context}.{event} must be a string chord"))?;
-                rows.push(OverrideRow {
-                    context: context.clone(),
-                    event: event.clone(),
-                    chord: chord.to_string(),
-                });
-            }
+            Self::append_table_rows(context, entries, &mut rows)?;
         }
         Ok(Self { rows })
+    }
+
+    fn append_table_rows(
+        context: &str,
+        entries: &toml::map::Map<String, toml::Value>,
+        rows: &mut Vec<OverrideRow>,
+    ) -> Result<(), String> {
+        for (event, chord) in entries {
+            match chord {
+                toml::Value::String(chord) => rows.push(OverrideRow {
+                    context: context.to_string(),
+                    event: event.clone(),
+                    chord: chord.clone(),
+                }),
+                toml::Value::Table(entries) => {
+                    Self::append_table_rows(&format!("{context}.{event}"), entries, rows)?;
+                }
+                _ => return Err(format!("{context}.{event} must be a string chord")),
+            }
+        }
+        Ok(())
     }
 
     /// Read a file without making a missing override an error.
