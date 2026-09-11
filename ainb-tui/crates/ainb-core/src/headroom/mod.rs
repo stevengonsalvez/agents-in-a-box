@@ -361,7 +361,8 @@ mod tests {
 
     /// Kills every test-owned child by its recorded PID if an assertion fails
     /// before the normal cleanup path runs. The fake proxy has no descendants:
-    /// its shell script `exec`s this test binary, so each PID is exact.
+    /// its shell script immediately `exec`s this test binary, so each PID is
+    /// exact throughout its lifetime.
     struct TestProcessCleanup {
         callers: Vec<std::process::Child>,
         pid_path: PathBuf,
@@ -431,6 +432,21 @@ mod tests {
         }
     }
 
+    /// Terminates exact PIDs observed by a regression test before it reports a
+    /// failure. This guard never searches for or signals unrelated processes.
+    struct ExactPidCleanup(Vec<u32>);
+
+    impl Drop for ExactPidCleanup {
+        fn drop(&mut self) {
+            for &pid in &self.0 {
+                TestProcessCleanup::terminate_pid(pid);
+            }
+            for &pid in &self.0 {
+                let _ = TestProcessCleanup::wait_until_gone(pid);
+            }
+        }
+    }
+
     fn wait_for_path(path: &std::path::Path, description: &str) {
         for _ in 0..500 {
             if path.exists() {
@@ -452,6 +468,51 @@ mod tests {
             }
         }
         panic!("timed out waiting for {description}");
+    }
+
+    fn direct_child_pids(pid: u32) -> Vec<u32> {
+        let output = std::process::Command::new("pgrep")
+            .args(["-P", &pid.to_string()])
+            .output()
+            .expect("list exact fake proxy children");
+        if !output.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect()
+    }
+
+    fn process_is_alive(pid: u32) -> bool {
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        matches!(
+            kill(Pid::from_raw(pid as i32), None),
+            Ok(()) | Err(nix::errno::Errno::EPERM)
+        )
+    }
+
+    fn write_fake_headroom(fake_headroom: &std::path::Path) {
+        std::fs::write(
+            fake_headroom,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"$AINB_HEADROOM_CROSS_PROCESS_SPAWN_LOG\"\nexport {CROSS_PROCESS_ROLE}=proxy\nexec \"$AINB_HEADROOM_CROSS_PROCESS_TEST_EXE\" --exact \"{CROSS_PROCESS_TEST_NAME}\" --nocapture\n"
+            ),
+        )
+        .expect("write fake headroom executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(fake_headroom)
+                .expect("read fake headroom permissions")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(fake_headroom, permissions)
+                .expect("make fake headroom executable");
+        }
     }
 
     /// Serves the fake proxy's health endpoint until the parent test terminates
@@ -481,6 +542,57 @@ mod tests {
                 Err(error) => panic!("accept test-owned headroom connection: {error}"),
             }
         }
+    }
+
+    /// Regression test for assertion cleanup: the fake executable must `exec`
+    /// immediately. A shell child before `exec` would survive cleanup of the
+    /// shell's exact recorded PID.
+    #[test]
+    fn failure_cleanup_leaves_no_fake_proxy_children() {
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let fake_headroom = temp.path().join("headroom");
+        let spawn_log = temp.path().join("headroom-spawns");
+        let pid_path = temp.path().join("proxy.pid");
+        let test_exe = std::env::current_exe().expect("locate current test executable");
+        let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("reserve test-owned loopback port")
+            .local_addr()
+            .expect("read reserved loopback port")
+            .port();
+        write_fake_headroom(&fake_headroom);
+
+        let mut fake_proxy = std::process::Command::new(&fake_headroom)
+            .env("AINB_HEADROOM_CROSS_PROCESS_SPAWN_LOG", &spawn_log)
+            .env("AINB_HEADROOM_CROSS_PROCESS_TEST_EXE", &test_exe)
+            .env("AINB_HEADROOM_PORT", port.to_string())
+            .spawn()
+            .expect("spawn test-owned fake proxy");
+        let fake_proxy_pid = fake_proxy.id();
+        let cleanup = TestProcessCleanup::new(pid_path, spawn_log.clone());
+
+        wait_for_path(&spawn_log, "fake proxy spawn record");
+        std::thread::sleep(Duration::from_millis(50));
+        let child_pids = direct_child_pids(fake_proxy_pid);
+        let child_cleanup = ExactPidCleanup(child_pids.clone());
+
+        drop(cleanup);
+        let surviving_children: Vec<u32> =
+            child_pids.iter().copied().filter(|pid| process_is_alive(*pid)).collect();
+        drop(child_cleanup);
+        let _ = fake_proxy.wait().expect("reap test-owned fake proxy");
+
+        assert!(
+            child_pids.is_empty(),
+            "fake proxy created children before exec: {child_pids:?}"
+        );
+        assert!(
+            surviving_children.is_empty(),
+            "failure cleanup left fake proxy children alive: {surviving_children:?}"
+        );
+        assert!(
+            TestProcessCleanup::wait_until_gone(fake_proxy_pid),
+            "test-owned fake proxy {fake_proxy_pid} survived exact cleanup"
+        );
     }
 
     /// Starts two independent test binaries at one barrier. Both callers see
@@ -527,24 +639,7 @@ mod tests {
         let test_exe = std::env::current_exe().expect("locate current test executable");
 
         let fake_headroom = bin_dir.join("headroom");
-        std::fs::write(
-            &fake_headroom,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"$AINB_HEADROOM_CROSS_PROCESS_SPAWN_LOG\"\n/bin/sleep 1\nexport {CROSS_PROCESS_ROLE}=proxy\nexec \"$AINB_HEADROOM_CROSS_PROCESS_TEST_EXE\" --exact \"{CROSS_PROCESS_TEST_NAME}\" --nocapture\n"
-            ),
-        )
-        .expect("write fake headroom executable");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut permissions = std::fs::metadata(&fake_headroom)
-                .expect("read fake headroom permissions")
-                .permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&fake_headroom, permissions)
-                .expect("make fake headroom executable");
-        }
+        write_fake_headroom(&fake_headroom);
 
         let mut cleanup = TestProcessCleanup::new(pid_path.clone(), spawn_log.clone());
         for ready in [&caller_one_ready, &caller_two_ready] {
