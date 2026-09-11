@@ -40,12 +40,13 @@ impl Chord {
         if input.is_empty() {
             return Err(ChordParseError("key chord cannot be empty".to_string()));
         }
+        if input.split_whitespace().nth(1).is_some() {
+            return Err(ChordParseError(
+                "key sequences are not supported by terminal dispatch".to_string(),
+            ));
+        }
 
-        let keys = input
-            .split_ascii_whitespace()
-            .map(Self::parse_key)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self(keys.join(" ")))
+        Self::parse_key(input).map(Self)
     }
 
     fn parse_key(input: &str) -> Result<String, ChordParseError> {
@@ -861,6 +862,7 @@ impl Keymap {
         mut self,
         overrides: &crate::app::keymap_toml::KeymapOverrides,
     ) -> Result<Self, OverrideError> {
+        let mut replacements = Vec::new();
         for override_row in overrides.rows() {
             let Some(context) = KeyContext::from_name(&override_row.context) else {
                 tracing::warn!(context = %override_row.context, "ignoring unknown keymap context");
@@ -872,7 +874,7 @@ impl Keymap {
                         .to_string(),
                 ));
             }
-            let Some(mut index) = self
+            let Some(index) = self
                 .bindings
                 .iter()
                 .position(|binding| binding.ctx == context && binding.id == override_row.event)
@@ -893,21 +895,31 @@ impl Keymap {
             }
             let chord = Chord::parse(&override_row.chord)
                 .map_err(|error| OverrideError(error.to_string()))?;
-            // A user override owns its requested chord. If that chord was a
-            // default for another action in the same context, drop the old
-            // row from the effective map rather than rejecting the override.
-            // This is what makes `[session_list] attach = "o"` move attach
-            // off Enter and replace the former `o` action.
-            if let Some(other) = self.bindings.iter().position(|binding| {
-                binding.ctx == context && binding.chord == chord && binding.id != override_row.event
-            }) {
-                self.bindings.remove(other);
-                if other < index {
-                    index -= 1;
-                }
-            }
-            self.bindings[index].chord = chord;
+            replacements.push((index, context, override_row.event.clone(), chord));
         }
+
+        // Resolve all target rows before removing displaced defaults. This lets
+        // two overrides exchange chords without erasing either target row.
+        let mut bindings =
+            std::mem::take(&mut self.bindings).into_iter().enumerate().collect::<Vec<_>>();
+        bindings.retain(|(index, binding)| {
+            let is_override_target = replacements.iter().any(|(target, _, _, _)| index == target);
+            is_override_target
+                || !replacements.iter().any(|(_, context, event, chord)| {
+                    binding.ctx == *context
+                        && binding.chord == *chord
+                        && binding.id != event.as_str()
+                })
+        });
+        for (index, _, _, chord) in replacements {
+            let binding = bindings
+                .iter_mut()
+                .find(|(binding_index, _)| *binding_index == index)
+                .expect("validated override target remains in keymap");
+            binding.1.chord = chord;
+        }
+        self.bindings = bindings.into_iter().map(|(_, binding)| binding).collect();
+
         Self::new(self.bindings)
     }
 }
