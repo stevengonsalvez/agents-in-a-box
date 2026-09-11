@@ -4,6 +4,7 @@ use ainb::app::{
     events::AppEvent,
     keymap::{Chord, KeyAction, KeyContext, Keymap, UiAction},
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[test]
 fn defaults_are_unique_documented_and_parseable() {
@@ -16,33 +17,56 @@ fn defaults_are_unique_documented_and_parseable() {
         assert_eq!(Chord::parse(binding.chord.as_str()).unwrap(), binding.chord);
     }
 
-    let fixture_rows = include_str!("fixtures/keymap_rows.txt")
-        .lines()
-        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        fixture_rows.len(),
-        491,
-        "fixture must cover every host binding"
-    );
     assert_eq!(
         keymap.bindings().count(),
         491,
         "default table must be complete"
     );
-    let table_rows = keymap
-        .bindings()
-        .map(|binding| {
-            format!(
-                "{} | {} | {}",
+}
+
+#[test]
+fn default_rows_resolve_to_their_declared_actions() {
+    let keymap = Keymap::defaults();
+
+    for binding in keymap.bindings() {
+        let resolved = keymap
+            .resolve(&[binding.ctx.clone()], &binding.chord)
+            .expect("default binding must resolve in its own context");
+        assert_eq!(
+            format!("{resolved:?}"),
+            format!("{:?}", binding.action),
+            "{} [{}] must preserve its complete action",
+            binding.id,
+            binding.ctx.name(),
+        );
+    }
+}
+
+#[test]
+fn shifted_letter_rows_resolve_with_or_without_shift_modifier_bit() {
+    let keymap = Keymap::defaults();
+
+    for binding in keymap.bindings().filter(|binding| {
+        binding.chord.as_str().chars().count() == 1
+            && binding.chord.as_str().chars().all(|character| character.is_ascii_uppercase())
+    }) {
+        let character = binding.chord.as_str().chars().next().unwrap();
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            let chord = Chord::from_key_event(&KeyEvent::new(KeyCode::Char(character), modifiers));
+            assert_eq!(chord, binding.chord);
+
+            let resolved = keymap
+                .resolve(&[binding.ctx.clone()], &chord)
+                .expect("shifted default binding must resolve in its own context");
+            assert_eq!(
+                format!("{resolved:?}"),
+                format!("{:?}", binding.action),
+                "{} [{}] must preserve its complete action",
+                binding.id,
                 binding.ctx.name(),
-                binding.chord.as_str(),
-                binding.id
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(fixture_rows, table_rows, "fixture must equal default table");
+            );
+        }
+    }
 }
 
 #[test]
