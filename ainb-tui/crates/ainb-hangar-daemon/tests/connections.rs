@@ -1,11 +1,13 @@
 //! Integration coverage for the daemon's in-memory surface connection registry.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
 use ainb_hangar_proto::events::EVENT_METHOD;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
+use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -131,7 +133,7 @@ impl Client {
     }
 }
 
-async fn start_server(home: &std::path::Path) -> std::path::PathBuf {
+async fn start_server(home: &std::path::Path) -> (std::path::PathBuf, Store) {
     let store = Store::open_in(home).await.expect("open store");
     rpc::auth::ensure_socket_token(store.pool(), home)
         .await
@@ -151,13 +153,13 @@ async fn start_server(home: &std::path::Path) -> std::path::PathBuf {
         health,
         ainb_hangar_daemon::events::EventBroker::new(),
     ));
-    socket
+    (socket, store)
 }
 
 #[tokio::test]
 async fn registry_lists_surfaces_and_broadcasts_connection_lifecycle() {
     let home = tempfile::tempdir().expect("temporary Hangar home");
-    let socket = start_server(home.path()).await;
+    let (socket, _store) = start_server(home.path()).await;
 
     let mut tui = Client::connect(&socket).await;
     tui.hello(home.path(), Some("tui")).await;
@@ -200,4 +202,131 @@ async fn registry_lists_surfaces_and_broadcasts_connection_lifecycle() {
     let changed = tui.next_connections_changed().await;
     assert_eq!(changed["connections"].as_array().map(Vec::len), Some(1));
     assert_eq!(changed["connections"][0]["surface"]["kind"], "tui");
+}
+
+/// Creates isolated discovery and delivery shims for the answer route.
+///
+/// The fake `ainb` exposes one exact-match session; the fake `tmux` reports a
+/// composer-less pane, which exercises the normal write plus single-Enter
+/// delivery path without touching a real session.
+fn install_answer_route_shims(bin: &Path, session_id: &str, cwd: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::create_dir_all(bin).expect("create shim directory");
+    let session = serde_json::json!([{
+        "session_id": session_id,
+        "tmux_session_name": "provenance-target",
+        "workspace_name": "provenance",
+        "worktree_path": cwd,
+        "created_at": "2026-01-01T00:00:00Z",
+        "is_running": true,
+        "claude_active": true,
+    }]);
+    let ainb = bin.join("ainb");
+    std::fs::write(&ainb, format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", session))
+        .expect("write fake ainb");
+    std::fs::set_permissions(&ainb, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake ainb executable");
+
+    let tmux = bin.join("tmux");
+    std::fs::write(&tmux, "#!/bin/sh\nexit 0\n").expect("write fake tmux");
+    std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755))
+        .expect("make fake tmux executable");
+}
+
+/// Restores one process-global environment variable at test end.
+struct EnvGuard {
+    name: &'static str,
+    prior: Option<std::ffi::OsString>,
+}
+
+impl EnvGuard {
+    fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let prior = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, prior }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.prior {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
+}
+
+#[tokio::test]
+async fn answer_provenance_comes_from_authenticated_connection_not_client() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let bin = home.path().join("bin");
+    let session_id = "provenance-session";
+    install_answer_route_shims(&bin, session_id, home.path());
+    let _ainb_bin = EnvGuard::set("AINB_BIN", bin.join("ainb"));
+    let mut path = vec![bin];
+    path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let _path = EnvGuard::set(
+        "PATH",
+        std::env::join_paths(path).expect("build shimmed PATH"),
+    );
+
+    let (socket, store) = start_server(home.path()).await;
+    let mut client = Client::connect(&socket).await;
+    client.hello(home.path(), Some("web")).await;
+    let connections = client.connections().await;
+    let connection = &connections["connections"][0];
+    assert_eq!(connection["surface"]["kind"], "web");
+    let daemon_host = connection["host"].as_str().expect("registry host").to_string();
+
+    let attention_id = "provenance-attention";
+    AttentionRepo::insert(
+        store.pool(),
+        &NewAttention {
+            id: attention_id.to_string(),
+            session_id: session_id.to_string(),
+            cwd: home.path().to_string_lossy().into_owned(),
+            workspace_id: None,
+            kind: AttentionKind::AskUserQuestion,
+            payload: "{}".to_string(),
+            degraded: false,
+            created_at: 1,
+            raise_transcript: None,
+            channels: ainb_hangar_core::channel::ChannelSet::NONE,
+        },
+    )
+    .await
+    .expect("seed open attention row");
+
+    let spoofed_by = "fleet@forged-host";
+    let response = client
+        .call(
+            methods::ATTENTION_ANSWER,
+            serde_json::json!({
+                "attention_id": attention_id,
+                "answer": "approved",
+                "answered_by": spoofed_by,
+            }),
+        )
+        .await;
+    assert!(
+        response["error"].is_null(),
+        "answer must succeed: {response}"
+    );
+    assert_eq!(response["result"]["outcome"], "delivered", "{response}");
+
+    let answered = AttentionRepo::get(store.pool(), attention_id)
+        .await
+        .expect("read answered row")
+        .expect("seeded row remains present");
+    assert_eq!(answered.state, "answered");
+    assert_eq!(answered.answer.as_deref(), Some("approved"));
+    assert_eq!(
+        answered.answered_by.as_deref(),
+        Some(format!("web@{daemon_host}").as_str()),
+        "daemon provenance must use the registry surface and host, not client input"
+    );
+    assert_ne!(answered.answered_by.as_deref(), Some(spoofed_by));
 }
