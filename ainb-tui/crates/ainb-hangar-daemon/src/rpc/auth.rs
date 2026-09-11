@@ -33,6 +33,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::token::{TokenKind, mint, sha256_hex};
 use ainb_hangar_proto::auth::{HelloParams, UNAUTHORIZED};
+use ainb_hangar_proto::connections::SurfaceInfo;
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse, methods};
 use ainb_hangar_store::repo::token::SocketTokenRepo;
 use sqlx::SqlitePool;
@@ -61,6 +62,15 @@ pub enum Caller {
         /// actually came from.
         scope_key: String,
     },
+}
+
+/// Identity established by one successful `auth/hello` frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedHello {
+    /// Credential authority carried for every later request on the connection.
+    pub caller: Caller,
+    /// Optional client-declared surface metadata for the live registry.
+    pub surface: Option<SurfaceInfo>,
 }
 
 /// Every method a Pal connection may call, and nothing else.
@@ -276,13 +286,13 @@ pub fn classify_peer(stream: &tokio::net::UnixStream) -> PeerGate {
 /// whose token verifies against the stored digest, or against a live Pal
 /// credential.
 ///
-/// Returns `Ok((ack, caller))` — the `{}` success envelope to write back plus
-/// WHO this connection is for the rest of its life — or `Err(error_envelope)`,
-/// which the caller writes before closing the connection.
+/// Returns `Ok((ack, authenticated))` — the `{}` success envelope to write
+/// back plus WHO the connection is and its optional surface metadata — or an
+/// error envelope which the caller writes before closing the connection.
 pub async fn authenticate_first_frame(
     pool: &SqlitePool,
     body: &[u8],
-) -> Result<(RpcResponse, Caller), RpcResponse> {
+) -> Result<(RpcResponse, AuthenticatedHello), RpcResponse> {
     let Ok(req) = serde_json::from_slice::<RpcRequest>(body) else {
         return Err(unauthorized(
             RpcId::Number(0),
@@ -296,15 +306,30 @@ pub async fn authenticate_first_frame(
         ));
     }
     let Ok(params) = serde_json::from_value::<HelloParams>(req.params.clone()) else {
-        return Err(unauthorized(req.id, "auth/hello params must be { token }"));
+        return Err(unauthorized(
+            req.id,
+            "auth/hello params must be { token, surface? }",
+        ));
     };
     // The Pal credential FIRST, and it is never the daemon token: a scoped
     // credential that also verified as the operator's would be no scope at all.
     if let Some(scope_key) = pal_scope_for(&params.token) {
-        return Ok((ack(req.id), Caller::Pal { scope_key }));
+        return Ok((
+            ack(req.id),
+            AuthenticatedHello {
+                caller: Caller::Pal { scope_key },
+                surface: params.surface,
+            },
+        ));
     }
     match SocketTokenRepo::verify(pool, &params.token).await {
-        Ok(true) => Ok((ack(req.id), Caller::Operator)),
+        Ok(true) => Ok((
+            ack(req.id),
+            AuthenticatedHello {
+                caller: Caller::Operator,
+                surface: params.surface,
+            },
+        )),
         Ok(false) => Err(unauthorized(req.id, "invalid daemon token")),
         Err(e) => {
             tracing::warn!(error = %e, "hangar rpc: socket-token lookup failed");
@@ -461,19 +486,19 @@ mod tests {
             }))
             .unwrap()
         };
-        let (_, caller) = authenticate_first_frame(store.pool(), &hello(&pal))
+        let (_, authenticated) = authenticate_first_frame(store.pool(), &hello(&pal))
             .await
             .expect("the Pal credential must authenticate");
         assert_eq!(
-            caller,
+            authenticated.caller,
             Caller::Pal {
                 scope_key: "channel:01J0COPILOT".to_string()
             }
         );
-        let (_, operator) = authenticate_first_frame(store.pool(), &hello(&daemon))
+        let (_, authenticated) = authenticate_first_frame(store.pool(), &hello(&daemon))
             .await
             .expect("the daemon token still authenticates");
-        assert_eq!(operator, Caller::Operator);
+        assert_eq!(authenticated.caller, Caller::Operator);
 
         // A re-mint for the same scope REVOKES the previous credential: the
         // adapter holding it is already gone.
