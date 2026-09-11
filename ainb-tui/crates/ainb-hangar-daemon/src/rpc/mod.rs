@@ -37,6 +37,7 @@
 //! receive event frames.
 
 pub mod auth;
+pub mod connections;
 pub mod snapshots;
 
 use std::fs::{File, OpenOptions};
@@ -57,6 +58,7 @@ use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
+use ainb_hangar_proto::{connections::ConnectionRow, events::HangarEvent};
 use ainb_hangar_store::service::activity::ActivityService;
 use fs2::FileExt as _;
 use futures_util::future::join_all;
@@ -289,6 +291,15 @@ fn idle_timeout_from_env(var: &str, default: std::time::Duration) -> std::time::
         .map_or(default, std::time::Duration::from_millis)
 }
 
+/// Publish a complete live-registry snapshot after an insert, removal, or
+/// changed tmux probe. Registry rows are process-local, so this is a live nudge
+/// only: reconnecting clients use `hangar/connections_list` as their snapshot.
+async fn emit_connections_changed(events: &EventSink, registry: &connections::ConnectionRegistry) {
+    events.emit_attention(HangarEvent::ConnectionsChanged {
+        connections: registry.list().await.connections,
+    });
+}
+
 /// Accept connections forever, serving each on its own task.
 ///
 /// `broker` is the daemon-global event broker: each connection that subscribes
@@ -304,6 +315,19 @@ pub async fn serve(
     broker: EventBroker,
 ) {
     let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
+    let registry = connections::ConnectionRegistry::new();
+    let refresh_registry = registry.clone();
+    let refresh_events = broker.sink();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if refresh_registry.refresh_tmux_clients().await {
+                emit_connections_changed(&refresh_events, &refresh_registry).await;
+            }
+        }
+    });
     // The cap is logged once per saturation, not once per refused accept: the
     // runaway client it contains must not turn into a log flood.
     let mut saturated = false;
@@ -328,9 +352,10 @@ pub async fn serve(
                 let pool = pool.clone();
                 let health = health.clone();
                 let broker = broker.clone();
+                let registry = registry.clone();
                 tokio::spawn(async move {
                     let _slot = slot;
-                    if let Err(e) = serve_conn(stream, pool, health, broker).await {
+                    if let Err(e) = serve_conn(stream, pool, health, broker, registry).await {
                         tracing::debug!(error = %e, "hangar rpc connection closed");
                     }
                 });
@@ -354,6 +379,7 @@ async fn serve_conn(
     pool: SqlitePool,
     health: DaemonHealth,
     broker: EventBroker,
+    registry: connections::ConnectionRegistry,
 ) -> std::io::Result<()> {
     // Gate 1 — kernel peer credentials: only this user's processes may talk to
     // the control plane. All three outcomes close the connection; they differ
@@ -420,9 +446,9 @@ async fn serve_conn(
             return Ok(None);
         };
         match auth::authenticate_first_frame(&pool, &first).await {
-            Ok((ack, caller)) => {
+            Ok((ack, authenticated)) => {
                 let _ = out_tx.send(encode_frame(&ack)).await;
-                Ok(Some(caller))
+                Ok(Some(authenticated))
             }
             Err(rejection) => {
                 let _ = out_tx.send(encode_frame(&rejection)).await;
@@ -439,13 +465,15 @@ async fn serve_conn(
             return Err(e);
         }
     };
-    let Some(caller) = proceed else {
+    let Some(authenticated) = proceed else {
         drop(out_tx);
         let _ = writer.await;
         return Ok(());
     };
 
     let events = broker.sink();
+    let connection = registry.insert(authenticated.surface).await;
+    emit_connections_changed(&events, &registry).await;
     // The connection's event subscription: at most one forwarder; a
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
@@ -540,7 +568,18 @@ async fn serve_conn(
                     .then(|| broker.subscribe_notifications())
             });
             let resp = match &req {
-                Ok(req) => dispatch_as(&pool, req, &health, &events, &caller).await,
+                Ok(req) => {
+                    dispatch_as_connection(
+                        &pool,
+                        req,
+                        &health,
+                        &events,
+                        &authenticated.caller,
+                        Some(&connection),
+                        Some(&registry),
+                    )
+                    .await
+                }
                 Err(e) => RpcResponse {
                     jsonrpc: ainb_hangar_proto::jsonrpc_version(),
                     // We could not parse an id; reply with a null/0 id so the
@@ -720,6 +759,9 @@ async fn serve_conn(
     }
     if let Some(f) = notification_forwarder {
         f.abort();
+    }
+    if registry.remove(connection.conn_id).await {
+        emit_connections_changed(&events, &registry).await;
     }
     drop(out_tx);
     let _ = writer.await;
@@ -1198,8 +1240,25 @@ pub async fn dispatch_as(
     events: &EventSink,
     caller: &auth::Caller,
 ) -> RpcResponse {
+    dispatch_as_connection(pool, req, health, events, caller, None, None).await
+}
+
+/// [`dispatch_as`] with the authenticated socket's live registry context.
+///
+/// The public helper stays connection-free for existing unit harnesses. Socket
+/// traffic always calls this path, which is the only place a caller can receive
+/// the in-memory registry or have `answered_by` stamped from its connection.
+async fn dispatch_as_connection(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    health: &DaemonHealth,
+    events: &EventSink,
+    caller: &auth::Caller,
+    connection: Option<&ConnectionRow>,
+    registry: Option<&connections::ConnectionRegistry>,
+) -> RpcResponse {
     let result = match caller.authorize(&req.method) {
-        Ok(()) => handle(pool, req, health, events, caller).await,
+        Ok(()) => handle(pool, req, health, events, caller, connection, registry).await,
         Err(refusal) => Err(refusal),
     };
     match result {
@@ -1221,6 +1280,8 @@ async fn handle(
     health: &DaemonHealth,
     events: &EventSink,
     caller: &auth::Caller,
+    connection: Option<&ConnectionRow>,
+    registry: Option<&connections::ConnectionRegistry>,
 ) -> Result<serde_json::Value, RpcError> {
     match req.method.as_str() {
         methods::PING => Ok(serde_json::json!({})),
@@ -1460,7 +1521,7 @@ async fn handle(
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
         methods::ATTENTION_SUBSCRIBE => handle_attention_subscribe(pool, req).await,
-        methods::ATTENTION_ANSWER => handle_attention_answer(pool, req, events).await,
+        methods::ATTENTION_ANSWER => handle_attention_answer(pool, req, events, connection).await,
         methods::ATC_REGISTER => handle_atc_register(pool, req).await,
         methods::ATC_LIST => handle_atc_list(pool).await,
         methods::ATC_RETRY_LIST => handle_atc_retry_list(pool, req).await,
@@ -1474,6 +1535,12 @@ async fn handle(
         methods::HANGAR_DAEMON_CONFIG_GET => handle_daemon_config_get(pool, req).await,
         methods::HANGAR_DAEMON_CONFIG_SET => handle_daemon_config_set(pool, req).await,
         methods::HANGAR_DAEMON_CONFIG_LIST => handle_daemon_config_list(pool).await,
+        methods::HANGAR_CONNECTIONS_LIST => {
+            let registry = registry.ok_or_else(|| {
+                internal("connections_list requires an authenticated socket connection")
+            })?;
+            to_value(&registry.list().await)
+        }
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -12655,9 +12722,13 @@ async fn handle_attention_answer(
     pool: &SqlitePool,
     req: &RpcRequest,
     events: &EventSink,
+    connection: Option<&ConnectionRow>,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AnswerParams =
+    let mut params: ainb_hangar_proto::snapshots::AnswerParams =
         parse_params(req, "{ attention_id, answer, answered_by, is_answer? }")?;
+    if let Some(connection) = connection {
+        params.answered_by = crate::answer::answered_by(connection);
+    }
     let result = crate::answer::answer(pool, events, &params, SystemClock.now_ms())
         .await
         .map_err(|e| store_err(&e))?;
