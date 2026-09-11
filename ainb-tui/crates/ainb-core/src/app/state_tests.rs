@@ -2335,6 +2335,16 @@ mod tests {
     }
 
     #[test]
+    fn legacy_codex_request_user_input_marks_ask_not_wait() {
+        use crate::fleet::attention::AttentionKind;
+        let recent = vec![rec("codex", CWD, "request_user_input", NOW - 1_000)];
+        assert_eq!(
+            kind_of(CWD, Some("codex"), false, 0, NOW, &recent),
+            Some(AttentionKind::Ask),
+        );
+    }
+
+    #[test]
     fn attention_stop_clears_immediately() {
         let fresh = vec![rec("claude", CWD, "Stop", NOW - 1000)];
         assert_eq!(kind_of(CWD, Some("claude"), false, 0, NOW, &fresh), None);
@@ -2514,7 +2524,7 @@ mod tests {
         use crate::fleet::attention::AttentionKind;
         use crate::models::Session;
         use ainb_hangar_proto::fleet::{
-            AttentionState, FleetCapabilities, FleetConfidence, FleetProvider, FleetProvenance,
+            AttentionState, FleetCapabilities, FleetConfidence, FleetProvenance, FleetProvider,
             FleetSession, LifecycleState, ManagementState, TransportHealth,
         };
 

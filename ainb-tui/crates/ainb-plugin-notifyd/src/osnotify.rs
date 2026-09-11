@@ -253,7 +253,9 @@ pub fn classify_attention(raw_event: &str, subtype: Option<&str>) -> Option<Aler
         | "permission_request"
         | "exec_approval_request"
         | "apply_patch_approval_request" => AlertKind::NeedsPermission,
-        // Asked the user something / idle awaiting input.
+        // OS notifications use one actionable attention class, while the
+        // materialized state keeps the important distinction: Codex
+        // `request_user_input` becomes ASK and `wait_for_user` becomes WAIT.
         "Notification" | "notification" | "request_user_input" | "wait_for_user" => {
             AlertKind::WaitingOnUser
         }
@@ -312,7 +314,8 @@ pub fn render_title(env: &Envelope) -> String {
         "Stop" | "SessionEnd" | "agentStop" | "agent-turn-complete" | "task_complete" => {
             format!("{agent} session finished")
         }
-        "Notification" | "notification" | "request_user_input" | "wait_for_user" => {
+        "request_user_input" => format!("{agent} asked for input"),
+        "wait_for_user" | "Notification" | "notification" => {
             format!("{agent} is waiting for you")
         }
         "PermissionRequest"
@@ -787,6 +790,14 @@ mod tests {
         assert_eq!(
             render_title(&env("Notification:idle_prompt", "claude")),
             "Claude is waiting for you"
+        );
+        assert_eq!(
+            render_title(&env("request_user_input", "codex")),
+            "Codex asked for input"
+        );
+        assert_eq!(
+            render_title(&env("wait_for_user", "codex")),
+            "Codex is waiting for you"
         );
     }
 
