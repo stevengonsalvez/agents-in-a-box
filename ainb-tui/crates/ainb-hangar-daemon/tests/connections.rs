@@ -1,6 +1,7 @@
 //! Integration coverage for the daemon's in-memory surface connection registry.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
@@ -8,6 +9,10 @@ use ainb_hangar_proto::events::EVENT_METHOD;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
+use ainb_web::data::{
+    CoreFuture, CoreSnapshot, CostFuture, DataSource, FleetSnapshot, SnapshotFuture,
+};
+use ainb_web::{WebConfig, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -202,6 +207,94 @@ async fn registry_lists_surfaces_and_broadcasts_connection_lifecycle() {
     let changed = tui.next_connections_changed().await;
     assert_eq!(changed["connections"].as_array().map(Vec::len), Some(1));
     assert_eq!(changed["connections"][0]["surface"]["kind"], "tui");
+}
+
+#[tokio::test]
+async fn web_server_presence_lives_for_server_task() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let (socket, _store) = start_server(home.path()).await;
+    let _hangar_home = EnvGuard::set("AINB_HANGAR_HOME", home.path());
+    let _ainb_home = EnvGuard::set("AINB_HOME", home.path());
+
+    // This starts the production server entry point. Its presence connection is
+    // owned by `serve`, never by this test's observer socket.
+    let server = tokio::spawn(serve(
+        WebConfig {
+            listen: "127.0.0.1:0".parse().expect("loopback address"),
+            token: None,
+            insecure_bind: false,
+            read_only: true,
+        },
+        Arc::new(WebServerSource),
+    ));
+
+    let mut observer = Client::connect(&socket).await;
+    observer.hello(home.path(), Some("tui")).await;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let listed = observer.connections().await;
+        if listed["connections"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["surface"]["kind"] == "web"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "web presence never appeared in connections_list: {listed}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Aborting the web server drops its server-owned guard and actual socket.
+    // The daemon must remove that row, not retain a synthetic lease.
+    server.abort();
+    assert!(server.await.expect_err("server was aborted").is_cancelled());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let listed = observer.connections().await;
+        if listed["connections"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().all(|row| row["surface"]["kind"] != "web"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "web presence lingered after its owner ended: {listed}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+struct WebServerSource;
+
+impl DataSource for WebServerSource {
+    fn snapshot(&self) -> SnapshotFuture<'_> {
+        Box::pin(async {
+            Ok(FleetSnapshot::from_parts(
+                CoreSnapshot {
+                    sessions: serde_json::json!([]),
+                    needs: serde_json::json!([]),
+                },
+                serde_json::Value::Null,
+            ))
+        })
+    }
+
+    fn core(&self) -> CoreFuture<'_> {
+        Box::pin(async {
+            Ok(CoreSnapshot {
+                sessions: serde_json::json!([]),
+                needs: serde_json::json!([]),
+            })
+        })
+    }
+
+    fn cost(&self) -> CostFuture<'_> {
+        Box::pin(async { serde_json::Value::Null })
+    }
 }
 
 /// Creates isolated discovery and delivery shims for the answer route.
