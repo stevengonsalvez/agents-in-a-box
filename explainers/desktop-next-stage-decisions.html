@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi-surface decisions · federation, mobile, agent status</title>
+<style>
+  :root {
+    --ivory: #FAF9F5; --slate: #141413; --clay: #D97757; --clay-d: #B85C3E;
+    --oat: #E3DACC; --olive: #788C5D; --olive-l: #E7EDDE; --sky: #6A8CAF; --sky-l: #DCE5EF;
+    --plum: #8A5A78; --plum-l: #E9D9E3; --ink-2: #3D3D3A; --ink-3: #87867F; --line: #D1CFC5; --white: #FFFFFF;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--ivory); color: var(--slate); font-family: var(--sans); font-size: 15px; line-height: 1.5; }
+  .page { max-width: 1040px; margin: 0 auto; padding: 40px 24px 96px; }
+  .page-head { border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 32px; }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--clay-d); }
+  h1 { font-size: 30px; line-height: 1.15; margin: 8px 0 12px; letter-spacing: -.01em; }
+  h2 { font-size: 20px; margin: 0; }
+  h3 { font-size: 15px; margin: 0 0 6px; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 18px; font-size: 13px; color: var(--ink-2); align-items: center; }
+  .meta-row .k { color: var(--ink-3); margin-right: 6px; }
+  .status-badge { font-family: var(--mono); font-size: 11px; padding: 3px 8px; border: 1px solid var(--clay); color: var(--clay-d); border-radius: 4px; }
+  section { margin: 40px 0; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+  .sec-head .num { font-family: var(--mono); font-size: 12px; color: var(--clay-d); }
+  .sec-intro { color: var(--ink-2); margin: 0 0 14px; font-size: 14px; }
+  pre.flow { font-family: var(--mono); font-size: 12.5px; line-height: 1.35; background: var(--white); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 10px 0 16px; color: var(--ink-2); }
+  pre.flow .hot { color: var(--clay-d); font-weight: 600; }
+  .matrix { overflow-x: auto; }
+  .matrix table { border-collapse: collapse; width: 100%; font-size: 13.5px; background: var(--white); }
+  .matrix th, .matrix td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+  .matrix th { background: var(--oat); font-weight: 600; font-size: 12.5px; }
+  .matrix th.row { background: var(--white); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  .matrix td.s1 { background: #F5DDD4; } .matrix td.s2 { background: #F1E3D6; } .matrix td.s3 { background: #EDE9DA; }
+  .matrix td.s4 { background: #D7E2C3; } .matrix td.s5 { background: #A8C188; color: var(--white); }
+  .matrix td.bad { color: var(--clay-d); font-weight: 600; }
+  .matrix code, .opt code, .qcard code, .rank-item code { font-family: var(--mono); font-size: 12px; background: var(--oat); padding: 1px 4px; border-radius: 3px; }
+  .decision { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 18px 0; background: var(--white); }
+  .decision .dhead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+  .decision .did { font-family: var(--mono); font-size: 12px; color: var(--clay-d); }
+  .decision .verdict { font-size: 13.5px; color: var(--ink-2); margin: 0 0 12px; }
+  .decision .verdict strong { color: var(--slate); }
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+  .opt { border: 1px solid var(--line); border-top: 4px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--ivory); }
+  .opt[data-color="olive"] { border-top-color: var(--olive); background: var(--olive-l); }
+  .opt[data-color="clay"]  { border-top-color: var(--clay); }
+  .opt[data-color="sky"]   { border-top-color: var(--sky); }
+  .opt-label { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .opt .desc { font-size: 13px; margin: 4px 0 8px; color: var(--ink-2); }
+  .opt .down { font-size: 12.5px; margin: 0 0 10px; color: var(--clay-d); }
+  .opt .down::before { content: "⚠ "; }
+  .scores { display: grid; gap: 4px; }
+  .score-row { display: grid; grid-template-columns: 44px 1fr 18px; gap: 8px; align-items: center; font-size: 11.5px; }
+  .score-row .bar { height: 6px; background: var(--oat); border-radius: 3px; overflow: hidden; }
+  .score-row .fill { display: block; height: 100%; }
+  .opt[data-color="olive"] .fill { background: var(--olive); }
+  .opt[data-color="clay"]  .fill { background: var(--clay); }
+  .opt[data-color="sky"]   .fill { background: var(--sky); }
+  .score-row .val { font-family: var(--mono); text-align: right; color: var(--ink-3); }
+  .facts { font-size: 12.5px; color: var(--ink-2); margin: 12px 0 0; padding-left: 18px; }
+  .facts li { margin: 2px 0; }
+  .facts .tag { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+  details.ev { margin-top: 10px; font-size: 12.5px; }
+  details.ev summary { cursor: pointer; color: var(--sky); font-family: var(--mono); font-size: 12px; }
+  details.ev ul { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); }
+  .rank-strip { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .rank-item { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--white); border-radius: 8px; padding: 8px 12px; font-size: 13px; }
+  .rank-item .pos { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .rank-item .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .rank-arrow { color: var(--ink-3); }
+  .rank-arrow::after { content: "→"; }
+  .qs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+  .qcard { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: var(--white); }
+  .qcard p { margin: 0; font-size: 13px; color: var(--ink-2); }
+  .qcard .owner { font-family: var(--mono); font-size: 11px; color: var(--clay-d); margin-top: 8px; display: inline-block; }
+  @media (max-width: 640px) { .page { padding: 24px 16px 64px; } h1 { font-size: 24px; } }
+</style>
+<style data-claude-theme="injected">
+/* Claude brand polish layer for explain-to-me templates.
+ * Inject as a second <style> block AFTER the template's own <style>.
+ * Templates already use Claude's palette (ivory/slate/clay/oat/olive);
+ * this layer adds:
+ *   - Söhne-like sans stack (matches claude.ai)
+ *   - Tiempos Headline–like serif fallback for headings
+ *   - Subtle paper texture on body
+ *   - Brand badge (bottom-right)
+ *   - Clay focus ring
+ * Layout-safe: only touches typography, surface, and decoration.
+ */
+
+:root {
+  /* Re-affirm tokens in case template scoped them. */
+  --ivory:    #FAF9F5;
+  --slate:    #141413;
+  --clay:     #D97757;
+  --oat:      #E3DACC;
+  --olive:    #788C5D;
+  --gray-150: #F0EEE6;
+  --gray-300: #D1CFC5;
+  --gray-500: #87867F;
+  --gray-700: #3D3D3A;
+
+  /* claude.ai font stacks. Web fonts (Söhne, Tiempos) are licensed; the
+   * stack falls back to high-quality system fonts that read as similar. */
+  --sans:  "Söhne", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --serif: "Tiempos Headline", "Tiempos Text", "Source Serif Pro", "Iowan Old Style", "Charter", Georgia, serif;
+  --mono:  "Söhne Mono", "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+body {
+  background-image:
+    radial-gradient(rgba(20, 20, 19, 0.018) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.012em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+pre, code {
+  font-feature-settings: "ss01", "cv11", "calt";
+}
+pre {
+  background: var(--gray-150) !important;
+  border: 1px solid var(--gray-300);
+}
+
+body::after {
+  content: "claude · explainer";
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 999;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--gray-500);
+  background: rgba(250, 249, 245, 0.92);
+  border: 1px solid var(--gray-300);
+  border-left: 3px solid var(--clay);
+  padding: 6px 10px 6px 12px;
+  border-radius: 4px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+}
+
+@media print {
+  body::after { display: none; }
+  body { background-image: none; }
+}
+
+@media (max-width: 640px) {
+  body::after { display: none; }
+}
+
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="page-head">
+    <div class="eyebrow">Options Paper · architecture decisions</div>
+    <h1>Federation, mobile, and agent status on the shared core</h1>
+    <div class="meta-row">
+      <span><span class="k">Date</span><span class="v">2026-09-11</span></span>
+      <span><span class="k">Builds on</span><span class="v">desktop shared-core spec (D1-D9 locked, P0+S in flight)</span></span>
+      <span><span class="k">For decision by</span><span class="v">Stevie · /interview</span></span>
+      <span class="status-badge">Decided 2026-09-11 · see section 08</span>
+    </div>
+  </header>
+
+  <!-- 01 problem -->
+  <section>
+    <div class="sec-head"><span class="num">01</span><h2>What we want, and the shape that gets there</h2></div>
+    <p class="sec-intro">One UI drives N boxes and streams them live. A phone answers a needs-input banner in two taps. Every surface reads one agent status. We are rearchitecting ground-up, so these are the decisions to take now.</p>
+<pre class="flow">┌─ desktop (Tauri) ─┐  ┌─ TUI ─┐  ┌─ mobile (Expo) ─┐  ┌─ web (axum) ─┐
+│ Vec&lt;HostApp&gt;      │  │ ainb  │  │ thin RPC client │  │ PWA + xterm  │
+└────────┬──────────┘  └───┬───┘  └────────┬────────┘  └──────┬───────┘
+         │ mirror+sub      │ mirror        │ sections+stream  │
+         ▼                 ▼               ▼                  ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ TRANSPORT   unix sock (local) │ <span class="hot">WebSocket + E2EE (off-box)</span>           │
+│             carriers: LAN · tailnet · ssh -L                         │
+│ AUTH        SO_PEERCRED (local) │ <span class="hot">per-device token + scope allowlist</span> │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               ▼  one binary, one role per box
+┌──────────────────────────────────────────────────────────────────────┐
+│ ainb-hangar-daemon = the control plane, per box                      │
+│  <span class="hot">HostId</span> · <span class="hot">status store</span> (single writer) · <span class="hot">op-id ledger</span>              │
+│  event_outbox + after_revision replay · PTY stream + <span class="hot">snapshot</span>        │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               ▼
+                        tmux server (unchanged, PTY owner)</pre>
+    <p class="sec-intro">Red marks what does not exist today. Everything else is already ours.</p>
+  </section>
+
+  <!-- 02 feature map -->
+  <section>
+    <div class="sec-head"><span class="num">02</span><h2>Feature map: need · have · gap</h2></div>
+    <div class="matrix">
+      <table>
+        <thead><tr><th>Feature</th><th>Core must provide</th><th>Have today</th><th>Gap</th></tr></thead>
+        <tbody>
+          <tr><th class="row">one UI, N boxes</th><td>host identity on the wire, off-box transport, per-host FSM, coverage census on listings</td><td>daemon control plane, cursor-replay subscribe with <code>after_revision</code>, <code>SnapshotReset</code></td><td class="bad">no host field anywhere; unix socket is the only door; session keys collide across boxes</td></tr>
+          <tr><th class="row">mobile companion</th><td>multiplexed WS, E2EE, per-device tokens, snapshot-then-tail terminal, sequenced status feed with epoch, idempotent mutations</td><td>VAPID web-push to a PWA, <code>ainb-web</code> PTY bridge</td><td class="bad">no mobile client, no APNs/FCM, one shared token, no op ids</td></tr>
+          <tr><th class="row">agent dashboard</th><td>daemon-owned single-writer status store, hook push as tier 0, provenance per row, silence never <code>done</code></td><td>30 lifecycle hooks into <code>events.jsonl</code>, pure <code>classify()</code>, transcript tail</td><td class="bad">pane regex is the default tier; three session-existence records; no write-time precedence</td></tr>
+          <tr><th class="row">remote execution</th><td>daemon on the box owns sessions; laptop is a mirror</td><td>daemon already owns sessions locally; ACP pool and headless runner are PTY-free</td><td class="bad">spec words remote as "ssh-forwarded socket owned by the desktop": a transport, not a host model</td></tr>
+          <tr><th class="row">answer from any surface</th><td>exactly-once with receipts</td><td><code>answer.rs</code> first-answer-wins plus misroute guards</td><td class="bad">picker answer reads the screen 60 times via <code>capture-pane</code>, local tmux only</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 03 blockers -->
+  <section>
+    <div class="sec-head"><span class="num">03</span><h2>Blockers in the current architecture</h2></div>
+    <p class="sec-intro">Each one is a fact from our own tree, with the decision that removes it.</p>
+    <div class="matrix">
+      <table>
+        <thead><tr><th>Blocker</th><th>Why it blocks</th><th>Removed by</th></tr></thead>
+        <tbody>
+          <tr><td>unix socket is the only RPC door; <code>bind()</code> returns a concrete <code>UnixListener</code>, no seam</td><td>cannot cross a machine</td><td>X4</td></tr>
+          <tr><td><code>SO_PEERCRED</code> same-uid is the trust boundary</td><td>no off-box equivalent; replace, not extend</td><td>X4</td></tr>
+          <tr><td>no <code>HostId</code>; <code>session_key</code> from tmux target and cwd</td><td>two boxes collide</td><td>X2</td></tr>
+          <tr><td>capabilities are advisory, not per-connection authz</td><td>N remote clients need scopes</td><td>X4</td></tr>
+          <tr><td><code>capture-pane</code> status and <code>send-keys</code> digit answers</td><td>remote answering and a phone's first frame need bytes, not a rendered pane</td><td>X1, X5</td></tr>
+          <tr><td>three hand-written daemon clients, 1,572 mirrored Swift lines</td><td>every wire change is a three-way edit</td><td>X8</td></tr>
+          <tr><td><code>hangar/*</code> and <code>attention/*</code> carry no protocol version</td><td>mixed versions become normal once a phone ships</td><td>X8</td></tr>
+          <tr><td><code>ainb-core</code> monolith, 252k LOC, no library boundary</td><td>nothing off-box can reuse session logic</td><td>P1-P6, already planned</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 04 decisions -->
+  <section>
+    <div class="sec-head"><span class="num">04</span><h2>Nine decisions</h2></div>
+    <p class="sec-intro">Recommended option first, in green. Bars are judgment, not measurement: <strong>fit</strong> to the feature map, <strong>cost</strong> (5 = cheap), <strong>risk</strong> (5 = safe). Every option carries its own downside.</p>
+
+    <!-- X1 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X1</span><h3>tmux: keep, replace, or hybrid?</h3></div>
+      <p class="verdict"><strong>Hybrid.</strong> tmux stays PTY owner and multi-attach substrate. The daemon adds a headless VT emulator fed by the attached stream, giving snapshot and status without replacing tmux.</p>
+<pre class="flow">tmux ──attach (portable-pty)──▶ daemon VT emulator ──▶ <span class="hot">snapshot</span> ──▶ phone first frame
+  └── N viewers free · survives our restart · operator can attach by hand</pre>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>Hybrid</h3><p class="desc">tmux owns the PTY. Daemon emulator for snapshot, per-viewer flow control, and tier-2 status.</p><p class="down">We parse tmux's re-render, not the child's bytes. Alt-screen, mouse, OSC 8 may not survive the hop. Spike 2 decides.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative</span><h3>Daemon-owned PTY</h3><p class="desc">Replace tmux with our own PTY host and emulator, like the reference.</p><p class="down">Loses discovery of hand-started agents and survival across our own restart. The reference's daemon dies on a service restart. Eight new persistence modules.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>tmux only</h3><p class="desc">No emulator. Keep <code>capture-pane</code> as the terminal view.</p><p class="down"><code>capture-pane</code> cannot express cursor, alt-screen, mouse mode, or link ranges. No authoritative first frame for a phone. This is the hard mobile blocker.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div></div></article>
+      </div>
+      <ul class="facts">
+        <li>Cost 2.5-4k LOC, 3-4 weeks. New phase R2. No change to P0-P6. <span class="tag">[inference]</span></li>
+        <li>126 non-test tmux call sites, no trait at the boundary; the <code>Transport</code> enum in <code>send/route.rs</code> is the designed seam. <span class="tag">[fact]</span></li>
+        <li>Input and resize arbitration between two typists: not built until a phone can type. <span class="tag">[inference]</span></li>
+      </ul>
+    </article>
+
+    <!-- X2 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X2</span><h3>Host model: who owns the control plane on a remote box?</h3></div>
+      <p class="verdict"><strong>Peer daemon on the box.</strong> Same binary, own control plane, <code>HostId</code> on every wire type. <code>ssh -L</code> becomes one carrier among LAN and tailnet, not the architecture.</p>
+<pre class="flow">laptop ──WS+E2EE──▶ daemon on box (owns sessions) ◀── laptop closed, agents keep running
+   carriers: tailnet · LAN · ssh -L   (any of them, same wire)</pre>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>Peer daemon + HostId</h3><p class="desc">Box owns sessions. Socket path versioned by protocol, never by build. Listings fan out with a coverage census.</p><p class="down">Every listing becomes a fan-out. Without <code>omitted_hosts</code> a host silently vanishes under a row cap.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative · spec wording today</span><h3>Client-owned over ssh -L</h3><p class="desc">Desktop owns the forwarded socket; remote is "the same socket, further away".</p><p class="down">Nothing on the box works while the laptop is shut. A socket path tied to a build orphans live work on every update.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>Both models per box</h3><p class="desc">Register a box as a dumb ssh host and as a peer.</p><p class="down">Splits its sessions across two identities. Listings depend on which flag you passed.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div></div></article>
+      </div>
+      <ul class="facts">
+        <li>Not a reversal of the locked spec: the daemon already lives on the box. This sharpens ownership and adds identity. <span class="tag">[inference]</span></li>
+        <li><code>HostId</code> through 159 proto methods, <code>fleet_session</code>, three clients: 1.5k LOC plus a migration, 2-3 weeks. Rewrites the D4 transport row. <span class="tag">[inference]</span></li>
+      </ul>
+    </article>
+
+    <!-- X3 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X3</span><h3>Relay: build one?</h3></div>
+      <p class="verdict"><strong>No.</strong> Tailnet or ssh covers laptop-to-box. Reserve an optional <code>relay</code> slot in the pairing offer so nobody re-pairs later.</p>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>No relay</h3><p class="desc">Zero build, zero service. Pairing offer carries an empty relay slot.</p><p class="down">A phone on cellular with no VPN profile cannot reach the box at all.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>Single-cell self-hosted</h3><p class="desc">One container, SQLite, splice forwarder, invite credentials.</p><p class="down">2k Rust LOC plus an OIDC issuer plus an operable service, 2-3 weeks, for a reach only cellular phones need.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative</span><h3>Full topology</h3><p class="desc">Director, cells, migration, fencing, ops console.</p><p class="down">18.5k LOC where the data plane is about 110 lines. Everything else is admission, assignment durability, and migration.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div></div></article>
+      </div>
+      <ul class="facts"><li>Reopen when a client genuinely cannot dial the box. <span class="tag">[fact]</span></li></ul>
+    </article>
+
+    <!-- X4 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X4</span><h3>Off-box transport and auth</h3></div>
+      <p class="verdict"><strong>WebSocket carrying the existing JSON-RPC envelope, application-level E2EE, per-device revocable tokens with a scope, scope-to-method allowlist checked before dispatch.</strong></p>
+<pre class="flow">pair (QR · deep link · paste) ──▶ { endpoints[], device_token, host_pubkey, scope, relay? }
+connect ──▶ X25519 handshake, transcript binds transport + host id ──▶ AEAD frames
+dispatch ──▶ <span class="hot">scope → method allowlist BEFORE handler</span></pre>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>WS + E2EE + device tokens</h3><p class="desc">Host key pinned in the offer, so TLS is optional and a relay can be untrusted later.</p><p class="down">Tokens have no expiry in the reference; revocation is the only control. Add expiry ourselves.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative</span><h3>Shared token over TLS</h3><p class="desc">Today's token file, tunnelled.</p><p class="down">Cannot revoke one device. Cannot give a phone a smaller surface than the desktop. Retrofit means re-pairing everything.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>mTLS</h3><p class="desc">Client certs per device.</p><p class="down">Cert distribution to a laptop on a LAN. Key pinning in the pairing offer removes that problem for free.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div></div></article>
+      </div>
+      <ul class="facts">
+        <li>2.9k LOC, 3-4 weeks. Replaces "same token, peer_cred sees ssh user" in the spec's Hosts table. <span class="tag">[inference]</span></li>
+        <li>Reuse as-is: JSON-RPC envelope, <code>ainb-hangar-proto</code>, <code>event_outbox</code> replay. <span class="tag">[fact]</span></li>
+      </ul>
+    </article>
+
+    <!-- X5 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X5</span><h3>Agent status: signal hierarchy and where the store lives</h3></div>
+      <p class="verdict"><strong>Six tiers, one daemon-owned store, single writer, provenance stamped at write time.</strong> Only hooks and structured feeds may open a turn or assert needs-input. Silence never becomes <code>done</code>.</p>
+<pre class="flow">T0 hook push ─┐  <span class="hot">only T0/T1 may OPEN a turn or assert needs-input</span>
+T1 ACP feed  ─┤
+T2 OSC frame ─┼──▶ daemon store, single writer, provenance per row ──▶ every surface mirrors
+T3 process   ─┤
+T4 transcript─┤  usage and prompt recovery only
+T5 pane text ─┘  discovery of hand-started agents · readiness gate · tagged last-resort row
+silence ──▶ unverifiable (we hold the pane) | idle (we do not).  <span class="hot">never done</span></pre>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>Six tiers, daemon store</h3><p class="desc">Three clocks per row. <code>restored_unconfirmed</code> on hydrate. Tiers 0, 1, 3, 4 are tmux-independent.</p><p class="down">Per-provider normalizers are ongoing work. One hookless CLI cost the reference 300 lines and 75 hardcoded status words.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative · today</span><h3>Pane regex primary</h3><p class="desc">Keep <code>capture-pane</code> classification as the default tier.</p><p class="down">Shared literal lists strand providers that name events differently. Pinned to a CLI's rendering, breaks on its updates.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>Store per surface</h3><p class="desc">Each surface derives status from the raw feeds.</p><p class="down">Three copies keyed differently. One session reads differently on desktop, phone, and CLI. The reference is mid-refactor out of exactly this.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div></div></article>
+      </div>
+      <ul class="facts">
+        <li>2-3k LOC, 3-4 weeks. Our hook pipeline is already the authoritative tier; <code>classify()</code> is already pure. Blocked by nothing. <span class="tag">[fact]</span></li>
+        <li>Provider order: Claude-compatible family first (one normalizer, six CLIs), then the OSC in-band contract, then session-state family. <span class="tag">[inference]</span></li>
+        <li>New <code>agent_status</code> mirror section with its own drain budget. It is the hottest state in the system. <span class="tag">[fact]</span></li>
+      </ul>
+    </article>
+
+    <!-- X6 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X6</span><h3>Renderer contract under the fan-out measurements</h3></div>
+      <p class="verdict"><strong>Keep plan B, the whole-state mirror in 19 versioned sections, with three day-one invariants.</strong> Frames name changed sections. One store transaction per channel drain, effects after commit. Clients may subscribe to a subset.</p>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>Plan B + invariants</h3><p class="desc">Section naming, per-drain apply, subscription filter. About 400 LOC plus a listener census with a CI ceiling.</p><p class="down">Naive mirroring measured 9,279 listeners, 160 publications/s, 11.6 points of renderer CPU, with zero long tasks to warn you.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative · spec as written</span><h3>Plan B, no filter</h3><p class="desc">Whole sections on change, every client gets everything.</p><p class="down">A phone showing one agent receives all 19 sections. Outbound volume to a phone is a budgeted resource.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>RPC catalog</h3><p class="desc">Hundreds of typed methods, narrow subscriptions.</p><p class="down">610 methods needed a generator, an identity-matching bundle, a byte-diff gate, and still drifted with a stringly-typed web client.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div></div></article>
+      </div>
+      <ul class="facts"><li>Additive to P0. Must be in the contract before the second consumer surface or every send site gets audited later. <span class="tag">[inference]</span></li></ul>
+    </article>
+
+    <!-- X7 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X7</span><h3>Mobile stack</h3></div>
+      <p class="verdict"><strong>Expo / React Native, xterm inside a webview, thin RPC client.</strong> v1: pair, host list, sessions with live status, transcript, send prompt, answer permission and question, cancel turn, read-only terminal with snapshot replay, notifications, connection log.</p>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>Expo</h3><p class="desc">One codebase, iOS and Android. Keychain, camera, notifications, CSPRNG out of the box. Proven at scale for exactly this shape.</p><p class="down">No type sharing with a Rust core; bindings must be generated. Hermes lacks a CSPRNG and Buffer. iOS release needs a hosted Mac runner pinned to current Xcode.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative</span><h3>Tauri mobile</h3><p class="desc">Reuse SolidJS components and the Rust core in-process.</p><p class="down">A phone wants a thin client talking to the core on the box, exactly what in-process Rust does not help with. No mature keychain, camera, notification plugins.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>Swift + Kotlin</h3><p class="desc">Native, sharing models with the macOS fleet app.</p><p class="down">Two UIs to maintain. The fleet app shares models, not screens. The saving inverts the moment Android ships.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div></div></article>
+      </div>
+      <ul class="facts"><li>16-19k LOC, 2-3 months. New phase M1. v1 banners ride the live socket plus existing VAPID web-push; native push deferred. <span class="tag">[inference]</span></li></ul>
+    </article>
+
+    <!-- X8 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X8</span><h3>Wire versioning and capabilities</h3></div>
+      <p class="verdict"><strong>One integer protocol version with a written bump rule, named capability strings negotiated both ways, handshake-negotiated opcodes with permanent numbers, a two-direction skew harness.</strong></p>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>Integer + capabilities</h3><p class="desc">Bump the integer only on removal or semantic change. Everything additive is a capability string.</p><p class="down">A catalogue of 65-80 strings to maintain. Cheapest item today, most expensive after a phone ships.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative</span><h3>Integer only</h3><p class="desc">One number, bump on any change.</p><p class="down">An app-store phone cannot be force-upgraded in lockstep. An unknown opcode is dropped silently and the feature appears to hang.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>Exact equality</h3><p class="desc">Client and daemon must match.</p><p class="down">A socket path per version and permanent legacy adapters, 35 of them in the reference.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:20%"></span></span><span class="val">1</span></div></div></article>
+      </div>
+      <ul class="facts"><li>600 LOC, 1-1.5 weeks. New phase W0, gates P6 and D4. Only the fleet family is versioned today. <span class="tag">[fact]</span></li></ul>
+    </article>
+
+    <!-- X9 -->
+    <article class="decision">
+      <div class="dhead"><span class="did">X9</span><h3>Idempotent mutation envelope</h3></div>
+      <p class="verdict"><strong>Every mutation carries a client-minted op id and an expected fence. The daemon commits first, then replies. A retry gets the committed result.</strong></p>
+<pre class="flow">client mints op_id (ts-prefixed, freshness-bounded) + expected fence
+daemon commits FIRST, then replies ──▶ retry gets: created | adopted | replayed
+receipt marks the pre-PTY-write boundary; <span class="hot">after the write, effects are ambiguous</span></pre>
+      <div class="options">
+        <article class="opt" data-color="olive"><span class="opt-label">Recommended</span><h3>Op id + fence + receipt</h3><p class="desc">Generalises the locked "reject-second on answers" into the envelope for all mutations.</p><p class="down">900 LOC plus a migration; <code>answer.rs</code> is 1,940 lines to thread through.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:60%"></span></span><span class="val">3</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div></div></article>
+        <article class="opt" data-color="clay"><span class="opt-label">Alternative · today</span><h3>First-answer-wins only</h3><p class="desc">SQLite conditional update on answers, nothing else.</p><p class="down">A lost reply cannot be told from not-delivered. A retry double-fires "approve" on an agent about to run a command. Correctness bug, not UX.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:100%"></span></span><span class="val">5</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+        <article class="opt" data-color="sky"><span class="opt-label">Alternative</span><h3>Client-side dedupe</h3><p class="desc">Clients remember what they sent.</p><p class="down">Retained ids must be expiry-bounded, or a dropped id becomes a second message on the host.</p>
+          <div class="scores"><div class="score-row"><span>fit</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div><div class="score-row"><span>cost</span><span class="bar"><span class="fill" style="width:80%"></span></span><span class="val">4</span></div><div class="score-row"><span>risk</span><span class="bar"><span class="fill" style="width:40%"></span></span><span class="val">2</span></div></div></article>
+      </div>
+      <ul class="facts"><li>Lives in W0. Must precede mobile. <span class="tag">[inference]</span></li></ul>
+    </article>
+  </section>
+
+  <!-- 05 sequencing -->
+  <section>
+    <div class="sec-head"><span class="num">05</span><h2>Sequencing against the current plan</h2></div>
+<pre class="flow">now ──▶ P0+S (in flight) ──▶ P1 ──▶ P2-P5 ──▶ P6 ──▶ D1-D3 ──▶ D4 (rescoped ⊂ R1)
+         + X6 invariants                │
+         ▼                              │
+      <span class="hot">W0</span> (X8, X9) ── any time, before P6 and any off-box client ──▶ <span class="hot">R1</span> (X2, X4) ──▶ <span class="hot">R2</span> (X1 emulator)
+         │                                                             │              │
+      <span class="hot">T0</span> (X5) ── parallel, independent of everything ──────────────────┴──▶ <span class="hot">M1</span> (X7) ◀───┘</pre>
+    <div class="rank-strip">
+      <div class="rank-item"><span class="pos">now</span><span class="swatch" style="background:#788C5D"></span><span>P0+S plus X6 invariants</span></div><div class="rank-arrow"></div>
+      <div class="rank-item"><span class="pos">parallel</span><span class="swatch" style="background:#6A8CAF"></span><span>W0 wire · T0 status</span></div><div class="rank-arrow"></div>
+      <div class="rank-item"><span class="pos">after P6</span><span class="swatch" style="background:#8A5A78"></span><span>R1 hosts + transport</span></div><div class="rank-arrow"></div>
+      <div class="rank-item"><span class="pos">then</span><span class="swatch" style="background:#D97757"></span><span>R2 emulator</span></div><div class="rank-arrow"></div>
+      <div class="rank-item"><span class="pos">last</span><span class="swatch" style="background:#141413"></span><span>M1 mobile</span></div>
+    </div>
+    <div class="matrix" style="margin-top:16px">
+      <table>
+        <thead><tr><th>Phase</th><th>Contents</th><th>Entry gate</th><th>Exit gate</th></tr></thead>
+        <tbody>
+          <tr><th class="row">P0+S</th><td>as planned, plus X6 invariants</td><td>now</td><td>tripwires green; listener census and fan-out bench in CI with a ceiling</td></tr>
+          <tr><th class="row">W0</th><td>X8 version + capabilities + skew harness; X9 envelope</td><td>any time, before P6</td><td>skew harness green both ways; every mutation carries an op id</td></tr>
+          <tr><th class="row">T0</th><td>X5 daemon status store, Claude-family normalizer, OSC contract</td><td>spike 1 passes</td><td>one status truth across TUI, web, CLI; no tier-5 row outranks a hook</td></tr>
+          <tr><th class="row">R1</th><td>X2 <code>HostId</code>, X4 WS + E2EE + device tokens + scope allowlist; absorbs D4</td><td>W0 and P6</td><td>two boxes in one UI with coverage census and <code>omitted_hosts</code></td></tr>
+          <tr><th class="row">R2</th><td>X1 emulator, snapshot, per-viewer flow control</td><td>R1, spike 2</td><td>phone-shaped first frame with colour, cursor, alt-screen</td></tr>
+          <tr><th class="row">M1</th><td>X7 mobile v1</td><td>R1, R2, W0</td><td>answer a needs-input banner in two taps</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="sec-intro" style="margin-top:14px"><strong>Paint-into-corner items</strong>, each before the phase that consumes it: X8 before any off-box client · X9 before mobile · X4 device tokens before the first pairing · X6 section subscription before a second consumer · X2 <code>HostId</code> before a second host in any UI · D4 rescoped before it starts.</p>
+  </section>
+
+  <!-- 06 do not build -->
+  <section>
+    <div class="sec-head"><span class="num">06</span><h2>Explicitly not building</h2></div>
+    <div class="matrix">
+      <table>
+        <thead><tr><th>Not building</th><th>Reopen when</th></tr></thead>
+        <tbody>
+          <tr><td>Cloud relay: director, cells, splice, assignment, fencing</td><td>a client cannot dial the box at all</td></tr>
+          <tr><td>Daemon-owned PTY replacing tmux</td><td>spike 2 shows the tmux-hop snapshot is unusable, or native Windows enters scope</td></tr>
+          <tr><td>Checkpoint-and-log durable scrollback pipeline</td><td>tmux stops being the scrollback of record</td></tr>
+          <tr><td>Native APNs / FCM push gateway</td><td>mobile ships and users need banners with the app suspended</td></tr>
+          <tr><td>Per-connection capability authz beyond the scope allowlist</td><td>a non-operator or third-party client pairs</td></tr>
+          <tr><td>Input and resize driver-floor arbitration</td><td>two viewers can type, or a phone at 40x20 attaches beside a desktop</td></tr>
+          <tr><td>Subagent roster rows in the status store</td><td>the dashboard shows child rows</td></tr>
+          <tr><td>Cross-box orchestration mailboxes</td><td>one box must run dispatches while the home client is offline</td></tr>
+          <tr><td>Rewriting the <code>ainb-web</code> renderer onto the shared core</td><td>after M1; P6 migrates only its daemon client</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 07 spikes -->
+  <section>
+    <div class="sec-head"><span class="num">07</span><h2>Spikes before committing</h2></div>
+    <p class="sec-intro">Spikes 1 and 4 can run during P0+S. None blocks the keymap or Phase S work.</p>
+    <div class="qs">
+      <div class="qcard"><h3>1 · OSC through tmux</h3><p>Emit an OSC status frame from a wrapper inside a tmux pane with <code>allow-passthrough on</code>. Does it reach a <code>portable-pty</code> attach stream intact? On failure, hooks carry everything alone over tmux.</p><span class="owner">1 day · flips X5 tier 2</span></div>
+      <div class="qcard"><h3>2 · Snapshot fidelity over the tmux hop</h3><p>Drive alt-screen, mouse, wide chars, OSC 8 through <code>tmux attach</code> under <code>portable-pty</code> into a Rust VT emulator. Diff the snapshot against a direct PTY. Poor fidelity reopens the daemon-owned PTY.</p><span class="owner">2-3 days · flips X1</span></div>
+      <div class="qcard"><h3>3 · Peer WS + E2EE prototype</h3><p>Over tailnet and over <code>ssh -L</code>. Confirm the daemon keeps working after the desktop closes. Measure reconnect and resync.</p><span class="owner">2-3 days · go for R1 before D4 rescope</span></div>
+      <div class="qcard"><h3>4 · Fan-out on the real 19 sections</h3><p>Extend the planned specta spike: 2,000-update burst at 100 sessions through the Solid store with a listener census. Per-section sends versus one transaction per drain.</p><span class="owner">2 days · flips X6</span></div>
+    </div>
+  </section>
+
+  <!-- 08 interview forks -->
+  <section>
+    <div class="sec-head"><span class="num">08</span><h2>Interview outcome</h2></div>
+    <p class="sec-intro">Three rounds, eleven forks, resolved 2026-09-11. Differences from the recommendation are marked.</p>
+    <div class="matrix">
+      <table>
+        <thead><tr><th>#</th><th>Fork</th><th>Decided</th></tr></thead>
+        <tbody>
+          <tr><td>F1</td><td>X1 tmux</td><td>hybrid, spike 2 gates R2</td></tr>
+          <tr><td>F2</td><td>X2 peer daemon + HostId, rescope D4</td><td>yes</td></tr>
+          <tr><td>F3</td><td>X3 relay</td><td>none now; slot reserved; reopen path is a single cell behind managed identity and managed SQL</td></tr>
+          <tr><td>F4</td><td>X4 transport + auth</td><td>WS + Noise IK + per-device scoped tokens</td></tr>
+          <tr><td>F5</td><td>X5 provider order</td><td>Claude-compatible family, then OSC contract</td></tr>
+          <tr><td>F6</td><td>X6 mirror invariants</td><td class="bad">not P0: P0 runs in another session; lands in W0, before the second consumer</td></tr>
+          <tr><td>F7</td><td>X7 mobile</td><td class="bad">Expo with an interactive terminal in v1, not read-only</td></tr>
+          <tr><td>F8</td><td>X8 + X9 phase</td><td>own phase W0 after P0+S land, gates P6</td></tr>
+          <tr><td>F9</td><td>X9 scope</td><td>every mutation</td></tr>
+          <tr><td>F10</td><td>T0 timing</td><td>alongside P1, after spike 1</td></tr>
+          <tr><td>F11</td><td>native Windows v2</td><td>no</td></tr>
+          <tr><td>F12</td><td>driver floor (input + resize arbitration), pulled in by F7</td><td>R2, with the emulator</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="sec-intro" style="margin-top:14px">Locked as D10-D18 in <code>docs/plans/2026-09-11-multi-surface-decisions-spec.md</code>. Options record: <code>docs/plans/2026-09-11-multi-surface-decisions.md</code>. Research: <code>research/2026-09-11_multi-surface_*.md</code>.</p>
+  </section>
+
+</div>
+</body>
+</html>
