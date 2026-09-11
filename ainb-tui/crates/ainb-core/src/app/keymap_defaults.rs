@@ -49,6 +49,20 @@ macro_rules! append_app_rows {
     };
 }
 
+macro_rules! append_action_rows {
+    ($rows:expr, $ctx:expr, $( $id:ident : $chord:literal => $key_action:expr ),+ $(,)?) => {
+        $(
+            $rows.push(action(
+                $ctx.clone(),
+                stringify!($id),
+                $chord,
+                $key_action,
+                "Host keyboard action",
+            ));
+        )+
+    };
+}
+
 /// Canonical host-owned defaults. Component-owned New Session and PickRepo rows stay local.
 #[must_use]
 pub fn defaults() -> Vec<Binding> {
@@ -300,11 +314,11 @@ pub fn defaults() -> Vec<Binding> {
             AppEvent::DetachSession,
             "Release interactive embed",
         ),
-        app(
+        action(
             Context::screen("session_list"),
             "attach",
             "enter",
-            AppEvent::AttachSession,
+            KeyAction::Ui(UiAction::SessionActivateSelected),
             "Attach selected session",
         ),
         app(
@@ -323,17 +337,17 @@ pub fn defaults() -> Vec<Binding> {
         ),
         app(
             Context::screen("session_list"),
-            "delete",
+            "cleanup",
             "x",
-            AppEvent::DeleteSession,
-            "Delete selected session",
+            AppEvent::CleanupOrphaned,
+            "Clean up orphaned sessions",
         ),
-        app(
+        action(
             Context::screen("session_list"),
             "restart",
             "r",
-            AppEvent::RestartSession,
-            "Restart selected session",
+            KeyAction::Ui(UiAction::SessionResumeSelected),
+            "Resume selected stopped session",
         ),
         app(
             Context::screen("session_list"),
@@ -518,19 +532,39 @@ pub fn defaults() -> Vec<Binding> {
             "Toggle keyboard help",
         ),
         app(
-            Context::Global,
+            Context::Screen("notifications", super::keymap::SubContext::Named("visible")),
             "dismiss_notifications",
             "ctrl+x",
             AppEvent::DismissNotifications,
             "Dismiss notifications",
         ),
-        app(Context::Global, "quit", "q", AppEvent::Quit, "Quit"),
+        app(
+            Context::Global,
+            "go_home",
+            "q",
+            AppEvent::GoToHomeScreen,
+            "Return to home screen",
+        ),
+        app(
+            Context::Global,
+            "go_home_escape",
+            "esc",
+            AppEvent::GoToHomeScreen,
+            "Return to home screen",
+        ),
         app(
             Context::Global,
             "quit_ctrl",
             "ctrl+c",
             AppEvent::Quit,
             "Quit",
+        ),
+        action(
+            Context::Global,
+            "wire_statusline",
+            "W",
+            KeyAction::Ui(UiAction::UsageWireStatusline),
+            "Wire Claude Code statusline when needed",
         ),
         action(
             Context::Global,
@@ -541,25 +575,94 @@ pub fn defaults() -> Vec<Binding> {
         ),
     ];
 
-    // Every printable terminal glyph has a first-class text row. Concrete
-    // modal/screen rows above win before this context, then the dispatcher
-    // converts this action into the active field's typed AppEvent.
-    for character in (b' '..=b'~').map(char::from) {
-        let chord = if character == '+' {
-            "plus".to_string()
-        } else if character == ' ' {
-            "space".to_string()
-        } else {
-            character.to_string()
-        };
-        rows.push(action(
-            Context::TextInput,
-            "text",
-            &chord,
-            KeyAction::Text(character),
-            "Type text in the active field",
-        ));
-    }
+    // Printable text is data-owned by `Keymap::resolve_with_context`: it
+    // emits `KeyAction::Text` for any bare printable chord after concrete
+    // modal and screen rows fail. The 491 defaults below are therefore all
+    // named host bindings, never filler copies of the printable alphabet.
+    append_app_rows!(rows, Context::OtherTmuxRename,
+        confirm: "enter" => AppEvent::OtherTmuxConfirmRename,
+        cancel: "esc" => AppEvent::OtherTmuxCancelRename,
+        backspace: "backspace" => AppEvent::OtherTmuxRenameBackspace,
+    );
+    append_app_rows!(rows, Context::SshRename,
+        confirm: "enter" => AppEvent::SshSessionConfirmRename,
+        cancel: "esc" => AppEvent::SshSessionCancelRename,
+        backspace: "backspace" => AppEvent::SshSessionRenameBackspace,
+    );
+    append_app_rows!(rows, Context::SessionRename,
+        confirm: "enter" => AppEvent::SessionLabelConfirmRename,
+        cancel: "esc" => AppEvent::SessionLabelCancelRename,
+        backspace: "backspace" => AppEvent::SessionLabelRenameBackspace,
+    );
+    append_app_rows!(rows, Context::Screen("auth_setup", super::keymap::SubContext::Named("picker")),
+        show_command: "c" => AppEvent::AuthSetupShowCommand,
+    );
+    append_app_rows!(rows, Context::Screen("auth_setup", super::keymap::SubContext::Named("input")),
+        select: "enter" => AppEvent::AuthSetupSelect,
+        backspace: "backspace" => AppEvent::AuthSetupBackspace,
+        clear: "esc" => AppEvent::AuthSetupBackspace,
+    );
+    append_app_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("sessions_pane")),
+        top: "home" => AppEvent::GoToTop,
+        bottom: "end" => AppEvent::GoToBottom,
+    );
+    append_app_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("logs_pane")),
+        up: "up" => AppEvent::ScrollLogsUp,
+        down: "down" => AppEvent::ScrollLogsDown,
+        top: "home" => AppEvent::ScrollLogsToTop,
+        bottom: "end" => AppEvent::ScrollLogsToBottom,
+        toggle_auto_scroll: "space" => AppEvent::ToggleAutoScroll,
+    );
+    append_app_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("preview_pane")),
+        up: "up" => AppEvent::ScrollLogsUp,
+        down: "down" => AppEvent::ScrollLogsDown,
+        top: "home" => AppEvent::ScrollLogsToTop,
+        bottom: "end" => AppEvent::ScrollLogsToBottom,
+        toggle_auto_scroll: "space" => AppEvent::ToggleAutoScroll,
+    );
+    append_app_rows!(rows, Context::screen("search_workspace"),
+        cancel: "esc" => AppEvent::NewSessionCancel,
+    );
+    append_app_rows!(rows, Context::Screen("skill_manager", super::keymap::SubContext::Named("browse_query")),
+        backspace: "backspace" => AppEvent::SkillManagerBrowseInputBackspace,
+    );
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("dependency_agent")),
+        claude: "c" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Claude),
+        claude_upper: "C" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Claude),
+        codex: "x" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Codex),
+        codex_upper: "X" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Codex),
+        antigravity: "a" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Antigravity),
+        antigravity_upper: "A" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Antigravity),
+        copilot: "p" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Copilot),
+        copilot_upper: "P" => AppEvent::OnboardingGenerateScript(crate::setup::Agent::Copilot),
+        cancel: "esc" => AppEvent::OnboardingCancelScriptPrompt,
+    );
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("auth_key")),
+        select: "enter" => AppEvent::OnboardingAuthSelect,
+        cancel: "esc" => AppEvent::OnboardingAuthCancel,
+        backspace: "backspace" => AppEvent::OnboardingAuthKeyBackspace,
+    );
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("auth_method")),
+        up: "up" => AppEvent::OnboardingAuthUp,
+        down: "down" => AppEvent::OnboardingAuthDown,
+        select: "enter" => AppEvent::OnboardingAuthSelect,
+        cancel: "esc" => AppEvent::OnboardingAuthCancel,
+    );
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("auth_agents")),
+        up: "up" => AppEvent::OnboardingAuthUp,
+        down: "down" => AppEvent::OnboardingAuthDown,
+        select: "enter" => AppEvent::OnboardingAuthSelect,
+        next: "right" => AppEvent::OnboardingNext,
+        menu: "esc" => AppEvent::OnboardingToMenu,
+        back: "left" => AppEvent::OnboardingBack,
+        backspace: "backspace" => AppEvent::OnboardingBack,
+    );
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("otel")),
+        next_field: "tab" => AppEvent::OnboardingOtelNextField,
+        previous_field: "shift+tab" => AppEvent::OnboardingOtelPrevField,
+        backspace: "backspace" => AppEvent::OnboardingOtelBackspace,
+        menu: "esc" => AppEvent::OnboardingToMenu,
+    );
 
     append_app_rows!(rows, Context::screen("skill_manager"),
         back: "q" => AppEvent::SkillManagerBack,
@@ -570,7 +673,6 @@ pub fn defaults() -> Vec<Binding> {
         add_source: "i" => AppEvent::SkillManagerOpenAddSource,
         update: "u" => AppEvent::SkillManagerUpdate,
         check: "c" => AppEvent::SkillManagerCheck,
-        remove: "r" => AppEvent::SkillManagerRemove,
         browse: "b" => AppEvent::SkillManagerOpenBrowse,
         library: "l" => AppEvent::SkillManagerOpenLibrary,
         search: "/" => AppEvent::SkillManagerOpenSearch,
@@ -583,6 +685,26 @@ pub fn defaults() -> Vec<Binding> {
         select_first_g: "g" => AppEvent::SkillManagerSelectFirst,
         select_last: "end" => AppEvent::SkillManagerSelectLast,
         select_last_g: "G" => AppEvent::SkillManagerSelectLast,
+    );
+    append_action_rows!(rows, Context::screen("skill_manager"),
+        sync_or_conflict: "s" => KeyAction::Ui(UiAction::SkillManagerSyncOrConflict),
+        remove_or_source: "r" => KeyAction::Ui(UiAction::SkillManagerRemoveOrSource),
+        open_unit: "o" => KeyAction::Ui(UiAction::SkillManagerOpenUnitIfFocused),
+        copy_unit: "y" => KeyAction::Ui(UiAction::SkillManagerCopyToLibraryIfFocused),
+        back_or_clear_filter: "esc" => KeyAction::Ui(UiAction::SkillManagerBackOrClearFilter),
+    );
+
+    append_app_rows!(rows, Context::HelpVisible,
+        close_escape: "esc" => AppEvent::ToggleHelp,
+        close_help: "?" => AppEvent::ToggleHelp,
+        close_help_upper: "H" => AppEvent::ToggleHelp,
+    );
+    append_app_rows!(rows, Context::Screen("help", super::keymap::SubContext::Named("text")),
+        close_escape: "esc" => AppEvent::ToggleHelp,
+    );
+    append_app_rows!(rows, Context::Screen("plugin", super::keymap::SubContext::Named("owned")),
+        back: "esc" => AppEvent::PanelBack,
+        back_q: "q" => AppEvent::PanelBack,
     );
 
     append_app_rows!(rows, Context::Screen("skill_manager", super::keymap::SubContext::Named("sync_confirm")),
@@ -767,9 +889,10 @@ pub fn defaults() -> Vec<Binding> {
     );
 
     append_app_rows!(rows, Context::screen("session_list"),
+        back: "esc" => AppEvent::GoToHomeScreen,
+        back_q: "q" => AppEvent::GoToHomeScreen,
         tab_next: "tab" => AppEvent::SessionTabNext,
         tab_previous: "shift+tab" => AppEvent::SessionTabPrev,
-        quit_ctrl: "ctrl+c" => AppEvent::Quit,
         toggle_chat: "c" => AppEvent::ToggleClaudeChat,
         refresh: "f" => AppEvent::RefreshWorkspaces,
         cycle_filter: "F" => AppEvent::CycleSessionFilter,
@@ -778,11 +901,11 @@ pub fn defaults() -> Vec<Binding> {
         attach_tmux: "a" => AppEvent::AttachTmuxSession,
         attach_interactive: "A" => AppEvent::EnterInteractivePane,
         reauthenticate: "u" => AppEvent::ReauthenticateCredentials,
-        rename: "f2" => AppEvent::SessionLabelStartRename,
         restart: "e" => AppEvent::RestartSession,
         toggle_selected: "space" => AppEvent::ToggleSelectSession,
         delete_selected: "D" => AppEvent::DeleteSelectedSessions,
         delete: "d" => AppEvent::DeleteSession,
+        cleanup_ctrl: "ctrl+x" => AppEvent::CleanupOrphaned,
         git: "g" => AppEvent::ShowGitView,
         quick_commit: "p" => AppEvent::QuickCommitStart,
         editor: "o" => AppEvent::OpenInEditor,
@@ -796,6 +919,19 @@ pub fn defaults() -> Vec<Binding> {
         abtop: "t" => AppEvent::GoToAbtop,
         preview_up: "shift+up" => AppEvent::ScrollPreviewUp,
         preview_down: "shift+down" => AppEvent::ScrollPreviewDown,
+    );
+    append_action_rows!(rows, Context::screen("session_list"),
+        rename: "f2" => KeyAction::Ui(UiAction::SessionStartRename),
+        headroom_or_help: "H" => KeyAction::Ui(UiAction::SessionHeadroomOrHelp),
+        attach_one: "1" => KeyAction::Ui(UiAction::AttachSessionByPosition(1)),
+        attach_two: "2" => KeyAction::Ui(UiAction::AttachSessionByPosition(2)),
+        attach_three: "3" => KeyAction::Ui(UiAction::AttachSessionByPosition(3)),
+        attach_four: "4" => KeyAction::Ui(UiAction::AttachSessionByPosition(4)),
+        attach_five: "5" => KeyAction::Ui(UiAction::AttachSessionByPosition(5)),
+        attach_six: "6" => KeyAction::Ui(UiAction::AttachSessionByPosition(6)),
+        attach_seven: "7" => KeyAction::Ui(UiAction::AttachSessionByPosition(7)),
+        attach_eight: "8" => KeyAction::Ui(UiAction::AttachSessionByPosition(8)),
+        attach_nine: "9" => KeyAction::Ui(UiAction::AttachSessionByPosition(9)),
     );
 
     append_app_rows!(rows, Context::Screen("home", super::keymap::SubContext::Named("sidebar")),
@@ -973,26 +1109,49 @@ pub fn defaults() -> Vec<Binding> {
         close: "esc" => AppEvent::ToggleClaudeChat,
     );
 
-    append_app_rows!(rows, Context::Screen("daemons", super::keymap::SubContext::Named("overlay")),
-        close: "esc" => AppEvent::PanelBack,
-        close_q: "q" => AppEvent::PanelBack,
-        confirm: "enter" => AppEvent::DaemonsRefresh,
-        previous: "up" => AppEvent::DaemonsRefresh,
-        previous_k: "k" => AppEvent::DaemonsRefresh,
-        next: "down" => AppEvent::DaemonsRefresh,
-        next_j: "j" => AppEvent::DaemonsRefresh,
+    append_action_rows!(rows, Context::Screen("daemons", super::keymap::SubContext::Named("overlay")),
+        close: "esc" => KeyAction::Ui(UiAction::DaemonsCloseOverlay),
+        close_q: "q" => KeyAction::Ui(UiAction::DaemonsCloseAndBack),
+        confirm: "enter" => KeyAction::Ui(UiAction::DaemonsConfirmMenu),
+        previous: "up" => KeyAction::Ui(UiAction::DaemonsMoveOverlay(-1)),
+        previous_k: "k" => KeyAction::Ui(UiAction::DaemonsMoveOverlay(-1)),
+        next: "down" => KeyAction::Ui(UiAction::DaemonsMoveOverlay(1)),
+        next_j: "j" => KeyAction::Ui(UiAction::DaemonsMoveOverlay(1)),
     );
-    append_app_rows!(rows, Context::Screen("daemons", super::keymap::SubContext::Named("list")),
-        open: "enter" => AppEvent::DaemonsRefresh,
-        previous: "up" => AppEvent::DaemonsRefresh,
-        previous_k: "k" => AppEvent::DaemonsRefresh,
-        next: "down" => AppEvent::DaemonsRefresh,
-        next_j: "j" => AppEvent::DaemonsRefresh,
+    append_action_rows!(rows, Context::Screen("daemons", super::keymap::SubContext::Named("list")),
+        open: "enter" => KeyAction::Ui(UiAction::DaemonsOpenMenu),
+        previous: "up" => KeyAction::Ui(UiAction::DaemonsMoveSelection(-1)),
+        previous_k: "k" => KeyAction::Ui(UiAction::DaemonsMoveSelection(-1)),
+        next: "down" => KeyAction::Ui(UiAction::DaemonsMoveSelection(1)),
+        next_j: "j" => KeyAction::Ui(UiAction::DaemonsMoveSelection(1)),
     );
     append_app_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("sessions_pane")),
         next: "down" => AppEvent::NextSession,
         previous: "up" => AppEvent::PreviousSession,
         interactive: "right" => AppEvent::EnterInteractivePane,
+    );
+    append_action_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("composer")),
+        enter: "enter" => KeyAction::Ui(UiAction::SessionComposerEnter),
+        backspace: "backspace" => KeyAction::Ui(UiAction::SessionComposerBackspace),
+        escape: "esc" => KeyAction::Ui(UiAction::SessionComposerEscape),
+        up: "up" => KeyAction::Ui(UiAction::SessionComposerUp),
+        down: "down" => KeyAction::Ui(UiAction::SessionComposerDown),
+        focus_toggle: "shift+tab" => KeyAction::Ui(UiAction::SessionComposerFocusToggle),
+        retry: "alt+p" => KeyAction::Ui(UiAction::SessionComposerRetry),
+        cancel: "alt+c" => KeyAction::Ui(UiAction::SessionComposerCancel),
+        engine: "alt+e" => KeyAction::Ui(UiAction::PalCycleEngine),
+        model: "alt+o" => KeyAction::Ui(UiAction::PalCycleModel),
+        mode: "alt+g" => KeyAction::Ui(UiAction::PalCycleMode),
+        dial_retry: "alt+r" => KeyAction::Ui(UiAction::PalRetry),
+    );
+    append_action_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("ask")),
+        enter: "enter" => KeyAction::App(AppEvent::SessionAskSend),
+        previous: "up" => KeyAction::Ui(UiAction::SessionAskPrevious),
+        next: "down" => KeyAction::Ui(UiAction::SessionAskNext),
+        backspace: "backspace" => KeyAction::Ui(UiAction::SessionAskBackspace),
+    );
+    append_app_rows!(rows, Context::Screen("session_recovery", super::keymap::SubContext::Named("filtered")),
+        clear: "esc" => AppEvent::SessionRecoverySearchCancel,
     );
 
     rows
