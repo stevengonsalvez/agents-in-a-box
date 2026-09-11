@@ -78,6 +78,11 @@ pub async fn serve(config: WebConfig, data: Arc<dyn DataSource>) -> Result<(), S
     config.check_bind_security()?;
 
     let addr = config.listen;
+    // A real authenticated socket owns the daemon's Web registry row for the
+    // full server lifetime. It reconnects independently of request handling,
+    // so an idle dashboard remains discoverable and daemon recovery never
+    // stalls a snapshot pull or answer submission.
+    let _presence = daemon::WebPresence::spawn();
 
     // Best-effort web-push init. A failure here (e.g. unwritable home dir) must
     // not take down the dashboard — push is an enhancement, the read surface
