@@ -719,6 +719,24 @@ pub enum KeyAction {
     Text(char),
 }
 
+impl KeyAction {
+    fn carries_payload(&self) -> bool {
+        matches!(
+            self,
+            Self::App(
+                AppEvent::OnboardingGenerateScript(_)
+                    | AppEvent::SkillManagerSyncScroll(_)
+                    | AppEvent::SkillManagerPreviewTool(_)
+                    | AppEvent::SkillManagerSourceRemoveMove(_)
+            ) | Self::Ui(
+                UiAction::AttachSessionByPosition(_)
+                    | UiAction::DaemonsMoveOverlay(_)
+                    | UiAction::DaemonsMoveSelection(_)
+            ) | Self::Text(_)
+        )
+    }
+}
+
 /// One discoverable, overrideable row in the keymap.
 #[derive(Debug, Clone)]
 pub struct Binding {
@@ -866,6 +884,13 @@ impl Keymap {
                 );
                 continue;
             };
+            if self.bindings[index].action.carries_payload() {
+                return Err(OverrideError(format!(
+                    "payload-bearing binding `{}` in [{}] cannot be overridden",
+                    override_row.event,
+                    context.name(),
+                )));
+            }
             let chord = Chord::parse(&override_row.chord)
                 .map_err(|error| OverrideError(error.to_string()))?;
             // A user override owns its requested chord. If that chord was a
