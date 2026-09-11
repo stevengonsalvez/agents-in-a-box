@@ -1060,9 +1060,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         }),
     )
     .await;
-    let listed = client
-        .call(methods::HANGAR_CONNECTIONS_LIST, serde_json::json!({}))
-        .await;
+    let listed = client.call(methods::HANGAR_CONNECTIONS_LIST, serde_json::json!({})).await;
     assert!(listed["error"].is_null(), "{listed}");
     let connections: ConnectionsListResult =
         serde_json::from_value(listed["result"].clone()).expect("connections list");
