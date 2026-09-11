@@ -16,8 +16,16 @@ use ainb_web::{ServeError, WebConfig, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::Mutex;
 
 const CONNECTIONS_LIST: &str = "hangar/connections_list";
+
+/// Serializes tests that redirect the process-wide web daemon-home settings.
+///
+/// `serve` resolves `AINB_HANGAR_HOME` on its background presence task. If
+/// these tests update that variable together, one server can authenticate with
+/// the other test's daemon, violating both tests' connection assertions.
+static WEB_HOME_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 struct Client {
     reader: BufReader<OwnedReadHalf>,
@@ -211,6 +219,7 @@ async fn registry_lists_surfaces_and_broadcasts_connection_lifecycle() {
 
 #[tokio::test]
 async fn web_server_presence_lives_for_server_task() {
+    let _env_lock = WEB_HOME_ENV_LOCK.lock().await;
     let home = tempfile::tempdir().expect("temporary Hangar home");
     let (socket, _store) = start_server(home.path()).await;
     let _hangar_home = EnvGuard::set("AINB_HANGAR_HOME", home.path());
@@ -270,6 +279,7 @@ async fn web_server_presence_lives_for_server_task() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn web_listen_failure_never_registers_presence() {
+    let _env_lock = WEB_HOME_ENV_LOCK.lock().await;
     let home = tempfile::tempdir().expect("temporary Hangar home");
     let (socket, _store) = start_server(home.path()).await;
     let _hangar_home = EnvGuard::set("AINB_HANGAR_HOME", home.path());
