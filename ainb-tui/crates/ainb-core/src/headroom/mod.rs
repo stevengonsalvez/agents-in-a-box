@@ -355,6 +355,248 @@ pub(crate) static HEADROOM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::ne
 mod tests {
     use super::*;
 
+    const CROSS_PROCESS_ROLE: &str = "AINB_HEADROOM_CROSS_PROCESS_TEST_ROLE";
+    const CROSS_PROCESS_TEST_NAME: &str =
+        "headroom::tests::cross_process_guard_prevents_second_proxy_spawn";
+
+    /// Kills every test-owned child by its recorded PID if an assertion fails
+    /// before the normal cleanup path runs. The fake proxy has no descendants:
+    /// its shell script `exec`s this test binary, so each PID is exact.
+    struct TestProcessCleanup {
+        callers: Vec<std::process::Child>,
+        pid_path: PathBuf,
+        spawn_log: PathBuf,
+    }
+
+    impl TestProcessCleanup {
+        fn new(pid_path: PathBuf, spawn_log: PathBuf) -> Self {
+            Self {
+                callers: Vec::new(),
+                pid_path,
+                spawn_log,
+            }
+        }
+
+        fn spawned_pids(&self) -> Vec<u32> {
+            let mut pids: Vec<u32> = std::fs::read_to_string(&self.spawn_log)
+                .map(|log| log.lines().filter_map(|line| line.parse().ok()).collect())
+                .unwrap_or_default();
+            if let Some(pid) = std::fs::read_to_string(&self.pid_path)
+                .ok()
+                .and_then(|pid| pid.trim().parse().ok())
+            {
+                pids.push(pid);
+            }
+            pids.sort_unstable();
+            pids.dedup();
+            pids
+        }
+
+        fn terminate_pid(pid: u32) {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+        }
+
+        fn wait_until_gone(pid: u32) -> bool {
+            use nix::sys::signal::kill;
+            use nix::unistd::Pid;
+
+            let target = Pid::from_raw(pid as i32);
+            for _ in 0..100 {
+                match kill(target, None) {
+                    Err(nix::errno::Errno::ESRCH) => return true,
+                    Ok(()) | Err(nix::errno::Errno::EPERM) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return false,
+                }
+            }
+            false
+        }
+    }
+
+    impl Drop for TestProcessCleanup {
+        fn drop(&mut self) {
+            for caller in &mut self.callers {
+                if matches!(caller.try_wait(), Ok(None)) {
+                    let _ = caller.kill();
+                    let _ = caller.wait();
+                }
+            }
+            for pid in self.spawned_pids() {
+                Self::terminate_pid(pid);
+            }
+        }
+    }
+
+    fn wait_for_path(path: &std::path::Path, description: &str) {
+        for _ in 0..500 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {description}: {}", path.display());
+    }
+
+    fn wait_for_child(child: &mut std::process::Child, description: &str) {
+        for _ in 0..1_000 {
+            match child.try_wait().expect("read test caller status") {
+                Some(status) => {
+                    assert!(status.success(), "{description} failed: {status}");
+                    return;
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        panic!("timed out waiting for {description}");
+    }
+
+    /// Serves the fake proxy's health endpoint until the parent test terminates
+    /// this exact process ID. This binary is launched only by the test-owned
+    /// `headroom` executable below.
+    fn run_fake_proxy() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, proxy_port()))
+            .expect("bind test-owned headroom loopback port");
+        listener.set_nonblocking(true).expect("make test listener nonblocking");
+
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut request = [0_u8; 1024];
+                    let _ = stream.read(&mut request);
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .expect("reply to headroom health probe");
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept test-owned headroom connection: {error}"),
+            }
+        }
+    }
+
+    /// Starts two independent test binaries at one barrier. Both callers see
+    /// an initially-unhealthy port. Only the caller holding `proxy.pid.lock`
+    /// may invoke the fake `headroom`; the other must wait, observe its healthy
+    /// proxy, and return without a second spawn.
+    #[tokio::test(flavor = "current_thread")]
+    async fn cross_process_guard_prevents_second_proxy_spawn() {
+        match std::env::var(CROSS_PROCESS_ROLE).as_deref() {
+            Ok("caller") => {
+                let ready = std::env::var_os("AINB_HEADROOM_CROSS_PROCESS_CALLER_READY")
+                    .map(PathBuf::from)
+                    .expect("caller ready path");
+                let start = std::env::var_os("AINB_HEADROOM_CROSS_PROCESS_START")
+                    .map(PathBuf::from)
+                    .expect("caller start path");
+                std::fs::write(&ready, "ready").expect("mark cross-process caller ready");
+                wait_for_path(&start, "cross-process caller start");
+                ensure_proxy_running().await.expect("ensure shared headroom proxy");
+                return;
+            }
+            Ok("proxy") => {
+                run_fake_proxy();
+                return;
+            }
+            Ok(role) => panic!("unknown headroom cross-process test role: {role}"),
+            Err(_) => {}
+        }
+
+        let _guard = HEADROOM_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp = tempfile::tempdir().expect("test tempdir");
+        let bin_dir = temp.path().join("bin");
+        std::fs::create_dir(&bin_dir).expect("create fake PATH directory");
+        let spawn_log = temp.path().join("headroom-spawns");
+        let caller_one_ready = temp.path().join("caller-one-ready");
+        let caller_two_ready = temp.path().join("caller-two-ready");
+        let start = temp.path().join("start-callers");
+        let pid_path = temp.path().join(".agents-in-a-box").join("headroom").join("proxy.pid");
+        let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("reserve test-owned loopback port")
+            .local_addr()
+            .expect("read reserved loopback port")
+            .port();
+        let test_exe = std::env::current_exe().expect("locate current test executable");
+
+        let fake_headroom = bin_dir.join("headroom");
+        std::fs::write(
+            &fake_headroom,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" >> \"$AINB_HEADROOM_CROSS_PROCESS_SPAWN_LOG\"\n/bin/sleep 1\nexport {CROSS_PROCESS_ROLE}=proxy\nexec \"$AINB_HEADROOM_CROSS_PROCESS_TEST_EXE\" --exact \"{CROSS_PROCESS_TEST_NAME}\" --nocapture\n"
+            ),
+        )
+        .expect("write fake headroom executable");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = std::fs::metadata(&fake_headroom)
+                .expect("read fake headroom permissions")
+                .permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&fake_headroom, permissions)
+                .expect("make fake headroom executable");
+        }
+
+        let mut cleanup = TestProcessCleanup::new(pid_path.clone(), spawn_log.clone());
+        for ready in [&caller_one_ready, &caller_two_ready] {
+            let caller = std::process::Command::new(&test_exe)
+                .args(["--exact", CROSS_PROCESS_TEST_NAME, "--nocapture"])
+                .env(CROSS_PROCESS_ROLE, "caller")
+                .env("AINB_HEADROOM_CROSS_PROCESS_CALLER_READY", ready)
+                .env("AINB_HEADROOM_CROSS_PROCESS_START", &start)
+                .env("AINB_HEADROOM_CROSS_PROCESS_SPAWN_LOG", &spawn_log)
+                .env("AINB_HEADROOM_CROSS_PROCESS_TEST_EXE", &test_exe)
+                .env("AINB_HOME", temp.path())
+                .env("AINB_HEADROOM_PORT", port.to_string())
+                .env("PATH", &bin_dir)
+                .spawn()
+                .expect("spawn independent headroom caller");
+            cleanup.callers.push(caller);
+        }
+
+        wait_for_path(&caller_one_ready, "first cross-process caller");
+        wait_for_path(&caller_two_ready, "second cross-process caller");
+        std::fs::write(&start, "go").expect("release cross-process callers");
+
+        for caller in &mut cleanup.callers {
+            wait_for_child(caller, "cross-process headroom caller");
+        }
+
+        let spawned = cleanup.spawned_pids();
+        assert_eq!(
+            spawned.len(),
+            1,
+            "concurrent callers spawned more than one headroom proxy: {spawned:?}"
+        );
+        let managed_pid = std::fs::read_to_string(&pid_path)
+            .expect("managed proxy pid file")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric managed proxy pid");
+        assert_eq!(
+            spawned,
+            vec![managed_pid],
+            "proxy.pid must name sole fake proxy"
+        );
+
+        TestProcessCleanup::terminate_pid(managed_pid);
+        assert!(
+            TestProcessCleanup::wait_until_gone(managed_pid),
+            "test-owned headroom proxy {managed_pid} survived exact SIGTERM"
+        );
+        std::fs::remove_file(&pid_path).expect("remove cleaned proxy pid file");
+        std::fs::remove_file(&spawn_log).expect("remove cleaned proxy spawn log");
+    }
+
     /// `proxy_port()` must honor `AINB_HEADROOM_PORT` override.
     #[test]
     fn proxy_port_honors_override() {
