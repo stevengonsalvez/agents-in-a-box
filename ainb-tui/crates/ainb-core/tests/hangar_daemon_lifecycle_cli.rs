@@ -133,9 +133,22 @@ fn kill_and_wait(child: &mut Child) {
     child.wait().expect("reap exact test parent");
 }
 
+#[test]
+fn shell_quote_path_preserves_apostrophes() {
+    assert_eq!(
+        shell_quote_path(Path::new("/tmp/ainb's tui")),
+        "'/tmp/ainb'\"'\"'s tui'"
+    );
+}
+
+/// Quote a UTF-8 path as one POSIX shell word for tmux's shell pane.
+fn shell_quote_path(path: &Path) -> String {
+    let path = path.to_str().expect("test launch path must be valid UTF-8");
+    format!("'{}'", path.replace('\'', r#"'"'"'"#))
+}
+
 /// Return the staged plugin root only when the real Hangar subprocess exists.
-/// A fresh checkout which has not run `just stage-plugins` cannot execute this
-/// acceptance path, so it reports an explicit skip instead of exercising a mock.
+/// The acceptance test requires this artifact instead of exercising a mock.
 fn hangar_plugin_root() -> Option<PathBuf> {
     let bin = ainb_bin();
     let mut dir = bin.parent()?;
@@ -252,32 +265,34 @@ impl Drop for OwnedTmuxSession {
 
 fn launch_tui(home: &Path, plugin_root: &Path, daemon: &Path) -> OwnedTmuxSession {
     let session = format!("tripwire-hangar-tui-presence-{}", std::process::id());
-    let status = Command::new("tmux")
-        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
-        .status()
-        .expect("create owned tmux session");
+    let ainb_home = home.join(".agents-in-a-box");
+    let mut new_session = Command::new("tmux");
+    new_session.args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"]);
+    for (key, value) in [
+        ("HOME", home),
+        ("AINB_HOME", ainb_home.as_path()),
+        ("AINB_HANGAR_HOME", home),
+        ("AINB_PLUGIN_ROOT", plugin_root),
+        ("AINB_HANGAR_DAEMON_BIN", daemon),
+    ] {
+        new_session.arg("-e").arg(format!("{key}={}", value.display()));
+    }
+    for (key, value) in [
+        ("AINB_DISABLE_PLUGINS", ""),
+        ("AINB_PLUGINS_ONLY", "hangar-tui"),
+    ] {
+        new_session.arg("-e").arg(format!("{key}={value}"));
+    }
+    // The environment reaches tmux directly. Its noninteractive shell receives
+    // one quoted executable path, avoiding user shell startup prompts.
+    let command = format!("exec {} tui", shell_quote_path(&ainb_bin()));
+    let status = new_session.arg(&command).status().expect("launch TUI in owned tmux session");
     assert!(status.success(), "tmux new-session failed");
-    let owned = OwnedTmuxSession {
+
+    OwnedTmuxSession {
         name: session,
         shut_down: Cell::new(false),
-    };
-
-    let command = format!(
-        "HOME={home} AINB_HOME={ainb_home} AINB_HANGAR_HOME={home} \
-         AINB_PLUGIN_ROOT={plugin_root} AINB_HANGAR_DAEMON_BIN={daemon} exec {ainb} tui",
-        home = home.display(),
-        ainb_home = home.join(".agents-in-a-box").display(),
-        plugin_root = plugin_root.display(),
-        daemon = daemon.display(),
-        ainb = ainb_bin().display(),
-    );
-    let status = Command::new("tmux")
-        .args(["send-keys", "-t", owned.name(), &command, "Enter"])
-        .status()
-        .expect("launch TUI in owned tmux session");
-    assert!(status.success(), "tmux launch command failed");
-
-    owned
+    }
 }
 
 fn connections_json(home: &Path, daemon: &Path) -> serde_json::Value {
@@ -415,18 +430,14 @@ fn daemon_start_status_stop_round_trip() {
 /// CLI-list path together.
 #[test]
 fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
-    if !tmux_available() {
-        eprintln!("SKIP: tmux not available");
-        return;
-    }
-    let Some(plugin_root) = hangar_plugin_root() else {
-        eprintln!("SKIP: dist/plugins/hangar-tui not staged; run `just stage-plugins`");
-        return;
-    };
-    let Some(daemon) = daemon_bin() else {
-        eprintln!("SKIP: ainb-hangar-daemon binary not built beside ainb");
-        return;
-    };
+    assert!(
+        tmux_available(),
+        "tmux is required for this real TUI acceptance test"
+    );
+    let plugin_root = hangar_plugin_root()
+        .expect("staged dist/plugins/hangar-tui is required for this acceptance test");
+    let daemon = daemon_bin()
+        .expect("sibling ainb-hangar-daemon binary is required for this acceptance test");
 
     let home = tempfile::tempdir().expect("isolated Hangar home");
     seed_tui_home(home.path());
@@ -460,11 +471,41 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         !home_capture.contains("Control Center"),
         "Hangar content appeared before its launch key:\n{home_capture}"
     );
+    let empty_listing = connections_json(home.path(), &daemon);
+    let empty_connections = empty_listing["connections"]
+        .as_array()
+        .expect("connections list must contain an array");
+    let non_observer_connections: Vec<_> = empty_connections
+        .iter()
+        .filter(|connection| connection["surface"]["kind"].as_str() != Some("cli"))
+        .collect();
+    assert!(
+        non_observer_connections.is_empty(),
+        "registry must have zero connections before the Hangar launch key, apart from its CLI observer: {empty_listing}"
+    );
+    assert_eq!(
+        empty_connections.len(),
+        1,
+        "only the connections-list CLI observer may be registered before the Hangar launch key: {empty_listing}"
+    );
 
     // `g` is a single-shot navigation key. It lazy-spawns the staged real
     // hangar-tui subprocess, which authenticates as `surface.kind=tui` over the
     // production daemon socket. Do not re-send it: plugin screens may own `g`.
     send_key(tui.name(), "g");
+    let hangar_capture = poll_capture(tui.name(), Duration::from_secs(30), |capture| {
+        capture.contains("[1]Issues") && capture.contains("[B]Boards")
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "Hangar screen chrome never rendered after its launch key; last capture:\n{}",
+            capture_pane(tui.name())
+        )
+    });
+    assert!(
+        !hangar_capture.contains("Stats"),
+        "HomeScreen remained visible after Hangar launch key:\n{hangar_capture}"
+    );
     let (plugin_pid, first_listing) =
         wait_for_tui_pid(home.path(), &daemon, Duration::from_secs(30));
     assert!(
