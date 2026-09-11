@@ -28,7 +28,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ainb_hangar_proto::auth;
+use ainb_hangar_proto::connections::{ConnectionsListResult, SurfaceInfo, SurfaceKind};
 use ainb_hangar_proto::events::AttentionRow;
+use ainb_hangar_proto::events::{EVENT_METHOD, HangarEvent};
 use ainb_hangar_proto::snapshots::{
     AnswerParams, AnswerResult, AtcRegisterParams, AtcRegisterResult, AtcUnregisterParams,
     AtcUnregisterResult, AttentionListParams, AttentionListResult,
@@ -130,6 +132,37 @@ pub fn socket_path() -> Option<PathBuf> {
 pub struct DaemonClient {
     socket: PathBuf,
     token: String,
+    surface: SurfaceInfo,
+}
+
+/// Live stream of daemon connection-registry changes.
+pub struct ConnectionSubscription {
+    reader: BufReader<OwnedReadHalf>,
+    // Retain the write half so the daemon retains this subscription and its
+    // associated registry row until the caller drops the stream.
+    _writer: OwnedWriteHalf,
+}
+
+impl ConnectionSubscription {
+    /// Wait for the next complete registry snapshot pushed by the daemon.
+    pub async fn next_event(&mut self) -> Result<ConnectionsListResult, DaemonError> {
+        loop {
+            let frame = read_frame(&mut self.reader).await?;
+            if frame.get("method").and_then(Value::as_str) != Some(EVENT_METHOD) {
+                continue;
+            }
+            let Some(params) = frame.get("params") else {
+                continue;
+            };
+            let event = match serde_json::from_value::<HangarEvent>(params.clone()) {
+                Ok(event) => event,
+                Err(_) => continue,
+            };
+            if let HangarEvent::ConnectionsChanged { connections } = event {
+                return Ok(ConnectionsListResult { connections });
+            }
+        }
+    }
 }
 
 /// One pushed update from a persistent Fleet subscription.
@@ -238,13 +271,26 @@ impl DaemonClient {
             .map_err(|e| DaemonError::Token(e.to_string()))?
             .trim()
             .to_string();
-        Ok(Self { socket, token })
+        Ok(Self {
+            socket,
+            token,
+            surface: cli_surface(),
+        })
     }
 
     /// Construct from explicit parts (the test seam).
     #[must_use]
     pub fn with_parts(socket: PathBuf, token: String) -> Self {
-        Self { socket, token }
+        Self {
+            socket,
+            token,
+            surface: cli_surface(),
+        }
+    }
+
+    /// Set the metadata sent in each `auth/hello` frame.
+    pub fn set_surface(&mut self, surface: SurfaceInfo) {
+        self.surface = surface;
     }
 
     /// The socket this client dials. Diagnostics MUST name it: "attention/list
@@ -267,6 +313,21 @@ impl DaemonClient {
         let parsed: AttentionListResult =
             serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))?;
         Ok(parsed.attention)
+    }
+
+    /// Return every currently authenticated surface on this daemon.
+    pub async fn connections_list(&self) -> Result<ConnectionsListResult, DaemonError> {
+        self.call_typed(methods::HANGAR_CONNECTIONS_LIST, &serde_json::json!({})).await
+    }
+
+    /// Open a registry-change stream. The acknowledgement is bounded; the
+    /// returned subscription stays live until its caller drops it.
+    pub async fn open_connections_subscription(
+        &self,
+    ) -> Result<ConnectionSubscription, DaemonError> {
+        tokio::time::timeout(RPC_TIMEOUT, self.open_connections_subscription_inner())
+            .await
+            .map_err(|_| DaemonError::Timeout(RPC_TIMEOUT))?
     }
 
     /// Answer one open attention row (`attention/answer`). The daemon runs the
@@ -602,13 +663,7 @@ impl DaemonClient {
             })?;
         let (read_half, mut writer) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        write_frame(
-            &mut writer,
-            methods::AUTH_HELLO,
-            json!({ "token": self.token }),
-            1,
-        )
-        .await?;
+        write_frame(&mut writer, methods::AUTH_HELLO, self.hello_params(), 1).await?;
         let hello = read_response(&mut reader).await?;
         if let Some(error) = hello.error {
             return Err(DaemonError::Rpc {
@@ -617,6 +672,30 @@ impl DaemonClient {
             });
         }
         Ok((reader, writer))
+    }
+
+    /// Encode the optional surface extension without widening every client call
+    /// site's public parameter list.
+    fn hello_params(&self) -> Value {
+        json!({ "token": self.token, "surface": self.surface })
+    }
+
+    async fn open_connections_subscription_inner(
+        &self,
+    ) -> Result<ConnectionSubscription, DaemonError> {
+        let (mut reader, mut writer) = self.dial().await?;
+        write_frame(&mut writer, methods::ATTENTION_SUBSCRIBE, json!({}), 2).await?;
+        let response = read_response(&mut reader).await?;
+        if let Some(error) = response.error {
+            return Err(DaemonError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        Ok(ConnectionSubscription {
+            reader,
+            _writer: writer,
+        })
     }
 
     /// Issue one authenticated JSON-RPC call, encoding the params and decoding
@@ -699,13 +778,7 @@ impl DaemonClient {
         let (read_half, mut writer) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        write_frame(
-            &mut writer,
-            methods::AUTH_HELLO,
-            json!({ "token": self.token }),
-            1,
-        )
-        .await?;
+        write_frame(&mut writer, methods::AUTH_HELLO, self.hello_params(), 1).await?;
         let hello = read_response(&mut reader).await?;
         if let Some(err) = hello.error {
             return Err(DaemonError::Rpc {
@@ -743,13 +816,7 @@ impl DaemonClient {
         let (read_half, mut writer) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        write_frame(
-            &mut writer,
-            methods::AUTH_HELLO,
-            json!({ "token": self.token }),
-            1,
-        )
-        .await?;
+        write_frame(&mut writer, methods::AUTH_HELLO, self.hello_params(), 1).await?;
         let hello = read_response(&mut reader).await?;
         if let Some(error) = hello.error {
             return Err(DaemonError::Rpc {
@@ -781,6 +848,15 @@ impl DaemonClient {
                 _writer: writer,
             },
         ))
+    }
+}
+
+/// Metadata used by generic daemon-client callers unless they choose a more
+/// specific surface through [`DaemonClient::set_surface`].
+fn cli_surface() -> SurfaceInfo {
+    SurfaceInfo {
+        kind: SurfaceKind::Cli,
+        pid: std::process::id(),
     }
 }
 
