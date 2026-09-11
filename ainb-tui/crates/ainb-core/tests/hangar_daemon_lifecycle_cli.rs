@@ -278,8 +278,11 @@ fn launch_tui(home: &Path, plugin_root: &Path, daemon: &Path) -> OwnedTmuxSessio
         new_session.arg("-e").arg(format!("{key}={}", value.display()));
     }
     for (key, value) in [
+        // Tmux windows inherit their server environment. Empty values prevent
+        // a server-owned kill or deny filter from changing this acceptance run.
         ("AINB_DISABLE_PLUGINS", ""),
-        ("AINB_PLUGINS_ONLY", "hangar-tui"),
+        ("AINB_DISABLE_PLUGIN", ""),
+        ("AINB_ONLY_PLUGINS", "hangar-tui"),
     ] {
         new_session.arg("-e").arg(format!("{key}={value}"));
     }
