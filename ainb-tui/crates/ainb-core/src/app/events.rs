@@ -1748,7 +1748,10 @@ impl EventHandler {
             SessionTab::Thread | SessionTab::Pal => return Some(AppEvent::SessionTabComposerSend),
             SessionTab::Err | SessionTab::Log => return None,
         }
-        if !state.selected_sessions.is_empty() {
+        if state.is_ssh_session_selected() || state.is_other_tmux_selected() || state.shell_selected
+        {
+            Some(AppEvent::AttachTmuxSession)
+        } else if !state.selected_sessions.is_empty() {
             Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
         } else if let Some(session) = state.selected_session() {
             let interactive = crate::app::state::is_stoppable_interactive(session);
