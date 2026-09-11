@@ -62,8 +62,8 @@ mod widgets;
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
 
-use app::{App, EventHandler};
 use app::keymap::{Chord, KeyAction, KeyContext, Keymap, UiAction};
+use app::{App, EventHandler};
 use components::LayoutComponent;
 use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
 
@@ -622,22 +622,20 @@ async fn run_tui_loop(
                         continue;
                     }
 
-                    use crossterm::event::KeyCode;
-
                     // Ctrl+Q belongs to the terminal screen. Interactive mode
                     // releases; every other session-list state consumes it so
                     // the host's plain `q` shortcut is never timing-dependent.
-                    {
-                        use crossterm::event::KeyModifiers;
-                        if key_event.code == KeyCode::Char('q')
-                            && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            if app.state.is_interactive_pane() {
-                                app.state.release_interactive_pane();
-                            }
-                            if app.state.current_screen == crate::app::screens::ids::SESSION_LIST {
-                                continue;
-                            }
+                    let chord = Chord::from_key_event(&key_event);
+                    let interactive_detach = matches!(
+                        keymap.resolve(&[KeyContext::EmbedInteractive], &chord),
+                        Some(KeyAction::App(crate::app::events::AppEvent::DetachSession))
+                    );
+                    if interactive_detach {
+                        if app.state.is_interactive_pane() {
+                            app.state.release_interactive_pane();
+                        }
+                        if app.state.current_screen == crate::app::screens::ids::SESSION_LIST {
+                            continue;
                         }
                     }
 
@@ -648,11 +646,7 @@ async fn run_tui_loop(
                     // inside the embed reaches the PTY instead of opening the
                     // palette.
                     if app.state.is_interactive_pane() {
-                        let chord = Chord::from_key_event(&key_event);
-                        if matches!(
-                            keymap.resolve(&[KeyContext::EmbedInteractive], &chord),
-                            Some(KeyAction::App(crate::app::events::AppEvent::DetachSession))
-                        ) {
+                        if interactive_detach {
                             app.state.release_interactive_pane();
                             continue;
                         }
@@ -690,7 +684,6 @@ async fn run_tui_loop(
                     //    typing an `ssh://...` URL.
                     // An already-open palette still consumes keys, so it can
                     // always be closed.
-                    let chord = Chord::from_key_event(&key_event);
                     let colon = matches!(
                         keymap.resolve(&[KeyContext::Global], &chord),
                         Some(KeyAction::OpenSlashPalette)
@@ -759,9 +752,11 @@ async fn run_tui_loop(
                         }
                     }
 
-                    if let Some(app_event) =
-                        EventHandler::handle_key_event_with_keymap(key_event, &mut app.state, &keymap)
-                    {
+                    if let Some(app_event) = EventHandler::handle_key_event_with_keymap(
+                        key_event,
+                        &mut app.state,
+                        &keymap,
+                    ) {
                         // Handle scroll events for live logs and tmux preview
                         use crate::app::events::AppEvent;
                         match app_event {
