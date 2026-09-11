@@ -50,6 +50,7 @@ pub fn open(path: &Path) -> Result<Connection, CacheError> {
     // writes). `synchronous=NORMAL` is the WAL-recommended balance: durable
     // across crashes, not across power loss — fine for a derived cache.
     conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
