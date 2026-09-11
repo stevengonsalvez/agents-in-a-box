@@ -1079,6 +1079,11 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         expected_answered_by.starts_with("tui@"),
         "the registry derives TUI provenance: {expected_answered_by}"
     );
+    let forged_answered_by = format!("{expected_answered_by}.forged");
+    assert_ne!(
+        forged_answered_by, expected_answered_by,
+        "the request-supplied provenance differs from daemon provenance"
+    );
     let (session_key, _scope) = harness.create_session(&mut client, None).await;
 
     let sent = client
@@ -1111,7 +1116,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "looks fine to me",
-                "answered_by": "tui@forged-host",
+                "answered_by": forged_answered_by,
             }),
         )
         .await;
@@ -1134,7 +1139,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "Reject",
-                "answered_by": "tui@forged-host",
+                "answered_by": forged_answered_by,
             }),
         )
         .await;
@@ -1208,7 +1213,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "Allow once",
-                "answered_by": "tui@forged-host",
+                "answered_by": forged_answered_by,
             }),
         )
         .await;
@@ -1267,7 +1272,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
                 serde_json::json!({
                     "attention_id": row_id,
                     "answer": "Reject",
-                    "answered_by": "tui@forged-host",
+                    "answered_by": forged_answered_by,
                 }),
             )
             .await;
@@ -1346,7 +1351,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": "drifted-options",
                 "answer": "Bogus",
-                "answered_by": "tui@forged-host",
+                "answered_by": forged_answered_by,
             }),
         )
         .await;
@@ -1372,7 +1377,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": second_id,
                 "answer": "deny",
-                "answered_by": "tui@forged-host",
+                "answered_by": forged_answered_by,
             }),
         )
         .await;
