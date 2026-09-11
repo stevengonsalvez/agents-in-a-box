@@ -91,19 +91,33 @@ pub async fn run_server_proxy(
     status: StatusMap,
     mut signal: tokio::sync::watch::Receiver<ProxySignal>,
 ) -> Result<()> {
-    if super::paths::socket_alive_or_cleanup(&socket_path) {
-        anyhow::bail!(
-            "socket {} already served by another daemon",
-            socket_path.display()
-        );
-    }
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("bind {}", socket_path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    // `flock` and `UnixListener::bind` are synchronous. Keep both inside the
+    // same blocking task so another ainb process cannot observe a stale socket,
+    // unlink it, and bind the path between our probe and bind.
+    let bind_path = socket_path.clone();
+    let std_listener = tokio::task::spawn_blocking(move || {
+        let _lock = crate::config::lock::lock_for(&bind_path)
+            .with_context(|| format!("lock MCP socket {}", bind_path.display()))?;
+        if super::paths::socket_alive_or_cleanup_with_lock(&bind_path, &_lock) {
+            anyhow::bail!(
+                "socket {} already served by another daemon",
+                bind_path.display()
+            );
+        }
+        let listener = std::os::unix::net::UnixListener::bind(&bind_path)
+            .with_context(|| format!("bind {}", bind_path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bind_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        listener.set_nonblocking(true)?;
+        Ok::<_, anyhow::Error>(listener)
+    })
+    .await
+    .context("MCP socket bind task panicked")??;
+    let listener = UnixListener::from_std(std_listener)
+        .with_context(|| format!("adopt {} into Tokio", socket_path.display()))?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<Event>();
 
