@@ -129,6 +129,9 @@ serde_yaml = { workspace = true }
 # Home-directory resolution for the per-task env tree root (mirrors the store's
 # `$AINB_HANGAR_HOME`-else-`~` resolution so env dirs and the db share a root).
 dirs = { workspace = true }
+# Daemon-side host stamp for live surface registry rows. Clients never send a
+# hostname, so a forwarded socket stays attributed to the daemon's machine.
+gethostname = { workspace = true }
 # y0f: the advisory file lock (`FileExt::lock_exclusive`) the inbox cap takes on
 # `inbox/hangar-daemon.lock` — the SAME lock the hook's inbox writer holds — so a
 # periodic cap of the daemon's own exhaust inbox never races a concurrent commit.
