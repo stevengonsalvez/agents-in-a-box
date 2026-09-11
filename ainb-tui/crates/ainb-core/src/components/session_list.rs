@@ -8,6 +8,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
+use unicode_width::UnicodeWidthChar;
 
 // Premium color palette (TUI Style Guide)
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
@@ -25,9 +26,7 @@ const ALERT_WAITING_AMBER: Color = Color::Rgb(230, 180, 80);
 const ALERT_PERMISSION_RED: Color = Color::Rgb(220, 90, 90);
 const ALERT_ERROR_RED: Color = Color::Rgb(230, 100, 100);
 
-// Per-agent brand colors for the coding-agent pill chip. The chip is a
-// filled block in these colors so the agent is identifiable at a glance —
-// orange = Claude, blue = Gemini, etc. — even before the glyph resolves.
+// Per-agent brand colours for the compact provider icon on the metadata line.
 const BRAND_CLAUDE: Color = Color::Rgb(217, 119, 87); // Anthropic clay-orange
 const BRAND_CODEX: Color = Color::Rgb(236, 236, 241); // OpenAI near-white
 const BRAND_COPILOT: Color = Color::Rgb(46, 160, 67); // GitHub green
@@ -37,10 +36,6 @@ const BRAND_KIRO: Color = Color::Rgb(171, 121, 224); // crystal purple
 const BRAND_SHELL: Color = Color::Rgb(150, 150, 165); // muted slate
 const BRAND_SSH: Color = Color::Rgb(255, 165, 0); // amber
 
-// Powerline rounded caps that wrap the pill chip's filled middle.
-const PILL_LEFT: &str = "\u{e0b6}"; //
-const PILL_RIGHT: &str = "\u{e0b4}"; //
-
 use crate::fleet::attention::{
     AttentionKind, AttentionTone, SessionAttention, format_age, needs_you_count, tone,
 };
@@ -49,9 +44,7 @@ use crate::app::{
     AppState,
     state::{AttachableRef, SessionContextAction, SessionListRowTarget},
 };
-use crate::models::{
-    Session, SessionAgentType, SessionMode, SessionStatus, ShellSessionStatus, Workspace,
-};
+use crate::models::{Session, SessionAgentType, SessionStatus, ShellSessionStatus, Workspace};
 
 /// Width of the leading badge slot rendered before every list row.
 /// Two characters: a digit (or space) and a trailing space separator.
@@ -115,56 +108,64 @@ fn chip_label(chip: &SessionAttention, sending: Option<&SessionAttention>) -> &'
     }
 }
 
-/// Cell width of the chip strip for `chips`, including the leading gap.
-fn chip_strip_width(
+/// Cell width of attention content, excluding its gap from the lifecycle word.
+fn attention_width(
     chips: &[SessionAttention],
     now_ms: i64,
     sending: Option<&SessionAttention>,
 ) -> usize {
-    if chips.is_empty() {
-        return 0;
-    }
     chips
         .iter()
-        .map(|chip| {
-            CHIP_GAP + chip_label(chip, sending).len() + 1 + format_age(now_ms, chip.since_ms).len()
+        .enumerate()
+        .map(|(index, chip)| {
+            usize::from(index > 0) * CHIP_GAP
+                + chip_label(chip, sending).len()
+                + 1
+                + format_age(now_ms, chip.since_ms).len()
         })
         .sum()
 }
 
-/// Append the row's attention chips, RIGHT-ALIGNED against `row_width`.
+/// Append a lifecycle plus attention gutter, right-aligned against `row_width`.
 ///
-/// Right-aligned because the strip is a column an operator scans down: chips
-/// that trail a variable-length branch name land at a different column on every
-/// row, which is exactly the scan the four-word vocabulary exists to make fast.
-///
-/// Width is measured with `Span::width` (unicode-width), never byte length —
-/// the row already carries a Nerd Font agent pill and a status glyph whose byte
-/// counts have nothing to do with their cell counts.
-///
-/// When the row is too narrow, the SESSION NAME at `name_index` gives way, not
-/// the chips: a truncated name still identifies the row (the tree, the agent
-/// pill and the attach digit are all still there), while a truncated `APPROVE`
-/// reading `APPRO` is a word the operator has to decode. This is the spec's
-/// 80-column rule — chip words never abbreviate.
-fn push_attention_chips(
+/// A row reads left-to-right as identity, then status. The lifecycle word is
+/// deliberately in the gutter with `ASK`/`WAIT`/`APPROVE`, rather than mixed
+/// into the title. Names give way first: status words never abbreviate.
+fn push_status_gutter(
     spans: &mut Vec<Span<'static>>,
+    status_indicator: &str,
+    lifecycle_label: &str,
+    lifecycle_style: Style,
     chips: &[SessionAttention],
     now_ms: i64,
     row_width: usize,
     name_index: usize,
     sending: Option<&SessionAttention>,
 ) {
-    if chips.is_empty() {
-        return;
-    }
-    let strip = chip_strip_width(chips, now_ms, sending);
+    let attention = attention_width(chips, now_ms, sending);
     let mut used: usize = spans.iter().map(Span::width).sum();
-    // The gap belongs in the BUDGET, not in the padding: applied afterwards as
-    // a floor it pushes the strip past the row's right edge on exactly the
-    // narrow rows the budget was computed to protect, and the widget then clips
-    // the age off the end.
-    let budget = row_width.saturating_sub(strip + CHIP_GAP + CHIP_RIGHT_MARGIN);
+    let fixed_title_width: usize = spans
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != name_index)
+        .map(|(_, span)| span.width())
+        .sum();
+    let lifecycle_width = Span::raw(status_indicator).width() + 1 + lifecycle_label.len();
+    // At the supported minimum width, an operator action wins over passive
+    // process state. Dropping `○ IDLE` leaves `APPROVE` whole rather than
+    // asking Ratatui to clip either word. Wider rows retain the full gutter.
+    let show_lifecycle = fixed_title_width
+        .saturating_add(lifecycle_width)
+        .saturating_add((!chips.is_empty()).then_some(CHIP_GAP).unwrap_or_default())
+        .saturating_add(attention)
+        .saturating_add(CHIP_RIGHT_MARGIN)
+        <= row_width;
+    let gutter_width = if show_lifecycle { lifecycle_width } else { 0 }
+        .saturating_add(
+            (show_lifecycle && !chips.is_empty()).then_some(CHIP_GAP).unwrap_or_default(),
+        )
+        .saturating_add(attention);
+    let budget = row_width.saturating_sub(gutter_width + CHIP_RIGHT_MARGIN);
     if used > budget {
         if let Some(name) = spans.get_mut(name_index) {
             let over = used - budget;
@@ -176,10 +177,18 @@ fn push_attention_chips(
             used += name.width();
         }
     }
-    let pad = row_width.saturating_sub(used + strip + CHIP_RIGHT_MARGIN).max(CHIP_GAP);
+    let pad = row_width.saturating_sub(used + gutter_width + CHIP_RIGHT_MARGIN);
     spans.push(Span::raw(" ".repeat(pad)));
+    if show_lifecycle {
+        spans.push(Span::styled(status_indicator.to_string(), lifecycle_style));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            lifecycle_label.to_string(),
+            lifecycle_style.add_modifier(Modifier::BOLD),
+        ));
+    }
     for (index, chip) in chips.iter().enumerate() {
-        if index > 0 {
+        if show_lifecycle || index > 0 {
             spans.push(Span::raw(" ".repeat(CHIP_GAP)));
         }
         // A chip nothing can answer renders DIMMED, never hidden. Hidden is
@@ -263,13 +272,17 @@ impl SessionListComponent {
         self.update_selection(state);
         state.sessions_pane_state.set_list_scroll_offset(self.list_state.offset());
 
-        // Width a row's own spans may occupy. `List` already takes its
-        // highlight symbol out of the item area before the row is laid out, so
-        // this is the panel interior and nothing further comes off it —
-        // measured, not assumed (`every_chip_strip_ends_one_cell_clear_of_the_border`).
-        let row_width = usize::from(area.width.saturating_sub(2));
+        // Width a row's own spans may occupy: the panel borders and List's
+        // reserved highlight column are both outside the item area. Reserving
+        // this here keeps the status gutter one cell clear of the right border
+        // on selected and unselected rows alike.
+        let row_width = usize::from(area.width.saturating_sub(2))
+            .saturating_sub(Span::raw(HIGHLIGHT_SYMBOL).width());
         let now_ms = chrono::Utc::now().timestamp_millis();
         let items = SessionListComponent::build_list_items_static(state, row_width, now_ms);
+        state
+            .sessions_pane_state
+            .set_list_item_heights(items.iter().map(ListItem::height).collect());
 
         // Show focus indicator with premium colors
         use crate::app::state::FocusedPane;
@@ -647,20 +660,7 @@ impl SessionListComponent {
                     let tree_prefix = if is_last_session { "└─" } else { "├─" };
 
                     let status_indicator = session.status.indicator();
-                    let lifecycle_label = session_lifecycle_label(&session.status);
-
-                    // Mode indicator (controlled by show_container_status config).
-                    // 1-cell Nerd Font glyphs (dev-docker / fa-desktop) instead of
-                    // the 🐳/🖥️ emoji — emoji render 2-cell and the variation
-                    // selector made width unpredictable across terminals.
-                    let mode_indicator = if state.app_config.ui_preferences.show_container_status {
-                        match session.mode {
-                            SessionMode::Boss => "\u{e7b0} ",        // dev-docker
-                            SessionMode::Interactive => "\u{f108} ", // fa-desktop
-                        }
-                    } else {
-                        ""
-                    };
+                    let lifecycle_label = session_lifecycle_label(state, session);
 
                     // Git changes (controlled by show_git_status config)
                     let changes_text = if state.app_config.ui_preferences.show_git_status
@@ -686,37 +686,8 @@ impl SessionListComponent {
                         }
                     };
                     let branch_color = state_color;
-                    // Background behind the agent pill's powerline caps so they
-                    // blend with the row (panel bg normally, highlight bar when
-                    // selected).
-                    let row_bg = if is_selected_session {
-                        LIST_HIGHLIGHT_BG
-                    } else {
-                        DARK_BG
-                    };
-
                     let agent_icon = session.agent_type.icon();
                     let agent_color = agent_brand_color(&session.agent_type);
-                    // Agent chip: non-selected rows get the filled brand pill;
-                    // the selected row drops the fill (bold brand glyph only) so
-                    // there is no square box around the glyph on the highlight
-                    // bar. Caps collapse to spaces to preserve column width.
-                    let (pill_l, pill_r, agent_style) = if is_selected_session {
-                        (
-                            " ",
-                            " ",
-                            Style::default().fg(agent_color).add_modifier(Modifier::BOLD),
-                        )
-                    } else {
-                        (
-                            PILL_LEFT,
-                            PILL_RIGHT,
-                            Style::default()
-                                .fg(DARK_BG)
-                                .bg(agent_color)
-                                .add_modifier(Modifier::BOLD),
-                        )
-                    };
                     let is_multi_selected = state.selected_sessions.contains(&session.id);
 
                     let checkbox = ballot_checkbox(is_multi_selected);
@@ -728,54 +699,21 @@ impl SessionListComponent {
                     // on a human then.
                     let session_alert = session.live_attention.as_slice();
 
-                    let mut session_spans = vec![
+                    // Line one contains only stable session identity. Status lives
+                    // in a fixed right gutter so it is readable as a column while
+                    // scanning; provider/model metadata moves to line two.
+                    let mut title_spans = vec![
                         next_badge(&mut attach_no),
                         checkbox,
                         Span::styled(tree_prefix, Style::default().fg(SUBDUED_BORDER)),
-                        Span::styled(
-                            format!(" {} ", status_indicator),
-                            Style::default().fg(state_color),
-                        ),
-                        // Lifecycle reports process/turn state only. It is
-                        // intentionally separate from ASK/WAIT/APPROVE chips,
-                        // which report an attention request and answer route.
-                        Span::styled(
-                            format!("{lifecycle_label} "),
-                            Style::default().fg(state_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(mode_indicator.to_string(), Style::default().fg(MUTED_GRAY)),
-                        // Coding-agent chip — brand colour carries identity
-                        // (orange Claude, blue Gemini, …). Filled pill on normal
-                        // rows; bold glyph only on the selected row (no square).
-                        Span::styled(pill_l, Style::default().fg(agent_color).bg(row_bg)),
-                        Span::styled(format!(" {} ", agent_icon), agent_style),
-                        Span::styled(pill_r, Style::default().fg(agent_color).bg(row_bg)),
                         Span::raw(" "),
                     ];
-                    // Model/effort belongs on the row rather than the selected
-                    // session footer: scanning the roster should answer what is
-                    // running where. It yields on narrow panes because an
-                    // attention chip must never be clipped to make room for
-                    // metadata.
-                    if let Some(metadata) = session_model_effort_label(state, session) {
-                        let fixed_width: usize = session_spans.iter().map(Span::width).sum();
-                        let required = fixed_width
-                            .saturating_add(Span::raw(metadata.as_str()).width())
-                            .saturating_add(Span::raw(session_list_name(session)).width().min(4))
-                            .saturating_add(Span::raw(changes_text.as_str()).width())
-                            .saturating_add(chip_strip_width(session_alert, now_ms, None))
-                            .saturating_add(CHIP_RIGHT_MARGIN);
-                        if required <= row_width {
-                            session_spans
-                                .push(Span::styled(metadata, Style::default().fg(MUTED_GRAY)));
-                        }
-                    }
-                    // The name is the span that gives way when the chip strip
-                    // needs the room. Its index is captured rather than searched
-                    // for, so reordering the row above can never silently
-                    // truncate the branch decoration instead.
-                    let name_span_index = session_spans.len();
-                    session_spans.push(Span::styled(
+                    // The title is the span that gives way when the fixed
+                    // right gutter needs room. Its index is captured rather
+                    // than searched, so future reordering cannot silently
+                    // truncate a tree or status decoration instead.
+                    let name_span_index = title_spans.len();
+                    title_spans.push(Span::styled(
                         session_list_name(session),
                         Style::default().fg(branch_color).add_modifier(if is_selected_session {
                             Modifier::BOLD
@@ -783,12 +721,12 @@ impl SessionListComponent {
                             Modifier::empty()
                         }),
                     ));
-                    session_spans.push(Span::styled(
+                    title_spans.push(Span::styled(
                         changes_text,
                         Style::default().fg(WARNING_ORANGE),
                     ));
                     debug_assert_eq!(
-                        session_spans[name_span_index].content,
+                        title_spans[name_span_index].content,
                         session_list_name(session),
                         "name_span_index must track the session-name span"
                     );
@@ -799,17 +737,38 @@ impl SessionListComponent {
                     // has navigated to a different question.
                     let sending =
                         session_alert.iter().find(|chip| state.ask_state.is_sending(chip));
-                    push_attention_chips(
-                        &mut session_spans,
+                    push_status_gutter(
+                        &mut title_spans,
+                        status_indicator,
+                        lifecycle_label,
+                        Style::default().fg(state_color),
                         session_alert,
                         now_ms,
                         row_width,
                         name_span_index,
                         sending,
                     );
-                    let session_line = Line::from(session_spans);
+                    let title_line = Line::from(title_spans);
 
-                    items.push(ListItem::new(session_line));
+                    // Keep model/effort visible for every row without making
+                    // identity compete with provider metadata. It is a separate
+                    // line, aligned underneath the title rather than a pill.
+                    let mut metadata_spans = vec![
+                        empty_badge(),
+                        Span::raw("     "),
+                        Span::styled(agent_icon.to_string(), Style::default().fg(agent_color)),
+                    ];
+                    if let Some(metadata) = session_model_effort_label(state, session) {
+                        let prefix_width: usize = metadata_spans.iter().map(Span::width).sum();
+                        metadata_spans.push(Span::raw(" "));
+                        metadata_spans.push(Span::styled(
+                            truncate_text(&metadata, row_width.saturating_sub(prefix_width + 1)),
+                            Style::default().fg(MUTED_GRAY),
+                        ));
+                    }
+                    let metadata_line = Line::from(metadata_spans);
+
+                    items.push(ListItem::new(vec![title_line, metadata_line]));
                 }
 
                 // Render workspace shell (single shell per workspace)
@@ -1223,15 +1182,51 @@ fn session_list_name(session: &Session) -> String {
         .unwrap_or_else(|| session.branch_name.clone())
 }
 
-/// Compact process/turn lifecycle word for the sidebar. This is deliberately
-/// not an attention state: a RUN row can still carry ASK or WAIT separately.
-const fn session_lifecycle_label(status: &SessionStatus) -> &'static str {
-    match status {
+/// Compact process/turn lifecycle word for the sidebar. Fleet's completed-turn
+/// observation is more precise than local `SessionStatus::Idle`, so it gets a
+/// dedicated `DONE` label rather than being collapsed into normal idle.
+fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str {
+    if matches!(
+        state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
+        Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete)
+    ) && state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false)
+        && session.live_attention.is_empty()
+    {
+        return "DONE";
+    }
+
+    match session.status {
         SessionStatus::Running => "RUN",
         SessionStatus::Idle => "IDLE",
         SessionStatus::Stopped => "STOP",
         SessionStatus::Error(_) => "ERR",
     }
+}
+
+/// Fit supplementary metadata into its independent second-line budget.
+/// Metadata is observational detail, so a clipped value is preferable to
+/// stealing room from the first line's identity and status gutter.
+fn truncate_text(text: &str, width: usize) -> String {
+    let full = Span::raw(text).width();
+    if full <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let keep = width.saturating_sub(UnicodeWidthChar::width('…').unwrap_or(1));
+    let mut used: usize = 0;
+    let mut out = String::new();
+    for character in text.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
+        if used.saturating_add(character_width) > keep {
+            break;
+        }
+        out.push(character);
+        used += character_width;
+    }
+    out.push('…');
+    out
 }
 
 /// Compact observed runtime metadata shown before a session's label.
@@ -1244,9 +1239,9 @@ fn session_model_effort_label(state: &AppState, session: &Session) -> Option<Str
         metadata.model.as_deref(),
         metadata.reasoning_effort.as_deref(),
     ) {
-        (Some(model), Some(effort)) => Some(format!("{model}/{effort} · ")),
-        (Some(model), None) => Some(format!("{model} · ")),
-        (None, Some(effort)) => Some(format!("effort:{effort} · ")),
+        (Some(model), Some(effort)) => Some(format!("{model} / {effort}")),
+        (Some(model), None) => Some(model.to_string()),
+        (None, Some(effort)) => Some(format!("effort: {effort}")),
         (None, None) => None,
     }
 }
@@ -1255,7 +1250,7 @@ fn context_action_label(action: SessionContextAction) -> &'static str {
     match action {
         SessionContextAction::Attach => "Attach",
         SessionContextAction::Restart => "Restart",
-        SessionContextAction::EditLabel => "Rename session label",
+        SessionContextAction::EditLabel => "Rename session prefix",
         SessionContextAction::OpenEditor => "Open editor",
         SessionContextAction::OpenShell => "Open shell",
         SessionContextAction::OpenGit => "Git",
@@ -1314,7 +1309,8 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let row_width = usize::from(area.width.saturating_sub(2));
+                let row_width = usize::from(area.width.saturating_sub(2))
+                    .saturating_sub(Span::raw(HIGHLIGHT_SYMBOL).width());
                 let items =
                     SessionListComponent::build_list_items_static(state, row_width, CHIP_NOW);
                 // Mirror `render`'s block so the snapshot carries the real
@@ -1443,7 +1439,7 @@ mod tests {
             },
         );
 
-        let rendered = render_panel(&mut state, 120, 9);
+        let rendered = render_panel(&mut state, 120, 14);
         let first_row = rendered
             .lines()
             .find(|line| line.contains("ainb/acp-chat"))
@@ -1452,16 +1448,23 @@ mod tests {
             .lines()
             .find(|line| line.contains("ainb/disk-clean"))
             .expect("second observed session row");
-        assert!(first_row.contains("gpt-5.6-terra/high"), "{first_row}");
-        assert!(second_row.contains("claude-opus-5/medium"), "{second_row}");
+        assert!(!first_row.contains("gpt-5.6-terra / high"), "{first_row}");
         assert!(
-            first_row.find("gpt-5.6-terra/high") < first_row.find("ainb/acp-chat"),
-            "metadata stays next to the agent marker, before the session label: {first_row}"
+            !second_row.contains("claude-opus-5 / medium"),
+            "{second_row}"
+        );
+        assert!(
+            rendered.contains("gpt-5.6-terra / high"),
+            "first row gets a second-line model/effort label: {rendered}"
+        );
+        assert!(
+            rendered.contains("claude-opus-5 / medium"),
+            "second row gets a second-line model/effort label: {rendered}"
         );
     }
 
     #[test]
-    fn sidebar_hides_model_effort_before_clipping_attention_at_narrow_width() {
+    fn sidebar_keeps_model_effort_on_its_own_line_at_narrow_width() {
         let mut state = chip_state();
         let first = state.workspaces[0].sessions[0].id;
         state.fleet_metadata.insert(
@@ -1473,8 +1476,8 @@ mod tests {
             },
         );
 
-        let rendered = render_panel(&mut state, 42, 9);
-        assert!(!rendered.contains("gpt-5.6-terra/high"), "{rendered}");
+        let rendered = render_panel(&mut state, 42, 14);
+        assert!(rendered.contains("gpt-5.6-terra / high"), "{rendered}");
         assert!(
             rendered.contains("ASK 40s"),
             "attention survives: {rendered}"
@@ -1488,9 +1491,12 @@ mod tests {
         state.workspaces[0].sessions[1].status = SessionStatus::Idle;
         state.workspaces[0].sessions[2].status = SessionStatus::Stopped;
         state.workspaces[0].sessions[3].status = SessionStatus::Error("lost transport".into());
-        assert_eq!(session_lifecycle_label(&SessionStatus::Stopped), "STOP");
+        assert_eq!(
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[2]),
+            "STOP"
+        );
 
-        let rendered = render_panel(&mut state, 140, 14);
+        let rendered = render_panel(&mut state, 140, 16);
         for (name, lifecycle) in [
             ("ainb/acp-chat", "RUN"),
             ("ainb/disk-clean", "IDLE"),
@@ -1506,15 +1512,131 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_uses_fleet_turn_complete_for_done_gutter() {
+        let mut state = chip_state();
+        let session = state.workspaces[0].sessions[0].id;
+        state.workspaces[0].sessions[0].live_attention.clear();
+        state.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet_metadata.insert(
+            session,
+            crate::app::state::SessionFleetMetadata {
+                lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
+                ..Default::default()
+            },
+        );
+
+        let rendered = render_panel(&mut state, 100, 16);
+        let row = rendered
+            .lines()
+            .find(|line| line.contains("ainb/acp-chat"))
+            .expect("completed session row");
+        assert!(
+            row.contains("DONE"),
+            "Fleet TurnComplete renders DONE: {row}"
+        );
+        assert!(
+            !row.contains("IDLE"),
+            "DONE must not collapse into IDLE: {row}"
+        );
+    }
+
+    #[test]
+    fn stale_or_contradicted_fleet_done_never_overrides_live_status() {
+        let mut state = chip_state();
+        let session = state.workspaces[0].sessions[0].id;
+        state.fleet_metadata.insert(
+            session,
+            crate::app::state::SessionFleetMetadata {
+                lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
+                ..Default::default()
+            },
+        );
+
+        // A current ASK is newer operator-facing evidence than an old turn
+        // completion and must not create the impossible `DONE ASK` row.
+        state.daemon_attention.lock().unwrap().reachable = true;
+        let with_ask = render_panel(&mut state, 100, 16);
+        let ask_row = with_ask
+            .lines()
+            .find(|line| line.contains("ainb/acp-chat"))
+            .expect("ask session row");
+        assert!(
+            ask_row.contains("IDLE") && ask_row.contains("ASK"),
+            "{ask_row}"
+        );
+        assert!(!ask_row.contains("DONE"), "{ask_row}");
+
+        // A retained snapshot cannot drive lifecycle after daemon reachability
+        // is lost, even when no current attention chip exists.
+        state.workspaces[0].sessions[0].live_attention.clear();
+        state.daemon_attention.lock().unwrap().reachable = false;
+        let unreachable = render_panel(&mut state, 100, 16);
+        let row = unreachable
+            .lines()
+            .find(|line| line.contains("ainb/acp-chat"))
+            .expect("unreachable daemon row");
+        assert!(row.contains("IDLE"), "{row}");
+        assert!(!row.contains("DONE"), "{row}");
+    }
+
+    #[test]
+    fn metadata_line_click_targets_its_own_session() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut state = chip_state();
+        state
+            .sessions_pane_state
+            .set_layout(Rect::new(0, 0, 100, 16), Rect::new(100, 0, 1, 16));
+        let mut list = SessionListComponent::new();
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("terminal");
+        terminal
+            .draw(|frame| list.render(frame, frame.area(), &mut state))
+            .expect("render");
+
+        let first = SessionListRowTarget::Attachable(AttachableRef::WorkspaceSession {
+            workspace_idx: 0,
+            session_idx: 0,
+        });
+        assert_eq!(state.session_list_row_at_mouse(8, 2), Some(first));
+        assert_eq!(state.session_list_row_at_mouse(8, 3), Some(first));
+
+        // When List has scrolled past the one-line workspace header, the two
+        // physical rows of the first session still resolve to the same logical
+        // item before the next session starts.
+        state.sessions_pane_state.set_list_scroll_offset(1);
+        assert_eq!(state.sessions_pane_state.row_index_at(8, 1), Some(1));
+        assert_eq!(state.sessions_pane_state.row_index_at(8, 2), Some(1));
+        assert_eq!(state.sessions_pane_state.row_index_at(8, 3), Some(2));
+    }
+
+    #[test]
+    fn minimum_width_keeps_attention_words_whole() {
+        let mut state = chip_state();
+        let rendered = render_panel(&mut state, 24, 16);
+        for word in ["ASK 40s", "ERR 9m", "APPROVE 3m", "DONE 1m"] {
+            assert!(
+                rendered.contains(word),
+                "`{word}` survives at minimum width: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_metadata_truncation_respects_terminal_cells() {
+        let truncated = truncate_text("界界界", 4);
+        assert_eq!(Span::raw(truncated).width(), 3);
+    }
+
+    #[test]
     fn chip_strip_at_100_columns() {
         let mut state = chip_state();
-        insta::assert_snapshot!(render_panel(&mut state, 100, 9));
+        insta::assert_snapshot!(render_panel(&mut state, 100, 16));
     }
 
     #[test]
     fn chip_strip_at_80_columns() {
         let mut state = chip_state();
-        insta::assert_snapshot!(render_panel(&mut state, 80, 9));
+        insta::assert_snapshot!(render_panel(&mut state, 80, 16));
     }
 
     /// The sidebar's real default width. The chip strip has to survive here,
@@ -1522,7 +1644,7 @@ mod tests {
     #[test]
     fn chip_strip_at_the_default_sidebar_width() {
         let mut state = chip_state();
-        insta::assert_snapshot!(render_panel(&mut state, 42, 9));
+        insta::assert_snapshot!(render_panel(&mut state, 42, 16));
     }
 
     #[test]
@@ -1532,7 +1654,7 @@ mod tests {
             SessionAttention::local(AttentionKind::Err, CHIP_NOW - 9 * 60_000),
             SessionAttention::local(AttentionKind::Ask, CHIP_NOW - 40_000),
         ]);
-        let rendered = render_panel(&mut state, 100, 9);
+        let rendered = render_panel(&mut state, 100, 16);
         let row = rendered
             .lines()
             .find(|line| line.contains("disk-clean"))
@@ -1555,7 +1677,7 @@ mod tests {
     fn every_chip_strip_ends_one_cell_clear_of_the_border() {
         for width in [42_u16, 60, 80, 100, 140] {
             let mut state = chip_state();
-            let rendered = render_panel(&mut state, width, 9);
+            let rendered = render_panel(&mut state, width, 16);
             // Cells between the last age character and the right border. The
             // line length itself proves nothing (`List` pads every row to the
             // full width), so measure the gap the operator actually sees.
@@ -1590,7 +1712,7 @@ mod tests {
     #[test]
     fn chip_words_survive_a_width_the_name_does_not() {
         let mut state = chip_state();
-        let rendered = render_panel(&mut state, 42, 9);
+        let rendered = render_panel(&mut state, 42, 16);
         for word in ["ASK 40s", "ERR 9m", "APPROVE 3m", "DONE 1m"] {
             assert!(
                 rendered.contains(word),
@@ -1607,7 +1729,7 @@ mod tests {
     fn a_request_the_screen_cannot_place_gets_its_own_row_not_a_truncated_badge() {
         let mut state = chip_state();
         state.attention_elsewhere = 1;
-        let rendered = render_panel(&mut state, 42, 11);
+        let rendered = render_panel(&mut state, 42, 16);
         assert!(
             rendered.contains("1 waiting elsewhere"),
             "the whole phrase must survive the narrow sidebar that clipped the \
@@ -1621,7 +1743,7 @@ mod tests {
     fn no_elsewhere_row_when_every_request_found_its_session() {
         let mut state = chip_state();
         state.attention_elsewhere = 0;
-        let rendered = render_panel(&mut state, 42, 11);
+        let rendered = render_panel(&mut state, 42, 16);
         assert!(
             !rendered.contains("elsewhere"),
             "the row must be absent, not zero: {rendered}"
@@ -1638,7 +1760,7 @@ mod tests {
         let mut without = chip_state();
         without.attention_elsewhere = 0;
         let digits = |state: &mut AppState| -> Vec<String> {
-            render_panel(state, 100, 12)
+            render_panel(state, 100, 16)
                 .lines()
                 .filter_map(|line| {
                     let trimmed = line.trim_start_matches(['│', '▶', ' ']);
@@ -1660,7 +1782,7 @@ mod tests {
         for session in &mut state.workspaces[0].sessions {
             session.live_attention.clear();
         }
-        let rendered = render_panel(&mut state, 100, 9);
+        let rendered = render_panel(&mut state, 100, 16);
         assert!(
             !rendered.contains("need you") && !rendered.contains("needs you"),
             "the badge must be absent, not zero: {rendered}"

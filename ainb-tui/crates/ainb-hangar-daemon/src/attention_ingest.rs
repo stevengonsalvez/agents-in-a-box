@@ -401,7 +401,13 @@ impl AttentionIngest {
                 envelope.insert("payload".to_string(), raw_value);
             }
         }
-        let provider = if line.agent.is_empty() {
+        // A Codex rollout is stronger evidence than the hook's `agent` field:
+        // old Codex hooks can still carry `agent: claude`. Use the same source
+        // of truth as transcript-model parsing, or the row is keyed as Claude
+        // while its lifecycle is being reduced from Codex events.
+        let provider = if is_codex_rollout(&line.transcript_path) {
+            "codex"
+        } else if line.agent.is_empty() {
             "unknown"
         } else {
             line.agent.as_str()
@@ -440,11 +446,11 @@ impl AttentionIngest {
         // Every hook line feeds the canonical Fleet reducer, including events
         // that do not raise an attention card. The source event ID is replay-safe;
         // legacy lines use their durable byte offset.
-        let semantic_event = if line.event_type == "PreToolUse" && line.matcher == "AskUserQuestion"
-        {
+        let raw_event = line.event_type.split(':').next().unwrap_or(&line.event_type);
+        let semantic_event = if raw_event == "PreToolUse" && line.matcher == "AskUserQuestion" {
             "AskUserQuestion"
         } else {
-            line.event_type.as_str()
+            crate::fleet::canonical_hook_event_type(provider, &line.event_type, &payload)
         };
         if !line.session_id.is_empty() {
             // Taken HERE, before the observation is built, and so before the
@@ -454,7 +460,7 @@ impl AttentionIngest {
             let transcript_model = self.transcript_model(&line, &payload).await;
             let observation = crate::fleet::HookObservation {
                 event_id: event_id.clone(),
-                provider: &line.agent,
+                provider,
                 provider_session_id: &line.session_id,
                 cwd: &line.cwd,
                 event_type: semantic_event,
@@ -501,10 +507,10 @@ impl AttentionIngest {
         // re-derived from the transcript. The distinction is load-bearing at the
         // stale-ASK gate below, so it travels with the context.
         let (context, from_hook_payload) =
-            match ask_context_from_hook_payload(&line.agent, semantic_event, &payload) {
+            match ask_context_from_hook_payload(provider, semantic_event, &payload) {
                 Some(ask) => (ask, true),
                 None => match permission_context_from_hook_payload(
-                    &line.agent,
+                    provider,
                     semantic_event,
                     &line.matcher,
                     &payload,
@@ -1191,12 +1197,11 @@ mod tests {
     /// CODEX parser.
     ///
     /// This is a measured shape, not a hypothetical: running the real event log
-    /// through this pipeline produced 9 sessions keyed `claude:<uuid>` whose
-    /// transcript is a codex rollout, because their opening hook predates the
-    /// `agent` field. Dispatching the parser on that label handed the rollout to
-    /// the claude parser, which finds no `assistant` record and returns nothing,
-    /// so the row showed a model (the hook supplies it) with the effort silently
-    /// missing, and every test still passed.
+    /// through this pipeline produced 9 sessions with a stale Claude label whose
+    /// transcript is a Codex rollout, because their opening hook predates the
+    /// `agent` field. Dispatching either parser OR Fleet identity on that label
+    /// handed the rollout to Claude and made all later Codex lifecycle hooks miss
+    /// the row.
     #[tokio::test]
     async fn a_codex_rollout_is_read_as_codex_even_when_labelled_claude() {
         let dir = tempfile::tempdir().unwrap();
@@ -1234,7 +1239,7 @@ mod tests {
         ingest.ingest_once(1_700_000_001_000).await;
 
         assert_eq!(
-            row_model_pair(&store, "claude:sid-rollout").await,
+            row_model_pair(&store, "codex:sid-rollout").await,
             (Some("gpt-5.6-terra".to_string()), Some("high".to_string())),
             "the rollout's turn_context must be parsed as codex despite the agent label"
         );
@@ -1583,6 +1588,47 @@ mod tests {
             open[0].payload.contains("Bash"),
             "the card must name the tool being approved, got {:?}",
             open[0].payload
+        );
+        let session = FleetRepo::get_session(store.pool(), "codex:codex-sid-1")
+            .await
+            .unwrap()
+            .expect("Codex hook must project a Fleet session");
+        assert_eq!(session.lifecycle_state, "IDLE");
+        assert_eq!(
+            session.attention_state, "APPROVAL",
+            "the Fleet status remains approval even though a degraded hook card is waiting-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_rollout_overrides_a_stale_claude_label_for_legacy_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let line = codex_permission_hook_line("codex-sid-2", "/tmp/codex-work", "evt-done", "Bash")
+            .replace(r#""agent":"codex""#, r#""agent":"claude""#)
+            .replace(
+                r#""event_type":"PermissionRequest""#,
+                r#""event_type":"agent-turn-complete""#,
+            );
+        std::fs::write(&events_jsonl, format!("{line}\n")).unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        ingest.ingest_once(1_700_000_000_000).await;
+
+        let session = FleetRepo::get_session(store.pool(), "codex:codex-sid-2")
+            .await
+            .unwrap()
+            .expect("rollout path identifies Codex despite stale hook label");
+        assert_eq!(session.lifecycle_state, "TURN_COMPLETE");
+        assert_eq!(session.attention_state, "NONE");
+        assert!(
+            FleetRepo::get_session(store.pool(), "claude:codex-sid-2")
+                .await
+                .unwrap()
+                .is_none(),
+            "the stale Claude label must not create a second Fleet row"
         );
     }
 

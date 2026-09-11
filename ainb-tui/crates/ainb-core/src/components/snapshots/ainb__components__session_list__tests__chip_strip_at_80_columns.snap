@@ -1,13 +1,21 @@
 ---
 source: crates/ainb-core/src/components/session_list.rs
-expression: "render_panel(&mut state, 80, 9)"
+assertion_line: 1500
+expression: "render_panel(&mut state, 80, 16)"
 ---
 ╭ Workspaces (1) · 2 need you ─────────────────────────────────────────────────╮
 │    ▼  agents-in-a-box (5)                                                   │
-│▶ 1 ☐ ├─ ○ IDLE    ✻   ainb/acp-chat                                 ASK 40s │
-│  2 ☐ ├─ ○ IDLE   ✻  ainb/disk-clean                                ERR 9m │
-│  3 ☐ ├─ ○ IDLE   ✻  ainb/api-stats                             APPROVE 3m │
-│  4 ☐ ├─ ○ IDLE   ✻  ainb/site-build                               DONE 1m │
-│  5 ☐ └─ ○ IDLE   ✻  ainb/quiet                                            │
+│▶ 1 ☐ ├─ ainb/acp-chat                                        ○ IDLE  ASK 40s │
+│         ✻                                                                    │
+│  2 ☐ ├─ ainb/disk-clean                                       ○ IDLE  ERR 9m │
+│         ✻                                                                    │
+│  3 ☐ ├─ ainb/api-stats                                    ○ IDLE  APPROVE 3m │
+│         ✻                                                                    │
+│  4 ☐ ├─ ainb/site-build                                      ○ IDLE  DONE 1m │
+│         ✻                                                                    │
+│  5 ☐ └─ ainb/quiet                                                    ○ IDLE │
+│         ✻                                                                    │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯

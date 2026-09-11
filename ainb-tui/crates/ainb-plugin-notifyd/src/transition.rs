@@ -39,7 +39,7 @@
 //! | `Stop`                                | `IDLE` once `age >= idle_threshold`, else `RUNNING` (turn-ended-but-fresh) |
 //! | `UserPromptSubmit`                    | `RUNNING` | a new user turn → clears ASK/WAIT/IDLE/ERR/APPROVE |
 //! | `PostToolUse` / `SubagentStart`       | `RUNNING` | active work resumed → clears ASK/WAIT/APPROVE |
-//! | `SessionEnd`                          | `DONE` | terminal                                  |
+//! | `SessionEnd` / legacy `agent-turn-complete` | `DONE` | terminal                             |
 //!
 //! So the materialized kind is "the latest non-lifecycle signal (ASK/WAIT/ERR),
 //! UNLESS a newer user turn reset it to RUNNING, OR a `Stop` aged it into IDLE,
@@ -317,7 +317,7 @@ impl Accum {
             self.parent = Some(p);
         }
 
-        let decision = match ev.event_type.as_str() {
+        let decision = match canonical_event_type(ev) {
             "PreToolUse" if ev.matcher.as_deref() == Some("AskUserQuestion") => {
                 Some(Decision::Ask(ask_context(&ev.payload)))
             }
@@ -333,12 +333,26 @@ impl Accum {
                 ev.matcher.as_deref(),
                 &ev.payload,
             ))),
+            // Codex's legacy hook transport names the user-input request and
+            // blocking wait directly.  They must not collapse into the same
+            // generic notification: the former is an answerable ASK, while
+            // the latter is an informational WAIT.
+            "CodexRequestUserInput" => Some(Decision::Ask(codex_ask_context(&ev.payload))),
+            "CodexWaitForUser" => Some(Decision::Wait(wait_context(
+                Some("wait_for_user"),
+                &ev.payload,
+            ))),
             "Stop" => Some(Decision::Stopped(ev.ts)),
             "UserPromptSubmit" => Some(Decision::Running),
             "SessionStart" => Some(Decision::Starting),
             // Active work resumed after an ASK/WAIT/APPROVE — clear back to RUNNING.
             "PostToolUse" | "SubagentStart" => Some(Decision::Running),
-            "SessionEnd" => Some(Decision::Done(reason_from_payload(&ev.payload))),
+            // Unlike Claude's `Stop` (which has an IDLE age policy), this
+            // event is an explicit Codex turn-completion acknowledgement.
+            // Persist DONE now; never create a stop-pending fake RUNNING row.
+            "SessionEnd" | "CodexTurnComplete" => {
+                Some(Decision::Done(reason_from_payload(&ev.payload)))
+            }
             // Unknown / telemetry event — does not change the decided kind.
             _ => None,
         };
@@ -407,6 +421,27 @@ impl Accum {
     }
 }
 
+/// Normalize legacy hook names before applying lifecycle policy.
+///
+/// Hooks predate the canonical event log and use provider-specific names.  Do
+/// the normalization at the fold boundary so existing durable logs acquire the
+/// same semantics on their next materialization without a migration.  These
+/// names are Codex-specific in practice; retaining the aliases regardless of
+/// `agent` is deliberate because a producer may omit/mislabel its agent while
+/// the event name itself is still unambiguous.
+fn canonical_event_type(ev: &EventRow) -> &str {
+    let event_type = ev.event_type.split(':').next().unwrap_or(&ev.event_type);
+    match event_type {
+        "request_user_input" => "CodexRequestUserInput",
+        "wait_for_user" => "CodexWaitForUser",
+        "agent-turn-complete" | "task_complete" | "agentStop" => "CodexTurnComplete",
+        "permission_request" | "exec_approval_request" | "apply_patch_approval_request" => {
+            "PermissionRequest"
+        }
+        other => other,
+    }
+}
+
 /// Extract the ASK context (serialized `AskUserQuestionData`) from a
 /// `PreToolUse(AskUserQuestion)` payload. The raw hook stdin carries
 /// `tool_input` = the AskUserQuestion tool input
@@ -424,6 +459,30 @@ fn ask_context(payload: &str) -> String {
         multi_select: false,
     });
     serde_json::to_string(&data).unwrap_or_default()
+}
+
+/// Build ASK context for Codex's legacy `request_user_input` hook.
+///
+/// Codex payloads are not `AskUserQuestion` tool input, but frequently carry
+/// an equivalent `question` or `message`.  Preserve that text when present;
+/// callers still receive a valid ASK row if an older hook sent no payload.
+fn codex_ask_context(payload: &str) -> String {
+    let v: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+    let question = v
+        .get("question")
+        .or_else(|| v.get("message"))
+        .or_else(|| v.get("prompt"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("(input requested)")
+        .to_string();
+    serde_json::to_string(&AskUserQuestionData {
+        question,
+        header: None,
+        options: Vec::new(),
+        multi_select: false,
+    })
+    .unwrap_or_default()
 }
 
 /// Parse the first question out of a PreToolUse payload's `tool_input`.
@@ -554,6 +613,24 @@ mod tests {
         matcher: Option<&str>,
         payload: &str,
     ) -> i64 {
+        push_as(
+            store, ts, session, cwd, "claude", event_type, matcher, payload,
+        )
+    }
+
+    /// Append an event from a specific provider. Legacy Codex hooks carry
+    /// provider-specific event names, so their fold must be exercised against
+    /// the same durable event-log path as production.
+    fn push_as(
+        store: &Store,
+        ts: i64,
+        session: &str,
+        cwd: &str,
+        agent: &str,
+        event_type: &str,
+        matcher: Option<&str>,
+        payload: &str,
+    ) -> i64 {
         store
             .append_event(&EventRow {
                 seq: 0,
@@ -561,7 +638,7 @@ mod tests {
                 session_id: session.into(),
                 cwd: cwd.into(),
                 transcript_path: format!("/t/{session}.jsonl"),
-                agent: "claude".into(),
+                agent: agent.into(),
                 event_type: event_type.into(),
                 matcher: matcher.map(str::to_string),
                 payload: payload.into(),
@@ -623,6 +700,114 @@ mod tests {
         );
         assert_eq!(ctx.options[1].label, "prod");
         assert_eq!(ctx.options[1].description, None);
+    }
+
+    #[test]
+    fn legacy_codex_request_user_input_is_an_answerable_ask() {
+        let (_d, store) = store();
+        push_as(
+            &store,
+            NOW,
+            "codex",
+            "/p",
+            "codex",
+            "request_user_input",
+            None,
+            r#"{"question":"Choose deployment target"}"#,
+        );
+
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        let row = state(&store, "codex", "/p");
+        assert_eq!(row.kind, "ASK");
+        let ctx: AskUserQuestionData =
+            serde_json::from_str(row.context.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx.question, "Choose deployment target");
+    }
+
+    #[test]
+    fn legacy_codex_wait_for_user_is_wait_not_ask() {
+        let (_d, store) = store();
+        push_as(
+            &store,
+            NOW,
+            "codex",
+            "/p",
+            "codex",
+            "wait_for_user",
+            None,
+            r#"{"message":"Waiting for external review"}"#,
+        );
+
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        let row = state(&store, "codex", "/p");
+        assert_eq!(row.kind, "WAIT");
+        let ctx: WaitContext = serde_json::from_str(row.context.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx.reason, "wait_for_user");
+        assert_eq!(ctx.message.as_deref(), Some("Waiting for external review"));
+    }
+
+    #[test]
+    fn legacy_codex_permission_alias_is_approve() {
+        let (_d, store) = store();
+        push_as(
+            &store,
+            NOW,
+            "codex",
+            "/p",
+            "codex",
+            "exec_approval_request",
+            None,
+            r#"{"tool_name":"Bash","tool_input":{"command":"git push"}}"#,
+        );
+
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        let row = state(&store, "codex", "/p");
+        assert_eq!(row.kind, "APPROVE");
+        let ctx: ApproveContext = serde_json::from_str(row.context.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx.tool, "Bash");
+    }
+
+    #[test]
+    fn suffixed_permission_request_is_approve_too() {
+        let (_d, store) = store();
+        push_as(
+            &store,
+            NOW,
+            "codex",
+            "/p",
+            "codex",
+            "PermissionRequest:Bash",
+            None,
+            r#"{"tool_name":"Bash","tool_input":{"command":"git push"}}"#,
+        );
+
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        let row = state(&store, "codex", "/p");
+        assert_eq!(row.kind, "APPROVE");
+    }
+
+    #[test]
+    fn legacy_codex_turn_completion_is_done_immediately() {
+        let (_d, store) = store();
+        push_as(
+            &store,
+            NOW,
+            "codex",
+            "/p",
+            "codex",
+            "agent-turn-complete",
+            None,
+            r#"{"reason":"completed"}"#,
+        );
+
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        let row = state(&store, "codex", "/p");
+        assert_eq!(row.kind, "DONE");
+        assert_eq!(row.context.as_deref(), Some(r#"{"reason":"completed"}"#));
+        assert!(
+            stopped_ts_from_context(row.context.as_deref()).is_none(),
+            "explicit turn completion must never become a delayed RUNNING stop"
+        );
     }
 
     #[test]

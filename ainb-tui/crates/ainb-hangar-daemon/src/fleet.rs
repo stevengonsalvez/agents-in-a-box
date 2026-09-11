@@ -123,7 +123,7 @@ pub async fn reproject_claude_interview(
         let Ok(payload) = serde_json::from_str::<Value>(&event.payload) else {
             continue;
         };
-        let event_type = canonical_hook_event_type(&event.event_type, &payload);
+        let event_type = canonical_hook_event_type("claude", &event.event_type, &payload);
         let (_, attention) = states_for_hook(event_type, &payload);
         match attention {
             Some(AttentionState::Ask)
@@ -325,7 +325,11 @@ pub async fn apply_hook(
     let source_event_id = observation.event_id.clone();
     // Claude emits a PermissionRequest and then a generic notification around an
     // AskUserQuestion. They describe the same picker, not two operator actions.
-    let event_type = canonical_hook_event_type(observation.event_type, observation.payload);
+    let event_type = canonical_hook_event_type(
+        provider.as_str(),
+        observation.event_type,
+        observation.payload,
+    );
     let source_event_type = observation
         .payload
         .pointer("/payload/hook_event_name")
@@ -334,7 +338,8 @@ pub async fn apply_hook(
     let duplicate_claude_structured_permission = provider == Provider::Claude
         && source_event_type == "PermissionRequest"
         && claude_hook_tool_name(observation.payload) == Some("AskUserQuestion");
-    let preserve_active_request = (observation.event_type == "Notification"
+    let preserve_active_request = (provider == Provider::Claude
+        && observation.event_type.split(':').next() == Some("Notification")
         || duplicate_claude_structured_permission)
         && FleetRepo::get_session(pool, session_key.as_str())
             .await?
@@ -2304,7 +2309,32 @@ fn states_for_hook(
     }
 }
 
-fn canonical_hook_event_type<'a>(event_type: &'a str, payload: &Value) -> &'a str {
+/// Normalize hook-specific spellings before reducing them into Fleet state.
+///
+/// `ainb-hooks` deliberately persists Codex's raw `type` token. That keeps the
+/// event log useful for provider debugging, but Fleet must not treat those
+/// tokens as unrelated telemetry: a Codex question, blocking wait, completed
+/// turn, and permission request are the same operator-facing facts as their
+/// Claude counterparts. Matcher suffixes are presentation/context only and do
+/// not alter lifecycle semantics.
+pub(crate) fn canonical_hook_event_type<'a>(
+    provider: &str,
+    event_type: &'a str,
+    payload: &Value,
+) -> &'a str {
+    let event_type = event_type.split(':').next().unwrap_or(event_type);
+    if provider.eq_ignore_ascii_case("codex") {
+        return match event_type {
+            "request_user_input" => "AskUserQuestion",
+            "wait_for_user" => "Notification",
+            "agent-turn-complete" | "agentStop" | "task_complete" => "Stop",
+            "PermissionRequest"
+            | "permission_request"
+            | "exec_approval_request"
+            | "apply_patch_approval_request" => "PermissionRequest",
+            _ => event_type,
+        };
+    }
     if event_type == "PermissionRequest"
         && claude_hook_tool_name(payload) == Some("AskUserQuestion")
     {
@@ -3900,6 +3930,82 @@ mod tests {
             states_for_hook("SessionEnd", &serde_json::json!({})),
             (Some(LifecycleState::Exited), Some(AttentionState::None))
         );
+    }
+
+    #[test]
+    fn codex_legacy_hook_tokens_normalize_to_shared_lifecycle_semantics() {
+        let payload = serde_json::json!({});
+        assert_eq!(
+            canonical_hook_event_type("codex", "request_user_input", &payload),
+            "AskUserQuestion"
+        );
+        assert_eq!(
+            canonical_hook_event_type("codex", "wait_for_user", &payload),
+            "Notification"
+        );
+        assert_eq!(
+            canonical_hook_event_type("codex", "agent-turn-complete", &payload),
+            "Stop"
+        );
+        assert_eq!(
+            canonical_hook_event_type("codex", "PermissionRequest:Bash", &payload),
+            "PermissionRequest"
+        );
+        assert_eq!(
+            canonical_hook_event_type("claude", "PermissionRequest", &payload),
+            "PermissionRequest",
+            "Codex aliases must not alter Claude's native permission semantics"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_legacy_hooks_project_ask_wait_done_and_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let payload = serde_json::json!({ "payload": { "model": "gpt-5.6-sol" } });
+
+        for (event_id, event_type, observed_at, expected_lifecycle, expected_attention) in [
+            ("codex-ask", "request_user_input", 1, "IDLE", "ASK"),
+            ("codex-wait", "wait_for_user", 2, "IDLE", "WAITING"),
+            (
+                "codex-done",
+                "agent-turn-complete",
+                3,
+                "TURN_COMPLETE",
+                "NONE",
+            ),
+            (
+                "codex-approval",
+                "PermissionRequest:Bash",
+                4,
+                "IDLE",
+                "APPROVAL",
+            ),
+        ] {
+            apply_hook(
+                store.pool(),
+                &sink,
+                HookObservation {
+                    event_id: event_id.to_string(),
+                    provider: "codex",
+                    provider_session_id: "legacy-thread-1",
+                    cwd: "/repo",
+                    event_type,
+                    payload: &payload,
+                    observed_at,
+                    transcript_model: None,
+                },
+            )
+            .await
+            .expect("legacy Codex hook applies");
+            let session = FleetRepo::get_session(store.pool(), "codex:legacy-thread-1")
+                .await
+                .expect("read session")
+                .expect("Codex session present");
+            assert_eq!(session.lifecycle_state, expected_lifecycle, "{event_type}");
+            assert_eq!(session.attention_state, expected_attention, "{event_type}");
+        }
     }
 
     #[tokio::test]

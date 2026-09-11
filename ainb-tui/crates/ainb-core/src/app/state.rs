@@ -796,6 +796,11 @@ pub struct SessionsPaneState {
     last_sessions_rect: Option<Rect>,
     last_preview_rect: Option<Rect>,
     last_list_scroll_offset: usize,
+    /// Physical terminal-line height for each logical `ListItem` from the
+    /// latest render. Session rows have metadata on a second line, while
+    /// headers and separators remain one line; mouse hit-testing needs this
+    /// mapping rather than assuming one item equals one terminal row.
+    last_list_item_heights: Vec<usize>,
     last_attachable_click: Option<(AttachableRef, Instant)>,
     filter_toggle_area: Option<Rect>,
 }
@@ -810,6 +815,7 @@ impl Default for SessionsPaneState {
             last_sessions_rect: None,
             last_preview_rect: None,
             last_list_scroll_offset: 0,
+            last_list_item_heights: Vec::new(),
             last_attachable_click: None,
             filter_toggle_area: None,
         }
@@ -831,6 +837,10 @@ impl SessionsPaneState {
 
     pub fn set_list_scroll_offset(&mut self, offset: usize) {
         self.last_list_scroll_offset = offset;
+    }
+
+    pub fn set_list_item_heights(&mut self, heights: Vec<usize>) {
+        self.last_list_item_heights = heights;
     }
 
     pub fn set_filter_toggle_area(&mut self, area: Rect) {
@@ -950,7 +960,17 @@ impl SessionsPaneState {
             return None;
         }
 
-        Some(self.last_list_scroll_offset + usize::from(y - rect.y - 1))
+        let mut item_index = self.last_list_scroll_offset;
+        let mut line_in_view = usize::from(y - rect.y - 1);
+        while let Some(&height) = self.last_list_item_heights.get(item_index) {
+            let height = height.max(1);
+            if line_in_view < height {
+                return Some(item_index);
+            }
+            line_in_view = line_in_view.saturating_sub(height);
+            item_index += 1;
+        }
+        None
     }
 
     pub fn record_row_click(&mut self, target: SessionListRowTarget, now: Instant) -> bool {
@@ -4040,6 +4060,8 @@ impl Default for NewSessionState {
 struct ConfigureLaunchSnapshot {
     repo_source: crate::git::repo_source::RepoSource,
     branch_name: String,
+    /// Optional durable session prefix; Git branch remains unchanged.
+    session_prefix: Option<String>,
     skip_permissions: bool,
     mode: crate::models::SessionMode,
     boss_prompt: Option<String>,
@@ -8402,9 +8424,17 @@ impl AppState {
         } else {
             None
         };
+        let session_prefix = match crate::config::normalize_session_label(&spec.session_prefix) {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                self.add_error_notification(error);
+                return;
+            }
+        };
         let snapshot = ConfigureLaunchSnapshot {
             repo_source: spec.repo_source.clone(),
             branch_name: spec.branch_worktree.clone(),
+            session_prefix,
             skip_permissions: preset.permissions.skip_all,
             mode,
             boss_prompt,
@@ -8580,6 +8610,21 @@ impl AppState {
             Ok(()) => {
                 info!("Session created successfully via configure flow");
                 self.load_real_workspaces().await;
+                if let Some(prefix) = snapshot.session_prefix.as_ref() {
+                    let tmux_name = self
+                        .find_session(session_id)
+                        .and_then(|session| session.tmux_session_name.clone());
+                    if let Some(tmux_name) = tmux_name {
+                        self.session_label_store.set(tmux_name, Some(prefix.clone()));
+                        if let Err(error) = self.session_label_store.save() {
+                            self.add_error_notification(format!(
+                                "Session started but prefix could not be saved: {error}"
+                            ));
+                        } else if let Some(session) = self.find_session_mut(session_id) {
+                            session.display_name = Some(prefix.clone());
+                        }
+                    }
+                }
                 if let Err(e) = self.start_log_streaming_for_session(session_id).await {
                     warn!(
                         "Failed to start log streaming for session {}: {}",
@@ -12126,11 +12171,18 @@ impl AppState {
                         .unanswerable(crate::fleet::attention::Unanswerable::NativePicker),
                 );
             }
-            return Some(
-                SessionAttention::local(Self::chip_for_alert(kind), rec.ts).with_detail(
-                    payload.as_ref().and_then(Self::payload_message).unwrap_or_default(),
-                ),
-            );
+            // Legacy Codex emits an explicit request token. It is a question,
+            // not the generic unstructured wait that notifyd's toast class
+            // uses for both shapes. Keep this fallback aligned with Fleet's
+            // authoritative Codex reducer until its snapshot arrives.
+            let attention = if agent == "codex" && rec.raw_event == "request_user_input" {
+                AttentionKind::Ask
+            } else {
+                Self::chip_for_alert(kind)
+            };
+            return Some(SessionAttention::local(attention, rec.ts).with_detail(
+                payload.as_ref().and_then(Self::payload_message).unwrap_or_default(),
+            ));
         }
         None
     }

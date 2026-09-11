@@ -270,6 +270,9 @@ pub enum ConfigureRow {
     /// ephemeral override of the configured Workspace default.
     Prefix,
     Branch,
+    /// Optional durable label rendered ahead of the Git branch in the session
+    /// list. Unlike [`Self::Prefix`], this never changes a branch name.
+    SessionPrefix,
     Prompt,
     /// Explicit submit row. Renders as a `[ Launch ]` button at the bottom of
     /// the form. Tab past Prompt lands here; Enter fires the launch. Avoids
@@ -312,6 +315,11 @@ pub struct ConfigureState {
     /// Inline prefix edit buffer. The committed value applies only to this
     /// launch; it never changes the Workspace default in `config.toml`.
     pub branch_prefix_edit: Option<String>,
+    /// Optional human prefix for the session row, persisted after a successful
+    /// tmux-backed launch through `SessionLabelStore`.
+    pub session_prefix: String,
+    /// Inline edit buffer for [`Self::session_prefix`].
+    pub session_prefix_edit: Option<String>,
     /// Multi-line prompt editor (Boss mode only).
     pub prompt: TextEditor,
     /// When `Some`, the save-preset modal is open and the contained string is
@@ -454,6 +462,8 @@ impl ConfigureState {
             branch_override: None,
             branch_edit: None,
             branch_prefix_edit: None,
+            session_prefix: String::new(),
+            session_prefix_edit: None,
             prompt,
             save_preset_modal: None,
             presets_cache,
@@ -694,6 +704,7 @@ impl ConfigureState {
         // Settings → Workspace.
         rows.push(ConfigureRow::Prefix);
         rows.push(ConfigureRow::Branch);
+        rows.push(ConfigureRow::SessionPrefix);
         // Prompt row visible only in Boss mode for non-shell agents.
         if preset.mode == SessionMode::Boss && preset.agent_provider != "shell" {
             rows.push(ConfigureRow::Prompt);
@@ -724,6 +735,9 @@ impl ConfigureState {
         }
         if self.focused_row != ConfigureRow::Prefix {
             self.branch_prefix_edit = None;
+        }
+        if self.focused_row != ConfigureRow::SessionPrefix {
+            self.session_prefix_edit = None;
         }
     }
 }
@@ -766,6 +780,8 @@ pub struct LaunchSpec {
     /// Persisted to `session-defaults.per_repo[].last_branch_override` so the
     /// next launch can pre-fill the textarea.
     pub branch_override: Option<String>,
+    /// Optional durable label displayed before the branch in the sidebar.
+    pub session_prefix: String,
     /// The base-branch popup pick, when used. `None` = legacy base policy
     /// (HEAD for local repos, origin/HEAD for remote/star launches).
     pub base: Option<BaseSelection>,
@@ -867,6 +883,9 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
             }
             ConfigureRow::Prefix => render_prefix_row(f, state, area_for_row, focused),
             ConfigureRow::Branch => render_branch_row(f, state, area_for_row, focused),
+            ConfigureRow::SessionPrefix => {
+                render_session_prefix_row(f, state, area_for_row, focused);
+            }
             ConfigureRow::Prompt => render_prompt_row(f, state, area_for_row, focused),
             ConfigureRow::Launch => render_launch_row(f, area_for_row, focused),
         }
@@ -890,11 +909,14 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
     let help_chunk = *chunks.last().expect("layout always emits help row");
     let in_prompt =
         state.focused_row == ConfigureRow::Prompt && rows.contains(&ConfigureRow::Prompt);
-    let help = render_help_bar(
-        variant,
-        in_prompt,
-        state.branch_edit.is_some() || state.branch_prefix_edit.is_some(),
-    );
+    let active_edit = if state.branch_edit.is_some() || state.branch_prefix_edit.is_some() {
+        Some("branch")
+    } else if state.session_prefix_edit.is_some() {
+        Some("session prefix")
+    } else {
+        None
+    };
+    let help = render_help_bar(variant, in_prompt, active_edit);
     f.render_widget(
         Paragraph::new(help).alignment(Alignment::Center),
         help_chunk,
@@ -913,8 +935,8 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
 
 /// Build the bottom help bar. Shape switches based on whether the prompt
 /// textarea is the focused row (which captures plain chars).
-fn render_help_bar(variant: Variant, in_prompt: bool, branch_editing: bool) -> Line<'static> {
-    if branch_editing {
+fn render_help_bar(variant: Variant, in_prompt: bool, active_edit: Option<&str>) -> Line<'static> {
+    if let Some(active_edit) = active_edit {
         return Line::from(vec![
             Span::styled(
                 "Enter",
@@ -925,7 +947,10 @@ fn render_help_bar(variant: Variant, in_prompt: bool, branch_editing: bool) -> L
                 "Esc",
                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("=Cancel branch edit", Style::default().fg(MUTED_GRAY)),
+            Span::styled(
+                format!("=Cancel {active_edit} edit"),
+                Style::default().fg(MUTED_GRAY),
+            ),
         ]);
     }
     if in_prompt {
@@ -1565,6 +1590,46 @@ fn render_prefix_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused:
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// Render optional durable prefix shown before the branch in the session list.
+/// This is independent of the worktree branch-generation prefix above.
+fn render_session_prefix_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
+    if let Some(prefix) = state.session_prefix_edit.as_ref() {
+        let line = Line::from(vec![
+            focus_indicator(focused),
+            label_span("Session prefix:  "),
+            Span::styled(
+                prefix.clone(),
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(MUTED_GRAY)),
+        ]);
+        f.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    let mut style = Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD);
+    if focused {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    let prefix = if state.session_prefix.is_empty() {
+        "(none)"
+    } else {
+        &state.session_prefix
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            focus_indicator(focused),
+            label_span("Session prefix:  "),
+            Span::styled(prefix, style),
+            Span::styled(
+                "   [Enter to edit]",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            ),
+        ])),
+        area,
+    );
+}
+
 fn render_prompt_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bool) {
     let border_color = if focused { GOLD } else { MUTED_GRAY };
     let prompt_block = Block::default()
@@ -2089,6 +2154,9 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
     if state.branch_prefix_edit.is_some() {
         return handle_branch_prefix_edit_key(state, key);
     }
+    if state.session_prefix_edit.is_some() {
+        return handle_session_prefix_edit_key(state, key);
+    }
 
     // Ctrl shortcuts.
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2122,6 +2190,10 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
         KeyCode::Enter => match state.focused_row {
             ConfigureRow::Prefix => {
                 state.branch_prefix_edit = Some(state.branch_prefix.clone());
+                ConfigureOutcome::Stay
+            }
+            ConfigureRow::SessionPrefix => {
+                state.session_prefix_edit = Some(state.session_prefix.clone());
                 ConfigureOutcome::Stay
             }
             ConfigureRow::Branch => match state.branch_segment {
@@ -2258,6 +2330,7 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
         branch_worktree,
         branch_source: state.branch_source.clone(),
         branch_override: state.branch_override.clone(),
+        session_prefix: state.session_prefix.trim().to_string(),
         base: state.base_selection.clone(),
         prompt,
         // Defensive: never launch with Headroom on if the binary isn't there,
@@ -2307,6 +2380,9 @@ fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
         }
         ConfigureRow::Prefix => {
             // Prefix is an editable text row, not a value ring.
+        }
+        ConfigureRow::SessionPrefix => {
+            // Session prefix is an editable text row, not a value ring.
         }
         ConfigureRow::Branch => {
             // ←/→ on the Branch row toggles the targeted segment
@@ -2552,6 +2628,31 @@ fn handle_branch_prefix_edit_key(state: &mut ConfigureState, key: KeyEvent) -> C
     }
 }
 
+/// Inline edit for the durable session prefix. Empty deliberately clears it.
+fn handle_session_prefix_edit_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome {
+    let buffer = state.session_prefix_edit.as_mut().expect("guard checked");
+    match key.code {
+        KeyCode::Esc => {
+            state.session_prefix_edit = None;
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Enter => {
+            state.session_prefix = buffer.trim().to_string();
+            state.session_prefix_edit = None;
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Backspace => {
+            buffer.pop();
+            ConfigureOutcome::Stay
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            buffer.push(c);
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
 /// Base-branch popup key handler. Chars/Backspace edit the fuzzy filter,
 /// ↑/↓ move the selection, Tab toggles the action mode (base-off ⇄ checkout),
 /// Enter commits the pick, Esc closes without changes.
@@ -2717,6 +2818,8 @@ mod tests {
             branch_override: None,
             branch_edit: None,
             branch_prefix_edit: None,
+            session_prefix: String::new(),
+            session_prefix_edit: None,
             prompt: TextEditor::new(),
             save_preset_modal: None,
             presets_cache,
@@ -3270,7 +3373,8 @@ mod tests {
     fn tab_cycles_focus_through_visible_rows() {
         let mut s = mk_state();
         // Named preset, default mode = Boss, Claude/Codex provider → rows =
-        // [Preset, Mode, Yolo, HeadroomProxy, Rtk, Prefix, Branch, Prompt, Launch].
+        // [Preset, Mode, Yolo, HeadroomProxy, Rtk, Prefix, Branch,
+        //  SessionPrefix, Prompt, Launch].
         assert_eq!(s.focused_row, ConfigureRow::Preset);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Mode);
@@ -3285,12 +3389,39 @@ mod tests {
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Branch);
         s.cycle_focus(1);
+        assert_eq!(s.focused_row, ConfigureRow::SessionPrefix);
+        s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Prompt);
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Launch);
         // Wraps.
         s.cycle_focus(1);
         assert_eq!(s.focused_row, ConfigureRow::Preset);
+    }
+
+    #[test]
+    fn session_prefix_is_optional_and_threads_into_launch() {
+        let mut s = mk_state();
+        s.focused_row = ConfigureRow::SessionPrefix;
+        assert_eq!(
+            handle_key(&mut s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ConfigureOutcome::Stay
+        );
+        for c in "slice-c".chars() {
+            assert_eq!(
+                handle_key(&mut s, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                ConfigureOutcome::Stay
+            );
+        }
+        assert_eq!(
+            handle_key(&mut s, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            ConfigureOutcome::Stay
+        );
+        assert_eq!(s.session_prefix, "slice-c");
+        let ConfigureOutcome::Launch(spec) = launch_outcome(&mut s) else {
+            panic!("launch should proceed")
+        };
+        assert_eq!(spec.session_prefix, "slice-c");
     }
 
     #[test]
