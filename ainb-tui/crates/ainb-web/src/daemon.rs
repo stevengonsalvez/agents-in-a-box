@@ -159,7 +159,10 @@ impl DaemonClient {
         write_frame(
             &mut writer,
             methods::AUTH_HELLO,
-            json!({ "token": self.token }),
+            json!({
+                "token": self.token,
+                "surface": { "kind": "web", "pid": std::process::id() },
+            }),
             1,
         )
         .await?;
