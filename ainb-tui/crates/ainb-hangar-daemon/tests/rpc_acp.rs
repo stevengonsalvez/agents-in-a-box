@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use ainb_hangar_daemon::acp_pool::{AcpPool, PoolConfig};
 use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
-use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
+use ainb_hangar_proto::connections::{ConnectionsListResult, SurfaceInfo, SurfaceKind};
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
@@ -1060,6 +1060,25 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         }),
     )
     .await;
+    let listed = client
+        .call(methods::HANGAR_CONNECTIONS_LIST, serde_json::json!({}))
+        .await;
+    assert!(listed["error"].is_null(), "{listed}");
+    let connections: ConnectionsListResult =
+        serde_json::from_value(listed["result"].clone()).expect("connections list");
+    let connection = connections
+        .connections
+        .into_iter()
+        .find(|connection| {
+            connection.surface.kind == SurfaceKind::Tui
+                && connection.surface.pid == std::process::id()
+        })
+        .expect("authenticated TUI connection");
+    let expected_answered_by = format!("{}@{}", connection.surface.kind, connection.host);
+    assert!(
+        expected_answered_by.starts_with("tui@"),
+        "the registry derives TUI provenance: {expected_answered_by}"
+    );
     let (session_key, _scope) = harness.create_session(&mut client, None).await;
 
     let sent = client
@@ -1092,7 +1111,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "looks fine to me",
-                "answered_by": "web",
+                "answered_by": "tui@forged-host",
             }),
         )
         .await;
@@ -1115,7 +1134,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "Reject",
-                "answered_by": "web",
+                "answered_by": "tui@forged-host",
             }),
         )
         .await;
@@ -1155,8 +1174,8 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         "and it was a selection: {permissions:?}"
     );
 
-    // The daemon stamps the authenticated TUI surface and host, never the
-    // request's spoofed web surface, and Fleet no longer advertises the ask.
+    // The daemon stamps registry-derived TUI provenance, never the request's
+    // forged host, and Fleet no longer advertises the ask.
     let (state, answered_by, answer): (String, Option<String>, Option<String>) =
         sqlx::query_as("SELECT state, answered_by, answer FROM attention WHERE id = ?")
             .bind(&attention_id)
@@ -1164,16 +1183,9 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             .await
             .expect("attention row");
     assert_eq!(state, "answered");
-    let stamped_answered_by = answered_by.expect("daemon-stamped provenance");
-    let stamped_host = stamped_answered_by
-        .strip_prefix("tui@")
-        .expect("daemon stamps the authenticated TUI surface");
-    assert!(
-        !stamped_host.is_empty(),
-        "daemon stamps a nonempty host: {stamped_answered_by}"
-    );
-    assert_ne!(
-        stamped_answered_by, "web",
+    assert_eq!(
+        answered_by.as_deref(),
+        Some(expected_answered_by.as_str()),
         "daemon ignores request-supplied answered_by"
     );
     assert_eq!(answer.as_deref(), Some("Reject"));
@@ -1196,14 +1208,14 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": attention_id,
                 "answer": "Allow once",
-                "answered_by": "web",
+                "answered_by": "tui@forged-host",
             }),
         )
         .await;
     assert_eq!(late["result"]["outcome"], "already_answered", "{late}");
     assert_eq!(
         late["result"]["by"].as_str(),
-        Some(stamped_answered_by.as_str()),
+        Some(expected_answered_by.as_str()),
         "{late}"
     );
     assert_eq!(
@@ -1255,7 +1267,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
                 serde_json::json!({
                     "attention_id": row_id,
                     "answer": "Reject",
-                    "answered_by": "web",
+                    "answered_by": "tui@forged-host",
                 }),
             )
             .await;
@@ -1273,7 +1285,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
         assert_eq!(state, "answered", "{row_id}: a spent ask is not reopened");
         assert_eq!(
             answered_by.as_deref(),
-            Some(stamped_answered_by.as_str()),
+            Some(expected_answered_by.as_str()),
             "{row_id}"
         );
     }
@@ -1334,7 +1346,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": "drifted-options",
                 "answer": "Bogus",
-                "answered_by": "web",
+                "answered_by": "tui@forged-host",
             }),
         )
         .await;
@@ -1360,7 +1372,7 @@ async fn a_permission_answered_through_attention_answer_reaches_the_adapter() {
             serde_json::json!({
                 "attention_id": second_id,
                 "answer": "deny",
-                "answered_by": "web",
+                "answered_by": "tui@forged-host",
             }),
         )
         .await;
