@@ -134,6 +134,7 @@ pub fn entry_for_event(event: &HangarEvent) -> Option<InboxFields> {
         // notification digest.
         | HangarEvent::AttentionRaised { .. }
         | HangarEvent::AttentionAnswered { .. }
+        | HangarEvent::ConnectionsChanged { .. }
         | HangarEvent::WorkspaceChanged { .. } => None,
     }
 }
