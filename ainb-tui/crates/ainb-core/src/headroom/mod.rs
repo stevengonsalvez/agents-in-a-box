@@ -470,18 +470,22 @@ mod tests {
         panic!("timed out waiting for {description}");
     }
 
+    /// Returns sorted direct children for an exact parent PID without PATH lookups.
     fn direct_child_pids(pid: u32) -> Vec<u32> {
-        let output = std::process::Command::new("pgrep")
-            .args(["-P", &pid.to_string()])
-            .output()
-            .expect("list exact fake proxy children");
-        if !output.status.success() {
-            return Vec::new();
-        }
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse().ok())
-            .collect()
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+
+        let parent = Pid::from_u32(pid);
+        let mut system = System::new();
+        system.refresh_processes(ProcessesToUpdate::All, false);
+        let mut children: Vec<u32> = system
+            .processes()
+            .iter()
+            .filter_map(|(&child_pid, process)| {
+                (process.parent() == Some(parent)).then_some(child_pid.as_u32())
+            })
+            .collect();
+        children.sort_unstable();
+        children
     }
 
     fn process_is_alive(pid: u32) -> bool {
