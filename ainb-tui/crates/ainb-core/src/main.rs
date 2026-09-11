@@ -14,6 +14,7 @@
 #![allow(missing_docs)]
 
 use anyhow::Result;
+use clap::{FromArgMatches, Subcommand};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -62,6 +63,7 @@ mod widgets;
 mod test_support;
 
 use app::{App, EventHandler};
+use app::keymap::{Chord, KeyAction, KeyContext, Keymap, UiAction};
 use components::LayoutComponent;
 use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
 
@@ -186,6 +188,17 @@ async fn tokio_main() -> Result<()> {
                  ainb diff-review ~/code/proj     Review a specific repo\n  \
                  ainb diff-review --format json   Emit the structured diff as JSON (headless)",
             ),
+    );
+    app = app.subcommand(
+        <cli::keymap::KeymapCommands as Subcommand>::augment_subcommands(
+            clap::Command::new("keymap").subcommand_required(true),
+        )
+        .about("List effective terminal shortcuts")
+        .after_help(
+            "EXAMPLES:\n  \\
+             ainb keymap list\n  \\
+             ainb keymap list --format json",
+        ),
     );
     app = registry.build_clap(app);
     let matches = app.get_matches();
@@ -350,6 +363,11 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        Some(("keymap", sub)) => {
+            let command = cli::keymap::KeymapCommands::from_arg_matches(sub)?;
+            cli::keymap::execute(command, format)
+        }
+
         // Every other subcommand routes through the registry.
         Some((name, sub)) => registry.dispatch(name, sub, ctx).await,
     };
@@ -420,6 +438,10 @@ async fn run_tui_loop(
     layout: &mut LayoutComponent,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
+    let (keymap, keymap_warning) = Keymap::load_user();
+    if let Some(warning) = keymap_warning {
+        app.state.add_warning_notification(warning);
+    }
     // Event-poll cadence: how often we wake up to check for a keystroke
     // or paste event. Drives the "time-to-first-response" for any input
     // the user generates — including keystrokes routed to plugin
@@ -626,6 +648,14 @@ async fn run_tui_loop(
                     // inside the embed reaches the PTY instead of opening the
                     // palette.
                     if app.state.is_interactive_pane() {
+                        let chord = Chord::from_key_event(&key_event);
+                        if matches!(
+                            keymap.resolve(&[KeyContext::EmbedInteractive], &chord),
+                            Some(KeyAction::App(crate::app::events::AppEvent::DetachSession))
+                        ) {
+                            app.state.release_interactive_pane();
+                            continue;
+                        }
                         // write_input only errors when the PTY writer thread is
                         // gone — release immediately instead of leaving a
                         // focused pane that silently eats input.
@@ -660,7 +690,11 @@ async fn run_tui_loop(
                     //    typing an `ssh://...` URL.
                     // An already-open palette still consumes keys, so it can
                     // always be closed.
-                    let colon = matches!(key_event.code, KeyCode::Char(':'));
+                    let chord = Chord::from_key_event(&key_event);
+                    let colon = matches!(
+                        keymap.resolve(&[KeyContext::Global], &chord),
+                        Some(KeyAction::OpenSlashPalette)
+                    );
                     let palette_open_suppressed = colon
                         && !slash_palette.is_open()
                         && (crate::app::screens::builtin::plugin_id_for_screen(
@@ -700,24 +734,24 @@ async fn run_tui_loop(
                     if observing_terminal {
                         preview.exit_scroll_mode();
                     } else if preview.is_scroll_mode() {
-                        match key_event.code {
-                            KeyCode::Esc => {
+                        match keymap.resolve(&[KeyContext::PreviewScroll], &chord) {
+                            Some(KeyAction::Ui(UiAction::PreviewExitScroll)) => {
                                 preview.exit_scroll_mode();
                                 continue; // Don't process ESC as Quit
                             }
-                            KeyCode::Up | KeyCode::Char('k') => {
+                            Some(KeyAction::Ui(UiAction::PreviewScrollUp)) => {
                                 preview.scroll_up();
                                 continue; // Don't let event handler navigate sessions
                             }
-                            KeyCode::Down | KeyCode::Char('j') => {
+                            Some(KeyAction::Ui(UiAction::PreviewScrollDown)) => {
                                 preview.scroll_down();
                                 continue; // Don't let event handler navigate sessions
                             }
-                            KeyCode::PageUp => {
+                            Some(KeyAction::Ui(UiAction::PreviewPageUp)) => {
                                 preview.scroll_page_up();
                                 continue;
                             }
-                            KeyCode::PageDown => {
+                            Some(KeyAction::Ui(UiAction::PreviewPageDown)) => {
                                 preview.scroll_page_down();
                                 continue;
                             }
@@ -726,7 +760,7 @@ async fn run_tui_loop(
                     }
 
                     if let Some(app_event) =
-                        EventHandler::handle_key_event(key_event, &mut app.state)
+                        EventHandler::handle_key_event_with_keymap(key_event, &mut app.state, &keymap)
                     {
                         // Handle scroll events for live logs and tmux preview
                         use crate::app::events::AppEvent;
