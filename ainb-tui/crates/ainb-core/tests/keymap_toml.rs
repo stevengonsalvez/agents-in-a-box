@@ -10,7 +10,7 @@ fn chord_normalises_terminal_spellings() {
     assert_eq!(Chord::parse("CTRL+K").unwrap().as_str(), "ctrl+k");
     assert_eq!(Chord::parse("shift+tab").unwrap().as_str(), "shift+tab");
     assert_eq!(Chord::parse("G").unwrap().as_str(), "G");
-    assert_eq!(Chord::parse("g g").unwrap().as_str(), "g g");
+    assert!(Chord::parse("g g").is_err());
     assert!(Chord::parse("cmd+k").is_err());
 }
 
@@ -53,6 +53,47 @@ attach = "o"
                 &Chord::parse("enter").unwrap(),
             )
             .is_none()
+    );
+}
+
+#[test]
+fn toml_overrides_can_swap_two_existing_bindings() {
+    let overrides = KeymapOverrides::parse(
+        r#"
+[session_list]
+attach = "x"
+cleanup = "enter"
+"#,
+    )
+    .unwrap();
+    let context = KeyContext::screen("session_list");
+    let keymap = Keymap::defaults().with_overrides(&overrides).unwrap();
+
+    assert_eq!(
+        keymap.binding_for(&context, "attach").unwrap().chord.as_str(),
+        "x"
+    );
+    assert_eq!(
+        keymap.binding_for(&context, "cleanup").unwrap().chord.as_str(),
+        "enter"
+    );
+}
+
+#[test]
+fn toml_nested_table_targets_dotted_key_context() {
+    let overrides = KeymapOverrides::parse(
+        r#"
+[session_list.ask]
+enter = "f12"
+"#,
+    )
+    .unwrap();
+    let context = KeyContext::from_name("session_list.ask").unwrap();
+    let keymap = Keymap::defaults().with_overrides(&overrides).unwrap();
+
+    assert_eq!(
+        keymap.binding_for(&context, "enter").unwrap().chord.as_str(),
+        "f12"
     );
 }
 
