@@ -115,7 +115,7 @@ impl Drop for AbortOnDrop {
 /// succeeds for exactly one creator. If the lock already exists we read the pid
 /// it records; a LIVE different pid means a real daemon owns startup (we bail),
 /// while a DEAD pid means the lock is stale (a crashed predecessor) and we
-/// recover it by removing and retrying the exclusive create once. The winner
+/// recover it by atomically renaming and retrying the exclusive create once. The winner
 /// holds the lock for its whole lifetime and removes it on drop.
 #[derive(Debug)]
 struct StartupLock {
@@ -130,6 +130,7 @@ impl StartupLock {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
+        let mut renamed_stale = None;
         // Two attempts: the first may lose to a stale lock we then recover.
         for attempt in 0..2 {
             match std::fs::OpenOptions::new()
@@ -140,17 +141,19 @@ impl StartupLock {
                 Ok(mut f) => {
                     // We won. Record our pid so a future racer can liveness-check us.
                     let _ = writeln!(f, "{}", std::process::id());
+                    if let Some(stale) = renamed_stale.take() {
+                        let _ = std::fs::remove_file(stale);
+                    }
                     return Ok(Self {
                         path: path.to_path_buf(),
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     // Someone holds (or crashed holding) the lock. Decide which.
-                    let holder = std::fs::read_to_string(path)
-                        .ok()
-                        .and_then(|s| s.trim().parse::<u32>().ok());
+                    let holder_body = std::fs::read_to_string(path).unwrap_or_default();
+                    let holder = holder_body.trim().parse::<u32>().ok();
                     match holder {
-                        Some(pid) if crate::pid::is_running(pid) && pid != std::process::id() => {
+                        Some(pid) if crate::pid::is_running(pid) => {
                             anyhow::bail!(
                                 "another notifyd is starting/running (lock pid {pid}); refusing to start"
                             );
@@ -158,9 +161,53 @@ impl StartupLock {
                         // Dead/unreadable holder → stale lock from a crash. Recover
                         // it and retry the exclusive create exactly once.
                         _ if attempt == 0 => {
-                            warn!(?path, "removing stale startup lock");
-                            std::fs::remove_file(path).ok();
-                            continue;
+                            let stale_path = PathBuf::from(format!(
+                                "{}.stale-{}",
+                                path.display(),
+                                std::process::id()
+                            ));
+                            match std::fs::rename(path, &stale_path) {
+                                Ok(()) => {
+                                    // A second racer can have read the old
+                                    // contents before the first recoverer wins.
+                                    // If it renamed a newly-created live lock,
+                                    // restore it and lose instead of deleting it.
+                                    let moved_body =
+                                        std::fs::read_to_string(&stale_path).unwrap_or_default();
+                                    if moved_body != holder_body {
+                                        std::fs::rename(&stale_path, path).with_context(|| {
+                                            format!(
+                                                "restoring live startup lock {}",
+                                                path.display()
+                                            )
+                                        })?;
+                                        anyhow::bail!(
+                                            "lost startup race for {} during stale-lock recovery",
+                                            path.display()
+                                        );
+                                    }
+                                    warn!(?path, "renamed stale startup lock");
+                                    renamed_stale = Some(stale_path);
+                                    continue;
+                                }
+                                Err(err)
+                                    if matches!(
+                                        err.kind(),
+                                        std::io::ErrorKind::NotFound
+                                            | std::io::ErrorKind::AlreadyExists
+                                    ) =>
+                                {
+                                    anyhow::bail!(
+                                        "lost startup race for {} during stale-lock recovery",
+                                        path.display()
+                                    );
+                                }
+                                Err(err) => {
+                                    return Err(err).with_context(|| {
+                                        format!("renaming stale startup lock {}", path.display())
+                                    });
+                                }
+                            }
                         }
                         // Still contended after recovery → a genuine race we lost.
                         _ => anyhow::bail!(
@@ -638,6 +685,38 @@ mod tests {
         // The reclaimed lock now records OUR pid.
         let body = std::fs::read_to_string(&lock).unwrap();
         assert_eq!(body.trim(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn stale_startup_lock_race_has_exactly_one_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("notify.spawn.lock");
+        std::fs::write(&lock, "2147483647\n").unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let lock = lock.clone();
+            let tx = tx.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                tx.send(StartupLock::acquire(&lock)).unwrap();
+            }));
+        }
+        drop(tx);
+
+        let holders: Vec<_> = rx.into_iter().collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(
+            holders.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "only one stale-lock recoverer may acquire startup ownership"
+        );
     }
 
     #[test]
