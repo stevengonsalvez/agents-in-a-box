@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -171,6 +172,17 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        // Mirror ainb-core/src/config/lock.rs exactly. This plugin cannot link
+        // ainb-core, but both writers must serialize on config.toml.lock.
+        let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening config lock {}", lock_path.display()))?;
+        lock.lock_exclusive()
+            .with_context(|| format!("acquiring config lock {}", lock_path.display()))?;
 
         // Re-read rather than trusting the snapshot from `load()`: another
         // writer may have touched the file since.
