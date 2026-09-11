@@ -12,7 +12,7 @@ use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttent
 use ainb_web::data::{
     CoreFuture, CoreSnapshot, CostFuture, DataSource, FleetSnapshot, SnapshotFuture,
 };
-use ainb_web::{WebConfig, serve};
+use ainb_web::{ServeError, WebConfig, serve};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -264,6 +264,65 @@ async fn web_server_presence_lives_for_server_task() {
             Instant::now() < deadline,
             "web presence lingered after its owner ended: {listed}"
         );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_listen_failure_never_registers_presence() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let (socket, _store) = start_server(home.path()).await;
+    let _hangar_home = EnvGuard::set("AINB_HANGAR_HOME", home.path());
+    let _ainb_home = EnvGuard::set("AINB_HOME", home.path());
+
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("occupy loopback port");
+    let addr = occupied.local_addr().expect("read occupied address");
+
+    let mut observer = Client::connect(&socket).await;
+    observer.hello(home.path(), Some("tui")).await;
+    observer.subscribe_connections().await;
+
+    let error = serve(
+        WebConfig {
+            listen: addr,
+            token: None,
+            insecure_bind: false,
+            read_only: true,
+        },
+        Arc::new(WebServerSource),
+    )
+    .await
+    .expect_err("occupied port rejects web server");
+    match error {
+        ServeError::Listen {
+            addr: listen_addr, ..
+        } => assert_eq!(listen_addr, addr),
+        other => panic!("occupied port returns Listen error, got {other:?}"),
+    }
+
+    if let Ok(event) = tokio::time::timeout(
+        Duration::from_millis(250),
+        observer.next_connections_changed(),
+    )
+    .await
+    {
+        panic!("failed web bind changed daemon connections: {event}");
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        let listed = observer.connections().await;
+        assert!(
+            listed["connections"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().all(|row| row["surface"]["kind"] != "web")),
+            "failed web bind registered a web presence: {listed}"
+        );
+        if Instant::now() >= deadline {
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
