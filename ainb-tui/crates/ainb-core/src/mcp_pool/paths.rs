@@ -77,6 +77,26 @@ pub fn write_atomic(target: &Path, contents: &str, mode: Option<u32>) -> Result<
 /// True when a unix socket file exists AND something is accepting on it.
 /// Removes the file if it's stale (exists but nothing listening).
 pub fn socket_alive_or_cleanup(path: &std::path::Path) -> bool {
+    socket_alive_or_cleanup_unlocked(path)
+}
+
+/// Same probe/cleanup operation while the caller holds `path`'s lock.
+///
+/// Proxy startup must use this variant so stale-socket removal and bind share
+/// one cross-process critical section. The legacy wrapper remains for the
+/// daemon control socket, whose caller lives outside this module's ownership.
+pub(crate) fn socket_alive_or_cleanup_with_lock(
+    path: &std::path::Path,
+    lock: &crate::config::lock::ConfigLock,
+) -> bool {
+    debug_assert!(
+        lock.guards(path),
+        "MCP socket lock must guard the probed path"
+    );
+    socket_alive_or_cleanup_unlocked(path)
+}
+
+fn socket_alive_or_cleanup_unlocked(path: &std::path::Path) -> bool {
     if !path.exists() {
         return false;
     }
