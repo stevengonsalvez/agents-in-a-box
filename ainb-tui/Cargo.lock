@@ -383,6 +383,7 @@ dependencies = [
  "ainb-plugin-notifyd",
  "ainb-plugin-session-reader",
  "ainb-plugin-types-sessions",
+ "ainb-web",
  "anyhow",
  "assert_cmd",
  "blake3",
