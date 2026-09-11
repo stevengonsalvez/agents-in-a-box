@@ -175,7 +175,7 @@ body::after {
       <span><span class="k">Date</span><span class="v">2026-09-11</span></span>
       <span><span class="k">Builds on</span><span class="v">desktop shared-core spec (D1-D9 locked, P0+S in flight)</span></span>
       <span><span class="k">For decision by</span><span class="v">Stevie · /interview</span></span>
-      <span class="status-badge">Decided 2026-09-11 · see section 08</span>
+      <span class="status-badge">Decided 2026-09-11 · critiqued, spec v1.1</span>
     </div>
   </header>
 
@@ -503,6 +503,21 @@ receipt marks the pre-PTY-write boundary; <span class="hot">after the write, eff
       </table>
     </div>
     <p class="sec-intro" style="margin-top:14px">Locked as D10-D18 in <code>docs/plans/2026-09-11-multi-surface-decisions-spec.md</code>. Options record: <code>docs/plans/2026-09-11-multi-surface-decisions.md</code>. Research: <code>research/2026-09-11_multi-surface_*.md</code>.</p>
+    <div class="sec-head" style="margin-top:28px"><span class="num">09</span><h2>Critique pass, spec v1.1</h2></div>
+    <p class="sec-intro">Distinguished-engineer critique, verdict CAUTION (8/10), 30 amendments folded the same day. The five that changed the shape:</p>
+    <div class="matrix">
+      <table>
+        <thead><tr><th>Gap</th><th>Amendment</th></tr></thead>
+        <tbody>
+          <tr><td class="bad">emulator fed by a rendered <code>tmux attach</code> parses tmux's re-render and becomes a sizing client</td><td>feed is tmux control mode (<code>tmux -C</code>, raw pane bytes, no window sizing, per-pane pause) or <code>-f ignore-size,read-only</code>; spike 2 compares both</td></tr>
+          <tr><td class="bad">phone drawn consuming renderer sections; sections live in <code>ainb-app</code>, not the daemon</td><td>phone consumes hangar RPC subscriptions plus the terminal stream; D15 justified by renderer fan-out only</td></tr>
+          <tr><td class="bad">W0 and T0 edit the same files as in-flight S-B and P1</td><td>W0-wire after S-B, W0-mirror after P1; T0-daemon alongside P1, T0-section after P1; <code>HelloParams</code> reaches final shape once</td></tr>
+          <tr><td class="bad">a third status writer beside the two that already drift (732 vs 7 measured)</td><td>the store is the <code>fleet_session</code> family; attention rows are a projection in the same transaction; the sweep only asserts</td></tr>
+          <tr><td class="bad">pairing offer embedding the token is a replayable bearer; Noise IK has no phone-side story</td><td>single-use invite redeemed inside the Noise session, token bound to the device key; <code>ainb-wire-mobile</code> Rust crate via uniffi, no crypto in JS</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="sec-intro" style="margin-top:14px">Also added: a scopes table, ULID host identity, receipt lifecycle in the same SQLite transaction, four more spikes, and testable rewrites of every phase gate. Full list: <code>research/2026-09-11_multi-surface_CRITIQUE-amendments.md</code>.</p>
   </section>
 
 </div>
