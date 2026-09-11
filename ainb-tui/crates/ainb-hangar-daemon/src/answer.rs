@@ -38,6 +38,7 @@ use ainb_fleet_core::discover::{discover_from_ainb, discover_from_peers, merge_s
 use ainb_fleet_core::read::jsonl_tail::latest_transcript_for_cwd;
 use ainb_fleet_core::send::send;
 use ainb_fleet_core::types::{SendOutcome, Session};
+use ainb_hangar_proto::connections::ConnectionRow;
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 use ainb_hangar_store::repo::attention::{AttentionRepo, AttentionRow};
@@ -46,6 +47,16 @@ use std::time::{Duration, Instant};
 
 use crate::acp_pool::{PermissionAnswer, PermissionDecision};
 use crate::events::EventSink;
+
+/// Daemon-owned provenance for an answer made through a live RPC connection.
+///
+/// The wire request's `answered_by` remains required for backwards-compatible
+/// decoding, but the socket handler replaces it with this value before any
+/// database write. Client input can therefore never forge another surface.
+#[must_use]
+pub fn answered_by(connection: &ConnectionRow) -> String {
+    format!("{}@{}", connection.surface.kind, connection.host)
+}
 
 /// The resolved delivery target for an answer, or a refusal.
 enum Target {
