@@ -538,3 +538,123 @@ impl Default for TmuxSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct FleetSection {
+    /// Per-session "cleared up to" timestamp (epoch ms). A hook event
+    /// only marks a session if its `ts` is newer than this. Defaults to
+    /// `0` (any event in the lookback window can mark); bumped to "now"
+    /// while the user is attached, so re-marking only happens for
+    /// activity that arrives after they look away.
+    pub attention_baseline: HashMap<Uuid, i64>,
+    /// Background poller for the live OAuth-window snapshot. The render
+    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
+    /// calling `live_window::current()` directly — Tier 2's JSONL walk
+    /// would otherwise stall input handling on every frame.
+    pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
+    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
+    // session is live but the proxy died).
+    pub last_headroom_watchdog: Option<std::time::Instant>,
+    // Track the last time we checked for OAuth token refresh
+    pub last_token_refresh_check: Option<std::time::Instant>,
+    /// The `ask` pane's own state: which option is selected, what has been
+    /// typed, and what the last send did.
+    pub ask_state: crate::fleet::answer::AskState,
+    /// The Pal conversation, opened lazily the first time the tab is.
+    ///
+    /// Lazy because opening it dials the daemon to resolve the minted channel
+    /// scope, and an operator who never opens the tab should never pay for it.
+    pub pal_chat: Option<crate::fleet::chat_host::ChatHost>,
+    /// The Pal pane's engine / model / guardrail header.
+    ///
+    /// NOT lazy like the conversation: the header is how an operator recovers
+    /// from an adapter that will not spawn, so it reads the registry the first
+    /// time the tab is rendered rather than waiting for a chat that may never
+    /// open. It costs one `fleet/adapter_list` per session.
+    pub pal_dial: crate::fleet::pal_dial::PalDial,
+    /// The Pal pane's offer to start the hangar daemon it needs.
+    ///
+    /// One per process, not one per pane: the offer starts the daemon the whole
+    /// TUI talks to, and a second copy would let two panes each shell a start
+    /// into the same home.
+    pub daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta,
+    /// The broadcast composer, shown on `thread` while rows are checked.
+    ///
+    /// Survives a change of checkbox set on purpose: an operator who ticks a
+    /// fifth session halfway through typing must not lose what they typed.
+    pub broadcast: crate::fleet::broadcast::Broadcast,
+    /// The selected session's own thread, rebuilt when the selection moves to a
+    /// different session.
+    ///
+    /// One host, not one per session: a thread the operator has navigated away
+    /// from is not being read, and keeping N of them alive means N poll loops
+    /// against the daemon for conversations nobody is looking at.
+    pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
+    /// The daemon's half of the attention picture, refreshed by
+    /// [`crate::fleet::attention_poll`] on its own thread.
+    ///
+    /// Read on the render path, never dialled there: a wedged daemon socket
+    /// must cost a frame nothing.
+    pub daemon_attention: crate::fleet::attention_poll::Shared,
+    /// Last Hangar Fleet snapshot, refreshed beside daemon attention off the
+    /// render path.
+    pub fleet_snapshot: crate::fleet::attention_poll::SnapshotShared,
+    /// Snapshot metadata matched to local session identities. This avoids
+    /// assigning a child sharing a cwd to its parent by accident.
+    pub fleet_metadata: HashMap<Uuid, SessionFleetMetadata>,
+    /// Whether the attention poller thread is alive, so the render loop can
+    /// start one without having to remember whether it already did.
+    pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Daemon attention rows whose cwd matched no row on this screen, counted
+    /// for the header so the ONE attention surface never silently swallows a
+    /// request it could not place.
+    pub attention_elsewhere: usize,
+    /// Per-session instant (epoch ms) the ERR chip's failure was FIRST
+    /// observed. `SessionStatus::Error` carries no timestamp of its own, so
+    /// without this the chip's age would reset to `0s` on every refresh and an
+    /// hour-old failure would read as brand new. Cleared the moment the session
+    /// recovers or leaves the tree, so a later failure starts its own clock.
+    pub attention_error_since: HashMap<Uuid, i64>,
+    /// When each LOCAL blocking chip was first observed, keyed by session and
+    /// chip kind.
+    ///
+    /// `attention_for_session` returns the newest QUALIFYING hook row, so a
+    /// producer that re-reports an unanswered question — which Claude Code
+    /// does, it re-emits `Notification` while a prompt stays open — hands back
+    /// a newer `ts` every time. Two things broke on that moving value: the
+    /// chip's age reset to `0s` on every repeat, defeating the oldest-wins rule
+    /// `attention::normalise` documents; and `request_id` is derived from
+    /// `since_ms`, so a landed answer outcome was filed under a key that then
+    /// changed underneath it and the `✗ not answered` line vanished from a
+    /// question that had genuinely failed.
+    ///
+    /// Same shape as [`Self::attention_error_since`]: stamped once, reused
+    /// while the chip stays that kind, dropped when it does not.
+    pub attention_local_since: HashMap<(Uuid, AttentionKind, Option<String>), i64>,
+}
+
+impl Default for FleetSection {
+    fn default() -> Self {
+        Self {
+            attention_baseline: HashMap::new(),
+            live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
+            last_headroom_watchdog: None,
+            last_token_refresh_check: None,
+            ask_state: crate::fleet::answer::AskState::default(),
+            pal_chat: None,
+            pal_dial: crate::fleet::pal_dial::PalDial::new(),
+            daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
+            broadcast: crate::fleet::broadcast::Broadcast::default(),
+            session_chat: None,
+            daemon_attention: Arc::new(Mutex::new(
+                crate::fleet::attention::DaemonAttention::default(),
+            )),
+            fleet_snapshot: Arc::new(Mutex::new(Vec::new())),
+            fleet_metadata: HashMap::new(),
+            attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            attention_elsewhere: 0,
+            attention_error_since: HashMap::new(),
+            attention_local_since: HashMap::new(),
+        }
+    }
+}

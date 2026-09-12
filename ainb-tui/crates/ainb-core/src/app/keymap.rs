@@ -674,7 +674,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
             crate::components::session_tabs::resolve(state, state.session_tab),
             crate::components::session_tabs::SessionTab::Ask
         )
-        && state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText;
+        && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText;
     if (table_text_input_active || ask_free_text) && !text_context_pushed {
         contexts.push(KeyContext::TextInput);
     }

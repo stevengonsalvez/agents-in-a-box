@@ -374,13 +374,13 @@ impl LayoutComponent {
             // state machine either way, so the two cannot drift in what they
             // render or which failures they report.
             SessionTab::Pal => {
-                let header = session_tabs::pal_header(&state.pal_dial);
+                let header = session_tabs::pal_header(&state.fleet.pal_dial);
                 // Inserted between the header and the conversation rather than
                 // replacing either. Both still have something true to say with
                 // the daemon down — the dials an operator recovers an adapter
                 // with, and the call the chat could not make — and the offer is
                 // the one thing neither of them could say.
-                let offer = state.pal_daemon_cta_open().then_some(&state.daemon_start_cta);
+                let offer = state.pal_daemon_cta_open().then_some(&state.fleet.daemon_start_cta);
                 // `chat_host`, not `chat_host_for`: the conversation was ticked
                 // in `tick_before_draw`, and `chat_host_for` ENDS by calling
                 // this, so what is painted is what was ticked rather than a
@@ -410,7 +410,7 @@ impl LayoutComponent {
                     session_tabs::render_broadcast(
                         frame,
                         inner,
-                        &state.broadcast,
+                        &state.fleet.broadcast,
                         &targets,
                         unreachable,
                     );
@@ -455,7 +455,7 @@ impl LayoutComponent {
         // the `ask` tab: the row's `SENT` chip is painted by the session list,
         // so an operator who sends and then switches tabs would otherwise watch
         // that chip stay SENT forever.
-        if state.ask_state.tick() {
+        if state.fleet.ask_state.tick() {
             state.ui_needs_refresh = true;
         }
 
@@ -474,7 +474,7 @@ impl LayoutComponent {
                 // unfocused — no cursor, no caret, and the operator's first
                 // characters fall through to the session shortcuts.
                 if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
-                    state.ask_state.retarget(&chip);
+                    state.fleet.ask_state.retarget(&chip);
                 }
             }
             SessionTab::Log => {
@@ -491,13 +491,13 @@ impl LayoutComponent {
                 // The dial ticks with the pane, so the registry read and any
                 // in-flight configure land without the operator pressing
                 // anything, exactly like the chat host's own tick.
-                if state.pal_dial.tick() {
+                if state.fleet.pal_dial.tick() {
                     state.ui_needs_refresh = true;
                 }
                 // The offer's own tick, for the same reason: the start runs on
                 // a detached worker, and its result has to reach the pane
                 // without the operator pressing anything else.
-                if state.daemon_start_cta.tick() {
+                if state.fleet.daemon_start_cta.tick() {
                     state.ui_needs_refresh = true;
                 }
                 let _ = state.chat_host_for(active);
@@ -509,7 +509,7 @@ impl LayoutComponent {
                 // private thread.
                 if state.broadcast_targets().is_empty() {
                     let _ = state.chat_host_for(active);
-                } else if state.broadcast.tick() {
+                } else if state.fleet.broadcast.tick() {
                     state.ui_needs_refresh = true;
                 }
             }
@@ -1462,7 +1462,7 @@ pub fn build_live_status_spans(
     //
     // The snapshot is maintained by a background tokio poller so this
     // hot path never touches the filesystem itself.
-    let live = state.live_window_watcher.snapshot();
+    let live = state.fleet.live_window_watcher.snapshot();
     // Render the widget when Claude Tier1 data is flowing OR Codex usage is
     // present — Codex is overlaid independently (separate cache, its own
     // poller), so a user who runs Codex but never wired the Claude

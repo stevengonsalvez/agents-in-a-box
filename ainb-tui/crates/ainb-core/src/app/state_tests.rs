@@ -2683,7 +2683,7 @@ mod tests {
         use crate::fleet::attention::DaemonAttention;
         let mut by_cwd = std::collections::HashMap::new();
         by_cwd.insert(cwd.to_string(), vec![chip]);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up(by_cwd);
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up(by_cwd);
     }
 
     /// A question the agent RE-REPORTS keeps the instant it was first seen.
@@ -2738,7 +2738,7 @@ mod tests {
         state.stamp_local_since(id, &mut chips);
         assert_eq!(chips[0].since_ms, 9_000);
         assert!(
-            state.attention_local_since.is_empty(),
+            state.fleet.attention_local_since.is_empty(),
             "a daemon row must not take a local clock"
         );
     }
@@ -2843,7 +2843,7 @@ mod tests {
         by_cwd.insert(cwd.into(), vec![chip.clone()]);
         let mut all = std::collections::HashMap::new();
         all.insert("att-parent".into(), chip);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
             by_session_id,
             by_cwd,
             std::collections::HashMap::new(),
@@ -2878,7 +2878,7 @@ mod tests {
         by_cwd.insert(cwd.into(), vec![chip.clone()]);
         let mut all = std::collections::HashMap::new();
         all.insert("att-child".into(), chip);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
             by_session_id,
             by_cwd,
             std::collections::HashMap::new(),
@@ -2907,7 +2907,7 @@ mod tests {
         by_session_id.insert("codex-thread".into(), vec![chip.clone()]);
         let mut all = std::collections::HashMap::new();
         all.insert("att-codex".into(), chip);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
             by_session_id,
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
@@ -2956,7 +2956,7 @@ mod tests {
                 "att-1".into(),
             )],
         );
-        *state.daemon_attention.lock().unwrap() = DaemonAttention {
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention {
             by_session_id: std::collections::HashMap::new(),
             by_cwd_without_session_id: by_cwd.clone(),
             by_cwd,
@@ -3122,7 +3122,7 @@ mod tests {
 
         assert!(state.sessions.workspaces[0].sessions[0].live_attention.is_empty());
         assert_eq!(
-            state.attention_elsewhere, 1,
+            state.fleet.attention_elsewhere, 1,
             "a request the screen cannot place is still a request"
         );
     }
@@ -3146,7 +3146,7 @@ mod tests {
             "an attached session never nags — the operator is looking at it"
         );
         assert_eq!(
-            state.attention_elsewhere, 0,
+            state.fleet.attention_elsewhere, 0,
             "the session under the cursor must not be reported as waiting elsewhere"
         );
     }

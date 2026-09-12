@@ -1449,7 +1449,7 @@ impl EventHandler {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
-        let live_source = state.live_window_watcher.snapshot().source;
+        let live_source = state.fleet.live_window_watcher.snapshot().source;
         let status = ui.statusline_status(state);
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
@@ -1523,7 +1523,7 @@ impl EventHandler {
         if state.current_screen == screen_ids::SESSION_LIST
             && crate::components::session_tabs::resolve(state, state.session_tab)
                 == crate::components::session_tabs::SessionTab::Ask
-            && state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
+            && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
         {
             return Self::route_session_ask_text(character, state);
         }
@@ -1672,7 +1672,7 @@ impl EventHandler {
             PalCycleMode => Self::route_pal_dial(|dial| dial.cycle_mode(), state),
             PalRetry
                 if matches!(
-                    state.pal_dial.status(),
+                    state.fleet.pal_dial.status(),
                     crate::fleet::pal_dial::DialStatus::Failed { .. }
                 ) =>
             {
@@ -1855,27 +1855,27 @@ impl EventHandler {
 
     fn route_session_ask_move(delta: isize, state: &mut AppState) -> Option<AppEvent> {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
-        state.ask_state.retarget(&chip);
-        state.ask_state.move_cursor(&chip, delta);
+        state.fleet.ask_state.retarget(&chip);
+        state.fleet.ask_state.move_cursor(&chip, delta);
         state.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
     fn route_session_ask_backspace(state: &mut AppState) -> Option<AppEvent> {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
-        state.ask_state.retarget(&chip);
-        state.ask_state.backspace();
+        state.fleet.ask_state.retarget(&chip);
+        state.fleet.ask_state.backspace();
         state.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
     fn route_session_ask_text(character: char, state: &mut AppState) -> Option<AppEvent> {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
-        state.ask_state.retarget(&chip);
-        if state.ask_state.focus() != crate::fleet::answer::AskFocus::FreeText {
+        state.fleet.ask_state.retarget(&chip);
+        if state.fleet.ask_state.focus() != crate::fleet::answer::AskFocus::FreeText {
             return None;
         }
-        state.ask_state.push_char(character);
+        state.fleet.ask_state.push_char(character);
         state.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
@@ -1887,7 +1887,7 @@ impl EventHandler {
         if state.session_tab != crate::components::session_tabs::SessionTab::Pal {
             return None;
         }
-        turn(&mut state.pal_dial);
+        turn(&mut state.fleet.pal_dial);
         state.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
@@ -1920,11 +1920,11 @@ impl EventHandler {
             if !targets.is_empty() {
                 let handled = match action {
                     ChatKey::Enter => {
-                        state.broadcast.send(targets);
+                        state.fleet.broadcast.send(targets);
                         true
                     }
                     ChatKey::Backspace => {
-                        state.broadcast.backspace();
+                        state.fleet.broadcast.backspace();
                         true
                     }
                     ChatKey::Esc => {
@@ -1933,11 +1933,11 @@ impl EventHandler {
                         true
                     }
                     ChatKey::Char(character) => {
-                        state.broadcast.push(character);
+                        state.fleet.broadcast.push(character);
                         true
                     }
                     ChatKey::Space => {
-                        state.broadcast.push(' ');
+                        state.fleet.broadcast.push(' ');
                         true
                     }
                     _ => false,
@@ -1951,8 +1951,8 @@ impl EventHandler {
         }
 
         let host = match state.session_tab {
-            SessionTab::Pal => state.pal_chat.as_mut(),
-            SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
+            SessionTab::Pal => state.fleet.pal_chat.as_mut(),
+            SessionTab::Thread => state.fleet.session_chat.as_mut().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?;
         let outcome = reduce_chat_key(host.state_mut(), action);
@@ -3052,8 +3052,8 @@ impl EventHandler {
                         )
                     },
                 );
-                state.ask_state.retarget(&chip);
-                if let Err(refusal) = state.ask_state.send(&chip, &session_id, &cwd) {
+                state.fleet.ask_state.retarget(&chip);
+                if let Err(refusal) = state.fleet.ask_state.send(&chip, &session_id, &cwd) {
                     // Refusals are shown, never swallowed: a send that silently
                     // does nothing is the failure mode this screen exists to
                     // remove.
@@ -3072,7 +3072,7 @@ impl EventHandler {
             // cannot open was to already know it was the hangar daemon, and to
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
-                state.daemon_start_cta.start();
+                state.fleet.daemon_start_cta.start();
                 state.ui_needs_refresh = true;
             }
             AppEvent::SwitchPaneFocus => {
@@ -5772,7 +5772,7 @@ impl EventHandler {
                 // already carry our block. This event is reachable from the
                 // global `W` shortcut as well as the legacy Burndown route,
                 // so the guard lives here rather than at the keymap.
-                if state.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
+                if state.fleet.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
                     return;
                 }
                 // Read uncached: the install is a once-per-session action, so
@@ -8682,7 +8682,7 @@ mod session_composer_key_tests {
         let mut state = AppState::default();
         state.current_screen = ids::SESSION_LIST.to_string();
         state.session_tab = SessionTab::Pal;
-        state.pal_chat = Some(ChatHost::pal());
+        state.fleet.pal_chat = Some(ChatHost::pal());
         assert!(
             state.session_composer_captures_text(),
             "the fixture must actually be capturing, or every assertion below is vacuous"
@@ -8816,7 +8816,7 @@ mod session_ask_key_tests {
         // Reach the composer row.
         press(&mut state, Down);
         press(&mut state, Down);
-        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+        assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
         for c in ['d', 'D', 'x', 'e', 'n', 'q'] {
             let event = press(&mut state, Char(c));
             assert!(
@@ -8824,7 +8824,7 @@ mod session_ask_key_tests {
                 "`{c}` in the answer composer produced {event:?}"
             );
         }
-        assert_eq!(state.ask_state.free_text(), "dDxenq");
+        assert_eq!(state.fleet.ask_state.free_text(), "dDxenq");
     }
 
     /// On the OPTION rows a bare letter is not swallowed: the operator has not
@@ -8833,7 +8833,7 @@ mod session_ask_key_tests {
     #[test]
     fn a_letter_on_the_option_list_falls_through_to_the_screen() {
         let mut state = asking();
-        assert_eq!(state.ask_state.focus(), AskFocus::Options);
+        assert_eq!(state.fleet.ask_state.focus(), AskFocus::Options);
         assert!(matches!(
             press(&mut state, Char('d')),
             Some(AppEvent::DeleteSession)
@@ -8844,9 +8844,9 @@ mod session_ask_key_tests {
     fn the_arrows_walk_the_options_and_reach_the_composer() {
         let mut state = asking();
         press(&mut state, Down);
-        assert_eq!(state.ask_state.cursor(), 1);
+        assert_eq!(state.fleet.ask_state.cursor(), 1);
         press(&mut state, Down);
-        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+        assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
     }
 
     #[test]

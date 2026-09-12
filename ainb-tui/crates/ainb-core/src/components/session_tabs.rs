@@ -489,7 +489,7 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
         );
         return;
     };
-    let ask = &state.ask_state;
+    let ask = &state.fleet.ask_state;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
@@ -1672,7 +1672,7 @@ mod tests {
     /// Put the attention poller's cell in the state it reaches when the socket
     /// is dialled and nothing accepts.
     fn with_daemon(state: &mut AppState, reachable: bool, not_running: bool) {
-        *state.daemon_attention.lock().unwrap() = crate::fleet::attention::DaemonAttention {
+        *state.fleet.daemon_attention.lock().unwrap() = crate::fleet::attention::DaemonAttention {
             by_session_id: std::collections::HashMap::new(),
             by_cwd: std::collections::HashMap::new(),
             by_cwd_without_session_id: std::collections::HashMap::new(),
@@ -1739,7 +1739,7 @@ mod tests {
         // Daemon UP: this is not the offer's case, it is the one where the
         // conversation opened and its scope never resolved.
         with_daemon(&mut state, true, false);
-        state.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
+        state.fleet.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
 
         assert!(
             state.session_tab_send_block(SessionTab::Pal).is_some(),
@@ -1837,7 +1837,7 @@ mod tests {
         with_daemon(&mut state, false, true);
         assert!(state.pal_daemon_cta_armed());
 
-        state.daemon_start_cta.start();
+        state.fleet.daemon_start_cta.start();
         assert!(!state.pal_daemon_cta_armed());
         assert!(!footer_text(&state, SessionTab::Pal, true).contains(START_DAEMON_VERB));
     }
@@ -1891,7 +1891,7 @@ mod tests {
 
         // The chat case: a Pal whose scope the daemon never minted.
         state.session_tab = SessionTab::Pal;
-        state.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
+        state.fleet.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
         with_daemon(&mut state, true, false);
         assert!(
             SessionTab::Pal.enter_refusal(&state).is_some(),
@@ -2065,7 +2065,7 @@ mod tests {
     fn selected_footer_shows_observed_model_effort_and_direct_children() {
         let mut state = state_with(Vec::new(), true);
         let id = state.sessions.workspaces[0].sessions[0].id;
-        state.fleet_metadata.insert(
+        state.fleet.fleet_metadata.insert(
             id,
             crate::app::state::SessionFleetMetadata {
                 model: Some("gpt-5.6".to_string()),

@@ -563,7 +563,7 @@ impl SessionListComponent {
         row_width: usize,
         now_ms: i64,
     ) -> Vec<ListItem<'static>> {
-        let elsewhere = state.attention_elsewhere;
+        let elsewhere = state.fleet.attention_elsewhere;
         let mut items = Vec::new();
 
         // Favorite status is precomputed off the render path into
@@ -757,7 +757,7 @@ impl SessionListComponent {
                     // SENT, and this one keeps reading SENT after the operator
                     // has navigated to a different question.
                     let sending =
-                        session_alert.iter().find(|chip| state.ask_state.is_sending(chip));
+                        session_alert.iter().find(|chip| state.fleet.ask_state.is_sending(chip));
                     push_status_gutter(
                         &mut title_spans,
                         status_indicator,
@@ -1225,10 +1225,19 @@ fn session_collision_id(session: &Session, has_collision: bool) -> Option<String
 fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str {
     if matches!(session.status, SessionStatus::Idle)
         && matches!(
-            state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
+            state
+                .fleet
+                .fleet_metadata
+                .get(&session.id)
+                .and_then(|metadata| metadata.lifecycle),
             Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete)
         )
-        && state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false)
+        && state
+            .fleet
+            .daemon_attention
+            .lock()
+            .map(|daemon| daemon.reachable)
+            .unwrap_or(false)
         && session.live_attention.is_empty()
     {
         return "DONE";
@@ -1273,7 +1282,7 @@ fn truncate_text(text: &str, width: usize) -> String {
 /// The field intentionally has no guessed fallback. A missing model or effort
 /// means no Fleet observation exists yet, not that a provider default is known.
 fn session_model_effort_label(state: &AppState, session: &Session) -> Option<String> {
-    let metadata = state.fleet_metadata.get(&session.id)?;
+    let metadata = state.fleet.fleet_metadata.get(&session.id)?;
     match (
         metadata.model.as_deref(),
         metadata.reasoning_effort.as_deref(),
@@ -1462,7 +1471,7 @@ mod tests {
         let mut state = chip_state();
         let first = state.sessions.workspaces[0].sessions[0].id;
         let second = state.sessions.workspaces[0].sessions[1].id;
-        state.fleet_metadata.insert(
+        state.fleet.fleet_metadata.insert(
             first,
             crate::app::state::SessionFleetMetadata {
                 model: Some("gpt-5.6-terra".to_string()),
@@ -1470,7 +1479,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        state.fleet_metadata.insert(
+        state.fleet.fleet_metadata.insert(
             second,
             crate::app::state::SessionFleetMetadata {
                 model: Some("claude-opus-5".to_string()),
@@ -1507,7 +1516,7 @@ mod tests {
     fn sidebar_keeps_model_effort_on_its_own_line_at_narrow_width() {
         let mut state = chip_state();
         let first = state.sessions.workspaces[0].sessions[0].id;
-        state.fleet_metadata.insert(
+        state.fleet.fleet_metadata.insert(
             first,
             crate::app::state::SessionFleetMetadata {
                 model: Some("gpt-5.6-terra".to_string()),
@@ -1557,8 +1566,8 @@ mod tests {
         let mut state = chip_state();
         let session = state.sessions.workspaces[0].sessions[0].id;
         state.sessions.workspaces[0].sessions[0].live_attention.clear();
-        state.daemon_attention.lock().unwrap().reachable = true;
-        state.fleet_metadata.insert(
+        state.fleet.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet.fleet_metadata.insert(
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
@@ -1585,7 +1594,7 @@ mod tests {
     fn stale_or_contradicted_fleet_done_never_overrides_live_status() {
         let mut state = chip_state();
         let session = state.sessions.workspaces[0].sessions[0].id;
-        state.fleet_metadata.insert(
+        state.fleet.fleet_metadata.insert(
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
@@ -1595,7 +1604,7 @@ mod tests {
 
         // A current ASK is newer operator-facing evidence than an old turn
         // completion and must not create the impossible `DONE ASK` row.
-        state.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet.daemon_attention.lock().unwrap().reachable = true;
         let with_ask = render_panel(&mut state, 100, 16);
         let ask_row = with_ask
             .lines()
@@ -1610,7 +1619,7 @@ mod tests {
         // A retained snapshot cannot drive lifecycle after daemon reachability
         // is lost, even when no current attention chip exists.
         state.sessions.workspaces[0].sessions[0].live_attention.clear();
-        state.daemon_attention.lock().unwrap().reachable = false;
+        state.fleet.daemon_attention.lock().unwrap().reachable = false;
         let unreachable = render_panel(&mut state, 100, 16);
         let row = unreachable
             .lines()
@@ -1626,8 +1635,8 @@ mod tests {
         let session = state.sessions.workspaces[0].sessions[0].id;
         state.sessions.workspaces[0].sessions[0].status = SessionStatus::Stopped;
         state.sessions.workspaces[0].sessions[0].live_attention.clear();
-        state.daemon_attention.lock().unwrap().reachable = true;
-        state.fleet_metadata.insert(
+        state.fleet.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet.fleet_metadata.insert(
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
@@ -1796,7 +1805,7 @@ mod tests {
     #[test]
     fn a_request_the_screen_cannot_place_gets_its_own_row_not_a_truncated_badge() {
         let mut state = chip_state();
-        state.attention_elsewhere = 1;
+        state.fleet.attention_elsewhere = 1;
         let rendered = render_panel(&mut state, 42, 16);
         assert!(
             rendered.contains("1 waiting elsewhere"),
@@ -1810,7 +1819,7 @@ mod tests {
     #[test]
     fn no_elsewhere_row_when_every_request_found_its_session() {
         let mut state = chip_state();
-        state.attention_elsewhere = 0;
+        state.fleet.attention_elsewhere = 0;
         let rendered = render_panel(&mut state, 42, 16);
         assert!(
             !rendered.contains("elsewhere"),
@@ -1824,9 +1833,9 @@ mod tests {
         // session's shortcut by one — the exact lockstep
         // `attachable_items_in_order` exists to hold.
         let mut with_row = chip_state();
-        with_row.attention_elsewhere = 3;
+        with_row.fleet.attention_elsewhere = 3;
         let mut without = chip_state();
-        without.attention_elsewhere = 0;
+        without.fleet.attention_elsewhere = 0;
         let digits = |state: &mut AppState| -> Vec<String> {
             render_panel(state, 100, 16)
                 .lines()

@@ -3145,6 +3145,8 @@ pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, S
 
 #[derive(Debug)]
 pub struct AppState {
+    pub fleet: Versioned<FleetSection>,
+
     pub tmux: Versioned<TmuxSection>,
 
     pub log_streams: Versioned<LogsSection>,
@@ -3191,11 +3193,6 @@ pub struct AppState {
 
     // Claude chat visibility toggle
     pub focused_pane: FocusedPane,
-    // Track the last time we checked for OAuth token refresh
-    pub last_token_refresh_check: Option<std::time::Instant>,
-    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
-    // session is live but the proxy died).
-    pub last_headroom_watchdog: Option<std::time::Instant>,
     // Git view state
     pub previous_screen: Option<ScreenId>,
     /// Last `ui.close_request` snapshot version consumed by
@@ -3223,109 +3220,10 @@ pub struct AppState {
     pub home_screen_state: HomeScreenState,
     pub home_screen_v2_state: HomeScreenV2State,
 
-    /// Background poller for the live OAuth-window snapshot. The render
-    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
-    /// calling `live_window::current()` directly — Tier 2's JSONL walk
-    /// would otherwise stall input handling on every frame.
-    pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
-
-    /// Per-session "cleared up to" timestamp (epoch ms). A hook event
-    /// only marks a session if its `ts` is newer than this. Defaults to
-    /// `0` (any event in the lookback window can mark); bumped to "now"
-    /// while the user is attached, so re-marking only happens for
-    /// activity that arrives after they look away.
-    pub attention_baseline: HashMap<Uuid, i64>,
-
-    /// The `ask` pane's own state: which option is selected, what has been
-    /// typed, and what the last send did.
-    pub ask_state: crate::fleet::answer::AskState,
-
-    /// The Pal conversation, opened lazily the first time the tab is.
-    ///
-    /// Lazy because opening it dials the daemon to resolve the minted channel
-    /// scope, and an operator who never opens the tab should never pay for it.
-    pub pal_chat: Option<crate::fleet::chat_host::ChatHost>,
-
-    /// The Pal pane's engine / model / guardrail header.
-    ///
-    /// NOT lazy like the conversation: the header is how an operator recovers
-    /// from an adapter that will not spawn, so it reads the registry the first
-    /// time the tab is rendered rather than waiting for a chat that may never
-    /// open. It costs one `fleet/adapter_list` per session.
-    pub pal_dial: crate::fleet::pal_dial::PalDial,
-
-    /// The Pal pane's offer to start the hangar daemon it needs.
-    ///
-    /// One per process, not one per pane: the offer starts the daemon the whole
-    /// TUI talks to, and a second copy would let two panes each shell a start
-    /// into the same home.
-    pub daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta,
-
-    /// The broadcast composer, shown on `thread` while rows are checked.
-    ///
-    /// Survives a change of checkbox set on purpose: an operator who ticks a
-    /// fifth session halfway through typing must not lose what they typed.
-    pub broadcast: crate::fleet::broadcast::Broadcast,
-
-    /// The selected session's own thread, rebuilt when the selection moves to a
-    /// different session.
-    ///
-    /// One host, not one per session: a thread the operator has navigated away
-    /// from is not being read, and keeping N of them alive means N poll loops
-    /// against the daemon for conversations nobody is looking at.
-    pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
-
     /// The active right-pane tab. Reconciled every frame against what is
     /// actually available, so a tab cannot stay open on a pane that has gone
     /// dead under the operator.
     pub session_tab: crate::components::session_tabs::SessionTab,
-
-    /// The daemon's half of the attention picture, refreshed by
-    /// [`crate::fleet::attention_poll`] on its own thread.
-    ///
-    /// Read on the render path, never dialled there: a wedged daemon socket
-    /// must cost a frame nothing.
-    pub daemon_attention: crate::fleet::attention_poll::Shared,
-
-    /// Last Hangar Fleet snapshot, refreshed beside daemon attention off the
-    /// render path.
-    pub fleet_snapshot: crate::fleet::attention_poll::SnapshotShared,
-
-    /// Snapshot metadata matched to local session identities. This avoids
-    /// assigning a child sharing a cwd to its parent by accident.
-    pub fleet_metadata: HashMap<Uuid, SessionFleetMetadata>,
-
-    /// Whether the attention poller thread is alive, so the render loop can
-    /// start one without having to remember whether it already did.
-    pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
-
-    /// Daemon attention rows whose cwd matched no row on this screen, counted
-    /// for the header so the ONE attention surface never silently swallows a
-    /// request it could not place.
-    pub attention_elsewhere: usize,
-
-    /// Per-session instant (epoch ms) the ERR chip's failure was FIRST
-    /// observed. `SessionStatus::Error` carries no timestamp of its own, so
-    /// without this the chip's age would reset to `0s` on every refresh and an
-    /// hour-old failure would read as brand new. Cleared the moment the session
-    /// recovers or leaves the tree, so a later failure starts its own clock.
-    pub attention_error_since: HashMap<Uuid, i64>,
-    /// When each LOCAL blocking chip was first observed, keyed by session and
-    /// chip kind.
-    ///
-    /// `attention_for_session` returns the newest QUALIFYING hook row, so a
-    /// producer that re-reports an unanswered question — which Claude Code
-    /// does, it re-emits `Notification` while a prompt stays open — hands back
-    /// a newer `ts` every time. Two things broke on that moving value: the
-    /// chip's age reset to `0s` on every repeat, defeating the oldest-wins rule
-    /// `attention::normalise` documents; and `request_id` is derived from
-    /// `since_ms`, so a landed answer outcome was filed under a key that then
-    /// changed underneath it and the `✗ not answered` line vanished from a
-    /// question that had genuinely failed.
-    ///
-    /// Same shape as [`Self::attention_error_since`]: stamped once, reused
-    /// while the chip stays that kind, dropped when it does not.
-    pub attention_local_since: HashMap<(Uuid, AttentionKind, Option<String>), i64>,
 }
 
 /// Result of background workspace loading
@@ -3640,6 +3538,7 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            fleet: Versioned::default(),
             tmux: Versioned::default(),
             log_streams: Versioned::default(),
             sessions: Versioned::default(),
@@ -3673,8 +3572,6 @@ impl Default for AppState {
             confirmation_dialog: None,
             ui_needs_refresh: false,
             focused_pane: FocusedPane::Sessions,
-            last_token_refresh_check: None,
-            last_headroom_watchdog: None,
             previous_screen: None,
             last_panel_close_version: None,
             notifications: Vec::new(),
@@ -3708,7 +3605,6 @@ impl Default for AppState {
             // Daemons observability (collects health on first/periodic render)
 
             // Fleet control panel (reads current_state on entry/tick)
-            live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
             // Skills browser state
 
@@ -3724,23 +3620,7 @@ impl Default for AppState {
             // Background workspace loading state
 
             // Per-session attention markers, driven by ainb-hooks events.
-            attention_baseline: HashMap::new(),
-            attention_error_since: HashMap::new(),
-            attention_local_since: HashMap::new(),
-            daemon_attention: Arc::new(Mutex::new(
-                crate::fleet::attention::DaemonAttention::default(),
-            )),
-            fleet_snapshot: Arc::new(Mutex::new(Vec::new())),
-            fleet_metadata: HashMap::new(),
-            attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            attention_elsewhere: 0,
             session_tab: crate::components::session_tabs::SessionTab::default(),
-            ask_state: crate::fleet::answer::AskState::default(),
-            pal_dial: crate::fleet::pal_dial::PalDial::new(),
-            daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
-            broadcast: crate::fleet::broadcast::Broadcast::default(),
-            pal_chat: None,
-            session_chat: None,
         }
     }
 }
@@ -5113,13 +4993,14 @@ impl AppState {
         const INTERVAL_SECS: u64 = 10;
         let now = std::time::Instant::now();
         let due = self
+            .fleet
             .last_headroom_watchdog
             .map(|last| now.duration_since(last).as_secs() >= INTERVAL_SECS)
             .unwrap_or(true);
         if !due {
             return;
         }
-        self.last_headroom_watchdog = Some(now);
+        self.fleet.last_headroom_watchdog = Some(now);
 
         let has_headroom_session = crate::interactive::SessionStore::load()
             .sessions
@@ -11832,7 +11713,7 @@ impl AppState {
     /// would put a fresh lie on the surface the offer exists to fix.
     #[must_use]
     pub fn hangar_daemon_not_running(&self) -> bool {
-        self.daemon_attention.lock().map_or_else(
+        self.fleet.daemon_attention.lock().map_or_else(
             |poisoned| {
                 let daemon = poisoned.into_inner();
                 (!daemon.reachable) && daemon.not_running
@@ -11872,7 +11753,7 @@ impl AppState {
             // lands on a tab that takes input, and takes it away again when it
             // lands on one that does not.
             && self.focused_pane == FocusedPane::LiveLogs
-            && *self.daemon_start_cta.status() != crate::fleet::daemon_cta::CtaStatus::Starting
+            && *self.fleet.daemon_start_cta.status() != crate::fleet::daemon_cta::CtaStatus::Starting
     }
 
     /// Why a conversation tab cannot send right now, in the pane's own words.
@@ -11894,8 +11775,8 @@ impl AppState {
             return None;
         }
         match tab {
-            SessionTab::Pal => self.pal_chat.as_ref(),
-            SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
+            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?
         .state()
@@ -11918,11 +11799,11 @@ impl AppState {
             return false;
         }
         match self.session_tab {
-            SessionTab::Pal => self.pal_chat.is_some(),
+            SessionTab::Pal => self.fleet.pal_chat.is_some(),
             // A broadcast owns the keyboard whether or not a thread host has
             // been opened: the composer is there the moment rows are checked.
             SessionTab::Thread => {
-                self.session_chat.is_some() || !self.broadcast_targets().is_empty()
+                self.fleet.session_chat.is_some() || !self.broadcast_targets().is_empty()
             }
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => false,
         }
@@ -11941,11 +11822,11 @@ impl AppState {
     pub fn session_composer_captures_text(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
         if self.session_tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
-            return self.broadcast.capturing();
+            return self.fleet.broadcast.capturing();
         }
         let host = match self.session_tab {
-            SessionTab::Pal => self.pal_chat.as_ref(),
-            SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
+            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         };
         host.is_some_and(|host| host.state().is_capturing_text())
@@ -11966,7 +11847,7 @@ impl AppState {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match tab {
             SessionTab::Pal => {
-                let host = self.pal_chat.get_or_insert_with(ChatHost::pal);
+                let host = self.fleet.pal_chat.get_or_insert_with(ChatHost::pal);
                 if host.tick(now_ms) {
                     self.ui_needs_refresh = true;
                 }
@@ -11977,11 +11858,12 @@ impl AppState {
                 // Re-target when the cursor moves to a different session. The
                 // old conversation is dropped rather than cached: nobody is
                 // reading it, and a cached host keeps polling the daemon for it.
-                let stale = self.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
+                let stale =
+                    self.fleet.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
                 if stale {
-                    self.session_chat = Some((key.clone(), ChatHost::thread(key)));
+                    self.fleet.session_chat = Some((key.clone(), ChatHost::thread(key)));
                 }
-                if let Some((_, host)) = self.session_chat.as_mut() {
+                if let Some((_, host)) = self.fleet.session_chat.as_mut() {
                     if host.tick(now_ms) {
                         self.ui_needs_refresh = true;
                     }
@@ -12008,8 +11890,8 @@ impl AppState {
     ) -> Option<&crate::fleet::chat_host::ChatHost> {
         use crate::components::session_tabs::SessionTab;
         match tab {
-            SessionTab::Pal => self.pal_chat.as_ref(),
-            SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
+            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }
     }
@@ -12197,7 +12079,7 @@ impl AppState {
     #[must_use]
     pub fn selected_fleet_metadata(&self) -> Option<&SessionFleetMetadata> {
         self.get_selected_session()
-            .and_then(|session| self.fleet_metadata.get(&session.id))
+            .and_then(|session| self.fleet.fleet_metadata.get(&session.id))
     }
 
     /// Hold each LOCAL chip at the instant it was FIRST seen.
@@ -12227,7 +12109,7 @@ impl AppState {
             // (`ASK:<since_ms>`) collided with the older one — which is how a
             // previous question's draft could land under a new one.
             let key = (id, chip.kind, chip.detail.clone());
-            let first_seen = *self.attention_local_since.entry(key).or_insert(chip.since_ms);
+            let first_seen = *self.fleet.attention_local_since.entry(key).or_insert(chip.since_ms);
             chip.since_ms = first_seen;
         }
     }
@@ -12244,11 +12126,13 @@ impl AppState {
         // Snapshot the daemon's half once. Holding the lock across the whole
         // loop would put the poller's 5-second write behind a render pass.
         let daemon = self
+            .fleet
             .daemon_attention
             .lock()
             .map(|cell| cell.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let snapshot = self
+            .fleet
             .fleet_snapshot
             .lock()
             .map(|cell| cell.clone())
@@ -12262,9 +12146,9 @@ impl AppState {
                 Self::fleet_metadata_for(session, &snapshot).map(|metadata| (session.id, metadata))
             })
             .collect();
-        let metadata_changed = self.fleet_metadata != fleet_metadata;
+        let metadata_changed = self.fleet.fleet_metadata != fleet_metadata;
         if metadata_changed {
-            self.fleet_metadata = fleet_metadata.clone();
+            self.fleet.fleet_metadata = fleet_metadata.clone();
         }
         // Exact daemon attention ids consumed by a local row. Keeping this as
         // ids rather than cwds prevents a parent's ASK leaking onto every
@@ -12334,7 +12218,7 @@ impl AppState {
                     provider_session_id.as_deref(),
                     allow_unidentified_cwd,
                     true,
-                    self.attention_baseline.get(&s.id).copied().unwrap_or(0),
+                    self.fleet.attention_baseline.get(&s.id).copied().unwrap_or(0),
                     &recent,
                 );
                 let projected_status =
@@ -12382,7 +12266,7 @@ impl AppState {
                 // Default 0: with no per-session clear point yet, any event in
                 // the lookback window can mark — so pre-launch waiters show up.
                 // Attaching advances this to "now" (see below).
-                let baseline = self.attention_baseline.get(&s.id).copied().unwrap_or(0);
+                let baseline = self.fleet.attention_baseline.get(&s.id).copied().unwrap_or(0);
                 let mut chips = Vec::new();
                 // The exact tmux target is gone. A retained daemon snapshot
                 // can still describe an older ASK/WAIT, but it has no pane to
@@ -12442,14 +12326,14 @@ impl AppState {
         // on the refresh that reads the poller's cell every tick, rather than
         // on the pane: a daemon that came up and went down again while the
         // operator was on another tab is still a change this sees.
-        if self.daemon_start_cta.observe_daemon((!reachable) && daemon.not_running) {
+        if self.fleet.daemon_start_cta.observe_daemon((!reachable) && daemon.not_running) {
             changed = true;
         }
         let live: HashSet<Uuid> = marks.iter().map(|(id, ..)| *id).collect();
         // A session that recovered (or vanished) must lose its ERR clock, or a
         // later failure would render with the age of the previous one.
-        self.attention_error_since.retain(|id, _| live.contains(id));
-        self.attention_local_since.retain(|(id, ..), _| live.contains(id));
+        self.fleet.attention_error_since.retain(|id, _| live.contains(id));
+        self.fleet.attention_local_since.retain(|(id, ..), _| live.contains(id));
         // Every (session, kind) a LOCAL chip still claims this pass. Anything
         // else loses its clock below, so a question that closed and a later one
         // of the same kind do not share an instant.
@@ -12462,10 +12346,10 @@ impl AppState {
                     .map(move |chip| (*id, chip.kind, chip.detail.clone()))
             })
             .collect();
-        self.attention_local_since.retain(|key, _| still_open.contains(key));
+        self.fleet.attention_local_since.retain(|key, _| still_open.contains(key));
         for (id, mut chips, attached, failure, projected_status, provider_session_id) in marks {
             if attached {
-                self.attention_baseline.insert(id, now_ms);
+                self.fleet.attention_baseline.insert(id, now_ms);
             }
             self.stamp_local_since(id, &mut chips);
             if let Some(status) = projected_status {
@@ -12507,10 +12391,10 @@ impl AppState {
                 // so the first refresh that observes it stamps the clock and
                 // every later one reuses it — the age must not restart at 0s
                 // five times a minute.
-                let since = *self.attention_error_since.entry(id).or_insert(now_ms);
+                let since = *self.fleet.attention_error_since.entry(id).or_insert(now_ms);
                 chips.push(SessionAttention::local(AttentionKind::Err, since).with_detail(reason));
             } else {
-                self.attention_error_since.remove(&id);
+                self.fleet.attention_error_since.remove(&id);
             }
             let mut chips = crate::fleet::attention::normalise(chips);
             // Split the errors off BEFORE the window is applied, and from the
@@ -12580,8 +12464,8 @@ impl AppState {
             }
         }
         let elsewhere = daemon.elsewhere(&claimed_attention_ids);
-        if self.attention_elsewhere != elsewhere {
-            self.attention_elsewhere = elsewhere;
+        if self.fleet.attention_elsewhere != elsewhere {
+            self.fleet.attention_elsewhere = elsewhere;
             changed = true;
         }
         if changed {
@@ -12736,9 +12620,9 @@ impl AppState {
         // rendered, so a `ainb` invocation that never opens the TUI never dials
         // the socket. `spawn` is idempotent.
         crate::fleet::attention_poll::spawn(
-            &self.daemon_attention,
-            &self.fleet_snapshot,
-            &self.attention_poll_running,
+            &self.fleet.daemon_attention,
+            &self.fleet.fleet_snapshot,
+            &self.fleet.attention_poll_running,
         );
         self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
@@ -13766,7 +13650,7 @@ impl App {
 
         // Kick off the live-window background poller. Render path reads
         // from its snapshot — never calls live_window::current() inline.
-        self.state.live_window_watcher.start();
+        self.state.fleet.live_window_watcher.start();
 
         // Initialize log streaming coordinator
         let (mut coordinator, log_sender) = LogStreamingCoordinator::new();
@@ -13972,12 +13856,13 @@ impl App {
         let now = Instant::now();
         let should_check_token = self
             .state
+            .fleet
             .last_token_refresh_check
             .map(|last| now.duration_since(last).as_secs() >= 300) // Check every 5 minutes
             .unwrap_or(true); // First time
 
         if should_check_token {
-            self.state.last_token_refresh_check = Some(now);
+            self.state.fleet.last_token_refresh_check = Some(now);
 
             // Check if we need to refresh OAuth tokens
             let home_dir = dirs::home_dir();
