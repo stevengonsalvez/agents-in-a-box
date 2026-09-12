@@ -576,7 +576,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::LOG_HISTORY => {
-                let sub = match state.log_history_state.focus {
+                let sub = match state.log_streams.log_history_state.focus {
                     crate::components::log_history_viewer::LogViewerFocus::SessionList => {
                         "sessions"
                     }

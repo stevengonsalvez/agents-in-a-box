@@ -265,7 +265,7 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
     }
     (home.welcome.content_height, home.welcome.visible_height) = ui.welcome_viewport;
 
-    state.log_history_state.log_entries_area = ui.log_entries_area;
+    state.log_streams.log_history_state.log_entries_area = ui.log_entries_area;
 }
 
 pub struct LayoutComponent {
@@ -361,7 +361,7 @@ impl LayoutComponent {
                 let log = state.get_selected_session().map_or(
                     crate::fleet::session_log::Log::Rows(Vec::new()),
                     |session| {
-                        state.session_log.read(&crate::fleet::session_log::LogKey::new(
+                        state.log_streams.session_log.read(&crate::fleet::session_log::LogKey::new(
                             &session.workspace_path,
                             AppState::agent_hook_name(session.agent_type),
                         ))
@@ -482,7 +482,10 @@ impl LayoutComponent {
                 // the attention poller is: an `ainb` invocation that never opens
                 // this pane never opens the notifications store. `spawn` is
                 // idempotent.
-                crate::fleet::session_log::spawn(&state.session_log, &state.session_log_running);
+                crate::fleet::session_log::spawn(
+                    &state.log_streams.session_log,
+                    &state.log_streams.session_log_running,
+                );
             }
             SessionTab::Pal => {
                 // The dial ticks with the pane, so the registry read and any

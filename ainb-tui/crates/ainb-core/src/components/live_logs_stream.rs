@@ -142,13 +142,13 @@ impl LiveLogsStreamComponent {
         // Get logs from currently selected session or all active sessions
         if let Some(session) = state.selected_session() {
             // Get logs for specific session
-            state.live_logs.get(&session.id).cloned().unwrap_or_default()
+            state.log_streams.live_logs.get(&session.id).cloned().unwrap_or_default()
         } else {
             // Aggregate logs from all active sessions
             let mut all_logs = Vec::new();
             for workspace in &state.sessions.workspaces {
                 for session in &workspace.sessions {
-                    if let Some(logs) = state.live_logs.get(&session.id) {
+                    if let Some(logs) = state.log_streams.live_logs.get(&session.id) {
                         all_logs.extend(logs.iter().cloned());
                     }
                 }

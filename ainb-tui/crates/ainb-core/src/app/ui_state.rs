@@ -380,7 +380,7 @@ impl UiState {
     /// routed straight back out to the `LayoutComponent`, which is what this
     /// does, without a round trip through core state.
     pub fn apply(&mut self, action: ScrollAction, layout: &mut LayoutComponent, state: &AppState) {
-        let total_logs = || state.live_logs.values().map(Vec::len).sum::<usize>();
+        let total_logs = || state.log_streams.live_logs.values().map(Vec::len).sum::<usize>();
         match action {
             ScrollAction::ScrollLogsUp => layout.live_logs_mut().scroll_up(),
             ScrollAction::ScrollLogsDown => layout.live_logs_mut().scroll_down(total_logs()),

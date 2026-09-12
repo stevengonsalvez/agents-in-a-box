@@ -444,7 +444,7 @@ exit 0"#,
 
     runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
 
-    let jsonl = env.logs.join("claude.jsonl");
+    let jsonl = env.log_streams.logs.join("claude.jsonl");
     assert!(jsonl.exists(), "expected claude.jsonl at {jsonl:?}");
     let lines: Vec<_> = fs::read_to_string(&jsonl)
         .expect("read jsonl")

@@ -890,7 +890,7 @@ impl Screen for LogHistoryScreen {
         ids::LOG_HISTORY
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
-        self.component.render(frame, area, &state.log_history_state, ui);
+        self.component.render(frame, area, &state.log_streams.log_history_state, ui);
     }
 }
 

@@ -937,7 +937,10 @@ async fn run_tui_loop(
                             // Handle log history view clicks directly
                             if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
                                 // Log history viewer takes full screen, starts at (0, 0)
-                                app.state.log_history_state.handle_click(col, row, 0, 0);
+                                app.state
+                                    .log_streams
+                                    .log_history_state
+                                    .handle_click(col, row, 0, 0);
                             } else if app.state.current_screen == crate::app::screens::ids::GIT_VIEW
                                 && app.state.git_view.git_view_state.as_ref().is_some_and(|g| {
                                     g.active_tab == crate::components::git_view::GitTab::Review
@@ -1030,16 +1033,28 @@ async fn run_tui_loop(
                                 {
                                     // Horizontal scroll
                                     if is_down {
-                                        app.state.log_history_state.scroll_right(SCROLL_LINES * 4);
+                                        app.state
+                                            .log_streams
+                                            .log_history_state
+                                            .scroll_right(SCROLL_LINES * 4);
                                     } else {
-                                        app.state.log_history_state.scroll_left(SCROLL_LINES * 4);
+                                        app.state
+                                            .log_streams
+                                            .log_history_state
+                                            .scroll_left(SCROLL_LINES * 4);
                                     }
                                 } else {
                                     // Vertical scroll
                                     if is_down {
-                                        app.state.log_history_state.scroll_down_by(SCROLL_LINES);
+                                        app.state
+                                            .log_streams
+                                            .log_history_state
+                                            .scroll_down_by(SCROLL_LINES);
                                     } else {
-                                        app.state.log_history_state.scroll_up_by(SCROLL_LINES);
+                                        app.state
+                                            .log_streams
+                                            .log_history_state
+                                            .scroll_up_by(SCROLL_LINES);
                                     }
                                 }
                             } else if app.state.current_screen == screen_ids::SESSION_LIST
@@ -1067,7 +1082,7 @@ async fn run_tui_loop(
 
                             // Handle log history text selection drag
                             if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
-                                app.state.log_history_state.update_selection(col, row);
+                                app.state.log_streams.log_history_state.update_selection(col, row);
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragging { x: col, y: row },
                                 &mut app.state,
@@ -1081,7 +1096,7 @@ async fn run_tui_loop(
 
                             // Handle log history text selection end
                             if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
-                                app.state.log_history_state.end_selection();
+                                app.state.log_streams.log_history_state.end_selection();
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragEnd { x: col, y: row },
                                 &mut app.state,

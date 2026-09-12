@@ -3141,6 +3141,8 @@ pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, S
 
 #[derive(Debug)]
 pub struct AppState {
+    pub log_streams: Versioned<LogsSection>,
+
     pub sessions: Versioned<SessionsSection>,
 
     pub new_session: Versioned<NewSessionSection>,
@@ -3171,7 +3173,6 @@ pub struct AppState {
 
     pub current_screen: ScreenId,
     pub should_quit: bool,
-    pub logs: HashMap<Uuid, Vec<String>>,
     pub help_visible: bool,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
@@ -3206,23 +3207,11 @@ pub struct AppState {
     // A spawned observer must survive briefly before it clears a prior retry
     // count. `tmux attach-session` reports some startup failures asynchronously.
     observer_started_at: Option<Instant>,
-    // Track if current directory is a git repository
-    pub last_logs_session_id: Option<Uuid>,
-    // Track when logs were last updated for each session
-    pub log_last_updated: HashMap<Uuid, std::time::Instant>,
-    // Track the last time we checked for log updates globally
-    pub last_log_check: Option<std::time::Instant>,
     // Track the last time we checked for OAuth token refresh
     pub last_token_refresh_check: Option<std::time::Instant>,
     // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
     // session is live but the proxy died).
     pub last_headroom_watchdog: Option<std::time::Instant>,
-    // Claude chat integration
-    pub live_logs: HashMap<Uuid, Vec<LogEntry>>,
-    // Claude API client manager (when initialized)
-    pub log_streaming_coordinator: Option<LogStreamingCoordinator>,
-    // Channel sender for log streaming
-    pub log_sender: Option<mpsc::UnboundedSender<(Uuid, LogEntry)>>,
     // Git view state
     pub previous_screen: Option<ScreenId>,
     /// Last `ui.close_request` snapshot version consumed by
@@ -3263,9 +3252,6 @@ pub struct AppState {
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
     pub home_screen_v2_state: HomeScreenV2State,
-
-    // Log history viewer state
-    pub log_history_state: crate::components::LogHistoryViewerState,
 
     /// Background poller for the live OAuth-window snapshot. The render
     /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
@@ -3342,17 +3328,6 @@ pub struct AppState {
     /// Whether the attention poller thread is alive, so the render loop can
     /// start one without having to remember whether it already did.
     pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
-
-    /// The `log` tab's history, filled by [`crate::fleet::session_log`] on its
-    /// own thread.
-    ///
-    /// Read on the render path, never QUERIED there: the store read used to
-    /// live inside `terminal.draw` and cost a real store up to 948 ms a frame.
-    pub session_log: Arc<crate::fleet::session_log::Shared>,
-
-    /// Whether the session-log worker is alive. Same idempotence flag, and the
-    /// same reason, as [`Self::attention_poll_running`].
-    pub session_log_running: Arc<std::sync::atomic::AtomicBool>,
 
     /// Daemon attention rows whose cwd matched no row on this screen, counted
     /// for the header so the ONE attention surface never silently swallows a
@@ -3695,6 +3670,7 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            log_streams: Versioned::default(),
             sessions: Versioned::default(),
             new_session: Versioned::default(),
             workspace_load: Versioned::default(),
@@ -3720,7 +3696,6 @@ impl Default for AppState {
             mcp_pool: Versioned::default(),
             current_screen: screen_ids::HOME.to_string(),
             should_quit: false,
-            logs: HashMap::new(),
             help_visible: false,
             pending_async_action: None,
             async_operation_cancelled: false,
@@ -3732,14 +3707,8 @@ impl Default for AppState {
             observer_pending: None,
             observer_failed_target: None,
             observer_started_at: None,
-            last_logs_session_id: None,
-            log_last_updated: HashMap::new(),
-            last_log_check: None,
             last_token_refresh_check: None,
             last_headroom_watchdog: None,
-            live_logs: HashMap::new(),
-            log_streaming_coordinator: None,
-            log_sender: None,
             previous_screen: None,
             last_panel_close_version: None,
             notifications: Vec::new(),
@@ -3771,7 +3740,6 @@ impl Default for AppState {
             // Persistent configuration
 
             // Log history viewer state
-            log_history_state: crate::components::LogHistoryViewerState::new(),
 
             // Changelog viewer state
 
@@ -3807,8 +3775,6 @@ impl Default for AppState {
             fleet_snapshot: Arc::new(Mutex::new(Vec::new())),
             fleet_metadata: HashMap::new(),
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            session_log: Arc::new(crate::fleet::session_log::Shared::default()),
-            session_log_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             attention_elsewhere: 0,
             session_tab: crate::components::session_tabs::SessionTab::default(),
             ask_state: crate::fleet::answer::AskState::default(),
@@ -3978,10 +3944,14 @@ impl AppState {
 
     /// Add a log entry to live logs
     pub fn add_live_log(&mut self, session_id: Uuid, log_entry: LogEntry) {
-        self.live_logs.entry(session_id).or_insert_with(Vec::new).push(log_entry);
+        self.log_streams
+            .live_logs
+            .entry(session_id)
+            .or_insert_with(Vec::new)
+            .push(log_entry);
 
         // Limit log entries to prevent memory issues (keep last 1000)
-        if let Some(logs) = self.live_logs.get_mut(&session_id) {
+        if let Some(logs) = self.log_streams.live_logs.get_mut(&session_id) {
             if logs.len() > 1000 {
                 logs.drain(0..logs.len() - 1000);
             }
@@ -3995,7 +3965,7 @@ impl AppState {
         &mut self,
         session_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(coordinator) = &mut self.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.log_streams.log_streaming_coordinator {
             // Find the session to get container info
             let session_info = self
                 .sessions
@@ -4031,7 +4001,7 @@ impl AppState {
         &mut self,
         session_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(coordinator) = &mut self.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.log_streams.log_streaming_coordinator {
             info!("Stopping log streaming for session {}", session_id);
             coordinator.stop_streaming(session_id).await?;
         }
@@ -4040,13 +4010,13 @@ impl AppState {
 
     /// Clear live logs for a session
     pub fn clear_live_logs(&mut self, session_id: Uuid) {
-        self.live_logs.remove(&session_id);
+        self.log_streams.live_logs.remove(&session_id);
         self.ui_needs_refresh = true;
     }
 
     /// Get total live log count across all sessions
     pub fn total_live_log_count(&self) -> usize {
-        self.live_logs.values().map(|logs| logs.len()).sum()
+        self.log_streams.live_logs.values().map(|logs| logs.len()).sum()
     }
 
     /// Check if this is first time setup (no auth configured)
@@ -7634,9 +7604,9 @@ impl AppState {
         // Get session ID without borrowing self
         if let Some(session_id) = self.get_selected_session_id() {
             // Only fetch if we haven't already fetched logs for this session
-            if self.last_logs_session_id != Some(session_id) {
+            if self.log_streams.last_logs_session_id != Some(session_id) {
                 self.pending_async_action = Some(AsyncAction::FetchContainerLogs(session_id));
-                self.last_logs_session_id = Some(session_id);
+                self.log_streams.last_logs_session_id = Some(session_id);
             }
         }
     }
@@ -7826,12 +7796,13 @@ impl AppState {
             let logs = container_manager.get_container_logs(&container_id, Some(50)).await?;
 
             // Update the logs cache
-            self.logs.insert(session_id, logs.clone());
+            self.log_streams.logs.insert(session_id, logs.clone());
 
             Ok(logs)
         } else {
             // No container ID - return session creation logs if available
             Ok(self
+                .log_streams
                 .logs
                 .get(&session_id)
                 .cloned()
@@ -8821,7 +8792,7 @@ impl AppState {
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(
+        self.log_streams.logs.insert(
             session_id,
             vec!["Restarting session with updated configuration...".to_string()],
         );
@@ -8865,7 +8836,7 @@ impl AppState {
         };
 
         // Add initial log message
-        if let Some(session_logs) = self.logs.get_mut(&session_id) {
+        if let Some(session_logs) = self.log_streams.logs.get_mut(&session_id) {
             session_logs.push("Checking for existing worktree...".to_string());
         }
 
@@ -8887,7 +8858,7 @@ impl AppState {
                     worktree_path.display()
                 );
 
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     logs.push(format!(
                         "Reusing existing worktree at {}",
                         worktree_path.display()
@@ -8907,7 +8878,7 @@ impl AppState {
             } else {
                 info!("Worktree path no longer exists, creating fresh session");
 
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     logs.push("Worktree not found, creating fresh session...".to_string());
                 }
 
@@ -8916,7 +8887,7 @@ impl AppState {
         } else {
             info!("No existing worktree info found, creating fresh session");
 
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.push("Creating fresh session...".to_string());
             }
 
@@ -8928,13 +8899,13 @@ impl AppState {
 
         // Transfer collected logs to our main logs HashMap
         if let Ok(collected_logs) = session_logs.lock() {
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.extend(collected_logs.clone());
             }
         }
 
         // Add completion log based on result
-        if let Some(logs) = self.logs.get_mut(&session_id) {
+        if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
             match &result {
                 Ok(_) => logs
                     .push("Session restarted successfully with updated configuration!".to_string()),
@@ -9087,7 +9058,7 @@ impl AppState {
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(
+        self.log_streams.logs.insert(
             session_id,
             vec!["Starting Interactive session creation...".to_string()],
         );
@@ -9163,7 +9134,7 @@ impl AppState {
 
         // Transfer collected logs
         if let Ok(collected_logs) = session_logs.lock() {
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.extend(collected_logs.clone());
             }
         }
@@ -9171,7 +9142,7 @@ impl AppState {
         match result {
             Ok(interactive_session) => {
                 // Send success log
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     logs.push("Interactive session created successfully!".to_string());
                 }
 
@@ -9229,7 +9200,7 @@ impl AppState {
             Err(e) => {
                 // See the configure-flow comment: `{:#}` keeps the cause.
                 error!("Failed to create Interactive session: {:#}", e);
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     // `{:#}`, matching the `error!` above: the session log is
                     // read instead of the daemon log, so dropping the cause
                     // chain here hides it from the person most likely to look.
@@ -9260,7 +9231,7 @@ impl AppState {
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(
+        self.log_streams.logs.insert(
             session_id,
             vec!["Starting Boss session creation...".to_string()],
         );
@@ -9301,7 +9272,7 @@ impl AppState {
         };
 
         // Add initial log message
-        if let Some(session_logs) = self.logs.get_mut(&session_id) {
+        if let Some(session_logs) = self.log_streams.logs.get_mut(&session_id) {
             session_logs.push("Creating worktree...".to_string());
         }
 
@@ -9316,13 +9287,13 @@ impl AppState {
 
         // Transfer collected logs to our main logs HashMap
         if let Ok(collected_logs) = session_logs.lock() {
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.extend(collected_logs.clone());
             }
         }
 
         // Add completion log based on result
-        if let Some(logs) = self.logs.get_mut(&session_id) {
+        if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
             match &result {
                 Ok(_) => logs.push("Boss session created successfully!".to_string()),
                 Err(e) => logs.push(format!("Session creation failed: {}", e)),
@@ -9411,7 +9382,7 @@ impl AppState {
             }
 
             // Clean up any remaining state
-            self.live_logs.remove(session_id);
+            self.log_streams.live_logs.remove(session_id);
 
             cleaned_up += 1;
         }
@@ -13848,8 +13819,8 @@ impl App {
             info!("Log streaming will be available when Docker is started");
         }
 
-        self.state.log_streaming_coordinator = Some(coordinator);
-        self.state.log_sender = Some(log_sender);
+        self.state.log_streams.log_streaming_coordinator = Some(coordinator);
+        self.state.log_streams.log_sender = Some(log_sender);
 
         // Try to refresh OAuth tokens if they're expired (before checking first-time setup)
         let home_dir = dirs::home_dir();
@@ -13936,7 +13907,7 @@ impl App {
 
     /// Initialize log streaming for all running sessions
     async fn init_log_streaming_for_sessions(&mut self) -> anyhow::Result<()> {
-        if let Some(coordinator) = &mut self.state.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.state.log_streams.log_streaming_coordinator {
             // Collect session info for streaming
             let sessions: Vec<(Uuid, String, String, crate::models::SessionMode)> = self
                 .state
@@ -14118,7 +14089,7 @@ impl App {
 
         // Process incoming log entries (non-blocking)
         let mut log_entries = Vec::new();
-        if let Some(coordinator) = &mut self.state.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.state.log_streams.log_streaming_coordinator {
             // Collect all available log entries without blocking
             while let Some((session_id, log_entry)) = coordinator.try_next_log() {
                 log_entries.push((session_id, log_entry));
@@ -14172,18 +14143,20 @@ impl App {
         let now = Instant::now();
         let should_update_logs = self
             .state
+            .log_streams
             .last_log_check
             .map(|last| now.duration_since(last).as_secs() >= 3) // Update every 3 seconds
             .unwrap_or(true); // First time
 
         if should_update_logs {
-            self.state.last_log_check = Some(now);
+            self.state.log_streams.last_log_check = Some(now);
 
             // If we have an attached session, fetch its logs
             if let Some(attached_id) = self.state.sessions.attached_session_id {
                 // Check if we should update this session's logs (don't spam updates)
                 let should_update_session = self
                     .state
+                    .log_streams
                     .log_last_updated
                     .get(&attached_id)
                     .map(|last| now.duration_since(*last).as_secs() >= 2) // Update session logs every 2 seconds
@@ -14194,7 +14167,7 @@ impl App {
                     if let Err(e) = self.state.fetch_claude_logs(attached_id).await {
                         warn!("Failed to fetch logs for session {}: {}", attached_id, e);
                     } else {
-                        self.state.log_last_updated.insert(attached_id, now);
+                        self.state.log_streams.log_last_updated.insert(attached_id, now);
                         // Set flag to refresh UI with new logs
                         self.state.ui_needs_refresh = true;
                     }

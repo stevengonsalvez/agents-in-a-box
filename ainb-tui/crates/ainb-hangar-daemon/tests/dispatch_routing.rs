@@ -178,11 +178,11 @@ async fn claude_backend_takes_claude_path() {
     );
     // run_claude writes claude.jsonl and never codex.jsonl.
     assert!(
-        env.logs.join("claude.jsonl").exists(),
+        env.log_streams.logs.join("claude.jsonl").exists(),
         "claude backend must take run_claude (writes claude.jsonl)"
     );
     assert!(
-        !env.logs.join("codex.jsonl").exists(),
+        !env.log_streams.logs.join("codex.jsonl").exists(),
         "claude backend must NOT take the codex path"
     );
 }
@@ -212,11 +212,11 @@ async fn codex_backend_takes_codex_path() {
     // the new path is taken, plus the negative proof it did NOT fall through to
     // the pre-e38.16 unconditional run_claude.
     assert!(
-        env.logs.join("codex.jsonl").exists(),
+        env.log_streams.logs.join("codex.jsonl").exists(),
         "codex backend must take run_codex (writes codex.jsonl)"
     );
     assert!(
-        !env.logs.join("claude.jsonl").exists(),
+        !env.log_streams.logs.join("claude.jsonl").exists(),
         "codex backend must NOT fall through to run_claude (no claude.jsonl)"
     );
 }
@@ -261,17 +261,17 @@ async fn copilot_backend_takes_copilot_path() {
 
     // Positive proof the copilot exec path ran…
     assert!(
-        env.logs.join("copilot.jsonl").exists(),
+        env.log_streams.logs.join("copilot.jsonl").exists(),
         "copilot backend must take run_copilot (writes copilot.jsonl)"
     );
     // …and negative proof it did not fall through to either other provider (the
     // silent claude fallback this branch removed).
     assert!(
-        !env.logs.join("claude.jsonl").exists(),
+        !env.log_streams.logs.join("claude.jsonl").exists(),
         "copilot backend must NOT fall through to run_claude (no claude.jsonl)"
     );
     assert!(
-        !env.logs.join("codex.jsonl").exists(),
+        !env.log_streams.logs.join("codex.jsonl").exists(),
         "copilot backend must NOT take the codex path (no codex.jsonl)"
     );
 }
@@ -309,15 +309,15 @@ async fn antigravity_backend_takes_antigravity_path() {
     );
 
     assert!(
-        env.logs.join("antigravity.jsonl").exists(),
+        env.log_streams.logs.join("antigravity.jsonl").exists(),
         "antigravity backend must take run_antigravity (writes antigravity.jsonl)"
     );
     assert!(
-        !env.logs.join("claude.jsonl").exists(),
+        !env.log_streams.logs.join("claude.jsonl").exists(),
         "antigravity backend must NOT fall through to run_claude"
     );
     assert!(
-        !env.logs.join("codex.jsonl").exists(),
+        !env.log_streams.logs.join("codex.jsonl").exists(),
         "antigravity backend must NOT take codex path"
     );
 }

@@ -3718,9 +3718,9 @@ impl EventHandler {
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
                         if let Some(log_dir) = state.log_dir() {
-                            state.log_history_state.set_log_dir(log_dir);
+                            state.log_streams.log_history_state.set_log_dir(log_dir);
                         }
-                        state.log_history_state.show();
+                        state.log_streams.log_history_state.show();
                         state.current_screen = screen_ids::LOG_HISTORY.to_string();
                     }
                     SidebarItem::Stats => {
@@ -3958,9 +3958,9 @@ impl EventHandler {
             }
             AppEvent::GoToLogHistory => {
                 if let Some(log_dir) = state.log_dir() {
-                    state.log_history_state.set_log_dir(log_dir);
+                    state.log_streams.log_history_state.set_log_dir(log_dir);
                 }
-                state.log_history_state.show();
+                state.log_streams.log_history_state.show();
                 state.current_screen = screen_ids::LOG_HISTORY.to_string();
             }
             AppEvent::GoToSessionList => {
@@ -5650,52 +5650,52 @@ impl EventHandler {
             // Log history viewer events
             AppEvent::LogHistoryBack => {
                 tracing::debug!("Log history back");
-                state.log_history_state.hide();
+                state.log_streams.log_history_state.hide();
                 state.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::LogHistoryNextSession => {
                 tracing::debug!("Log history next session");
-                state.log_history_state.select_next_session();
+                state.log_streams.log_history_state.select_next_session();
             }
             AppEvent::LogHistoryPrevSession => {
                 tracing::debug!("Log history prev session");
-                state.log_history_state.select_prev_session();
+                state.log_streams.log_history_state.select_prev_session();
             }
             AppEvent::LogHistorySelectSession => {
                 tracing::debug!("Log history select session");
-                state.log_history_state.load_selected_session();
+                state.log_streams.log_history_state.load_selected_session();
             }
             AppEvent::LogHistoryToggleFocus => {
                 tracing::debug!("Log history toggle focus");
-                state.log_history_state.toggle_focus();
+                state.log_streams.log_history_state.toggle_focus();
             }
             AppEvent::LogHistoryScrollUp => {
                 tracing::debug!("Log history scroll up");
-                state.log_history_state.scroll_up();
+                state.log_streams.log_history_state.scroll_up();
             }
             AppEvent::LogHistoryScrollDown => {
                 tracing::debug!("Log history scroll down");
-                state.log_history_state.scroll_down();
+                state.log_streams.log_history_state.scroll_down();
             }
             AppEvent::LogHistoryPageUp => {
                 tracing::debug!("Log history page up");
-                state.log_history_state.page_up(20);
+                state.log_streams.log_history_state.page_up(20);
             }
             AppEvent::LogHistoryPageDown => {
                 tracing::debug!("Log history page down");
-                state.log_history_state.page_down(20);
+                state.log_streams.log_history_state.page_down(20);
             }
             AppEvent::LogHistoryCycleFilter => {
                 tracing::debug!("Log history cycle filter");
-                state.log_history_state.cycle_filter();
+                state.log_streams.log_history_state.cycle_filter();
             }
             AppEvent::LogHistoryRefresh => {
                 tracing::debug!("Log history refresh");
-                state.log_history_state.refresh_sessions();
+                state.log_streams.log_history_state.refresh_sessions();
             }
             AppEvent::LogHistoryCopySelection => {
                 tracing::debug!("Log history copy selection");
-                if let Err(e) = state.log_history_state.copy_selection_to_clipboard() {
+                if let Err(e) = state.log_streams.log_history_state.copy_selection_to_clipboard() {
                     tracing::warn!("Failed to copy to clipboard: {}", e);
                 } else {
                     tracing::info!("Copied selection to clipboard");
@@ -5703,22 +5703,22 @@ impl EventHandler {
             }
             AppEvent::LogHistoryScrollLeft => {
                 tracing::debug!("Log history scroll left");
-                state.log_history_state.scroll_left(4);
+                state.log_streams.log_history_state.scroll_left(4);
             }
             AppEvent::LogHistoryScrollRight => {
                 tracing::debug!("Log history scroll right");
-                state.log_history_state.scroll_right(4);
+                state.log_streams.log_history_state.scroll_right(4);
             }
             AppEvent::LogHistoryScrollHome => {
                 tracing::debug!("Log history scroll home");
-                state.log_history_state.scroll_home();
+                state.log_streams.log_history_state.scroll_home();
             }
             AppEvent::LogHistoryCleanup => {
                 tracing::info!("Log history cleanup requested");
-                match state.log_history_state.delete_all_logs() {
+                match state.log_streams.log_history_state.delete_all_logs() {
                     Ok(count) => {
                         tracing::info!("Deleted {} log files", count);
-                        state.log_history_state.refresh_sessions();
+                        state.log_streams.log_history_state.refresh_sessions();
                     }
                     Err(e) => {
                         tracing::error!("Failed to delete log files: {}", e);

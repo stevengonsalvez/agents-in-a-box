@@ -435,3 +435,48 @@ impl Default for SessionsSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct LogsSection {
+    pub logs: HashMap<Uuid, Vec<String>>,
+    // Claude chat integration
+    pub live_logs: HashMap<Uuid, Vec<LogEntry>>,
+    // Track when logs were last updated for each session
+    pub log_last_updated: HashMap<Uuid, std::time::Instant>,
+    // Track the last time we checked for log updates globally
+    pub last_log_check: Option<std::time::Instant>,
+    // Track if current directory is a git repository
+    pub last_logs_session_id: Option<Uuid>,
+    // Claude API client manager (when initialized)
+    pub log_streaming_coordinator: Option<LogStreamingCoordinator>,
+    // Channel sender for log streaming
+    pub log_sender: Option<mpsc::UnboundedSender<(Uuid, LogEntry)>>,
+    // Log history viewer state
+    pub log_history_state: crate::components::LogHistoryViewerState,
+    /// The `log` tab's history, filled by [`crate::fleet::session_log`] on its
+    /// own thread.
+    ///
+    /// Read on the render path, never QUERIED there: the store read used to
+    /// live inside `terminal.draw` and cost a real store up to 948 ms a frame.
+    pub session_log: Arc<crate::fleet::session_log::Shared>,
+    /// Whether the session-log worker is alive. Same idempotence flag, and the
+    /// same reason, as [`Self::attention_poll_running`].
+    pub session_log_running: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Default for LogsSection {
+    fn default() -> Self {
+        Self {
+            logs: HashMap::new(),
+            live_logs: HashMap::new(),
+            log_last_updated: HashMap::new(),
+            last_log_check: None,
+            last_logs_session_id: None,
+            log_streaming_coordinator: None,
+            log_sender: None,
+            log_history_state: crate::components::LogHistoryViewerState::new(),
+            session_log: Arc::new(crate::fleet::session_log::Shared::default()),
+            session_log_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+}

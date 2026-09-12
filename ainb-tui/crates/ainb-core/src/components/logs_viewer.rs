@@ -98,7 +98,7 @@ impl LogsViewerComponent {
         session: &crate::models::Session,
     ) -> Vec<ListItem> {
         // First check if we have real logs for this session
-        if let Some(logs) = state.logs.get(&session.id) {
+        if let Some(logs) = state.log_streams.logs.get(&session.id) {
             if !logs.is_empty() {
                 return logs.iter().map(|log| ListItem::new(log.clone())).collect();
             }

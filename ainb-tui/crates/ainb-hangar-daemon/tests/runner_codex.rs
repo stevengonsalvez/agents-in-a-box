@@ -120,7 +120,7 @@ async fn codex_exec_streams_jsonl_to_codex_log() {
         .expect("run");
 
     // The codex provider writes its OWN log file (not claude.jsonl).
-    let jsonl = env.logs.join("codex.jsonl");
+    let jsonl = env.log_streams.logs.join("codex.jsonl");
     assert!(jsonl.exists(), "expected codex.jsonl at {jsonl:?}");
     let lines = fs::read_to_string(&jsonl)
         .expect("read jsonl")
