@@ -177,10 +177,15 @@ async fn two_surfaces_answering_one_row_yield_one_delivered_and_one_already_answ
 }
 
 /// The fence: a surface answering the version it read wins; one answering a
-/// version that has moved is told the row was already answered, rather than
+/// version that has moved is REFUSED, with the row left open, rather than
 /// delivering a second time.
+///
+/// The refusal is `ambiguous`, not `already_answered`. Those are two different
+/// facts and the row proves it: nobody answered this one, and it is still
+/// answerable — telling the client "already answered by unknown" would be wrong
+/// in both directions at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stale_fence_is_refused_as_already_answered() {
+async fn a_stale_fence_is_refused_with_the_row_still_open() {
     let _seam = SEAM.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let fake = install_fake_ainb(dir.path());
@@ -232,9 +237,14 @@ async fn a_stale_fence_is_refused_as_already_answered() {
     )
     .await;
     let stale = serde_json::to_value(stale).unwrap();
-    assert_eq!(stale["result"]["outcome"], "already_answered", "{stale}");
+    assert_eq!(stale["result"]["outcome"], "ambiguous", "{stale}");
+    assert!(
+        stale["result"]["reason"].as_str().is_some_and(|r| r.contains("moved on")),
+        "the refusal must say the read was stale, not invent a winner: {stale}"
+    );
     let row = AttentionRepo::get(store.pool(), "att-fence").await.unwrap().unwrap();
     assert_eq!(row.state, "open", "a refused fence must not flip the row");
+    assert!(row.answered_by.is_none(), "nobody answered it: {row:?}");
 
     // The version the surface actually read wins.
     let fresh = rpc::dispatch_as(

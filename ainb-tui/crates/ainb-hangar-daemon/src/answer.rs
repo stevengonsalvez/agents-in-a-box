@@ -291,10 +291,33 @@ async fn claim(
     // Nothing was claimed, so nothing is compensated: roll back rather than
     // commit an empty transaction that would still bump the ledger clock.
     tx.rollback().await?;
-    let by = AttentionRepo::get(pool, &params.attention_id)
-        .await?
-        .and_then(|r| r.answered_by)
-        .unwrap_or_else(|| "unknown".to_string());
+
+    // Two different facts reach this line with the same `flipped == 0`, and
+    // they deserve different answers. Re-read the row to tell them apart:
+    //
+    //   state != open   somebody won the race. `already_answered by X`.
+    //   state == open   the FENCE did not match, so this caller is answering a
+    //                   version of the request that no longer exists. Reporting
+    //                   "already answered by unknown" there would be a lie in
+    //                   two directions at once — nobody answered it, and it is
+    //                   still answerable.
+    let row = AttentionRepo::get(pool, &params.attention_id).await?;
+    let still_open = row.as_ref().is_some_and(|r| r.state == "open");
+    if still_open {
+        let read = fenced_version(params).unwrap_or_default();
+        let live = row.as_ref().map_or(0, |r| r.version);
+        // `Ambiguous` is the REFUSED-and-still-answerable outcome this enum
+        // already has, and reusing it is deliberate: a new variant on a
+        // `#[serde(tag)]` enum is a decode error on every N-1 client, which
+        // would break the very skew matrix this phase exists to keep green.
+        return Ok(Some(AnswerResult::Ambiguous {
+            reason: format!(
+                "this request has moved on since it was read (fence version {read}, now {live}); \
+                 re-read the row and answer it again"
+            ),
+        }));
+    }
+    let by = row.and_then(|r| r.answered_by).unwrap_or_else(|| "unknown".to_string());
     Ok(Some(AnswerResult::AlreadyAnswered { by }))
 }
 
