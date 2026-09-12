@@ -1128,6 +1128,7 @@ pub(crate) const fn is_stoppable_interactive(session: &crate::models::session::S
                 | SessionAgentType::Codex
                 | SessionAgentType::Gemini
                 | SessionAgentType::Copilot
+                | SessionAgentType::Antigravity
         )
 }
 
@@ -10284,6 +10285,37 @@ impl AppState {
         result
     }
 
+    /// Record the terminal fact discovered by a failed attach: the exact tmux
+    /// target no longer exists.  This is deliberately narrower than a generic
+    /// attach failure: nesting and terminal errors must leave a live row alone.
+    ///
+    /// Keeping the persisted metadata intact makes the row immediately
+    /// resumable and makes the next reload retain it under the Stopped filter.
+    pub(crate) fn mark_session_stopped_for_missing_tmux(
+        &mut self,
+        session_id: Uuid,
+        tmux_session_name: &str,
+    ) -> bool {
+        use crate::models::SessionStatus;
+
+        let matches_target = self
+            .find_session(session_id)
+            .is_some_and(|session| session.tmux_session_name.as_deref() == Some(tmux_session_name));
+        if !matches_target {
+            return false;
+        }
+
+        self.tmux_sessions.remove(&session_id);
+        if let Some(session) = self.find_session_mut(session_id) {
+            session.set_status(SessionStatus::Stopped);
+            session.is_attached = false;
+            // A dead pane cannot still be waiting for input. Keep historical
+            // errors for the Err tab, but remove actionable row chips.
+            session.live_attention.clear();
+        }
+        true
+    }
+
     /// Soft-stop every session in `session_ids`.
     ///
     /// Each one goes through `stop_interactive_session`, so tmux is killed and
@@ -12858,18 +12890,24 @@ impl AppState {
                 // Attaching advances this to "now" (see below).
                 let baseline = self.attention_baseline.get(&s.id).copied().unwrap_or(0);
                 let mut chips = Vec::new();
-                if let Some(chip) = Self::attention_for_session_identity(
-                    &s.workspace_path,
-                    Self::agent_hook_name(s.agent_type),
-                    provider_session_id.as_deref(),
-                    allow_unidentified_cwd,
-                    true,
-                    generating,
-                    baseline,
-                    now_ms,
-                    &recent,
-                ) {
-                    chips.push(chip);
+                // The exact tmux target is gone. A retained daemon snapshot
+                // can still describe an older ASK/WAIT, but it has no pane to
+                // receive an answer and must not resurrect an actionable chip.
+                let locally_stopped = matches!(s.status, crate::models::SessionStatus::Stopped);
+                if !locally_stopped {
+                    if let Some(chip) = Self::attention_for_session_identity(
+                        &s.workspace_path,
+                        Self::agent_hook_name(s.agent_type),
+                        provider_session_id.as_deref(),
+                        allow_unidentified_cwd,
+                        true,
+                        generating,
+                        baseline,
+                        now_ms,
+                        &recent,
+                    ) {
+                        chips.push(chip);
+                    }
                 }
                 // The daemon's rows for the same worktree. Added unconditionally,
                 // NOT gated on `generating`: the generating gate exists because
@@ -12878,7 +12916,7 @@ impl AppState {
                 // and an agent can be mid-turn and blocked on an approval at the
                 // same time — suppressing it there is how an operator ends up
                 // watching a spinner that is waiting on them.
-                if !daemon_rows.is_empty() {
+                if !locally_stopped && !daemon_rows.is_empty() {
                     chips.extend(daemon_rows.iter().cloned());
                 }
                 // The REASON, not a boolean. `SessionStatus::Error` has always
@@ -12952,6 +12990,20 @@ impl AppState {
                         changed = true;
                     }
                 }
+            }
+            // Stop is terminal for the pane, not for historical diagnostics.
+            // Do not rebuild live chips from a retained daemon snapshot, and
+            // do not overwrite the Err tab's history with an empty set.
+            if self.find_session(id).is_some_and(|session| {
+                matches!(session.status, crate::models::SessionStatus::Stopped)
+            }) {
+                if let Some(session) = self.find_session_mut(id) {
+                    if !session.live_attention.is_empty() {
+                        session.live_attention.clear();
+                        changed = true;
+                    }
+                }
+                continue;
             }
             if let Some(reason) = failure {
                 // ERR is a SECOND, independent chip, not a competitor: a

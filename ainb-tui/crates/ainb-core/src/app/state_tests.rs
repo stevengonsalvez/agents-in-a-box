@@ -31,6 +31,63 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_is_stoppable_and_resumable_interactive() {
+        let session = crate::models::Session::new_with_options(
+            "agent".to_string(),
+            "/tmp/agent".to_string(),
+            true,
+            SessionMode::Interactive,
+            None,
+            SessionAgentType::Antigravity,
+            None,
+        );
+
+        assert!(crate::app::state::is_stoppable_interactive(&session));
+    }
+
+    #[test]
+    fn missing_exact_tmux_target_becomes_stopped_and_resumable() {
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        let mut workspace = crate::models::Workspace::new("ws".to_string(), "/tmp/ws".into());
+        let mut session = crate::models::Session::new_with_options(
+            "agent".to_string(),
+            "/tmp/ws/agent".to_string(),
+            true,
+            SessionMode::Interactive,
+            None,
+            SessionAgentType::Antigravity,
+            None,
+        );
+        let id = session.id;
+        session.tmux_session_name = Some("tmux_missing_exact".to_string());
+        session.status = crate::models::SessionStatus::Idle;
+        session.is_attached = true;
+        session.live_attention.push(crate::fleet::attention::SessionAttention::local(
+            crate::fleet::attention::AttentionKind::Wait,
+            1,
+        ));
+        workspace.add_session(session);
+        state.workspaces.push(workspace);
+
+        assert!(state.mark_session_stopped_for_missing_tmux(id, "tmux_missing_exact"));
+        let session = state.workspaces[0].sessions.first().expect("session");
+        assert!(matches!(
+            session.status,
+            crate::models::SessionStatus::Stopped
+        ));
+        assert!(!session.is_attached);
+        assert!(session.live_attention.is_empty());
+        assert_eq!(
+            state.selected_resumable_session_ids(),
+            Vec::<uuid::Uuid>::new()
+        );
+
+        state.selected_sessions.insert(id);
+        assert_eq!(state.selected_resumable_session_ids(), vec![id]);
+    }
+
+    #[test]
     fn observer_waits_for_a_stable_selection() {
         let mut state = AppState::new();
         let now = std::time::Instant::now();
@@ -2724,6 +2781,59 @@ mod tests {
         assert_eq!(chips[0].kind, AttentionKind::Ask);
         assert_eq!(chips[0].source, AttentionSource::Daemon);
         assert_eq!(chips[0].detail.as_deref(), Some("Decide the sqlite path"));
+    }
+
+    #[test]
+    fn missing_tmux_stop_cannot_regain_a_stale_daemon_question() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/missing-tmux";
+        let mut state = state_with_session_at(cwd, Some("tmux_missing"));
+        let id = state.workspaces[0].sessions[0].id;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-stale".into()),
+        );
+
+        assert!(state.mark_session_stopped_for_missing_tmux(id, "tmux_missing"));
+        state.refresh_attention_markers(2_000);
+
+        assert!(
+            state.workspaces[0].sessions[0].live_attention.is_empty(),
+            "a stopped row must not regain an unanswerable daemon question"
+        );
+    }
+
+    #[test]
+    fn missing_tmux_stop_keeps_daemon_error_history() {
+        use crate::fleet::attention::{AttentionKind, SessionAttention};
+        let cwd = "/work/missing-tmux-error";
+        let mut state = state_with_session_at(cwd, Some("tmux_missing_error"));
+        let id = state.workspaces[0].sessions[0].id;
+        install_daemon_row(
+            &state,
+            cwd,
+            SessionAttention::daemon(AttentionKind::Err, 1_000, "att-error".into())
+                .with_detail("agent command failed"),
+        );
+
+        state.refresh_attention_markers(2_000);
+        assert_eq!(state.workspaces[0].sessions[0].errors.len(), 1);
+
+        assert!(state.mark_session_stopped_for_missing_tmux(id, "tmux_missing_error"));
+        state.refresh_attention_markers(3_000);
+
+        let session = &state.workspaces[0].sessions[0];
+        assert!(session.live_attention.is_empty());
+        assert_eq!(
+            session.errors.len(),
+            1,
+            "stopping must preserve Err tab history"
+        );
+        assert_eq!(
+            session.errors[0].detail.as_deref(),
+            Some("agent command failed")
+        );
     }
 
     #[test]
