@@ -129,13 +129,25 @@
     return Array.isArray(opts) ? opts : [];
   }
 
-  // Attention rows the daemon has told us are already answered, keyed by id,
-  // with the surface that won. `/api/snapshot` is served from a cache the
-  // daemon refreshes every 2s, and `renderNeeds` rebuilds every card from
-  // scratch, so a row retired here comes back with live controls on the very
-  // next render until that snapshot catches up. This is what keeps it retired
-  // across those renders; an id leaves the set once the snapshot stops listing
-  // the row, so nothing accumulates and a reopened row is answerable again.
+  // Attention rows the daemon told us were already answered, keyed by id, each
+  // holding the surface that won and when we heard it.
+  //
+  // Renders rebuild every card from scratch, and they arrive from two places:
+  // the SSE stream on /api/events, and the re-pull after an answer. Either one
+  // would put live option buttons back on a row the daemon has already
+  // resolved, for as long as it takes the daemon's 2s snapshot cache to drop
+  // it. This is what keeps such a row retired in between.
+  //
+  // It is a short-lived HINT, never a lock, which is why the entries expire.
+  // The daemon can legitimately put the same id back: a winner whose last-mile
+  // delivery fails is reverted to `open` and re-raised
+  // (`answer.rs::reopen_on_failed_delivery`), so the row the operator is
+  // looking at is answerable again under the id we retired. Holding the
+  // retirement until the snapshot drops the row would strand that card with no
+  // controls for the life of the tab. Both exits are kept: the id goes when the
+  // snapshot stops listing it, and it goes anyway once the hint has outlived
+  // two snapshot cycles, after which the daemon's own view is the only one.
+  const ANSWERED_HINT_TTL_MS = 5000;
   const answeredElsewhere = new Map();
 
   // Paint a card as retired: no controls, and the winner named under it.
@@ -170,7 +182,7 @@
       // poller's next snapshot to drop the card, and name the winner.
       if (data && data.outcome === "already_answered") {
         const by = (data && data.by) || "another surface";
-        answeredElsewhere.set(attentionId, by);
+        answeredElsewhere.set(attentionId, { by, at: Date.now() });
         markAnswered(card, by);
       }
       // Reconcile from the source of truth (an answered row drops from the inbox).
@@ -185,11 +197,15 @@
     const host = $("needs");
     host.replaceChildren();
     const list = Array.isArray(needs) ? needs : [];
-    // Drop retirements the snapshot has caught up with, so the set tracks the
-    // open inbox rather than growing for the life of the tab.
+    // Drop retirements the daemon has caught up with, and any that have simply
+    // gone stale, so the map tracks the open inbox rather than growing for the
+    // life of the tab or outliving a row the daemon reopened.
     const live = new Set(list.map((r) => r.attentionId).filter(Boolean));
-    for (const id of [...answeredElsewhere.keys()]) {
-      if (!live.has(id)) answeredElsewhere.delete(id);
+    const now = Date.now();
+    for (const [id, hint] of [...answeredElsewhere]) {
+      if (!live.has(id) || now - hint.at > ANSWERED_HINT_TTL_MS) {
+        answeredElsewhere.delete(id);
+      }
     }
     // Count only the actionable kinds for the headline stat.
     const attn = list.filter((r) => ["ASK", "ERR", "WAIT"].includes(needKind(r)));
@@ -246,8 +262,8 @@
       card.appendChild(body);
       host.appendChild(card);
       // Re-apply a retirement this render would otherwise have undone.
-      const retiredBy = answeredElsewhere.get(row.attentionId);
-      if (retiredBy) markAnswered(card, retiredBy);
+      const hint = answeredElsewhere.get(row.attentionId);
+      if (hint) markAnswered(card, hint.by);
     }
   }
 
