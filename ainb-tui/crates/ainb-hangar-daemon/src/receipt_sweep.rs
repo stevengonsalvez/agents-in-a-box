@@ -23,10 +23,10 @@
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
-use ainb_hangar_proto::mutation::{REASON_EFFECTS_AMBIGUOUS, ReceiptState};
+use ainb_hangar_proto::mutation::{REASON_EFFECTS_AMBIGUOUS, REASON_NOT_DELIVERED, ReceiptState};
 use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::mutation_ledger::{
-    LOCAL_HOST_ID, LedgerRow, MutationLedgerRepo, TIER_RECEIPT,
+    LOCAL_HOST_ID, LedgerRow, MutationLedgerRepo, STATUS_ACCEPTED, STATUS_REJECTED, TIER_RECEIPT,
 };
 use sqlx::SqlitePool;
 
@@ -39,6 +39,9 @@ pub struct SweepReport {
     pub reopened: u64,
     /// Non-receipt claims whose handler never answered.
     pub ambiguous: u64,
+    /// Claims whose receipt had already reached a terminal state, so the
+    /// outcome was known and only the reply was lost.
+    pub settled: u64,
 }
 
 /// Resolve every receipt and claim a prior daemon left unresolved.
@@ -80,6 +83,34 @@ pub async fn run(pool: &SqlitePool) -> Result<SweepReport, sqlx::Error> {
                     now_ms,
                 )
                 .await?;
+            }
+            // A receipt that reached a TERMINAL state before the daemon died
+            // knows its own outcome, and the sweep must not overwrite it. The
+            // window is real: `delivered` is committed by the answer path and
+            // the reply is recorded by the dispatcher a few awaits later, so a
+            // crash in between leaves `in_flight` beside `delivered`. Calling
+            // that `unknown` would overwrite a confirmed delivery and tell an
+            // operator the daemon "stopped before it answered", which is the
+            // one thing it demonstrably did not do.
+            Some(state @ (ReceiptState::Delivered | ReceiptState::Failed)) => {
+                let (status, reason, detail) = if state == ReceiptState::Delivered {
+                    (
+                        STATUS_ACCEPTED,
+                        None,
+                        "the daemon stopped after this mutation was delivered",
+                    )
+                } else {
+                    (
+                        STATUS_REJECTED,
+                        Some(REASON_NOT_DELIVERED),
+                        "the daemon stopped after this mutation failed to deliver",
+                    )
+                };
+                MutationLedgerRepo::resolve_from_receipt(
+                    pool, &row.key, status, reason, detail, now_ms,
+                )
+                .await?;
+                report.settled += 1;
             }
             _ => {
                 // A claim of any tier whose handler never answered. It may have

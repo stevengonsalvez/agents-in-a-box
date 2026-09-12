@@ -89,6 +89,33 @@ async fn stall_at_write_boundary() {
 #[cfg(not(any(test, feature = "test-support")))]
 async fn stall_at_write_boundary() {}
 
+/// Test seam: whether [`answer`] parks AFTER its terminal receipt commits.
+///
+/// The second crash window, and a narrower one: `delivered` is committed here,
+/// and the dispatcher records the reply several awaits later. A daemon killed
+/// in between leaves `status = in_flight` beside `receipt_state = delivered` —
+/// an outcome that IS known, sitting under a status that says it is not.
+#[cfg(any(test, feature = "test-support"))]
+static STALL_AFTER_DELIVERY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Arm or disarm the post-delivery stall. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_stall_after_delivery_for_test(armed: bool) {
+    STALL_AFTER_DELIVERY.store(armed, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn stall_after_delivery() {
+    if STALL_AFTER_DELIVERY.load(std::sync::atomic::Ordering::SeqCst) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Compiled out entirely in a shipped daemon.
+#[cfg(not(any(test, feature = "test-support")))]
+async fn stall_after_delivery() {}
+
 /// Test seam: whether [`deliver`] reports a successful tmux delivery without a
 /// tmux.
 ///
@@ -213,6 +240,7 @@ pub async fn answer(
                 Ok(SendOutcome::Tmux { tmux_session }) => {
                     let via = format!("tmux ({tmux_session})");
                     mark_receipt(pool, params, ReceiptState::Delivered, Some(&via), now_ms).await;
+                    stall_after_delivery().await;
                     emit_answered(events, params);
                     Ok(AnswerResult::Delivered { via })
                 }

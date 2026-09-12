@@ -30,6 +30,11 @@ use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttent
 use ainb_hangar_store::repo::mutation_ledger::{LedgerKey, MutationLedgerRepo};
 
 const OP_ID: &str = "op-crash-between-claim-and-send";
+
+/// The write-boundary stall, the post-delivery stall and `$AINB_BIN` are all
+/// process-global, so the tests in this file must not overlap: one arming a
+/// stall the next is waiting past is indistinguishable from a hang.
+static SEAM: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const SESSION: &str = "sess-crash";
 const CWD: &str = "/work/crash";
 
@@ -65,16 +70,16 @@ fn install_fake_ainb(dir: &std::path::Path) -> std::path::PathBuf {
     script
 }
 
-async fn seed_open_row(pool: &sqlx::SqlitePool) {
+async fn seed_open_row_as(pool: &sqlx::SqlitePool, attention_id: &str) {
     AttentionRepo::insert(
         pool,
         &NewAttention {
-            id: "att-crash".into(),
+            id: attention_id.into(),
             session_id: SESSION.into(),
             cwd: CWD.into(),
             workspace_id: None,
             kind: AttentionKind::Approval,
-            payload: r#"{"kind":"APPROVAL","id":"att-crash"}"#.into(),
+            payload: format!(r#"{{"kind":"APPROVAL","id":"{attention_id}"}}"#),
             degraded: false,
             created_at: 1_000,
             raise_transcript: None,
@@ -85,29 +90,32 @@ async fn seed_open_row(pool: &sqlx::SqlitePool) {
     .unwrap();
 }
 
-fn answer_request() -> RpcRequest {
+fn answer_request_for(attention_id: &str, op_id: &str) -> RpcRequest {
     RpcRequest {
         jsonrpc: ainb_hangar_proto::jsonrpc_version(),
         id: RpcId::Number(1),
         method: methods::ATTENTION_ANSWER.to_string(),
         params: serde_json::json!({
-            "attention_id": "att-crash",
+            "attention_id": attention_id,
             "answer": "approve",
             "answered_by": "tui",
-            "op_id": OP_ID,
+            "op_id": op_id,
         }),
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
+    const ATT: &str = "att-crash-writing";
+    const OP: &str = OP_ID;
+    let _seam = SEAM.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let fake = install_fake_ainb(dir.path());
     // Single-test binary: no sibling test can observe this mutation.
     std::env::set_var("AINB_BIN", &fake);
 
     let store = Store::open_in(dir.path()).await.unwrap();
-    seed_open_row(store.pool()).await;
+    seed_open_row_as(store.pool(), ATT).await;
     let broker = EventBroker::new();
     let events = broker.sink();
 
@@ -119,7 +127,7 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
         let sink = broker.sink();
         rpc::dispatch_as(
             &pool,
-            &answer_request(),
+            &answer_request_for(ATT, OP),
             &health(),
             &sink,
             &Caller::Operator,
@@ -127,7 +135,7 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
         .await
     });
 
-    let key = LedgerKey::local(OP_ID);
+    let key = LedgerKey::local(OP);
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         let row = MutationLedgerRepo::get(store.pool(), &key).await.unwrap();
@@ -148,7 +156,7 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
     let mid = MutationLedgerRepo::get(store.pool(), &key).await.unwrap().unwrap();
     assert_eq!(mid.status, "in_flight", "a killed handler records no reply");
     assert_eq!(mid.receipt_state.as_deref(), Some("writing"));
-    let claimed = AttentionRepo::get(store.pool(), "att-crash").await.unwrap().unwrap();
+    let claimed = AttentionRepo::get(store.pool(), ATT).await.unwrap().unwrap();
     assert_eq!(claimed.state, "answered", "the claim itself did commit");
 
     // ── the restart ─────────────────────────────────────────────────────────
@@ -170,7 +178,7 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
         payload["context"]["answer"], "approve",
         "the row must NAME the answer whose delivery is unconfirmed: {payload}"
     );
-    assert_eq!(payload["op_id"], OP_ID);
+    assert_eq!(payload["op_id"], OP);
     assert_eq!(
         unconfirmed[0].state, "open",
         "only an operator closes it — the daemon never does"
@@ -179,7 +187,7 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
     // ── the retry ───────────────────────────────────────────────────────────
     let response = rpc::dispatch_as(
         store.pool(),
-        &answer_request(),
+        &answer_request_for(ATT, OP),
         &health(),
         &events,
         &Caller::Operator,
@@ -218,17 +226,20 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
 /// "close it quietly" outcome the sweep exists to avoid.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claimed_receipt_at_boot_reopens_its_attention_row() {
+    const ATT: &str = "att-crash-claimed";
+    const OP: &str = "op-claimed-at-boot";
+    let _seam = SEAM.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
-    seed_open_row(store.pool()).await;
+    seed_open_row_as(store.pool(), ATT).await;
 
     // The durable state a daemon killed between the claim commit and the
     // `writing` commit leaves behind: the row flipped, the ledger claimed, and
     // no reply recorded.
-    let key = LedgerKey::local("op-claimed-at-boot");
+    let key = LedgerKey::local(OP);
     let fingerprint = MutationLedgerRepo::fingerprint(
         methods::ATTENTION_ANSWER,
-        &serde_json::json!({ "attention_id": "att-crash", "answer": "approve" }),
+        &serde_json::json!({ "attention_id": ATT, "answer": "approve" }),
     );
     MutationLedgerRepo::claim(
         store.pool(),
@@ -244,13 +255,13 @@ async fn a_claimed_receipt_at_boot_reopens_its_attention_row() {
         store.pool(),
         &key,
         "claimed",
-        Some(&serde_json::json!({ "attention_id": "att-crash" }).to_string()),
+        Some(&serde_json::json!({ "attention_id": ATT }).to_string()),
         5_000,
     )
     .await
     .unwrap();
     assert_eq!(
-        AttentionRepo::mark_answered_if_open(store.pool(), "att-crash", "tui", "approve", 5_000)
+        AttentionRepo::mark_answered_if_open(store.pool(), ATT, "tui", "approve", 5_000)
             .await
             .unwrap(),
         1
@@ -261,7 +272,7 @@ async fn a_claimed_receipt_at_boot_reopens_its_attention_row() {
     assert_eq!(report.reopened, 1, "{report:?}");
     assert_eq!(report.unconfirmed, 0, "nothing was mid-write: {report:?}");
 
-    let row = AttentionRepo::get(store.pool(), "att-crash").await.unwrap().unwrap();
+    let row = AttentionRepo::get(store.pool(), ATT).await.unwrap().unwrap();
     assert_eq!(row.state, "open", "a lost answer must go back on the board");
     assert!(row.answered_by.is_none());
     assert!(row.answer.is_none());
@@ -278,4 +289,114 @@ async fn a_claimed_receipt_at_boot_reopens_its_attention_row() {
             == ainb_hangar_daemon::receipt_sweep::SweepReport::default(),
         "the sweep must be idempotent"
     );
+}
+
+/// The narrower crash window, and the one a sweep can get WRONG rather than
+/// merely miss: `delivered` is committed by the answer path, and the reply is
+/// recorded by the dispatcher several awaits later. A daemon killed in between
+/// leaves `status = in_flight` beside `receipt_state = delivered` — an outcome
+/// that is known, under a status that says it is not.
+///
+/// Routing that through the generic arm overwrote a CONFIRMED delivery with
+/// `unknown` and told the operator the daemon "stopped before this mutation
+/// answered", which is the one thing it demonstrably did not do.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crash_after_delivery_keeps_the_outcome_its_receipt_recorded() {
+    const ATT: &str = "att-crash-delivered";
+    const OP: &str = "op-crash-after-delivery";
+    let _seam = SEAM.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let fake = install_fake_ainb(dir.path());
+    std::env::set_var("AINB_BIN", &fake);
+
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_open_row_as(store.pool(), ATT).await;
+    let broker = EventBroker::new();
+
+    ainb_hangar_daemon::answer::set_forced_delivery_for_test(true);
+    ainb_hangar_daemon::answer::set_stall_after_delivery_for_test(true);
+    let pool = store.pool().clone();
+    let task = tokio::spawn(async move {
+        let broker = EventBroker::new();
+        let sink = broker.sink();
+        rpc::dispatch_as(
+            &pool,
+            &answer_request_for(ATT, OP),
+            &health(),
+            &sink,
+            &Caller::Operator,
+        )
+        .await
+    });
+
+    let key = LedgerKey::local(OP);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let row = MutationLedgerRepo::get(store.pool(), &key).await.unwrap();
+        if row.as_ref().and_then(|r| r.receipt_state.as_deref()) == Some("delivered") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the answer never reached a delivered receipt: {row:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // The daemon dies HERE: the delivery is durable, the reply is not.
+    task.abort();
+    let _ = task.await;
+    ainb_hangar_daemon::answer::set_stall_after_delivery_for_test(false);
+    ainb_hangar_daemon::answer::set_forced_delivery_for_test(false);
+
+    let mid = MutationLedgerRepo::get(store.pool(), &key).await.unwrap().unwrap();
+    assert_eq!(mid.status, "in_flight", "no reply was recorded");
+    assert_eq!(mid.receipt_state.as_deref(), Some("delivered"));
+
+    drop(store);
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let report = ainb_hangar_daemon::receipt_sweep::run(store.pool()).await.unwrap();
+    assert_eq!(report.settled, 1, "{report:?}");
+    assert_eq!(report.unconfirmed, 0, "nothing was mid-write: {report:?}");
+    assert_eq!(report.ambiguous, 0, "the outcome was known: {report:?}");
+
+    let after = MutationLedgerRepo::get(store.pool(), &key).await.unwrap().unwrap();
+    assert_eq!(
+        after.status, "accepted",
+        "a confirmed delivery must not be rewritten as unknown: {after:?}"
+    );
+    assert_eq!(
+        after.receipt_state.as_deref(),
+        Some("delivered"),
+        "the receipt is the evidence and must survive the sweep: {after:?}"
+    );
+
+    // No operator alert: nothing is unconfirmed.
+    let rows = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+    assert!(
+        rows.iter().all(|r| r.kind != AttentionKind::DeliveryUnconfirmed),
+        "a delivered answer must not raise delivery_unconfirmed: {rows:?}"
+    );
+
+    // A retry replays the KNOWN outcome. The body is gone — the daemon died
+    // before storing it — but the status axis still says the answer was
+    // applied, and the receipt says how. `op_expired` here would tell a client
+    // its delivered answer might never have run at all.
+    let response = rpc::dispatch_as(
+        store.pool(),
+        &answer_request_for(ATT, OP),
+        &health(),
+        &broker.sink(),
+        &Caller::Operator,
+    )
+    .await;
+    let response = serde_json::to_value(response).unwrap();
+    let ack = &response["error"]["data"][ainb_hangar_proto::mutation::ACK_KEY];
+    assert_eq!(ack["outcome"], "replayed", "{response}");
+    assert_eq!(ack["status"], "accepted", "{response}");
+    assert_eq!(ack["receipt"], "delivered", "{response}");
+    assert_eq!(ack["reason"], "reply_lost", "{response}");
+
+    // And nothing was typed a second time: the attention row is untouched.
+    let row = AttentionRepo::get(store.pool(), ATT).await.unwrap().unwrap();
+    assert_eq!(row.state, "answered", "{row:?}");
 }
