@@ -545,6 +545,11 @@ impl FleetRepo {
                             &projection.closed_by,
                             &projection.closed_answer,
                             projection.closed_at,
+                            // No client version to fence on: this close is the
+                            // projection's own, driven by the session state in
+                            // this same transaction, so `state = 'open'` is the
+                            // whole fence exactly as it was before D18.
+                            None,
                         )
                         .await?
                             == 1

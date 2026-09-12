@@ -391,10 +391,9 @@ mod tests {
         .expect("the other agent's hook row lands");
 
         // The 0.154 session asks who owns a pane in the same directory.
-        let candidates =
-            discovered_candidates(store.pool(), "codex:sid-b", "codex", "/w/app")
-                .await
-                .expect("query");
+        let candidates = discovered_candidates(store.pool(), "codex:sid-b", "codex", "/w/app")
+            .await
+            .expect("query");
         assert!(
             candidates.is_empty(),
             "a row carrying a provider session id was written by a hook and \

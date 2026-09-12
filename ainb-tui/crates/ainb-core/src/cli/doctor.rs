@@ -36,7 +36,15 @@ struct PaneUnboundRow {
     cwd: String,
 }
 
-/// Full machine health check. `--offline` skips skill-source network probes.
+/// Full machine health check.
+///
+/// `--offline` skips skill-source NETWORK probes. It does not skip the local
+/// daemon read: `fleet/status` is a unix socket on this machine, and the two
+/// facts it carries (panes nothing can be attributed to, and provider event
+/// names this build cannot map) are exactly what an operator runs `ainb doctor`
+/// to find out. Skipping them would make the offline run quieter without making
+/// it more honest. A daemon that is not running is reported once, in the daemon
+/// section, and costs nothing here.
 #[derive(clap::Args)]
 pub struct DoctorArgs {
     /// Skip skill-source reachability checks. Runtime checks stay local.

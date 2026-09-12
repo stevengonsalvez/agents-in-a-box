@@ -169,14 +169,6 @@ pub fn resolved<T: FromStr>(env_var: &str, from_config: T) -> T {
     }
 }
 
-/// [`resolved`] for booleans, which have no useful `FromStr`.
-///
-/// Accepts the tolerant token family the rest of ainb uses
-/// (`1`/`true`/`yes`/`on` and their negatives, case-insensitively), so the two
-/// promoted flags stop disagreeing about what "off" looks like:
-/// `AINB_FLEET_ENRICH` used to treat everything but `0` as on, while
-/// `AGENTS_BOX_SYNTAX_HIGHLIGHT` treated everything but `true` as off.
-#[must_use]
 /// The `[fleet.status] legacy_classify_primary` env spelling.
 ///
 /// Named once because three crates read it and a typo in any of them would
@@ -184,8 +176,7 @@ pub fn resolved<T: FromStr>(env_var: &str, from_config: T) -> T {
 pub const LEGACY_CLASSIFY_PRIMARY_ENV: &str = "AINB_FLEET_LEGACY_CLASSIFY_PRIMARY";
 
 /// Whether the pre-T0 read ordering is in force: the live `classify()` pane and
-/// transcript scan answers first, and the daemon's status read is consulted
-/// only where that scan has nothing.
+/// transcript scan is the answer, and `fleet/status` is not called at all.
 ///
 /// The ONE-RELEASE rollback for T0. It is removed in T0+2; leaving it past that
 /// would be a second status truth, which is the thing D14 removes.
@@ -197,6 +188,14 @@ pub fn legacy_classify_primary() -> bool {
     )
 }
 
+/// [`resolved`] for booleans, which have no useful `FromStr`.
+///
+/// Accepts the tolerant token family the rest of ainb uses
+/// (`1`/`true`/`yes`/`on` and their negatives, case-insensitively), so the two
+/// promoted flags stop disagreeing about what "off" looks like:
+/// `AINB_FLEET_ENRICH` used to treat everything but `0` as on, while
+/// `AGENTS_BOX_SYNTAX_HIGHLIGHT` treated everything but `true` as off.
+#[must_use]
 pub fn resolved_bool(env_var: &str, from_config: bool) -> bool {
     match env_override(env_var) {
         Some(raw) => parse_bool_token(&raw).unwrap_or(from_config),

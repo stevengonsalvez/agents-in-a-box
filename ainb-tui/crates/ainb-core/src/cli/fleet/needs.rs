@@ -268,8 +268,7 @@ pub fn stamp_rows(
             .split_once(':')
             .map(|(_, id)| id)
             .filter(|id| !id.is_empty());
-        let by_identity = identity
-            .and_then(|id| rows.iter().position(|row| row.session.id == id));
+        let by_identity = identity.and_then(|id| rows.iter().position(|row| row.session.id == id));
         let by_unique_cwd = || {
             (daemon_per_cwd.get(status_row.cwd.as_str()).copied() == Some(1)
                 && local_per_cwd.get(status_row.cwd.as_str()).copied() == Some(1))

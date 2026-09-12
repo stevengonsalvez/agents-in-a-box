@@ -217,6 +217,23 @@ impl FleetRetentionRepo {
         Ok(res.rows_affected())
     }
 
+    /// Fold the write-ahead log back into the database file.
+    ///
+    /// Required between retention batches, not hygiene. Blanking ~700 MB of
+    /// payload writes ~700 MB of WAL frames, and a WAL only shrinks at a
+    /// checkpoint. A continuous backlog sweep starves the automatic checkpointer
+    /// (it runs on a committing writer, and this writer never pauses long
+    /// enough), so the WAL and the pages pinned behind it grow for the whole
+    /// sweep, measured at 2,599 MB RSS against a 204 MB steady state on the
+    /// first production backlog run.
+    ///
+    /// `PASSIVE` on purpose: it checkpoints as much as it can and returns
+    /// immediately if a reader is mid-snapshot. `TRUNCATE`/`RESTART` would BLOCK
+    /// on that reader, which is the one thing a background janitor must never do
+    /// to the Fleet read path.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` failure.
     pub async fn checkpoint_wal(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)").execute(pool).await?;
         Ok(())
