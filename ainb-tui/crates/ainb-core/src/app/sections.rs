@@ -330,7 +330,7 @@ pub struct WorkspaceLoadSection {
     pub last_preview_update: Option<Instant>,
     // Throttle for the cheaper non-selected-session status sweep. Status
     // (running/idle) is not time-critical, so it polls on a longer cadence than
-    // the selected session's live preview — one `capture-pane` subprocess per
+    // the selected session's live preview: one `capture-pane` subprocess per
     // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
     // every 5s preview refresh. (perf: bead 9pb)
     pub last_status_check: Option<Instant>,
@@ -362,7 +362,7 @@ pub struct NewSessionSection {
     /// Background base-branch refresh for the Configure picker. The fetch +
     /// re-list runs on `spawn_blocking`; the result lands here and is applied
     /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
-    /// generation guard — results from a closed/reopened picker are dropped.
+    /// generation guard, so results from a closed or reopened picker are dropped.
     pub branch_refresh_receiver: Option<
         mpsc::UnboundedReceiver<(
             u64,
@@ -413,7 +413,7 @@ pub struct SessionsSection {
     pub attached_session_id: Option<Uuid>,
     /// Cache of workspace paths that are currently favorited (starred).
     /// Computed by `recompute_favorite_workspaces()` whenever the workspace
-    /// list or the favorites store changes — NOT in the render path. The
+    /// list or the favorites store changes, NOT in the render path. The
     /// session-list render reads this set with an O(1) lookup, so it never
     /// re-parses `favorites.yaml` or opens a git repo per frame.
     pub favorite_workspace_paths: HashSet<PathBuf>,
@@ -549,7 +549,7 @@ pub struct FleetSection {
     pub attention_baseline: HashMap<Uuid, i64>,
     /// Background poller for the live OAuth-window snapshot. The render
     /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
-    /// calling `live_window::current()` directly — Tier 2's JSONL walk
+    /// calling `live_window::current()` directly, because Tier 2's JSONL walk
     /// would otherwise stall input handling on every frame.
     pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
     // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
@@ -619,8 +619,8 @@ pub struct FleetSection {
     /// chip kind.
     ///
     /// `attention_for_session` returns the newest QUALIFYING hook row, so a
-    /// producer that re-reports an unanswered question — which Claude Code
-    /// does, it re-emits `Notification` while a prompt stays open — hands back
+    /// producer that re-reports an unanswered question (which Claude Code
+    /// does, it re-emits `Notification` while a prompt stays open) hands back
     /// a newer `ts` every time. Two things broke on that moving value: the
     /// chip's age reset to `0s` on every repeat, defeating the oldest-wins rule
     /// `attention::normalise` documents; and `request_id` is derived from

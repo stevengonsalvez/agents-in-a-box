@@ -193,7 +193,7 @@ impl UITestFramework {
     /// filtering tests assert against known data instead of whatever
     /// favorites/recents/repo-cache happen to exist on the host running the
     /// suite. The picker reads its rows from disk (`PickRepoState::from_disk`),
-    /// not from `state.sessions.workspaces`, so mock workspaces never reach it — this
+    /// not from `state.sessions.workspaces`, so mock workspaces never reach it. This
     /// helper is the test-side equivalent of the old `available_repos`/
     /// `filtered_repos` priming.
     pub fn seed_picker_rows(&mut self, count: usize) {
