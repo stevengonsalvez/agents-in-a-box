@@ -296,8 +296,21 @@ impl AttentionRepo {
     }
 
     /// [`AttentionRepo::open_ask_ids_for_session`] inside a caller-owned
-    /// transaction, so the stale-ASK close and the raise that replaces it are
-    /// one atomic step rather than a window in which both cards are open.
+    /// transaction, so the stale close and the raise that replaces it are one
+    /// atomic step rather than a window in which both cards are open.
+    ///
+    /// Covers every kind the drift assertion measures, not just
+    /// `ask_user_question`. The two must agree by construction: `sweep_once` no
+    /// longer mutates, so this is now the ONLY closer for a `waiting` or
+    /// `error` card, and `close_unclaimed_open` used to be. A hook-raised
+    /// `waiting` card, which is what a Codex approval produces, would otherwise
+    /// have nobody to retire it: it would sit open forever advertising an
+    /// answer route, and the drift alarm would fire permanently on a row no
+    /// code path could close.
+    ///
+    /// `approval` stays out, for the reason it is out of the drift query too:
+    /// an ACP permission is owned by its own producer's parked responder, not
+    /// by a `fleet_session` attention state.
     ///
     /// # Errors
     ///
@@ -308,42 +321,15 @@ impl AttentionRepo {
     ) -> Result<Vec<String>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id FROM attention \
-             WHERE session_id = ? AND kind = 'ask_user_question' AND state = 'open' \
+             WHERE session_id = ? \
+               AND kind IN ('ask_user_question', 'waiting', 'error') \
+               AND state = 'open' \
              ORDER BY created_at ASC, id ASC",
         )
         .bind(session_id)
         .fetch_all(&mut **tx)
         .await?;
         rows.iter().map(|r| r.try_get("id")).collect()
-    }
-
-    /// [`AttentionRepo::mark_answered_if_open`] inside a caller-owned
-    /// transaction. Still first-answer-wins: the `state = 'open'` predicate is
-    /// what a surface racing on the same row loses against, and holding the
-    /// write lock does not change that contract.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`sqlx::Error`] if the update fails.
-    pub async fn mark_answered_if_open_in_tx(
-        tx: &mut Transaction<'_, Sqlite>,
-        id: &str,
-        answered_by: &str,
-        answer: &str,
-        answered_at: i64,
-    ) -> Result<u64, sqlx::Error> {
-        let res = sqlx::query(
-            "UPDATE attention \
-             SET state = 'answered', answered_by = ?, answer = ?, answered_at = ? \
-             WHERE id = ? AND state = 'open'",
-        )
-        .bind(answered_by)
-        .bind(answer)
-        .bind(answered_at)
-        .bind(id)
-        .execute(&mut **tx)
-        .await?;
-        Ok(res.rows_affected())
     }
 
     /// List OPEN attention rows for a workspace scope, oldest first.
@@ -714,6 +700,12 @@ impl AttentionRepo {
         // for the same reason `close_unclaimed_open` excludes it: an ACP
         // permission is owned by the pool's parked responder, not by a
         // `fleet_session` attention state, so it is not evidence of drift.
+        //
+        // Both directions carry `visible = 1 AND superseded_by IS NULL`, and
+        // the first one needs it just as much as the second: a superseded row
+        // still reading `ASK` would satisfy the inner EXISTS and vouch for a
+        // card whose session has been retired out from under it, masking the
+        // very drift this counts.
         let open_without_asking_session: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM attention a \
              WHERE a.state = 'open' \
@@ -721,6 +713,7 @@ impl AttentionRepo {
                AND NOT EXISTS ( \
                    SELECT 1 FROM fleet_session f \
                    WHERE f.provider_session_id = a.session_id \
+                     AND f.visible = 1 AND f.superseded_by IS NULL \
                      AND f.attention_state != 'NONE' \
                )",
         )
