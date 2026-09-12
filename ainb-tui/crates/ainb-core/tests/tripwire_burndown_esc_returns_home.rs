@@ -160,8 +160,13 @@ fn seed_session_list_origin(home: &Path) -> TmuxFixture {
     fs::create_dir_all(&worktree).expect("create origin worktree");
     init_git_repo(&worktree);
 
+    // The `tmux_` prefix is not cosmetic: `discover_interactive_sessions`
+    // skips every tmux session without it, so a differently-named fixture is
+    // never matched to its `sessions.json` entry and never becomes a row. The
+    // session list then renders empty and the assertions below would pass on
+    // bare chrome.
     let origin = TmuxFixture {
-        name: format!("tripwire-burndown-origin-{}", std::process::id()),
+        name: format!("tmux_burndown-origin-{}", std::process::id()),
     };
     let status = Command::new("tmux")
         .args([
@@ -259,12 +264,17 @@ fn esc_on_burndown_returns_to_home() {
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
 
+    // `AINB_HOME` pins the fleet/atc plumbing at the fixture too. `HOME`
+    // alone leaves any resolver that reads `AINB_HOME` first pointing at the
+    // developer's real `~/.agents-in-a-box`, which is both a false pass and a
+    // write into live state from a test.
     let cmd = format!(
-        "HOME={} AINB_PLUGIN_ROOT={} AINB_NOW={} exec {} tui",
-        home_tmp.path().display(),
-        plugin_root.display(),
-        fixture_now(),
-        ainb.display()
+        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_PLUGIN_ROOT={plugins} \
+         AINB_NOW={now} exec {bin} tui",
+        home = home_tmp.path().display(),
+        plugins = plugin_root.display(),
+        now = fixture_now(),
+        bin = ainb.display()
     );
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
@@ -367,12 +377,17 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
 
+    // `AINB_HOME` pins the fleet/atc plumbing at the fixture too. `HOME`
+    // alone leaves any resolver that reads `AINB_HOME` first pointing at the
+    // developer's real `~/.agents-in-a-box`, which is both a false pass and a
+    // write into live state from a test.
     let cmd = format!(
-        "HOME={} AINB_PLUGIN_ROOT={} AINB_NOW={} exec {} tui",
-        home_tmp.path().display(),
-        plugin_root.display(),
-        fixture_now(),
-        ainb.display()
+        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_PLUGIN_ROOT={plugins} \
+         AINB_NOW={now} exec {bin} tui",
+        home = home_tmp.path().display(),
+        plugins = plugin_root.display(),
+        now = fixture_now(),
+        bin = ainb.display()
     );
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
@@ -393,12 +408,21 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
     send_key(&session, "s");
 
     // Session-list chrome: the four-line menu legend is unique to this
-    // screen — `del-sel` only appears there.
+    // screen — `del-sel` only appears there. The seeded row must be on it
+    // too: an empty session list carries the same chrome, so without this the
+    // Esc assertion would prove nothing about returning to a real list.
     let sessions_deadline = Instant::now() + Duration::from_secs(40);
-    if poll_capture(&session, sessions_deadline, |c| c.contains("del-sel")).is_none() {
+    if poll_capture(&session, sessions_deadline, |c| {
+        c.contains("del-sel") && c.contains("burndown-origin")
+    })
+    .is_none()
+    {
         let last = capture_pane(&session);
         kill_session(&session);
-        panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
+        panic!(
+            "session list never rendered the seeded `burndown-origin` row after `s`; \
+             last:\n---\n{last}\n---"
+        );
     }
 
     // Open burndown from the session list.
@@ -420,7 +444,7 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
     send_key(&session, "Escape");
     let back_deadline = Instant::now() + Duration::from_secs(25);
     let back_on_sessions = poll_capture(&session, back_deadline, |c| {
-        c.contains("del-sel") && !c.contains("Usage Analytics")
+        c.contains("del-sel") && c.contains("burndown-origin") && !c.contains("Usage Analytics")
     });
 
     let final_cap = capture_pane(&session);
