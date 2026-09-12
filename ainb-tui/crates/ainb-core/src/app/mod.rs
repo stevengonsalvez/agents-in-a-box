@@ -12,6 +12,7 @@ pub mod session_loader;
 pub mod snapshot;
 pub mod state;
 pub mod ui_state;
+pub mod versioned;
 
 pub use attach_handler::AttachHandler;
 pub use events::EventHandler;
