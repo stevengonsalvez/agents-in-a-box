@@ -1303,7 +1303,7 @@ impl EventHandler {
         // handle_key_event, but listing them keeps this helper a
         // complete predicate.
         if state.other_tmux_rename_mode
-            || state.ssh_session_rename_mode
+            || state.ssh.ssh_session_rename_mode
             || state.is_in_quick_commit_mode()
         {
             return true;
@@ -1528,7 +1528,7 @@ impl EventHandler {
         if state.other_tmux_rename_mode {
             return Some(AppEvent::OtherTmuxRenameChar(character));
         }
-        if state.ssh_session_rename_mode {
+        if state.ssh.ssh_session_rename_mode {
             return Some(AppEvent::SshSessionRenameChar(character));
         }
         if state.session_label_rename_mode {
@@ -2661,7 +2661,7 @@ impl EventHandler {
                     state.selected_session_index,
                     state.shell_selected,
                     state.is_ssh_session_selected(),
-                    state.selected_ssh_session_index,
+                    state.ssh.selected_ssh_session_index,
                     state.is_other_tmux_selected(),
                     state.selected_other_tmux_index
                 );
@@ -2824,7 +2824,7 @@ impl EventHandler {
                     } else {
                         tracing::warn!(
                             "[ACTION] SSH session selected but no session found at index {:?}",
-                            state.selected_ssh_session_index
+                            state.ssh.selected_ssh_session_index
                         );
                     }
                 // Check if we're in the "Other tmux" section
@@ -8001,7 +8001,7 @@ mod text_input_guard_tests {
         fn reset_text_context_state(state: &mut AppState) {
             state.current_screen = screen_ids::HOME.to_string();
             state.other_tmux_rename_mode = false;
-            state.ssh_session_rename_mode = false;
+            state.ssh.ssh_session_rename_mode = false;
             state.git_view.quick_commit_message = None;
             state.onboarding.auth_provider_popup_state.show_popup = false;
             state.config_screen_state = Default::default();
@@ -8097,7 +8097,7 @@ mod text_input_guard_tests {
                 s.other_tmux_rename_mode = true
             }),
             ("ssh_session_rename_mode", |s| {
-                s.ssh_session_rename_mode = true
+                s.ssh.ssh_session_rename_mode = true
             }),
             ("quick_commit_message", |s| {
                 s.git_view.quick_commit_message = Some(String::new())

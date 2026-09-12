@@ -445,7 +445,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     if state.other_tmux_rename_mode {
         contexts.push(KeyContext::OtherTmuxRename);
     }
-    if state.ssh_session_rename_mode {
+    if state.ssh.ssh_session_rename_mode {
         contexts.push(KeyContext::SshRename);
     }
     if state.session_label_rename_mode {

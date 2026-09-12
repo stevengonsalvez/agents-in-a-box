@@ -249,6 +249,7 @@ fn selected_row_target(state: &AppState) -> Option<SessionListRowTarget> {
         };
     }
     state
+        .ssh
         .selected_ssh_session_index
         .map(|ssh_idx| SessionListRowTarget::Attachable(AttachableRef::SshSession { ssh_idx }))
         .or_else(|| {
@@ -380,7 +381,7 @@ impl SessionListComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(title_spans))
                     .title_bottom(
-                        if state.ssh_session_rename_mode
+                        if state.ssh.ssh_session_rename_mode
                             || state.other_tmux_rename_mode
                             || state.session_label_rename_mode
                         {
@@ -839,30 +840,30 @@ impl SessionListComponent {
         }
 
         // Add "SSH Sessions" section if there are SSH sessions
-        if !state.ssh_sessions.is_empty() {
+        if !state.ssh.ssh_sessions.is_empty() {
             // Add separator line
             if !items.is_empty() {
                 items.push(ListItem::new(Line::from("")));
             }
 
-            let session_count = state.ssh_sessions.len();
+            let session_count = state.ssh.ssh_sessions.len();
             let is_selected_ssh = state.selected_workspace_index.is_none()
                 && state.selected_other_tmux_index.is_none()
-                && state.selected_ssh_session_index.is_some();
+                && state.ssh.selected_ssh_session_index.is_some();
 
-            let ssh_symbol = if state.ssh_sessions_expanded {
+            let ssh_symbol = if state.ssh.ssh_sessions_expanded {
                 "▼"
             } else {
                 "▶"
             };
 
             // Orange color scheme for SSH section
-            let ssh_header_color = if is_selected_ssh || state.selected_ssh_session_index.is_some()
-            {
-                WARNING_ORANGE
-            } else {
-                MUTED_GRAY
-            };
+            let ssh_header_color =
+                if is_selected_ssh || state.ssh.selected_ssh_session_index.is_some() {
+                    WARNING_ORANGE
+                } else {
+                    MUTED_GRAY
+                };
 
             let ssh_header = Line::from(vec![
                 empty_badge(),
@@ -885,20 +886,20 @@ impl SessionListComponent {
             items.push(ListItem::new(ssh_header));
 
             // Show SSH sessions if expanded
-            if state.ssh_sessions_expanded {
-                let session_len = state.ssh_sessions.len();
-                for (idx, ssh_session) in state.ssh_sessions.iter().enumerate() {
+            if state.ssh.ssh_sessions_expanded {
+                let session_len = state.ssh.ssh_sessions.len();
+                for (idx, ssh_session) in state.ssh.ssh_sessions.iter().enumerate() {
                     let is_selected =
-                        is_selected_ssh && state.selected_ssh_session_index == Some(idx);
+                        is_selected_ssh && state.ssh.selected_ssh_session_index == Some(idx);
                     let is_last = idx == session_len - 1;
-                    let is_being_renamed = is_selected && state.ssh_session_rename_mode;
+                    let is_being_renamed = is_selected && state.ssh.ssh_session_rename_mode;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };
 
                     // Use display_name if set, otherwise fall back to ssh_target.display_name() or name
                     let display_text = if is_being_renamed {
                         // Show inline rename editor with cursor
-                        format!("✏️ {}_", state.ssh_session_rename_buffer)
+                        format!("✏️ {}_", state.ssh.ssh_session_rename_buffer)
                     } else {
                         ssh_session.display_name.clone().unwrap_or_else(|| {
                             if let Some(ref target) = ssh_session.ssh_target {
@@ -1165,19 +1166,20 @@ impl SessionListComponent {
         }
 
         // Count "SSH Sessions" section items
-        if !state.ssh_sessions.is_empty() {
+        if !state.ssh.ssh_sessions.is_empty() {
             if !state.workspaces.is_empty() {
                 count += 1; // Empty separator line
             }
             count += 1; // "SSH Sessions" header
-            if state.ssh_sessions_expanded {
-                count += state.ssh_sessions.len();
+            if state.ssh.ssh_sessions_expanded {
+                count += state.ssh.ssh_sessions.len();
             }
         }
 
         // Count "Other tmux" section items
         if !state.other_tmux_sessions.is_empty() {
-            let has_items_above = !state.workspaces.is_empty() || !state.ssh_sessions.is_empty();
+            let has_items_above =
+                !state.workspaces.is_empty() || !state.ssh.ssh_sessions.is_empty();
             if has_items_above {
                 count += 1; // Empty separator line
             }

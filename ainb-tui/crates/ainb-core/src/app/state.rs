@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub ssh: Versioned<SshSection>,
+
     pub onboarding: Versioned<OnboardingSection>,
 
     pub skills: Versioned<SkillsSection>,
@@ -3258,17 +3260,6 @@ pub struct AppState {
     /// Buffer for the new name being typed during rename
     pub other_tmux_rename_buffer: String,
 
-    // SSH Sessions (Claude-managed sessions with agent_type=Ssh)
-    /// SSH sessions displayed in their own section
-    pub ssh_sessions: Vec<crate::models::Session>,
-    /// Whether the SSH sessions section is expanded
-    pub ssh_sessions_expanded: bool,
-    /// Currently selected SSH session index (within ssh_sessions vec)
-    pub selected_ssh_session_index: Option<usize>,
-    /// Whether we're in rename mode for the selected SSH session
-    pub ssh_session_rename_mode: bool,
-    /// Buffer for the new display name being typed during rename
-    pub ssh_session_rename_buffer: String,
     /// Persistent store for durable session labels.
     pub session_label_store: SessionLabelStore,
     /// Durable-label text popup state for managed and SSH sessions.
@@ -3779,6 +3770,7 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            ssh: Versioned::default(),
             onboarding: Versioned::new(OnboardingSection {
                 // The popup's provider rows come from the config this function
                 // just loaded, not from a second read of disk.
@@ -3842,11 +3834,6 @@ impl Default for AppState {
             other_tmux_rename_buffer: String::new(),
 
             // Initialize SSH sessions (separate section)
-            ssh_sessions: Vec::new(),
-            ssh_sessions_expanded: true, // Default to expanded
-            selected_ssh_session_index: None,
-            ssh_session_rename_mode: false,
-            ssh_session_rename_buffer: String::new(),
             session_label_store: SessionLabelStore::load(),
             session_label_rename_mode: false,
             session_label_rename_buffer: String::new(),
@@ -4729,14 +4716,14 @@ impl AppState {
         self.selected_workspace_index = None;
         self.selected_session_index = None;
         self.shell_selected = false;
-        self.selected_ssh_session_index = None;
+        self.ssh.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
         // Set initial selection from rows visible under the active filter.
         if !self.select_first_visible_workspace_item_from(0) {
-            if !self.ssh_sessions.is_empty() {
+            if !self.ssh.ssh_sessions.is_empty() {
                 // No workspaces but there are SSH sessions - select the first one
-                self.selected_ssh_session_index = Some(0);
+                self.ssh.selected_ssh_session_index = Some(0);
             } else if !self.other_tmux_sessions.is_empty() {
                 // No workspaces or SSH sessions but there are "Other tmux" sessions - select the first one
                 self.selected_other_tmux_index = Some(0);
@@ -4804,7 +4791,7 @@ impl AppState {
                             );
 
                             self.workspaces = workspaces;
-                            self.ssh_sessions = ssh_sessions;
+                            self.ssh.ssh_sessions = ssh_sessions;
                             self.workspace_load_error = None;
 
                             // Resolve favorite status once per workspace now
@@ -4844,13 +4831,13 @@ impl AppState {
                             self.selected_workspace_index = None;
                             self.selected_session_index = None;
                             self.shell_selected = false;
-                            self.selected_ssh_session_index = None;
+                            self.ssh.selected_ssh_session_index = None;
                             self.selected_other_tmux_index = None;
 
                             if !self.select_first_visible_workspace_item_from(0) {
-                                if !self.ssh_sessions.is_empty() {
+                                if !self.ssh.ssh_sessions.is_empty() {
                                     // No workspaces but there are SSH sessions - select the first one
-                                    self.selected_ssh_session_index = Some(0);
+                                    self.ssh.selected_ssh_session_index = Some(0);
                                 } else if !self.other_tmux_sessions.is_empty() {
                                     // No workspaces or SSH sessions but there are "Other tmux" sessions
                                     self.selected_other_tmux_index = Some(0);
@@ -5864,7 +5851,7 @@ impl AppState {
         let live_other_names: HashSet<String> =
             self.other_tmux_sessions.iter().map(|session| session.name.clone()).collect();
         self.selected_other_tmux_sessions.retain(|name| live_other_names.contains(name));
-        self.ssh_sessions = ssh_sessions;
+        self.ssh.ssh_sessions = ssh_sessions;
     }
 
     /// Auto-detect workspace shell sessions from tmux
@@ -6030,7 +6017,7 @@ impl AppState {
         self.selected_workspace_index = None;
         self.selected_session_index = None;
         self.shell_selected = false;
-        self.selected_ssh_session_index = None;
+        self.ssh.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
         self.select_first_visible_workspace_item_from(0);
@@ -6177,8 +6164,8 @@ impl AppState {
             }
         }
 
-        if !self.ssh_sessions.is_empty() && self.ssh_sessions_expanded {
-            for ssh_idx in 0..self.ssh_sessions.len() {
+        if !self.ssh.ssh_sessions.is_empty() && self.ssh.ssh_sessions_expanded {
+            for ssh_idx in 0..self.ssh.ssh_sessions.len() {
                 out.push(AttachableRef::SshSession { ssh_idx });
             }
         }
@@ -6204,14 +6191,14 @@ impl AppState {
                 self.selected_workspace_index = Some(workspace_idx);
                 self.selected_session_index = Some(session_idx);
                 self.shell_selected = false;
-                self.selected_ssh_session_index = None;
+                self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
             }
             AttachableRef::WorkspaceShell { workspace_idx } => {
                 self.selected_workspace_index = Some(workspace_idx);
                 self.selected_session_index = None;
                 self.shell_selected = true;
-                self.selected_ssh_session_index = None;
+                self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
             }
             AttachableRef::SshSession { ssh_idx } => {
@@ -6219,13 +6206,13 @@ impl AppState {
                 self.selected_session_index = None;
                 self.shell_selected = false;
                 self.selected_other_tmux_index = None;
-                self.selected_ssh_session_index = Some(ssh_idx);
+                self.ssh.selected_ssh_session_index = Some(ssh_idx);
             }
             AttachableRef::OtherTmux { other_idx } => {
                 self.selected_workspace_index = None;
                 self.selected_session_index = None;
                 self.shell_selected = false;
-                self.selected_ssh_session_index = None;
+                self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = Some(other_idx);
             }
         }
@@ -6249,7 +6236,7 @@ impl AppState {
                 self.selected_workspace_index = Some(workspace_idx);
                 self.selected_session_index = None;
                 self.shell_selected = false;
-                self.selected_ssh_session_index = None;
+                self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
             }
             SessionListRowTarget::SshHeader => {
@@ -6257,14 +6244,14 @@ impl AppState {
                 self.selected_session_index = None;
                 self.shell_selected = false;
                 self.selected_other_tmux_index = None;
-                self.selected_ssh_session_index = None;
-                self.ssh_sessions_expanded = !self.ssh_sessions_expanded;
+                self.ssh.selected_ssh_session_index = None;
+                self.ssh.ssh_sessions_expanded = !self.ssh.ssh_sessions_expanded;
             }
             SessionListRowTarget::OtherTmuxHeader => {
                 self.selected_workspace_index = None;
                 self.selected_session_index = None;
                 self.shell_selected = false;
-                self.selected_ssh_session_index = None;
+                self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
                 self.other_tmux_expanded = !self.other_tmux_expanded;
             }
@@ -6367,7 +6354,7 @@ impl AppState {
             }
         }
 
-        if !self.ssh_sessions.is_empty() {
+        if !self.ssh.ssh_sessions.is_empty() {
             if current_row > 0 {
                 if current_row == row_index {
                     return None;
@@ -6380,8 +6367,8 @@ impl AppState {
             }
             current_row += 1;
 
-            if self.ssh_sessions_expanded {
-                for ssh_idx in 0..self.ssh_sessions.len() {
+            if self.ssh.ssh_sessions_expanded {
+                for ssh_idx in 0..self.ssh.ssh_sessions.len() {
                     if current_row == row_index {
                         return Some(SessionListRowTarget::Attachable(
                             AttachableRef::SshSession { ssh_idx },
@@ -6433,14 +6420,14 @@ impl AppState {
         }
 
         // Check if we're in the "SSH Sessions" section
-        if self.selected_ssh_session_index.is_some() {
+        if self.ssh.selected_ssh_session_index.is_some() {
             // Navigate within SSH sessions
-            let current = self.selected_ssh_session_index.unwrap_or(0);
-            if current + 1 < self.ssh_sessions.len() {
-                self.selected_ssh_session_index = Some(current + 1);
+            let current = self.ssh.selected_ssh_session_index.unwrap_or(0);
+            if current + 1 < self.ssh.ssh_sessions.len() {
+                self.ssh.selected_ssh_session_index = Some(current + 1);
             } else if !self.other_tmux_sessions.is_empty() {
                 // At end of SSH sessions - move to "Other tmux"
-                self.selected_ssh_session_index = None;
+                self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = Some(0);
             }
             // Else: stay at last SSH session (no wrap)
@@ -6449,8 +6436,8 @@ impl AppState {
 
         // If nothing is selected, try SSH sessions first, then "Other tmux"
         if self.selected_workspace_index.is_none() {
-            if !self.ssh_sessions.is_empty() {
-                self.selected_ssh_session_index = Some(0);
+            if !self.ssh.ssh_sessions.is_empty() {
+                self.ssh.selected_ssh_session_index = Some(0);
                 return;
             } else if !self.other_tmux_sessions.is_empty() {
                 self.selected_other_tmux_index = Some(0);
@@ -6506,7 +6493,7 @@ impl AppState {
         self.selected_workspace_index = Some(workspace_idx);
         self.selected_session_index = session_idx;
         self.shell_selected = session_idx.is_none();
-        self.selected_ssh_session_index = None;
+        self.ssh.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
         if session_idx.is_some() {
             self.queue_logs_fetch();
@@ -6578,11 +6565,11 @@ impl AppState {
         }
 
         // No more workspaces - move to SSH sessions if available
-        if !self.ssh_sessions.is_empty() {
+        if !self.ssh.ssh_sessions.is_empty() {
             self.selected_workspace_index = None;
             self.selected_session_index = None;
             self.shell_selected = false;
-            self.selected_ssh_session_index = Some(0);
+            self.ssh.selected_ssh_session_index = Some(0);
             return;
         }
 
@@ -6605,8 +6592,8 @@ impl AppState {
             } else {
                 // At first other_tmux session - move to SSH sessions if available
                 self.selected_other_tmux_index = None;
-                if !self.ssh_sessions.is_empty() {
-                    self.selected_ssh_session_index = Some(self.ssh_sessions.len() - 1);
+                if !self.ssh.ssh_sessions.is_empty() {
+                    self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 } else {
                     self.select_last_visible_workspace_item_before(self.workspaces.len());
                 }
@@ -6615,13 +6602,13 @@ impl AppState {
         }
 
         // Check if we're in the "SSH Sessions" section
-        if let Some(ssh_idx) = self.selected_ssh_session_index {
+        if let Some(ssh_idx) = self.ssh.selected_ssh_session_index {
             if ssh_idx > 0 {
                 // Move up within SSH sessions
-                self.selected_ssh_session_index = Some(ssh_idx - 1);
+                self.ssh.selected_ssh_session_index = Some(ssh_idx - 1);
             } else {
                 // At first SSH session - move back to workspaces
-                self.selected_ssh_session_index = None;
+                self.ssh.selected_ssh_session_index = None;
                 self.select_last_visible_workspace_item_before(self.workspaces.len());
             }
             return;
@@ -6629,8 +6616,8 @@ impl AppState {
 
         // If nothing is selected, try SSH sessions, then "Other tmux"
         if self.selected_workspace_index.is_none() {
-            if !self.ssh_sessions.is_empty() {
-                self.selected_ssh_session_index = Some(self.ssh_sessions.len() - 1);
+            if !self.ssh.ssh_sessions.is_empty() {
+                self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 return;
             } else if !self.other_tmux_sessions.is_empty() {
                 self.selected_other_tmux_index = Some(self.other_tmux_sessions.len() - 1);
@@ -6904,17 +6891,19 @@ impl AppState {
 
     /// Toggle the expand/collapse state of the "SSH Sessions" section
     pub fn toggle_ssh_sessions_expanded(&mut self) {
-        self.ssh_sessions_expanded = !self.ssh_sessions_expanded;
+        self.ssh.ssh_sessions_expanded = !self.ssh.ssh_sessions_expanded;
     }
 
     /// Get the currently selected SSH session, if any
     pub fn selected_ssh_session(&self) -> Option<&crate::models::Session> {
-        self.selected_ssh_session_index.and_then(|idx| self.ssh_sessions.get(idx))
+        self.ssh
+            .selected_ssh_session_index
+            .and_then(|idx| self.ssh.ssh_sessions.get(idx))
     }
 
     /// Check if the selection is in the "SSH Sessions" section
     pub fn is_ssh_session_selected(&self) -> bool {
-        self.selected_ssh_session_index.is_some()
+        self.ssh.selected_ssh_session_index.is_some()
             && self.selected_workspace_index.is_none()
             && self.selected_other_tmux_index.is_none()
     }
@@ -6923,46 +6912,47 @@ impl AppState {
     pub fn start_ssh_session_rename(&mut self) {
         if let Some(session) = self.selected_ssh_session() {
             // Start with existing display_name or ssh_target display
-            self.ssh_session_rename_buffer = session.display_name.clone().unwrap_or_else(|| {
-                session
-                    .ssh_target
-                    .as_ref()
-                    .map(|t| t.display_name())
-                    .unwrap_or_else(|| session.name.clone())
-            });
-            self.ssh_session_rename_mode = true;
+            self.ssh.ssh_session_rename_buffer =
+                session.display_name.clone().unwrap_or_else(|| {
+                    session
+                        .ssh_target
+                        .as_ref()
+                        .map(|t| t.display_name())
+                        .unwrap_or_else(|| session.name.clone())
+                });
+            self.ssh.ssh_session_rename_mode = true;
         }
     }
 
     /// Cancel SSH session rename mode
     pub fn cancel_ssh_session_rename(&mut self) {
-        self.ssh_session_rename_mode = false;
-        self.ssh_session_rename_buffer.clear();
+        self.ssh.ssh_session_rename_mode = false;
+        self.ssh.ssh_session_rename_buffer.clear();
     }
 
     /// Add a character to the SSH session rename buffer
     pub fn ssh_session_rename_char(&mut self, c: char) {
-        if self.ssh_session_rename_mode {
-            self.ssh_session_rename_buffer.push(c);
+        if self.ssh.ssh_session_rename_mode {
+            self.ssh.ssh_session_rename_buffer.push(c);
         }
     }
 
     /// Remove a character from the SSH session rename buffer
     pub fn ssh_session_rename_backspace(&mut self) {
-        if self.ssh_session_rename_mode {
-            self.ssh_session_rename_buffer.pop();
+        if self.ssh.ssh_session_rename_mode {
+            self.ssh.ssh_session_rename_buffer.pop();
         }
     }
 
     /// Confirm the SSH session rename (updates display_name in memory)
     pub fn confirm_ssh_session_rename(&mut self) {
-        if !self.ssh_session_rename_mode {
+        if !self.ssh.ssh_session_rename_mode {
             return;
         }
 
-        let new_name = self.ssh_session_rename_buffer.trim().to_string();
-        if let Some(idx) = self.selected_ssh_session_index {
-            if let Some(session) = self.ssh_sessions.get_mut(idx) {
+        let new_name = self.ssh.ssh_session_rename_buffer.trim().to_string();
+        if let Some(idx) = self.ssh.selected_ssh_session_index {
+            if let Some(session) = self.ssh.ssh_sessions.get_mut(idx) {
                 // Get tmux session name for persistence key
                 let tmux_name = session.tmux_session_name.clone();
 
@@ -6983,8 +6973,8 @@ impl AppState {
             }
         }
 
-        self.ssh_session_rename_mode = false;
-        self.ssh_session_rename_buffer.clear();
+        self.ssh.ssh_session_rename_mode = false;
+        self.ssh.ssh_session_rename_buffer.clear();
     }
 
     /// Open durable-label editing for the selected managed or SSH session.
@@ -6997,7 +6987,8 @@ impl AppState {
                 session_idx,
             })
         } else {
-            self.selected_ssh_session_index
+            self.ssh
+                .selected_ssh_session_index
                 .map(|ssh_idx| AttachableRef::SshSession { ssh_idx })
         };
         let Some(target) = target else {
@@ -7013,9 +7004,11 @@ impl AppState {
                 .get(workspace_idx)
                 .and_then(|workspace| workspace.sessions.get(session_idx))
                 .and_then(|session| session.display_name.clone()),
-            AttachableRef::SshSession { ssh_idx } => {
-                self.ssh_sessions.get(ssh_idx).and_then(|session| session.display_name.clone())
-            }
+            AttachableRef::SshSession { ssh_idx } => self
+                .ssh
+                .ssh_sessions
+                .get(ssh_idx)
+                .and_then(|session| session.display_name.clone()),
             _ => None,
         };
         self.session_label_rename_target = Some(target);
@@ -7063,7 +7056,7 @@ impl AppState {
                 .workspaces
                 .get_mut(workspace_idx)
                 .and_then(|workspace| workspace.sessions.get_mut(session_idx)),
-            AttachableRef::SshSession { ssh_idx } => self.ssh_sessions.get_mut(ssh_idx),
+            AttachableRef::SshSession { ssh_idx } => self.ssh.ssh_sessions.get_mut(ssh_idx),
             _ => None,
         }
         .and_then(|session| {
@@ -8816,7 +8809,7 @@ impl AppState {
                 let mut session = Session::new_ssh_session(display.clone(), target);
                 session.tmux_session_name = Some(tmux_name.clone());
                 session.status = crate::models::SessionStatus::Idle;
-                self.ssh_sessions.push(session);
+                self.ssh.ssh_sessions.push(session);
                 self.add_info_notification(format!("SSH session ready: {}", display));
                 self.ui_needs_refresh = true;
                 // Refresh workspaces / sessions list so the new bucket entry is

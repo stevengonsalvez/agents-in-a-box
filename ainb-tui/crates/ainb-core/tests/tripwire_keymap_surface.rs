@@ -301,8 +301,8 @@ fn selected_managed_sessions_resume_after_cursor_moves_to_attachable_rows() {
     let mut ssh = state_with_selected_stopped_managed_session();
     let mut ssh_session = Session::new("remote".to_string(), "/tmp/remote".to_string());
     ssh_session.agent_type = SessionAgentType::Ssh;
-    ssh.ssh_sessions.push(ssh_session);
-    ssh.selected_ssh_session_index = Some(0);
+    ssh.ssh.ssh_sessions.push(ssh_session);
+    ssh.ssh.selected_ssh_session_index = Some(0);
     assert!(
         is_bulk_resume_on_enter(enter_event(&mut ssh)),
         "selected managed sessions must resume before an SSH cursor attaches"

@@ -240,3 +240,30 @@ impl Default for OnboardingSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct SshSection {
+    // SSH Sessions (Claude-managed sessions with agent_type=Ssh)
+    /// SSH sessions displayed in their own section
+    pub ssh_sessions: Vec<crate::models::Session>,
+    /// Whether the SSH sessions section is expanded
+    pub ssh_sessions_expanded: bool,
+    /// Currently selected SSH session index (within ssh_sessions vec)
+    pub selected_ssh_session_index: Option<usize>,
+    /// Whether we're in rename mode for the selected SSH session
+    pub ssh_session_rename_mode: bool,
+    /// Buffer for the new display name being typed during rename
+    pub ssh_session_rename_buffer: String,
+}
+
+impl Default for SshSection {
+    fn default() -> Self {
+        Self {
+            ssh_sessions: Vec::new(),
+            ssh_sessions_expanded: true, // Default to expanded
+            selected_ssh_session_index: None,
+            ssh_session_rename_mode: false,
+            ssh_session_rename_buffer: String::new(),
+        }
+    }
+}
