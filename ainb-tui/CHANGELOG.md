@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.3] - 2026-09-12
+### Fixed
+- keep stopped sessions out of active
+- observe terminal model metadata
+- reconcile stale tmux sessions
+
+
 ## [1.28.2] - 2026-09-11
 ### Added
 - **fleet-macos**: add signed Sparkle updates
