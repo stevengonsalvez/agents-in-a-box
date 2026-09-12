@@ -40,6 +40,50 @@ fn golden_context(name: &str) -> Option<KeyContext> {
     })
 }
 
+/// Rewrite `fixtures/keymap_rows.txt` from the live table.
+///
+/// The golden is the contract, so it is never rewritten by a test run: set
+/// `UPDATE_KEYMAP_GOLDEN=1` deliberately, read the diff, and commit it. Without
+/// the variable this is a no-op, which is what keeps the fixture a check rather
+/// than an echo of whatever the table currently says.
+#[test]
+fn update_golden_when_asked() {
+    if std::env::var_os("UPDATE_KEYMAP_GOLDEN").is_none() {
+        return;
+    }
+
+    let keymap = Keymap::defaults();
+    let rows: Vec<serde_json::Value> = keymap
+        .bindings()
+        .map(|binding| {
+            serde_json::json!({
+                "context": binding.ctx.name(),
+                "chord": binding.chord.as_str(),
+                "action": format!("{:?}", binding.action),
+            })
+        })
+        .collect();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("keymap_rows.txt");
+    // One row per line, in the table's own order, so the diff of a table change
+    // is the rows that changed and nothing else. `to_string_pretty` would
+    // reflow every row onto five lines and bury a four-row addition in a
+    // 3,000-line diff.
+    let mut body = String::from("{\n  \"bindings\": [\n");
+    for (index, row) in rows.iter().enumerate() {
+        let comma = if index + 1 == rows.len() { "" } else { "," };
+        body.push_str(&format!(
+            "    {}{comma}\n",
+            serde_json::to_string(row).expect("row")
+        ));
+    }
+    body.push_str("  ]\n}\n");
+    std::fs::write(&path, body).expect("write golden");
+    eprintln!("rewrote {} with {} rows", path.display(), rows.len());
+}
+
 #[test]
 fn defaults_are_unique_documented_and_parseable() {
     let keymap = Keymap::defaults();
@@ -53,7 +97,7 @@ fn defaults_are_unique_documented_and_parseable() {
 
     assert_eq!(
         keymap.bindings().count(),
-        491,
+        525,
         "default table must be complete"
     );
 }
@@ -63,7 +107,7 @@ fn default_rows_resolve_to_their_independent_golden_actions() {
     let golden = golden_default_bindings();
     assert_eq!(
         golden.bindings.len(),
-        491,
+        525,
         "golden fixture must cover every host binding"
     );
 
