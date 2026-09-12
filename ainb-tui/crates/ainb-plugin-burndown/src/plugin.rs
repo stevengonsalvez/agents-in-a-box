@@ -966,6 +966,17 @@ impl BurndownPlugin {
     fn dispatch_key_pure(&mut self, code: &KeyCode) -> bool {
         use chrono::{Datelike, Local};
 
+        // The parsed snapshot lives on `self.data`; the render path copies it
+        // into `self.ui.data` only when it clones `self.ui` for the frame, so
+        // a key handler that reads `ui.data` sees `None` unless it syncs
+        // first. Enter, X and the mouse scroll each learned that the hard way
+        // and grew their own copy of this line; the Activity cursor keys did
+        // not, so every arrow press hit `heatmap_move`'s `data.is_none()`
+        // early return and the selected day never moved. Syncing once here
+        // covers every binding, present and future. `self.data` is an
+        // `Arc<UsageData>`, so this is a refcount bump, not a deep copy.
+        self.ui.data = self.data.clone();
+
         // Zoom fuzzy-search text entry. While the `/` overlay is active,
         // printable keys build the query, Backspace deletes (or cancels
         // once the query is empty), and Enter commits — captured here so
@@ -1089,23 +1100,15 @@ impl BurndownPlugin {
             // On the Activity tab Enter pivots to the selected day rather than
             // committing a table row — there are no rows on a heatmap.
             KeyCode::Enter if self.ui.active_tab == crate::ui::UsageTab::Activity => {
-                self.ui.data = self.data.clone();
                 let _ = self.ui.heatmap_commit_day();
             }
             KeyCode::Enter => {
                 // `commit_focused_row` resolves the row through
-                // `filtered_data()` which reads `self.ui.data`. The
-                // plugin keeps the parsed snapshot on `self.data`
-                // (the render path copies it into `ui.data` only at
-                // render time), so without this sync the commit
-                // would silently return false — drill-down dead.
-                // Now that `self.data` is `Arc<UsageData>`, the sync
-                // is an `Arc::clone` (refcount bump), not a deep copy.
-                self.ui.data = self.data.clone();
+                // `filtered_data()`, which reads the `ui.data` synced at the
+                // top of this function.
                 let _ = self.ui.commit_focused_row();
             }
             KeyCode::Char { ch: 'X' } => {
-                self.ui.data = self.data.clone();
                 let _ = self.ui.commit_focused_row_exclude();
             }
             KeyCode::Char { ch: 'C' } => self.ui.clear_all_filter_chips(),

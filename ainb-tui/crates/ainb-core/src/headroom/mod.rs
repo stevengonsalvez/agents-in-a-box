@@ -477,9 +477,15 @@ mod tests {
         let parent = Pid::from_u32(pid);
         let mut system = System::new();
         system.refresh_processes(ProcessesToUpdate::All, false);
+        // sysinfo lists a task's threads alongside real processes, and a
+        // thread's parent is the process that owns it. Without the
+        // `thread_kind` filter every thread of the exec'd fake proxy counted
+        // as a child process, so this assertion failed on a tokio runtime
+        // rather than on a leaked subprocess.
         let mut children: Vec<u32> = system
             .processes()
             .iter()
+            .filter(|(_, process)| process.thread_kind().is_none())
             .filter_map(|(&child_pid, process)| {
                 (process.parent() == Some(parent)).then_some(child_pid.as_u32())
             })

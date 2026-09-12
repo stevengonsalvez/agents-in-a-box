@@ -138,11 +138,14 @@ test("web dashboard retires a card the daemon says another surface answered", as
   const pickButton = page.getByRole("button", { name: ANSWER_BUTTON });
   await expect(pickButton).toBeVisible();
 
-  // Another surface wins while this browser is still looking at the card.
-  setAttentionRow("answered", "tui@e2e", "1");
-  expect(attentionRow()).toBe("answered|tui@e2e|1");
-
   try {
+    // Another surface wins while this browser is still looking at the card.
+    // Inside the try, because from here on the seeded row is not the one the
+    // delivering journey below expects: anything that throws between the flip
+    // and the restore has to reach the finally.
+    setAttentionRow("answered", "tui@e2e", "1");
+    expect(attentionRow()).toBe("answered|tui@e2e|1");
+
     await pickButton.click();
 
     // The controls are gone and the winner is named, without waiting for any
@@ -158,8 +161,8 @@ test("web dashboard retires a card the daemon says another surface answered", as
     await expect(page.getByRole("button", { name: ANSWER_BUTTON })).toHaveCount(0);
 
     // And the retirement is a hint, not a lock. The daemon may put the same id
-    // back — a winner whose delivery fails is reverted to `open` and re-raised
-    // (`answer.rs::reopen_on_failed_delivery`) — so once the hint has outlived
+    // back: a winner whose delivery fails is reverted to `open` and re-raised
+    // (`answer.rs::reopen_on_failed_delivery`), so once the hint has outlived
     // two snapshot cycles the daemon's view wins again and the row a frozen
     // frame still calls open becomes answerable. Holding it forever would
     // strand a reopened card with no controls for the life of the tab.
