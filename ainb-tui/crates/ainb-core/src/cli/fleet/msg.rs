@@ -238,6 +238,7 @@ async fn send(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             origin_message_id: matches.get_one::<String>("origin").cloned(),
             text,
             request_id,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
         .await;
     let result = match result {

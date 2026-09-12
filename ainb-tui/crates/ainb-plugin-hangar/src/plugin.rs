@@ -2880,6 +2880,7 @@ impl HangarPlugin {
                     expected_version,
                     request_id,
                     action,
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 };
                 self.send_fleet_rpc(
                     host,
@@ -2901,6 +2902,7 @@ impl HangarPlugin {
                     target_keys: recipient_keys,
                     text,
                     idempotency_key,
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 };
                 self.send_fleet_rpc(
                     host,

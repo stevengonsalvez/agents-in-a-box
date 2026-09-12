@@ -108,6 +108,7 @@ impl Harness {
                     kind: FleetChannelKind::Pal,
                     name: "copilot".to_string(),
                     recipients: None,
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 },
             )
             .await
@@ -168,6 +169,7 @@ impl Harness {
                 &FleetConfirmAnswerParams {
                     confirm_id: confirm_id.to_string(),
                     answer,
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 },
             )
             .await
@@ -587,6 +589,7 @@ async fn the_pal_credential_cannot_answer_its_own_card_or_write_as_the_operator(
             &FleetConfirmAnswerParams {
                 confirm_id: card.confirm_id.clone(),
                 answer: FleetConfirmAnswer::Approve,
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             },
         )
         .await;

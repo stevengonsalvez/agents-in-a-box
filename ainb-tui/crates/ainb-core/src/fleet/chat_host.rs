@@ -189,6 +189,7 @@ impl ChatHost {
                         origin_message_id: None,
                         text,
                         request_id,
+                        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                     };
                     match crate::fleet::control::chat_send_blocking(params) {
                         Ok(result) => (None, Some(scope_key), Some(result.deliveries)),

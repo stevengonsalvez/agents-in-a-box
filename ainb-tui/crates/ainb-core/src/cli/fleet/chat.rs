@@ -76,6 +76,7 @@ async fn channel_create(matches: &clap::ArgMatches, format: OutputFormat) -> Res
             kind,
             name,
             recipients: (!recipients.is_empty()).then_some(recipients),
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         },
     )
     .await;
@@ -166,6 +167,7 @@ async fn channel_send(matches: &clap::ArgMatches, format: OutputFormat) -> Resul
             origin_message_id: None,
             text,
             request_id,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         },
     )
     .await;
@@ -250,6 +252,7 @@ async fn pal_configure(matches: &clap::ArgMatches, format: OutputFormat) -> Resu
             model: matches.get_one::<String>("model").cloned(),
             reasoning_effort: matches.get_one::<String>("reasoning-effort").cloned(),
             persona,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         },
     )
     .await;
@@ -362,7 +365,11 @@ async fn confirm_answer(matches: &clap::ArgMatches, format: OutputFormat) -> Res
     };
     let result: FleetConfirmAnswerResult = call(
         methods::FLEET_CONFIRM_ANSWER,
-        &FleetConfirmAnswerParams { confirm_id, answer },
+        &FleetConfirmAnswerParams {
+            confirm_id,
+            answer,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
+        },
     )
     .await;
     if format == OutputFormat::Json {

@@ -308,6 +308,7 @@ impl PalDial {
             model,
             reasoning_effort: None,
             persona: None,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         Self::spawn(
             inbox,

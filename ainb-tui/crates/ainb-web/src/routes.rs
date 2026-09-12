@@ -371,6 +371,7 @@ async fn answer(State(state): State<AppState>, body: Bytes) -> Response {
         answer: req.answer,
         answered_by: req.answered_by.unwrap_or_else(|| "web".to_string()),
         is_answer: req.is_answer.unwrap_or(true),
+        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
     };
 
     match state.answer.answer(params).await {
