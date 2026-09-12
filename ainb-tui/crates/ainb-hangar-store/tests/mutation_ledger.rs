@@ -355,3 +355,125 @@ async fn a_rolled_back_transaction_leaves_no_receipt() {
         "a rolled-back claim must not leave a ledger row"
     );
 }
+
+/// Amendment 15 under CONCURRENCY, which is the only way it can actually fail.
+///
+/// Every other test in this file awaits the first claim before starting the
+/// second, so the fast-path SELECT always sees the winner. Two principals that
+/// truly race never see each other's row: `principal` is inside the primary
+/// key, so each insert lands under its own key and both callers are told
+/// `Fresh` — and both execute, under one op id, which is the exact double-fire
+/// the ledger exists to stop.
+///
+/// The UNIQUE (host_id, op_id) index is what decides it. Exactly one `Fresh`,
+/// and the loser is `Foreign` naming the winner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_principals_racing_one_op_id_yield_exactly_one_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let fp = MutationLedgerRepo::fingerprint("attention/answer", &body());
+
+    // Repeated, because a race that only sometimes interleaves would otherwise
+    // pass on the run where it happened not to.
+    for round in 0..25 {
+        let op = format!("op-raced-{round:02}");
+        let mine = LedgerKey::local(&op);
+        let theirs = LedgerKey::device("phone-7", &op);
+        let (a, b) = (store.pool().clone(), store.pool().clone());
+        let (ka, kb) = (mine.clone(), theirs.clone());
+        let (fa, fb) = (fp.clone(), fp.clone());
+
+        let (left, right) = tokio::join!(
+            tokio::spawn(async move {
+                MutationLedgerRepo::claim(&a, &ka, "attention/answer", &fa, TIER_DEDUPE, NOW).await
+            }),
+            tokio::spawn(async move {
+                MutationLedgerRepo::claim(&b, &kb, "attention/answer", &fb, TIER_DEDUPE, NOW).await
+            }),
+        );
+        let outcomes = [left.unwrap().unwrap(), right.unwrap().unwrap()];
+
+        let fresh = outcomes.iter().filter(|o| **o == ClaimOutcome::Fresh).count();
+        assert_eq!(
+            fresh, 1,
+            "round {round}: exactly one principal may execute an op id, got {outcomes:?}"
+        );
+        let foreign = outcomes.iter().filter(|o| matches!(o, ClaimOutcome::Foreign { .. })).count();
+        assert_eq!(
+            foreign, 1,
+            "round {round}: the loser must be told whose op id it is, got {outcomes:?}"
+        );
+
+        // And exactly one row exists for that op id, under whichever principal
+        // won — never one per principal.
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mutation_ledger WHERE op_id = ?")
+            .bind(&op)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "round {round}: one op id, one ledger row");
+    }
+}
+
+/// The ceiling retention cannot provide: a burst INSIDE the hourly window.
+///
+/// Every deterministic outcome writes a row and its serialized reply, and a
+/// fresh op id per call makes every call a new row — so a caller that loops
+/// grows the ledger unbounded between sweeps. The cap is per principal, so one
+/// runaway credential cannot crowd out the operator's own.
+#[tokio::test]
+async fn a_principal_past_its_ceiling_is_refused_and_its_neighbour_is_not() {
+    use ainb_hangar_store::repo::mutation_ledger::MAX_ROWS_PER_PRINCIPAL;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let pool = store.pool();
+    let fp = MutationLedgerRepo::fingerprint("attention/answer", &body());
+
+    // Fill one principal's quota directly: driving 50k claims through the repo
+    // would test SQLite's insert rate, not the ceiling.
+    for i in 0..MAX_ROWS_PER_PRINCIPAL {
+        sqlx::query(
+            "INSERT INTO mutation_ledger \
+             (host_id, principal, op_id, method, body_fingerprint, tier, status, \
+              expired, created_at, updated_at) \
+             VALUES ('local', 'pal:channel-1', ?, 'attention/answer', ?, 'dedupe', \
+                     'accepted', 0, ?, ?)",
+        )
+        .bind(format!("op-flood-{i:06}"))
+        .bind(&fp)
+        .bind(NOW)
+        .bind(NOW)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    let flooder = LedgerKey {
+        host_id: "local".to_string(),
+        principal: "pal:channel-1".to_string(),
+        op_id: "op-one-too-many".to_string(),
+    };
+    let outcome =
+        MutationLedgerRepo::claim(pool, &flooder, "attention/answer", &fp, TIER_DEDUPE, NOW)
+            .await
+            .unwrap();
+    assert!(
+        matches!(outcome, ClaimOutcome::Saturated { .. }),
+        "a principal past its ceiling must be refused, got {outcome:?}"
+    );
+    assert!(
+        MutationLedgerRepo::get(pool, &flooder).await.unwrap().is_none(),
+        "a refused claim must not mint the row it was refused for"
+    );
+
+    // The operator's own principal is untouched: the cap is per principal
+    // precisely so one credential cannot deny service to another.
+    let operator = LedgerKey::local("op-operator-still-works");
+    assert_eq!(
+        MutationLedgerRepo::claim(pool, &operator, "attention/answer", &fp, TIER_DEDUPE, NOW)
+            .await
+            .unwrap(),
+        ClaimOutcome::Fresh
+    );
+}

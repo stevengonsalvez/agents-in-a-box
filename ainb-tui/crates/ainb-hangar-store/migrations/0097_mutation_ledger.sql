@@ -88,8 +88,18 @@ CREATE TABLE mutation_ledger (
     PRIMARY KEY (host_id, principal, op_id)
 );
 
--- Amendment 15's foreign-op-id check: one lookup, any principal.
-CREATE INDEX idx_mutation_ledger_host_op
+-- Amendment 15's foreign-op-id rule, ENFORCED rather than looked up.
+--
+-- UNIQUE, not a plain index, and that is the whole mutual exclusion. The
+-- primary key contains `principal`, so two principals racing one op id collide
+-- on nothing: each inserts under its own key and each is told `Fresh`, and both
+-- execute. A SELECT-then-INSERT cannot close that — they are two autocommit
+-- statements, and the window between them is exactly where the race lives.
+--
+-- One op id is one operation on this host, whoever presents it. The second
+-- presenter loses the insert and is re-read as `Foreign`, which is what
+-- amendment 15 asks for and what the concurrent-claim test pins.
+CREATE UNIQUE INDEX idx_mutation_ledger_host_op
     ON mutation_ledger (host_id, op_id);
 
 -- The retention sweep scans oldest-first.

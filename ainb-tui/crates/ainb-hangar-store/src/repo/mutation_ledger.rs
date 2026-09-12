@@ -137,6 +137,15 @@ pub enum ClaimOutcome {
         /// The principal that owns it.
         principal: String,
     },
+    /// This principal already holds [`MAX_ROWS_PER_PRINCIPAL`] rows and may not
+    /// mint another until retention catches up.
+    ///
+    /// A refusal, never a silent execution: running the mutation without a
+    /// ledger row would drop the guarantee the row exists to provide.
+    Saturated {
+        /// How many rows it holds.
+        rows: i64,
+    },
 }
 
 /// How much history the ledger keeps (D18: 7 days or 100k rows).
@@ -173,6 +182,20 @@ pub struct RetentionReport {
     /// Tombstones deleted outright.
     pub deleted: u64,
 }
+
+/// The most in-flight-or-recorded rows ONE principal may hold between
+/// retention passes.
+///
+/// Retention runs hourly and bounds the corpus over time; it does not bound a
+/// burst inside the hour. Every deterministic outcome writes a row and a
+/// serialized reply, a fresh op id per call means every call is a new row, and
+/// the Pal credential — which a model steers — can reach a mutating method. So
+/// the sweep needs a companion that acts inside the window.
+///
+/// Generous on purpose: an operator answering, sending and running all day does
+/// not approach it, and a caller that does is either looping or hostile. It is
+/// per PRINCIPAL, so one runaway credential cannot starve the operator's own.
+pub const MAX_ROWS_PER_PRINCIPAL: i64 = 50_000;
 
 /// Stateless typed wrapper over `mutation_ledger`.
 pub struct MutationLedgerRepo;
@@ -250,6 +273,10 @@ impl MutationLedgerRepo {
         tier: &str,
         now_ms: i64,
     ) -> Result<ClaimOutcome, sqlx::Error> {
+        // A fast path, NOT the guarantee. The guarantee is the UNIQUE
+        // (host_id, op_id) index: this read and the insert below are two
+        // autocommit statements, so a concurrent foreign claim can slip between
+        // them, and only the database can decide that race.
         if let Some(owner) = Self::holder_of_on(&mut *conn, &key.host_id, &key.op_id).await? {
             if owner.key.principal != key.principal {
                 return Ok(ClaimOutcome::Foreign {
@@ -258,13 +285,27 @@ impl MutationLedgerRepo {
             }
         }
 
+        // The ceiling is checked HERE, not only by the hourly sweep: a burst
+        // inside the window is exactly what a sweep cannot bound, and every
+        // deterministic outcome writes a row plus its serialized reply.
+        let held: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mutation_ledger WHERE host_id = ? AND principal = ?",
+        )
+        .bind(&key.host_id)
+        .bind(&key.principal)
+        .fetch_one(&mut *conn)
+        .await?;
+        if held >= MAX_ROWS_PER_PRINCIPAL {
+            return Ok(ClaimOutcome::Saturated { rows: held });
+        }
+
         let receipt_state = (tier == TIER_RECEIPT).then_some("claimed");
         let inserted = sqlx::query(
             "INSERT INTO mutation_ledger \
              (host_id, principal, op_id, method, body_fingerprint, tier, status, \
               reply, receipt_state, expired, created_at, updated_at) \
              VALUES (?, ?, ?, ?, ?, ?, 'in_flight', NULL, ?, 0, ?, ?) \
-             ON CONFLICT (host_id, principal, op_id) DO NOTHING",
+             ON CONFLICT DO NOTHING",
         )
         .bind(&key.host_id)
         .bind(&key.principal)
@@ -282,6 +323,16 @@ impl MutationLedgerRepo {
         }
 
         let Some(existing) = Self::get_on(&mut *conn, key).await? else {
+            // No row under OUR key, yet the insert conflicted. Either the
+            // UNIQUE (host_id, op_id) index refused it because another
+            // principal holds this op id — the race the fast path above cannot
+            // see — or a retention sweep deleted our row between the two
+            // statements. Re-read the winner to tell them apart.
+            if let Some(owner) = Self::holder_of_on(&mut *conn, &key.host_id, &key.op_id).await? {
+                return Ok(ClaimOutcome::Foreign {
+                    principal: owner.key.principal,
+                });
+            }
             // The row vanished between the conflict and the read: a concurrent
             // retention sweep. Read as expired, which is the honest answer and
             // never a second execution.
@@ -420,7 +471,9 @@ impl MutationLedgerRepo {
     /// Drop a claim whose handler produced no terminal outcome.
     ///
     /// Used only where re-execution is provably safe, and the SQL is what makes
-    /// "provably" true rather than a comment: a row whose receipt has reached
+    /// "provably" true rather than a comment: `failed` is safe because the
+    /// provider CONFIRMED nothing landed, and `claimed` because the write
+    /// boundary was never crossed — but a row whose receipt has reached
     /// `writing` is NEVER deleted, because `writing` is committed immediately
     /// before the first byte reaches the PTY and deleting it would leave the
     /// boot sweep nothing to surface and a retry free to type the answer a
@@ -439,7 +492,7 @@ impl MutationLedgerRepo {
         let res = sqlx::query(
             "DELETE FROM mutation_ledger \
              WHERE host_id = ? AND principal = ? AND op_id = ? AND status = 'in_flight' \
-               AND (receipt_state IS NULL OR receipt_state = 'claimed')",
+               AND (receipt_state IS NULL OR receipt_state IN ('claimed', 'failed'))",
         )
         .bind(&key.host_id)
         .bind(&key.principal)
@@ -674,6 +727,45 @@ impl MutationLedgerRepo {
                  receipt_detail = COALESCE(?, receipt_detail), updated_at = ? \
              WHERE host_id = ? AND principal = ? AND op_id = ? AND status = 'in_flight'",
         )
+        .bind(reason)
+        .bind(detail)
+        .bind(now_ms)
+        .bind(&key.host_id)
+        .bind(&key.principal)
+        .bind(&key.op_id)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Resolve a claim from the outcome its own receipt already recorded.
+    ///
+    /// The counterpart to [`Self::resolve_unknown`], and the difference is
+    /// which of the two facts is known. A receipt that reached `delivered` or
+    /// `failed` before the daemon died knows exactly what happened; only the
+    /// REPLY was lost. Routing that through `resolve_unknown` would overwrite a
+    /// confirmed outcome with `unknown` and report that the daemon stopped
+    /// before answering, which is false.
+    ///
+    /// The receipt is deliberately left as it is: it is the evidence.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the `SQLite` failure.
+    pub async fn resolve_from_receipt(
+        pool: &SqlitePool,
+        key: &LedgerKey,
+        status: &str,
+        reason: Option<&str>,
+        detail: &str,
+        now_ms: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE mutation_ledger \
+             SET status = ?, reason = ?, receipt_detail = ?, updated_at = ? \
+             WHERE host_id = ? AND principal = ? AND op_id = ? AND status = 'in_flight'",
+        )
+        .bind(status)
         .bind(reason)
         .bind(detail)
         .bind(now_ms)
