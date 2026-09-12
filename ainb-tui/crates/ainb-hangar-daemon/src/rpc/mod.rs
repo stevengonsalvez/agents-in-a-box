@@ -2164,18 +2164,22 @@ fn message_send_receipt(
     let Some(deliveries) = value.get("deliveries").and_then(|d| d.as_array()) else {
         return ReceiptState::Unknown;
     };
-    let status_is = |wanted: &str| {
+    // `state`, not `status`: `FleetMessageDelivery` spells it `state` on the
+    // wire (proto/fleet.rs), and reading the wrong key here made EVERY
+    // successful send record a `failed` receipt while its own result said
+    // DELIVERED.
+    let state_is = |wanted: &str| {
         deliveries
             .iter()
-            .any(|d| d.get("status").and_then(serde_json::Value::as_str) == Some(wanted))
+            .any(|d| d.get("state").and_then(serde_json::Value::as_str) == Some(wanted))
     };
-    if status_is("DELIVERED") {
+    if state_is("DELIVERED") {
         ReceiptState::Delivered
-    } else if status_is("PENDING") {
+    } else if state_is("PENDING") {
         // An ACP leg stays pending until turn end; the pool resolves it later.
         // Claiming an outcome here would answer for a turn that has not started.
         ReceiptState::Writing
-    } else if status_is("UNKNOWN") {
+    } else if state_is("UNKNOWN") {
         ReceiptState::Unknown
     } else {
         ReceiptState::Failed
