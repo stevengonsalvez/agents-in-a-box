@@ -361,6 +361,12 @@ impl KeyContext {
                 Self::Screen("onboarding", SubContext::Named("auth_agents"))
             }
             "onboarding.otel" => Self::Screen("onboarding", SubContext::Named("otel")),
+            "onboarding.dependency_ready" => {
+                Self::Screen("onboarding", SubContext::Named("dependency_ready"))
+            }
+            "onboarding.welcome" => Self::Screen("onboarding", SubContext::Named("welcome")),
+            "onboarding.editor" => Self::Screen("onboarding", SubContext::Named("editor")),
+            "onboarding.summary" => Self::Screen("onboarding", SubContext::Named("summary")),
             "setup_menu.menu" => Self::Screen("setup_menu", SubContext::Named("menu")),
             "setup_menu.confirm" => Self::Screen("setup_menu", SubContext::Named("confirm")),
             "daemons.overlay" => Self::Screen("daemons", SubContext::Named("overlay")),
