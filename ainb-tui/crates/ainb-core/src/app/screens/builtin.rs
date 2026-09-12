@@ -717,7 +717,7 @@ impl Screen for SkillsScreen {
         ids::SKILLS
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        crate::components::skills::render(frame, area, &state.skills_state);
+        crate::components::skills::render(frame, area, &state.skills.skills_state);
     }
 }
 
@@ -728,7 +728,11 @@ impl Screen for SkillManagerScreen {
         ids::SKILL_MANAGER
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        crate::components::skill_manager_screen::render(frame, area, &state.skill_manager_state);
+        crate::components::skill_manager_screen::render(
+            frame,
+            area,
+            &state.skills.skill_manager_state,
+        );
     }
 }
 

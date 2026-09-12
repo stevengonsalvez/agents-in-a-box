@@ -592,13 +592,13 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("filtered")));
                 }
             }
-            screen_ids::SKILLS if state.skills_state.search_active => {
+            screen_ids::SKILLS if state.skills.skills_state.search_active => {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
             }
             screen_ids::SKILL_MANAGER => {
                 use crate::components::skill_manager_screen::{BrowseMode, FocusedSkillPane};
 
-                let skills = &state.skill_manager_state;
+                let skills = &state.skills.skill_manager_state;
                 if skills.input.is_some() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("input")));
                 } else if skills.sync_confirm.is_some() {

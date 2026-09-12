@@ -182,3 +182,34 @@ impl Default for PluginsHostSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct SkillsSection {
+    // Skills browser state
+    pub skills_state: crate::components::skills::SkillsViewState,
+    /// Channel receiver for background skills+agents scan.
+    /// Present only while a scan is in flight; `tick()` drains it.
+    pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
+    // Skill-manager screen state (spec §10.1)
+    pub skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData,
+    /// Background drift-poll receiver. Present only while a drift scan
+    /// (kicked off by `GoToSkillManager`) is in flight; `tick()`
+    /// drains it into `skill_manager_state.drift_cache`.
+    pub drift_load_receiver: Option<
+        mpsc::UnboundedReceiver<
+            std::collections::BTreeMap<String, ainb_skill_core::drift::DriftStatus>,
+        >,
+    >,
+}
+
+impl Default for SkillsSection {
+    fn default() -> Self {
+        Self {
+            skills_state: crate::components::skills::SkillsViewState::default(),
+            skills_load_receiver: None,
+            skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData::default(
+            ),
+            drift_load_receiver: None,
+        }
+    }
+}

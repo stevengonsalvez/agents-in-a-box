@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub skills: Versioned<SkillsSection>,
+
     pub plugins_host: Versioned<PluginsHostSection>,
 
     pub hangar: Versioned<HangarSection>,
@@ -3316,23 +3318,6 @@ pub struct AppState {
     // `usage_state` / `usage_load_receiver`. Statusline-related state
     // (live_window_watcher, statusline_status_cache) stays in core
     // because that's a host CLI install concern, not a plugin one.
-
-    // Skills browser state
-    pub skills_state: crate::components::skills::SkillsViewState,
-    /// Channel receiver for background skills+agents scan.
-    /// Present only while a scan is in flight; `tick()` drains it.
-    pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
-
-    // Skill-manager screen state (spec §10.1)
-    pub skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData,
-    /// Background drift-poll receiver. Present only while a drift scan
-    /// (kicked off by `GoToSkillManager`) is in flight; `tick()`
-    /// drains it into `skill_manager_state.drift_cache`.
-    pub drift_load_receiver: Option<
-        mpsc::UnboundedReceiver<
-            std::collections::BTreeMap<String, ainb_skill_core::drift::DriftStatus>,
-        >,
-    >,
     /// Background base-branch refresh for the Configure picker. The fetch +
     /// re-list runs on `spawn_blocking`; the result lands here and is applied
     /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
@@ -3801,6 +3786,7 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            skills: Versioned::default(),
             plugins_host: Versioned::default(),
             hangar: Versioned::default(),
             claude_chat: Versioned::default(),
@@ -3903,13 +3889,8 @@ impl Default for AppState {
             live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
             // Skills browser state
-            skills_state: crate::components::skills::SkillsViewState::default(),
-            skills_load_receiver: None,
 
             // Skill-manager screen state (spec §10.1)
-            skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData::default(
-            ),
-            drift_load_receiver: None,
             // Configure base-branch picker background refresh
             branch_refresh_receiver: None,
             branch_refresh_seq: 0,
@@ -5011,15 +4992,15 @@ impl AppState {
     /// Mirrors `start_background_usage_load` so Skills screen navigation
     /// never blocks the event thread.
     pub fn start_background_skills_load(&mut self, force: bool) -> bool {
-        if self.skills_load_receiver.is_some() {
+        if self.skills.skills_load_receiver.is_some() {
             return false;
         }
-        if !force && self.skills_state.data.is_some() {
+        if !force && self.skills.skills_state.data.is_some() {
             return false;
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        self.skills_load_receiver = Some(rx);
-        self.skills_state.loading = true;
+        self.skills.skills_load_receiver = Some(rx);
+        self.skills.skills_state.loading = true;
         tokio::spawn(async move {
             match tokio::task::spawn_blocking(crate::models::skills::parse_skills).await {
                 Ok(data) => {
@@ -5035,18 +5016,18 @@ impl AppState {
 
     /// Poll the background scan. Returns true if data was applied this tick.
     pub fn check_skills_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.skills_load_receiver {
+        if let Some(ref mut receiver) = self.skills.skills_load_receiver {
             match receiver.try_recv() {
                 Ok(data) => {
-                    self.skills_state.data = Some(data);
-                    self.skills_state.loading = false;
-                    self.skills_load_receiver = None;
+                    self.skills.skills_state.data = Some(data);
+                    self.skills.skills_state.loading = false;
+                    self.skills.skills_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.skills_state.loading = false;
-                    self.skills_load_receiver = None;
+                    self.skills.skills_state.loading = false;
+                    self.skills.skills_load_receiver = None;
                     warn!("Skills parse task dropped its sender without delivering data");
                     self.add_warning_notification(
                         "Failed to parse skills; keeping cached data".to_string(),
@@ -5074,11 +5055,11 @@ impl AppState {
         home: &std::path::Path,
         backend: std::sync::Arc<dyn ainb_skill_core::drift::DriftBackend + Send + Sync>,
     ) -> bool {
-        if self.drift_load_receiver.is_some() {
+        if self.skills.drift_load_receiver.is_some() {
             return false;
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        self.drift_load_receiver = Some(rx);
+        self.skills.drift_load_receiver = Some(rx);
         let home = home.to_path_buf();
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -5106,16 +5087,16 @@ impl AppState {
     /// applied this tick. Drains a single message — backend returns
     /// the whole map in one go so a single drain is enough.
     pub fn check_drift_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.drift_load_receiver {
+        if let Some(ref mut receiver) = self.skills.drift_load_receiver {
             match receiver.try_recv() {
                 Ok(map) => {
-                    self.skill_manager_state.drift_cache = map;
-                    self.drift_load_receiver = None;
+                    self.skills.skill_manager_state.drift_cache = map;
+                    self.skills.drift_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.drift_load_receiver = None;
+                    self.skills.drift_load_receiver = None;
                     warn!("Drift detect task dropped its sender without delivering data");
                     true
                 }
@@ -10709,7 +10690,7 @@ impl AppState {
                         ainb_cli::source::preview_source(&ainb_home, &fetch_uri)
                     })
                     .await;
-                    self.skill_manager_state.preview_loading = None;
+                    self.skills.skill_manager_state.preview_loading = None;
                     match result {
                         Ok(Ok(preview)) if preview.units.is_empty() => {
                             self.add_warning_notification(format!(
@@ -10724,12 +10705,13 @@ impl AppState {
                             // track. `declared_uri` is the same
                             // `<source>@<ref>/<path>` shape the picker rebuilds.
                             let installed_uris: std::collections::HashSet<String> = self
+                                .skills
                                 .skill_manager_state
                                 .units
                                 .iter()
                                 .map(|u| u.declared_uri.clone())
                                 .collect();
-                            self.skill_manager_state.preview = Some(
+                            self.skills.skill_manager_state.preview = Some(
                                 crate::components::skill_manager_screen::SourcePreviewViewState::new(
                                     preview,
                                     &installed_uris,
