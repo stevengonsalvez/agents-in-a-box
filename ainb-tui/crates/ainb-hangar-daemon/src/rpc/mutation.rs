@@ -33,8 +33,9 @@
 //! the cases where the caller is supposed to retry and get a different answer.
 
 use ainb_hangar_proto::mutation::{
-    ACK_KEY, MutatingMethod, MutationAck, MutationStatus, MutationTier, REASON_ALREADY_ANSWERED_BY,
-    REASON_EFFECTS_AMBIGUOUS, REASON_OP_EXPIRED, REASON_OP_ID_FOREIGN, ReceiptState,
+    ACK_KEY, MutatingMethod, MutationAck, MutationStatus, MutationTier, OpId,
+    REASON_ALREADY_ANSWERED_BY, REASON_EFFECTS_AMBIGUOUS, REASON_OP_EXPIRED, REASON_OP_ID_FOREIGN,
+    ReceiptState,
 };
 use ainb_hangar_proto::{RpcError, RpcRequest, methods};
 use ainb_hangar_store::repo::mutation_ledger::{
@@ -163,9 +164,17 @@ pub fn principal_of(caller: &Caller) -> String {
 /// family and `fleet_action_receipt` IS its ledger. W0-wire renames nothing on
 /// the wire, so the envelope's `op_id` is an ALIAS — a client that already
 /// sends `request_id` is already deduplicated, without changing a byte.
-#[must_use]
-pub fn op_id_of(method: &str, params: &Value) -> Option<String> {
-    let object = params.as_object()?;
+/// # Errors
+///
+/// The reason the presented id cannot be an op id. The caller answers
+/// `INVALID_PARAMS`: an id longer than [`OpId`]'s bound would otherwise reach
+/// the ledger's own `length(op_id) <= 128` CHECK, surface as an internal error,
+/// and be classified retryable — inviting a client to retry forever on a
+/// request that can never succeed, with raw SQLite text in the reply.
+pub fn op_id_of(method: &str, params: &Value) -> Result<Option<OpId>, String> {
+    let Some(object) = params.as_object() else {
+        return Ok(None);
+    };
     let named = |key: &str| {
         object
             .get(key)
@@ -174,13 +183,14 @@ pub fn op_id_of(method: &str, params: &Value) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
-    named("op_id").or_else(|| match method {
+    let raw = named("op_id").or_else(|| match method {
         methods::FLEET_ACTION | methods::FLEET_MESSAGE_SEND | methods::FLEET_START => {
             named("request_id")
         }
         methods::FLEET_BROADCAST => named("idempotency_key"),
         _ => None,
-    })
+    });
+    raw.map(OpId::parse).transpose()
 }
 
 /// Attach the ack to an object-shaped result.
@@ -234,6 +244,25 @@ fn with_error_ack(mut error: RpcError, ack: &MutationAck) -> RpcError {
         Some(other) => error.data = Some(other),
     }
     error
+}
+
+/// The D18 reason a handler's `Ok` result is actually a refusal, or `None` when
+/// it really did mutate.
+///
+/// `attention/answer` is the only method whose result enum carries refusals: it
+/// predates D18 and reports "somebody else won" and "your read is stale" as
+/// tagged outcomes rather than RPC errors, because a new variant on that enum
+/// would be a decode error on every N-1 client.
+fn refusal_reason(method: &str, value: &Value) -> Option<&'static str> {
+    if method != methods::ATTENTION_ANSWER {
+        return None;
+    }
+    match value.get("outcome").and_then(Value::as_str)? {
+        // Somebody else answered, or the fence named a version the row has
+        // moved past. Both mean this answer was NOT applied.
+        "already_answered" | "ambiguous" => Some(REASON_ALREADY_ANSWERED_BY),
+        _ => None,
+    }
 }
 
 /// Map a store fault onto the wire, matching the dispatcher's own mapping.
@@ -390,7 +419,12 @@ where
     let Some(entry) = ainb_hangar_proto::mutation::mutating(&req.method) else {
         return handler().await;
     };
-    let Some(op_id) = op_id_of(&req.method, &req.params) else {
+    let op_id = op_id_of(&req.method, &req.params).map_err(|reason| RpcError {
+        code: super::INVALID_PARAMS,
+        message: format!("op_id: {reason}"),
+        data: None,
+    })?;
+    let Some(op_id) = op_id else {
         // No op id: exactly today's behaviour. The ledger is opt-in on the
         // client's side precisely so an N-1 client keeps working unchanged.
         return handler().await;
@@ -399,7 +433,7 @@ where
     let key = LedgerKey {
         host_id: ainb_hangar_store::repo::mutation_ledger::LOCAL_HOST_ID.to_string(),
         principal: principal_of(caller),
-        op_id,
+        op_id: op_id.as_str().to_string(),
     };
     let fingerprint = MutationLedgerRepo::fingerprint(&req.method, &req.params);
     let tier = tier_token(entry.tier);
@@ -422,6 +456,28 @@ where
     // `updated_at` is the only honest answer to "when did this op id settle".
     let settled_ms =
         ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
+
+    // A handler that REFUSED is not an accepted mutation, even though it
+    // returned `Ok`: `attention/answer` reports a lost race and a stale fence
+    // inside its result enum rather than as an RPC error. Recording those as
+    // `accepted` tells a client branching on `mutation.status` that a refused
+    // answer was applied — and, because the body fingerprint strips the fence,
+    // a client that re-reads the fence and retries under the same op id would
+    // get that refusal replayed forever and never deliver.
+    if let Ok(value) = &result {
+        if let Some(reason) = refusal_reason(&req.method, value) {
+            // Not recorded at all: the op id stays free, so the documented
+            // "refresh the fence and retry" workflow actually works.
+            let _ = MutationLedgerRepo::abandon(pool, &key).await;
+            return Ok(with_ack(
+                value.clone(),
+                &MutationAck::refused(
+                    ainb_hangar_proto::mutation::MutationOutcome::Created,
+                    reason,
+                ),
+            ));
+        }
+    }
 
     match &result {
         Ok(value) => {
@@ -499,24 +555,31 @@ where
 mod tests {
     use super::*;
 
+    /// The parsed op id as a plain string, for the shape assertions below.
+    fn id_of(method: &str, params: &serde_json::Value) -> Option<String> {
+        op_id_of(method, params)
+            .expect("these fixtures are all within the op id bound")
+            .map(|op| op.as_str().to_string())
+    }
+
     /// The fleet family's existing spelling is accepted as the op id, because
     /// amendment 19 says W0-wire renames nothing on the wire.
     #[test]
     fn the_legacy_request_id_is_an_op_id_alias() {
         let params = serde_json::json!({ "request_id": "action-request-001" });
         assert_eq!(
-            op_id_of(methods::FLEET_ACTION, &params).as_deref(),
-            Some("action-request-001")
+            id_of(methods::FLEET_ACTION, &params),
+            Some("action-request-001".to_string())
         );
         let params = serde_json::json!({ "idempotency_key": "broadcast-001" });
         assert_eq!(
-            op_id_of(methods::FLEET_BROADCAST, &params).as_deref(),
-            Some("broadcast-001")
+            id_of(methods::FLEET_BROADCAST, &params),
+            Some("broadcast-001".to_string())
         );
         // The alias is per-family: a hangar method's `request_id` (there is no
         // such field) must not be invented into an op id.
         let params = serde_json::json!({ "request_id": "nope" });
-        assert_eq!(op_id_of(methods::HANGAR_ISSUE_UPDATE, &params), None);
+        assert_eq!(id_of(methods::HANGAR_ISSUE_UPDATE, &params), None);
     }
 
     /// An explicit `op_id` always wins over the legacy alias.
@@ -524,8 +587,8 @@ mod tests {
     fn an_explicit_op_id_wins() {
         let params = serde_json::json!({ "op_id": "abc", "request_id": "xyz" });
         assert_eq!(
-            op_id_of(methods::FLEET_ACTION, &params).as_deref(),
-            Some("abc")
+            id_of(methods::FLEET_ACTION, &params),
+            Some("abc".to_string())
         );
     }
 
@@ -533,20 +596,31 @@ mod tests {
     #[test]
     fn a_blank_op_id_is_no_op_id() {
         assert_eq!(
-            op_id_of(
+            id_of(
                 methods::ATTENTION_ANSWER,
                 &serde_json::json!({ "op_id": "   " })
             ),
             None
         );
         assert_eq!(
-            op_id_of(methods::ATTENTION_ANSWER, &serde_json::json!({})),
+            id_of(methods::ATTENTION_ANSWER, &serde_json::json!({})),
             None
         );
         assert_eq!(
-            op_id_of(methods::ATTENTION_ANSWER, &serde_json::Value::Null),
+            id_of(methods::ATTENTION_ANSWER, &serde_json::Value::Null),
             None
         );
+    }
+
+    /// The proto crate's bound is enforced HERE, at the boundary. Left to the
+    /// ledger's own `length(op_id) <= 128` CHECK it would surface as an
+    /// internal error, which the guard classifies retryable — inviting a client
+    /// to retry forever on a request that can never succeed.
+    #[test]
+    fn an_over_long_op_id_is_refused_at_the_boundary() {
+        let params = serde_json::json!({ "op_id": "x".repeat(200) });
+        let error = op_id_of(methods::ATTENTION_ANSWER, &params).unwrap_err();
+        assert!(error.contains("at most"), "{error}");
     }
 
     /// Pal is a different principal, so its op ids can never reach the

@@ -151,22 +151,26 @@ async fn two_surfaces_answering_one_row_yield_one_delivered_and_one_already_answ
     // left `claimed` because its claim lost.
     let a = MutationLedgerRepo::get(store.pool(), &LedgerKey::local("op-race-a"))
         .await
-        .unwrap()
         .unwrap();
     let b = MutationLedgerRepo::get(store.pool(), &LedgerKey::local("op-race-b"))
         .await
-        .unwrap()
         .unwrap();
-    let states: Vec<Option<&str>> = vec![a.receipt_state.as_deref(), b.receipt_state.as_deref()];
+    let states: Vec<Option<&str>> = vec![
+        a.as_ref().and_then(|r| r.receipt_state.as_deref()),
+        b.as_ref().and_then(|r| r.receipt_state.as_deref()),
+    ];
     assert_eq!(
         states.iter().filter(|s| **s == Some("delivered")).count(),
         1,
         "exactly one receipt may reach delivered: {states:?}"
     );
+    // The loser has NO ledger row at all. Losing the race is a refusal, not an
+    // applied mutation, so recording it would both mis-report `accepted` and
+    // pin that refusal to the op id forever.
     assert_eq!(
-        states.iter().filter(|s| **s == Some("claimed")).count(),
+        [a.is_none(), b.is_none()].iter().filter(|gone| **gone).count(),
         1,
-        "the loser's receipt never advances past its claim: {states:?}"
+        "the loser's claim must be abandoned, not recorded: a={a:?} b={b:?}"
     );
 
     // And the row itself is answered exactly once, by the winner.
@@ -246,16 +250,42 @@ async fn a_stale_fence_is_refused_with_the_row_still_open() {
     assert_eq!(row.state, "open", "a refused fence must not flip the row");
     assert!(row.answered_by.is_none(), "nobody answered it: {row:?}");
 
-    // The version the surface actually read wins.
-    let fresh = rpc::dispatch_as(
+    // The ack must say REJECTED. Stamping a refusal `accepted` tells a client
+    // branching on `mutation.status` that its answer was applied.
+    let ack = &stale["result"][ainb_hangar_proto::mutation::ACK_KEY];
+    assert_eq!(ack["status"], "rejected", "{stale}");
+    assert_eq!(ack["reason"], "already_answered_by", "{stale}");
+
+    // And the refusal must NOT be cached as this op id's permanent reply. The
+    // body fingerprint strips the fence, so a client that re-reads the fence
+    // and retries under the same op id would otherwise replay the refusal
+    // forever and never deliver.
+    assert!(
+        MutationLedgerRepo::get(store.pool(), &LedgerKey::local("op-fence-stale"))
+            .await
+            .unwrap()
+            .is_none(),
+        "a fence refusal must leave the op id free for the documented retry"
+    );
+    let retried = rpc::dispatch_as(
         store.pool(),
-        &fenced("op-fence-fresh", row.version),
+        &fenced("op-fence-stale", row.version),
         &health(),
         &sink,
         &Caller::Operator,
     )
     .await;
-    let fresh = serde_json::to_value(fresh).unwrap();
+    let retried = serde_json::to_value(retried).unwrap();
     ainb_hangar_daemon::answer::set_forced_delivery_for_test(false);
-    assert_eq!(fresh["result"]["outcome"], "delivered", "{fresh}");
+    // Both halves in one assertion: the version the surface actually read wins,
+    // AND the op id that carried the refusal is reusable for that retry.
+    assert_eq!(
+        retried["result"]["outcome"], "delivered",
+        "the same op id must deliver once the client refreshes its fence: {retried}"
+    );
+    assert_eq!(
+        retried["result"][ainb_hangar_proto::mutation::ACK_KEY]["status"],
+        "accepted",
+        "{retried}"
+    );
 }
