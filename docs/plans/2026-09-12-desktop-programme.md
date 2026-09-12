@@ -4,7 +4,7 @@
 **Role:** execution view. The two specs are locked decision records; this doc is the single place that says what runs, in what order, behind which gate, and what is done. Edit it in the same PR that flips a node.
 **Wraps:** `2026-09-04-desktop-shared-core-spec.md` (D1-D9, phases P0-P6, S, D1-D4) and `2026-09-11-multi-surface-decisions-spec.md` (D10-D18, phases W0, T0, R1, R2, M1).
 **Integration branch:** `v2`. Every node lands as a PR to `v2`; `v2` merges to `main` as a whole at an agreed cut. `main` keeps moving (10 commits since the cut on 2026-09-11); `v2` takes `main` back by merge before each slice starts.
-**Grounding:** node states below were read from `git` and `gh` on 2026-09-12; re-ground before trusting.
+**Grounding:** node states below were read from `git` and `gh` on 2026-09-12 against `v2` at `54266dcd` (96 commits of slice-1 work replayed from `anthias` and pushed directly, plus the P0 handoff `2026-09-12-p0-surface-safety-handoff.md`); re-ground before trusting.
 
 ## The DAG
 
@@ -19,17 +19,20 @@ flowchart TD
   CR[critique CAUTION 8/10]:::done --> SPEC
   SPEC --> PR915[PR #915 merged to v2]:::done
 
-  subgraph S1[slice 1: P0 + S, running elsewhere]
-    P1k[Phase 1 keymap]:::run
-    SA[S-A locks, atomic, window-size]:::run
-    SB[S-B ConnectionRegistry]:::run
-    P3u[Phase 3 UiState]:::run
-    SC[S-C card retirement]:::run
-    P2v[Phase 2 Versioned sections]:::run
-    SD[S-D concurrency tests]:::run
-    P1k --> P3u --> P2v --> SD
+  subgraph S1[slice 1: P0 + S]
+    P1k[Phase 1 keymap, on v2]:::done
+    SA[S-A locks, atomic, window-size, on v2]:::done
+    SB[S-B ConnectionRegistry, on v2]:::done
+    G1[slice-1 gates: heatmap tripwire, burndown fixture, human G6]:::run
+    P3u[Phase 3 UiState]:::plan
+    SC[S-C card retirement]:::plan
+    P2v[Phase 2 Versioned sections]:::plan
+    SD[S-D concurrency tests]:::plan
+    P1k --> G1
+    SA --> G1
+    SB --> G1
+    G1 --> P3u --> P2v --> SD
     SB --> SC --> SD
-    SA --> SD
   end
 
   subgraph S2[slice 2: extraction]
@@ -83,10 +86,11 @@ Same DAG, terminal view:
  research ─▶ options ─▶ interview ─▶ spec v1.3 ─▶ PR #915 → v2          [done]
                                     ▲ critique
 
- slice 1  P0+S  (running elsewhere, no branch pushed yet)
-          wave1: Phase 1 keymap · S-A · S-B      wave2: Phase 3 UiState · S-C
-          wave3: Phase 2 Versioned               wave4: S-D
-              │ S-B merged                          │ S-D merged
+ slice 1  P0+S
+          wave1: Phase 1 keymap ✓ · S-A ✓ · S-B ✓  (on v2, 96 commits)
+          gates open: heatmap tripwire ✗ · burndown fixture findings · human G6 checkpoint
+          wave2: Phase 3 UiState · S-C            wave3: Phase 2 Versioned    wave4: S-D
+              │ S-B on v2 (met)                     │ S-D merged
               ▼                                     ▼
  slice 4  W0-wire (D17 D18) ◀── spike 8 ✓      slice 2  P1 ─▶ P2 ─▶ P3 ─▶ P4 ─▶ P5 ─▶ P6
           T0-daemon (D14) ◀── spikes 1 8 9 ✓, #916     │ P1 merged        │      │
@@ -107,15 +111,19 @@ Same DAG, terminal view:
 | node | slice | state | gate to start | gate to finish | evidence |
 |---|---|---|---|---|---|
 | research, syntheses, critique, options paper, interview, spec v1.3 | 0 | **done** | | | PR #915 merged to `v2` at `1fdf399c` |
+| P0 status explainer | 1 | done | | | `explainers/ainb-p0-surface-safety.html` on `v2` |
 | spikes 1, 4, 7, 8, 9 | 0 | **done** | | | `research/2026-09-11_multi-surface_SPIKE-{1,4,7,8,9}-*.md` on `v2` |
-| Phase 1 keymap, S-A, S-B (wave 1) | 1 | **running** in another session | none | tripwires green, `keyboard-shortcuts.md` regenerated | no `desktop-p0` branch on origin yet |
-| Phase 3 UiState, S-C (wave 2) | 1 | running | wave 1 | human-verify checkpoint: scroll and mouse | plan `2026-09-05-desktop-p0-surface-safety.md:442,319` |
-| Phase 2 Versioned sections (wave 3) | 1 | running | Phase 3 | 19 sections, `SectionVersions` | plan `:350` |
-| S-D concurrency tests (wave 4) | 1 | running | S-A, S-B, S-C, Phase 2 | answer race, resize during answer, surface combo | plan `:510` |
+| Phase 1 keymap (wave 1) | 1 | **done on v2** | | keymap table, TOML overrides, `keyboard-shortcuts.md` regenerated, CI freshness gate | `keymap.rs`, `keymap_toml.rs`, `tests/keymap_parity.rs`, `ci: verify keymap docs freshness` on `v2` |
+| S-A locks, atomic writes, window-size (wave 1) | 1 | **done on v2** | | concurrent-save test, headroom proxy lock | `config/lock.rs`, `tests/config_concurrent_save.rs` on `v2` |
+| S-B ConnectionRegistry (wave 1) | 1 | **done on v2** | | hello extension, `hangar/connections_list`, presence lifecycle, ACP provenance | `proto/connections.rs`, `rpc/connections.rs`, `feat(hangar): list live connections` on `v2` |
+| slice-1 open gates | 1 | **blocked** | | core suite green, fixture findings fixed, human G6 two-terminal check | handoff: `tripwire_burndown_heatmap` fails after `Left`; burndown Esc fixture P1/P2 findings; G6 pending |
+| Phase 3 UiState, S-C (wave 2) | 1 | **not started** | slice-1 gates | human-verify checkpoint: scroll and mouse | `ui_state.rs`, `tests/ui_state.rs` absent on `v2`; plan `:442,319` |
+| Phase 2 Versioned sections (wave 3) | 1 | not started | Phase 3 | 19 sections, `SectionVersions` | `versioned.rs`, `sections.rs` absent on `v2`; plan `:350` |
+| S-D concurrency tests (wave 4) | 1 | not started | S-A, S-B, S-C, Phase 2 | answer race, resize during answer, surface combo | `tests/answer_race.rs`, `surface-combo-smoke.sh` absent on `v2`; plan `:510` |
 | P1 `ainb-app` extraction | 2 | planned | slice 1 merged | `cargo test -p ainb-app` runs the moved tests; tripwires green | base spec P1 |
 | P2-P5 screens | 2 | planned | P1 | per-screen tripwires green | base spec |
 | P6 client reconnect, web onto client, sessions.json to daemon | 2 | planned | P5 | web e2e green; TUI + web + CLI concurrent smoke | base spec |
-| W0-wire: `PROTOCOL_VERSION` in hello, capability catalogue, skew harness, op-id ledger, receipts | 4 | planned | **S-B merged** | `MUTATING_METHODS` test, replay twice = one `created` one `replayed`, skew harness both ways | spec v1.3 W0-wire |
+| W0-wire: `PROTOCOL_VERSION` in hello, capability catalogue, skew harness, op-id ledger, receipts | 4 | **ready to start** | S-B on `v2` (met 2026-09-12); coordinate `rpc/mod.rs` with nothing, S-C and S-D do not touch it | `MUTATING_METHODS` test, replay twice = one `created` one `replayed`, skew harness both ways | spec v1.3 W0-wire |
 | #916 pane binding without launcher env | 4 | planned | none | `env -i` hook test, no duplicate legacy row | issue open |
 | T0-daemon: status store on `fleet_session`, one txn per event, retention, normalizers, OSC schema | 4 | planned | spike 1 (done), #916 | identical tuples across CLI, web, TUI; silence never `done` | spec v1.3 T0-daemon |
 | W0-mirror: per-drain apply, scalar selectors, subscription filter, specta feature | 4 | planned | **P1 merged** | bench ceiling 12,800 runs, 32.5 ms per 1,000 frames, units = 125 | spec v1.3 W0-mirror |
@@ -136,7 +144,7 @@ Same DAG, terminal view:
 
 | slice | nodes | plan file | state |
 |---|---|---|---|
-| 1 | Phase 1, S-A, S-B, Phase 3, S-C, Phase 2, S-D | `2026-09-05-desktop-p0-surface-safety.md` | running elsewhere |
+| 1 | Phase 1, S-A, S-B, Phase 3, S-C, Phase 2, S-D | `2026-09-05-desktop-p0-surface-safety.md`; resume point `2026-09-12-p0-surface-safety-handoff.md` | wave 1 on `v2`; gates open; waves 2-4 not started |
 | 2 | P1-P6 | not written; `/plan` from the base spec after slice 1 merges | |
 | 3 | D1-D3, D4' | not written; `/plan` from the base spec plus D11 after P2 | |
 | 4 | W0-wire, #916, T0-daemon, then W0-mirror, T0-section | not written; `/plan` from spec v1.3 after S-B merges | |
@@ -147,6 +155,8 @@ Same DAG, terminal view:
 
 | item | why it is free | cost |
 |---|---|---|
+| **W0-wire** | its only gate, S-B, is on `v2`; edits `HelloParams`, `rpc/mod.rs`, `answer.rs`, `hangar-client`, none of which slice-1 waves 2-4 touch | 1-2 weeks |
+| slice-1 gate repair (heatmap tripwire, burndown fixture) | named in the handoff's First Resume Work; blocks waves 2-4 | days |
 | #916 pane binding | daemon-only, touches `fleet.rs`, `rpc/mod.rs`, `atc.rs`, none of which slice 1 edits except `rpc/mod.rs` (S-B); coordinate that one file | days |
 | spike 3 | scratch prototype, no repo edits | 2-3 days |
 | spike 2 | scratch prototype, picks the VT emulator crate | 2-3 days |
@@ -155,7 +165,8 @@ Same DAG, terminal view:
 
 ## Rules of the road
 
-- Base every PR on `v2`. A PR against `main` for this programme is a mistake; retarget it.
+- Base every PR on `v2`. A PR against `main` for this programme is a mistake; retarget it. Slice-1 wave 1 landed by direct push (a replay from `anthias`); from here every node lands by PR so its gate is visible in CI.
+- The P0 handoff's line "do not start P1-P6 or D1-D4" scopes that worker, not the programme: W0-wire, #916 and the spikes are free now per the table above.
 - A node flips to done only when its finish gate is green in CI on `v2`, and this table is edited in the same PR.
 - Locked decisions D1-D18 are not re-opened by a node PR. A node that needs a decision change opens a spec amendment PR first.
 - Spikes write to `research/` (force-add) and never to crates.
