@@ -1,4 +1,4 @@
-//! The mutation ledger (migration 0097) — one durable row per operation, so a
+//! The mutation ledger (migration 0097), one durable row per operation, so a
 //! retry is a READ (spec D18, critique amendments 15-19).
 //!
 //! The failure this table exists for is a LOST REPLY. The daemon committed, the
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! Every entry point exists twice: once taking a pool, once taking a
-//! caller-owned transaction. The transaction form is not a convenience — it is
+//! caller-owned transaction. The transaction form is not a convenience, it is
 //! the whole tier-2 guarantee. A receipt written through the event outbox would
 //! inherit that outbox's documented crash loss window, so the receipt has to be
 //! in the SAME transaction as the state flip it describes.
@@ -143,7 +143,9 @@ pub enum ClaimOutcome {
     /// A refusal, never a silent execution: running the mutation without a
     /// ledger row would drop the guarantee the row exists to provide.
     Saturated {
-        /// How many rows it holds.
+        /// The ceiling it reached. Not an exact count: the check asks whether
+        /// the cap is reached, not how far past it the principal is, because
+        /// counting every row on every claim is the cost this avoids.
         rows: i64,
     },
 }
@@ -189,7 +191,7 @@ pub struct RetentionReport {
 /// Retention runs hourly and bounds the corpus over time; it does not bound a
 /// burst inside the hour. Every deterministic outcome writes a row and a
 /// serialized reply, a fresh op id per call means every call is a new row, and
-/// the Pal credential — which a model steers — can reach a mutating method. So
+/// the Pal credential, which a model steers, can reach a mutating method. So
 /// the sweep needs a companion that acts inside the window.
 ///
 /// Generous on purpose: an operator answering, sending and running all day does
@@ -288,15 +290,23 @@ impl MutationLedgerRepo {
         // The ceiling is checked HERE, not only by the hourly sweep: a burst
         // inside the window is exactly what a sweep cannot bound, and every
         // deterministic outcome writes a row plus its serialized reply.
-        let held: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM mutation_ledger WHERE host_id = ? AND principal = ?",
+        // `LIMIT 1 OFFSET <cap - 1>`, not `COUNT(*)`: the question is "are there
+        // at least this many", and a count walks every row this principal holds
+        // on EVERY claim. The offset form stops at the cap.
+        let saturated = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM mutation_ledger WHERE host_id = ? AND principal = ? \
+             LIMIT 1 OFFSET ?",
         )
         .bind(&key.host_id)
         .bind(&key.principal)
-        .fetch_one(&mut *conn)
-        .await?;
-        if held >= MAX_ROWS_PER_PRINCIPAL {
-            return Ok(ClaimOutcome::Saturated { rows: held });
+        .bind(MAX_ROWS_PER_PRINCIPAL - 1)
+        .fetch_optional(&mut *conn)
+        .await?
+        .is_some();
+        if saturated {
+            return Ok(ClaimOutcome::Saturated {
+                rows: MAX_ROWS_PER_PRINCIPAL,
+            });
         }
 
         let receipt_state = (tier == TIER_RECEIPT).then_some("claimed");
@@ -325,8 +335,8 @@ impl MutationLedgerRepo {
         let Some(existing) = Self::get_on(&mut *conn, key).await? else {
             // No row under OUR key, yet the insert conflicted. Either the
             // UNIQUE (host_id, op_id) index refused it because another
-            // principal holds this op id — the race the fast path above cannot
-            // see — or a retention sweep deleted our row between the two
+            // principal holds this op id, the race the fast path above cannot
+            // see, or a retention sweep deleted our row between the two
             // statements. Re-read the winner to tell them apart.
             if let Some(owner) = Self::holder_of_on(&mut *conn, &key.host_id, &key.op_id).await? {
                 return Ok(ClaimOutcome::Foreign {
@@ -473,7 +483,7 @@ impl MutationLedgerRepo {
     /// Used only where re-execution is provably safe, and the SQL is what makes
     /// "provably" true rather than a comment: `failed` is safe because the
     /// provider CONFIRMED nothing landed, and `claimed` because the write
-    /// boundary was never crossed — but a row whose receipt has reached
+    /// boundary was never crossed, but a row whose receipt has reached
     /// `writing` is NEVER deleted, because `writing` is committed immediately
     /// before the first byte reaches the PTY and deleting it would leave the
     /// boot sweep nothing to surface and a retry free to type the answer a
@@ -657,7 +667,7 @@ impl MutationLedgerRepo {
         Self::record_reply_on(&mut *tx, key, status, reason, reply, now_ms).await
     }
 
-    /// Move the receipt lifecycle on inside a caller-owned transaction — the
+    /// Move the receipt lifecycle on inside a caller-owned transaction, the
     /// tier-2 write boundary.
     ///
     /// # Errors
@@ -677,7 +687,7 @@ impl MutationLedgerRepo {
     ///
     /// `status = 'in_flight'` is the whole predicate, and deliberately so. A
     /// crash always leaves that status, because the reply is recorded in the
-    /// same step that leaves it — so every ambiguous row is caught. Selecting
+    /// same step that leaves it, so every ambiguous row is caught. Selecting
     /// on `receipt_state = 'writing'` as well would ALSO catch a settled row
     /// that legitimately ends there: a `fleet/action` that returned `PENDING`
     /// is accepted, its bytes are on their way, and the next boot would rewrite
