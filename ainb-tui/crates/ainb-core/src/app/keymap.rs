@@ -383,6 +383,7 @@ impl KeyContext {
 /// four of them did not. A free function over the four inputs that decide it is
 /// something a test can walk exhaustively; a match buried in a 600-line
 /// dispatcher is not.
+#[must_use]
 pub(crate) fn onboarding_sub_context(
     step: &crate::components::onboarding::OnboardingStep,
     auth_pane: &crate::components::onboarding::AuthPane,
