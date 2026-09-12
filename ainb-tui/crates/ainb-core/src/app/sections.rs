@@ -729,3 +729,14 @@ impl Default for ShellSection {
         }
     }
 }
+
+/// The ainb-hooks inbox.
+///
+/// Empty on purpose. The inbox screen's state was removed from `AppState`
+/// before this refactor, but the section is one of the nineteen the plan
+/// fixes as the boundary set, and `SectionId::Inbox` is what a surface
+/// subscribes to. Deleting it would renumber every section after it for a
+/// screen that is coming back, so it keeps its place and gains fields when
+/// the screen does.
+#[derive(Debug, Default)]
+pub struct InboxSection {}

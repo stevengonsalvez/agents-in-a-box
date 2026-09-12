@@ -4,7 +4,7 @@
 
 use crate::app::SessionLoader;
 use crate::app::sections::*;
-use crate::app::versioned::Versioned;
+use crate::app::versioned::{SectionId, SectionVersions, Versioned};
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::claude::client::ClaudeChatManager;
 use crate::claude::types::ClaudeStreamingEvent;
@@ -532,6 +532,48 @@ fn host_tmux_session_name() -> Option<&'static str> {
 }
 
 impl AppState {
+    /// Every section's current version, indexed by [`SectionId::index`].
+    ///
+    /// A surface keeps the array it last saw and compares; that is 19 integer
+    /// compares, against a diff of 117 fields of which several are SQLite
+    /// handles and channel receivers that cannot be compared at all.
+    pub fn versions(&self) -> SectionVersions {
+        [
+            self.sessions.version(),
+            self.session_labels.version(),
+            self.tmux.version(),
+            self.ssh.version(),
+            self.git_view.version(),
+            self.workspace_load.version(),
+            self.new_session.version(),
+            self.log_streams.version(),
+            self.claude_chat.version(),
+            self.fleet.version(),
+            self.hangar.version(),
+            self.mcp_pool.version(),
+            self.inbox.version(),
+            self.plugins_host.version(),
+            self.config.version(),
+            self.skills.version(),
+            self.recovery.version(),
+            self.onboarding.version(),
+            self.shell.version(),
+        ]
+    }
+
+    /// Which sections have been borrowed mutably since `seen` was taken.
+    ///
+    /// "Borrowed mutably", not "changed": a `&mut` that writes the same value
+    /// back still counts. Over-reporting costs a surface one redundant send,
+    /// and is the direction this is allowed to be wrong in.
+    pub fn changed_since(&self, seen: &SectionVersions) -> Vec<SectionId> {
+        let now = self.versions();
+        SectionId::ALL
+            .into_iter()
+            .filter(|id| now[id.index()] != seen[id.index()])
+            .collect()
+    }
+
     /// Enter interactive mode by replacing the selected read-only tmux client
     /// with a writable client feeding the same terminal parser path.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
@@ -3145,6 +3187,7 @@ pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, S
 
 #[derive(Debug)]
 pub struct AppState {
+    pub inbox: Versioned<InboxSection>,
     pub shell: Versioned<ShellSection>,
 
     pub fleet: Versioned<FleetSection>,
@@ -3494,6 +3537,7 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            inbox: Versioned::default(),
             shell: Versioned::new(ShellSection {
                 home_screen_v2_state,
                 ..ShellSection::default()
