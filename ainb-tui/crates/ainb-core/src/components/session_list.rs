@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use crate::app::ui_state::UiState;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -270,10 +271,10 @@ impl SessionListComponent {
         Self::default()
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
         // Update list state selection based on app state first
         self.update_selection(state);
-        state.sessions_pane_state.set_list_scroll_offset(self.list_state.offset());
+        ui.sessions_pane.set_list_scroll_offset(self.list_state.offset());
 
         // Width a row's own spans may occupy: the panel borders and List's
         // reserved highlight column are both outside the item area. Reserving
@@ -283,8 +284,7 @@ impl SessionListComponent {
             .saturating_sub(Span::raw(HIGHLIGHT_SYMBOL).width());
         let now_ms = chrono::Utc::now().timestamp_millis();
         let items = SessionListComponent::build_list_items_static(state, row_width, now_ms);
-        state
-            .sessions_pane_state
+        ui.sessions_pane
             .set_list_item_heights(items.iter().map(ListItem::height).collect());
 
         // Show focus indicator with premium colors
@@ -293,7 +293,7 @@ impl SessionListComponent {
             FocusedPane::Sessions => (SELECTION_GREEN, true),
             FocusedPane::LiveLogs | FocusedPane::Preview => (SUBDUED_BORDER, false),
         };
-        let border_color = if state.sessions_pane_state.edge_highlighted() {
+        let border_color = if ui.sessions_pane.edge_highlighted() {
             GOLD
         } else {
             border_color
@@ -352,7 +352,7 @@ impl SessionListComponent {
         ];
         let filter_label = format!("F [{}]", state.session_filter.label());
         let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}){needs_you_label} ");
-        state.sessions_pane_state.set_filter_toggle_area(Rect::new(
+        ui.sessions_pane.set_filter_toggle_area(Rect::new(
             area.x.saturating_add(1 + title_prefix.chars().count() as u16),
             area.y,
             filter_label.chars().count() as u16,
@@ -1332,7 +1332,7 @@ mod tests {
     /// depends on the panel width. A test that asserted on span structure would
     /// pass while the strip rendered off the right edge; only the painted
     /// buffer proves where the chips actually land.
-    fn render_panel(state: &mut AppState, width: u16, height: u16) -> String {
+    fn render_panel(state: &AppState, width: u16, height: u16) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -1636,30 +1636,35 @@ mod tests {
     fn metadata_line_click_targets_its_own_session() {
         use ratatui::{Terminal, backend::TestBackend};
 
-        let mut state = chip_state();
-        state
-            .sessions_pane_state
-            .set_layout(Rect::new(0, 0, 100, 16), Rect::new(100, 0, 1, 16));
+        let state = chip_state();
+        let mut ui = crate::app::ui_state::UiState::default();
+        ui.sessions_pane.set_layout(Rect::new(0, 0, 100, 16), Rect::new(100, 0, 1, 16));
         let mut list = SessionListComponent::new();
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("terminal");
         terminal
-            .draw(|frame| list.render(frame, frame.area(), &mut state))
+            .draw(|frame| list.render(frame, frame.area(), &state, &mut ui))
             .expect("render");
 
         let first = SessionListRowTarget::Attachable(AttachableRef::WorkspaceSession {
             workspace_idx: 0,
             session_idx: 0,
         });
-        assert_eq!(state.session_list_row_at_mouse(8, 2), Some(first));
-        assert_eq!(state.session_list_row_at_mouse(8, 3), Some(first));
+        assert_eq!(
+            state.session_list_row_at_mouse(&ui.sessions_pane, 8, 2),
+            Some(first)
+        );
+        assert_eq!(
+            state.session_list_row_at_mouse(&ui.sessions_pane, 8, 3),
+            Some(first)
+        );
 
         // When List has scrolled past the one-line workspace header, the two
         // physical rows of the first session still resolve to the same logical
         // item before the next session starts.
-        state.sessions_pane_state.set_list_scroll_offset(1);
-        assert_eq!(state.sessions_pane_state.row_index_at(8, 1), Some(1));
-        assert_eq!(state.sessions_pane_state.row_index_at(8, 2), Some(1));
-        assert_eq!(state.sessions_pane_state.row_index_at(8, 3), Some(2));
+        ui.sessions_pane.set_list_scroll_offset(1);
+        assert_eq!(ui.sessions_pane.row_index_at(8, 1), Some(1));
+        assert_eq!(ui.sessions_pane.row_index_at(8, 2), Some(1));
+        assert_eq!(ui.sessions_pane.row_index_at(8, 3), Some(2));
     }
 
     #[test]
@@ -1921,9 +1926,10 @@ mod tests {
         state.selected_workspace_index = Some(0);
 
         let mut list = SessionListComponent::new();
+        let mut ui = crate::app::ui_state::UiState::default();
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).expect("terminal");
         terminal
-            .draw(|frame| list.render(frame, frame.area(), &mut state))
+            .draw(|frame| list.render(frame, frame.area(), &state, &mut ui))
             .expect("draw");
         let painted: String =
             terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();

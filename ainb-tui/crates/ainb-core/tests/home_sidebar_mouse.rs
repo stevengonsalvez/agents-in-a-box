@@ -20,20 +20,23 @@ fn home_sidebar_mouse_click_selects_and_double_click_navigates() {
     std::env::set_var("HOME", temp_home.path());
 
     let mut state = AppState::default();
+    let mut ui = ainb::app::ui_state::UiState::default();
     state.current_screen = screen_ids::HOME.to_string();
     state.home_screen_v2_state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
 
     // Sidebar rect starts at y=4, so first item row is y=7. With Sessions
     // (index 0) selected and thus 2 rows tall, y=10 lands on index 2 =
     // Config per SidebarItem::all().
-    let first = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 3, y: 10 }, &mut state);
+    let first =
+        EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 3, y: 10 }, &mut state, &mut ui);
     assert!(first.is_none());
     assert_eq!(
         state.home_screen_v2_state.sidebar.selected_item(),
         SidebarItem::Config
     );
 
-    let second = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 3, y: 10 }, &mut state);
+    let second =
+        EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 3, y: 10 }, &mut state, &mut ui);
     assert!(matches!(second, Some(AppEvent::HomeScreenSidebarSelect)));
 }
 
@@ -46,19 +49,31 @@ fn home_sidebar_resize_release_persists_width_to_isolated_home() {
     std::env::set_var("HOME", temp_home.path());
 
     let mut state = AppState::default();
+    let mut ui = ainb::app::ui_state::UiState::default();
     state.current_screen = screen_ids::HOME.to_string();
     state.home_screen_v2_state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
 
-    let down = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 25, y: 10 }, &mut state);
+    let down = EventHandler::handle_mouse_event(
+        AppEvent::MouseClick { x: 25, y: 10 },
+        &mut state,
+        &mut ui,
+    );
     assert!(down.is_none());
     assert!(state.home_screen_v2_state.sidebar_resize_active);
 
-    let drag =
-        EventHandler::handle_mouse_event(AppEvent::MouseDragging { x: 29, y: 10 }, &mut state);
+    let drag = EventHandler::handle_mouse_event(
+        AppEvent::MouseDragging { x: 29, y: 10 },
+        &mut state,
+        &mut ui,
+    );
     assert!(drag.is_none());
     assert_eq!(state.home_screen_v2_state.sidebar.preferred_width, 30);
 
-    let up = EventHandler::handle_mouse_event(AppEvent::MouseDragEnd { x: 29, y: 10 }, &mut state);
+    let up = EventHandler::handle_mouse_event(
+        AppEvent::MouseDragEnd { x: 29, y: 10 },
+        &mut state,
+        &mut ui,
+    );
     assert!(up.is_none());
     assert!(!state.home_screen_v2_state.sidebar_resize_active);
 

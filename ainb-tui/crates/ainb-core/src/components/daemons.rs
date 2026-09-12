@@ -603,10 +603,29 @@ impl DaemonsState {
             .map(|(line, _)| line.as_str())
     }
 
-    /// Read the latest published snapshot. Off the render path this is a pure
-    /// memory read under a microsecond lock.
-    pub fn snapshot(&mut self) -> Snapshot {
-        let shared = self.shared();
+    /// Fold in whatever the workers reported and keep the collector alive.
+    ///
+    /// Everything here is a side effect — joining finished actions, reviving a
+    /// parked collector thread, clamping the cursor against a table that shrank
+    /// — so it runs once per frame BEFORE the draw rather than inside it.
+    pub fn tick(&mut self) {
+        self.poll_actions();
+        self.poll_hooks();
+        let rows = {
+            let shared = self.shared();
+            let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+            guard.rows.len()
+        };
+        self.selected = self.selected.min(rows.saturating_sub(1));
+    }
+
+    /// Read the latest published snapshot. A pure memory read under a
+    /// microsecond lock; the collector that fills it is started by [`Self::tick`],
+    /// so an unticked state reads empty rather than spawning a thread mid-paint.
+    pub fn snapshot(&self) -> Snapshot {
+        let Some(shared) = self.shared.as_ref() else {
+            return Snapshot::default();
+        };
         let guard = shared.lock().unwrap_or_else(|p| p.into_inner());
         Snapshot {
             rows: guard.rows.clone(),
@@ -870,12 +889,8 @@ fn spawn_collector(shared: Arc<Mutex<Snapshot>>, wake: std::sync::mpsc::Receiver
 
 /// Render the Daemons screen into `area`. Reads ONLY the cached background
 /// snapshot — no disk I/O, no socket connects on the UI thread (H-D2).
-pub fn render(frame: &mut Frame, area: Rect, state: &mut DaemonsState) {
-    state.poll_actions();
-    state.poll_hooks();
+pub fn render(frame: &mut Frame, area: Rect, state: &DaemonsState) {
     let snapshot = state.snapshot();
-    // Clamp before painting: the collector can shrink the table under us.
-    state.selected = state.selected.min(snapshot.rows.len().saturating_sub(1));
 
     let outer = Block::default()
         .title(Line::from(vec![
@@ -2030,9 +2045,12 @@ mod tests {
 
     /// Render the screen against an in-memory TestBackend and return the buffer
     /// as a single string for substring assertions.
+    /// One host frame: the pre-draw tick, then the paint. Split apart in the
+    /// seal, so a helper that only painted would test half a frame.
     fn render_to_string(state: &mut DaemonsState, w: u16, h: u16) -> String {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
+        state.tick();
         terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
@@ -2043,6 +2061,7 @@ mod tests {
     fn render_to_lines(state: &mut DaemonsState, w: u16, h: u16) -> Vec<String> {
         let backend = TestBackend::new(w, h);
         let mut terminal = Terminal::new(backend).unwrap();
+        state.tick();
         terminal.draw(|f| render(f, f.area(), state)).unwrap();
         let buf = terminal.backend().buffer().clone();
         (0..h)
@@ -2655,15 +2674,28 @@ mod tests {
 
     #[test]
     fn render_does_not_panic_on_default_state() {
-        // A fresh state lazily spawns the background collector; the first render
-        // sees an empty snapshot (the collector hasn't published yet) and must
-        // render an empty table without panicking.
+        // A fresh state sees an empty snapshot (the collector hasn't published
+        // yet) and must render an empty table without panicking.
         let mut state = DaemonsState::default();
         let _ = render_to_string(&mut state, 100, 10);
-        // The collector handle is now installed (spawned lazily on first render).
+        // The collector handle is installed by the tick, which is what the frame
+        // helper runs before painting.
+        assert!(state.shared.is_some(), "the tick must arm the collector");
+    }
+
+    /// The seal: painting is a read. A frame that only paints must not spawn a
+    /// background thread, or the draw path is still doing work behind the
+    /// reducer's back.
+    #[test]
+    fn painting_alone_never_arms_the_collector() {
+        let state = DaemonsState::default();
+        let backend = TestBackend::new(100, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, f.area(), &state)).unwrap();
+
         assert!(
-            state.shared.is_some(),
-            "first render must arm the collector"
+            state.shared.is_none(),
+            "render must not spawn the collector; only `tick` may"
         );
     }
 }

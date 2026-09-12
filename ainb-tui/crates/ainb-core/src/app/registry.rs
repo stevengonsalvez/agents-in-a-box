@@ -70,6 +70,7 @@ mod tests {
     use super::*;
     use crate::app::AppState;
     use crate::app::screens::{EventOutcome, ids};
+    use crate::app::ui_state::UiState;
     use ratatui::{Frame, layout::Rect};
 
     struct Stub {
@@ -81,7 +82,13 @@ mod tests {
         fn id(&self) -> &str {
             self.id
         }
-        fn render(&mut self, _frame: &mut Frame, _area: Rect, _state: &mut AppState) {
+        fn render(
+            &mut self,
+            _frame: &mut Frame,
+            _area: Rect,
+            _state: &AppState,
+            _ui: &mut UiState,
+        ) {
             self.rendered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         fn handle_event(&mut self, _state: &mut AppState) -> EventOutcome {

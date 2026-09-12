@@ -1,5 +1,6 @@
 // ABOUTME: Built-in Screen impls — thin shims around existing component renderers; no logic moves in Phase 2a
 
+use crate::app::ui_state::UiState;
 use ratatui::{Frame, layout::Rect};
 
 use super::{EventOutcome, Screen, ids};
@@ -331,6 +332,7 @@ pub fn crossterm_to_protocol_mouse(
 /// plugin hit-tests against the same `(0, 0)`-based grid it painted.
 pub fn forward_mouse_to_focused_plugin(
     state: &mut AppState,
+    ui: &UiState,
     event: &crossterm::event::MouseEvent,
 ) -> EventOutcome {
     use ainb_plugin_runtime::MouseKind;
@@ -355,12 +357,8 @@ pub fn forward_mouse_to_focused_plugin(
     // Translate absolute terminal coords → plugin-viewport coords. Drop
     // (still Handled) when the point falls outside the plugin's painted
     // rect rather than forwarding a click the plugin would mis-hit-test.
-    let origin = state
-        .plugin_render_origins
-        .get(&state.current_screen)
-        .copied()
-        .unwrap_or((0, 0));
-    let area = state.plugin_render_areas.get(&state.current_screen).copied().unwrap_or((0, 0));
+    let origin = ui.plugin_render_origins.get(&state.current_screen).copied().unwrap_or((0, 0));
+    let area = ui.plugin_render_areas.get(&state.current_screen).copied().unwrap_or((0, 0));
     let Some((col, row)) = click_to_viewport(mouse.col, mouse.row, origin, area) else {
         return EventOutcome::Handled;
     };
@@ -632,17 +630,16 @@ impl Screen for PluginScreen {
     fn id(&self) -> &str {
         self.screen_id
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
         // Stash the allocated size so the next tick of
         // `App::tick_plugin_renders` can ask the plugin for a buffer that
         // actually fills this area. Without this the plugin renders into
         // its fallback (80×24) and everything outside that rect stays blank.
-        state
-            .plugin_render_areas
+        ui.plugin_render_areas
             .insert(self.screen_id.to_string(), (area.width, area.height));
         // Stash the origin too, so the mouse forwarder can translate an
         // absolute terminal click into this plugin's viewport space.
-        state.plugin_render_origins.insert(self.screen_id.to_string(), (area.x, area.y));
+        ui.plugin_render_origins.insert(self.screen_id.to_string(), (area.x, area.y));
 
         let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
             let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state, area);
@@ -714,7 +711,7 @@ impl Screen for SkillsScreen {
     fn id(&self) -> &str {
         ids::SKILLS
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         crate::components::skills::render(frame, area, &state.skills_state);
     }
 }
@@ -725,7 +722,7 @@ impl Screen for SkillManagerScreen {
     fn id(&self) -> &str {
         ids::SKILL_MANAGER
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         crate::components::skill_manager_screen::render(frame, area, &state.skill_manager_state);
     }
 }
@@ -736,7 +733,7 @@ impl Screen for ChangelogScreen {
     fn id(&self) -> &str {
         ids::CHANGELOG
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         ChangelogComponent::render(frame, area, &state.changelog_state);
     }
 }
@@ -747,7 +744,7 @@ impl Screen for GitViewScreen {
     fn id(&self) -> &str {
         ids::GIT_VIEW
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         if let Some(ref git_state) = state.git_view_state {
             GitViewComponent::render(frame, area, git_state);
         }
@@ -760,16 +757,17 @@ impl Screen for SessionRecoveryScreen {
     fn id(&self) -> &str {
         ids::SESSION_RECOVERY
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        SessionRecovery::render(frame, area, &mut state.session_recovery_state);
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
+        SessionRecovery::render(frame, area, &state.session_recovery_state, ui);
     }
 }
 
 /// Daemons screen — runtime health and repair controls for every long-running ainb daemon
 /// (phone bridge / notifyd / ATC / fleet daemon). Renders from
-/// `fleet::daemons::collect` via the shared component, refreshing live on the
-/// render tick. State lives on `AppState::daemons_state` so the cached snapshot
-/// survives cross-screen navigation.
+/// `fleet::daemons::collect` via the shared component; the collector is started
+/// and polled by `LayoutComponent::tick_before_draw`, so painting is a pure read
+/// of the last published snapshot. State lives on `AppState::daemons_state` so
+/// that snapshot survives cross-screen navigation.
 #[derive(Default)]
 pub struct DaemonsScreen;
 
@@ -777,8 +775,8 @@ impl Screen for DaemonsScreen {
     fn id(&self) -> &str {
         ids::DAEMONS
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        crate::components::daemons::render(frame, area, &mut state.daemons_state);
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
+        crate::components::daemons::render(frame, area, &state.daemons_state);
     }
 }
 
@@ -809,13 +807,14 @@ impl Screen for HomeScreen {
     fn id(&self) -> &str {
         ids::HOME
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
         self.component.render_with_loading(
             frame,
             area,
-            &mut state.home_screen_v2_state,
+            &state.home_screen_v2_state,
             &state.workspaces,
             state.is_loading_workspaces,
+            ui,
         );
     }
 }
@@ -847,7 +846,7 @@ impl Screen for ConfigScreen {
     fn id(&self) -> &str {
         ids::CONFIG
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         self.component.render(frame, area, state);
         if state.auth_provider_popup_state.show_popup {
             self.auth_provider_popup.render(frame, area, state);
@@ -881,8 +880,8 @@ impl Screen for LogHistoryScreen {
     fn id(&self) -> &str {
         ids::LOG_HISTORY
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        self.component.render(frame, area, &mut state.log_history_state);
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
+        self.component.render(frame, area, &state.log_history_state, ui);
     }
 }
 
@@ -909,7 +908,7 @@ impl Screen for OnboardingScreen {
     fn id(&self) -> &str {
         ids::ONBOARDING
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         if let Some(ref onboarding_state) = state.onboarding_state {
             self.component.render(frame, area, onboarding_state);
         }
@@ -944,13 +943,14 @@ impl Screen for SetupMenuScreen {
     fn id(&self) -> &str {
         ids::SETUP_MENU
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
         self.backdrop.render_with_loading(
             frame,
             area,
-            &mut state.home_screen_v2_state,
+            &state.home_screen_v2_state,
             &state.workspaces,
             state.is_loading_workspaces,
+            ui,
         );
         self.setup_menu.render(frame, area, &state.setup_menu_state);
     }
@@ -979,7 +979,7 @@ impl Screen for AuthSetupScreen {
     fn id(&self) -> &str {
         ids::AUTH_SETUP
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         // Auth setup historically renders into a centred 60x60 sub-rect of the
         // full frame; preserve that.
         let centered = centered_rect(60, 60, area);
@@ -1010,7 +1010,7 @@ impl Screen for AttachedTerminalScreen {
     fn id(&self) -> &str {
         ids::ATTACHED_TERMINAL
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         self.component.render(frame, area, state);
     }
 }
