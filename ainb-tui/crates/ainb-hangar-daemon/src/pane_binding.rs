@@ -10,8 +10,8 @@
 // store key survives; what is lost is the pane.
 //
 // A null `tmux_target` is not cosmetic. It skips legacy-row retirement
-// (`fleet::retire_correlated_legacy`), so one agent shows as two rows — a
-// tier-5 discovered pane row and a tier-0 hook row — and it strips the exact
+// (`fleet::retire_correlated_legacy`), so one agent shows as two rows, a
+// tier-5 discovered pane row and a tier-0 hook row, and it strips the exact
 // target the send-keys answer path needs. Measured on the ainb-owned
 // app-server: 1,215 of 1,215 sampled hook lines carried a null target.
 //
@@ -26,7 +26,7 @@ use ainb_hangar_store::repo::fleet::FleetRepoError;
 use sqlx::SqlitePool;
 
 /// Why a managed row could not be bound to a pane. Carried for the operator
-/// surfaces (`ainb doctor`, the fleet panel detail) — the two cases have
+/// surfaces (`ainb doctor`, the fleet panel detail): the two cases have
 /// different fixes, so they are never collapsed into one message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnboundReason {
@@ -41,7 +41,7 @@ pub enum UnboundReason {
 
 impl UnboundReason {
     /// Operator-facing sentence. Names the directory and, when the problem is
-    /// a collision, the exact panes that collided — "names the pane it could
+    /// a collision, the exact panes that collided: "names the pane it could
     /// not find" rather than failing silently.
     #[must_use]
     pub fn describe(&self, provider: &str, cwd: &str) -> String {
@@ -50,7 +50,7 @@ impl UnboundReason {
                 "pane_unbound: no discovered {provider} pane in {cwd} (the hook carried no tmux target and nothing matched)"
             ),
             Self::Ambiguous(candidates) => format!(
-                "pane_unbound: {} discovered {provider} panes in {cwd} ({}) — no single pane can be attributed",
+                "pane_unbound: {} discovered {provider} panes in {cwd} ({}), no single pane can be attributed",
                 candidates.len(),
                 candidates.join(", ")
             ),
@@ -173,9 +173,23 @@ pub fn bind(mut candidates: Vec<PaneCandidate>) -> PaneBinding {
 /// Scoped to rows the scan owns and nothing else claims: `DEGRADED` management
 /// (a `MANAGED` row is another agent's hook row, never a free pane), a live
 /// target, not superseded, still visible, and not already exited. `cwd` is
-/// matched exactly — a hook whose agent has `cd`-ed below its session root
+/// matched exactly: a hook whose agent has `cd`-ed below its session root
 /// reports the subdirectory, and binding on containment would let one pane
 /// swallow every session beneath it.
+///
+/// `provider_session_id IS NULL` is what makes a candidate genuinely tier 5,
+/// and `management_state` alone is not enough to establish that. `apply_hook`
+/// promotes a row to `MANAGED` only for Claude, so another CODEX session's hook
+/// row sits at `DEGRADED` with a resolved pane and used to qualify. Two Codex
+/// sessions in one directory, one on 0.148 whose pane is visible and one on
+/// 0.154 whose pane is null, then correlated onto each other: the unbound row
+/// took the bound row's pane and `supersede_session` retired the row that
+/// actually owned it. Two live agents merged into one and an answer typed into
+/// the agent that had not asked.
+///
+/// A discovery scan cannot learn a provider's own session id, so a row that has
+/// one was written by a hook and belongs to an agent. This is the same test
+/// `tier_of` already makes.
 ///
 /// # Errors
 /// Propagates the store fault.
@@ -195,6 +209,7 @@ pub async fn discovered_candidates(
          FROM fleet_session \
          WHERE session_key != ? AND provider = ? AND cwd = ? \
            AND management_state = 'DEGRADED' \
+           AND provider_session_id IS NULL \
            AND tmux_target IS NOT NULL AND tmux_target != '' \
            AND lifecycle_state != 'EXITED' \
            AND superseded_by IS NULL AND visible = 1 \
@@ -212,7 +227,7 @@ pub async fn discovered_candidates(
 /// that the raising session has no pane bound (D14, issue #916).
 ///
 /// The answer router discovers its target live, so a `pane_unbound` row fails
-/// there with the router's generic "no live session matched" — true, but it
+/// there with the router's generic "no live session matched", true, but it
 /// hides the actual cause and gives the operator nothing to act on. This
 /// recomputes the binding for the raising session and returns the same sentence
 /// the fleet panel and `ainb doctor` show, so all three name the same pane.
@@ -329,6 +344,71 @@ mod tests {
             Some("pane=%7;pid=9;session_started=1")
         );
         assert!(matches!(binding, PaneBinding::FromHook { .. }));
+    }
+
+    /// Another agent's hook row is never a free pane, whatever its
+    /// `management_state` says.
+    ///
+    /// THE #916 hazard. `apply_hook` promotes a row to `MANAGED` only for
+    /// Claude, so a second CODEX session's hook row sits at `DEGRADED` with a
+    /// resolved pane and used to qualify as a tier-5 candidate. Two Codex
+    /// sessions in one directory, one on 0.148 whose pane is visible and one on
+    /// 0.154 whose pane is null, then correlated onto each other: the unbound
+    /// row took the bound row's pane and the bound row was retired behind it.
+    /// Two live agents merged into one, and an answer typed into the agent that
+    /// had not asked.
+    ///
+    /// A discovery scan cannot learn a provider's own session id, so carrying
+    /// one is proof a hook wrote the row.
+    #[tokio::test]
+    async fn another_agents_hook_row_is_not_a_free_pane() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.expect("open store");
+
+        // The 0.148 session: its own hook line named its pane, and being Codex
+        // it stays DEGRADED. Only `provider_session_id` distinguishes it from a
+        // pane the discovery scan found on its own.
+        ainb_hangar_store::repo::fleet::FleetRepo::apply_event(
+            store.pool(),
+            &ainb_hangar_store::repo::fleet::NewFleetEvent {
+                event_id: "hook:codex-a".to_string(),
+                session_key: "codex:sid-a".to_string(),
+                observed_at: 1,
+                authority: ainb_hangar_store::repo::fleet::ObservationAuthority::Authoritative,
+                event_type: "SessionStart".to_string(),
+                payload: "{}".to_string(),
+                patch: ainb_hangar_store::repo::fleet::FleetSessionPatch {
+                    provider: Some("codex".to_string()),
+                    provider_session_id: Some("sid-a".to_string()),
+                    tmux_target: Some("dev:1.0".to_string()),
+                    cwd: Some("/w/app".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    ..ainb_hangar_store::repo::fleet::FleetSessionPatch::default()
+                },
+            },
+        )
+        .await
+        .expect("the other agent's hook row lands");
+
+        // The 0.154 session asks who owns a pane in the same directory.
+        let candidates =
+            discovered_candidates(store.pool(), "codex:sid-b", "codex", "/w/app")
+                .await
+                .expect("query");
+        assert!(
+            candidates.is_empty(),
+            "a row carrying a provider session id was written by a hook and \
+             belongs to an agent, so it is not a pane to hand out: {candidates:?}"
+        );
+
+        // And with no candidate the binding says so rather than guessing.
+        let binding = resolve(store.pool(), "codex:sid-b", "codex", "/w/app", None, None)
+            .await
+            .expect("resolve");
+        assert!(
+            matches!(binding, PaneBinding::Unbound(UnboundReason::NoCandidate)),
+            "zero candidates is `pane_unbound`, not a guess: {binding:?}"
+        );
     }
 
     /// An empty cwd carries no information. Matching on it would correlate a
