@@ -220,14 +220,13 @@ fn parse_row(line: &str) -> Result<TmuxPaneRow> {
 /// desktop app (`…/Claude.app/Contents/MacOS/Claude`) nor a branch called
 /// `f/claude-resume` can pass as a session.
 ///
-/// Copilot is admitted now that `Provider::Copilot` exists on the wire AND the
-/// Swift client decodes unknown enum values tolerantly. Emitting a provider token
-/// an older client has never seen used to fail its whole snapshot decode, so this
-/// name could not land before those two.
+/// Antigravity's terminal executable is `agy`; accept its exact process name
+/// alongside Claude and Codex so its footer metadata reaches Fleet too.
 fn agent_provider(processes: &ProcessTable, pane_pid: u32) -> Option<Provider> {
     processes.tree_commands(pane_pid).into_iter().find_map(|command| match command {
         "claude" => Some(Provider::Claude),
         "codex" => Some(Provider::Codex),
+        "agy" => Some(Provider::Antigravity),
         _ => None,
     })
 }
@@ -251,8 +250,18 @@ mod tests {
             "  111   101 /Users/me/.local/bin/claude\n",
             "  202     1 /bin/zsh\n",
             "  222   202 /opt/homebrew/bin/codex\n",
+            "  303     1 /bin/zsh\n",
+            "  333   303 /opt/homebrew/bin/agy\n",
             "  909     1 /bin/zsh\n",
         ))
+    }
+
+    #[test]
+    fn antigravity_terminal_process_is_a_roster_provider() {
+        assert_eq!(
+            agent_provider(&processes(), 303),
+            Some(Provider::Antigravity)
+        );
     }
 
     #[test]

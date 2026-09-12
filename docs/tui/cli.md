@@ -71,6 +71,46 @@ EXAMPLES:
   ainb diff-review --format json   Emit the structured diff as JSON (headless)
 ```
 
+## `ainb keymap`
+
+List effective terminal shortcuts
+
+```console
+$ ainb keymap --help
+List effective terminal shortcuts
+
+Usage: ainb keymap [OPTIONS] <COMMAND>
+
+Commands:
+  list  Print the merged, effective keymap
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+
+EXAMPLES:
+  \
+             ainb keymap list
+  \
+             ainb keymap list --format json
+```
+
+### `ainb keymap list`
+
+Print the merged, effective keymap
+
+```console
+$ ainb keymap list --help
+Print the merged, effective keymap
+
+Usage: ainb keymap list [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
 ## `ainb run`
 
 Spawn a new AI coding session
@@ -4214,25 +4254,26 @@ Hangar managed-agents control plane (issue / task / beads / daemon)
 Usage: ainb hangar [OPTIONS] <COMMAND>
 
 Commands:
-  issue      Manage Hangar issues
-  task       Inspect and control Hangar tasks
-  beads      Sync Hangar issues with the beads (`bd`) tracker
-  daemon     Inspect the Hangar control-plane daemon
-  auth       Manage Hangar auth tokens (PATs + daemon tokens)
-  config     Configure Hangar (env allowlist, …)
-  skills     Import + list workspace-scoped skills
-  templates  List, inspect, and apply curated agent templates
-  agent      Edit, archive, and list workspace agents
-  member     List, re-role, and remove workspace members
-  squad      Create squads, manage membership, and view squad status + leader
-  autopilot  Create and control cron-scheduled autopilots
-  workspace  View + set per-workspace config (context prompt, issue prefix, repo whitelist)
-  logs       Read the daemon's structured logs
-  property   Define and archive a workspace's custom issue properties
-  comment    Post issue comments and preview their `@`-mention routing
-  inbox      Read an actor's notification inbox
-  pipeline   Provision and inspect the role-gated pull pipeline
-  help       Print this message or the help of the given subcommand(s)
+  issue        Manage Hangar issues
+  task         Inspect and control Hangar tasks
+  beads        Sync Hangar issues with the beads (`bd`) tracker
+  daemon       Inspect the Hangar control-plane daemon
+  connections  Inspect live authenticated Hangar client connections
+  auth         Manage Hangar auth tokens (PATs + daemon tokens)
+  config       Configure Hangar (env allowlist, …)
+  skills       Import + list workspace-scoped skills
+  templates    List, inspect, and apply curated agent templates
+  agent        Edit, archive, and list workspace agents
+  member       List, re-role, and remove workspace members
+  squad        Create squads, manage membership, and view squad status + leader
+  autopilot    Create and control cron-scheduled autopilots
+  workspace    View + set per-workspace config (context prompt, issue prefix, repo whitelist)
+  logs         Read the daemon's structured logs
+  property     Define and archive a workspace's custom issue properties
+  comment      Post issue comments and preview their `@`-mention routing
+  inbox        Read an actor's notification inbox
+  pipeline     Provision and inspect the role-gated pull pipeline
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -5075,6 +5116,40 @@ Commands:
   set     Store a long-lived token. Reads the token from STDIN by default (so it never lands on argv or in shell history); `--setup-token` instead drives the interactive `claude setup-token` browser flow and captures the result
   clear   Remove the stored credential. Idempotent
   help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+### `ainb hangar connections`
+
+Inspect live authenticated Hangar client connections
+
+```console
+$ ainb hangar connections --help
+Inspect live authenticated Hangar client connections
+
+Usage: ainb hangar connections [OPTIONS] <COMMAND>
+
+Commands:
+  list  List connection id, surface kind, process id, and daemon host
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar connections list`
+
+List connection id, surface kind, process id, and daemon host
+
+```console
+$ ainb hangar connections list --help
+List connection id, surface kind, process id, and daemon host
+
+Usage: ainb hangar connections list [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]

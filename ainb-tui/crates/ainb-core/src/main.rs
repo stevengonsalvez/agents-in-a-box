@@ -1899,6 +1899,7 @@ async fn run_tui_loop(
                             );
                             let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
                             info!("[ACTION] Attach handler created, calling attach_to_session...");
+                            let mut target_missing = false;
                             match attach_handler.attach_to_session(&tmux_session_name).await {
                                 Ok(()) => {
                                     info!(
@@ -1915,6 +1916,14 @@ async fn run_tui_loop(
                                         &tmux_session_name,
                                         &e,
                                     ));
+                                    // An attach can fail because the terminal is nested even
+                                    // though the target is alive. Probe the exact target before
+                                    // changing lifecycle state, so only a terminally missing
+                                    // tmux session becomes resumable Stopped.
+                                    target_missing = matches!(
+                                        tmux_session_presence(&tmux_session_name).await,
+                                        TmuxSessionPresence::Missing
+                                    );
                                 }
                             }
 
@@ -1926,6 +1935,17 @@ async fn run_tui_loop(
                                         break;
                                     }
                                 }
+                            }
+
+                            if target_missing
+                                && app.state.mark_session_stopped_for_missing_tmux(
+                                    session_id,
+                                    &tmux_session_name,
+                                )
+                            {
+                                // Rebuild from the persisted record too. This keeps the row
+                                // correctly filtered after an immediate refresh or TUI restart.
+                                app.state.load_real_workspaces().await;
                             }
 
                             app.state.ui_needs_refresh = true;
@@ -2015,6 +2035,47 @@ fn preview_scroll_route(
     } else {
         PreviewScrollRoute::Ignore
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TmuxSessionPresence {
+    Exists,
+    Missing,
+    Uncertain,
+}
+
+/// Probe an exact tmux target without converting a transport failure into a
+/// lifecycle fact. A bare `-t name` can prefix-match a different live session;
+/// `=name` cannot.
+async fn tmux_session_presence(session_name: &str) -> TmuxSessionPresence {
+    let output = match tokio::process::Command::new("tmux")
+        .args(["has-session", "-t", &format!("={session_name}")])
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(error) => {
+            tracing::warn!(%error, %session_name, "could not verify tmux target after attach failure");
+            return TmuxSessionPresence::Uncertain;
+        }
+    };
+    if output.status.success() {
+        return TmuxSessionPresence::Exists;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_explicitly_missing_tmux_target(&stderr) {
+        TmuxSessionPresence::Missing
+    } else {
+        tracing::warn!(%session_name, %stderr, "tmux target probe was inconclusive after attach failure");
+        TmuxSessionPresence::Uncertain
+    }
+}
+
+fn is_explicitly_missing_tmux_target(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("can't find session")
+        || stderr.contains("no server running")
+        || (stderr.contains("error connecting to") && stderr.contains("no such file or directory"))
 }
 
 fn setup_logging() {
@@ -2213,7 +2274,7 @@ where
 
 #[cfg(test)]
 mod attach_failure_notice_tests {
-    use super::attach_failure_notice;
+    use super::{attach_failure_notice, is_explicitly_missing_tmux_target};
 
     /// The three things the old one-liner never said.
     #[test]
@@ -2229,6 +2290,23 @@ mod attach_failure_notice_tests {
             "the remedy: {notice}"
         );
         assert!(notice.contains("nest"), "the other cause: {notice}");
+    }
+
+    #[test]
+    fn only_definitive_tmux_diagnostics_mean_target_missing() {
+        assert!(is_explicitly_missing_tmux_target(
+            "can't find session: tmux_dead"
+        ));
+        assert!(is_explicitly_missing_tmux_target(
+            "no server running on /tmp/tmux-1/default"
+        ));
+        assert!(is_explicitly_missing_tmux_target(
+            "error connecting to /tmp/tmux-1/default (No such file or directory)"
+        ));
+        assert!(!is_explicitly_missing_tmux_target("permission denied"));
+        assert!(!is_explicitly_missing_tmux_target(
+            "protocol version mismatch"
+        ));
     }
 }
 
