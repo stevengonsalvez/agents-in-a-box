@@ -675,7 +675,7 @@ impl SessionListComponent {
                     let lifecycle_label = session_lifecycle_label(state, session);
 
                     // Git changes (controlled by show_git_status config)
-                    let changes_text = if state.app_config.ui_preferences.show_git_status
+                    let changes_text = if state.config.app_config.ui_preferences.show_git_status
                         && session.git_changes.total() > 0
                     {
                         format!(" ({})", session.git_changes.format())

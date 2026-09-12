@@ -1534,7 +1534,8 @@ mod tests {
     #[test]
     fn cancelling_a_keychain_prompt_disarms_the_row() {
         let mut state = crate::app::state::AppState::new();
-        state.config_screen_state.keychain_target = Some("fleet.bridge.telegram.token".to_string());
+        state.config.config_screen_state.keychain_target =
+            Some("fleet.bridge.telegram.token".to_string());
 
         crate::app::EventHandler::process_event(
             crate::app::events::AppEvent::ConfigPopupCancel,
@@ -1542,7 +1543,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.config_screen_state.keychain_target, None,
+            state.config.config_screen_state.keychain_target, None,
             "an escaped Ctrl+K prompt left the row armed; the next edit of it \
              would be stored in the keychain"
         );

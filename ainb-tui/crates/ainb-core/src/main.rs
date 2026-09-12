@@ -442,7 +442,7 @@ async fn run_tui_loop(
     // status bar's TTL cache. Lives here, beside the `LayoutComponent`, because
     // none of it survives this process or crosses to another surface.
     let mut ui = crate::app::ui_state::UiState::default();
-    ui.restore(&app.state.app_config);
+    ui.restore(&app.state.config.app_config);
 
     let (keymap, keymap_warning) = Keymap::load_user();
     if let Some(warning) = keymap_warning {
@@ -534,7 +534,7 @@ async fn run_tui_loop(
                 sz.width,
                 sz.height,
                 sidebar,
-                app.state.app_config.ui_preferences.show_session_menu_bar,
+                app.state.config.app_config.ui_preferences.show_session_menu_bar,
             );
             needs_redraw |= app.state.sync_terminal_observer(rows, cols);
         }
@@ -826,7 +826,11 @@ async fn run_tui_loop(
                                         sz.width,
                                         sz.height,
                                         sidebar,
-                                        app.state.app_config.ui_preferences.show_session_menu_bar,
+                                        app.state
+                                            .config
+                                            .app_config
+                                            .ui_preferences
+                                            .show_session_menu_bar,
                                     );
                                 // Failure (no tmux session on the row / attach
                                 // error) surfaces as a notification from
@@ -1477,7 +1481,7 @@ async fn run_tui_loop(
                         info!("[ACTION] Opening workspace in editor: {:?}", workspace_path);
 
                         // Resolve editor using fallback chain
-                        let editor = resolve_editor(&app.state.app_config);
+                        let editor = resolve_editor(&app.state.config.app_config);
 
                         match editor {
                             Some(cmd) => {

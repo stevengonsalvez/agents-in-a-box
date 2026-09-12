@@ -290,3 +290,28 @@ impl Default for SessionLabelsSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct ConfigSection {
+    // Persistent configuration (saved to ~/.agents-in-a-box/config/config.toml)
+    pub app_config: AppConfig,
+    pub config_screen_state: ConfigScreenState,
+    /// Config popup state for choice/text input popups in config screen
+    pub config_popup_state: crate::components::config_popup::ConfigPopupState,
+    // Changelog viewer state
+    pub changelog_state: crate::components::ChangelogState,
+}
+
+impl Default for ConfigSection {
+    fn default() -> Self {
+        // AppState::default replaces both of these with the config it loads.
+        // The neutral baseline keeps the section standing alone.
+        let app_config = AppConfig::default();
+        Self {
+            config_screen_state: ConfigScreenState::from_app_config(&app_config),
+            app_config,
+            config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
+            changelog_state: crate::components::ChangelogState::new(),
+        }
+    }
+}

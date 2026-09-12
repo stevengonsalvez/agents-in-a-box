@@ -497,8 +497,8 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
         }
         contexts.push(KeyContext::AuthProviderPopup);
     }
-    if state.config_popup_state.show_popup {
-        if state.config_popup_state.is_text_entry() {
+    if state.config.config_popup_state.show_popup {
+        if state.config.config_popup_state.is_text_entry() {
             contexts.push(KeyContext::Screen(
                 "config_popup",
                 SubContext::Named("input"),
@@ -557,11 +557,11 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
             }
             screen_ids::CONFIG => {
-                if state.config_screen_state.api_key_input_mode {
+                if state.config.config_screen_state.api_key_input_mode {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("api_key")));
-                } else if state.config_screen_state.editing {
+                } else if state.config.config_screen_state.editing {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("editing")));
-                } else if state.config_screen_state.is_searching() {
+                } else if state.config.config_screen_state.is_searching() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
                 }
             }

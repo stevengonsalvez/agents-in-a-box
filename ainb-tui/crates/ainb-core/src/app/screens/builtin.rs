@@ -743,7 +743,7 @@ impl Screen for ChangelogScreen {
         ids::CHANGELOG
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        ChangelogComponent::render(frame, area, &state.changelog_state);
+        ChangelogComponent::render(frame, area, &state.config.changelog_state);
     }
 }
 
@@ -860,8 +860,8 @@ impl Screen for ConfigScreen {
         if state.onboarding.auth_provider_popup_state.show_popup {
             self.auth_provider_popup.render(frame, area, state);
         }
-        if state.config_popup_state.show_popup {
-            self.config_popup.render(frame, area, &state.config_popup_state);
+        if state.config.config_popup_state.show_popup {
+            self.config_popup.render(frame, area, &state.config.config_popup_state);
         }
     }
 }

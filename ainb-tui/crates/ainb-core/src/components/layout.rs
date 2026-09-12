@@ -561,7 +561,7 @@ impl LayoutComponent {
         // The bottom keymap legend can be hidden (⇧M) to give the session list
         // more room; hidden it collapses to a single hint row.
         let menu_bar_h =
-            session_menu_bar_height(state.app_config.ui_preferences.show_session_menu_bar);
+            session_menu_bar_height(state.config.app_config.ui_preferences.show_session_menu_bar);
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -773,7 +773,7 @@ impl LayoutComponent {
     fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         // Hidden legend → a single muted hint row (still discoverable: shows the
         // ⇧M un-hide key plus help/home).
-        if !state.app_config.ui_preferences.show_session_menu_bar {
+        if !state.config.app_config.ui_preferences.show_session_menu_bar {
             self.render_menu_bar_collapsed(frame, area);
             return;
         }
@@ -1392,7 +1392,7 @@ mod menu_bar_render_tests {
 
     fn painted_menu_bar(width: u16, shown: bool) -> String {
         let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = shown;
+        state.config.app_config.ui_preferences.show_session_menu_bar = shown;
         let component = LayoutComponent::new();
         let height = session_menu_bar_height(shown);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
@@ -1449,7 +1449,7 @@ pub fn build_live_status_spans(
     use crate::models::live_window::Source;
 
     let status = ui.statusline_status(state);
-    let decision = state.app_config.ui_preferences.statusline_decision;
+    let decision = state.config.app_config.ui_preferences.statusline_decision;
 
     // Trust the cache: if Tier1 data is flowing — whether it came from
     // our own command in settings.json (Configured) or from a user's

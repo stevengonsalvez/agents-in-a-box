@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub config: Versioned<ConfigSection>,
+
     pub session_labels: Versioned<SessionLabelsSection>,
 
     pub ssh: Versioned<SshSection>,
@@ -3265,18 +3267,9 @@ pub struct AppState {
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
     pub home_screen_v2_state: HomeScreenV2State,
-    pub config_screen_state: ConfigScreenState,
-    /// Config popup state for choice/text input popups in config screen
-    pub config_popup_state: crate::components::config_popup::ConfigPopupState,
-
-    // Persistent configuration (saved to ~/.agents-in-a-box/config/config.toml)
-    pub app_config: AppConfig,
 
     // Log history viewer state
     pub log_history_state: crate::components::LogHistoryViewerState,
-
-    // Changelog viewer state
-    pub changelog_state: crate::components::ChangelogState,
 
     /// Cache of workspace paths that are currently favorited (starred).
     /// Computed by `recompute_favorite_workspaces()` whenever the workspace
@@ -3763,6 +3756,8 @@ impl Default for AppState {
         });
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
+        // Read before the literal moves `app_config` into its section.
+        let session_filter = app_config.ui_preferences.session_filter;
         Self {
             session_labels: Versioned::default(),
             ssh: Versioned::default(),
@@ -3771,6 +3766,11 @@ impl Default for AppState {
                 // just loaded, not from a second read of disk.
                 auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
                 ..OnboardingSection::default()
+            }),
+            config: Versioned::new(ConfigSection {
+                config_screen_state: ConfigScreenState::from_app_config(&app_config),
+                app_config,
+                ..ConfigSection::default()
             }),
             skills: Versioned::default(),
             plugins_host: Versioned::default(),
@@ -3785,7 +3785,7 @@ impl Default for AppState {
             shell_selected: false,
             selected_sessions: HashSet::new(),
             expand_all_workspaces: true, // Default to expanded view
-            session_filter: app_config.ui_preferences.session_filter,
+            session_filter,
             current_screen: screen_ids::HOME.to_string(),
             should_quit: false,
             logs: HashMap::new(),
@@ -3833,21 +3833,17 @@ impl Default for AppState {
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
             home_screen_v2_state,
-            config_screen_state: ConfigScreenState::from_app_config(&app_config),
-            config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
 
             // Onboarding wizard state (initialized to None, set during app init)
 
             // Setup menu state
 
             // Persistent configuration
-            app_config,
 
             // Log history viewer state
             log_history_state: crate::components::LogHistoryViewerState::new(),
 
             // Changelog viewer state
-            changelog_state: crate::components::ChangelogState::new(),
 
             // Session recovery state (lazy-load when entering view)
 
@@ -4306,7 +4302,7 @@ impl AppState {
             .map(|c| c.git_directories)
             .unwrap_or_default();
         let saved = if saved.is_empty() {
-            self.app_config.workspace_defaults.workspace_scan_paths.clone()
+            self.config.app_config.workspace_defaults.workspace_scan_paths.clone()
         } else {
             saved
         };
@@ -4387,8 +4383,8 @@ impl AppState {
         }
 
         // App-config scan paths (what session creation actually reads).
-        self.app_config.workspace_defaults.workspace_scan_paths = valid;
-        if let Err(e) = self.app_config.save() {
+        self.config.app_config.workspace_defaults.workspace_scan_paths = valid;
+        if let Err(e) = self.config.app_config.save() {
             warn!("Failed to persist workspace scan paths: {}", e);
         }
     }
@@ -4401,11 +4397,12 @@ impl AppState {
             config.save().map_err(|e| format!("Failed to save onboarding config: {}", e))?;
 
             // Update app config with git directories
-            self.app_config.workspace_defaults.workspace_scan_paths = state.get_valid_directories();
+            self.config.app_config.workspace_defaults.workspace_scan_paths =
+                state.get_valid_directories();
 
             // Save selected editor preference
             if let Some(editor) = state.get_selected_editor() {
-                self.app_config.ui_preferences.preferred_editor = Some(editor);
+                self.config.app_config.ui_preferences.preferred_editor = Some(editor);
             }
 
             // Optional OpenTelemetry -> Grafana Cloud setup. Best-effort: a
@@ -4436,7 +4433,7 @@ impl AppState {
                 }
             }
 
-            if let Err(e) = self.app_config.save() {
+            if let Err(e) = self.config.app_config.save() {
                 warn!(
                     "Failed to save app config during onboarding completion: {}",
                     e
@@ -6725,9 +6722,9 @@ impl AppState {
 
     /// Hide/show the Sessions bottom keymap legend (⇧M) and persist the choice.
     pub fn toggle_session_menu_bar(&mut self) {
-        let show = !self.app_config.ui_preferences.show_session_menu_bar;
-        self.app_config.ui_preferences.show_session_menu_bar = show;
-        if let Err(e) = self.app_config.save() {
+        let show = !self.config.app_config.ui_preferences.show_session_menu_bar;
+        self.config.app_config.ui_preferences.show_session_menu_bar = show;
+        if let Err(e) = self.config.app_config.save() {
             warn!("Failed to persist show_session_menu_bar: {}", e);
         }
         self.add_info_notification(if show {
@@ -6741,8 +6738,8 @@ impl AppState {
     /// Resets the session selection so it doesn't point to a now-hidden row.
     pub fn cycle_session_filter(&mut self) {
         self.session_filter = self.session_filter.next();
-        self.app_config.ui_preferences.session_filter = self.session_filter;
-        if let Err(e) = self.app_config.save() {
+        self.config.app_config.ui_preferences.session_filter = self.session_filter;
+        if let Err(e) = self.config.app_config.save() {
             warn!("Failed to persist session filter: {}", e);
         }
         // Selection indices are positional over the *displayed* list. Resetting
@@ -8351,7 +8348,7 @@ impl AppState {
             crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
             _ => None,
         };
-        let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+        let branch_prefix = self.config.app_config.workspace_defaults.branch_prefix.clone();
         // Every branch already checked out in any worktree (ainb's by-session
         // worktrees + the repo's own checkout + manual worktrees). Single
         // source of truth so the collision guard matches what `git worktree
@@ -10310,7 +10307,7 @@ impl AppState {
     /// be what is stored.
     async fn load_hangar_daemon_config(&mut self) {
         match read_daemon_config().await {
-            Ok(Some(stored)) => self.config_screen_state.seed_hangar_daemon_rows(&stored),
+            Ok(Some(stored)) => self.config.config_screen_state.seed_hangar_daemon_rows(&stored),
             Ok(None) => {}
             Err(error) => {
                 warn!(%error, "hangar daemon config: could not read stored values");
@@ -10358,7 +10355,7 @@ impl AppState {
         // for today. The error notification names the row, so the failure is
         // never silent; re-typing it is the recovery.
         for row_key in failed_rows {
-            self.config_screen_state.dirty.insert(row_key);
+            self.config.config_screen_state.dirty.insert(row_key);
         }
     }
 
@@ -11141,7 +11138,8 @@ impl AppState {
                         .map(str::to_string)
                         .unwrap_or_else(|| workspace.path.display().to_string());
                     let branch_source = crate::git::repo_source::head_branch(&workspace.path);
-                    let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+                    let branch_prefix =
+                        self.config.app_config.workspace_defaults.branch_prefix.clone();
                     // Same complete in-use list the repo-picker path uses. The
                     // legacy `list_worktrees()` here only saw legacy UUID dirs
                     // and missed every by-name worktree, so a re-launch onto an
@@ -13818,9 +13816,14 @@ impl App {
                 // rebuilt; the static enable/disable rows are kept.
                 let manifests: Vec<ainb_plugin_protocol::manifest::Manifest> =
                     handle.registered_plugins().iter().map(|p| p.manifest.clone()).collect();
+                // The rows and the table they read defaults from are one
+                // section now, so the plugin list is cloned out before the
+                // section is borrowed mutably.
+                let plugins = self.state.config.app_config.plugins.clone();
                 self.state
+                    .config
                     .config_screen_state
-                    .apply_plugin_manifests(&manifests, &self.state.app_config.plugins);
+                    .apply_plugin_manifests(&manifests, &plugins);
 
                 // A fresh runtime means a fresh snapshot store whose
                 // version counter restarts at 0 — drop any version
