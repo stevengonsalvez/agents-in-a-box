@@ -137,6 +137,25 @@ fn send_key(session: &str, key: &str) {
         .expect("tmux send-keys");
 }
 
+/// Press an idempotent navigation key until the screen it opens is on the
+/// pane. The first painted frame is not proof the app is reading stdin yet, so
+/// a single press right after the home poll is lost on a slow boot; the test
+/// then waited out its whole timeout on the home screen. Only safe for keys
+/// that are a no-op once their screen is open, per the tripwire skill: `i`
+/// navigates to Analytics and means nothing to the burndown plugin afterwards.
+fn send_nav_key_until<F>(session: &str, key: &str, deadline: Instant, mut ok: F) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    while Instant::now() < deadline {
+        send_key(session, key);
+        if let Some(cap) = poll_capture(session, Instant::now() + Duration::from_secs(3), &mut ok) {
+            return Some(cap);
+        }
+    }
+    None
+}
+
 /// Send a key once, then wait for the frame to change and settle.
 ///
 /// Send-once matters here: `M` cycles the metric, so re-pressing it on every
@@ -173,6 +192,36 @@ fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
+/// Kills the session by its exact name however the test leaves, panic
+/// included. Without it a failing assertion leaves a live TUI and its plugin
+/// subprocesses behind, and the next run of this test competes with them.
+struct SessionGuard(String);
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        kill_session(&self.0);
+    }
+}
+
+/// The day the detail strip is titled with, e.g. `2026-05-11`. This is the
+/// selected-day cursor rendered as plain text, so it survives a capture with
+/// no styling, which is exactly what a colour-only highlight would not.
+fn selected_day(cap: &str) -> Option<String> {
+    cap.lines().find_map(|line| {
+        let rest = line.split_once("\u{256d} ")?.1;
+        let day: String = rest.chars().take(10).collect();
+        let is_date = day.len() == 10
+            && day.chars().enumerate().all(|(i, c)| {
+                if i == 4 || i == 7 {
+                    c == '-'
+                } else {
+                    c.is_ascii_digit()
+                }
+            });
+        is_date.then_some(day)
+    })
+}
+
 /// The grid is present only when its own chrome is: the weekday gutter, the
 /// legend ends, and at least one cell glyph. None of these appear on any other
 /// burndown tab, so this cannot pass on a blank or wrong panel.
@@ -200,6 +249,7 @@ fn activity_tab_renders_heatmap_and_responds_to_keys() {
     seed_fixture_home(home_tmp.path());
 
     let session = format!("tripwire-heatmap-{}", std::process::id());
+    let _guard = SessionGuard(session.clone());
     let status = Command::new("tmux")
         .args(["new-session", "-d", "-s", &session, "-x", "200", "-y", "50"])
         .status()
@@ -229,9 +279,8 @@ fn activity_tab_renders_heatmap_and_responds_to_keys() {
         panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
     }
 
-    send_key(&session, "i");
     let data_deadline = Instant::now() + Duration::from_secs(90);
-    let Some(burndown) = poll_capture(&session, data_deadline, |c| {
+    let Some(burndown) = send_nav_key_until(&session, "i", data_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')
@@ -287,15 +336,25 @@ fn activity_tab_renders_heatmap_and_responds_to_keys() {
         "M did not advance the selected metric cost -> tokens:\n---\n{after_metric}\n---"
     );
 
-    // Arrow moves the day cursor, which retitles the detail strip.
+    // Arrow moves the day cursor, which retitles the detail strip. Assert on
+    // that title, not merely on "the frame changed": a live badge or a
+    // refreshed timestamp changes the frame on its own, so a bare inequality
+    // passes while the cursor sits still, which is how a dead arrow key hid
+    // behind this test.
+    let day_before = selected_day(&after_metric).unwrap_or_else(|| {
+        panic!("no detail-strip day before the cursor move:\n---\n{after_metric}\n---")
+    });
     let after_left = send_key_and_settle(&session, "Left");
     assert!(
         heatmap_rendered(&after_left),
         "grid vanished after cursor move:\n---\n{after_left}\n---"
     );
-    assert!(
-        after_left != after_metric,
-        "Left did not move the heatmap cursor:\n---\n{after_left}\n---"
+    let day_after = selected_day(&after_left).unwrap_or_else(|| {
+        panic!("no detail-strip day after the cursor move:\n---\n{after_left}\n---")
+    });
+    assert_ne!(
+        day_after, day_before,
+        "Left did not move the heatmap cursor off {day_before}:\n---\n{after_left}\n---"
     );
 
     // Return path: `[` walks back to Burndown and the grid goes away. Tab

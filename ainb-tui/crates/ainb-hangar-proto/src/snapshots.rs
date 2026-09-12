@@ -50,6 +50,14 @@ pub struct InboxScopedParams {
     /// The actor whose inbox this is; `None` means the local human.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipient: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::WORKSPACE_SUBSCRIBE`] — the workspace to stream,
@@ -271,6 +279,14 @@ pub struct SkillsSyncParams {
     /// resolve the default toolkit source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_SKILLS_SYNC`]: the imported skill names.
@@ -300,6 +316,14 @@ pub struct SkillAttachParams {
     pub agent_id: String,
     /// The skill being (de)attached.
     pub skill_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_SKILL_SET_ENABLED`] (parity #24).
@@ -318,6 +342,14 @@ pub struct SkillSetEnabledParams {
     /// The target state: `true` = the link materialises, `false` = it stays
     /// attached but is suppressed.
     pub enabled: bool,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_SKILLS_LIST`] (parity #24).
@@ -383,6 +415,14 @@ pub struct AutopilotFireNowParams {
     /// Append-only + `serde(default)`: a pre-0061 caller's payload omits it.
     #[serde(default)]
     pub actor_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_ENABLED`]: the workspace
@@ -400,6 +440,14 @@ pub struct AutopilotSetEnabledParams {
     /// human. Omitted ⇒ the version is minted unattributed.
     #[serde(default)]
     pub actor_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`]: the workspace
@@ -416,6 +464,14 @@ pub struct AutopilotTriggerApiParams {
     /// for symmetry and future auditing.
     #[serde(default)]
     pub actor_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`].
@@ -460,6 +516,14 @@ pub struct AutopilotSetApiTriggerParams {
     /// accountable human.
     #[serde(default)]
     pub actor_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_AUTOPILOT_SET_API_TRIGGER`]: whether a row
@@ -514,6 +578,14 @@ pub struct AutopilotUpdateParams {
     /// on the minted rule version. Omitted ⇒ unattributed.
     #[serde(default)]
     pub actor_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_AUTOPILOT_UPDATE`].
@@ -565,6 +637,14 @@ pub struct AutopilotActorParams {
     /// legacy path). Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// One write-grant on an autopilot rule (multica parity #27).
@@ -633,6 +713,14 @@ pub struct AutopilotSetAccessModeParams {
     /// The acting human (gate subject + rule-version attribution). Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_VERSIONS`]: the workspace
@@ -773,6 +861,14 @@ pub struct AnswerParams {
     /// looser broadcast passes `false` but gets the same refusal — the safe call.
     #[serde(default = "default_true")]
     pub is_answer: bool,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::ATTENTION_ANSWER`] (spec P2): what happened to the
@@ -840,6 +936,14 @@ pub struct AtcRegisterParams {
     /// CLI compatibility; negotiated clients must send it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<i64>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Authoritative scheduler ownership state. Mutation stays unavailable until
@@ -969,6 +1073,14 @@ pub struct AtcEscalateParams {
     pub workspace_id: Option<String>,
     /// Why the session is being escalated (rendered on the attention card).
     pub reason: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::ATC_ESCALATE`]: the raised attention id.
@@ -988,6 +1100,14 @@ pub struct AtcUnregisterParams {
     /// CLI compatibility; negotiated clients must send it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<i64>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::ATC_UNREGISTER`]: the instance name and whether it
@@ -1108,6 +1228,14 @@ pub struct ProfileUpsertParams {
     /// The system-prompt body.
     #[serde(default)]
     pub body: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::PROFILE_UPSERT`] (spec P5): the written slug and
@@ -1235,6 +1363,14 @@ pub struct PrStatusRefreshParams {
     pub workspace_id: String,
     /// The issue whose bound PR to refresh (`issue.id`).
     pub issue_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_PR_STATUS_REFRESH`] (e38.34): the freshly
@@ -1265,6 +1401,14 @@ pub struct TaskTransitionParams {
     pub task_id: String,
     /// The target lifecycle status — one of the six `TaskStatus` wire tokens.
     pub to_status: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_TASK_RETRY`]: the workspace (tenant guard)
@@ -1275,6 +1419,14 @@ pub struct TaskRetryParams {
     pub workspace_id: String,
     /// The terminal task to requeue.
     pub task_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_TASK_RETRY`]: the id of the freshly-queued
@@ -1382,6 +1534,14 @@ pub struct IssueUpdateParams {
     /// appended to the dispatched brief. Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_LABEL_ATTACH`] /
@@ -1405,6 +1565,14 @@ pub struct IssueLabelParams {
     /// label; omitted when unset, ignored on detach / label reuse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_CRITERION_SET`] (multica parity
@@ -1430,6 +1598,14 @@ pub struct IssueCriterionSetParams {
     /// Who ticked it (`"<kind>:<id>"`); optional, append-only. Cleared on untick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_CREATE`] (e38.29): create one new
@@ -1535,6 +1711,14 @@ pub struct IssuesBatchUpdateParams {
     /// exists for the aggregated cascade, so there is nothing else to apply).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_ISSUES_BATCH_UPDATE`].
@@ -1636,6 +1820,14 @@ pub struct AgentUpdateParams {
     /// inheriting the local config), a value sets it (migration 0050).
     #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
     pub service_tier: FieldUpdate<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_CREATE`]: create one agent from
@@ -1696,6 +1888,14 @@ pub struct AgentCreateParams {
     // A `system` agent is a hidden internal carrier minted by the agent-builder
     // (gap #9-rest), never by a client, so exposing it here would let any peer
     // manufacture an agent no roster can see.
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_ARCHIVE`] (e38.15): archive or
@@ -1720,6 +1920,14 @@ pub struct AgentArchiveParams {
     /// daemon ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_by_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_DELETE`]: delete one named agent
@@ -1736,6 +1944,14 @@ pub struct AgentDeleteParams {
     pub workspace_id: String,
     /// The agent to delete (`agent.id`).
     pub agent_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_COMMENT_ADD`] (e38.5): append one comment
@@ -1766,6 +1982,14 @@ pub struct CommentAddParams {
     /// The mention router walks it for the reply-to-parent-author fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// One routed `@mention` target and what the router DID about it
@@ -1945,6 +2169,14 @@ pub struct InviteCreateParams {
     /// The role the invitee will hold on accept (`admin` / `member`).
     #[serde(default)]
     pub role: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_INVITE_ACCEPT`] and
@@ -1965,6 +2197,14 @@ pub struct InviteActParams {
     /// The acting human's email; must match the invitee.
     #[serde(default)]
     pub actor_email: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_INVITE_REVOKE`] (parity #18): an admin
@@ -1980,6 +2220,14 @@ pub struct InviteRevokeParams {
     /// The invitation being withdrawn.
     #[serde(default)]
     pub invitation_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_MEMBER_SET_ROLE`] (e38.11): change one
@@ -1998,6 +2246,14 @@ pub struct MemberSetRoleParams {
     pub user_id: String,
     /// The new role token (`owner` / `admin` / `member`).
     pub role: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_MEMBER_REMOVE`] (e38.11): remove one
@@ -2012,6 +2268,14 @@ pub struct MemberRemoveParams {
     pub workspace_id: String,
     /// The member to remove (`user.id`).
     pub user_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// One squad for the `ainb hangar squad list` status view
@@ -2094,6 +2358,14 @@ pub struct SquadArchiveParams {
     /// [`AgentArchiveParams::archived_by_user_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived_by_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_SQUADS_LIST`] and the refreshed view the
@@ -2131,6 +2403,14 @@ pub struct SquadCreateParams {
     /// guidance, exactly as a pre-0053 client's create behaves.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_MEMBER_ADD`] and
@@ -2156,6 +2436,14 @@ pub struct SquadMemberParams {
     /// role untouched — a plain re-add never clears a role an operator set.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_MEMBER_ROLE_SET`] (parity #25): set
@@ -2177,6 +2465,14 @@ pub struct SquadMemberRoleParams {
     /// The free-text role label; empty clears it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_INSTRUCTIONS_SET`] (parity #25): set
@@ -2195,6 +2491,14 @@ pub struct SquadInstructionsParams {
     /// The routing guidance; empty clears it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instructions: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): route a task to a
@@ -2229,6 +2533,14 @@ pub struct SquadAssignParams {
     /// against the leader's / each member's allow-list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invoker_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): the enqueued task
@@ -2452,6 +2764,14 @@ pub struct BoardCreateParams {
     pub workspace_id: String,
     /// The board name (unique within the workspace).
     pub name: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_UPDATE`] (P4): rename a board and/or
@@ -2468,6 +2788,14 @@ pub struct BoardUpdateParams {
     /// The new auto-move master toggle, or `None` to leave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_move: Option<bool>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_DELETE`] (P4): a board id in a
@@ -2478,6 +2806,14 @@ pub struct BoardIdParams {
     pub workspace_id: String,
     /// The board to delete.
     pub board_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_COLUMN_ADD`] (P4): append a column.
@@ -2496,6 +2832,14 @@ pub struct BoardColumnAddParams {
     /// Whether the column auto-moves; omitted defaults to `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_move: Option<bool>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_COLUMN_UPDATE`] (P4).
@@ -2520,6 +2864,14 @@ pub struct BoardColumnUpdateParams {
     /// The new auto-move flag, or `None` to leave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_move: Option<bool>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_COLUMN_DELETE`] (P4).
@@ -2531,6 +2883,14 @@ pub struct BoardColumnDeleteParams {
     pub board_id: String,
     /// The column to delete (its cards park unmapped).
     pub column_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_COLUMN_REORDER`] (P4): the board's
@@ -2544,6 +2904,14 @@ pub struct BoardColumnReorderParams {
     /// The column ids in their new left-to-right order (a permutation of the
     /// board's current columns).
     pub column_ids: Vec<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_ADD`] and
@@ -2561,6 +2929,14 @@ pub struct BoardCardParams {
     /// The column to place / move the card into, or `None` for unmapped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_CREATE`] (ccc / D8, D16):
@@ -2603,6 +2979,14 @@ pub struct BoardCardCreateParams {
     /// stored now, consumed by later PR automation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_RUN`]: enqueue a run of one issue
@@ -2660,6 +3044,14 @@ pub struct IssueDeleteParams {
     pub workspace_id: String,
     /// The issue to delete.
     pub issue_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_CANCEL_ACTIVE`]: cancel every active
@@ -2674,6 +3066,14 @@ pub struct IssueCancelActiveParams {
     pub workspace_id: String,
     /// The issue whose active run(s) to cancel.
     pub issue_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_ISSUE_CANCEL_ACTIVE`].
@@ -2721,6 +3121,14 @@ pub struct BoardCardRunParams {
     /// [`IssueRunParams::invoker_user_id`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invoker_user_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6): the enqueued
@@ -2767,6 +3175,14 @@ pub struct BoardCardCancelParams {
     pub board_id: String,
     /// The card's issue whose active run to cancel.
     pub issue_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_CANCEL`] (tcp T3 / F6).
@@ -2799,6 +3215,14 @@ pub struct BoardCardReorderParams {
     /// The card issue ids in their new top-to-bottom order (a permutation of the
     /// column's current cards).
     pub issue_ids: Vec<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_TIMELINE`] (tcp T3 / F6): the
@@ -2873,6 +3297,14 @@ pub struct BoardCardAssignSquadParams {
     /// The squad to assign (`squad.id`), or `None` to clear the assignment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub squad_id: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// The KIND of a card link on the wire (multica parity #20), mirroring
@@ -2938,6 +3370,14 @@ pub struct BoardCardDepParams {
     /// i.e. exactly the pre-#20 gating edge.
     #[serde(default, skip_serializing_if = "LinkKindWire::is_default")]
     pub link_type: LinkKindWire,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_LINK_ADD`] /
@@ -2954,6 +3394,14 @@ pub struct IssueLinkParams {
     /// The link's kind. APPEND-ONLY: omitted ⇒ `blocked_by`.
     #[serde(default, skip_serializing_if = "LinkKindWire::is_default")]
     pub link_type: LinkKindWire,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_LINKS`] (multica parity #20): read
@@ -2989,6 +3437,14 @@ pub struct IssueSubscribeParams {
     /// human behind it. Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_SUBSCRIBERS`] (multica parity #22).
@@ -3023,6 +3479,14 @@ pub struct IssueReactionParams {
     /// The reacting actor. Omitted ⇒ the LOCAL HUMAN. Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of every #22 reaction method: the issue's REFRESHED aggregated
@@ -3075,6 +3539,14 @@ pub struct PropertyDefineParams {
     /// Render order within the workspace. Absent ⇒ unchanged (0 when new).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<i64>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_PROPERTY_ARCHIVE`] (multica parity #17).
@@ -3087,6 +3559,14 @@ pub struct PropertyArchiveParams {
     /// `true` archives, `false` un-archives. NEVER a delete.
     #[serde(default)]
     pub archived: bool,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_PROPERTY_SET`] (multica parity
@@ -3105,6 +3585,14 @@ pub struct IssuePropertySetParams {
     /// The `multi_select` form. Takes precedence over `value` when non-empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_PROPERTY_CLEAR`] (multica parity
@@ -3117,6 +3605,14 @@ pub struct IssuePropertyClearParams {
     pub issue_id: String,
     /// The definition's stable slug.
     pub key: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Params shared by the three `hangar/issue_metadata_*` methods (multica parity
@@ -3138,6 +3634,14 @@ pub struct IssueMetadataParams {
     /// valid decimal ⇒ number, else string), the reference's `--type` override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_type: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of every `hangar/issue_metadata_*` method (multica parity #17): the
@@ -3162,6 +3666,14 @@ pub struct BoardCardAutoRunParams {
     /// The new auto-run state (`true` = auto-launch when the last blocker
     /// completes; `false` = explicit run only, the default).
     pub auto_run: bool,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// One pickable repository in the card-create `@` roster
@@ -3251,6 +3763,14 @@ pub struct NotifyRuleSetParams {
     pub kind: String,
     /// The new push-channel set (empty = board-only).
     pub channels: ChannelSet,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_NOTIFY_RULE_SET`] (tcp T5): the scope + kind
@@ -3292,6 +3812,14 @@ pub struct DaemonConfigSetParams {
     pub key: String,
     /// The value to persist under `key`.
     pub value: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result of [`crate::methods::HANGAR_DAEMON_CONFIG_SET`] (D13): the key + stored
@@ -3652,6 +4180,7 @@ mod tests {
         let sync = SkillsSyncParams {
             workspace_id: "ws-1".into(),
             source_path: Some("/tmp/skills".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&sync).unwrap();
         assert_eq!(serde_json::from_str::<SkillsSyncParams>(&s).unwrap(), sync);
@@ -3659,6 +4188,7 @@ mod tests {
         let no_src = SkillsSyncParams {
             workspace_id: "ws-1".into(),
             source_path: None,
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         assert_eq!(
             serde_json::to_string(&no_src).unwrap(),
@@ -3679,6 +4209,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             agent_id: "agent-1".into(),
             skill_id: "skill-commit".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&attach).unwrap();
         assert_eq!(
@@ -3696,6 +4227,7 @@ mod tests {
             agent_id: "agent-1".into(),
             skill_id: "skill-review".into(),
             enabled: false,
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&toggle).unwrap();
         assert_eq!(
@@ -3998,6 +4530,7 @@ mod tests {
             actor: Some("member:bob".into()),
             role: Some("editor".into()),
             actor_user_id: Some("member:amy".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
@@ -4039,6 +4572,7 @@ mod tests {
             autopilot_id: "ap-1".into(),
             access_mode: "restricted".into(),
             actor_user_id: Some("member:amy".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&mode).unwrap();
         assert_eq!(
@@ -4095,6 +4629,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             task_id: "task-1".into(),
             to_status: "done".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&transition).unwrap();
         assert_eq!(
@@ -4146,6 +4681,7 @@ mod tests {
         let params = PrStatusRefreshParams {
             workspace_id: "ws-1".into(),
             issue_id: "issue-1".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
@@ -4211,6 +4747,7 @@ mod tests {
             source_branch: Some("develop".into()),
             target_branch: Some("main".into()),
             external_ref: Some("acme/api#42".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<IssueUpdateParams>(&s).unwrap(), full);
@@ -4249,6 +4786,7 @@ mod tests {
             author: "member:alice".into(),
             body: "looks good to me".into(),
             parent_id: None,
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
@@ -4357,6 +4895,7 @@ mod tests {
             description: Some("ships the backend".into()),
             avatar_url: FieldUpdate::Set("emoji:\u{1F98A}".into()),
             service_tier: FieldUpdate::Set("priority".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentUpdateParams>(&s).unwrap(), full);
@@ -4394,6 +4933,7 @@ mod tests {
             agent_id: "agent-1".into(),
             archived: true,
             archived_by_user_id: Some("user-2".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
@@ -4432,6 +4972,7 @@ mod tests {
             squad_id: "s1".into(),
             archived: true,
             archived_by_user_id: Some("user-2".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(
@@ -4518,6 +5059,7 @@ mod tests {
             squad_id: "s1".into(),
             member: "agent:a-1".into(),
             role: "owns the migrations".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&role).unwrap();
         assert_eq!(
@@ -4528,6 +5070,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             squad_id: "s1".into(),
             instructions: "Line one.\nLine two.".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&instr).unwrap();
         assert_eq!(
@@ -4552,6 +5095,7 @@ mod tests {
             description: Some("reviews every PR".into()),
             avatar_url: Some("emoji:\u{1F98A}".into()),
             service_tier: Some("priority".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentCreateParams>(&s).unwrap(), full);
@@ -4603,6 +5147,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             user_id: "u-bob".into(),
             role: "member".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&set_role).unwrap();
         assert_eq!(
@@ -4613,6 +5158,7 @@ mod tests {
         let remove = MemberRemoveParams {
             workspace_id: "ws-1".into(),
             user_id: "u-bob".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&remove).unwrap();
         assert_eq!(
@@ -4679,6 +5225,7 @@ mod tests {
             inviter_user_id: "u-amy".into(),
             invitee_email: "dana@example.com".into(),
             role: "member".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&create).unwrap();
         assert_eq!(
@@ -4690,6 +5237,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             invitation_id: "inv-1".into(),
             actor_email: "dana@example.com".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&act).unwrap();
         assert_eq!(serde_json::from_str::<InviteActParams>(&s).unwrap(), act);
@@ -4697,6 +5245,7 @@ mod tests {
         let revoke = InviteRevokeParams {
             workspace_id: "ws-1".into(),
             invitation_id: "inv-1".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&revoke).unwrap();
         assert_eq!(
@@ -4725,6 +5274,7 @@ mod tests {
             name: "alpha".into(),
             leader: "agent:a-lead".into(),
             instructions: "Route schema work to the DB owner.".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&create).unwrap();
         assert_eq!(
@@ -4737,6 +5287,7 @@ mod tests {
             squad_id: "s1".into(),
             member: "agent:a-1".into(),
             role: "owns the migrations".into(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&member).unwrap();
         assert_eq!(
@@ -4751,6 +5302,7 @@ mod tests {
             work_dir: Some("/tmp/run".into()),
             priority: Some(2),
             invoker_user_id: Some("user-1".into()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         };
         let s = serde_json::to_string(&assign).unwrap();
         assert_eq!(

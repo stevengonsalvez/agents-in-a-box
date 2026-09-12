@@ -1,5 +1,6 @@
 // ABOUTME: Screen trait and stable ScreenId constants for in-tree views and (future) plugin screens
 
+use crate::app::ui_state::UiState;
 use ratatui::{Frame, layout::Rect};
 
 use crate::app::AppState;
@@ -76,7 +77,7 @@ pub trait Screen: Send {
 
     /// Render this screen into `area`. The frame may be the full terminal
     /// area; the screen is free to clip or carve sub-regions as needed.
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState);
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState);
 
     /// Stub for future event routing. Default: `NotHandled`.
     fn handle_event(&mut self, _state: &mut AppState) -> EventOutcome {

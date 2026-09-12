@@ -1498,6 +1498,7 @@ fn answer_selected(state: &mut ChatState, answer: FleetConfirmAnswer) -> ChatKey
     ChatKeyOutcome::Intent(ChatIntent::ConfirmAnswer(FleetConfirmAnswerParams {
         confirm_id,
         answer,
+        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
     }))
 }
 
@@ -1598,6 +1599,7 @@ fn submit_edit(state: &mut ChatState) -> ChatKeyOutcome {
     ChatKeyOutcome::Intent(ChatIntent::ConfirmAnswer(FleetConfirmAnswerParams {
         confirm_id,
         answer: FleetConfirmAnswer::Edit { arguments },
+        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
     }))
 }
 
@@ -2487,6 +2489,7 @@ mod tests {
             ChatKeyOutcome::Intent(ChatIntent::ConfirmAnswer(FleetConfirmAnswerParams {
                 confirm_id: "01J0CONFIRM".into(),
                 answer: FleetConfirmAnswer::Approve,
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             }))
         );
         let deny = reduce_chat_key(&mut state, ChatKey::Char('n'));
@@ -2495,6 +2498,7 @@ mod tests {
             ChatKeyOutcome::Intent(ChatIntent::ConfirmAnswer(FleetConfirmAnswerParams {
                 confirm_id: "01J0CONFIRM".into(),
                 answer: FleetConfirmAnswer::Deny,
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             }))
         );
     }
@@ -2536,6 +2540,7 @@ mod tests {
                 answer: FleetConfirmAnswer::Edit {
                     arguments: serde_json::json!({ "session": "claude:two" }),
                 },
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             }))
         );
         assert!(state.edit.is_none());
@@ -2925,6 +2930,7 @@ mod tests {
             ChatKeyOutcome::Intent(ChatIntent::ConfirmAnswer(FleetConfirmAnswerParams {
                 confirm_id: "CARD-RMRF".into(),
                 answer: FleetConfirmAnswer::Approve,
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             }))
         );
     }

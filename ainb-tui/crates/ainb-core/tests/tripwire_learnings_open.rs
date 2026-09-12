@@ -278,12 +278,17 @@ fn learnings_screen_opens_and_renders_title() {
     // Return path (skill hard-rule 6): Esc is host-reserved and must
     // navigate back to home, NOT get swallowed by the plugin. Assert the
     // title token is gone and a HomeScreen marker is back.
-    send_key(&session, "Escape");
+    // Resent, like the open above: `esc` resolves to `GoToHomeScreen` in the
+    // Global context, so a second press once home is up is a no-op, and a
+    // first press dropped on a loaded box is otherwise never retried.
     let home_again_deadline = Instant::now() + Duration::from_secs(15);
-    let home_again = poll_capture(&session, home_again_deadline, |c| {
+    let home_again = poll_capture_resending(&session, "Escape", home_again_deadline, |c| {
         !c.contains(TITLE_TOKEN) && c.contains("Stats")
     });
 
+    // Captured BEFORE the kill: the failure message below reads this, and a
+    // capture taken after `kill_session` is empty on every failure.
+    let last = capture_pane(&session);
     kill_session(&session);
 
     assert!(
@@ -293,8 +298,7 @@ fn learnings_screen_opens_and_renders_title() {
     assert!(
         home_again.is_some(),
         "Esc from learnings did not return to HomeScreen (title token swallowed the key); \
-         last capture:\n---\n{}\n---",
-        capture_pane(&session)
+         last capture:\n---\n{last}\n---"
     );
 }
 
@@ -344,12 +348,13 @@ fn learnings_screen_opens_via_slash_recall() {
     };
 
     // Return path (skill hard-rule 6): Esc must navigate back to home.
-    send_key(&session, "Escape");
+    // Same resend and the same reason as the `m` case above.
     let home_again_deadline = Instant::now() + Duration::from_secs(15);
-    let home_again = poll_capture(&session, home_again_deadline, |c| {
+    let home_again = poll_capture_resending(&session, "Escape", home_again_deadline, |c| {
         !c.contains(TITLE_TOKEN) && c.contains("Stats")
     });
 
+    let last = capture_pane(&session);
     kill_session(&session);
 
     assert!(
@@ -359,7 +364,6 @@ fn learnings_screen_opens_via_slash_recall() {
     assert!(
         home_again.is_some(),
         "Esc from learnings (opened via /recall) did not return to HomeScreen; \
-         last capture:\n---\n{}\n---",
-        capture_pane(&session)
+         last capture:\n---\n{last}\n---"
     );
 }

@@ -105,12 +105,17 @@ async fn serve_connection(stream: UnixStream, behaviour: SendBehaviour) {
                             .collect::<Vec<Value>>(),
                     },
                 }),
+                // The shape the DISPATCHER now refuses with: `request_id` is
+                // the op id for this family (D18 amendment 19), so the generic
+                // mutation ledger answers before the handler's own check, with
+                // its own code. The CLI must still exit `idempotency_conflict`.
                 SendBehaviour::IdempotencyConflict => json!({
                     "jsonrpc": "2.0",
                     "id": id,
                     "error": {
-                        "code": -32602,
-                        "message": "request_id was reused for a different message",
+                        "code": ainb_hangar_proto::mutation::MUTATION_REJECTED,
+                        "message": "op id \"m-1\" already committed a different fleet/message_send body",
+                        "data": { "mutation": { "status": "rejected", "reason": "already_answered_by" } },
                     },
                 }),
             },

@@ -38,6 +38,7 @@
 
 pub mod auth;
 pub mod connections;
+pub mod mutation;
 pub mod snapshots;
 
 use std::fs::{File, OpenOptions};
@@ -257,7 +258,55 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
     }
     let listener = UnixListener::bind(socket_path)?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    link_versioned_sockets(socket_path);
     Ok(listener)
+}
+
+/// The versioned socket alias for protocol `version`: `hangar-v<N>.sock`.
+#[must_use]
+pub fn versioned_socket_path_in(store_dir: &Path, version: u32) -> PathBuf {
+    store_dir.join(format!("hangar-v{version}.sock"))
+}
+
+/// Point `hangar-v<N>.sock` at the real socket for every version served (D17).
+///
+/// The unversioned `hangar.sock` stays the bind target and keeps working, which
+/// is the whole reason this is a SYMLINK rather than a second bind: amendment
+/// 21's problem is that today's clients hardcode `hangar.sock`, and moving the
+/// socket to a versioned path orphans every one of them. So both names resolve
+/// to one inode, one listener, one flock singleton.
+///
+/// Best-effort by design. A daemon that cannot create an alias still serves
+/// every client that dials the real path, so a read-only or exotic filesystem
+/// degrades to "no versioned alias" rather than "no daemon".
+fn link_versioned_sockets(socket_path: &Path) {
+    let Some(dir) = socket_path.parent() else {
+        return;
+    };
+    let Some(name) = socket_path.file_name() else {
+        return;
+    };
+    for version in ainb_hangar_proto::protocol::PROTOCOL_MIN_SUPPORTED
+        ..=ainb_hangar_proto::protocol::PROTOCOL_VERSION
+    {
+        let alias = versioned_socket_path_in(dir, version);
+        // A stale alias from a previous daemon points at an unlinked inode, so
+        // it is replaced unconditionally. `remove_file` on a dangling symlink
+        // removes the LINK, never a target.
+        let _ = std::fs::remove_file(&alias);
+        if let Err(e) = std::os::unix::fs::symlink(name, &alias) {
+            // WARN, not debug. A missing alias is not cosmetic: clients prefer
+            // it, so an absent one is the exact condition under which some
+            // other same-uid process could create a file at that path and
+            // receive tokens. An operator has to be able to see that happened.
+            tracing::warn!(
+                error = %e,
+                alias = %alias.display(),
+                "hangar rpc: could not publish the versioned socket alias; \
+                 clients will fall back to the unversioned path"
+            );
+        }
+    }
 }
 
 /// Idle read bound for a request/response connection (no live subscription).
@@ -1261,7 +1310,16 @@ async fn dispatch_as_connection(
     registry: Option<&connections::ConnectionRegistry>,
 ) -> RpcResponse {
     let result = match caller.authorize(&req.method) {
-        Ok(()) => handle(pool, req, health, events, caller, connection, registry).await,
+        // Every mutation goes through the ledger guard, so "generic dedupe at
+        // dispatch for every mutation" (D18) is a property of THIS line rather
+        // than of ~96 hand-written transactions. A read, or a mutation whose
+        // caller sent no op id, passes straight through.
+        Ok(()) => {
+            mutation::guard(pool, req, caller, SystemClock.now_ms(), || {
+                handle(pool, req, health, events, caller, connection, registry)
+            })
+            .await
+        }
         Err(refusal) => Err(refusal),
     };
     match result {
@@ -1647,8 +1705,61 @@ async fn handle_fleet_action(
 ) -> Result<serde_json::Value, RpcError> {
     let params: ainb_hangar_proto::fleet::FleetActionParams =
         parse_params(req, "{ session_key, expected_version, request_id, action }")?;
-    let receipt = execute_fleet_action(pool, params, None, events).await?;
+    // The D18 `writing` boundary for this family. It is set HERE, one frame
+    // above `execute_fleet_action`, rather than beside the `send-keys` itself:
+    // the executor lives in `fleet.rs`, which another lane owns, and nothing
+    // between this line and the first PTY byte writes to a terminal. So the
+    // invariant the receipt needs (`writing` is durable BEFORE any byte can
+    // leave) holds exactly as it does for `attention/answer`.
+    let now_ms = SystemClock.now_ms();
+    mutation::mark_active_receipt(
+        pool,
+        ainb_hangar_proto::mutation::ReceiptState::Writing,
+        None,
+        now_ms,
+    )
+    .await;
+    let receipt = match execute_fleet_action(pool, params, None, events).await {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            mutation::mark_active_receipt(
+                pool,
+                ainb_hangar_proto::mutation::ReceiptState::Failed,
+                Some(&error.message),
+                now_ms,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    mutation::mark_active_receipt(
+        pool,
+        receipt_lifecycle(receipt.status),
+        receipt.detail.as_deref(),
+        now_ms,
+    )
+    .await;
     to_value(&ainb_hangar_proto::fleet::FleetActionResult { receipt })
+}
+
+/// Map a Fleet action receipt's own status onto the D18 receipt lifecycle.
+///
+/// Two vocabularies for one fact, deliberately kept separate: the Fleet
+/// receipt describes the ACTION's delivery and predates W0-wire on the wire,
+/// while the mutation receipt describes what this OP ID did to a PTY. A
+/// still-pending action has not finished writing, so its mutation receipt stays
+/// `writing` rather than claiming an outcome nothing has established.
+const fn receipt_lifecycle(
+    status: ainb_hangar_proto::fleet::ActionReceiptStatus,
+) -> ainb_hangar_proto::mutation::ReceiptState {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus as Fleet;
+    use ainb_hangar_proto::mutation::ReceiptState as Receipt;
+    match status {
+        Fleet::Pending => Receipt::Writing,
+        Fleet::Delivered => Receipt::Delivered,
+        Fleet::Failed | Fleet::Rejected => Receipt::Failed,
+        Fleet::Unknown => Receipt::Unknown,
+    }
 }
 
 /// Rebuild one stale Claude interview and publish its committed revision.
@@ -2029,7 +2140,59 @@ async fn handle_fleet_message_send(
         message_id = tracing::field::Empty,
         replay = tracing::field::Empty,
     );
-    message_send_inner(pool, params, events).instrument(span).await
+    // The D18 `writing` boundary for prompt send, for the same reason as
+    // `fleet/action`: the verified `send-keys` runs several frames below, in a
+    // file another lane owns, and nothing between here and it writes to a
+    // terminal. Committed before any byte can leave, which is the only property
+    // the receipt needs.
+    let now_ms = SystemClock.now_ms();
+    mutation::mark_active_receipt(
+        pool,
+        ainb_hangar_proto::mutation::ReceiptState::Writing,
+        None,
+        now_ms,
+    )
+    .await;
+    let sent = message_send_inner(pool, params, events).instrument(span).await;
+    mutation::mark_active_receipt(pool, message_send_receipt(sent.as_ref()), None, now_ms).await;
+    sent
+}
+
+/// The D18 receipt state a completed `fleet/message_send` earns.
+///
+/// A send fans out to many recipients, and "did anything reach a PTY" is the
+/// question the receipt answers. One delivered leg means bytes landed, so a
+/// retry must not re-send; every leg refused means nothing did.
+fn message_send_receipt(
+    sent: Result<&serde_json::Value, &RpcError>,
+) -> ainb_hangar_proto::mutation::ReceiptState {
+    use ainb_hangar_proto::mutation::ReceiptState;
+    let Ok(value) = sent else {
+        return ReceiptState::Failed;
+    };
+    let Some(deliveries) = value.get("deliveries").and_then(|d| d.as_array()) else {
+        return ReceiptState::Unknown;
+    };
+    // `state`, not `status`: `FleetMessageDelivery` spells it `state` on the
+    // wire (proto/fleet.rs), and reading the wrong key here made EVERY
+    // successful send record a `failed` receipt while its own result said
+    // DELIVERED.
+    let state_is = |wanted: &str| {
+        deliveries
+            .iter()
+            .any(|d| d.get("state").and_then(serde_json::Value::as_str) == Some(wanted))
+    };
+    if state_is("DELIVERED") {
+        ReceiptState::Delivered
+    } else if state_is("PENDING") {
+        // An ACP leg stays pending until turn end; the pool resolves it later.
+        // Claiming an outcome here would answer for a turn that has not started.
+        ReceiptState::Writing
+    } else if state_is("UNKNOWN") {
+        ReceiptState::Unknown
+    } else {
+        ReceiptState::Failed
+    }
 }
 
 async fn message_send_inner(
@@ -2456,6 +2619,7 @@ async fn deliver_message_leg(
                 action: ControlAction::SendPrompt {
                     text: text.to_string(),
                 },
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             },
             None,
             events,
@@ -4176,6 +4340,7 @@ async fn handle_fleet_broadcast(
                                 action: ainb_hangar_proto::fleet::ControlAction::SendPrompt {
                                     text,
                                 },
+                                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                             },
                             Some(idempotency_key),
                             &events,
@@ -13458,6 +13623,7 @@ mod tests {
             model: None,
             thread_id: None,
             skip_permissions: false,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let failure = reserve_pending_codex_thread(&pool, &params, "/tmp/does-not-matter")
             .await
@@ -14045,6 +14211,7 @@ mod tests {
             action: ControlAction::SendPrompt {
                 text: "hello".to_string(),
             },
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let action_slot =
             DatabaseOperationSlot::try_acquire(store.pool(), "fleet-receipt", &action.request_id)
@@ -14083,6 +14250,7 @@ mod tests {
             provider: FleetProvider::Codex,
             cwd: dir.path().to_string_lossy().into_owned(),
             prompt: None,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let start_slot =
             DatabaseOperationSlot::try_acquire(store.pool(), "fleet-receipt", &start.request_id)

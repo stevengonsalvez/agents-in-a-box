@@ -41,6 +41,7 @@ fn attention_row(id: &str, cwd: &str, kind: &str, created_at: i64, payload: &str
         cwd: cwd.to_string(),
         workspace_id: None,
         kind: kind.to_string(),
+        version: 1,
         payload: payload.to_string(),
         degraded: false,
         created_at,

@@ -67,8 +67,9 @@ fn painted(state: &mut AppState) -> String {
     state.expand_all_workspaces = true;
 
     let mut list = SessionListComponent::new();
+    let mut ui = ainb::app::ui_state::UiState::default();
     let mut term = Terminal::new(TestBackend::new(140, 40)).expect("test terminal");
-    term.draw(|f| list.render(f, f.area(), state)).expect("draw");
+    term.draw(|f| list.render(f, f.area(), state, &mut ui)).expect("draw");
     term.backend()
         .buffer()
         .content()

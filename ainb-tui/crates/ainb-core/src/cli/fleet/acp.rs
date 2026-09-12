@@ -50,6 +50,7 @@ async fn create(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
             // there is no operator intent to resolve from a standing one.
             cwd: Some(cwd),
             scope_key: matches.get_one::<String>("scope").cloned(),
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
         .await;
     let result = match result {
@@ -145,6 +146,7 @@ async fn prune(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             before_order,
             export_path,
             no_export,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
         .await;
     let result = match result {

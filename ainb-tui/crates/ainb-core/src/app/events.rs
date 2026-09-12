@@ -5,12 +5,13 @@
 #[cfg(test)]
 use super::keymap::test_key_codes::*;
 use crate::app::keymap::{
-    Chord, HostFlags, KeyAction, KeyContext, Keymap, UiAction, active_contexts,
+    Chord, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
 };
 use crate::app::{
     AppState,
     screens::ids as screen_ids,
     state::{AsyncAction, AuthMethod, ConfigPane},
+    ui_state::UiState,
 };
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
@@ -105,12 +106,6 @@ pub enum AppEvent {
     /// Toggle the sessions sidebar between full width and the thin rail —
     /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
     ToggleSessionsSidebar,
-    // Log scrolling events
-    ScrollLogsUp,
-    ScrollLogsDown,
-    ScrollLogsToTop,
-    ScrollLogsToBottom,
-    ToggleAutoScroll, // Toggle auto-scroll mode in live logs
     // Mouse events
     MouseClick {
         x: u16,
@@ -221,10 +216,6 @@ pub enum AppEvent {
     AttachTmuxSession,    // Attach to tmux session (full-screen)
     EnterInteractivePane, // Attach in-place: interactive embedded tmux pane
     DetachTmuxSession,    // Detach from tmux session
-    EnterScrollMode,      // Enter scroll mode in tmux preview
-    ExitScrollMode,       // Exit scroll mode in tmux preview
-    ScrollPreviewUp,      // Scroll tmux preview up
-    ScrollPreviewDown,    // Scroll tmux preview down
     ToggleExpandAll,      // Toggle expand/collapse all workspaces
     ToggleSessionMenuBar, // Hide/show the Sessions bottom keymap legend (⇧M)
     // Other tmux rename events
@@ -811,11 +802,11 @@ impl PersistOutcome {
 }
 
 impl EventHandler {
-    fn persist_sessions_pane_preferences(state: &mut AppState) {
+    pub fn persist_sessions_pane_preferences(state: &mut AppState, ui: &UiState) {
         state.app_config.ui_preferences.sessions_sidebar_width =
-            Some(state.sessions_pane_state.preferred_width);
+            Some(ui.sessions_pane.preferred_width);
         state.app_config.ui_preferences.sessions_sidebar_collapsed =
-            Some(state.sessions_pane_state.collapsed);
+            Some(ui.sessions_pane.collapsed);
         if let Err(e) = state.app_config.save() {
             tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
         }
@@ -937,7 +928,11 @@ impl EventHandler {
     }
 
     /// Handle mouse events and convert to appropriate app events
-    pub fn handle_mouse_event(event: AppEvent, state: &mut AppState) -> Option<AppEvent> {
+    pub fn handle_mouse_event(
+        event: AppEvent,
+        state: &mut AppState,
+        ui: &mut UiState,
+    ) -> Option<AppEvent> {
         // Mode boundary (defense in depth): while the interactive embed owns
         // input, host mouse handling must never mutate focus/selection under
         // the live pane. main.rs already swallows/forwards mouse events before
@@ -950,7 +945,7 @@ impl EventHandler {
             AppEvent::MouseRightClick { x, y } => {
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
                     if let Some(crate::app::state::SessionListRowTarget::Attachable(target)) =
-                        state.session_list_row_at_mouse(x, y)
+                        state.session_list_row_at_mouse(&ui.sessions_pane, x, y)
                     {
                         if matches!(
                             target,
@@ -1053,29 +1048,29 @@ impl EventHandler {
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
                     // Click on the bottom keymap legend (or its collapsed hint
                     // row) toggles it — the mouse twin of ⇧M.
-                    if let Some(area) = state.menu_bar_area {
+                    if let Some(area) = ui.menu_bar_area {
                         if Self::point_in_rect(x, y, area) {
                             return Some(AppEvent::ToggleSessionMenuBar);
                         }
                     }
 
-                    if state.sessions_pane_state.is_on_filter_toggle(x, y) {
+                    if ui.sessions_pane.is_on_filter_toggle(x, y) {
                         return Some(AppEvent::CycleSessionFilter);
                     }
 
-                    if state.sessions_pane_state.is_on_toggle(x, y) {
-                        state.sessions_pane_state.toggle_collapsed();
-                        Self::persist_sessions_pane_preferences(state);
+                    if ui.sessions_pane.is_on_toggle(x, y) {
+                        ui.sessions_pane.toggle_collapsed();
+                        Self::persist_sessions_pane_preferences(state, ui);
                         return None;
                     }
 
-                    if state.sessions_pane_state.begin_resize(x, y) {
+                    if ui.sessions_pane.begin_resize(x, y) {
                         return None;
                     }
 
-                    if let Some(target) = state.session_list_row_at_mouse(x, y) {
+                    if let Some(target) = state.session_list_row_at_mouse(&ui.sessions_pane, x, y) {
                         let double_click =
-                            state.sessions_pane_state.record_row_click(target, Instant::now());
+                            ui.sessions_pane.record_row_click(target, Instant::now());
                         state.select_session_list_row(target);
                         if double_click {
                             return Some(AppEvent::AttachTmuxSession);
@@ -1083,12 +1078,12 @@ impl EventHandler {
                         return None;
                     }
 
-                    if state.sessions_pane_state.contains_sessions_point(x, y) {
+                    if ui.sessions_pane.contains_sessions_point(x, y) {
                         state.focused_pane = crate::app::state::FocusedPane::Sessions;
                         return None;
                     }
 
-                    if state.sessions_pane_state.contains_preview_point(x, y) {
+                    if ui.sessions_pane.contains_preview_point(x, y) {
                         state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
                         return None;
                     }
@@ -1120,11 +1115,11 @@ impl EventHandler {
                 }
 
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
-                    let width = state
-                        .sessions_pane_state
+                    let width = ui
+                        .sessions_pane
                         .last_content_width()
                         .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)).0);
-                    state.sessions_pane_state.drag_resize(x, width);
+                    ui.sessions_pane.drag_resize(x, width);
                     return None;
                 }
 
@@ -1165,9 +1160,9 @@ impl EventHandler {
                 }
 
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
-                    state.sessions_pane_state.update_hover(x, y);
-                    if state.sessions_pane_state.finish_resize() {
-                        Self::persist_sessions_pane_preferences(state);
+                    ui.sessions_pane.update_hover(x, y);
+                    if ui.sessions_pane.finish_resize() {
+                        Self::persist_sessions_pane_preferences(state, ui);
                     }
                     return None;
                 }
@@ -1194,7 +1189,7 @@ impl EventHandler {
                     state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
                 }
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
-                    state.sessions_pane_state.update_hover(x, y);
+                    ui.sessions_pane.update_hover(x, y);
                 }
                 None
             }
@@ -1439,21 +1434,24 @@ impl EventHandler {
     /// is ignored at the global layer and falls through to the active
     /// view's normal handling.
     ///
-    /// The settings.json read goes through [`AppState::statusline_status_cached`]
+    /// The settings.json read goes through [`UiState::statusline_status`]
     /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
     /// the filesystem.
-    fn should_wire_statusline(state: &mut AppState) -> bool {
+    fn should_wire_statusline(state: &AppState, ui: &mut UiState) -> bool {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
         let live_source = state.live_window_watcher.snapshot().source;
-        let status = state.statusline_status_cached();
+        let status = ui.statusline_status(state);
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
 
+    /// Convenience wrapper for callers with no renderer of their own (tests,
+    /// and the tripwire harnesses that drive key handling headlessly).
     pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
         let keymap = Keymap::defaults();
-        return Self::handle_key_event_with_keymap(key_event, state, &keymap);
+        let mut ui = UiState::default();
+        Self::handle_key_event_with_keymap(key_event, state, &keymap, &mut ui)
     }
 
     /// Resolve host-owned rows through the data keymap.
@@ -1464,6 +1462,7 @@ impl EventHandler {
         key_event: KeyEvent,
         state: &mut AppState,
         keymap: &Keymap,
+        ui: &mut UiState,
     ) -> Option<AppEvent> {
         let chord = Chord::from_key_event(&key_event);
         // New Session delegates to component-owned handlers in this phase, but
@@ -1503,7 +1502,7 @@ impl EventHandler {
             }
             Some((_, KeyAction::App(event))) => Some(event),
             Some((_, KeyAction::Text(character))) => Self::keymap_text_event(character, state),
-            Some((_, KeyAction::Ui(action))) => Self::keymap_ui_event(action, state),
+            Some((_, KeyAction::Ui(action))) => Self::keymap_ui_event(action, state, ui),
             Some((_, KeyAction::Passthrough | KeyAction::OpenSlashPalette)) | None => None,
         }
     }
@@ -1565,6 +1564,19 @@ impl EventHandler {
             screen_ids::SKILL_MANAGER if state.skill_manager_state.input.is_some() => {
                 Some(AppEvent::SkillManagerInputChar(character))
             }
+            // The browse overlay's Query phase is a free-form buffer: `/`, `:`
+            // and spaces all belong in the query. `browse_query` rows in the
+            // table own only the non-printable keys (tab, enter, esc,
+            // backspace), so without this branch every typed character was
+            // resolved as `KeyAction::Text` and then dropped here, which is
+            // what broke `[b]` search after the dispatcher moved to the table.
+            screen_ids::SKILL_MANAGER
+                if state.skill_manager_state.browse.as_ref().is_some_and(|browse| {
+                    browse.mode == crate::components::skill_manager_screen::BrowseMode::Query
+                }) =>
+            {
+                Some(AppEvent::SkillManagerBrowseInputChar(character))
+            }
             screen_ids::AUTH_SETUP
                 if state
                     .auth_setup_state
@@ -1592,7 +1604,11 @@ impl EventHandler {
 
     /// Apply stateful host commands selected by the key table. None of these
     /// branches inspect terminal key codes: their only input is a typed action.
-    fn keymap_ui_event(action: UiAction, state: &mut AppState) -> Option<AppEvent> {
+    fn keymap_ui_event(
+        action: UiAction,
+        state: &mut AppState,
+        ui: &mut UiState,
+    ) -> Option<AppEvent> {
         use UiAction::{
             PalCycleEngine, PalCycleMode, PalCycleModel, PalRetry, SessionAskBackspace,
             SessionAskNext, SessionAskPrevious, SessionComposerBackspace, SessionComposerCancel,
@@ -1728,13 +1744,23 @@ impl EventHandler {
                 }
             }
             UiAction::UsageWireStatusline => {
-                Self::should_wire_statusline(state).then_some(AppEvent::UsageWireStatusline)
+                Self::should_wire_statusline(state, ui).then_some(AppEvent::UsageWireStatusline)
             }
-            UiAction::PreviewScrollUp
-            | UiAction::PreviewScrollDown
-            | UiAction::PreviewPageUp
-            | UiAction::PreviewPageDown
-            | UiAction::PreviewExitScroll => None,
+            // A read-only mirror uses tmux's own scrollback, so entering the
+            // host's scroll mode over it would swallow navigation invisibly.
+            UiAction::Scroll(ScrollAction::ScrollPreviewUp | ScrollAction::ScrollPreviewDown)
+                if state.is_observing_selected_terminal() =>
+            {
+                state.notify_live_preview_no_scrollback();
+                None
+            }
+            // Scroll is renderer-local: queued for the host to apply against
+            // its `LayoutComponent`, never handed to the reducer. One arm, so a
+            // new `ScrollAction` cannot be left out of it.
+            UiAction::Scroll(scroll) => {
+                ui.queue(scroll);
+                None
+            }
         }
     }
 
@@ -2333,12 +2359,10 @@ impl EventHandler {
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
-            AppEvent::ToggleSessionsSidebar => {
-                // Same path the [-]/[+] mouse glyph takes: flip + persist the
-                // preference so the choice survives restarts.
-                state.sessions_pane_state.toggle_collapsed();
-                Self::persist_sessions_pane_preferences(state);
-            }
+            // Applied in the main loop: the sidebar's collapsed flag is
+            // renderer state (`UiState::sessions_pane`), which the reducer does
+            // not hold. Same path the [-]/[+] mouse glyph takes.
+            AppEvent::ToggleSessionsSidebar => {}
             // Entering the interactive embed is handled in the main loop (it needs
             // the terminal size and the embed lives in the event loop) — no-op here.
             AppEvent::EnterInteractivePane => {}
@@ -2714,26 +2738,6 @@ impl EventHandler {
                 // This event is a no-op placeholder
                 tracing::debug!("DetachTmuxSession event received (no-op)");
             }
-            AppEvent::ScrollPreviewUp => {
-                // Scroll events are handled by the LayoutComponent's tmux_preview
-                // This is a signal that should be processed in main loop
-                tracing::debug!("ScrollPreviewUp event (handled by layout component)");
-                state.ui_needs_refresh = true;
-            }
-            AppEvent::ScrollPreviewDown => {
-                // Scroll events are handled by the LayoutComponent's tmux_preview
-                // This is a signal that should be processed in main loop
-                tracing::debug!("ScrollPreviewDown event (handled by layout component)");
-                state.ui_needs_refresh = true;
-            }
-            AppEvent::EnterScrollMode => {
-                tracing::debug!("EnterScrollMode event (handled by layout component)");
-                state.ui_needs_refresh = true;
-            }
-            AppEvent::ExitScrollMode => {
-                tracing::debug!("ExitScrollMode event (handled by layout component)");
-                state.ui_needs_refresh = true;
-            }
             AppEvent::KillContainer => {
                 if let Some(session_id) = state.attached_session_id {
                     state.pending_async_action = Some(AsyncAction::KillContainer(session_id));
@@ -3043,21 +3047,6 @@ impl EventHandler {
                     old_pane,
                     state.focused_pane
                 );
-            }
-            AppEvent::ScrollLogsUp => {
-                // Handled in main.rs to access layout component
-            }
-            AppEvent::ScrollLogsDown => {
-                // Handled in main.rs to access layout component
-            }
-            AppEvent::ScrollLogsToTop => {
-                // Handled in main.rs to access layout component
-            }
-            AppEvent::ScrollLogsToBottom => {
-                // Handled in main.rs to access layout component
-            }
-            AppEvent::ToggleAutoScroll => {
-                // Handled in main.rs to access layout component
             }
             AppEvent::ConfirmationToggle => {
                 if let Some(ref mut dialog) = state.confirmation_dialog {
@@ -5708,15 +5697,17 @@ impl EventHandler {
                 if state.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
                     return;
                 }
-                match state.statusline_status_cached() {
+                // Read uncached: the install is a once-per-session action, so
+                // it can afford the settings.json read, and it must not act on a
+                // value up to the TTL old. The renderer drops its own cache
+                // after this event lands (`UiState::invalidate_statusline_status`
+                // in the run loop) so the CTA flips on the very next frame.
+                match crate::cli::statusline_install::detect_statusline_status().ok() {
                     Some(StatuslineStatus::Configured) => return,
                     Some(_) => {}
                     None => return,
                 }
                 let outcome = install_statusline();
-                // Any successful install path mutates settings.json, so
-                // drop the cached detection result before the next read.
-                state.invalidate_statusline_status_cache();
                 match outcome {
                     Ok(InstallOutcome::Installed) => {
                         state.app_config.ui_preferences.statusline_decision =
@@ -7253,14 +7244,21 @@ mod panel_back_tests {
         use ratatui::layout::Rect;
         let mut state = AppState::default();
         state.current_screen = ids::SESSION_LIST.to_string();
-        state.menu_bar_area = Some(Rect::new(0, 20, 100, 6));
+        let mut ui = UiState::default();
+        ui.menu_bar_area = Some(Rect::new(0, 20, 100, 6));
 
-        let inside =
-            EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 10, y: 22 }, &mut state);
+        let inside = EventHandler::handle_mouse_event(
+            AppEvent::MouseClick { x: 10, y: 22 },
+            &mut state,
+            &mut ui,
+        );
         assert!(matches!(inside, Some(AppEvent::ToggleSessionMenuBar)));
 
-        let outside =
-            EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 10, y: 5 }, &mut state);
+        let outside = EventHandler::handle_mouse_event(
+            AppEvent::MouseClick { x: 10, y: 5 },
+            &mut state,
+            &mut ui,
+        );
         assert!(!matches!(outside, Some(AppEvent::ToggleSessionMenuBar)));
     }
 

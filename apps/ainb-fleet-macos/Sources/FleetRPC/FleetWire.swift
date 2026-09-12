@@ -64,8 +64,131 @@ struct RPCError: Codable, Equatable {
     let data: JSONValue?
 }
 
+/// `auth/hello` params in their final D17 shape.
+///
+/// `protocol` and `capabilities` are declared, never assumed: a daemon that
+/// predates the negotiation ignores both members and answers the bare `{}` it
+/// always did, which is exactly what `AuthHelloResult`'s defaults read as.
 struct AuthHelloParams: Codable, Equatable {
     let token: String
+    let surface: AuthHelloSurface?
+    let protocolRange: HangarProtocolRange
+    let capabilities: [String]
+
+    private enum CodingKeys: String, CodingKey {
+        case token
+        case surface
+        case protocolRange = "protocol"
+        case capabilities
+    }
+
+    init(
+        token: String,
+        surface: AuthHelloSurface? = nil,
+        protocolRange: HangarProtocolRange = .supported,
+        capabilities: [String] = HangarCapability.clientCatalogue
+    ) {
+        self.token = token
+        self.surface = surface
+        self.protocolRange = protocolRange
+        self.capabilities = capabilities
+    }
+
+    /// Tolerant decode: a frame from a pre-W0-wire client carries only `token`,
+    /// and reading it has to yield "speaks version 1, declares nothing" rather
+    /// than a decoding error. That is the N-1-client leg of the skew matrix.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        token = try container.decode(String.self, forKey: .token)
+        surface = try container.decodeIfPresent(AuthHelloSurface.self, forKey: .surface)
+        protocolRange =
+            try container.decodeIfPresent(HangarProtocolRange.self, forKey: .protocolRange)
+            ?? .legacy
+        capabilities = try container.decodeIfPresent([String].self, forKey: .capabilities) ?? []
+    }
+}
+
+/// The surface metadata the live connection registry records.
+struct AuthHelloSurface: Codable, Equatable {
+    let kind: String
+    let host: String?
+    let pid: Int32?
+}
+
+/// An inclusive Hangar protocol-version range.
+struct HangarProtocolRange: Codable, Equatable {
+    let min: UInt32
+    let max: UInt32
+
+    /// What this build speaks. Mirrors `ainb_hangar_proto::protocol`.
+    static let supported = HangarProtocolRange(min: 1, max: 1)
+    /// What a peer that declared nothing is: version 1 and only 1.
+    static let legacy = HangarProtocolRange(min: 1, max: 1)
+}
+
+/// The `auth/hello` reply.
+///
+/// EVERY member is optional with a legacy default, because a pre-W0-wire daemon
+/// answers `{}` and that has to decode, it is the N-1-daemon leg of the skew
+/// matrix, not an error.
+struct AuthHelloResult: Decodable, Equatable {
+    let protocolRange: HangarProtocolRange
+    let selected: UInt32?
+    let capabilities: [String]
+    let daemonVersion: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolRange = "protocol"
+        case selected
+        case capabilities
+        case daemonVersion = "daemon_version"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolRange =
+            try container.decodeIfPresent(HangarProtocolRange.self, forKey: .protocolRange)
+            ?? .legacy
+        selected = try container.decodeIfPresent(UInt32.self, forKey: .selected)
+        capabilities = try container.decodeIfPresent([String].self, forKey: .capabilities) ?? []
+        daemonVersion = try container.decodeIfPresent(String.self, forKey: .daemonVersion)
+    }
+
+    init(
+        protocolRange: HangarProtocolRange = .legacy,
+        selected: UInt32? = nil,
+        capabilities: [String] = [],
+        daemonVersion: String? = nil
+    ) {
+        self.protocolRange = protocolRange
+        self.selected = selected
+        self.capabilities = capabilities
+        self.daemonVersion = daemonVersion
+    }
+
+    /// The negotiated version, treating a silent daemon as protocol 1.
+    var selectedOrLegacy: UInt32 { selected ?? 1 }
+
+    /// Whether the daemon advertised `capability`.
+    func advertises(_ capability: String) -> Bool { capabilities.contains(capability) }
+}
+
+/// The capability strings this client understands.
+///
+/// Deliberately short: a client declares what it can READ, not the daemon's
+/// whole catalogue. Adding one here is a statement that this app handles it.
+enum HangarCapability {
+    static let authHelloNegotiated = "hangar.auth.hello.negotiated"
+    static let mutationOpID = "hangar.mutation.op_id"
+    static let mutationReceipt = "hangar.mutation.receipt"
+    static let socketVersioned = "hangar.socket.versioned"
+
+    static let clientCatalogue: [String] = [
+        authHelloNegotiated,
+        mutationOpID,
+        mutationReceipt,
+        socketVersioned,
+    ]
 }
 
 indirect enum JSONValue: Codable, Equatable {

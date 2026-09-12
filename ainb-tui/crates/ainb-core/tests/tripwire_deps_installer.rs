@@ -84,16 +84,25 @@ fn deps_installer_cursor_docs_and_install_affordance() {
         panic!("wizard welcome never rendered:\n{last}");
     }
 
-    // Advance through the wizard until DependencyCheck. Rendering transitions
-    // are asynchronous, so fixed key counts can drop an Enter on a slow host.
+    // Advance through the wizard to DependencyCheck. Rendering transitions are
+    // asynchronous, so fixed key counts can drop an Enter on a slow host, which
+    // is why this presses until the screen says it arrived rather than counting.
+    //
+    // It stops pressing at the SCREEN, not at the result, and that distinction
+    // is the whole of this loop. Enter on the dependency step runs the check;
+    // Enter on the dependency step once the check is done ADVANCES. A loop that
+    // kept pressing until the results appeared would therefore race the check
+    // and walk on to Git Directories, and the footer assertions below would run
+    // against the wrong screen. That race was invisible while
+    // `onboarding.dependency_ready` had no bindings and the extra press was a
+    // no-op; it became real the moment those bindings were restored.
+    //
+    // `◉` is the stepper's current-step marker (`render_progress`), so
+    // `◉ Dependencies` is the screen saying where it is, not a guess from body
+    // text that the check's own output also changes.
     let deadline = Instant::now() + Duration::from_secs(40);
-    let mut loaded = None;
     let mut current = capture(&session);
-    while Instant::now() < deadline {
-        if current.contains("Plugin binaries") && !current.contains("Checking dependencies") {
-            loaded = Some(current);
-            break;
-        }
+    while Instant::now() < deadline && !current.contains("◉ Dependencies") {
         send(&session, "Enter");
         let transition_deadline = std::cmp::min(deadline, Instant::now() + Duration::from_secs(5));
         let Some(next) = poll_capture(&session, transition_deadline, |screen| screen != current)
@@ -102,7 +111,23 @@ fn deps_installer_cursor_docs_and_install_affordance() {
         };
         current = next;
     }
-    let loaded = loaded.unwrap_or_else(|| capture(&session));
+    assert!(
+        current.contains("◉ Dependencies"),
+        "wizard never reached the Dependencies step:\n{current}"
+    );
+
+    // Now wait for the check WITHOUT pressing anything: from here every Enter
+    // would leave the screen under test.
+    let Some(loaded) = poll_capture(&session, deadline, |screen| {
+        screen.contains("Plugin binaries") && !screen.contains("Checking dependencies")
+    }) else {
+        // Falling back to a plain capture here would hand the footer
+        // assertions a mid-check screen and report the timeout as a missing
+        // chord, which is a different bug from the one that happened.
+        let last = capture(&session);
+        Command::new("tmux").args(["kill-session", "-t", &session]).status().ok();
+        panic!("dependency check never finished within the deadline:\n{last}");
+    };
 
     // The new keymap footer must advertise the install + cursor affordances.
     assert!(

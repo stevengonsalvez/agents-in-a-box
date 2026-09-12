@@ -1,5 +1,6 @@
 // ABOUTME: Main layout component handling split-pane arrangement and bottom menu bar
 
+use crate::app::ui_state::UiState;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -243,6 +244,30 @@ fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
     if show_menu_bar { 6 } else { 1 }
 }
 
+/// Apply the effects of a frame that only the frame could measure.
+///
+/// The embed's size, the HomeScreen sidebar rect, the welcome panel's viewport
+/// and the log-history entry pane all come out of the layout arithmetic, so
+/// they cannot be known before the draw. Applying them is a mutation and the
+/// draw takes `&AppState`, so the draw records what it measured in [`UiState`]
+/// and this hands it back once the frame is out — which is exactly when the
+/// hit tests and scroll clamps that read them next run.
+pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
+    if let Some((rows, cols)) = ui.embed_desired_size.take() {
+        if let Some(embed) = state.embed.as_mut() {
+            let _ = embed.resize(rows, cols);
+        }
+    }
+
+    let home = &mut state.home_screen_v2_state;
+    if ui.home_sidebar_rect.is_some() {
+        home.last_sidebar_rect = ui.home_sidebar_rect;
+    }
+    (home.welcome.content_height, home.welcome.visible_height) = ui.welcome_viewport;
+
+    state.log_history_state.log_entries_area = ui.log_entries_area;
+}
+
 pub struct LayoutComponent {
     session_list: SessionListComponent,
     logs_viewer: LogsViewerComponent,
@@ -302,7 +327,7 @@ impl LayoutComponent {
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        state: &mut AppState,
+        state: &AppState,
         active: crate::components::session_tabs::SessionTab,
     ) {
         use crate::components::session_tabs::{self, SessionTab};
@@ -327,27 +352,12 @@ impl LayoutComponent {
         match active {
             // Handled by the caller, which keeps the tmux mirror it always had.
             SessionTab::Preview => {}
-            SessionTab::Ask => {
-                // Point the pane at the request it is showing BEFORE painting.
-                // Without this the focus is only initialised by the first key
-                // press, so a request with no options opens with the composer
-                // unfocused — no cursor, no caret, and the operator's first
-                // characters fall through to the session shortcuts.
-                if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
-                    state.ask_state.retarget(&chip);
-                }
-                session_tabs::render_ask(frame, inner, state);
-            }
+            SessionTab::Ask => session_tabs::render_ask(frame, inner, state),
             SessionTab::Err => session_tabs::render_err(frame, inner, state),
             SessionTab::Log => {
-                // Started here rather than at construction, for the same reason
-                // the attention poller is: an `ainb` invocation that never opens
-                // this pane never opens the notifications store. `spawn` is
-                // idempotent.
-                crate::fleet::session_log::spawn(&state.session_log, &state.session_log_running);
-                // The read itself belongs to that worker. Asking for it here —
-                // inside `terminal.draw` — is what made this pane cost up to
-                // 948 ms a frame on a real store.
+                // The read itself belongs to the worker `tick_before_draw`
+                // starts. Asking for it here — inside `terminal.draw` — is what
+                // made this pane cost up to 948 ms a frame on a real store.
                 let log = state.get_selected_session().map_or(
                     crate::fleet::session_log::Log::Rows(Vec::new()),
                     |session| {
@@ -364,36 +374,17 @@ impl LayoutComponent {
             // state machine either way, so the two cannot drift in what they
             // render or which failures they report.
             SessionTab::Pal => {
-                // The dial ticks with the pane, so the registry read and any
-                // in-flight configure land without the operator pressing
-                // anything, exactly like the chat host's own tick.
-                if state.pal_dial.tick() {
-                    state.ui_needs_refresh = true;
-                }
-                // The offer's own tick, for the same reason: the start runs on
-                // a detached worker, and its result has to reach the pane
-                // without the operator pressing anything else.
-                if state.daemon_start_cta.tick() {
-                    state.ui_needs_refresh = true;
-                }
-                // Cloned rather than borrowed: `chat_host_for` needs `&mut
-                // state` to tick the conversation, and the header is three
-                // strings and a status.
                 let header = session_tabs::pal_header(&state.pal_dial);
-                // Ticked for its effect, then re-read through `chat_host`:
-                // `chat_host_for` borrows the whole state mutably and the offer
-                // beside it is another field of the same state, so the two
-                // borrows cannot be held at once. `chat_host_for` ENDS by
-                // calling `chat_host`, so what is painted below is what was
-                // ticked here rather than a second guess at which host this tab
-                // shows.
-                let _ = state.chat_host_for(active);
                 // Inserted between the header and the conversation rather than
                 // replacing either. Both still have something true to say with
                 // the daemon down — the dials an operator recovers an adapter
                 // with, and the call the chat could not make — and the offer is
                 // the one thing neither of them could say.
                 let offer = state.pal_daemon_cta_open().then_some(&state.daemon_start_cta);
+                // `chat_host`, not `chat_host_for`: the conversation was ticked
+                // in `tick_before_draw`, and `chat_host_for` ENDS by calling
+                // this, so what is painted is what was ticked rather than a
+                // second guess at which host this tab shows.
                 session_tabs::render_pal(frame, inner, header, offer, state.chat_host(active));
             }
             SessionTab::Thread => {
@@ -403,7 +394,7 @@ impl LayoutComponent {
                 // private thread. The strip label says which it currently is.
                 let targets = state.broadcast_targets();
                 if targets.is_empty() {
-                    match state.chat_host_for(active) {
+                    match state.chat_host(active) {
                         Some(host) => session_tabs::render_chat(frame, inner, host),
                         // Reachable only for `thread` with no session selected,
                         // which the strip already dims — say it rather than
@@ -415,9 +406,6 @@ impl LayoutComponent {
                         ),
                     }
                 } else {
-                    if state.broadcast.tick() {
-                        state.ui_needs_refresh = true;
-                    }
                     let unreachable = state.broadcast_unreachable();
                     session_tabs::render_broadcast(
                         frame,
@@ -431,7 +419,107 @@ impl LayoutComponent {
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame, state: &mut AppState) {
+    /// Advance every live state machine the draw path used to tick, then let
+    /// the draw be a pure read of the result.
+    ///
+    /// Each of these was written inside `render` because that is where the
+    /// operator sees the result, not because painting is when they should
+    /// happen: a conversation, a dial, an answer worker and a broadcast all
+    /// advance on wall-clock time. The gates are the ones `render` applied —
+    /// same screen, same tab, same emptiness check — so nothing ticks that
+    /// would not have ticked before.
+    pub fn tick_before_draw(&self, state: &mut AppState) {
+        use crate::components::session_tabs::{self, SessionTab};
+
+        // Fold in what the daemon workers reported and keep the collector
+        // alive. Gated on the screen for the same reason `DaemonsScreen::render`
+        // was the only caller: an operator who never opens it never starts a
+        // collector thread.
+        if state.current_screen == screen_ids::DAEMONS {
+            state.daemons_state.tick();
+        }
+
+        // Registry-routed screens return before any of this in `render`.
+        if self.screens.contains(&state.current_screen) {
+            return;
+        }
+
+        // The active tab, reconciled against what is actually available: a tab
+        // can go dead under the operator (the ASK is answered, the cursor moves
+        // off a session row) and leaving them on a stale pane shows a question
+        // they can no longer act on.
+        let active = session_tabs::resolve(state, state.session_tab);
+        state.session_tab = active;
+
+        // Fold in whatever the answer worker reported. EVERY frame, not only on
+        // the `ask` tab: the row's `SENT` chip is painted by the session list,
+        // so an operator who sends and then switches tabs would otherwise watch
+        // that chip stay SENT forever.
+        if state.ask_state.tick() {
+            state.ui_needs_refresh = true;
+        }
+
+        // An attached embed owns the right pane outright, and `preview` is a
+        // tmux mirror with no state machine of its own.
+        if state.is_interactive_pane() || active == SessionTab::Preview {
+            return;
+        }
+
+        match active {
+            SessionTab::Preview | SessionTab::Err => {}
+            SessionTab::Ask => {
+                // Point the pane at the request it is showing BEFORE painting.
+                // Without this the focus is only initialised by the first key
+                // press, so a request with no options opens with the composer
+                // unfocused — no cursor, no caret, and the operator's first
+                // characters fall through to the session shortcuts.
+                if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
+                    state.ask_state.retarget(&chip);
+                }
+            }
+            SessionTab::Log => {
+                // Started here rather than at construction, for the same reason
+                // the attention poller is: an `ainb` invocation that never opens
+                // this pane never opens the notifications store. `spawn` is
+                // idempotent.
+                crate::fleet::session_log::spawn(&state.session_log, &state.session_log_running);
+            }
+            SessionTab::Pal => {
+                // The dial ticks with the pane, so the registry read and any
+                // in-flight configure land without the operator pressing
+                // anything, exactly like the chat host's own tick.
+                if state.pal_dial.tick() {
+                    state.ui_needs_refresh = true;
+                }
+                // The offer's own tick, for the same reason: the start runs on
+                // a detached worker, and its result has to reach the pane
+                // without the operator pressing anything else.
+                if state.daemon_start_cta.tick() {
+                    state.ui_needs_refresh = true;
+                }
+                let _ = state.chat_host_for(active);
+            }
+            SessionTab::Thread => {
+                // Checked rows win over the cursor, the same rule `Enter` and
+                // `r` follow on this screen: with a multi-select active this
+                // pane is a broadcast to the checked set, not one session's
+                // private thread.
+                if state.broadcast_targets().is_empty() {
+                    let _ = state.chat_host_for(active);
+                } else if state.broadcast.tick() {
+                    state.ui_needs_refresh = true;
+                }
+            }
+        }
+    }
+
+    pub fn render(&mut self, frame: &mut Frame, state: &AppState, ui: &mut UiState) {
+        // Both are re-published by the branch that paints the embed. Cleared
+        // first so a frame that does NOT paint it can neither replay a stale
+        // resize nor leave the mouse forwarder pointing at a pane that is gone
+        // — which is what `release_interactive_pane` used to have to do by hand.
+        ui.embed_desired_size = None;
+        ui.embed_pane_area = None;
         // Full-screen views go through the screen registry. Each Screen impl
         // owns its component(s) and renders any screen-specific overlays
         // (e.g. Config's auth-provider/config popups). Help overlay is
@@ -439,7 +527,7 @@ impl LayoutComponent {
         let frame_size = frame.area();
         if let Some(screen) = self.screens.get_mut(&state.current_screen) {
             tracing::debug!("Rendering screen via registry: {}", state.current_screen);
-            screen.render(frame, frame_size, state);
+            screen.render(frame, frame_size, state, ui);
             // Notifications must render on registry-routed screens too —
             // before this fix they only painted on the legacy
             // fallthrough path, which silently masked any
@@ -485,14 +573,14 @@ impl LayoutComponent {
             .split(frame.area());
 
         // Render top status bar
-        self.render_status_bar(frame, main_layout[0], state);
+        self.render_status_bar(frame, main_layout[0], state, ui);
 
         // Simple 2-panel layout: session list | logs (Claude chat is now a popup).
         // The interactive embed honors whatever sidebar layout the user has
         // (decision 2026-06-12: no forced collapse — the sidebar is a fixed
         // ~40 cols, modern TUIs reflow cleanly, and `B` pre-collapses to the
         // rail when maximum embed width is wanted).
-        let sessions_width = state.sessions_pane_state.effective_width(main_layout[1].width);
+        let sessions_width = ui.sessions_pane.effective_width(main_layout[1].width);
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -500,13 +588,13 @@ impl LayoutComponent {
                 Constraint::Min(0),                 // Live logs stream
             ])
             .split(main_layout[1]);
-        state.sessions_pane_state.set_layout(content_chunks[0], content_chunks[1]);
+        ui.sessions_pane.set_layout(content_chunks[0], content_chunks[1]);
 
         // Pass focus information to components
-        if state.sessions_pane_state.collapsed {
-            self.render_collapsed_sessions_rail(frame, content_chunks[0], state);
+        if ui.sessions_pane.collapsed {
+            self.render_collapsed_sessions_rail(frame, content_chunks[0], state, ui);
         } else {
-            self.session_list.render(frame, content_chunks[0], state);
+            self.session_list.render(frame, content_chunks[0], state, ui);
         }
 
         // The legacy capture renderer supports regular sessions and shells.
@@ -519,20 +607,9 @@ impl LayoutComponent {
             || state.selected_shell_session().is_some();
         let observing_selection = state.is_observing_selected_terminal();
 
-        // The active tab, reconciled against what is actually available: a tab
-        // can go dead under the operator (the ASK is answered, the cursor moves
-        // off a session row) and leaving them on a stale pane shows a question
-        // they can no longer act on.
-        let active_tab = crate::components::session_tabs::resolve(state, state.session_tab);
-        state.session_tab = active_tab;
-
-        // Fold in whatever the answer worker reported. EVERY frame, not only on
-        // the `ask` tab: the row's `SENT` chip is painted by the session list,
-        // so an operator who sends and then switches tabs would otherwise watch
-        // that chip stay SENT forever.
-        if state.ask_state.tick() {
-            state.ui_needs_refresh = true;
-        }
+        // Already reconciled by `tick_before_draw` against what is actually
+        // available, so this is a read of a settled value, not a second guess.
+        let active_tab = state.session_tab;
 
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to
@@ -547,12 +624,10 @@ impl LayoutComponent {
                 vertical: 1,
                 horizontal: 1,
             });
-            if let Some(e) = state.embed.as_mut() {
-                let _ = e.resize(inner.height, inner.width);
-            }
+            ui.embed_desired_size = Some((inner.height, inner.width));
             // Publish the interior so mouse events can be translated into
             // 1-based pane-local SGR coordinates (see encode_mouse_event).
-            state.embed_pane_area = Some(inner);
+            ui.embed_pane_area = Some(inner);
             self.tmux_preview.render_interactive(frame, area, state);
         } else if active_tab == crate::components::session_tabs::SessionTab::Preview {
             // The observer is not a branch of its own: it is what `preview`
@@ -569,10 +644,7 @@ impl LayoutComponent {
                     vertical: 1,
                     horizontal: 1,
                 });
-                if let Some(observer) = state.embed.as_mut() {
-                    let _ = observer.resize(inner.height, inner.width);
-                }
-                state.embed_pane_area = None;
+                ui.embed_desired_size = Some((inner.height, inner.width));
                 self.tmux_preview.render_observer(frame, area, state);
             } else if selected_has_legacy_preview {
                 // Read-only tmux capture. Initial attach can take one frame, so
@@ -598,7 +670,7 @@ impl LayoutComponent {
 
         // Render bottom menu bar. Publish its rect so a mouse click on the
         // legend (or its collapsed hint row) can toggle visibility.
-        state.menu_bar_area = Some(main_layout[3]);
+        ui.menu_bar_area = Some(main_layout[3]);
         self.render_menu_bar(frame, main_layout[3], state);
 
         // Render help overlay if visible
@@ -648,8 +720,14 @@ impl LayoutComponent {
         &mut self.tmux_preview
     }
 
-    fn render_collapsed_sessions_rail(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let border_color = if state.sessions_pane_state.edge_highlighted() {
+    fn render_collapsed_sessions_rail(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &AppState,
+        ui: &UiState,
+    ) {
+        let border_color = if ui.sessions_pane.edge_highlighted() {
             GOLD
         } else if state.focused_pane == crate::app::state::FocusedPane::Sessions {
             SELECTION_GREEN
@@ -1000,7 +1078,7 @@ impl LayoutComponent {
         );
     }
 
-    fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &mut AppState) {
+    fn render_status_bar(&self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
         let mut status_spans: Vec<Span> = vec![];
 
         // Claude-chat popup toggle — a small global indicator. The
@@ -1025,7 +1103,7 @@ impl LayoutComponent {
         let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
         const SEP_W: usize = 5; // "  │  "
         let avail = area_inner_w.saturating_sub(existing_w + SEP_W);
-        let live_spans = build_live_status_spans(state, avail);
+        let live_spans = build_live_status_spans(state, ui, avail);
         if !live_spans.is_empty() {
             status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
             status_spans.extend(live_spans);
@@ -1358,15 +1436,19 @@ mod menu_bar_render_tests {
 /// bar. Returns an empty vec when nothing should render (statusline
 /// unwired AND user declined, or status detection failed).
 ///
-/// The settings.json read goes through [`AppState::statusline_status_cached`]
+/// The settings.json read goes through [`UiState::statusline_status`]
 /// so the top bar's 30-60Hz redraws don't translate into 30-60Hz
 /// filesystem reads.
-pub fn build_live_status_spans(state: &mut AppState, max_width: usize) -> Vec<Span<'static>> {
+pub fn build_live_status_spans(
+    state: &AppState,
+    ui: &mut UiState,
+    max_width: usize,
+) -> Vec<Span<'static>> {
     use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
 
-    let status = state.statusline_status_cached();
+    let status = ui.statusline_status(state);
     let decision = state.app_config.ui_preferences.statusline_decision;
 
     // Trust the cache: if Tier1 data is flowing — whether it came from

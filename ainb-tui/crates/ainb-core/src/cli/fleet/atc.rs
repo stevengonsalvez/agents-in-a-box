@@ -324,6 +324,7 @@ heartbeat falls back to the local timer"
         err_retry_cap: None,
         idle_pause_min: Some(i64::from(meta.idle_pause_min)),
         expected_generation: None,
+        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
     };
     match client.atc_register(params).await {
         Ok(_) => true,
@@ -362,6 +363,7 @@ the instance row is left as-is"
         .atc_unregister(AtcUnregisterParams {
             name: name.to_string(),
             expected_generation: None,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
         .await
     {
@@ -2782,6 +2784,7 @@ mod tests {
             degraded: false,
             created_at: 0,
             channels,
+            version: 1,
         }
     }
 

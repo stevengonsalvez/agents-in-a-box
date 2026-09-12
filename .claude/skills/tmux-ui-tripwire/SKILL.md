@@ -71,6 +71,8 @@ Full copy-paste helper functions in `references/helpers.md`.
 |---|---|---|
 | Stage plugins (if test exercises plugin path) | `just stage-plugins` | Plugins live at `dist/plugins/<id>/<id>` and are re-signed for macOS AMFI |
 | Build ainb | `cargo build -p ainb` | Test resolves binary via `env!("CARGO_BIN_EXE_ainb")` |
+| Build the plugin host binaries | `cargo build -p ainb-plugin-runtime --bins` | A tripwire that drives a plugin screen needs the host's own binaries present, not just the staged plugin. Without them the TUI comes up on the home screen and the test's first assertion fails against a screen that never opened |
+| Use a private tmux server | `export TMUX_TMPDIR=$HOME/.<lane>-tmux` | The shared server sizes new windows to whatever its existing client has, commonly 63x36, which truncates every screen these tests assert on. Set it as its OWN command, never behind a `&&` after a `cd` that can fail |
 
 ## Hard rules (violating these costs hours)
 

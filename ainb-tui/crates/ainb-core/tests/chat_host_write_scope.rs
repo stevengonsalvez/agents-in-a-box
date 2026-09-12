@@ -251,6 +251,7 @@ fn answering_a_confirm_pages_the_conversation_it_was_answered_in() {
         ChatIntent::ConfirmAnswer(FleetConfirmAnswerParams {
             confirm_id: "01J0CARDREADING".to_string(),
             answer: FleetConfirmAnswer::Approve,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
     });
 }
@@ -370,6 +371,7 @@ fn a_refused_confirm_answer_reads_as_a_failed_answer_and_keeps_the_sends_legs() 
     host.dispatch(ChatIntent::ConfirmAnswer(FleetConfirmAnswerParams {
         confirm_id: "01J0CARDTHATNEVEREXISTED".to_string(),
         answer: FleetConfirmAnswer::Approve,
+        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
     }));
     tick_until(&mut host, "the refused answer", |host| {
         host.state().feedback().is_some_and(|line| line.contains("failed: "))

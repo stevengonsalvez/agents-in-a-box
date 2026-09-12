@@ -8,9 +8,6 @@
 //! ([`ainb_hangar_store`](../ainb_hangar_store/index.html)) and the daemon both
 //! depend on it, never the other way around.
 
-/// Structured acceptance criteria: per-criterion stable id + checked state
-/// (multica parity #11-rest), plus the tolerant legacy/structured JSON codec
-/// shared by the store column and the wire.
 pub mod acceptance;
 /// Per-issue ACTIVITY vocabulary (multica parity #13): the stable
 /// `created | status_changed | assignee_changed | …` action tokens plus the
@@ -66,6 +63,11 @@ pub mod lsof;
 /// per-target routing outcome vocabulary (multica parity #2-rest). The pure
 /// half; resolution + writes live in `ainb_hangar_store::service::mention`.
 pub mod mention;
+/// Structured acceptance criteria: per-criterion stable id + checked state
+/// (multica parity #11-rest), plus the tolerant legacy/structured JSON codec
+/// shared by the store column and the wire.
+/// The 128 bits behind a D18 op id.
+pub mod opid;
 /// Issue / task ORIGIN PROVENANCE: the validated `(origin_type, origin_id)`
 /// pair over the closed `{autopilot, comment_mention, manual}` allow-list
 /// (multica parity #21, migration 0056).
@@ -97,6 +99,8 @@ pub mod skill;
 /// Workspace-scoped orchestration over a [`skill_service::SkillBackend`] the
 /// daemon wraps with sqlx and tests fake.
 pub mod skill_service;
+/// Where a client dials the Hangar daemon, and why it is allowed to.
+pub mod socket;
 /// The task domain: the `agent_task_queue` lifecycle FSM.
 pub mod task;
 /// The `agent_task_queue` lifecycle status enum (P0 placeholder).

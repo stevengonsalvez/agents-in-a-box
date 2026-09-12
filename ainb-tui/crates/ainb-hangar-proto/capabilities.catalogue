@@ -1,0 +1,71 @@
+# The ONE capability catalogue (D17).
+#
+# Every string this wire has ever advertised, in the order it was added.
+# APPEND-ONLY: a line may be added, never removed and never reordered.
+# Removing a capability is a PROTOCOL_VERSION bump, not an edit to this file.
+#
+# Blank lines and `#` comments are ignored. Enforced by
+# ainb-hangar-proto/tests/capability_catalogue.rs.
+hangar.auth.hello.negotiated
+hangar.mutation.op_id
+hangar.mutation.receipt
+hangar.socket.versioned
+hangar.connections.registry
+hangar.attention.inbox
+hangar.workspace.subscribe
+hangar.issue.read
+hangar.issue.write
+hangar.board.read
+hangar.board.write
+hangar.agent.read
+hangar.agent.write
+hangar.skill.read
+hangar.skill.write
+hangar.autopilot.read
+hangar.autopilot.write
+hangar.squad.read
+hangar.squad.write
+hangar.member.read
+hangar.member.write
+hangar.inbox.read
+hangar.notify.rules
+hangar.daemon.config
+hangar.profile.read
+hangar.profile.write
+hangar.property.catalog
+hangar.task.control
+hangar.usage.rollup
+hangar.run.history
+hangar.pr_status.refresh
+hangar.health
+hangar.search
+hangar.repo.list
+hangar.dispatch.attempts
+atc.registry
+codex.session
+fleet.acp.spawn
+fleet.action.execute
+fleet.chat.read
+fleet.chat.write
+fleet.confirm.answer
+fleet.copilot.configure
+fleet.copilot.gate
+fleet.atc.read
+fleet.broadcast.execute
+fleet.message.read
+fleet.message.send
+fleet.protocol.negotiate
+fleet.receipt.read
+fleet.quota.read
+fleet.snapshot.read
+fleet.start.execute
+fleet.subscription.live
+fleet.subscription.replay
+fleet.subscription.resync
+fleet.timeline.read
+fleet.transcript.prune
+fleet.transcript.read
+fleet.runtime.read
+fleet.usage.read
+fleet.dashboard.read
+hangar.attention.fence

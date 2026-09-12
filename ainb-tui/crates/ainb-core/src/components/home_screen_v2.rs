@@ -4,6 +4,7 @@
 // - Premium VS Code/Discord-style sidebar navigation with shortcuts
 // - Welcome panel with getting started guide and architecture overview
 
+use crate::app::ui_state::UiState;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -121,10 +122,6 @@ impl HomeScreenV2State {
 
     pub fn rendered_sidebar_width(&self) -> Option<u16> {
         self.last_sidebar_rect.map(|rect| rect.width)
-    }
-
-    fn remember_sidebar_rect(&mut self, rect: Rect) {
-        self.last_sidebar_rect = Some(rect);
     }
 
     pub fn sidebar_edge_highlighted(&self) -> bool {
@@ -258,10 +255,11 @@ impl HomeScreenV2Component {
         &self,
         frame: &mut Frame,
         area: Rect,
-        state: &mut HomeScreenV2State,
+        state: &HomeScreenV2State,
         workspaces: &[Workspace],
+        ui: &mut UiState,
     ) {
-        self.render_with_loading(frame, area, state, workspaces, false)
+        self.render_with_loading(frame, area, state, workspaces, false, ui)
     }
 
     /// Main render function with loading indicator support
@@ -269,9 +267,10 @@ impl HomeScreenV2Component {
         &self,
         frame: &mut Frame,
         area: Rect,
-        state: &mut HomeScreenV2State,
+        state: &HomeScreenV2State,
         workspaces: &[Workspace],
         is_loading: bool,
+        ui: &mut UiState,
     ) {
         let layout_mode = LayoutMode::detect(area);
 
@@ -281,26 +280,17 @@ impl HomeScreenV2Component {
 
         match layout_mode {
             LayoutMode::Full | LayoutMode::Standard => {
-                self.render_full_layout_with_loading(frame, area, state, workspaces, is_loading);
+                self.render_full_layout_with_loading(
+                    frame, area, state, workspaces, is_loading, ui,
+                );
             }
             LayoutMode::Compact => {
-                self.render_compact_layout(frame, area, state, workspaces);
+                self.render_compact_layout(frame, area, state, workspaces, ui);
             }
             LayoutMode::Minimal => {
-                self.render_minimal_layout(frame, area, state);
+                self.render_minimal_layout(frame, area, state, ui);
             }
         }
-    }
-
-    /// Full layout with sidebar, mascot header, and welcome panel
-    fn render_full_layout(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        state: &mut HomeScreenV2State,
-        workspaces: &[Workspace],
-    ) {
-        self.render_full_layout_with_loading(frame, area, state, workspaces, false)
     }
 
     /// Full layout with loading indicator support
@@ -308,9 +298,10 @@ impl HomeScreenV2Component {
         &self,
         frame: &mut Frame,
         area: Rect,
-        state: &mut HomeScreenV2State,
+        state: &HomeScreenV2State,
         workspaces: &[Workspace],
         is_loading: bool,
+        ui: &mut UiState,
     ) {
         // Vertical layout: header, main content, recent activity, help bar
         let main_layout = Layout::default()
@@ -335,7 +326,7 @@ impl HomeScreenV2Component {
                 Constraint::Min(1),                // Welcome panel
             ])
             .split(main_layout[1]);
-        state.remember_sidebar_rect(content_layout[0]);
+        ui.home_sidebar_rect = Some(content_layout[0]);
 
         // Render sidebar
         self.sidebar.render_with_edge_highlight(
@@ -346,7 +337,7 @@ impl HomeScreenV2Component {
         );
 
         // Render welcome panel (needs mutable state for scroll tracking)
-        self.welcome_panel.render(frame, content_layout[1], &mut state.welcome);
+        ui.welcome_viewport = self.welcome_panel.render(frame, content_layout[1], &state.welcome);
 
         // Render recent activity (or loading indicator)
         if is_loading {
@@ -389,8 +380,9 @@ impl HomeScreenV2Component {
         &self,
         frame: &mut Frame,
         area: Rect,
-        state: &mut HomeScreenV2State,
+        state: &HomeScreenV2State,
         workspaces: &[Workspace],
+        ui: &mut UiState,
     ) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
@@ -413,7 +405,7 @@ impl HomeScreenV2Component {
                 Constraint::Min(1),                // Welcome panel
             ])
             .split(layout[1]);
-        state.remember_sidebar_rect(content_layout[0]);
+        ui.home_sidebar_rect = Some(content_layout[0]);
 
         self.sidebar.render_with_edge_highlight(
             frame,
@@ -421,14 +413,20 @@ impl HomeScreenV2Component {
             &state.sidebar,
             state.sidebar_edge_highlighted(),
         );
-        self.welcome_panel.render(frame, content_layout[1], &mut state.welcome);
+        ui.welcome_viewport = self.welcome_panel.render(frame, content_layout[1], &state.welcome);
 
         self.render_recent_activity(frame, layout[2], workspaces);
         self.render_help_bar(frame, layout[3], state);
     }
 
     /// Minimal layout for very small terminals
-    fn render_minimal_layout(&self, frame: &mut Frame, area: Rect, state: &mut HomeScreenV2State) {
+    fn render_minimal_layout(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &HomeScreenV2State,
+        ui: &mut UiState,
+    ) {
         // Just show sidebar as a simple list
         let layout = Layout::default()
             .direction(Direction::Vertical)
@@ -456,7 +454,7 @@ impl HomeScreenV2Component {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(sidebar_width), Constraint::Min(1)])
             .split(layout[1]);
-        state.remember_sidebar_rect(content_layout[0]);
+        ui.home_sidebar_rect = Some(content_layout[0]);
 
         self.sidebar.render_with_edge_highlight(
             frame,
@@ -696,10 +694,11 @@ mod tests {
         let component = HomeScreenV2Component::new();
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
-        let mut state = HomeScreenV2State::new();
+        let state = HomeScreenV2State::new();
+        let mut ui = crate::app::ui_state::UiState::default();
 
         terminal
-            .draw(|frame| component.render(frame, frame.area(), &mut state, &[]))
+            .draw(|frame| component.render(frame, frame.area(), &state, &[], &mut ui))
             .unwrap();
 
         terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect()
@@ -743,7 +742,7 @@ mod tests {
     #[test]
     fn detects_sidebar_drag_start_band() {
         let mut state = HomeScreenV2State::new();
-        state.remember_sidebar_rect(Rect::new(0, 4, 26, 20));
+        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 20));
 
         assert!(state.begin_sidebar_resize(24, 8));
         assert!(state.sidebar_resize_active);
@@ -762,7 +761,7 @@ mod tests {
     #[test]
     fn drag_resize_updates_width_with_bounds() {
         let mut state = HomeScreenV2State::new();
-        state.remember_sidebar_rect(Rect::new(0, 4, 26, 20));
+        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 20));
         assert!(state.begin_sidebar_resize(25, 8));
         assert!(state.drag_sidebar_resize(44, 120));
         assert_eq!(state.sidebar.preferred_width, 45);
@@ -777,7 +776,7 @@ mod tests {
     #[test]
     fn sidebar_click_selects_then_double_click_navigates() {
         let mut state = HomeScreenV2State::new();
-        state.remember_sidebar_rect(Rect::new(0, 4, 26, 30));
+        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
         let now = Instant::now();
 
         // first_item_y = rect.y + 3 = 7. Sessions (item 0) is selected and 2 rows
@@ -796,7 +795,7 @@ mod tests {
     #[test]
     fn slow_second_sidebar_click_is_not_double_click() {
         let mut state = HomeScreenV2State::new();
-        state.remember_sidebar_rect(Rect::new(0, 4, 26, 30));
+        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
         let now = Instant::now();
 
         assert!(!state.click_sidebar_item_at(3, 10, now).unwrap().double_click);
@@ -819,13 +818,14 @@ mod tests {
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
         let mut state = HomeScreenV2State::new();
         state.sidebar.set_preferred_width(40, 120);
+        let mut ui = crate::app::ui_state::UiState::default();
 
         terminal
             .draw(|frame| {
-                component.render(frame, Rect::new(0, 0, 120, 40), &mut state, &[]);
+                component.render(frame, Rect::new(0, 0, 120, 40), &state, &[], &mut ui);
             })
             .unwrap();
 
-        assert_eq!(state.rendered_sidebar_width(), Some(40));
+        assert_eq!(ui.home_sidebar_rect.map(|rect| rect.width), Some(40));
     }
 }

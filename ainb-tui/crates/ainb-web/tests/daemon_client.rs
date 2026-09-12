@@ -138,6 +138,7 @@ async fn answer_round_trips_and_decodes_outcome() {
             answer: "2".into(),
             answered_by: "web".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
         .await
         .expect("attention/answer ok");

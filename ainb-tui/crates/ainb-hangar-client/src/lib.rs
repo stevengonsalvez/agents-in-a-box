@@ -121,10 +121,24 @@ impl DaemonError {
     }
 }
 
-/// The daemon unix socket path (`{hangar_home}/hangar.sock`).
+/// The daemon unix socket path.
+///
+/// D17: the versioned alias `hangar-v<N>.sock` when the daemon published one
+/// and it is verifiably the daemon's own symlink, else the unversioned
+/// `hangar.sock`. The verification lives in
+/// [`ainb_hangar_core::socket::dial_path_in`], one copy, shared with
+/// `ainb-web`, because the FIRST frame on this socket is the daemon token and a
+/// path that any same-uid process can squat must not be preferred blind.
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
-    Some(ainb_hangar_core::hangar_home()?.join("hangar.sock"))
+    let home = ainb_hangar_core::hangar_home()?;
+    Some(socket_path_in(&home))
+}
+
+/// [`socket_path`] against an explicit home.
+#[must_use]
+pub fn socket_path_in(home: &std::path::Path) -> PathBuf {
+    ainb_hangar_core::socket::dial_path_in(home, ainb_hangar_proto::protocol::PROTOCOL_VERSION)
 }
 
 /// Client for stateless daemon RPCs and persistent Fleet subscription.
@@ -332,7 +346,22 @@ impl DaemonClient {
 
     /// Answer one open attention row (`attention/answer`). The daemon runs the
     /// first-answer-wins + C1 guards and performs the verified last-mile send.
-    pub async fn answer(&self, params: AnswerParams) -> Result<AnswerResult, DaemonError> {
+    pub async fn answer(&self, mut params: AnswerParams) -> Result<AnswerResult, DaemonError> {
+        // D18: an answer with no op id gets no ledger row, and therefore no
+        // receipt - which means a daemon killed mid-`send-keys` leaves nothing
+        // to surface as `delivery_unconfirmed`. Minting one here turns that
+        // safety on for every local surface (TUI, CLI, bridge) with no
+        // call-site change.
+        //
+        // Fresh per call, deliberately: a DERIVED id would make an operator's
+        // second attempt at a reopened row replay the first attempt's failure
+        // instead of delivering. A caller that wants retry-idempotence supplies
+        // its own id and keeps it across the retry.
+        if params.mutation.op_id.is_none() {
+            params.mutation.op_id = Some(ainb_hangar_proto::mutation::OpId::from_bytes(
+                ainb_hangar_core::opid::mint_bytes(),
+            ));
+        }
         let value = serde_json::to_value(params).expect("AnswerParams serializes");
         let result = self.call(methods::ATTENTION_ANSWER, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
@@ -692,7 +721,15 @@ impl DaemonClient {
     /// Encode the optional surface extension without widening every client call
     /// site's public parameter list.
     fn hello_params(&self) -> Value {
-        json!({ "token": self.token, "surface": self.surface })
+        json!({
+            "token": self.token,
+            "surface": self.surface,
+            // D17: what this build can speak, and what it understands. A daemon
+            // that predates the negotiation ignores both members and answers
+            // the same bare `{}` it always did.
+            "protocol": ainb_hangar_proto::protocol::ProtocolRange::supported(),
+            "capabilities": ainb_hangar_proto::protocol::catalogue_strings(),
+        })
     }
 
     async fn open_connections_subscription_inner(

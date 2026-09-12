@@ -40,6 +40,7 @@ pub mod issue_reaction;
 pub mod issue_subscriber;
 pub mod label;
 pub mod member;
+pub mod mutation_ledger;
 pub mod notify_rule;
 pub mod profile;
 pub mod run_history;

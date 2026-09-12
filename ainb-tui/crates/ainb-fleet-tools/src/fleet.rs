@@ -240,6 +240,7 @@ impl FleetTools {
                 &FleetPalGateParams {
                     tool: tool.to_string(),
                     arguments: arguments.clone(),
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 },
                 GATE_TIMEOUT,
             )
@@ -442,6 +443,7 @@ impl FleetTools {
                 // The safety-critical route: on an ambiguous target the daemon
                 // REFUSES rather than guessing which session gets the answer.
                 is_answer: true,
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             })
             .await?;
 
@@ -507,6 +509,7 @@ impl FleetTools {
                 origin_message_id: None,
                 text: text.to_string(),
                 request_id: request_id.clone(),
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             })
             .await?;
         let deliveries: Vec<Value> = result

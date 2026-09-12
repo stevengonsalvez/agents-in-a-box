@@ -114,7 +114,16 @@ impl From<DaemonError> for CliFailure {
                         exit_code: EXIT_AUTH,
                         next: Some("ainb hangar daemon status".to_string()),
                     }
-                } else if message.contains("request_id was reused") {
+                } else if code == ainb_hangar_proto::mutation::MUTATION_REJECTED
+                    || message.contains("request_id was reused")
+                {
+                    // Two codes, one fact. `request_id` IS the op id for this
+                    // family (D18 amendment 19), so the dispatcher's generic
+                    // ledger now refuses a reused id with a different body
+                    // BEFORE the handler's own check is reached, and that
+                    // refusal must still exit `idempotency_conflict`, not the
+                    // generic code, or a script that branches on the exit
+                    // status silently stops distinguishing the two.
                     Self {
                         kind: "idempotency_conflict",
                         message,
@@ -238,6 +247,7 @@ async fn send(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             origin_message_id: matches.get_one::<String>("origin").cloned(),
             text,
             request_id,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
         .await;
     let result = match result {

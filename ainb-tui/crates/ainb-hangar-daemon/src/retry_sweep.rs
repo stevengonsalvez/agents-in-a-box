@@ -585,6 +585,7 @@ async fn send_continue(
         action: ControlAction::SendPrompt {
             text: CONTINUE_TEXT.to_string(),
         },
+        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
     };
     match crate::rpc::execute_fleet_action(pool, params, None, events).await {
         Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => {
