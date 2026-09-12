@@ -188,9 +188,7 @@ fn local_row(session_id: &str, cwd: &str) -> ainb_fleet_core::fleet::read::needs
 /// ambiguous, so it is the case this must get right.
 #[test]
 fn two_agents_in_one_directory_keep_their_own_identity() {
-    use ainb_hangar_proto::agent_status::{
-        AgentState, AgentStatusRow, Provenance, Tier,
-    };
+    use ainb_hangar_proto::agent_status::{AgentState, AgentStatusRow, Provenance, Tier};
     use ainb_hangar_proto::fleet::FleetProvider;
 
     let row = |id: &str, state: AgentState, at: i64| AgentStatusRow {
@@ -228,8 +226,18 @@ fn two_agents_in_one_directory_keep_their_own_identity() {
     assert_eq!(
         stamped,
         vec![
-            ("agent-a", Some("claude:agent-a"), Some("waiting"), Some(111)),
-            ("agent-b", Some("claude:agent-b"), Some("working"), Some(222)),
+            (
+                "agent-a",
+                Some("claude:agent-a"),
+                Some("waiting"),
+                Some(111)
+            ),
+            (
+                "agent-b",
+                Some("claude:agent-b"),
+                Some("working"),
+                Some(222)
+            ),
         ],
         "each row must carry ITS OWN agent's tuple, not the last daemon row's"
     );
@@ -240,9 +248,7 @@ fn two_agents_in_one_directory_keep_their_own_identity() {
 /// not visible at all.
 #[test]
 fn an_ambiguous_directory_leaves_the_row_unstamped() {
-    use ainb_hangar_proto::agent_status::{
-        AgentState, AgentStatusRow, Provenance, Tier,
-    };
+    use ainb_hangar_proto::agent_status::{AgentState, AgentStatusRow, Provenance, Tier};
     use ainb_hangar_proto::fleet::FleetProvider;
 
     // Two daemon rows in one cwd, and a local row whose id matches neither.
@@ -261,7 +267,11 @@ fn an_ambiguous_directory_leaves_the_row_unstamped() {
     let mut rows = vec![local_row("something-else", CWD)];
     ainb::cli::fleet::needs::stamp_rows(&mut rows, &[row("x"), row("y")]);
 
-    assert_eq!(rows.len(), 1, "neither daemon row is `waiting`, so none is added");
+    assert_eq!(
+        rows.len(),
+        1,
+        "neither daemon row is `waiting`, so none is added"
+    );
     assert_eq!(
         rows[0].session_key, None,
         "an ambiguous cwd must not be treated as evidence of identity"
@@ -382,27 +392,32 @@ async fn no_event_sequence_ending_in_silence_reports_completion() {
         // Then silence: nothing else is fed, and the read happens much later.
         let status =
             ainb_hangar_daemon::fleet::status_rows(store.pool()).await.expect("status rows");
+        // `Stop` is the only member of the set that OBSERVES a turn finishing,
+        // so it is the only one entitled to produce `idle`. Asserting against
+        // the absent `done` variant would be unfalsifiable; `idle` is the state
+        // that can actually be claimed wrongly, and this is the claim.
+        let saw_terminal = mask & (1 << 4) != 0;
         for row in &status.rows {
-            assert_ne!(
-                row.state.as_str(),
-                "done",
-                "mask {mask} produced a state claiming completion"
-            );
             if mask == 0 {
+                assert_eq!(
+                    row.state,
+                    AgentState::Unverifiable,
+                    "a session nothing has reported on is unverifiable, never free"
+                );
                 continue;
             }
             assert!(
-                matches!(
-                    row.state,
-                    AgentState::Working
-                        | AgentState::Waiting
-                        | AgentState::Idle
-                        | AgentState::Exited
-                        | AgentState::Unverifiable
-                ),
-                "mask {mask} produced an unknown state {:?}",
-                row.state
+                !matches!(row.state, AgentState::Exited),
+                "mask {mask} claimed the process is gone on evidence no hook line carries"
             );
+            if !saw_terminal {
+                assert_ne!(
+                    row.state,
+                    AgentState::Idle,
+                    "mask {mask} reported a session free with no terminal event in the \
+                     sequence; only `Stop` observes a turn finishing"
+                );
+            }
         }
     }
 }

@@ -111,7 +111,22 @@ fn percentile(samples: &mut [f64], percentile: f64) -> f64 {
     samples[rank.saturating_sub(1).min(samples.len() - 1)]
 }
 
+/// `#[ignore]` deliberately, and the run command is in the PR body.
+///
+/// This asserts a wall-clock p99 over 90 seconds of paced arrivals. As a plain
+/// test it ran on every PR on a shared runner, where it adds 90 s to the suite
+/// and reds intermittently for reasons that have nothing to do with the change
+/// under review: measured here at 12.1 ms p99 on an idle box and 163 ms while
+/// three other builds shared the machine. A gate that fires on the neighbour's
+/// load is not a gate.
+///
+/// Run it on purpose:
+///
+/// ```text
+/// cargo test -p ainb-hangar-daemon --test status_write_path_bench -- --ignored --nocapture
+/// ```
 #[tokio::test]
+#[ignore = "wall-clock p99 gate; run explicitly with --ignored on an idle machine"]
 async fn one_transaction_per_event_holds_the_p99_ceiling_with_the_projection_inside() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
