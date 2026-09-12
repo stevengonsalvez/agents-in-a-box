@@ -205,3 +205,77 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
         "a retry must not raise a second unconfirmed row"
     );
 }
+
+/// The OTHER half of the boot sweep, and the branch a bug had made dead code:
+/// a receipt still `claimed` never committed `writing`, so provably no byte
+/// reached the PTY — the answer was lost, and the row has to go back on the
+/// operator's board.
+///
+/// `AttentionRepo::reopen` scopes its revert to ONE claim with
+/// `answered_by = ? AND answered_at = ?`. The sweep used to bind its own boot
+/// clock as the second value, so the UPDATE matched zero rows every time: the
+/// request left the inbox while the agent stayed blocked, which is exactly the
+/// "close it quietly" outcome the sweep exists to avoid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claimed_receipt_at_boot_reopens_its_attention_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_open_row(store.pool()).await;
+
+    // The durable state a daemon killed between the claim commit and the
+    // `writing` commit leaves behind: the row flipped, the ledger claimed, and
+    // no reply recorded.
+    let key = LedgerKey::local("op-claimed-at-boot");
+    let fingerprint = MutationLedgerRepo::fingerprint(
+        methods::ATTENTION_ANSWER,
+        &serde_json::json!({ "attention_id": "att-crash", "answer": "approve" }),
+    );
+    MutationLedgerRepo::claim(
+        store.pool(),
+        &key,
+        methods::ATTENTION_ANSWER,
+        &fingerprint,
+        "receipt",
+        5_000,
+    )
+    .await
+    .unwrap();
+    MutationLedgerRepo::set_receipt(
+        store.pool(),
+        &key,
+        "claimed",
+        Some(&serde_json::json!({ "attention_id": "att-crash" }).to_string()),
+        5_000,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        AttentionRepo::mark_answered_if_open(store.pool(), "att-crash", "tui", "approve", 5_000)
+            .await
+            .unwrap(),
+        1
+    );
+
+    // Boot, a good while later: the sweep's own clock is NOT the row's stamp.
+    let report = ainb_hangar_daemon::receipt_sweep::run(store.pool()).await.unwrap();
+    assert_eq!(report.reopened, 1, "{report:?}");
+    assert_eq!(report.unconfirmed, 0, "nothing was mid-write: {report:?}");
+
+    let row = AttentionRepo::get(store.pool(), "att-crash").await.unwrap().unwrap();
+    assert_eq!(row.state, "open", "a lost answer must go back on the board");
+    assert!(row.answered_by.is_none());
+    assert!(row.answer.is_none());
+    assert!(
+        row.version >= 3,
+        "the fence advanced on the flip AND on the reopen: {row:?}"
+    );
+
+    // And the ledger row is resolved, so a retry is never re-executed blindly.
+    let ledger = MutationLedgerRepo::get(store.pool(), &key).await.unwrap().unwrap();
+    assert_eq!(ledger.status, "unknown");
+    assert!(
+        ainb_hangar_daemon::receipt_sweep::run(store.pool()).await.unwrap()
+            == ainb_hangar_daemon::receipt_sweep::SweepReport::default(),
+        "the sweep must be idempotent"
+    );
+}

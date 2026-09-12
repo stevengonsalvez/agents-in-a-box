@@ -71,7 +71,7 @@ pub async fn run(pool: &SqlitePool) -> Result<SweepReport, sqlx::Error> {
                 report.unconfirmed += 1;
             }
             Some(ReceiptState::Claimed) => {
-                report.reopened += u64::from(reopen_claimed(pool, &row, now_ms).await?);
+                report.reopened += u64::from(reopen_claimed(pool, &row).await?);
                 MutationLedgerRepo::resolve_unknown(
                     pool,
                     &row.key,
@@ -181,18 +181,23 @@ async fn surface_unconfirmed(
 }
 
 /// Put back the attention row a claim flipped but never delivered.
-async fn reopen_claimed(
-    pool: &SqlitePool,
-    row: &LedgerRow,
-    now_ms: i64,
-) -> Result<u32, sqlx::Error> {
+async fn reopen_claimed(pool: &SqlitePool, row: &LedgerRow) -> Result<u32, sqlx::Error> {
     let Some(answered) = answered_row(pool, row).await? else {
         return Ok(0);
     };
     let Some(answered_by) = answered.answered_by.as_deref() else {
         return Ok(0);
     };
-    let reverted = AttentionRepo::reopen(pool, &answered.id, answered_by, now_ms).await?;
+    // `reopen` scopes its revert to ONE claim with `answered_by = ? AND
+    // answered_at = ?`, so the second bind is the row's STORED stamp, never the
+    // sweep's clock. Passing `now_ms` here matched zero rows every time and made
+    // this whole branch dead: the request left the operator's inbox while the
+    // agent stayed blocked, which is the "close it quietly" outcome this
+    // module's own doc calls the wrong answer.
+    let Some(answered_at) = answered.answered_at else {
+        return Ok(0);
+    };
+    let reverted = AttentionRepo::reopen(pool, &answered.id, answered_by, answered_at).await?;
     if reverted > 0 {
         tracing::warn!(
             op_id = %row.key.op_id,
