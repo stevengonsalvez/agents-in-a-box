@@ -1380,7 +1380,7 @@ impl EventHandler {
         // must accept bracketed paste (endpoints/tokens/paths are exactly
         // the values users paste).
         let onboarding_text_active = state.current_screen == screen_ids::ONBOARDING
-            && state.onboarding_state.as_ref().is_some_and(|o| {
+            && state.onboarding.onboarding_state.as_ref().is_some_and(|o| {
                 use crate::components::onboarding::{AuthPane, OnboardingStep};
                 match o.current_step {
                     OnboardingStep::GitDirectories | OnboardingStep::OtelSetup => true,
@@ -1410,7 +1410,7 @@ impl EventHandler {
                     | screen_ids::ATTACHED_TERMINAL
             )
             || config_text_active
-            || state.auth_provider_popup_state.show_popup
+            || state.onboarding.auth_provider_popup_state.show_popup
             || skills_text_active
             || recovery_text_active
             || skill_manager_input_active
@@ -1540,8 +1540,8 @@ impl EventHandler {
         if state.config_popup_state.show_popup {
             return Some(AppEvent::ConfigPopupInputChar(character));
         }
-        if state.auth_provider_popup_state.show_popup
-            && state.auth_provider_popup_state.is_entering_key
+        if state.onboarding.auth_provider_popup_state.show_popup
+            && state.onboarding.auth_provider_popup_state.is_entering_key
         {
             return Some(AppEvent::AuthProviderPopupInputChar(character));
         }
@@ -1589,25 +1589,28 @@ impl EventHandler {
             }
             screen_ids::AUTH_SETUP
                 if state
+                    .onboarding
                     .auth_setup_state
                     .as_ref()
                     .is_some_and(|auth| auth.selected_method == AuthMethod::ApiKey) =>
             {
                 Some(AppEvent::AuthSetupInputChar(character))
             }
-            screen_ids::ONBOARDING => state.onboarding_state.as_ref().map(|onboarding| {
-                use crate::components::onboarding::{AuthPane, OnboardingStep};
+            screen_ids::ONBOARDING => {
+                state.onboarding.onboarding_state.as_ref().map(|onboarding| {
+                    use crate::components::onboarding::{AuthPane, OnboardingStep};
 
-                match onboarding.current_step {
-                    OnboardingStep::OtelSetup => AppEvent::OnboardingOtelChar(character),
-                    OnboardingStep::Authentication
-                        if matches!(onboarding.auth_pane, AuthPane::KeyEntry { .. }) =>
-                    {
-                        AppEvent::OnboardingAuthKeyChar(character)
+                    match onboarding.current_step {
+                        OnboardingStep::OtelSetup => AppEvent::OnboardingOtelChar(character),
+                        OnboardingStep::Authentication
+                            if matches!(onboarding.auth_pane, AuthPane::KeyEntry { .. }) =>
+                        {
+                            AppEvent::OnboardingAuthKeyChar(character)
+                        }
+                        _ => AppEvent::OnboardingInputChar(character),
                     }
-                    _ => AppEvent::OnboardingInputChar(character),
-                }
-            }),
+                })
+            }
             _ => None,
         }
     }
@@ -3227,7 +3230,7 @@ impl EventHandler {
                 state.confirmation_dialog = None;
             }
             AppEvent::AuthSetupNext => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.selected_method = match auth_state.selected_method {
                         AuthMethod::OAuth => AuthMethod::ApiKey,
                         AuthMethod::ApiKey => AuthMethod::Skip,
@@ -3236,7 +3239,7 @@ impl EventHandler {
                 }
             }
             AppEvent::AuthSetupPrevious => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.selected_method = match auth_state.selected_method {
                         AuthMethod::OAuth => AuthMethod::Skip,
                         AuthMethod::ApiKey => AuthMethod::OAuth,
@@ -3245,7 +3248,7 @@ impl EventHandler {
                 }
             }
             AppEvent::AuthSetupSelect => {
-                if let Some(ref auth_state) = state.auth_setup_state {
+                if let Some(ref auth_state) = state.onboarding.auth_setup_state {
                     match auth_state.selected_method {
                         AuthMethod::OAuth => {
                             // Mark for async OAuth processing
@@ -3254,7 +3257,8 @@ impl EventHandler {
                         AuthMethod::ApiKey => {
                             if auth_state.api_key_input.is_empty() {
                                 // Enter API key input mode
-                                if let Some(ref mut auth_state) = state.auth_setup_state {
+                                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state
+                                {
                                     auth_state.api_key_input = "sk-".to_string();
                                     auth_state.show_cursor = true;
                                 }
@@ -3265,7 +3269,7 @@ impl EventHandler {
                         }
                         AuthMethod::Skip => {
                             // Skip auth setup and go to home screen
-                            state.auth_setup_state = None;
+                            state.onboarding.auth_setup_state = None;
                             state.current_screen = screen_ids::HOME.to_string();
                             state.check_current_directory_status();
                             state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
@@ -3275,18 +3279,18 @@ impl EventHandler {
             }
             AppEvent::AuthSetupCancel => {
                 // Same as skip - go to home screen without auth
-                state.auth_setup_state = None;
+                state.onboarding.auth_setup_state = None;
                 state.current_screen = screen_ids::HOME.to_string();
                 state.check_current_directory_status();
                 state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
             AppEvent::AuthSetupInputChar(ch) => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.api_key_input.push(ch);
                 }
             }
             AppEvent::AuthSetupBackspace => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     if auth_state.api_key_input.is_empty() {
                         // Exit API key input mode
                         auth_state.show_cursor = false;
@@ -3297,9 +3301,9 @@ impl EventHandler {
             }
             AppEvent::AuthSetupCheckStatus => {
                 // Check if authentication was completed and transition if so
-                if state.auth_setup_state.is_some() && !AppState::is_first_time_setup() {
+                if state.onboarding.auth_setup_state.is_some() && !AppState::is_first_time_setup() {
                     // Authentication completed!
-                    state.auth_setup_state = None;
+                    state.onboarding.auth_setup_state = None;
                     state.current_screen = screen_ids::HOME.to_string();
                     state.check_current_directory_status();
                     state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
@@ -3307,10 +3311,10 @@ impl EventHandler {
             }
             AppEvent::AuthSetupRefresh => {
                 // Manual refresh - check authentication status immediately
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     if !AppState::is_first_time_setup() {
                         // Authentication completed!
-                        state.auth_setup_state = None;
+                        state.onboarding.auth_setup_state = None;
                         state.current_screen = screen_ids::HOME.to_string();
                         state.check_current_directory_status();
                         state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
@@ -3322,7 +3326,7 @@ impl EventHandler {
             }
             AppEvent::AuthSetupShowCommand => {
                 // Show alternative authentication methods
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.error_message = Some(
                         "📋 Alternative Authentication Methods:\n\n\
                          1. If the OAuth URL didn't appear, check the container logs\n\n\
@@ -5323,23 +5327,23 @@ impl EventHandler {
             // Auth provider popup events
             AppEvent::AuthProviderPopupOpen => {
                 tracing::info!("Opening auth provider popup");
-                state.auth_provider_popup_state.show_popup = true;
-                state.auth_provider_popup_state.refresh_providers();
+                state.onboarding.auth_provider_popup_state.show_popup = true;
+                state.onboarding.auth_provider_popup_state.refresh_providers();
             }
             AppEvent::AuthProviderPopupClose => {
                 tracing::info!("Closing auth provider popup");
-                state.auth_provider_popup_state.show_popup = false;
-                state.auth_provider_popup_state.is_entering_key = false;
-                state.auth_provider_popup_state.api_key_input.clear();
+                state.onboarding.auth_provider_popup_state.show_popup = false;
+                state.onboarding.auth_provider_popup_state.is_entering_key = false;
+                state.onboarding.auth_provider_popup_state.api_key_input.clear();
             }
             AppEvent::AuthProviderPopupNext => {
-                state.auth_provider_popup_state.select_next();
+                state.onboarding.auth_provider_popup_state.select_next();
             }
             AppEvent::AuthProviderPopupPrev => {
-                state.auth_provider_popup_state.select_prev();
+                state.onboarding.auth_provider_popup_state.select_prev();
             }
             AppEvent::AuthProviderPopupSelect => {
-                let popup_state = &state.auth_provider_popup_state;
+                let popup_state = &state.onboarding.auth_provider_popup_state;
 
                 if popup_state.is_entering_key {
                     // Save the API key
@@ -5370,10 +5374,10 @@ impl EventHandler {
                             }
 
                             // Close popup and refresh
-                            state.auth_provider_popup_state.show_popup = false;
-                            state.auth_provider_popup_state.is_entering_key = false;
-                            state.auth_provider_popup_state.api_key_input.clear();
-                            state.auth_provider_popup_state.refresh_providers();
+                            state.onboarding.auth_provider_popup_state.show_popup = false;
+                            state.onboarding.auth_provider_popup_state.is_entering_key = false;
+                            state.onboarding.auth_provider_popup_state.api_key_input.clear();
+                            state.onboarding.auth_provider_popup_state.refresh_providers();
                         }
                         Err(e) => {
                             state.add_error_notification(format!("Failed to save API key: {}", e));
@@ -5387,7 +5391,7 @@ impl EventHandler {
                                 .add_info_notification(format!("{} - Coming Soon!", provider.name));
                         } else if provider.id == "api_key" {
                             // Start API key input mode
-                            state.auth_provider_popup_state.start_key_input();
+                            state.onboarding.auth_provider_popup_state.start_key_input();
                         } else if provider.id == "system" {
                             // System auth - just close and confirm
                             state.add_success_notification(
@@ -5412,21 +5416,21 @@ impl EventHandler {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
-                            state.auth_provider_popup_state.show_popup = false;
-                            state.auth_provider_popup_state.refresh_providers();
+                            state.onboarding.auth_provider_popup_state.show_popup = false;
+                            state.onboarding.auth_provider_popup_state.refresh_providers();
                         }
                     }
                 }
             }
             AppEvent::AuthProviderPopupInputChar(c) => {
-                state.auth_provider_popup_state.api_key_input.push(c);
+                state.onboarding.auth_provider_popup_state.api_key_input.push(c);
             }
             AppEvent::AuthProviderPopupBackspace => {
-                if state.auth_provider_popup_state.api_key_input.is_empty() {
+                if state.onboarding.auth_provider_popup_state.api_key_input.is_empty() {
                     // Exit key input mode
-                    state.auth_provider_popup_state.cancel_key_input();
+                    state.onboarding.auth_provider_popup_state.cancel_key_input();
                 } else {
-                    state.auth_provider_popup_state.api_key_input.pop();
+                    state.onboarding.auth_provider_popup_state.api_key_input.pop();
                 }
             }
             AppEvent::AuthProviderPopupDeleteKey => {
@@ -5434,7 +5438,7 @@ impl EventHandler {
                 match credentials::delete_anthropic_api_key() {
                     Ok(()) => {
                         state.add_success_notification("API key removed".to_string());
-                        state.auth_provider_popup_state.refresh_providers();
+                        state.onboarding.auth_provider_popup_state.refresh_providers();
 
                         // Update config screen
                         // Reseed from the live config: this row is a registry Choice,
@@ -6054,6 +6058,7 @@ impl EventHandler {
                 // the bool under an immutable borrow, then warn under a mutable
                 // one (borrow dance).
                 let otel_partial = state
+                    .onboarding
                     .onboarding_state
                     .as_ref()
                     .map(|o| o.current_step == OnboardingStep::OtelSetup && o.otel_creds_partial())
@@ -6068,13 +6073,13 @@ impl EventHandler {
                 }
                 // Save git directories as soon as the user leaves the step,
                 // not only on wizard finish.
-                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                if state.onboarding.onboarding_state.as_ref().map(|o| o.current_step)
                     == Some(OnboardingStep::GitDirectories)
                 {
                     state.persist_onboarding_git_dirs();
                 }
                 let mut trigger_dep_check = false;
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if onboarding_state.is_final_step() {
                         // On final step, finish onboarding
                         if let Err(e) = state.complete_onboarding() {
@@ -6102,7 +6107,7 @@ impl EventHandler {
                 // Queue as async action so UI shows loading state immediately
                 if trigger_dep_check {
                     tracing::debug!("Queuing dependency check as async action");
-                    if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                         onboarding_state.dependency_check_running = true;
                     }
                     state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
@@ -6112,12 +6117,12 @@ impl EventHandler {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding back step");
                 // Persist git dirs when stepping back out of the step too.
-                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                if state.onboarding.onboarding_state.as_ref().map(|o| o.current_step)
                     == Some(OnboardingStep::GitDirectories)
                 {
                     state.persist_onboarding_git_dirs();
                 }
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.go_back();
                     // Refresh per-agent auth when stepping back into the step.
                     if onboarding_state.current_step == OnboardingStep::Authentication {
@@ -6131,7 +6136,7 @@ impl EventHandler {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Leaving onboarding wizard for the Setup menu");
                 // Persist git dirs before dropping the wizard state.
-                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                if state.onboarding.onboarding_state.as_ref().map(|o| o.current_step)
                     == Some(OnboardingStep::GitDirectories)
                 {
                     state.persist_onboarding_git_dirs();
@@ -6139,43 +6144,43 @@ impl EventHandler {
                 state.onboarding_to_menu();
             }
             AppEvent::OnboardingInputChar(ch) => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.input_char(ch);
                 }
             }
             AppEvent::OnboardingBackspace => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.backspace();
                 }
             }
             AppEvent::OnboardingDelete => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.delete();
                 }
             }
             AppEvent::OnboardingCursorLeft => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_left();
                 }
             }
             AppEvent::OnboardingCursorRight => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_right();
                 }
             }
             AppEvent::OnboardingCursorHome => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_home();
                 }
             }
             AppEvent::OnboardingCursorEnd => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_end();
                 }
             }
             AppEvent::OnboardingCheckDeps => {
                 tracing::debug!("Queuing dependency check as async action");
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.dependency_check_running = true;
                 }
                 state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
@@ -6184,13 +6189,13 @@ impl EventHandler {
                 // "Configure later" — advance without changing anything. The
                 // per-agent statuses already reflect the real current auth.
                 tracing::debug!("Skipping authentication configuration");
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.advance();
                 }
             }
             AppEvent::OnboardingAuthUp => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     match &mut o.auth_pane {
                         AuthPane::MethodPicker { cursor, .. } => {
                             *cursor = cursor.saturating_sub(1);
@@ -6202,7 +6207,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingAuthDown => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     match &mut o.auth_pane {
                         AuthPane::MethodPicker { cursor, .. } => {
                             if *cursor < 2 {
@@ -6216,7 +6221,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingAuthKeyChar(ch) => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.push(ch);
                     }
@@ -6224,7 +6229,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingAuthKeyBackspace => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.pop();
                     }
@@ -6234,7 +6239,7 @@ impl EventHandler {
                 // Esc backs out one level: key entry → its method picker,
                 // method picker → the agent list.
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     o.auth_pane = match &o.auth_pane {
                         AuthPane::KeyEntry { agent, .. } => AuthPane::MethodPicker {
                             agent: *agent,
@@ -6249,7 +6254,7 @@ impl EventHandler {
                 use crate::config::{AppConfig, ClaudeAuthProvider};
 
                 // Read the active pane, then mutate/notify without a held borrow.
-                let pane = state.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
+                let pane = state.onboarding.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
 
                 // Persist the Claude auth provider so build_env_setup() honours it.
                 let set_claude_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
@@ -6266,7 +6271,7 @@ impl EventHandler {
                     // Drill into the focused agent's method picker, defaulting the
                     // cursor to that agent's current method.
                     Some(AuthPane::AgentList) => {
-                        if let Some(o) = state.onboarding_state.as_mut() {
+                        if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                             if let Some(st) = o.auth_statuses.get(o.auth_agent_cursor) {
                                 let agent = st.agent;
                                 let cursor = match st.method {
@@ -6303,7 +6308,7 @@ impl EventHandler {
                                     }
                                 }
                             }
-                            if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                 o.auth_pane = AuthPane::AgentList;
                                 o.refresh_auth_statuses();
                             }
@@ -6315,7 +6320,7 @@ impl EventHandler {
                         }
                         // API key → inline entry seeded with the expected prefix.
                         1 => {
-                            if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                 o.auth_pane = AuthPane::KeyEntry {
                                     agent,
                                     buf: agent.key_seed().to_string(),
@@ -6324,7 +6329,7 @@ impl EventHandler {
                         }
                         // Back
                         _ => {
-                            if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                 o.auth_pane = AuthPane::AgentList;
                             }
                         }
@@ -6355,7 +6360,7 @@ impl EventHandler {
                                     if agent == AuthAgent::Claude {
                                         set_claude_provider(ClaudeAuthProvider::ApiKey);
                                     }
-                                    if let Some(o) = state.onboarding_state.as_mut() {
+                                    if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                         o.auth_pane = AuthPane::AgentList;
                                         o.refresh_auth_statuses();
                                     }
@@ -6379,14 +6384,14 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingEditorUp => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if onboarding_state.selected_editor_index > 0 {
                         onboarding_state.selected_editor_index -= 1;
                     }
                 }
             }
             AppEvent::OnboardingEditorDown => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     let max_idx = onboarding_state.available_editors.len().saturating_sub(1);
                     if onboarding_state.selected_editor_index < max_idx {
                         onboarding_state.selected_editor_index += 1;
@@ -6395,7 +6400,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingQuestionUp => {
                 use crate::components::onboarding::QuestionnaireKind;
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
                         onboarding_state.questionnaire_select_up(kind);
                     }
@@ -6403,39 +6408,39 @@ impl EventHandler {
             }
             AppEvent::OnboardingQuestionDown => {
                 use crate::components::onboarding::QuestionnaireKind;
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
                         onboarding_state.questionnaire_select_down(kind);
                     }
                 }
             }
             AppEvent::OnboardingOtelChar(ch) => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_input_char(ch);
                 }
             }
             AppEvent::OnboardingOtelBackspace => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_backspace();
                 }
             }
             AppEvent::OnboardingOtelNextField => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_next_field();
                 }
             }
             AppEvent::OnboardingOtelPrevField => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_prev_field();
                 }
             }
             AppEvent::OnboardingDepCursorUp => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.move_dep_cursor(-1);
                 }
             }
             AppEvent::OnboardingDepCursorDown => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.move_dep_cursor(1);
                 }
             }
@@ -6444,11 +6449,11 @@ impl EventHandler {
                 // Snapshot the focused dep, then queue the install. The drain
                 // does the catalog lookup + run (and reports manual-only deps as
                 // an error via install_dep_capture).
-                let target = state.onboarding_state.as_ref().and_then(|os| {
+                let target = state.onboarding.onboarding_state.as_ref().and_then(|os| {
                     os.focused_dep().map(|d| (d.id.to_string(), d.name.to_string(), d.satisfied))
                 });
                 if let (Some((id, name, satisfied)), Some(os)) =
-                    (target, state.onboarding_state.as_mut())
+                    (target, state.onboarding.onboarding_state.as_mut())
                 {
                     if satisfied {
                         os.status_message = Some(format!("{name} is already installed"));
@@ -6467,7 +6472,7 @@ impl EventHandler {
                     Ok(()) => {
                         tracing::info!("Successfully installed tmux.conf");
                         // Re-run dependency check to update status
-                        if let Some(ref mut onboarding_state) = state.onboarding_state {
+                        if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                             onboarding_state.error_message = None;
                             onboarding_state.status_message =
                                 Some("✓ Installed optimized tmux.conf → ~/.tmux.conf (backup saved if one existed)".to_string());
@@ -6477,7 +6482,7 @@ impl EventHandler {
                     }
                     Err(e) => {
                         tracing::error!("Failed to install tmux.conf: {}", e);
-                        if let Some(ref mut onboarding_state) = state.onboarding_state {
+                        if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                             onboarding_state.status_message = None;
                             onboarding_state.error_message =
                                 Some(format!("✗ tmux.conf install failed: {e}"));
@@ -6486,20 +6491,20 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingScriptPrompt => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.agent_pick_open = true;
                     os.error_message = None;
                     os.status_message = None;
                 }
             }
             AppEvent::OnboardingCancelScriptPrompt => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.agent_pick_open = false;
                 }
             }
             AppEvent::OnboardingGenerateScript(agent) => {
                 use crate::setup::{RealEnv, generate_install_script};
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.agent_pick_open = false;
                 }
                 match generate_install_script(agent, &RealEnv) {
@@ -6509,7 +6514,7 @@ impl EventHandler {
                         // you can't mouse-select in the TUI. Best-effort.
                         let run_cmd = format!("bash {}", path.display());
                         let copied = crate::clipboard::copy_osc52(&run_cmd).is_ok();
-                        if let Some(os) = &mut state.onboarding_state {
+                        if let Some(os) = &mut state.onboarding.onboarding_state {
                             os.error_message = None;
                             let suffix = if copied { " (copied to clipboard)" } else { "" };
                             os.status_message = Some(format!(
@@ -6522,7 +6527,7 @@ impl EventHandler {
                     }
                     Err(e) => {
                         tracing::error!("Failed to generate installer: {}", e);
-                        if let Some(os) = &mut state.onboarding_state {
+                        if let Some(os) = &mut state.onboarding.onboarding_state {
                             os.status_message = None;
                             os.error_message = Some(format!("✗ installer generation failed: {e}"));
                         }
@@ -6538,8 +6543,8 @@ impl EventHandler {
             // Setup menu events
             AppEvent::SetupMenuBack => {
                 tracing::debug!("Setup menu back");
-                if state.setup_menu_state.showing_confirmation {
-                    state.setup_menu_state.cancel_action();
+                if state.onboarding.setup_menu_state.showing_confirmation {
+                    state.onboarding.setup_menu_state.cancel_action();
                 } else {
                     state.current_screen = screen_ids::HOME.to_string();
                 }
@@ -6549,9 +6554,9 @@ impl EventHandler {
                 use crate::components::setup_menu::SetupMenuItem;
 
                 // Check if showing confirmation dialog
-                if state.setup_menu_state.showing_confirmation {
+                if state.onboarding.setup_menu_state.showing_confirmation {
                     // Confirmed action
-                    if let Some(item) = state.setup_menu_state.confirm_action() {
+                    if let Some(item) = state.onboarding.setup_menu_state.confirm_action() {
                         match item {
                             SetupMenuItem::FactoryReset => {
                                 use crate::config::OnboardingConfig;
@@ -6568,7 +6573,7 @@ impl EventHandler {
                 } else {
                     // Request action (may show confirmation for dangerous actions)
                     use crate::components::onboarding::OnboardingStep;
-                    if let Some(item) = state.setup_menu_state.request_action() {
+                    if let Some(item) = state.onboarding.setup_menu_state.request_action() {
                         match item {
                             SetupMenuItem::RerunWizard => {
                                 state.start_onboarding(true, None);
@@ -6594,14 +6599,14 @@ impl EventHandler {
             }
             AppEvent::SetupMenuUp => {
                 tracing::debug!("Setup menu up");
-                if !state.setup_menu_state.showing_confirmation {
-                    state.setup_menu_state.move_up();
+                if !state.onboarding.setup_menu_state.showing_confirmation {
+                    state.onboarding.setup_menu_state.move_up();
                 }
             }
             AppEvent::SetupMenuDown => {
                 tracing::debug!("Setup menu down");
-                if !state.setup_menu_state.showing_confirmation {
-                    state.setup_menu_state.move_down();
+                if !state.onboarding.setup_menu_state.showing_confirmation {
+                    state.onboarding.setup_menu_state.move_down();
                 }
             }
             AppEvent::StartOnboarding => {
@@ -7922,7 +7927,7 @@ mod text_input_guard_tests {
     fn paste_lands_in_onboarding_otel_field() {
         let mut state = AppState::default();
         state.start_onboarding(false, None);
-        if let Some(o) = state.onboarding_state.as_mut() {
+        if let Some(o) = state.onboarding.onboarding_state.as_mut() {
             o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
             // `start_onboarding` re-populates this form from the HOST's saved
             // Grafana creds (`otel::read_grafana_creds`), so on a machine that
@@ -7937,7 +7942,7 @@ mod text_input_guard_tests {
             &mut state,
         );
         assert!(consumed, "OTEL form must be a paste-accepting context");
-        let o = state.onboarding_state.as_ref().unwrap();
+        let o = state.onboarding.onboarding_state.as_ref().unwrap();
         assert_eq!(
             o.otel_otlp_endpoint,
             "https://otlp-gateway.grafana.net/otlp"
@@ -7998,7 +8003,7 @@ mod text_input_guard_tests {
             state.other_tmux_rename_mode = false;
             state.ssh_session_rename_mode = false;
             state.git_view.quick_commit_message = None;
-            state.auth_provider_popup_state.show_popup = false;
+            state.onboarding.auth_provider_popup_state.show_popup = false;
             state.config_screen_state = Default::default();
             state.config_popup_state = Default::default();
             state.skills.skills_state.search_active = false;
@@ -8098,7 +8103,7 @@ mod text_input_guard_tests {
                 s.git_view.quick_commit_message = Some(String::new())
             }),
             ("auth_provider_popup", |s| {
-                s.auth_provider_popup_state.show_popup = true
+                s.onboarding.auth_provider_popup_state.show_popup = true
             }),
         ];
         for (label, setup) in cases {

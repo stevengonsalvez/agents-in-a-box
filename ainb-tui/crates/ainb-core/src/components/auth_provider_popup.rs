@@ -69,7 +69,7 @@ impl AuthProviderPopupComponent {
     }
 
     fn render_providers(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let popup_state = &state.auth_provider_popup_state;
+        let popup_state = &state.onboarding.auth_provider_popup_state;
 
         let providers = &popup_state.providers;
         let selected = popup_state.selected_index;
@@ -152,7 +152,7 @@ impl AuthProviderPopupComponent {
     }
 
     fn render_api_key_input(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let popup_state = &state.auth_provider_popup_state;
+        let popup_state = &state.onboarding.auth_provider_popup_state;
 
         // Only show input if API Key provider is selected
         let selected_provider = popup_state.providers.get(popup_state.selected_index);
@@ -218,7 +218,7 @@ impl AuthProviderPopupComponent {
     }
 
     fn render_help_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let popup_state = &state.auth_provider_popup_state;
+        let popup_state = &state.onboarding.auth_provider_popup_state;
 
         let help_items = if popup_state.is_entering_key {
             vec![("Enter", "save"), ("Esc", "cancel")]

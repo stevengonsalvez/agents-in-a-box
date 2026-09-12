@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub onboarding: Versioned<OnboardingSection>,
+
     pub skills: Versioned<SkillsSection>,
 
     pub plugins_host: Versioned<PluginsHostSection>,
@@ -3204,8 +3206,6 @@ pub struct AppState {
     pub last_logs_session_id: Option<Uuid>,
     // Track attached terminal state
     pub attached_session_id: Option<Uuid>,
-    // Auth setup state
-    pub auth_setup_state: Option<AuthSetupState>,
     // Track when logs were last updated for each session
     pub log_last_updated: HashMap<Uuid, std::time::Instant>,
     // Track the last time we checked for log updates globally
@@ -3281,15 +3281,8 @@ pub struct AppState {
     pub home_screen_state: HomeScreenState,
     pub home_screen_v2_state: HomeScreenV2State,
     pub config_screen_state: ConfigScreenState,
-    pub auth_provider_popup_state: AuthProviderPopupState,
     /// Config popup state for choice/text input popups in config screen
     pub config_popup_state: crate::components::config_popup::ConfigPopupState,
-
-    // Onboarding wizard state
-    pub onboarding_state: Option<crate::components::onboarding::OnboardingState>,
-
-    // Setup menu state
-    pub setup_menu_state: crate::components::setup_menu::SetupMenuState,
 
     // Persistent configuration (saved to ~/.agents-in-a-box/config/config.toml)
     pub app_config: AppConfig,
@@ -3786,6 +3779,12 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            onboarding: Versioned::new(OnboardingSection {
+                // The popup's provider rows come from the config this function
+                // just loaded, not from a second read of disk.
+                auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
+                ..OnboardingSection::default()
+            }),
             skills: Versioned::default(),
             plugins_host: Versioned::default(),
             hangar: Versioned::default(),
@@ -3817,7 +3816,6 @@ impl Default for AppState {
             observer_started_at: None,
             last_logs_session_id: None,
             attached_session_id: None,
-            auth_setup_state: None,
             log_last_updated: HashMap::new(),
             last_log_check: None,
             last_token_refresh_check: None,
@@ -3859,14 +3857,11 @@ impl Default for AppState {
             home_screen_state: HomeScreenState::default(),
             home_screen_v2_state,
             config_screen_state: ConfigScreenState::from_app_config(&app_config),
-            auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
             config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
 
             // Onboarding wizard state (initialized to None, set during app init)
-            onboarding_state: None,
 
             // Setup menu state
-            setup_menu_state: crate::components::setup_menu::SetupMenuState::new(),
 
             // Persistent configuration
             app_config,
@@ -4363,7 +4358,7 @@ impl AppState {
         // always opens showing real current values (config + keychain).
         state.refresh_auth_statuses();
 
-        self.onboarding_state = Some(state);
+        self.onboarding.onboarding_state = Some(state);
         self.current_screen = screen_ids::ONBOARDING.to_string();
     }
 
@@ -4399,7 +4394,7 @@ impl AppState {
     pub fn persist_onboarding_git_dirs(&mut self) {
         use crate::config::OnboardingConfig;
 
-        let Some(state) = self.onboarding_state.as_ref() else {
+        let Some(state) = self.onboarding.onboarding_state.as_ref() else {
             return;
         };
         let valid = state.get_valid_directories();
@@ -4423,7 +4418,7 @@ impl AppState {
 
     /// Complete the onboarding process
     pub fn complete_onboarding(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(state) = &self.onboarding_state {
+        if let Some(state) = &self.onboarding.onboarding_state {
             // Save onboarding config
             let config = Self::onboarding_config_from_state(state);
             config.save().map_err(|e| format!("Failed to save onboarding config: {}", e))?;
@@ -4473,7 +4468,7 @@ impl AppState {
         }
 
         // Clean up and return to home
-        self.onboarding_state = None;
+        self.onboarding.onboarding_state = None;
         self.current_screen = screen_ids::HOME.to_string();
 
         // New-user path: now that onboarding is done, offer to install
@@ -4486,7 +4481,7 @@ impl AppState {
 
     /// Cancel onboarding and return to home (for factory reset scenario)
     pub fn cancel_onboarding(&mut self) {
-        self.onboarding_state = None;
+        self.onboarding.onboarding_state = None;
         self.current_screen = screen_ids::HOME.to_string();
     }
 
@@ -4499,8 +4494,8 @@ impl AppState {
     /// always clean (selection at the top, no stale confirmation open).
     pub fn onboarding_to_menu(&mut self) {
         use crate::components::setup_menu::SetupMenuState;
-        self.onboarding_state = None;
-        self.setup_menu_state = SetupMenuState::new();
+        self.onboarding.onboarding_state = None;
+        self.onboarding.setup_menu_state = SetupMenuState::new();
         self.current_screen = screen_ids::SETUP_MENU.to_string();
     }
 
@@ -8074,7 +8069,7 @@ impl AppState {
                     "Boss mode selected but authentication not set up, switching to auth setup view"
                 );
                 self.current_screen = screen_ids::AUTH_SETUP.to_string();
-                self.auth_setup_state = Some(AuthSetupState {
+                self.onboarding.auth_setup_state = Some(AuthSetupState {
                     selected_method: AuthMethod::OAuth,
                     api_key_input: String::new(),
                     is_processing: false,
@@ -10522,7 +10517,7 @@ impl AppState {
                     info!("Starting OAuth authentication setup");
                     if let Err(e) = self.run_oauth_setup().await {
                         error!("Failed to setup OAuth authentication: {}", e);
-                        if let Some(ref mut auth_state) = self.auth_setup_state {
+                        if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                             auth_state.error_message = Some(format!("OAuth setup failed: {}", e));
                             auth_state.is_processing = false;
                         }
@@ -10532,7 +10527,7 @@ impl AppState {
                     info!("Saving API key authentication");
                     if let Err(e) = self.save_api_key().await {
                         error!("Failed to save API key: {}", e);
-                        if let Some(ref mut auth_state) = self.auth_setup_state {
+                        if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                             auth_state.error_message =
                                 Some(format!("Failed to save API key: {}", e));
                             auth_state.is_processing = false;
@@ -10640,7 +10635,7 @@ impl AppState {
                             .unwrap_or_else(|e| Err(e.to_string())),
                         None => Err("unknown dependency".to_string()),
                     };
-                    if let Some(os) = &mut self.onboarding_state {
+                    if let Some(os) = &mut self.onboarding.onboarding_state {
                         match result {
                             Ok(()) => {
                                 // Mark done; the row keeps a ✓ marker until the
@@ -10667,7 +10662,8 @@ impl AppState {
                     // Run blocking I/O on dedicated thread pool to avoid blocking async runtime
                     match tokio::task::spawn_blocking(|| detect_all(&RealEnv)).await {
                         Ok(status) => {
-                            if let Some(ref mut onboarding_state) = self.onboarding_state {
+                            if let Some(ref mut onboarding_state) = self.onboarding.onboarding_state
+                            {
                                 onboarding_state.dependency_status = Some(status);
                                 onboarding_state.dependency_check_running = false;
                                 self.ui_needs_refresh = true;
@@ -10675,7 +10671,8 @@ impl AppState {
                         }
                         Err(e) => {
                             warn!("Dependency check task failed: {}", e);
-                            if let Some(ref mut onboarding_state) = self.onboarding_state {
+                            if let Some(ref mut onboarding_state) = self.onboarding.onboarding_state
+                            {
                                 onboarding_state.dependency_check_running = false;
                             }
                         }
@@ -10751,7 +10748,7 @@ impl AppState {
         std::fs::create_dir_all(&auth_dir)?;
 
         // Update UI state to show we're starting
-        if let Some(ref mut auth_state) = self.auth_setup_state {
+        if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
             auth_state.is_processing = true;
             auth_state.error_message = Some("Preparing authentication setup...".to_string());
         }
@@ -10763,7 +10760,7 @@ impl AppState {
             auth_setup_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async).await
         {
             warn!("Docker is not available or not running");
-            if let Some(ref mut auth_state) = self.auth_setup_state {
+            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                 auth_state.error_message = Some(message);
                 auth_state.is_processing = false;
             }
@@ -10783,7 +10780,7 @@ impl AppState {
                 .status()?;
 
             if !build_status.success() {
-                if let Some(ref mut auth_state) = self.auth_setup_state {
+                if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                     auth_state.error_message = Some(
                         "❌ Failed to build claude-dev image\n\n\
                          Please check Docker and try again."
@@ -10853,7 +10850,7 @@ impl AppState {
             let _ = std::io::stdin().read_line(&mut String::new());
 
             // Success - transition to main view
-            self.auth_setup_state = None;
+            self.onboarding.auth_setup_state = None;
             self.current_screen = screen_ids::SESSION_LIST.to_string();
             self.check_current_directory_status();
             self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
@@ -10862,7 +10859,7 @@ impl AppState {
             println!("Press Enter to return to the authentication menu...");
             let _ = std::io::stdin().read_line(&mut String::new());
 
-            if let Some(ref mut auth_state) = self.auth_setup_state {
+            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                 auth_state.error_message = Some(
                     "❌ Authentication failed\n\n\
                      Please try again or use API Key method."
@@ -10987,7 +10984,7 @@ impl AppState {
 
     /// Save API key authentication
     async fn save_api_key(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let api_key = match &self.auth_setup_state {
+        let api_key = match &self.onboarding.auth_setup_state {
             Some(auth_state) => auth_state.api_key_input.clone(),
             None => return Err("No API key to save".into()),
         };
@@ -11008,7 +11005,7 @@ impl AppState {
         info!("API key saved to {:?}", env_path);
 
         // Success - transition to main view
-        self.auth_setup_state = None;
+        self.onboarding.auth_setup_state = None;
         self.current_screen = screen_ids::SESSION_LIST.to_string();
         self.check_current_directory_status();
         self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
@@ -11030,7 +11027,7 @@ impl AppState {
 
             // For now, we'll show an error and require manual session cleanup
             // TODO: Add confirmation dialog with option to stop sessions automatically
-            if let Some(ref mut auth_state) = self.auth_setup_state {
+            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                 auth_state.error_message = Some(format!(
                     "❌ Cannot re-authenticate with {} running sessions\n\n\
                      Running sessions use the current credentials.\n\
@@ -11041,7 +11038,7 @@ impl AppState {
                 auth_state.is_processing = false;
             } else {
                 // Create auth state to show the error
-                self.auth_setup_state = Some(AuthSetupState {
+                self.onboarding.auth_setup_state = Some(AuthSetupState {
                     selected_method: AuthMethod::OAuth,
                     api_key_input: String::new(),
                     is_processing: false,
@@ -11095,7 +11092,7 @@ impl AppState {
         }
 
         // Initialize auth setup state and switch to auth view
-        self.auth_setup_state = Some(AuthSetupState {
+        self.onboarding.auth_setup_state = Some(AuthSetupState {
             selected_method: AuthMethod::OAuth, // Default to OAuth
             api_key_input: String::new(),
             is_processing: false,

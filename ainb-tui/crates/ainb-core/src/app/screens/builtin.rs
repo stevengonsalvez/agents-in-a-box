@@ -857,7 +857,7 @@ impl Screen for ConfigScreen {
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         self.component.render(frame, area, state);
-        if state.auth_provider_popup_state.show_popup {
+        if state.onboarding.auth_provider_popup_state.show_popup {
             self.auth_provider_popup.render(frame, area, state);
         }
         if state.config_popup_state.show_popup {
@@ -918,7 +918,7 @@ impl Screen for OnboardingScreen {
         ids::ONBOARDING
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        if let Some(ref onboarding_state) = state.onboarding_state {
+        if let Some(ref onboarding_state) = state.onboarding.onboarding_state {
             self.component.render(frame, area, onboarding_state);
         }
     }
@@ -961,7 +961,7 @@ impl Screen for SetupMenuScreen {
             state.is_loading_workspaces,
             ui,
         );
-        self.setup_menu.render(frame, area, &state.setup_menu_state);
+        self.setup_menu.render(frame, area, &state.onboarding.setup_menu_state);
     }
 }
 

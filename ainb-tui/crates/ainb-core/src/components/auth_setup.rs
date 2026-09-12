@@ -19,7 +19,7 @@ impl AuthSetupComponent {
         frame.render_widget(Clear, area);
 
         // Get auth setup state
-        let auth_state = match &state.auth_setup_state {
+        let auth_state = match &state.onboarding.auth_setup_state {
             Some(state) => state,
             None => return,
         };

@@ -417,6 +417,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     let text_input_active = crate::app::events::EventHandler::is_in_text_input_context(state);
     let auth_setup_api_input = state.current_screen == screen_ids::AUTH_SETUP
         && state
+            .onboarding
             .auth_setup_state
             .as_ref()
             .is_some_and(|auth| auth.selected_method == crate::app::state::AuthMethod::ApiKey);
@@ -483,8 +484,8 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
             _ => {}
         }
     }
-    if state.auth_provider_popup_state.show_popup {
-        if state.auth_provider_popup_state.is_entering_key {
+    if state.onboarding.auth_provider_popup_state.show_popup {
+        if state.onboarding.auth_provider_popup_state.is_entering_key {
             contexts.push(KeyContext::Screen(
                 "auth_provider_popup",
                 SubContext::Named("input"),
@@ -628,7 +629,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::AUTH_SETUP => {
-                if state.auth_setup_state.is_some() {
+                if state.onboarding.auth_setup_state.is_some() {
                     if auth_setup_api_input {
                         contexts.push(KeyContext::Screen(screen, SubContext::Named("input")));
                     } else {
@@ -637,7 +638,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::ONBOARDING => {
-                if let Some(onboarding) = &state.onboarding_state {
+                if let Some(onboarding) = &state.onboarding.onboarding_state {
                     let sub = onboarding_sub_context(
                         &onboarding.current_step,
                         &onboarding.auth_pane,
@@ -648,7 +649,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::SETUP_MENU => {
-                let sub = if state.setup_menu_state.showing_confirmation {
+                let sub = if state.onboarding.setup_menu_state.showing_confirmation {
                     "confirm"
                 } else {
                     "menu"

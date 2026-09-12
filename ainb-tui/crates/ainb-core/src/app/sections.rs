@@ -213,3 +213,30 @@ impl Default for SkillsSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct OnboardingSection {
+    // Onboarding wizard state
+    pub onboarding_state: Option<crate::components::onboarding::OnboardingState>,
+    // Setup menu state
+    pub setup_menu_state: crate::components::setup_menu::SetupMenuState,
+    // Auth setup state
+    pub auth_setup_state: Option<AuthSetupState>,
+    pub auth_provider_popup_state: AuthProviderPopupState,
+}
+
+impl Default for OnboardingSection {
+    fn default() -> Self {
+        Self {
+            onboarding_state: None,
+            setup_menu_state: crate::components::setup_menu::SetupMenuState::new(),
+            auth_setup_state: None,
+            // AppState::default overwrites this from the config it loads. The
+            // neutral baseline is here so the section still stands alone, which
+            // the section tests need and a partial `..Default::default()` uses.
+            auth_provider_popup_state: AuthProviderPopupState::from_app_config(
+                &crate::config::AppConfig::default(),
+            ),
+        }
+    }
+}
