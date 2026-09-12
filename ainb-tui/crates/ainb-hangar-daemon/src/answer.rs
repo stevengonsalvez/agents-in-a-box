@@ -123,7 +123,15 @@ pub async fn answer(
     .await
     {
         Target::Ambiguous(reason) => Ok(AnswerResult::Ambiguous { reason }),
-        Target::NoTarget(reason) => Ok(AnswerResult::NoTarget { reason }),
+        // A row whose session has no pane bound (D14, issue #916) fails here
+        // with the router's generic "no live session matched". Replace that
+        // with the binding's own sentence so the operator is told which pane is
+        // missing rather than left with a silent failure.
+        Target::NoTarget(reason) => Ok(AnswerResult::NoTarget {
+            reason: crate::pane_binding::unbound_answer_reason(pool, &row.session_id)
+                .await
+                .unwrap_or(reason),
+        }),
         Target::Send(session) => {
             // Claim the answer. A second surface that also resolved a target loses
             // this flip (0 rows) and delivers nothing.

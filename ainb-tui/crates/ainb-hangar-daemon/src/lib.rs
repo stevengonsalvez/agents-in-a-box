@@ -184,6 +184,14 @@ pub mod notify;
 /// [`observability::install`] returns a `WorkerGuard` the daemon `main` holds
 /// for the process lifetime, and exposes an `otlp` seam for P8.2.
 pub mod observability;
+/// Daemon-side pane binding for hook-sourced Fleet rows (D14, issue #916).
+///
+/// A provider whose hooks run from a long-lived shared daemon (Codex 0.154)
+/// cannot see `$TMUX_PANE`, so its hook lines carry a null `tmux_target`. The
+/// daemon recovers the pane by correlating `(provider, cwd)` against the
+/// tier-5 discovery scan, binds when exactly one pane matches, and leaves the
+/// row `pane_unbound` when zero or two do rather than guessing.
+pub mod pane_binding;
 /// Pal's guardrail gate and its confirm cards (buzz-port part 2).
 ///
 /// The classifier and the argument projection are `ainb-fleet-tools`'; the

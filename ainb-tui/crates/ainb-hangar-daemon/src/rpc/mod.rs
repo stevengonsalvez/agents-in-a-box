@@ -1478,6 +1478,10 @@ async fn handle(
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::FLEET_NEGOTIATE => handle_fleet_negotiate(req, health).await,
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
+        methods::FLEET_STATUS => crate::fleet::status_rows(pool)
+            .await
+            .map_err(|error| store_err(&error))
+            .and_then(|result| to_value(&result)),
         // Receiver registration occurs in `serve_conn` before this snapshot is
         // read. The ack carries its exact head, then the forwarder drains rows
         // committed after that head before waiting for live wakeups.

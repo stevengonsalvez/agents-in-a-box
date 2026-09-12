@@ -11,8 +11,8 @@ use ainb_fleet_core::types::{
     SessionKey, TransportHealth,
 };
 use ainb_hangar_store::repo::fleet::{
-    ApplyFleetEventResult, FleetEventRow, FleetRepo, FleetRepoError, FleetSessionPatch,
-    FleetSessionRow, NewFleetEvent, ObservationAuthority,
+    ApplyFleetEventResult, AttentionProjection, FleetEventRow, FleetRepo, FleetRepoError,
+    FleetSessionPatch, FleetSessionRow, NewFleetEvent, ObservationAuthority,
 };
 use ainb_hangar_store::repo::fleet_provider_event::{
     FleetProviderEventError, FleetProviderEventRepo, NewFleetProviderEvent,
@@ -26,6 +26,19 @@ use crate::fleet_provider::codex::{
     CodexApprovalKind, CodexCapabilities, CodexInbound, CodexInboundEnvelope,
     parse_inbound_envelope,
 };
+
+/// What one hook line changed: the Fleet event's outcome plus the attention
+/// rows the same transaction raised and retired, so the caller emits exactly
+/// one nudge per real change and none on a replay.
+#[derive(Debug, Clone)]
+pub struct HookApplyOutcome {
+    /// The Fleet event's own outcome.
+    pub fleet: ApplyFleetEventResult,
+    /// True when this call raised the projected attention row.
+    pub raised: bool,
+    /// The attention ids this call retired.
+    pub closed: Vec<String>,
+}
 
 /// Semantic hook observation before storage normalization.
 #[derive(Debug, Clone)]
@@ -315,11 +328,41 @@ pub(crate) fn display_name_for_cwd(cwd: &str) -> Option<String> {
 }
 
 /// Apply one exact provider hook and wake revision subscribers after commit.
+///
+/// The no-projection form. Callers that also decide an attention outcome for
+/// the event use [`apply_hook_with_attention`] so both commit together.
+///
+/// # Errors
+/// Propagates any store fault from the apply.
 pub async fn apply_hook(
     pool: &SqlitePool,
     events: &EventSink,
     observation: HookObservation<'_>,
 ) -> Result<ApplyFleetEventResult, FleetRepoError> {
+    apply_hook_with_attention(pool, events, observation, None)
+        .await
+        .map(|outcome| outcome.fleet)
+}
+
+/// Apply one exact provider hook together with the attention projection it
+/// implies, in ONE transaction (D14 status store).
+///
+/// `fleet_session.attention_state` and the `attention` inbox describe the same
+/// fact. Committing them separately is what let them drift to 732 open rows
+/// against 7 waiting sessions. The projection is decided by the caller before
+/// this runs (it needs the transcript classifier, which does blocking I/O and
+/// must not run under the write lock) and is applied here against the same
+/// commit as the event.
+///
+/// # Errors
+/// Propagates any store fault. Nothing is committed on an error, so the caller
+/// replays the whole line rather than reconciling a half-write.
+pub async fn apply_hook_with_attention(
+    pool: &SqlitePool,
+    events: &EventSink,
+    observation: HookObservation<'_>,
+    attention: Option<AttentionProjection>,
+) -> Result<HookApplyOutcome, FleetRepoError> {
     let provider = parse_provider(observation.provider);
     let session_key = SessionKey::managed(provider, observation.provider_session_id);
     let source_event_id = observation.event_id.clone();
@@ -330,35 +373,56 @@ pub async fn apply_hook(
         observation.event_type,
         observation.payload,
     );
-    let source_event_type = observation
-        .payload
-        .pointer("/payload/hook_event_name")
-        .and_then(Value::as_str)
-        .unwrap_or(observation.event_type);
-    let duplicate_claude_structured_permission = provider == Provider::Claude
-        && source_event_type == "PermissionRequest"
-        && claude_hook_tool_name(observation.payload) == Some("AskUserQuestion");
-    let preserve_active_request = (provider == Provider::Claude
-        && observation.event_type.split(':').next() == Some("Notification")
-        || duplicate_claude_structured_permission)
-        && FleetRepo::get_session(pool, session_key.as_str())
-            .await?
-            .is_some_and(|session| {
-                matches!(session.attention_state.as_str(), "ASK" | "APPROVAL")
-                    && session.current_request_fingerprint.is_some()
-            });
-    let tmux_target = observation
+    let preserve_active_request = reannounces_live_request(
+        observation.provider,
+        observation.event_type,
+        observation.payload,
+    ) && FleetRepo::get_session(pool, session_key.as_str())
+        .await?
+        .is_some_and(|session| {
+            matches!(session.attention_state.as_str(), "ASK" | "APPROVAL")
+                && session.current_request_fingerprint.is_some()
+        });
+    let hook_target = observation
         .payload
         .get("tmux_target")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let process_start_fingerprint = observation
+    let hook_fingerprint = observation
         .payload
         .get("process_start_fingerprint")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    // Issue #916. A hook that ran from a shared provider daemon never saw
+    // `$TMUX_PANE`, so it could not name its own pane. The daemon holds the
+    // tier-5 discovery scan and can correlate `(provider, cwd)` instead. A
+    // store fault here must not drop the event: the identity, the states and
+    // the clocks are all still correct, and only the pane is missing, so the
+    // failure degrades to `pane_unbound` exactly as a real miss would.
+    let binding = crate::pane_binding::resolve(
+        pool,
+        session_key.as_str(),
+        provider.as_str(),
+        observation.cwd,
+        hook_target,
+        hook_fingerprint,
+    )
+    .await
+    .unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "fleet pane binding query failed; row stays pane_unbound");
+        crate::pane_binding::PaneBinding::Unbound(crate::pane_binding::UnboundReason::NoCandidate)
+    });
+    if let crate::pane_binding::PaneBinding::Unbound(reason) = &binding {
+        tracing::debug!(
+            session_key = session_key.as_str(),
+            detail = %reason.describe(provider.as_str(), observation.cwd),
+            "fleet hook row has no pane"
+        );
+    }
+    let tmux_target = binding.target().map(str::to_string);
+    let process_start_fingerprint = binding.fingerprint().map(str::to_string);
     let exact_tmux_identity = tmux_target.is_some() && process_start_fingerprint.is_some();
     let (model, reasoning_effort) = observed_model_pair(&observation);
     let (lifecycle_state, attention_state) = if preserve_active_request {
@@ -417,28 +481,120 @@ pub async fn apply_hook(
             ..FleetSessionPatch::default()
         },
     };
-    let result = FleetRepo::apply_event(pool, &event).await?;
+    // The one write. The Fleet event, the session state it reduces to, and the
+    // inbox rows that state implies all reach disk together or not at all.
+    let applied = FleetRepo::apply_event_with_attention(pool, &event, attention.as_ref()).await?;
+    let result = applied.fleet.clone();
     if !result.duplicate {
         events.emit_fleet_revision(result.revision);
     }
     if let Some(update) = hook_work_update(&observation, session_key.as_str()) {
         apply_workload_projection(pool, events, &update).await?;
     }
-    if let (Some(target), Some(fingerprint)) =
-        (tmux_target.as_deref(), process_start_fingerprint.as_deref())
-    {
-        retire_correlated_legacy(
-            pool,
-            events,
-            session_key.as_str(),
-            provider.as_str(),
-            target,
-            fingerprint,
-            observation.observed_at,
-        )
-        .await?;
+    // Retirement keys on the RESOLVED binding, never only on the
+    // hook-provided target (D14). A correlated binding already names the exact
+    // discovered row it came from, so it retires that key directly instead of
+    // re-deriving it from a fingerprint the scan may never have recorded.
+    match &binding {
+        crate::pane_binding::PaneBinding::Correlated { legacy_key, .. } => {
+            if let Some(revision) = FleetRepo::supersede_session(
+                pool,
+                legacy_key,
+                session_key.as_str(),
+                observation.observed_at,
+            )
+            .await?
+            {
+                events.emit_fleet_revision(revision);
+            }
+        }
+        crate::pane_binding::PaneBinding::FromHook { .. } => {
+            if let (Some(target), Some(fingerprint)) =
+                (tmux_target.as_deref(), process_start_fingerprint.as_deref())
+            {
+                retire_correlated_legacy(
+                    pool,
+                    events,
+                    session_key.as_str(),
+                    provider.as_str(),
+                    target,
+                    fingerprint,
+                    observation.observed_at,
+                )
+                .await?;
+            }
+        }
+        // Nothing was attributed, so there is nothing to retire. The discovered
+        // pane row stays visible beside the hook row on purpose: suppressing it
+        // would hide a live agent rather than admit the binding is missing.
+        crate::pane_binding::PaneBinding::Unbound(_) => {}
     }
-    Ok(result)
+    Ok(HookApplyOutcome {
+        fleet: result,
+        raised: applied.raised,
+        closed: applied.closed,
+    })
+}
+
+/// Will this session hold an open structured request once `event_type` applies?
+///
+/// The stale-ASK gate used to read `fleet_session.attention_state` AFTER the
+/// apply. Now that the attention projection rides the apply's own transaction,
+/// the decision has to be made first, so the answer is composed the same way
+/// the apply composes it: this event's own attention state when it sets one,
+/// and the stored row's when it does not. Same answer, one statement earlier.
+///
+/// # Errors
+/// Propagates the store fault from reading the stored row.
+pub async fn holds_open_request_after(
+    pool: &SqlitePool,
+    provider: &str,
+    provider_session_id: &str,
+    event_type: &str,
+    payload: &Value,
+) -> Result<bool, FleetRepoError> {
+    if provider_session_id.is_empty() {
+        return Ok(false);
+    }
+    let prior = FleetRepo::provider_session_holds_open_request(pool, provider_session_id).await?;
+    // An event that merely RE-ANNOUNCES a live request leaves the attention
+    // group untouched, so the stored answer is still the answer. Without this
+    // the gate reads the Waiting a bare `Notification` would otherwise imply
+    // and closes the very question the notification is about.
+    if prior && reannounces_live_request(provider, event_type, payload) {
+        return Ok(true);
+    }
+    match states_for_hook(event_type, payload).1 {
+        // The apply writes a request fingerprint for exactly these two, which
+        // is the other half of the stored predicate.
+        Some(attention) => Ok(matches!(
+            attention,
+            AttentionState::Ask | AttentionState::Approval
+        )),
+        // The event changes no attention state, so the row keeps what it has.
+        None => Ok(prior),
+    }
+}
+
+/// Does this event merely re-announce a request that is already live?
+///
+/// Claude emits a `PermissionRequest` and then a generic `Notification` around
+/// one `AskUserQuestion`: two lines describing one picker, not two operator
+/// actions. Both the apply (which must not overwrite the live request's state)
+/// and the stale-ASK gate (which must not close it) need the same answer, so
+/// they read it here rather than each spelling it out and drifting apart.
+fn reannounces_live_request(provider: &str, event_type: &str, payload: &Value) -> bool {
+    let provider = parse_provider(provider);
+    if provider == Provider::Claude && event_type.split(':').next() == Some("Notification") {
+        return true;
+    }
+    let source_event_type = payload
+        .pointer("/payload/hook_event_name")
+        .and_then(Value::as_str)
+        .unwrap_or(event_type);
+    provider == Provider::Claude
+        && source_event_type == "PermissionRequest"
+        && claude_hook_tool_name(payload) == Some("AskUserQuestion")
 }
 
 async fn apply_workload_projection(
@@ -540,6 +696,48 @@ async fn retire_correlated_legacy(
         }
     }
     Ok(())
+}
+
+/// Read one status row per agent — the D14 "one truth" read.
+///
+/// Every surface calls this (the TUI fleet panel through `fleet/status`, `ainb
+/// fleet needs` and `ainb-web` through the same method) rather than folding its
+/// own view, so the state an operator sees on the phone is the state the panel
+/// shows, character for character.
+///
+/// The inbox is read ONCE for the whole snapshot and joined in memory: a
+/// per-row query would be N round trips for a read that runs on every tick.
+///
+/// # Errors
+/// Propagates the store fault.
+pub async fn status_rows(
+    pool: &SqlitePool,
+) -> Result<ainb_hangar_proto::agent_status::AgentStatusResult, sqlx::Error> {
+    use std::collections::HashSet;
+
+    let projection = FleetRepo::subscription_projection(pool, 0, 0).await?;
+    let snapshot = subscription_snapshot_wire(&projection);
+    let open: HashSet<String> = ainb_hangar_store::repo::attention::AttentionRepo::list_fleet(pool)
+        .await?
+        .into_iter()
+        .map(|row| row.session_id)
+        .collect();
+    let mut rows: Vec<_> = snapshot
+        .sessions
+        .iter()
+        .map(|session| {
+            let has_open_request = session
+                .provider_session_id
+                .as_deref()
+                .is_some_and(|id| open.contains(id));
+            ainb_hangar_proto::agent_status::status_row(session, has_open_request)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.session_key.cmp(&b.session_key));
+    Ok(ainb_hangar_proto::agent_status::AgentStatusResult {
+        rows,
+        head_revision: snapshot.head_revision,
+    })
 }
 
 /// Read a wire-ready consistent snapshot from Hangar SQLite.
@@ -1258,6 +1456,33 @@ pub async fn events_after_wire(
         .map(|events| events.iter().map(event_wire).collect())
 }
 
+/// Derive one row's pane binding for the wire (D14, issue #916).
+///
+/// Only a row with a tier-0/1 identity can be `pane_unbound`, and the
+/// discriminator is `provider_session_id`, NOT `management_state`. A hook row
+/// is the only kind that can have lost a pane it ought to have; a tier-5
+/// discovered row IS the scan's own record of a pane, so a null target there
+/// means "not scanned yet" rather than "an agent lost its pane", and an ACP
+/// child has no pane by construction. `management_state` does not separate
+/// those cases: only Claude hook rows are marked MANAGED, so keying on it
+/// would report every Codex session — the exact provider #916 is about — as
+/// having no pane question to answer.
+fn pane_binding_of(row: &FleetSessionRow) -> ainb_hangar_proto::fleet::PaneBinding {
+    use ainb_hangar_proto::fleet::PaneBinding;
+    let hook_sourced = row
+        .provider_session_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty());
+    if !hook_sourced || row.provider == "acp" {
+        return PaneBinding::NotApplicable;
+    }
+    if row.tmux_target.as_deref().is_some_and(|t| !t.is_empty()) {
+        PaneBinding::Bound
+    } else {
+        PaneBinding::PaneUnbound
+    }
+}
+
 fn session_wire(
     row: &FleetSessionRow,
     current_request: Option<Value>,
@@ -1275,6 +1500,7 @@ fn session_wire(
         },
         provider_session_id: row.provider_session_id.clone(),
         tmux_target: row.tmux_target.clone(),
+        pane_binding: pane_binding_of(row),
         process_start_fingerprint: row.process_start_fingerprint.clone(),
         cwd: row.cwd.clone(),
         display_name: row.display_name.clone(),
@@ -1393,7 +1619,8 @@ pub async fn reconcile_tmux_once(
 /// Fold one discovery sample into the registry.
 ///
 /// Split from [`reconcile_tmux_once`] so pane-to-row correlation is testable
-/// without a live tmux server.
+/// without a live tmux server, and public for the same reason: the pane-binding
+/// gate (issue #916) needs tier-5 rows in the store with no tmux on the box.
 ///
 /// The sweep never derives "is this pane live?" for itself. It consults one
 /// `discovered` set assembled from both of the passes that do: the scanned keys
@@ -1404,7 +1631,7 @@ pub async fn reconcile_tmux_once(
 /// `session_key`, so a row the two disagreed about was set HEALTHY by one and
 /// UNAVAILABLE by the other, one applied event each, every three seconds,
 /// forever.
-async fn reconcile_discovered_panes(
+pub async fn reconcile_discovered_panes(
     pool: &SqlitePool,
     events: &EventSink,
     sessions: Vec<FleetSession>,

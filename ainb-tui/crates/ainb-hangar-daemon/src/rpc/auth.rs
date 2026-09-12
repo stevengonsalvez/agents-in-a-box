@@ -88,6 +88,7 @@ const PAL_METHODS: &[&str] = &[
     methods::PING,
     methods::FLEET_PAL_GATE,
     methods::FLEET_SNAPSHOT,
+    methods::FLEET_STATUS,
     methods::ATTENTION_LIST,
     methods::ATTENTION_ANSWER,
     methods::FLEET_TRANSCRIPT_LIST,
