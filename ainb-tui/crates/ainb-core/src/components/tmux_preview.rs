@@ -99,7 +99,7 @@ impl TmuxPreviewPane {
             .style(Style::default().bg(DARK_BG))
             .title(title);
 
-        match state.embed.as_ref() {
+        match state.tmux.embed.as_ref() {
             Some(embed) => {
                 let parser = embed.parser();
                 let guard = parser.read();

@@ -22,8 +22,8 @@ mod tests {
         let mut state = AppState::new();
         state.sessions.selected_workspace_index = None;
         state.sessions.selected_session_index = None;
-        state.selected_other_tmux_index = Some(0);
-        state.other_tmux_sessions = names
+        state.tmux.selected_other_tmux_index = Some(0);
+        state.tmux.other_tmux_sessions = names
             .iter()
             .map(|name| OtherTmuxSession::new((*name).to_string(), false, 1))
             .collect();
@@ -134,18 +134,18 @@ mod tests {
         }
 
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
+            state.tmux.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
             Some(missing.as_str())
         );
-        assert!(state.embed.is_none(), "dead observer must release");
+        assert!(state.tmux.embed.is_none(), "dead observer must release");
         assert!(
             !state.sync_terminal_observer(24, 80),
             "same stale selection must not respawn an observer"
         );
 
-        state.selected_other_tmux_index = None;
+        state.tmux.selected_other_tmux_index = None;
         assert!(!state.sync_terminal_observer(24, 80));
-        assert!(state.observer_failed_target.is_none());
+        assert!(state.tmux.observer_failed_target.is_none());
     }
 
     #[test]
@@ -156,7 +156,7 @@ mod tests {
         }
 
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3)
         );
         assert!(state.notifications.iter().any(|notification| {
@@ -190,12 +190,12 @@ mod tests {
 
         let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
         state.current_screen = "session_list".to_string();
-        state.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
+        state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
         assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80), "observer starts");
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(2),
             "a spawned client can still fail asynchronously"
         );
@@ -203,7 +203,7 @@ mod tests {
         state.release_interactive_pane();
         state.record_observer_failure(session.clone());
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3),
             "a failed spawn must advance the existing retry count"
         );
@@ -239,13 +239,13 @@ mod tests {
 
         let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
         state.current_screen = "session_list".to_string();
-        state.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
+        state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
         assert!(!state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!state.poll_embed_exit());
-        assert!(state.observer_failed_target.is_none());
+        assert!(state.tmux.observer_failed_target.is_none());
 
         state.release_interactive_pane();
         let _ = std::process::Command::new("tmux")
@@ -284,11 +284,11 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80));
 
-        state.selected_other_tmux_index = Some(1);
-        state.observer_failed_target =
+        state.tmux.selected_other_tmux_index = Some(1);
+        state.tmux.observer_failed_target =
             Some((blocked, std::time::Instant::now(), MAX_OBSERVER_FAILURES));
         assert!(!state.sync_terminal_observer(24, 80));
-        assert!(state.embed.is_none());
+        assert!(state.tmux.embed.is_none());
 
         let _ = std::process::Command::new("tmux")
             .args(["kill-session", "-t", &format!("={active}")])
@@ -318,12 +318,12 @@ mod tests {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
 
         state.toggle_select_session();
-        state.selected_other_tmux_index = Some(1);
+        state.tmux.selected_other_tmux_index = Some(1);
         state.toggle_select_session();
 
-        assert_eq!(state.selected_other_tmux_sessions.len(), 2);
-        assert!(state.selected_other_tmux_sessions.contains("alpha"));
-        assert!(state.selected_other_tmux_sessions.contains("beta"));
+        assert_eq!(state.tmux.selected_other_tmux_sessions.len(), 2);
+        assert!(state.tmux.selected_other_tmux_sessions.contains("alpha"));
+        assert!(state.tmux.selected_other_tmux_sessions.contains("beta"));
         assert_eq!(
             state.selected_other_tmux_names_in_order(),
             vec!["alpha".to_string(), "beta".to_string()]
@@ -333,8 +333,8 @@ mod tests {
     #[test]
     fn test_delete_selected_other_tmux_sessions_opens_bulk_kill_confirmation() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
-        state.selected_other_tmux_sessions.insert("alpha".to_string());
-        state.selected_other_tmux_sessions.insert("beta".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("beta".to_string());
 
         EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
@@ -350,9 +350,9 @@ mod tests {
     #[test]
     fn test_delete_session_uses_checked_other_tmux_sessions_before_cursor_row() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
-        state.selected_other_tmux_index = Some(1);
-        state.selected_other_tmux_sessions.insert("alpha".to_string());
-        state.selected_other_tmux_sessions.insert("beta".to_string());
+        state.tmux.selected_other_tmux_index = Some(1);
+        state.tmux.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("beta".to_string());
 
         EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
@@ -367,8 +367,8 @@ mod tests {
     #[test]
     fn test_confirm_selected_other_tmux_sessions_queues_bulk_kill() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
-        state.selected_other_tmux_sessions.insert("alpha".to_string());
-        state.selected_other_tmux_sessions.insert("beta".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("beta".to_string());
         EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
         state
@@ -378,7 +378,7 @@ mod tests {
             .selected_option = true;
         EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-        assert!(state.selected_other_tmux_sessions.is_empty());
+        assert!(state.tmux.selected_other_tmux_sessions.is_empty());
         assert!(matches!(
             state.pending_async_action,
             Some(AsyncAction::KillOtherTmuxSessions(ref names))

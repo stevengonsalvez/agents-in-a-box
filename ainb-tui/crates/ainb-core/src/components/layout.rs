@@ -254,7 +254,7 @@ fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
 /// hit tests and scroll clamps that read them next run.
 pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
     if let Some((rows, cols)) = ui.embed_desired_size.take() {
-        if let Some(embed) = state.embed.as_mut() {
+        if let Some(embed) = state.tmux.embed.as_mut() {
             let _ = embed.resize(rows, cols);
         }
     }

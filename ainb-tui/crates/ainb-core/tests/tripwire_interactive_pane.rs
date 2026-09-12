@@ -93,8 +93,8 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
     // Select the real tmux session as an "other tmux" row (the same resolution
     // path `a`/`l` use). selected_tmux_name() must resolve to it.
     let mut state = AppState::new();
-    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
-    state.selected_other_tmux_index = Some(0);
+    state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.tmux.selected_other_tmux_index = Some(0);
     assert_eq!(
         state.selected_tmux_name().as_deref(),
         Some(session.as_str()),
@@ -138,6 +138,7 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
 
     // ── B6: typed input reaches the session and renders live in the pane ──
     state
+        .tmux
         .embed
         .as_ref()
         .expect("embed")
@@ -158,7 +159,7 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
 
     // ── B8: Ctrl+Q release reverts out of interactive AND the session survives ──
     state.release_interactive_pane();
-    let released = !state.is_interactive_pane() && state.embed.is_none();
+    let released = !state.is_interactive_pane() && state.tmux.embed.is_none();
     let alive = session_alive(&session);
 
     kill_session(&session);
@@ -193,8 +194,8 @@ fn interactive_embed_width_follows_the_sidebar_state() {
     // session_list is a split-pane (non-registry) screen, so layout takes the
     // split path that renders the preview/embed pane.
     state.current_screen = "session_list".to_string();
-    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
-    state.selected_other_tmux_index = Some(0);
+    state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.tmux.selected_other_tmux_index = Some(0);
     // Pin the sidebar to a known width: AppState::new() restores the
     // developer's persisted preference from the real config, which would make
     // the expected interior widths env-dependent.
@@ -211,12 +212,12 @@ fn interactive_embed_width_follows_the_sidebar_state() {
     // 40-col sidebar: the embed gets the remaining pane interior —
     // 120 − 40 − 2 (border) = 78 — NOT a forced near-full-width expansion.
     draw_frame(&mut term, &mut layout, &mut state, &mut ui);
-    let (_, cols_with_sidebar) = state.embed.as_ref().expect("embed").size();
+    let (_, cols_with_sidebar) = state.tmux.embed.as_ref().expect("embed").size();
 
     // Pre-collapsed rail (what `B` toggles): near-full width — 120 − 5 − 2.
     ui.sessions_pane.collapsed = true;
     draw_frame(&mut term, &mut layout, &mut state, &mut ui);
-    let (_, cols_with_rail) = state.embed.as_ref().expect("embed").size();
+    let (_, cols_with_rail) = state.tmux.embed.as_ref().expect("embed").size();
 
     state.release_interactive_pane();
     kill_session(&session);
@@ -247,22 +248,22 @@ fn reentering_on_a_different_row_retargets_the_embed() {
 
     let mut state = AppState::new();
     state.current_screen = "session_list".to_string();
-    state.other_tmux_sessions = vec![
+    state.tmux.other_tmux_sessions = vec![
         OtherTmuxSession::new(first.clone(), false, 1),
         OtherTmuxSession::new(second.clone(), false, 1),
     ];
-    state.selected_other_tmux_index = Some(0);
+    state.tmux.selected_other_tmux_index = Some(0);
     assert!(state.enter_interactive_pane(26, 100), "attach to first");
-    let initial_target = state.embed_session.clone();
+    let initial_target = state.tmux.embed_session.clone();
 
     // Same row again = self-healing no-op, embed target unchanged.
     assert!(state.enter_interactive_pane(26, 100), "same-row re-entry");
-    let same_row_target = state.embed_session.clone();
+    let same_row_target = state.tmux.embed_session.clone();
 
     // Different row: must swap the embed onto the newly selected session.
-    state.selected_other_tmux_index = Some(1);
+    state.tmux.selected_other_tmux_index = Some(1);
     assert!(state.enter_interactive_pane(26, 100), "re-target to second");
-    let swapped_target = state.embed_session.clone();
+    let swapped_target = state.tmux.embed_session.clone();
     let interactive_after = state.is_interactive_pane();
 
     state.release_interactive_pane();
@@ -307,8 +308,8 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     // releases on any other screen) and the screen whose mouse handler owns
     // pane focus.
     state.current_screen = "session_list".to_string();
-    state.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
-    state.selected_other_tmux_index = Some(0);
+    state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.tmux.selected_other_tmux_index = Some(0);
     assert!(
         state.enter_interactive_pane(26, 100),
         "enter_interactive_pane"
@@ -340,7 +341,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
         &mut ui,
     );
     let click_swallowed = click.is_none();
-    let still_interactive_after_click = state.is_interactive_pane() && state.embed.is_some();
+    let still_interactive_after_click = state.is_interactive_pane() && state.tmux.embed.is_some();
 
     // ── (b) ':' through the interactive key path reaches the PTY ──
     // Runs BEFORE the wheel check: a forwarded wheel-up legitimately puts
@@ -366,7 +367,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     };
     let colon_bytes = encode_key_event(&colon).expect("':' must encode");
     assert_eq!(colon_bytes, b":".to_vec());
-    let embed = state.embed.as_ref().expect("embed");
+    let embed = state.tmux.embed.as_ref().expect("embed");
     embed.write_input(&colon_bytes).expect("write ':'");
     // `: <marker>` — the shell no-op builtin; the echoed input line carries
     // the marker into the rendered pane.
@@ -394,6 +395,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     };
     let wheel_bytes = encode_mouse_event(&wheel, inner).expect("wheel inside the pane must encode");
     state
+        .tmux
         .embed
         .as_ref()
         .expect("embed")

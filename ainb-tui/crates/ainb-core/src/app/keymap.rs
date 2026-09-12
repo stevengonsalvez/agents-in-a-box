@@ -442,7 +442,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     if state.mcp_pool.mcp_overlay.is_some() {
         contexts.push(KeyContext::McpOverlay);
     }
-    if state.other_tmux_rename_mode {
+    if state.tmux.other_tmux_rename_mode {
         contexts.push(KeyContext::OtherTmuxRename);
     }
     if state.ssh.ssh_session_rename_mode {

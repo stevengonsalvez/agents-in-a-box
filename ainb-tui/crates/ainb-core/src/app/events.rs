@@ -1303,7 +1303,7 @@ impl EventHandler {
         // Modal text-entry overlays. These early-return higher up in
         // handle_key_event, but listing them keeps this helper a
         // complete predicate.
-        if state.other_tmux_rename_mode
+        if state.tmux.other_tmux_rename_mode
             || state.ssh.ssh_session_rename_mode
             || state.is_in_quick_commit_mode()
         {
@@ -1527,7 +1527,7 @@ impl EventHandler {
         {
             return Self::route_session_ask_text(character, state);
         }
-        if state.other_tmux_rename_mode {
+        if state.tmux.other_tmux_rename_mode {
             return Some(AppEvent::OtherTmuxRenameChar(character));
         }
         if state.ssh.ssh_session_rename_mode {
@@ -2687,7 +2687,7 @@ impl EventHandler {
                     state.is_ssh_session_selected(),
                     state.ssh.selected_ssh_session_index,
                     state.is_other_tmux_selected(),
-                    state.selected_other_tmux_index
+                    state.tmux.selected_other_tmux_index
                 );
 
                 // Check if we're in the "SSH Sessions" section
@@ -2807,7 +2807,7 @@ impl EventHandler {
                     state.sessions.selected_session_index,
                     state.sessions.shell_selected,
                     state.is_other_tmux_selected(),
-                    state.selected_other_tmux_index
+                    state.tmux.selected_other_tmux_index
                 );
 
                 let managed_count = state.sessions.selected_sessions.len();
@@ -2862,7 +2862,7 @@ impl EventHandler {
                     } else {
                         tracing::warn!(
                             "[ACTION] Other tmux selected but no session found at index {:?}",
-                            state.selected_other_tmux_index
+                            state.tmux.selected_other_tmux_index
                         );
                     }
                 } else if state.sessions.shell_selected {
@@ -2896,7 +2896,7 @@ impl EventHandler {
                         state.sessions.selected_workspace_index,
                         state.sessions.selected_session_index,
                         state.sessions.shell_selected,
-                        state.selected_other_tmux_index
+                        state.tmux.selected_other_tmux_index
                     );
                     state.add_warning_notification("No session selected to delete".to_string());
                 }
@@ -2904,7 +2904,7 @@ impl EventHandler {
             AppEvent::ToggleSelectSession => {
                 state.toggle_select_session();
                 let count = state.sessions.selected_sessions.len()
-                    + state.selected_other_tmux_sessions.len();
+                    + state.tmux.selected_other_tmux_sessions.len();
                 if count > 0 {
                     state.add_success_notification(format!(
                         "{} session(s) selected — Enter to start, Shift+D to delete",
@@ -3165,7 +3165,7 @@ impl EventHandler {
                             crate::app::state::ConfirmAction::KillOtherTmuxSessions(
                                 session_names,
                             ) => {
-                                state.selected_other_tmux_sessions.clear();
+                                state.tmux.selected_other_tmux_sessions.clear();
                                 state.pending_async_action =
                                     Some(AsyncAction::KillOtherTmuxSessions(session_names));
                             }
@@ -8038,7 +8038,7 @@ mod text_input_guard_tests {
 
         fn reset_text_context_state(state: &mut AppState) {
             state.current_screen = screen_ids::HOME.to_string();
-            state.other_tmux_rename_mode = false;
+            state.tmux.other_tmux_rename_mode = false;
             state.ssh.ssh_session_rename_mode = false;
             state.git_view.quick_commit_message = None;
             state.onboarding.auth_provider_popup_state.show_popup = false;
@@ -8132,7 +8132,7 @@ mod text_input_guard_tests {
         // predicate to true.
         let cases: Vec<(&str, fn(&mut AppState))> = vec![
             ("other_tmux_rename_mode", |s| {
-                s.other_tmux_rename_mode = true
+                s.tmux.other_tmux_rename_mode = true
             }),
             ("ssh_session_rename_mode", |s| {
                 s.ssh.ssh_session_rename_mode = true

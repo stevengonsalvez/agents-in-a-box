@@ -287,12 +287,12 @@ fn is_bulk_resume_on_enter(event: Option<AppEvent>) -> bool {
 #[test]
 fn selected_managed_sessions_resume_after_cursor_moves_to_attachable_rows() {
     let mut terminal = state_with_selected_stopped_managed_session();
-    terminal.other_tmux_sessions.push(OtherTmuxSession::new(
+    terminal.tmux.other_tmux_sessions.push(OtherTmuxSession::new(
         "external-terminal".to_string(),
         false,
         1,
     ));
-    terminal.selected_other_tmux_index = Some(0);
+    terminal.tmux.selected_other_tmux_index = Some(0);
     assert!(
         is_bulk_resume_on_enter(enter_event(&mut terminal)),
         "selected managed sessions must resume before an Other tmux cursor attaches"

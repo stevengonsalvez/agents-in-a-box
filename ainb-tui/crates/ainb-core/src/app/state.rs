@@ -536,10 +536,10 @@ impl AppState {
     /// with a writable client feeding the same terminal parser path.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
         let attached_elsewhere = self.selected_session_attached_elsewhere();
-        self.observer_pending = None;
-        self.observer_failed_target = None;
-        if self.embed.is_some() {
-            if self.selected_tmux_name() == self.embed_session && self.is_interactive_pane() {
+        self.tmux.observer_pending = None;
+        self.tmux.observer_failed_target = None;
+        if self.tmux.embed.is_some() {
+            if self.selected_tmux_name() == self.tmux.embed_session && self.is_interactive_pane() {
                 return true;
             }
             self.release_interactive_pane();
@@ -553,8 +553,8 @@ impl AppState {
         // user's call, so allow it and warn (never block).
         match crate::tmux::EmbedClient::attach(&name, rows, cols) {
             Ok(client) => {
-                self.embed = Some(client);
-                self.embed_session = Some(name);
+                self.tmux.embed = Some(client);
+                self.tmux.embed_session = Some(name);
                 self.focused_pane = FocusedPane::Preview;
                 if attached_elsewhere {
                     self.add_warning_notification(
@@ -579,8 +579,8 @@ impl AppState {
     pub fn sync_terminal_observer(&mut self, rows: u16, cols: u16) -> bool {
         let target = self.selected_tmux_name();
         let Some(name) = target else {
-            self.observer_pending = None;
-            self.observer_failed_target = None;
+            self.tmux.observer_pending = None;
+            self.tmux.observer_failed_target = None;
             self.release_interactive_pane();
             return false;
         };
@@ -590,25 +590,26 @@ impl AppState {
         }
         let now = Instant::now();
         if self
+            .tmux
             .observer_failed_target
             .as_ref()
             .is_some_and(|(failed, _, _)| failed != &name)
         {
-            self.observer_failed_target = None;
+            self.tmux.observer_failed_target = None;
         }
-        if self.embed_session.as_deref() == Some(name.as_str()) && self.embed.is_some() {
-            self.observer_pending = None;
+        if self.tmux.embed_session.as_deref() == Some(name.as_str()) && self.tmux.embed.is_some() {
+            self.tmux.observer_pending = None;
             return false;
         }
         if !crate::tmux::EmbedClient::read_only_observer_supported() {
             self.release_interactive_pane();
-            self.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
+            self.tmux.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
             self.add_warning_notification(
                 "Live preview requires tmux client ignore-size support".to_string(),
             );
             return false;
         }
-        if let Some((failed, retry_at, attempts)) = &self.observer_failed_target {
+        if let Some((failed, retry_at, attempts)) = &self.tmux.observer_failed_target {
             if failed == &name && (*attempts >= MAX_OBSERVER_FAILURES || now < *retry_at) {
                 self.release_interactive_pane();
                 return false;
@@ -622,13 +623,13 @@ impl AppState {
         self.release_interactive_pane();
         match crate::tmux::EmbedClient::observe(&name, rows, cols) {
             Ok(client) => {
-                self.embed = Some(client);
-                self.embed_session = Some(name);
+                self.tmux.embed = Some(client);
+                self.tmux.embed_session = Some(name);
                 // `attach-session` can spawn successfully then immediately
                 // fail (for example, if tmux rejects a client flag). Keep a
                 // prior retry count until this client survives one grace
                 // period so failed spawns cannot reset the retry cap.
-                self.observer_started_at = Some(now);
+                self.tmux.observer_started_at = Some(now);
                 true
             }
             Err(e) => {
@@ -641,12 +642,13 @@ impl AppState {
 
     fn record_observer_failure(&mut self, session: String) {
         let attempts = self
+            .tmux
             .observer_failed_target
             .as_ref()
             .filter(|(failed, _, _)| failed == &session)
             .map_or(1, |(_, _, attempts)| attempts.saturating_add(1))
             .min(MAX_OBSERVER_FAILURES);
-        self.observer_failed_target = Some((
+        self.tmux.observer_failed_target = Some((
             session.clone(),
             Instant::now() + OBSERVER_RETRY_DELAY.saturating_mul(attempts.into()),
             attempts,
@@ -659,14 +661,15 @@ impl AppState {
     }
 
     fn observer_target_settled(&mut self, target: &str, now: Instant) -> bool {
-        match self.observer_pending.as_ref() {
+        match self.tmux.observer_pending.as_ref() {
             Some((pending, ready_at)) if pending == target && now >= *ready_at => {
-                self.observer_pending = None;
+                self.tmux.observer_pending = None;
                 true
             }
             Some((pending, _)) if pending == target => false,
             _ => {
-                self.observer_pending = Some((target.to_string(), now + OBSERVER_SETTLE_DELAY));
+                self.tmux.observer_pending =
+                    Some((target.to_string(), now + OBSERVER_SETTLE_DELAY));
                 false
             }
         }
@@ -690,11 +693,11 @@ impl AppState {
 
     /// Release the ephemeral client. Read-only preview reconnects next loop.
     pub fn release_interactive_pane(&mut self) {
-        if let Some(mut client) = self.embed.take() {
+        if let Some(mut client) = self.tmux.embed.take() {
             client.shutdown();
         }
-        self.embed_session = None;
-        self.observer_started_at = None;
+        self.tmux.embed_session = None;
+        self.tmux.observer_started_at = None;
         if self.focused_pane == FocusedPane::Preview {
             self.focused_pane = FocusedPane::Sessions;
         }
@@ -722,7 +725,7 @@ impl AppState {
 
     /// True while an interactive embed is focused.
     pub fn is_interactive_pane(&self) -> bool {
-        self.embed.is_some() && self.focused_pane == FocusedPane::Preview
+        self.tmux.embed.is_some() && self.focused_pane == FocusedPane::Preview
     }
 
     /// True when the selected terminal has a read-only observer client.
@@ -733,8 +736,8 @@ impl AppState {
 
     fn is_observing_tmux_session(&self, session: &str) -> bool {
         !self.is_interactive_pane()
-            && self.embed.is_some()
-            && self.embed_session.as_deref() == Some(session)
+            && self.tmux.embed.is_some()
+            && self.tmux.embed_session.as_deref() == Some(session)
     }
 
     /// If the observer has ended or become invisible, stop it. Keys can never
@@ -742,13 +745,13 @@ impl AppState {
     ///
     /// Returns true when it released (the layout changed → repaint needed).
     pub fn poll_embed_exit(&mut self) -> bool {
-        if self.embed.is_none() {
+        if self.tmux.embed.is_none() {
             return false;
         }
-        let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
+        let exited = self.tmux.embed.as_ref().is_some_and(|e| e.has_exited());
         let invisible = self.current_screen != screen_ids::SESSION_LIST;
         let interactive = self.is_interactive_pane();
-        let session = self.embed_session.clone();
+        let session = self.tmux.embed_session.clone();
         if exited || invisible {
             self.release_interactive_pane();
             if exited && interactive {
@@ -762,11 +765,12 @@ impl AppState {
         }
         if !interactive
             && self
+                .tmux
                 .observer_started_at
                 .is_some_and(|started| started.elapsed() >= OBSERVER_SUCCESS_GRACE)
         {
-            self.observer_started_at = None;
-            self.observer_failed_target = None;
+            self.tmux.observer_started_at = None;
+            self.tmux.observer_failed_target = None;
         }
         false
     }
@@ -776,7 +780,7 @@ impl AppState {
     /// arrives without host input, so the dirty-gate (perf bead `wai`) would
     /// otherwise hold the pane at the 250ms animation floor.
     pub fn embed_take_dirty(&self) -> bool {
-        self.embed.as_ref().is_some_and(|e| e.take_dirty())
+        self.tmux.embed.as_ref().is_some_and(|e| e.take_dirty())
     }
 }
 
@@ -3141,6 +3145,8 @@ pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, S
 
 #[derive(Debug)]
 pub struct AppState {
+    pub tmux: Versioned<TmuxSection>,
+
     pub log_streams: Versioned<LogsSection>,
 
     pub sessions: Versioned<SessionsSection>,
@@ -3185,28 +3191,6 @@ pub struct AppState {
 
     // Claude chat visibility toggle
     pub focused_pane: FocusedPane,
-    // Live interactive embedded tmux-attach client for the preview pane.
-    // Enforced invariants (focus can drift, so none of these are assumed):
-    //  - Input forwards to the PTY only while `is_interactive_pane()` holds
-    //    (embed Some AND focused_pane == Preview).
-    //  - Ctrl+Q releases only while interactive focus owns the terminal.
-    //  - `poll_embed_exit` (run before every draw) releases on client death
-    //    or when the session-list screen is no longer current, so keys are
-    //    never forwarded to an invisible PTY.
-    // Dropping it kills the ephemeral tmux client (never the session).
-    pub embed: Option<crate::tmux::EmbedClient>,
-    // The tmux session name the live embed is attached to. Some iff `embed`
-    // is Some. Re-entering on a DIFFERENT row releases the old client and
-    // attaches to the new target instead of silently refocusing the stale
-    // one (see `enter_interactive_pane`).
-    pub embed_session: Option<String>,
-    // A changed selection must settle before starting a read-only client.
-    observer_pending: Option<(String, Instant)>,
-    // A read-only observer that dies waits before the next retry.
-    observer_failed_target: Option<(String, Instant, u8)>,
-    // A spawned observer must survive briefly before it clears a prior retry
-    // count. `tmux attach-session` reports some startup failures asynchronously.
-    observer_started_at: Option<Instant>,
     // Track the last time we checked for OAuth token refresh
     pub last_token_refresh_check: Option<std::time::Instant>,
     // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
@@ -3234,20 +3218,6 @@ pub struct AppState {
     codex_degrade_announced: std::collections::HashSet<Uuid>,
     // Pending event to be processed in next loop iteration
     pub pending_event: Option<crate::app::events::AppEvent>,
-
-    // Tmux integration
-    pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
-    pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
-
-    // Other tmux sessions (not managed by agents-in-a-box)
-    pub other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
-    pub other_tmux_expanded: bool,
-    pub selected_other_tmux_index: Option<usize>,
-    pub selected_other_tmux_sessions: HashSet<String>, // Multi-selected external tmux names
-    /// Whether we're in rename mode for the selected "Other tmux" session
-    pub other_tmux_rename_mode: bool,
-    /// Buffer for the new name being typed during rename
-    pub other_tmux_rename_buffer: String,
 
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
@@ -3670,6 +3640,7 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            tmux: Versioned::default(),
             log_streams: Versioned::default(),
             sessions: Versioned::default(),
             new_session: Versioned::default(),
@@ -3702,11 +3673,6 @@ impl Default for AppState {
             confirmation_dialog: None,
             ui_needs_refresh: false,
             focused_pane: FocusedPane::Sessions,
-            embed: None,
-            embed_session: None,
-            observer_pending: None,
-            observer_failed_target: None,
-            observer_started_at: None,
             last_token_refresh_check: None,
             last_headroom_watchdog: None,
             previous_screen: None,
@@ -3716,16 +3682,8 @@ impl Default for AppState {
             pending_event: None,
 
             // Initialize quick commit state
-            tmux_sessions: HashMap::new(),
-            preview_update_task: None,
 
             // Initialize other tmux sessions
-            other_tmux_sessions: Vec::new(),
-            other_tmux_expanded: true, // Default to expanded
-            selected_other_tmux_index: None,
-            selected_other_tmux_sessions: HashSet::new(),
-            other_tmux_rename_mode: false,
-            other_tmux_rename_buffer: String::new(),
 
             // Initialize SSH sessions (separate section)
 
@@ -4591,16 +4549,16 @@ impl AppState {
         self.sessions.selected_session_index = None;
         self.sessions.shell_selected = false;
         self.ssh.selected_ssh_session_index = None;
-        self.selected_other_tmux_index = None;
+        self.tmux.selected_other_tmux_index = None;
 
         // Set initial selection from rows visible under the active filter.
         if !self.select_first_visible_workspace_item_from(0) {
             if !self.ssh.ssh_sessions.is_empty() {
                 // No workspaces but there are SSH sessions - select the first one
                 self.ssh.selected_ssh_session_index = Some(0);
-            } else if !self.other_tmux_sessions.is_empty() {
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
                 // No workspaces or SSH sessions but there are "Other tmux" sessions - select the first one
-                self.selected_other_tmux_index = Some(0);
+                self.tmux.selected_other_tmux_index = Some(0);
             } else {
                 info!("No active sessions found. Use 'n' to create a new session.");
                 // Selection indices already reset above
@@ -4688,7 +4646,7 @@ impl AppState {
                                             tmux_name,
                                             "claude".to_string(),
                                         );
-                                        self.tmux_sessions.insert(session.id, tmux_session);
+                                        self.tmux.tmux_sessions.insert(session.id, tmux_session);
                                         debug!(
                                             "Populated tmux_sessions for session {}: {}",
                                             session.id, session.name
@@ -4698,7 +4656,7 @@ impl AppState {
                             }
                             info!(
                                 "Populated tmux_sessions with {} entries",
-                                self.tmux_sessions.len()
+                                self.tmux.tmux_sessions.len()
                             );
 
                             // Set initial selection
@@ -4706,15 +4664,15 @@ impl AppState {
                             self.sessions.selected_session_index = None;
                             self.sessions.shell_selected = false;
                             self.ssh.selected_ssh_session_index = None;
-                            self.selected_other_tmux_index = None;
+                            self.tmux.selected_other_tmux_index = None;
 
                             if !self.select_first_visible_workspace_item_from(0) {
                                 if !self.ssh.ssh_sessions.is_empty() {
                                     // No workspaces but there are SSH sessions - select the first one
                                     self.ssh.selected_ssh_session_index = Some(0);
-                                } else if !self.other_tmux_sessions.is_empty() {
+                                } else if !self.tmux.other_tmux_sessions.is_empty() {
                                     // No workspaces or SSH sessions but there are "Other tmux" sessions
-                                    self.selected_other_tmux_index = Some(0);
+                                    self.tmux.selected_other_tmux_index = Some(0);
                                 }
                             }
 
@@ -5459,7 +5417,7 @@ impl AppState {
                         interactive_session.tmux_session_name.clone(),
                         "claude".to_string(),
                     );
-                    self.tmux_sessions.insert(interactive_session.session_id, tmux_session);
+                    self.tmux.tmux_sessions.insert(interactive_session.session_id, tmux_session);
                 }
             }
             Err(e) => {
@@ -5602,16 +5560,16 @@ impl AppState {
                     "Failed to list tmux sessions: {} (tmux might not be running)",
                     e
                 );
-                self.other_tmux_sessions.clear();
-                self.selected_other_tmux_sessions.clear();
+                self.tmux.other_tmux_sessions.clear();
+                self.tmux.selected_other_tmux_sessions.clear();
                 return;
             }
         };
 
         if !output.status.success() {
             debug!("No tmux sessions found (tmux might not be running)");
-            self.other_tmux_sessions.clear();
-            self.selected_other_tmux_sessions.clear();
+            self.tmux.other_tmux_sessions.clear();
+            self.tmux.selected_other_tmux_sessions.clear();
             return;
         }
 
@@ -5739,10 +5697,16 @@ impl AppState {
             other_sessions.len(),
             ssh_sessions.len()
         );
-        self.other_tmux_sessions = other_sessions;
-        let live_other_names: HashSet<String> =
-            self.other_tmux_sessions.iter().map(|session| session.name.clone()).collect();
-        self.selected_other_tmux_sessions.retain(|name| live_other_names.contains(name));
+        self.tmux.other_tmux_sessions = other_sessions;
+        let live_other_names: HashSet<String> = self
+            .tmux
+            .other_tmux_sessions
+            .iter()
+            .map(|session| session.name.clone())
+            .collect();
+        self.tmux
+            .selected_other_tmux_sessions
+            .retain(|name| live_other_names.contains(name));
         self.ssh.ssh_sessions = ssh_sessions;
     }
 
@@ -5910,7 +5874,7 @@ impl AppState {
         self.sessions.selected_session_index = None;
         self.sessions.shell_selected = false;
         self.ssh.selected_ssh_session_index = None;
-        self.selected_other_tmux_index = None;
+        self.tmux.selected_other_tmux_index = None;
 
         self.select_first_visible_workspace_item_from(0);
     }
@@ -6008,10 +5972,10 @@ impl AppState {
     pub fn toggle_select_other_tmux_session(&mut self) {
         if let Some(session) = self.selected_other_tmux_session() {
             let name = session.name.clone();
-            if self.selected_other_tmux_sessions.contains(&name) {
-                self.selected_other_tmux_sessions.remove(&name);
+            if self.tmux.selected_other_tmux_sessions.contains(&name) {
+                self.tmux.selected_other_tmux_sessions.remove(&name);
             } else {
-                self.selected_other_tmux_sessions.insert(name);
+                self.tmux.selected_other_tmux_sessions.insert(name);
             }
         }
     }
@@ -6069,8 +6033,8 @@ impl AppState {
             }
         }
 
-        if !self.other_tmux_sessions.is_empty() && self.other_tmux_expanded {
-            for other_idx in 0..self.other_tmux_sessions.len() {
+        if !self.tmux.other_tmux_sessions.is_empty() && self.tmux.other_tmux_expanded {
+            for other_idx in 0..self.tmux.other_tmux_sessions.len() {
                 out.push(AttachableRef::OtherTmux { other_idx });
             }
         }
@@ -6091,20 +6055,20 @@ impl AppState {
                 self.sessions.selected_session_index = Some(session_idx);
                 self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
+                self.tmux.selected_other_tmux_index = None;
             }
             AttachableRef::WorkspaceShell { workspace_idx } => {
                 self.sessions.selected_workspace_index = Some(workspace_idx);
                 self.sessions.selected_session_index = None;
                 self.sessions.shell_selected = true;
                 self.ssh.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
+                self.tmux.selected_other_tmux_index = None;
             }
             AttachableRef::SshSession { ssh_idx } => {
                 self.sessions.selected_workspace_index = None;
                 self.sessions.selected_session_index = None;
                 self.sessions.shell_selected = false;
-                self.selected_other_tmux_index = None;
+                self.tmux.selected_other_tmux_index = None;
                 self.ssh.selected_ssh_session_index = Some(ssh_idx);
             }
             AttachableRef::OtherTmux { other_idx } => {
@@ -6112,7 +6076,7 @@ impl AppState {
                 self.sessions.selected_session_index = None;
                 self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = Some(other_idx);
+                self.tmux.selected_other_tmux_index = Some(other_idx);
             }
         }
     }
@@ -6136,13 +6100,13 @@ impl AppState {
                 self.sessions.selected_session_index = None;
                 self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
+                self.tmux.selected_other_tmux_index = None;
             }
             SessionListRowTarget::SshHeader => {
                 self.sessions.selected_workspace_index = None;
                 self.sessions.selected_session_index = None;
                 self.sessions.shell_selected = false;
-                self.selected_other_tmux_index = None;
+                self.tmux.selected_other_tmux_index = None;
                 self.ssh.selected_ssh_session_index = None;
                 self.ssh.ssh_sessions_expanded = !self.ssh.ssh_sessions_expanded;
             }
@@ -6151,8 +6115,8 @@ impl AppState {
                 self.sessions.selected_session_index = None;
                 self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
-                self.other_tmux_expanded = !self.other_tmux_expanded;
+                self.tmux.selected_other_tmux_index = None;
+                self.tmux.other_tmux_expanded = !self.tmux.other_tmux_expanded;
             }
             SessionListRowTarget::Attachable(target) => {
                 self.select_attachable(target);
@@ -6279,7 +6243,7 @@ impl AppState {
             }
         }
 
-        if !self.other_tmux_sessions.is_empty() {
+        if !self.tmux.other_tmux_sessions.is_empty() {
             if current_row > 0 {
                 if current_row == row_index {
                     return None;
@@ -6292,8 +6256,8 @@ impl AppState {
             }
             current_row += 1;
 
-            if self.other_tmux_expanded {
-                for other_idx in 0..self.other_tmux_sessions.len() {
+            if self.tmux.other_tmux_expanded {
+                for other_idx in 0..self.tmux.other_tmux_sessions.len() {
                     if current_row == row_index {
                         return Some(SessionListRowTarget::Attachable(AttachableRef::OtherTmux {
                             other_idx,
@@ -6309,11 +6273,11 @@ impl AppState {
 
     pub fn next_session(&mut self) {
         // Check if we're in the "Other tmux" section
-        if self.selected_other_tmux_index.is_some() {
+        if self.tmux.selected_other_tmux_index.is_some() {
             // Navigate within other tmux sessions
-            let current = self.selected_other_tmux_index.unwrap_or(0);
-            if current + 1 < self.other_tmux_sessions.len() {
-                self.selected_other_tmux_index = Some(current + 1);
+            let current = self.tmux.selected_other_tmux_index.unwrap_or(0);
+            if current + 1 < self.tmux.other_tmux_sessions.len() {
+                self.tmux.selected_other_tmux_index = Some(current + 1);
             }
             // At the end - stay at last item (no wrap)
             return;
@@ -6325,10 +6289,10 @@ impl AppState {
             let current = self.ssh.selected_ssh_session_index.unwrap_or(0);
             if current + 1 < self.ssh.ssh_sessions.len() {
                 self.ssh.selected_ssh_session_index = Some(current + 1);
-            } else if !self.other_tmux_sessions.is_empty() {
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
                 // At end of SSH sessions - move to "Other tmux"
                 self.ssh.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = Some(0);
+                self.tmux.selected_other_tmux_index = Some(0);
             }
             // Else: stay at last SSH session (no wrap)
             return;
@@ -6339,8 +6303,8 @@ impl AppState {
             if !self.ssh.ssh_sessions.is_empty() {
                 self.ssh.selected_ssh_session_index = Some(0);
                 return;
-            } else if !self.other_tmux_sessions.is_empty() {
-                self.selected_other_tmux_index = Some(0);
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
+                self.tmux.selected_other_tmux_index = Some(0);
                 return;
             }
         }
@@ -6394,7 +6358,7 @@ impl AppState {
         self.sessions.selected_session_index = session_idx;
         self.sessions.shell_selected = session_idx.is_none();
         self.ssh.selected_ssh_session_index = None;
-        self.selected_other_tmux_index = None;
+        self.tmux.selected_other_tmux_index = None;
         if session_idx.is_some() {
             self.queue_logs_fetch();
         }
@@ -6474,24 +6438,24 @@ impl AppState {
         }
 
         // No SSH sessions - move to "Other tmux" if available
-        if !self.other_tmux_sessions.is_empty() {
+        if !self.tmux.other_tmux_sessions.is_empty() {
             self.sessions.selected_workspace_index = None;
             self.sessions.selected_session_index = None;
             self.sessions.shell_selected = false;
-            self.selected_other_tmux_index = Some(0);
+            self.tmux.selected_other_tmux_index = Some(0);
         }
         // Else: stay at current position (no wrap)
     }
 
     pub fn previous_session(&mut self) {
         // Check if we're in the "Other tmux" section
-        if let Some(other_idx) = self.selected_other_tmux_index {
+        if let Some(other_idx) = self.tmux.selected_other_tmux_index {
             if other_idx > 0 {
                 // Move up within other tmux sessions
-                self.selected_other_tmux_index = Some(other_idx - 1);
+                self.tmux.selected_other_tmux_index = Some(other_idx - 1);
             } else {
                 // At first other_tmux session - move to SSH sessions if available
-                self.selected_other_tmux_index = None;
+                self.tmux.selected_other_tmux_index = None;
                 if !self.ssh.ssh_sessions.is_empty() {
                     self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 } else {
@@ -6519,8 +6483,8 @@ impl AppState {
             if !self.ssh.ssh_sessions.is_empty() {
                 self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 return;
-            } else if !self.other_tmux_sessions.is_empty() {
-                self.selected_other_tmux_index = Some(self.other_tmux_sessions.len() - 1);
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
+                self.tmux.selected_other_tmux_index = Some(self.tmux.other_tmux_sessions.len() - 1);
                 return;
             }
         }
@@ -6692,69 +6656,73 @@ impl AppState {
 
     /// Toggle the expand/collapse state of the "Other tmux" section
     pub fn toggle_other_tmux_expanded(&mut self) {
-        self.other_tmux_expanded = !self.other_tmux_expanded;
+        self.tmux.other_tmux_expanded = !self.tmux.other_tmux_expanded;
     }
 
     /// Get the currently selected other tmux session, if any
     pub fn selected_other_tmux_session(&self) -> Option<&crate::models::OtherTmuxSession> {
-        self.selected_other_tmux_index.and_then(|idx| self.other_tmux_sessions.get(idx))
+        self.tmux
+            .selected_other_tmux_index
+            .and_then(|idx| self.tmux.other_tmux_sessions.get(idx))
     }
 
     /// Selected "Other tmux" names in current render order.
     pub fn selected_other_tmux_names_in_order(&self) -> Vec<String> {
-        self.other_tmux_sessions
+        self.tmux
+            .other_tmux_sessions
             .iter()
-            .filter(|session| self.selected_other_tmux_sessions.contains(&session.name))
+            .filter(|session| self.tmux.selected_other_tmux_sessions.contains(&session.name))
             .map(|session| session.name.clone())
             .collect()
     }
 
     /// Check if the selection is in the "Other tmux" section
     pub fn is_other_tmux_selected(&self) -> bool {
-        self.selected_other_tmux_index.is_some() && self.sessions.selected_workspace_index.is_none()
+        self.tmux.selected_other_tmux_index.is_some()
+            && self.sessions.selected_workspace_index.is_none()
     }
 
     /// Start rename mode for the selected "Other tmux" session
     pub fn start_other_tmux_rename(&mut self) {
         if let Some(session) = self.selected_other_tmux_session() {
-            self.other_tmux_rename_buffer = session.name.clone();
-            self.other_tmux_rename_mode = true;
+            self.tmux.other_tmux_rename_buffer = session.name.clone();
+            self.tmux.other_tmux_rename_mode = true;
         }
     }
 
     /// Cancel rename mode
     pub fn cancel_other_tmux_rename(&mut self) {
-        self.other_tmux_rename_mode = false;
-        self.other_tmux_rename_buffer.clear();
+        self.tmux.other_tmux_rename_mode = false;
+        self.tmux.other_tmux_rename_buffer.clear();
     }
 
     /// Add a character to the rename buffer
     pub fn other_tmux_rename_char(&mut self, c: char) {
-        if self.other_tmux_rename_mode {
-            self.other_tmux_rename_buffer.push(c);
+        if self.tmux.other_tmux_rename_mode {
+            self.tmux.other_tmux_rename_buffer.push(c);
         }
     }
 
     /// Remove a character from the rename buffer
     pub fn other_tmux_rename_backspace(&mut self) {
-        if self.other_tmux_rename_mode {
-            self.other_tmux_rename_buffer.pop();
+        if self.tmux.other_tmux_rename_mode {
+            self.tmux.other_tmux_rename_buffer.pop();
         }
     }
 
     /// Execute the rename using tmux rename-session
     pub async fn confirm_other_tmux_rename(&mut self) -> Result<(), String> {
-        if !self.other_tmux_rename_mode {
+        if !self.tmux.other_tmux_rename_mode {
             return Err("Not in rename mode".to_string());
         }
 
-        let new_name = self.other_tmux_rename_buffer.trim().to_string();
+        let new_name = self.tmux.other_tmux_rename_buffer.trim().to_string();
         if new_name.is_empty() {
             return Err("Name cannot be empty".to_string());
         }
 
-        if let Some(idx) = self.selected_other_tmux_index {
-            if let Some(session) = self.other_tmux_sessions.get(idx) {
+        if let Some(idx) = self.tmux.selected_other_tmux_index {
+            if let Some(session) = self.tmux.other_tmux_sessions.get(idx) {
                 let old_name = session.name.clone();
 
                 // Sanitize new name (tmux compatible)
@@ -6769,8 +6737,8 @@ impl AppState {
 
                 if output.status.success() {
                     // Exit rename mode
-                    self.other_tmux_rename_mode = false;
-                    self.other_tmux_rename_buffer.clear();
+                    self.tmux.other_tmux_rename_mode = false;
+                    self.tmux.other_tmux_rename_buffer.clear();
 
                     // Reload other tmux sessions to reflect the change
                     self.load_other_tmux_sessions().await;
@@ -6805,7 +6773,7 @@ impl AppState {
     pub fn is_ssh_session_selected(&self) -> bool {
         self.ssh.selected_ssh_session_index.is_some()
             && self.sessions.selected_workspace_index.is_none()
-            && self.selected_other_tmux_index.is_none()
+            && self.tmux.selected_other_tmux_index.is_none()
     }
 
     /// Start rename mode for the selected SSH session
@@ -8946,7 +8914,7 @@ impl AppState {
                             }
 
                             // Store tmux session in our map
-                            self.tmux_sessions.insert(session_id, tmux_session);
+                            self.tmux.tmux_sessions.insert(session_id, tmux_session);
 
                             let _ =
                                 log_sender.send("Tmux session created successfully!".to_string());
@@ -9192,7 +9160,7 @@ impl AppState {
                     interactive_session.branch_name.clone(),
                     "claude".to_string(),
                 );
-                self.tmux_sessions.insert(session_id, tmux_session);
+                self.tmux.tmux_sessions.insert(session_id, tmux_session);
 
                 info!("Successfully created Interactive session {}", session_id);
                 Ok(())
@@ -9639,7 +9607,7 @@ impl AppState {
         info!("=== DELETE INTERACTIVE SESSION START: {} ===", session_id);
 
         // Cleanup tmux session if it exists
-        if let Some(mut tmux_session) = self.tmux_sessions.remove(&session_id) {
+        if let Some(mut tmux_session) = self.tmux.tmux_sessions.remove(&session_id) {
             info!("Found tmux session in state, cleaning up: {}", session_id);
             if let Err(e) = tmux_session.cleanup().await {
                 warn!("Failed to cleanup tmux session from state: {}", e);
@@ -9692,6 +9660,7 @@ impl AppState {
         // Resolve tmux session name preferring the in-memory map, falling back to
         // sessions.json (handles edge case where the live map is out of sync).
         let tmux_name = self
+            .tmux
             .tmux_sessions
             .get(&session_id)
             .map(|t| t.name().to_string())
@@ -9768,7 +9737,7 @@ impl AppState {
         // the live agent.
         if result.is_ok() {
             // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
-            self.tmux_sessions.remove(&session_id);
+            self.tmux.tmux_sessions.remove(&session_id);
 
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_status(SessionStatus::Stopped);
@@ -9813,7 +9782,7 @@ impl AppState {
             return false;
         }
 
-        self.tmux_sessions.remove(&session_id);
+        self.tmux.tmux_sessions.remove(&session_id);
         if let Some(session) = self.find_session_mut(session_id) {
             session.set_status(SessionStatus::Stopped);
             session.is_attached = false;
@@ -10045,7 +10014,7 @@ impl AppState {
                 metadata.tmux_session_name.clone(),
                 metadata.agent_type.name().to_string(),
             );
-            self.tmux_sessions.insert(session_id, tmux_session);
+            self.tmux.tmux_sessions.insert(session_id, tmux_session);
 
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_status(SessionStatus::Running);
@@ -10184,7 +10153,7 @@ impl AppState {
         info!("Deleting Boss mode session: {}", session_id);
 
         // Cleanup tmux session if it exists (Boss mode might have tmux for attach)
-        if let Some(mut tmux_session) = self.tmux_sessions.remove(&session_id) {
+        if let Some(mut tmux_session) = self.tmux.tmux_sessions.remove(&session_id) {
             info!("Cleaning up tmux session for Boss session {}", session_id);
             if let Err(e) = tmux_session.cleanup().await {
                 warn!("Failed to cleanup tmux session: {}", e);
@@ -11527,7 +11496,7 @@ impl AppState {
 
     /// Stop the preview update task
     pub fn stop_preview_updates(&mut self) {
-        if let Some(task) = self.preview_update_task.take() {
+        if let Some(task) = self.tmux.preview_update_task.take() {
             task.abort();
         }
     }
@@ -12661,7 +12630,7 @@ impl AppState {
         // For all other sessions, just do a quick status check (visible area only).
         let selected_session_id = self.get_selected_session_id();
 
-        for (session_id, tmux_session) in &self.tmux_sessions {
+        for (session_id, tmux_session) in &self.tmux.tmux_sessions {
             let should_update = self
                 .sessions
                 .workspaces
@@ -12680,7 +12649,7 @@ impl AppState {
             // The selected session renders from the observer's vt100 screen,
             // so a parallel capture would waste work and rebuild terminal
             // text through the lossy legacy path.
-            if is_selected && self.embed_session.as_deref() != Some(tmux_session.name()) {
+            if is_selected && self.tmux.embed_session.as_deref() != Some(tmux_session.name()) {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {

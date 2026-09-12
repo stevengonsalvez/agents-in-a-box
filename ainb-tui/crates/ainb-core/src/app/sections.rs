@@ -480,3 +480,61 @@ impl Default for LogsSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct TmuxSection {
+    // Live interactive embedded tmux-attach client for the preview pane.
+    // Enforced invariants (focus can drift, so none of these are assumed):
+    //  - Input forwards to the PTY only while `is_interactive_pane()` holds
+    //    (embed Some AND focused_pane == Preview).
+    //  - Ctrl+Q releases only while interactive focus owns the terminal.
+    //  - `poll_embed_exit` (run before every draw) releases on client death
+    //    or when the session-list screen is no longer current, so keys are
+    //    never forwarded to an invisible PTY.
+    // Dropping it kills the ephemeral tmux client (never the session).
+    pub embed: Option<crate::tmux::EmbedClient>,
+    // The tmux session name the live embed is attached to. Some iff `embed`
+    // is Some. Re-entering on a DIFFERENT row releases the old client and
+    // attaches to the new target instead of silently refocusing the stale
+    // one (see `enter_interactive_pane`).
+    pub embed_session: Option<String>,
+    // Tmux integration
+    pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
+    pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
+    // Other tmux sessions (not managed by agents-in-a-box)
+    pub other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
+    pub other_tmux_expanded: bool,
+    pub selected_other_tmux_index: Option<usize>,
+    pub selected_other_tmux_sessions: HashSet<String>, // Multi-selected external tmux names
+    /// Whether we're in rename mode for the selected "Other tmux" session
+    pub other_tmux_rename_mode: bool,
+    /// Buffer for the new name being typed during rename
+    pub other_tmux_rename_buffer: String,
+    // A changed selection must settle before starting a read-only client.
+    pub(crate) observer_pending: Option<(String, Instant)>,
+    // A read-only observer that dies waits before the next retry.
+    pub(crate) observer_failed_target: Option<(String, Instant, u8)>,
+    // A spawned observer must survive briefly before it clears a prior retry
+    // count. `tmux attach-session` reports some startup failures asynchronously.
+    pub(crate) observer_started_at: Option<Instant>,
+}
+
+impl Default for TmuxSection {
+    fn default() -> Self {
+        Self {
+            embed: None,
+            embed_session: None,
+            tmux_sessions: HashMap::new(),
+            preview_update_task: None,
+            other_tmux_sessions: Vec::new(),
+            other_tmux_expanded: true, // Default to expanded
+            selected_other_tmux_index: None,
+            selected_other_tmux_sessions: HashSet::new(),
+            other_tmux_rename_mode: false,
+            other_tmux_rename_buffer: String::new(),
+            observer_pending: None,
+            observer_failed_target: None,
+            observer_started_at: None,
+        }
+    }
+}

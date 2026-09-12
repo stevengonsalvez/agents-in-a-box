@@ -256,7 +256,7 @@ fn selected_row_target(state: &AppState) -> Option<SessionListRowTarget> {
         .selected_ssh_session_index
         .map(|ssh_idx| SessionListRowTarget::Attachable(AttachableRef::SshSession { ssh_idx }))
         .or_else(|| {
-            state.selected_other_tmux_index.map(|other_idx| {
+            state.tmux.selected_other_tmux_index.map(|other_idx| {
                 SessionListRowTarget::Attachable(AttachableRef::OtherTmux { other_idx })
             })
         })
@@ -386,7 +386,7 @@ impl SessionListComponent {
                     .title(Line::from(title_spans))
                     .title_bottom(
                         if state.ssh.ssh_session_rename_mode
-                            || state.other_tmux_rename_mode
+                            || state.tmux.other_tmux_rename_mode
                             || state.session_labels.session_label_rename_mode
                         {
                             // Rename mode help (SSH or Other tmux)
@@ -853,7 +853,7 @@ impl SessionListComponent {
 
             let session_count = state.ssh.ssh_sessions.len();
             let is_selected_ssh = state.sessions.selected_workspace_index.is_none()
-                && state.selected_other_tmux_index.is_none()
+                && state.tmux.selected_other_tmux_index.is_none()
                 && state.ssh.selected_ssh_session_index.is_some();
 
             let ssh_symbol = if state.ssh.ssh_sessions_expanded {
@@ -955,17 +955,17 @@ impl SessionListComponent {
         }
 
         // Add "Other tmux" section if there are other tmux sessions
-        if !state.other_tmux_sessions.is_empty() {
+        if !state.tmux.other_tmux_sessions.is_empty() {
             // Add separator line
             if !items.is_empty() {
                 items.push(ListItem::new(Line::from("")));
             }
 
-            let session_count = state.other_tmux_sessions.len();
+            let session_count = state.tmux.other_tmux_sessions.len();
             let is_selected_other = state.sessions.selected_workspace_index.is_none()
-                && state.selected_other_tmux_index.is_some();
+                && state.tmux.selected_other_tmux_index.is_some();
 
-            let other_symbol = if state.other_tmux_expanded {
+            let other_symbol = if state.tmux.other_tmux_expanded {
                 "▼"
             } else {
                 "▶"
@@ -998,13 +998,13 @@ impl SessionListComponent {
             items.push(ListItem::new(other_header));
 
             // Show other tmux sessions if expanded
-            if state.other_tmux_expanded {
-                let session_len = state.other_tmux_sessions.len();
-                for (idx, other_session) in state.other_tmux_sessions.iter().enumerate() {
+            if state.tmux.other_tmux_expanded {
+                let session_len = state.tmux.other_tmux_sessions.len();
+                for (idx, other_session) in state.tmux.other_tmux_sessions.iter().enumerate() {
                     let is_selected =
-                        is_selected_other && state.selected_other_tmux_index == Some(idx);
+                        is_selected_other && state.tmux.selected_other_tmux_index == Some(idx);
                     let is_multi_selected =
-                        state.selected_other_tmux_sessions.contains(&other_session.name);
+                        state.tmux.selected_other_tmux_sessions.contains(&other_session.name);
                     let is_last = idx == session_len - 1;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };
@@ -1025,7 +1025,7 @@ impl SessionListComponent {
                     };
 
                     // Check if this session is being renamed
-                    let is_being_renamed = is_selected && state.other_tmux_rename_mode;
+                    let is_being_renamed = is_selected && state.tmux.other_tmux_rename_mode;
 
                     let badge = next_badge(&mut attach_no);
                     let checkbox = ballot_checkbox(is_multi_selected);
@@ -1038,7 +1038,7 @@ impl SessionListComponent {
                             Span::styled(format!(" {} ", status), Style::default()),
                             Span::styled("✏️ ", Style::default()),
                             Span::styled(
-                                format!("{}_", state.other_tmux_rename_buffer),
+                                format!("{}_", state.tmux.other_tmux_rename_buffer),
                                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
                             ),
                         ])
@@ -1182,15 +1182,15 @@ impl SessionListComponent {
         }
 
         // Count "Other tmux" section items
-        if !state.other_tmux_sessions.is_empty() {
+        if !state.tmux.other_tmux_sessions.is_empty() {
             let has_items_above =
                 !state.sessions.workspaces.is_empty() || !state.ssh.ssh_sessions.is_empty();
             if has_items_above {
                 count += 1; // Empty separator line
             }
             count += 1; // "Other tmux" header
-            if state.other_tmux_expanded {
-                count += state.other_tmux_sessions.len();
+            if state.tmux.other_tmux_expanded {
+                count += state.tmux.other_tmux_sessions.len();
             }
         }
 

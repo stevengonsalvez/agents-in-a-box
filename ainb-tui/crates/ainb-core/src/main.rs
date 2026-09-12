@@ -670,6 +670,7 @@ async fn run_tui_loop(
                         // focused pane that silently eats input.
                         let write_failed = app
                             .state
+                            .tmux
                             .embed
                             .as_ref()
                             .zip(crate::tmux::encode_key_event(&key_event))
@@ -900,7 +901,7 @@ async fn run_tui_loop(
                     if app.state.is_interactive_pane() {
                         let write_failed = ui
                             .embed_pane_area
-                            .zip(app.state.embed.as_ref())
+                            .zip(app.state.tmux.embed.as_ref())
                             .and_then(|(inner, client)| {
                                 crate::tmux::encode_mouse_event(&mouse_event, inner)
                                     .map(|bytes| client.write_input(&bytes).is_err())
@@ -1130,7 +1131,7 @@ async fn run_tui_loop(
                     if app.state.is_interactive_pane() {
                         // Forward as a bracketed paste so the inner program
                         // doesn't submit multi-line content line-by-line.
-                        let write_failed = app.state.embed.as_ref().is_some_and(|client| {
+                        let write_failed = app.state.tmux.embed.as_ref().is_some_and(|client| {
                             let mut bytes = Vec::with_capacity(text.len() + 12);
                             bytes.extend_from_slice(b"\x1b[200~");
                             bytes.extend_from_slice(text.as_bytes());
@@ -1405,7 +1406,7 @@ async fn run_tui_loop(
                                 if app.state.selected_other_tmux_session().map(|s| s.name.as_str())
                                     == Some(&session_name)
                                 {
-                                    app.state.selected_other_tmux_index = None;
+                                    app.state.tmux.selected_other_tmux_index = None;
                                 }
                             }
                             Ok(o) => {
@@ -1472,7 +1473,7 @@ async fn run_tui_loop(
 
                         if let Some(selected_name) = selected_name {
                             if session_names.iter().any(|name| name == &selected_name) {
-                                app.state.selected_other_tmux_index = None;
+                                app.state.tmux.selected_other_tmux_index = None;
                             }
                         }
 
