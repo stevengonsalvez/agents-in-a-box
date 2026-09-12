@@ -878,6 +878,10 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         help: "How `ainb fleet send` delivers: tmux first, tmux only, broker (restart)",
         kind: RowKind::Choice(&["tmux", "tmux-only", "broker"]),
     }),
+    Entry::Hidden {
+        key: "fleet.status.legacy_classify_primary",
+        why: "the one-release T0 rollback, set in config.toml when a fleet reads worse after the status store lands; removed at T0+2, so a settings row would advertise it as a permanent preference",
+    },
     Entry::Row(ConfigRow {
         key: "fleet.enrich",
         category: C::Fleet,
