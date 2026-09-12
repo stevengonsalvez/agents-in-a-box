@@ -190,6 +190,14 @@ pub mod observability;
 /// parking, the expiry, the activity feed and Pal's authorship live
 /// here, because only the daemon owns the store and the event broker.
 pub mod pal;
+/// `gh`-backed PR status fetch behind an injectable seam (e38.34).
+///
+/// Fetches a captured PR's CI rollup + mergeability + merge state by shelling out
+/// to `gh pr view --json statusCheckRollup,mergeable,state` behind the
+/// [`pr_status::PrStatusProvider`] trait, so the task-detail badge can surface
+/// real check status and the refresh path can auto-move a merged PR's issue to
+/// Done. Every failure (absent / unauthenticated `gh`, no checks) degrades to an
+/// all-`Unknown` status — never a panic.
 pub mod pr_status;
 /// P5 agent profiles: the on-disk master store, the DB-index reconciler +
 /// fs-watch, and compile-on-dispatch of the tool-native files (D14-D16, T6).
@@ -209,14 +217,13 @@ pub mod profile;
 /// transcript buffer. Scoped to tasks bound to an issue (a `NULL`-issue chat task
 /// is skipped); best-effort (a write fault is logged, never blocks the task FSM).
 pub mod progress_comment;
-/// `gh`-backed PR status fetch behind an injectable seam (e38.34).
+/// Boot resolution for mutation receipts a dead daemon left mid-flight (D18).
 ///
-/// Fetches a captured PR's CI rollup + mergeability + merge state by shelling out
-/// to `gh pr view --json statusCheckRollup,mergeable,state` behind the
-/// [`pr_status::PrStatusProvider`] trait, so the task-detail badge can surface
-/// real check status and the refresh path can auto-move a merged PR's issue to
-/// Done. Every failure (absent / unauthenticated `gh`, no checks) degrades to an
-/// all-`Unknown` status — never a panic.
+/// Runs once, before the socket accepts anything, so no client can observe a
+/// half-resolved ledger. A receipt still `writing` becomes
+/// `unknown{effects_ambiguous}` and surfaces as a `delivery_unconfirmed`
+/// attention row; one still `claimed` never reached the PTY, so its attention
+/// row is reopened instead.
 pub mod receipt_sweep;
 /// The daemon-wide retry sweep: LLM-free auto-`continue` of transient API
 /// errors, capped and escalated through the same ledger and attention pipeline
