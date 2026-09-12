@@ -724,32 +724,38 @@ async fn run_tui_loop(
                     // preview scroll mode would swallow navigation invisibly.
                     let observing_terminal = app.state.is_observing_selected_terminal();
                     let preview = layout.tmux_preview_mut();
-                    if observing_terminal {
-                        preview.exit_scroll_mode();
-                    } else if preview.is_scroll_mode() {
-                        match keymap.resolve(&[KeyContext::PreviewScroll], &chord) {
-                            Some(KeyAction::Ui(UiAction::PreviewExitScroll)) => {
-                                preview.exit_scroll_mode();
-                                continue; // Don't process ESC as Quit
+                    match preview_scroll_route(
+                        &app.state.current_screen,
+                        preview.is_scroll_mode(),
+                        observing_terminal,
+                    ) {
+                        PreviewScrollRoute::Clear => preview.exit_scroll_mode(),
+                        PreviewScrollRoute::Handle => {
+                            match keymap.resolve(&[KeyContext::PreviewScroll], &chord) {
+                                Some(KeyAction::Ui(UiAction::PreviewExitScroll)) => {
+                                    preview.exit_scroll_mode();
+                                    continue; // Don't process ESC as Quit
+                                }
+                                Some(KeyAction::Ui(UiAction::PreviewScrollUp)) => {
+                                    preview.scroll_up();
+                                    continue; // Don't let event handler navigate sessions
+                                }
+                                Some(KeyAction::Ui(UiAction::PreviewScrollDown)) => {
+                                    preview.scroll_down();
+                                    continue; // Don't let event handler navigate sessions
+                                }
+                                Some(KeyAction::Ui(UiAction::PreviewPageUp)) => {
+                                    preview.scroll_page_up();
+                                    continue;
+                                }
+                                Some(KeyAction::Ui(UiAction::PreviewPageDown)) => {
+                                    preview.scroll_page_down();
+                                    continue;
+                                }
+                                _ => {} // Let other keys pass through to event handler
                             }
-                            Some(KeyAction::Ui(UiAction::PreviewScrollUp)) => {
-                                preview.scroll_up();
-                                continue; // Don't let event handler navigate sessions
-                            }
-                            Some(KeyAction::Ui(UiAction::PreviewScrollDown)) => {
-                                preview.scroll_down();
-                                continue; // Don't let event handler navigate sessions
-                            }
-                            Some(KeyAction::Ui(UiAction::PreviewPageUp)) => {
-                                preview.scroll_page_up();
-                                continue;
-                            }
-                            Some(KeyAction::Ui(UiAction::PreviewPageDown)) => {
-                                preview.scroll_page_down();
-                                continue;
-                            }
-                            _ => {} // Let other keys pass through to event handler
                         }
+                        PreviewScrollRoute::Ignore => {}
                     }
 
                     // Plugin screens own every non-reserved key after the
@@ -1987,6 +1993,30 @@ fn attach_failure_notice(session_name: &str, error: &impl std::fmt::Display) -> 
     )
 }
 
+/// Route preview scrolling before focused-plugin key forwarding. `tmux_preview`
+/// belongs only to the split-pane session-list surface, so any other screen
+/// clears stale preview state before it can claim a plugin key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviewScrollRoute {
+    Clear,
+    Handle,
+    Ignore,
+}
+
+fn preview_scroll_route(
+    current_screen: &str,
+    preview_is_scrolling: bool,
+    observing_terminal: bool,
+) -> PreviewScrollRoute {
+    if observing_terminal || current_screen != crate::app::screens::ids::SESSION_LIST {
+        PreviewScrollRoute::Clear
+    } else if preview_is_scrolling {
+        PreviewScrollRoute::Handle
+    } else {
+        PreviewScrollRoute::Ignore
+    }
+}
+
 fn setup_logging() {
     use std::fs::OpenOptions;
     use std::path::PathBuf;
@@ -2199,6 +2229,33 @@ mod attach_failure_notice_tests {
             "the remedy: {notice}"
         );
         assert!(notice.contains("nest"), "the other cause: {notice}");
+    }
+}
+
+#[cfg(test)]
+mod preview_scroll_surface_tests {
+    use super::{PreviewScrollRoute, preview_scroll_route};
+    use crate::app::screens::ids;
+
+    #[test]
+    fn preview_scroll_stays_on_session_list_and_clears_elsewhere() {
+        assert_eq!(
+            preview_scroll_route(ids::SESSION_LIST, true, false),
+            PreviewScrollRoute::Handle
+        );
+        assert_eq!(
+            preview_scroll_route(ids::HANGAR, true, false),
+            PreviewScrollRoute::Clear,
+            "stale preview scroll must clear before focused-plugin forwarding"
+        );
+    }
+
+    #[test]
+    fn observed_terminal_never_uses_host_preview_scrolling() {
+        assert_eq!(
+            preview_scroll_route(ids::SESSION_LIST, true, true),
+            PreviewScrollRoute::Clear
+        );
     }
 }
 
