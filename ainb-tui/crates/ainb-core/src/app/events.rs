@@ -841,7 +841,7 @@ impl EventHandler {
     /// that case so a click meant for the modal doesn't leak through.
     fn skill_manager_overlay_open(state: &AppState) -> bool {
         let s = &state.skills.skill_manager_state;
-        state.help_visible
+        state.shell.help_visible
             || s.banner.is_active()
             || s.input.is_some()
             || s.library.is_some()
@@ -905,7 +905,7 @@ impl EventHandler {
             return;
         }
         state.skills.skill_manager_state.preview_loading = Some(uri.to_string());
-        state.pending_async_action = Some(crate::app::state::AsyncAction::SkillPreviewFetch(
+        state.shell.pending_async_action = Some(crate::app::state::AsyncAction::SkillPreviewFetch(
             uri.to_string(),
         ));
     }
@@ -943,7 +943,9 @@ impl EventHandler {
         }
         match event {
             AppEvent::MouseRightClick { x, y } => {
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     if let Some(crate::app::state::SessionListRowTarget::Attachable(target)) =
                         state.session_list_row_at_mouse(&ui.sessions_pane, x, y)
                     {
@@ -959,13 +961,13 @@ impl EventHandler {
                 None
             }
             AppEvent::MouseClick { x, y } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
-                    if state.home_screen_v2_state.begin_sidebar_resize(x, y) {
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
+                    if state.shell.home_screen_v2_state.begin_sidebar_resize(x, y) {
                         return None;
                     }
 
                     if let Some(outcome) =
-                        state.home_screen_v2_state.click_sidebar_item_at(x, y, Instant::now())
+                        state.shell.home_screen_v2_state.click_sidebar_item_at(x, y, Instant::now())
                     {
                         if outcome.double_click {
                             return Some(AppEvent::HomeScreenSidebarSelect);
@@ -979,7 +981,7 @@ impl EventHandler {
                 // Sources / Units. Guarded so clicks meant for an open
                 // overlay (banner / input / library / browse / help)
                 // don't leak through to the panels.
-                if state.current_screen == screen_ids::SKILL_MANAGER
+                if state.shell.current_screen == screen_ids::SKILL_MANAGER
                     && !Self::skill_manager_overlay_open(state)
                 {
                     if let Some((sources_rect, units_rect, sources_w)) =
@@ -1046,7 +1048,9 @@ impl EventHandler {
                 let split_point = (term_width as f32 * SESSIONS_PANE_WIDTH_PERCENTAGE) as u16;
 
                 // Check if we're in the main view (not in overlays)
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     // Click on the bottom keymap legend (or its collapsed hint
                     // row) toggles it — the mouse twin of ⇧M.
                     if let Some(area) = ui.menu_bar_area {
@@ -1080,19 +1084,19 @@ impl EventHandler {
                     }
 
                     if ui.sessions_pane.contains_sessions_point(x, y) {
-                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                         return None;
                     }
 
                     if ui.sessions_pane.contains_preview_point(x, y) {
-                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
                         return None;
                     }
 
                     if x < split_point {
-                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                     } else {
-                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
                     }
                     None
                 } else {
@@ -1101,7 +1105,7 @@ impl EventHandler {
             }
             AppEvent::MouseDragStart { x: _, y: _ } => {
                 // Start text selection in logs pane
-                if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
+                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
                     None
                 } else {
@@ -1109,13 +1113,15 @@ impl EventHandler {
                 }
             }
             AppEvent::MouseDragging { x, y: _ } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
                     let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                    state.home_screen_v2_state.drag_sidebar_resize(x, term_width);
+                    state.shell.home_screen_v2_state.drag_sidebar_resize(x, term_width);
                     return None;
                 }
 
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     let width = ui
                         .sessions_pane
                         .last_content_width()
@@ -1127,7 +1133,7 @@ impl EventHandler {
                 // SkillManager divider drag: the new Sources width is the
                 // pointer's x + 1 (the panel spans columns 0..=x). Clamped
                 // by `grow`/`shrink`'s shared clamp via the setter below.
-                if state.current_screen == screen_ids::SKILL_MANAGER
+                if state.shell.current_screen == screen_ids::SKILL_MANAGER
                     && state.skills.skill_manager_state.resize_active
                 {
                     let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
@@ -1140,7 +1146,7 @@ impl EventHandler {
                 }
 
                 // Update selection during drag
-                if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
+                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
                     None
                 } else {
@@ -1148,10 +1154,10 @@ impl EventHandler {
                 }
             }
             AppEvent::MouseDragEnd { x, y } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
-                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
-                    if state.home_screen_v2_state.finish_sidebar_resize() {
-                        let width = state.home_screen_v2_state.sidebar.preferred_width;
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
+                    state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                    if state.shell.home_screen_v2_state.finish_sidebar_resize() {
+                        let width = state.shell.home_screen_v2_state.sidebar.preferred_width;
                         state.config.app_config.ui_preferences.home_sidebar_width = Some(width);
                         if let Err(e) = state.config.app_config.save() {
                             tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
@@ -1160,7 +1166,9 @@ impl EventHandler {
                     return None;
                 }
 
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     ui.sessions_pane.update_hover(x, y);
                     if ui.sessions_pane.finish_resize() {
                         Self::persist_sessions_pane_preferences(state, ui);
@@ -1168,7 +1176,7 @@ impl EventHandler {
                     return None;
                 }
 
-                if state.current_screen == screen_ids::SKILL_MANAGER {
+                if state.shell.current_screen == screen_ids::SKILL_MANAGER {
                     let _ = (x, y);
                     if state.skills.skill_manager_state.resize_active {
                         state.skills.skill_manager_state.resize_active = false;
@@ -1178,7 +1186,7 @@ impl EventHandler {
                 }
 
                 // Finalize text selection
-                if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
+                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
                     None
                 } else {
@@ -1186,10 +1194,12 @@ impl EventHandler {
                 }
             }
             AppEvent::MouseMove { x, y } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
-                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
+                    state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
                 }
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     ui.sessions_pane.update_hover(x, y);
                 }
                 None
@@ -1230,7 +1240,7 @@ impl EventHandler {
         // screen too — `new_session_state` can linger after navigating away
         // (e.g. via the sidebar), and a paste must not leak into a hidden
         // picker.
-        let on_pick_repo = state.current_screen == crate::app::screens::ids::NEW_SESSION
+        let on_pick_repo = state.shell.current_screen == crate::app::screens::ids::NEW_SESSION
             && state
                 .new_session
                 .new_session_state
@@ -1315,7 +1325,7 @@ impl EventHandler {
         // textarea. Both accept colon-bearing input (URLs, prompts), so
         // global single-character shortcuts must be suppressed while they
         // own focus.
-        let new_session_text_active = state.current_screen == screen_ids::NEW_SESSION
+        let new_session_text_active = state.shell.current_screen == screen_ids::NEW_SESSION
             && state
                 .new_session
                 .new_session_state
@@ -1338,11 +1348,11 @@ impl EventHandler {
         // sessions screen binds bare `d` to delete-session and bare `q` to
         // leave, so without this a message typed into the thread composer would
         // fire session shortcuts one character at a time.
-        let session_composer_active = state.current_screen == screen_ids::SESSION_LIST
+        let session_composer_active = state.shell.current_screen == screen_ids::SESSION_LIST
             && state.session_composer_captures_text();
-        let skills_text_active =
-            state.current_screen == screen_ids::SKILLS && state.skills.skills_state.search_active;
-        let recovery_text_active = state.current_screen == screen_ids::SESSION_RECOVERY
+        let skills_text_active = state.shell.current_screen == screen_ids::SKILLS
+            && state.skills.skills_state.search_active;
+        let recovery_text_active = state.shell.current_screen == screen_ids::SESSION_RECOVERY
             && state.recovery.session_recovery_state.search_active;
         // SkillManager add-source / search prompt — when its input
         // overlay is open the user is typing a URI or filter, which
@@ -1351,12 +1361,12 @@ impl EventHandler {
         // palette would open mid-URI and swallow the rest of the
         // keystrokes — exactly the bug that made `[i] add source`
         // appear broken.
-        let skill_manager_input_active = state.current_screen == screen_ids::SKILL_MANAGER
+        let skill_manager_input_active = state.shell.current_screen == screen_ids::SKILL_MANAGER
             && (state.skills.skill_manager_state.input.is_some()
                 || state.skills.skill_manager_state.browse.as_ref().is_some_and(|b| {
                     b.mode == crate::components::skill_manager_screen::BrowseMode::Query
                 }));
-        let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
+        let git_view_text_active = state.shell.current_screen == screen_ids::GIT_VIEW
             && state
                 .git_view
                 .git_view_state
@@ -1372,7 +1382,7 @@ impl EventHandler {
         // `TextInput` / `NumberInput` variants (via
         // `ConfigPopupState::is_text_entry`); `Choice` and `Boolean`
         // popups are navigation-only, so `H` is still allowed there.
-        let config_text_active = state.current_screen == screen_ids::CONFIG
+        let config_text_active = state.shell.current_screen == screen_ids::CONFIG
             && (state.config.config_screen_state.editing
                 || state.config.config_screen_state.api_key_input_mode
                 || state.config.config_popup_state.is_text_entry());
@@ -1381,7 +1391,7 @@ impl EventHandler {
         // the OTEL credential form, and the auth API-key entry pane. These
         // must accept bracketed paste (endpoints/tokens/paths are exactly
         // the values users paste).
-        let onboarding_text_active = state.current_screen == screen_ids::ONBOARDING
+        let onboarding_text_active = state.shell.current_screen == screen_ids::ONBOARDING
             && state.onboarding.onboarding_state.as_ref().is_some_and(|o| {
                 use crate::components::onboarding::{AuthPane, OnboardingStep};
                 match o.current_step {
@@ -1405,7 +1415,7 @@ impl EventHandler {
             || plugin_capturing_text
             || onboarding_text_active
             || matches!(
-                state.current_screen.as_str(),
+                state.shell.current_screen.as_str(),
                 screen_ids::SEARCH_WORKSPACE
                     | screen_ids::CLAUDE_CHAT
                     | screen_ids::AUTH_SETUP
@@ -1475,7 +1485,7 @@ impl EventHandler {
         let chord = Chord::from_key_event(&key_event);
         // New Session delegates to component-owned handlers in this phase, but
         // Help remains a host modal and therefore wins before that delegation.
-        if state.help_visible {
+        if state.shell.help_visible {
             let context = if Self::is_text_input_context(state) {
                 KeyContext::Screen("help", crate::app::keymap::SubContext::Named("text"))
             } else {
@@ -1488,14 +1498,14 @@ impl EventHandler {
                 return None;
             }
         }
-        if state.current_screen == screen_ids::NEW_SESSION {
+        if state.shell.current_screen == screen_ids::NEW_SESSION {
             return Self::handle_new_session_keys(key_event, state);
         }
 
         let contexts = active_contexts(state, &HostFlags::default());
         match keymap.resolve_with_context(&contexts, &chord) {
             Some((context, _))
-                if state.help_visible
+                if state.shell.help_visible
                     && context != KeyContext::HelpVisible
                     && !Self::is_text_input_context(state) =>
             {
@@ -1517,11 +1527,11 @@ impl EventHandler {
 
     /// Map a table-owned printable glyph onto the reducer's input intent.
     fn keymap_text_event(character: char, state: &mut AppState) -> Option<AppEvent> {
-        if state.current_screen == screen_ids::SESSION_LIST && state.session_tab_owns_keys() {
+        if state.shell.current_screen == screen_ids::SESSION_LIST && state.session_tab_owns_keys() {
             return Self::route_session_composer_char(character, state);
         }
-        if state.current_screen == screen_ids::SESSION_LIST
-            && crate::components::session_tabs::resolve(state, state.session_tab)
+        if state.shell.current_screen == screen_ids::SESSION_LIST
+            && crate::components::session_tabs::resolve(state, state.shell.session_tab)
                 == crate::components::session_tabs::SessionTab::Ask
             && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
         {
@@ -1548,7 +1558,7 @@ impl EventHandler {
             return Some(AppEvent::AuthProviderPopupInputChar(character));
         }
 
-        match state.current_screen.as_str() {
+        match state.shell.current_screen.as_str() {
             screen_ids::CONFIG
                 if state.config.config_screen_state.editing
                     || state.config.config_screen_state.api_key_input_mode =>
@@ -1690,7 +1700,8 @@ impl EventHandler {
             UiAction::DaemonsConfirmMenu => {
                 state.hangar.daemons_state.confirm_menu();
                 if let Some(session) = state.hangar.daemons_state.take_attach_request() {
-                    state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::AttachToOtherTmux(session));
                 }
                 None
             }
@@ -1785,7 +1796,7 @@ impl EventHandler {
         use crate::components::session_tabs::SessionTab;
         use crate::models::SessionStatus;
 
-        match crate::components::session_tabs::resolve(state, state.session_tab) {
+        match crate::components::session_tabs::resolve(state, state.shell.session_tab) {
             SessionTab::Preview => {}
             SessionTab::Ask => return Some(AppEvent::SessionAskSend),
             SessionTab::Thread | SessionTab::Pal => return Some(AppEvent::SessionTabComposerSend),
@@ -1857,7 +1868,7 @@ impl EventHandler {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
         state.fleet.ask_state.retarget(&chip);
         state.fleet.ask_state.move_cursor(&chip, delta);
-        state.ui_needs_refresh = true;
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
@@ -1865,7 +1876,7 @@ impl EventHandler {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
         state.fleet.ask_state.retarget(&chip);
         state.fleet.ask_state.backspace();
-        state.ui_needs_refresh = true;
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
@@ -1876,7 +1887,7 @@ impl EventHandler {
             return None;
         }
         state.fleet.ask_state.push_char(character);
-        state.ui_needs_refresh = true;
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
@@ -1884,11 +1895,11 @@ impl EventHandler {
     where
         F: FnOnce(&mut crate::fleet::pal_dial::PalDial),
     {
-        if state.session_tab != crate::components::session_tabs::SessionTab::Pal {
+        if state.shell.session_tab != crate::components::session_tabs::SessionTab::Pal {
             return None;
         }
         turn(&mut state.fleet.pal_dial);
-        state.ui_needs_refresh = true;
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
@@ -1915,7 +1926,7 @@ impl EventHandler {
         if matches!(action, ChatKey::Enter) && state.pal_daemon_cta_armed() {
             return Some(AppEvent::SessionStartHangarDaemon);
         }
-        if state.session_tab == SessionTab::Thread {
+        if state.shell.session_tab == SessionTab::Thread {
             let targets = state.broadcast_targets();
             if !targets.is_empty() {
                 let handled = match action {
@@ -1928,8 +1939,8 @@ impl EventHandler {
                         true
                     }
                     ChatKey::Esc => {
-                        state.session_tab = SessionTab::Preview;
-                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        state.shell.session_tab = SessionTab::Preview;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                         true
                     }
                     ChatKey::Char(character) => {
@@ -1943,25 +1954,25 @@ impl EventHandler {
                     _ => false,
                 };
                 if handled {
-                    state.ui_needs_refresh = true;
+                    state.shell.ui_needs_refresh = true;
                     return Some(AppEvent::Consumed);
                 }
                 return None;
             }
         }
 
-        let host = match state.session_tab {
+        let host = match state.shell.session_tab {
             SessionTab::Pal => state.fleet.pal_chat.as_mut(),
             SessionTab::Thread => state.fleet.session_chat.as_mut().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?;
         let outcome = reduce_chat_key(host.state_mut(), action);
-        state.ui_needs_refresh = true;
+        state.shell.ui_needs_refresh = true;
         match outcome {
             ChatKeyOutcome::Handled => Some(AppEvent::Consumed),
             ChatKeyOutcome::Close => {
-                state.session_tab = SessionTab::Preview;
-                state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                state.shell.session_tab = SessionTab::Preview;
+                state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                 Some(AppEvent::Consumed)
             }
             ChatKeyOutcome::Intent(intent) => {
@@ -2035,7 +2046,7 @@ impl EventHandler {
                         .and_then(|p| p.git_auth_status.as_ref())
                         == Some(&GitAuthStatus::Checking);
                     if needs_recheck {
-                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                        state.shell.pending_async_action = Some(AsyncAction::CheckGitAuth);
                     }
                     None
                 }
@@ -2094,10 +2105,11 @@ impl EventHandler {
                     // previous screen recorded.
                     state.new_session.new_session_state = None;
                     let prev = state
+                        .shell
                         .previous_screen
                         .take()
                         .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
-                    state.current_screen = prev;
+                    state.shell.current_screen = prev;
                     None
                 }
                 PickRepoOutcome::AdvanceTo(source) => {
@@ -2128,7 +2140,7 @@ impl EventHandler {
                             pick.git_auth_status = Some(GitAuthStatus::Checking);
                             pick.pending_clone_source = Some(source);
                         }
-                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                        state.shell.pending_async_action = Some(AsyncAction::CheckGitAuth);
                     } else {
                         // SSH (key-based auth), local paths, and non-GitHub
                         // HTTPS remotes skip the GitHub pre-check.
@@ -2319,17 +2331,20 @@ impl EventHandler {
             AppEvent::Quit => state.quit(),
             AppEvent::GoToHomeScreen => {
                 tracing::info!("Navigating to HomeScreen");
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::PanelBack => {
                 // Panels (inbox, stats, skills, plugin screens) open from
                 // either the home menu or the session list; closing one
                 // returns to wherever it was opened from rather than
                 // hardcoding HOME. Mirrors GitViewBack's pop semantics.
-                let target =
-                    state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
+                let target = state
+                    .shell
+                    .previous_screen
+                    .take()
+                    .unwrap_or_else(|| screen_ids::HOME.to_string());
                 tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
-                state.current_screen = target;
+                state.shell.current_screen = target;
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
@@ -2341,7 +2356,7 @@ impl EventHandler {
                 if let Some(name) =
                     state.mcp_pool.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
                 {
-                    state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                    state.shell.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
                         title: "Stop MCP server".to_string(),
                         message: format!(
                             "Stop pooled server '{name}'? Its process is reaped; attached sessions reconnect and the next attach respawns it."
@@ -2364,7 +2379,7 @@ impl EventHandler {
                         (o.servers.len(), s)
                     })
                     .unwrap_or((0, 0));
-                state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                state.shell.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
                     title: "Stop the MCP pool".to_string(),
                     message: format!(
                         "Stop the whole pool daemon? {servers} server(s) and {sessions} attached session(s) lose pooled MCP (each falls back to its own process)."
@@ -2407,7 +2422,7 @@ impl EventHandler {
             AppEvent::OtherTmuxRenameBackspace => state.other_tmux_rename_backspace(),
             AppEvent::OtherTmuxCancelRename => state.cancel_other_tmux_rename(),
             AppEvent::OtherTmuxConfirmRename => {
-                state.pending_async_action = Some(AsyncAction::ConfirmOtherTmuxRename);
+                state.shell.pending_async_action = Some(AsyncAction::ConfirmOtherTmuxRename);
             }
             // SSH session rename events
             AppEvent::SshSessionStartRename => state.start_ssh_session_rename(),
@@ -2457,7 +2472,7 @@ impl EventHandler {
             }
             AppEvent::RefreshWorkspaces => {
                 // Mark for async processing to reload workspace data
-                state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
             AppEvent::CycleSessionFilter => {
                 state.cycle_session_filter();
@@ -2467,7 +2482,7 @@ impl EventHandler {
                     crate::app::state::SessionFilter::StoppedOnly => "stopped only",
                 };
                 state.add_success_notification(format!("Filter: {}", label));
-                state.ui_needs_refresh = true;
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::NextSession => {
                 state.next_session();
@@ -2538,10 +2553,10 @@ impl EventHandler {
                     ..Default::default()
                 };
                 state.new_session.new_session_state = Some(ns);
-                state.previous_screen = Some(state.current_screen.clone());
-                state.current_screen = crate::app::screens::ids::NEW_SESSION.to_string();
+                state.shell.previous_screen = Some(state.shell.current_screen.clone());
+                state.shell.current_screen = crate::app::screens::ids::NEW_SESSION.to_string();
                 tracing::debug!(
-                    previous = %state.previous_screen.as_deref().unwrap_or(""),
+                    previous = %state.shell.previous_screen.as_deref().unwrap_or(""),
                     "AppEvent::NewSession -> PickRepo opened"
                 );
             }
@@ -2647,7 +2662,8 @@ impl EventHandler {
                 if let Some(ns) = state.new_session.new_session_state.as_mut() {
                     ns.step = crate::app::state::NewSessionStep::Creating;
                 }
-                state.pending_async_action = Some(AsyncAction::CreateSessionFromConfigure(spec));
+                state.shell.pending_async_action =
+                    Some(AsyncAction::CreateSessionFromConfigure(spec));
             }
             AppEvent::ConfigureOpenPresetManager => {
                 // Phase 7 polish — stub for now.
@@ -2674,7 +2690,8 @@ impl EventHandler {
             }
             AppEvent::AttachSession => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    state.pending_async_action = Some(AsyncAction::AttachToContainer(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::AttachToContainer(session_id));
                 }
             }
             AppEvent::AttachTmuxSession => {
@@ -2696,7 +2713,7 @@ impl EventHandler {
                         if let Some(tmux_name) = &ssh_session.tmux_session_name {
                             let session_name = tmux_name.clone();
                             tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
-                            state.pending_async_action =
+                            state.shell.pending_async_action =
                                 Some(AsyncAction::AttachToOtherTmux(session_name));
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux session name");
@@ -2715,7 +2732,7 @@ impl EventHandler {
                             "[ACTION] Attaching to other tmux session: {}",
                             session_name
                         );
-                        state.pending_async_action =
+                        state.shell.pending_async_action =
                             Some(AsyncAction::AttachToOtherTmux(session_name));
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
@@ -2730,7 +2747,7 @@ impl EventHandler {
                                     "[ACTION] Attaching to workspace shell: {}",
                                     session_name
                                 );
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::AttachToOtherTmux(session_name));
                             } else {
                                 tracing::warn!(
@@ -2751,7 +2768,8 @@ impl EventHandler {
                             session.status
                         );
                     }
-                    state.pending_async_action = Some(AsyncAction::AttachToTmuxSession(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::AttachToTmuxSession(session_id));
                 } else {
                     tracing::warn!(
                         "[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
@@ -2772,8 +2790,8 @@ impl EventHandler {
             AppEvent::DetachSession => {
                 // Clear attached session and return to home screen
                 state.sessions.attached_session_id = None;
-                state.current_screen = screen_ids::HOME.to_string();
-                state.ui_needs_refresh = true;
+                state.shell.current_screen = screen_ids::HOME.to_string();
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::DetachTmuxSession => {
                 // Detaching from tmux is handled by AttachHandler (Ctrl+Q)
@@ -2782,21 +2800,23 @@ impl EventHandler {
             }
             AppEvent::KillContainer => {
                 if let Some(session_id) = state.sessions.attached_session_id {
-                    state.pending_async_action = Some(AsyncAction::KillContainer(session_id));
+                    state.shell.pending_async_action = Some(AsyncAction::KillContainer(session_id));
                 }
             }
             AppEvent::ReauthenticateCredentials => {
                 info!("Queueing re-authentication request");
-                state.pending_async_action = Some(AsyncAction::ReauthenticateCredentials);
+                state.shell.pending_async_action = Some(AsyncAction::ReauthenticateCredentials);
             }
             AppEvent::RestartSession => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    state.pending_async_action = Some(AsyncAction::RestartSession(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::RestartSession(session_id));
                 }
             }
             AppEvent::DowngradeHeadroom => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    state.pending_async_action = Some(AsyncAction::DowngradeHeadroom(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::DowngradeHeadroom(session_id));
                 }
             }
             AppEvent::DeleteSession => {
@@ -2938,7 +2958,7 @@ impl EventHandler {
                         session_id,
                         trigger
                     );
-                    state.pending_async_action =
+                    state.shell.pending_async_action =
                         Some(AsyncAction::ResumeSession(session_id, trigger));
                 } else {
                     state.add_warning_notification("No session selected to resume".to_string());
@@ -2967,7 +2987,7 @@ impl EventHandler {
                         "Resuming {} selected session(s)...",
                         ids.len()
                     ));
-                    state.pending_async_action =
+                    state.shell.pending_async_action =
                         Some(AsyncAction::BulkResumeSessions(ids, trigger));
                     state.sessions.selected_sessions.clear();
                 }
@@ -2976,14 +2996,15 @@ impl EventHandler {
                 // Open session's workspace in preferred editor
                 if let Some(session) = state.selected_session() {
                     let workspace_path = std::path::PathBuf::from(&session.workspace_path);
-                    state.pending_async_action = Some(AsyncAction::OpenInEditor(workspace_path));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::OpenInEditor(workspace_path));
                 } else {
                     state.add_warning_notification("⚠️ No session selected".to_string());
                 }
             }
             AppEvent::CleanupOrphaned => {
                 // Queue cleanup of orphaned containers
-                state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+                state.shell.pending_async_action = Some(AsyncAction::CleanupOrphaned);
             }
             AppEvent::OpenQuickShell => {
                 // Open workspace shell and optionally cd to session's worktree
@@ -2998,7 +3019,7 @@ impl EventHandler {
                     };
 
                     tracing::info!("Opening workspace shell, target_dir: {:?}", target_dir);
-                    state.pending_async_action = Some(AsyncAction::OpenWorkspaceShell {
+                    state.shell.pending_async_action = Some(AsyncAction::OpenWorkspaceShell {
                         workspace_index: workspace_idx,
                         target_dir,
                     });
@@ -3018,20 +3039,20 @@ impl EventHandler {
                 use crate::app::state::FocusedPane;
                 use crate::components::session_tabs::{SessionTab, cycle, resolve};
                 let forward = matches!(event, AppEvent::SessionTabNext);
-                let from = resolve(state, state.session_tab);
-                state.session_tab = cycle(state, from, forward);
+                let from = resolve(state, state.shell.session_tab);
+                state.shell.session_tab = cycle(state, from, forward);
                 // Focus follows the tab. The composer tabs take typed input, so
                 // the right pane owns the keyboard there; `preview` and `log`
                 // do not, so the list keeps it. This is the whole of what
                 // `SwitchPaneFocus` used to provide, now derived rather than
                 // toggled by a second key.
-                state.focused_pane = match state.session_tab {
+                state.shell.focused_pane = match state.shell.session_tab {
                     SessionTab::Ask | SessionTab::Thread | SessionTab::Pal => FocusedPane::LiveLogs,
                     SessionTab::Preview | SessionTab::Err | SessionTab::Log => {
                         FocusedPane::Sessions
                     }
                 };
-                state.ui_needs_refresh = true;
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::SessionAskSend => {
                 let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
@@ -3059,7 +3080,7 @@ impl EventHandler {
                     // remove.
                     state.add_info_notification(refusal);
                 }
-                state.ui_needs_refresh = true;
+                state.shell.ui_needs_refresh = true;
             }
             // The composer tabs fire their own send through the chat reducer,
             // which is reached by the key routing above. Reaching here means
@@ -3073,12 +3094,12 @@ impl EventHandler {
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
                 state.fleet.daemon_start_cta.start();
-                state.ui_needs_refresh = true;
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::SwitchPaneFocus => {
                 use crate::app::state::FocusedPane;
-                let old_pane = state.focused_pane.clone();
-                state.focused_pane = match state.focused_pane {
+                let old_pane = state.shell.focused_pane.clone();
+                state.shell.focused_pane = match state.shell.focused_pane {
                     FocusedPane::Sessions => FocusedPane::LiveLogs,
                     // Preview is entered via 'l' / exited via Ctrl+Q, not Tab —
                     // Tab while focused is intercepted upstream, so this is only a
@@ -3088,11 +3109,11 @@ impl EventHandler {
                 tracing::debug!(
                     "Switched focus from {:?} to {:?}",
                     old_pane,
-                    state.focused_pane
+                    state.shell.focused_pane
                 );
             }
             AppEvent::ConfirmationToggle => {
-                if let Some(ref mut dialog) = state.confirmation_dialog {
+                if let Some(ref mut dialog) = state.shell.confirmation_dialog {
                     if let Some(ref options) = dialog.options {
                         let len = options.len().max(1);
                         dialog.selected_index = (dialog.selected_index + 1) % len;
@@ -3102,7 +3123,7 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfirmationPrev => {
-                if let Some(ref mut dialog) = state.confirmation_dialog {
+                if let Some(ref mut dialog) = state.shell.confirmation_dialog {
                     if let Some(ref options) = dialog.options {
                         let len = options.len().max(1);
                         dialog.selected_index = (dialog.selected_index + len - 1) % len;
@@ -3112,7 +3133,7 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfirmationConfirm => {
-                if let Some(dialog) = state.confirmation_dialog.take() {
+                if let Some(dialog) = state.shell.confirmation_dialog.take() {
                     let action = if let Some(options) = dialog.options.as_ref() {
                         // Tri-option mode: pick the highlighted option's action.
                         options.get(dialog.selected_index).map(|o| o.action.clone())
@@ -3125,11 +3146,11 @@ impl EventHandler {
                     if let Some(action) = action {
                         match action {
                             crate::app::state::ConfirmAction::DeleteSession(session_id) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::DeleteSession(session_id));
                             }
                             crate::app::state::ConfirmAction::StopSession(session_id) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::StopSession(session_id));
                             }
                             crate::app::state::ConfirmAction::BulkDeleteSessions(session_ids) => {
@@ -3144,7 +3165,7 @@ impl EventHandler {
                                 for id in &session_ids {
                                     state.sessions.selected_sessions.remove(id);
                                 }
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::BulkDeleteSessions(session_ids));
                             }
                             crate::app::state::ConfirmAction::BulkStopSessions(session_ids) => {
@@ -3155,37 +3176,37 @@ impl EventHandler {
                                 for id in &session_ids {
                                     state.sessions.selected_sessions.remove(id);
                                 }
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::BulkStopSessions(session_ids));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmux(session_name) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::KillOtherTmux(session_name));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmuxSessions(
                                 session_names,
                             ) => {
                                 state.tmux.selected_other_tmux_sessions.clear();
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::KillOtherTmuxSessions(session_names));
                             }
                             crate::app::state::ConfirmAction::KillWorkspaceShell(workspace_idx) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
                             crate::app::state::ConfirmAction::SetupAbtopRateLimits => {
                                 // Run `abtop --setup`, then open abtop.
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::SetupAbtopRateLimits);
                             }
                             crate::app::state::ConfirmAction::OpenAbtopSkipSetup => {
                                 // Decline setup this time; open abtop now.
-                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                             }
                             crate::app::state::ConfirmAction::DismissAbtopSetup => {
                                 // Never offer again, then open abtop.
                                 state.dismiss_abtop_setup();
-                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                             }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
                                 // Install the ainb-hooks plugin for both agents.
@@ -3252,7 +3273,7 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfirmationCancel => {
-                state.confirmation_dialog = None;
+                state.shell.confirmation_dialog = None;
             }
             AppEvent::AuthSetupNext => {
                 if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
@@ -3277,7 +3298,7 @@ impl EventHandler {
                     match auth_state.selected_method {
                         AuthMethod::OAuth => {
                             // Mark for async OAuth processing
-                            state.pending_async_action = Some(AsyncAction::AuthSetupOAuth);
+                            state.shell.pending_async_action = Some(AsyncAction::AuthSetupOAuth);
                         }
                         AuthMethod::ApiKey => {
                             if auth_state.api_key_input.is_empty() {
@@ -3289,15 +3310,16 @@ impl EventHandler {
                                 }
                             } else {
                                 // Save the API key
-                                state.pending_async_action = Some(AsyncAction::AuthSetupApiKey);
+                                state.shell.pending_async_action =
+                                    Some(AsyncAction::AuthSetupApiKey);
                             }
                         }
                         AuthMethod::Skip => {
                             // Skip auth setup and go to home screen
                             state.onboarding.auth_setup_state = None;
-                            state.current_screen = screen_ids::HOME.to_string();
+                            state.shell.current_screen = screen_ids::HOME.to_string();
                             state.check_current_directory_status();
-                            state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                         }
                     }
                 }
@@ -3305,9 +3327,9 @@ impl EventHandler {
             AppEvent::AuthSetupCancel => {
                 // Same as skip - go to home screen without auth
                 state.onboarding.auth_setup_state = None;
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
                 state.check_current_directory_status();
-                state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
             AppEvent::AuthSetupInputChar(ch) => {
                 if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
@@ -3329,9 +3351,9 @@ impl EventHandler {
                 if state.onboarding.auth_setup_state.is_some() && !AppState::is_first_time_setup() {
                     // Authentication completed!
                     state.onboarding.auth_setup_state = None;
-                    state.current_screen = screen_ids::HOME.to_string();
+                    state.shell.current_screen = screen_ids::HOME.to_string();
                     state.check_current_directory_status();
-                    state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                    state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                 }
             }
             AppEvent::AuthSetupRefresh => {
@@ -3340,9 +3362,9 @@ impl EventHandler {
                     if !AppState::is_first_time_setup() {
                         // Authentication completed!
                         state.onboarding.auth_setup_state = None;
-                        state.current_screen = screen_ids::HOME.to_string();
+                        state.shell.current_screen = screen_ids::HOME.to_string();
                         state.check_current_directory_status();
-                        state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                        state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                     } else {
                         // Still waiting - update message
                         auth_state.error_message = Some("Still waiting for authentication. Complete the process in the terminal window.\n\nPress 'r' to refresh or 'Esc' to cancel.".to_string());
@@ -3380,7 +3402,7 @@ impl EventHandler {
                 state.show_git_view();
                 tracing::info!(
                     "Git view state after show: current_screen = {:?}, git_state = {}",
-                    state.current_screen,
+                    state.shell.current_screen,
                     state.git_view.git_view_state.is_some()
                 );
             }
@@ -3538,7 +3560,8 @@ impl EventHandler {
             }
             AppEvent::GitViewBack => {
                 // Return to the previous view (where user was before opening Git view)
-                state.current_screen = state
+                state.shell.current_screen = state
+                    .shell
                     .previous_screen
                     .take()
                     .unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
@@ -3616,7 +3639,7 @@ impl EventHandler {
                 // Add success notification
                 state.add_success_notification(format!("✅ {}", message));
                 // Exit git view and return to home screen
-                state.current_screen = crate::app::screens::ids::HOME.to_string();
+                state.shell.current_screen = crate::app::screens::ids::HOME.to_string();
                 state.git_view.git_view_state = None;
                 tracing::info!("Returned to home screen after successful commit");
             }
@@ -3624,28 +3647,28 @@ impl EventHandler {
             AppEvent::HomeScreenSelectTile => {
                 use crate::app::state::HomeTile;
                 tracing::info!("HomeScreenSelectTile event - processing tile selection");
-                if let Some(tile) = state.home_screen_state.selected().cloned() {
+                if let Some(tile) = state.shell.home_screen_state.selected().cloned() {
                     tracing::info!("Selected tile: {:?}", tile);
                     match tile {
                         HomeTile::Sessions => {
                             tracing::info!("Navigating to SessionList view");
-                            state.current_screen = screen_ids::SESSION_LIST.to_string();
+                            state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
                         }
                         HomeTile::Help => {
                             tracing::info!("Toggling help overlay visible");
-                            state.help_visible = true;
+                            state.shell.help_visible = true;
                         }
                         HomeTile::Config => {
                             tracing::info!("Navigating to Config view");
-                            state.current_screen = screen_ids::CONFIG.to_string();
+                            state.shell.current_screen = screen_ids::CONFIG.to_string();
                         }
                         HomeTile::Recovery => {
                             tracing::info!("Navigating to SessionRecovery view");
-                            state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                            state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                         }
                         HomeTile::SkillManager => {
                             tracing::info!("Navigating to SkillManager view (spec §10.1)");
-                            state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                            state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
                             Self::apply_skill_manager_sources_width(state);
                         }
                         HomeTile::Mcp => {
@@ -3668,39 +3691,39 @@ impl EventHandler {
             }
             AppEvent::HomeScreenNavigateUp => {
                 tracing::debug!("HomeScreen navigate up");
-                state.home_screen_state.select_up();
+                state.shell.home_screen_state.select_up();
             }
             AppEvent::HomeScreenNavigateDown => {
                 tracing::debug!("HomeScreen navigate down");
-                state.home_screen_state.select_down();
+                state.shell.home_screen_state.select_down();
             }
             AppEvent::HomeScreenNavigateLeft => {
                 tracing::debug!("HomeScreen navigate left");
-                state.home_screen_state.select_left();
+                state.shell.home_screen_state.select_left();
             }
             AppEvent::HomeScreenNavigateRight => {
                 tracing::debug!("HomeScreen navigate right");
-                state.home_screen_state.select_right();
+                state.shell.home_screen_state.select_right();
             }
             // AINB 2.0: Home screen V2 events
             AppEvent::HomeScreenSidebarUp => {
                 tracing::debug!("HomeScreen V2 sidebar up");
-                state.home_screen_v2_state.sidebar.move_up();
+                state.shell.home_screen_v2_state.sidebar.move_up();
             }
             AppEvent::HomeScreenSidebarDown => {
                 tracing::debug!("HomeScreen V2 sidebar down");
-                state.home_screen_v2_state.sidebar.move_down();
+                state.shell.home_screen_v2_state.sidebar.move_down();
             }
             AppEvent::HomeScreenSidebarSelect => {
                 use crate::components::sidebar::SidebarItem;
                 tracing::debug!("HomeScreen V2 sidebar select");
-                let selected = state.home_screen_v2_state.sidebar.selected_item();
+                let selected = state.shell.home_screen_v2_state.sidebar.selected_item();
                 match selected {
                     SidebarItem::Config => {
-                        state.current_screen = screen_ids::CONFIG.to_string();
+                        state.shell.current_screen = screen_ids::CONFIG.to_string();
                     }
                     SidebarItem::Sessions => {
-                        state.current_screen = screen_ids::SESSION_LIST.to_string();
+                        state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
                     SidebarItem::Daemons => {
                         // Same canonical-event routing as Inbox.
@@ -3708,7 +3731,7 @@ impl EventHandler {
                     }
                     SidebarItem::Recovery => {
                         state.recovery.session_recovery_state.refresh();
-                        state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                        state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                     }
                     SidebarItem::Mcp => {
                         // Opens the overlay on top of the current screen (not a
@@ -3721,7 +3744,7 @@ impl EventHandler {
                             state.log_streams.log_history_state.set_log_dir(log_dir);
                         }
                         state.log_streams.log_history_state.show();
-                        state.current_screen = screen_ids::LOG_HISTORY.to_string();
+                        state.shell.current_screen = screen_ids::LOG_HISTORY.to_string();
                     }
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
@@ -3737,7 +3760,7 @@ impl EventHandler {
                         // Hand the terminal to witr's own interactive TUI
                         // (see AppEvent::GoToWitr) rather than a
                         // plugin-rendered screen.
-                        state.pending_async_action = Some(AsyncAction::AttachWitr);
+                        state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
                     }
                     SidebarItem::Abtop => {
                         tracing::info!("Launching abtop (top-for-agents) from sidebar");
@@ -3748,7 +3771,7 @@ impl EventHandler {
                         if state.should_offer_abtop_setup() {
                             state.show_abtop_setup_prompt();
                         } else {
-                            state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                         }
                     }
                     SidebarItem::Skills => {
@@ -3767,11 +3790,11 @@ impl EventHandler {
                         // `hangar-tui` screen renders itself and owns its
                         // own data load (snapshot RPCs over the daemon
                         // socket).
-                        state.current_screen = screen_ids::HANGAR.to_string();
+                        state.shell.current_screen = screen_ids::HANGAR.to_string();
                     }
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
-                        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                        state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
                         Self::apply_skill_manager_sources_width(state);
                         // Mirror the discovery flow from the `m` keybind
                         // handler (AppEvent::GoToSkillManager) — sidebar entry
@@ -3799,19 +3822,19 @@ impl EventHandler {
                         );
                     }
                     SidebarItem::Changelog => {
-                        state.current_screen = screen_ids::CHANGELOG.to_string();
+                        state.shell.current_screen = screen_ids::CHANGELOG.to_string();
                     }
                     SidebarItem::Setup => {
-                        state.current_screen = screen_ids::SETUP_MENU.to_string();
+                        state.shell.current_screen = screen_ids::SETUP_MENU.to_string();
                     }
                     SidebarItem::Help => {
-                        state.help_visible = true;
+                        state.shell.help_visible = true;
                     }
                 }
             }
             AppEvent::HomeScreenToggleFocus => {
                 tracing::debug!("HomeScreen V2 toggle focus");
-                state.home_screen_v2_state.toggle_focus();
+                state.shell.home_screen_v2_state.toggle_focus();
             }
             AppEvent::StarSelectedWorkspace => {
                 tracing::info!("StarSelectedWorkspace event triggered");
@@ -3924,23 +3947,23 @@ impl EventHandler {
             }
             AppEvent::WelcomePanelScrollUp => {
                 tracing::debug!("Welcome panel scroll up");
-                state.home_screen_v2_state.welcome.scroll_up();
+                state.shell.home_screen_v2_state.welcome.scroll_up();
             }
             AppEvent::WelcomePanelScrollDown => {
                 tracing::debug!("Welcome panel scroll down");
-                state.home_screen_v2_state.welcome.scroll_down();
+                state.shell.home_screen_v2_state.welcome.scroll_down();
             }
             AppEvent::WelcomePanelPageUp => {
                 tracing::debug!("Welcome panel page up");
-                state.home_screen_v2_state.welcome.page_up();
+                state.shell.home_screen_v2_state.welcome.page_up();
             }
             AppEvent::WelcomePanelPageDown => {
                 tracing::debug!("Welcome panel page down");
-                state.home_screen_v2_state.welcome.page_down();
+                state.shell.home_screen_v2_state.welcome.page_down();
             }
             AppEvent::WelcomePanelCopyContent => {
                 tracing::debug!("Welcome panel copy content");
-                match state.home_screen_v2_state.welcome.copy_content_to_clipboard() {
+                match state.shell.home_screen_v2_state.welcome.copy_content_to_clipboard() {
                     Ok(()) => {
                         state.add_success_notification("Content copied to clipboard".to_string());
                     }
@@ -3951,28 +3974,28 @@ impl EventHandler {
             }
             AppEvent::GoToConfig => {
                 tracing::info!("Navigating to Config");
-                state.current_screen = screen_ids::CONFIG.to_string();
+                state.shell.current_screen = screen_ids::CONFIG.to_string();
             }
             AppEvent::GoToSetupMenu => {
-                state.current_screen = screen_ids::SETUP_MENU.to_string();
+                state.shell.current_screen = screen_ids::SETUP_MENU.to_string();
             }
             AppEvent::GoToLogHistory => {
                 if let Some(log_dir) = state.log_dir() {
                     state.log_streams.log_history_state.set_log_dir(log_dir);
                 }
                 state.log_streams.log_history_state.show();
-                state.current_screen = screen_ids::LOG_HISTORY.to_string();
+                state.shell.current_screen = screen_ids::LOG_HISTORY.to_string();
             }
             AppEvent::GoToSessionList => {
                 tracing::info!("Navigating to SessionList");
-                state.current_screen = screen_ids::SESSION_LIST.to_string();
+                state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
             }
             AppEvent::GoToStats => {
                 tracing::info!("Navigating to Usage Analytics");
-                if state.current_screen != screen_ids::ANALYTICS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::ANALYTICS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::ANALYTICS.to_string();
+                state.shell.current_screen = screen_ids::ANALYTICS.to_string();
                 // Plugin owns its own data load; host no longer
                 // pre-populates analytics state.
             }
@@ -3986,7 +4009,7 @@ impl EventHandler {
                 // agent session) and resume ainb when the user quits it.
                 // The witr plugin still owns the `ainb witr` CLI + `/witr`
                 // slash; only the screen is the embedded binary.
-                state.pending_async_action = Some(AsyncAction::AttachWitr);
+                state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
             }
             AppEvent::GoToLearnings => {
                 tracing::info!("Navigating to Learnings (knowledge-base browser)");
@@ -3996,10 +4019,10 @@ impl EventHandler {
                 // origin like every other panel so Esc/PanelBack (and the
                 // plugin's `ui.close_request`) pops back to where the
                 // panel was opened from instead of falling back to home.
-                if state.current_screen != screen_ids::LEARNINGS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::LEARNINGS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::LEARNINGS.to_string();
+                state.shell.current_screen = screen_ids::LEARNINGS.to_string();
             }
             AppEvent::GoToAbtop => {
                 tracing::info!("Launching abtop (top-for-agents)");
@@ -4017,20 +4040,20 @@ impl EventHandler {
                 if state.should_offer_abtop_setup() {
                     state.show_abtop_setup_prompt();
                 } else {
-                    state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                    state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                 }
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
-                if state.current_screen != screen_ids::SKILLS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::SKILLS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::SKILLS.to_string();
+                state.shell.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
             }
             AppEvent::GoToSkillManager => {
                 tracing::info!("Navigating to SkillManager (spec §10.1)");
-                state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
                 Self::apply_skill_manager_sources_width(state);
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 // P8 live-data binding (hdt.9): rehydrate Sources /
@@ -4079,7 +4102,7 @@ impl EventHandler {
                 tracing::info!("Returning to home from SkillManager (Esc/q)");
                 // Leaving the screen cancels any armed remove confirm.
                 state.skills.skill_manager_state.pending_remove_confirm = None;
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::SkillManagerDiscoveryImport => {
                 tracing::info!("Discovery banner: import all");
@@ -4613,7 +4636,7 @@ impl EventHandler {
                         } else {
                             p
                         };
-                        state.pending_async_action = Some(AsyncAction::OpenInEditor(target));
+                        state.shell.pending_async_action = Some(AsyncAction::OpenInEditor(target));
                     }
                     None => {
                         state.add_warning_notification(
@@ -5036,10 +5059,10 @@ impl EventHandler {
             }
             AppEvent::GoToDaemons => {
                 tracing::info!("Navigating to Daemons");
-                if state.current_screen != screen_ids::DAEMONS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::DAEMONS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::DAEMONS.to_string();
+                state.shell.current_screen = screen_ids::DAEMONS.to_string();
                 // Arm the background collector on entry (H-D2): collection runs
                 // off the UI thread, never on render, so this only spawns/keeps
                 // the collector — it does no disk I/O on the event loop.
@@ -5055,15 +5078,15 @@ impl EventHandler {
                 // screens resolves to `PanelBack`, and via `ui.close_request` once
                 // hangar-tui adopts it) pops back to where it was opened from
                 // rather than a stale `previous_screen` left by an earlier panel.
-                if state.current_screen != screen_ids::HANGAR {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::HANGAR {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::HANGAR.to_string();
+                state.shell.current_screen = screen_ids::HANGAR.to_string();
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
                 state.recovery.session_recovery_state.refresh();
-                state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
             } // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
@@ -5075,7 +5098,7 @@ impl EventHandler {
                         tracing::warn!(error = %e, "could not persist config tree expansion");
                     }
                 }
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ConfigNextCategory => {
                 state.config.config_screen_state.select_next_category();
@@ -5651,7 +5674,7 @@ impl EventHandler {
             AppEvent::LogHistoryBack => {
                 tracing::debug!("Log history back");
                 state.log_streams.log_history_state.hide();
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::LogHistoryNextSession => {
                 tracing::debug!("Log history next session");
@@ -5728,11 +5751,11 @@ impl EventHandler {
             // Changelog viewer events
             AppEvent::ShowChangelog => {
                 tracing::debug!("Show changelog");
-                state.current_screen = screen_ids::CHANGELOG.to_string();
+                state.shell.current_screen = screen_ids::CHANGELOG.to_string();
             }
             AppEvent::ChangelogBack => {
                 tracing::debug!("Changelog back");
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ChangelogScrollUp => {
                 tracing::debug!("Changelog scroll up");
@@ -5926,7 +5949,7 @@ impl EventHandler {
                     state.recovery.session_recovery_state.dismiss_overlay();
                 } else {
                     tracing::debug!("Session recovery back");
-                    state.current_screen = screen_ids::HOME.to_string();
+                    state.shell.current_screen = screen_ids::HOME.to_string();
                 }
             }
             AppEvent::SessionRecoveryNext => {
@@ -6148,7 +6171,7 @@ impl EventHandler {
                     if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                         onboarding_state.dependency_check_running = true;
                     }
-                    state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
+                    state.shell.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
                 }
             }
             AppEvent::OnboardingBack => {
@@ -6221,7 +6244,7 @@ impl EventHandler {
                 if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.dependency_check_running = true;
                 }
-                state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
+                state.shell.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
             }
             AppEvent::OnboardingSkipAuth => {
                 // "Configure later" — advance without changing anything. The
@@ -6499,7 +6522,8 @@ impl EventHandler {
                         os.error_message = None;
                         os.status_message = Some(format!("installing {name}…"));
                         os.install_states.insert(id.clone(), DepInstall::Installing);
-                        state.pending_async_action = Some(AsyncAction::OnboardingInstallDep(id));
+                        state.shell.pending_async_action =
+                            Some(AsyncAction::OnboardingInstallDep(id));
                     }
                 }
             }
@@ -6516,7 +6540,7 @@ impl EventHandler {
                                 Some("✓ Installed optimized tmux.conf → ~/.tmux.conf (backup saved if one existed)".to_string());
                             onboarding_state.dependency_check_running = true;
                         }
-                        state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
+                        state.shell.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
                     }
                     Err(e) => {
                         tracing::error!("Failed to install tmux.conf: {}", e);
@@ -6584,7 +6608,7 @@ impl EventHandler {
                 if state.onboarding.setup_menu_state.showing_confirmation {
                     state.onboarding.setup_menu_state.cancel_action();
                 } else {
-                    state.current_screen = screen_ids::HOME.to_string();
+                    state.shell.current_screen = screen_ids::HOME.to_string();
                 }
             }
             AppEvent::SetupMenuSelect => {
@@ -6687,14 +6711,14 @@ impl EventHandler {
                 // Phase 2c integration step: route through the screen-id table
                 // landed by Phase 2a. We validate against the built-in `ids`
                 // constants statically; layout dispatch reads
-                // `state.current_screen` and looks up the matching `Screen`
+                // `state.shell.current_screen` and looks up the matching `Screen`
                 // impl in `LayoutComponent::screens` (the in-tree
                 // `ScreenRegistry`). Plugin-supplied screens (Phase 4) will
                 // register additional ids into that same registry, at which
                 // point this validation switches to a registry probe.
                 if is_known_screen_id(&screen_id) {
-                    state.previous_screen = Some(state.current_screen.clone());
-                    state.current_screen = screen_id;
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
+                    state.shell.current_screen = screen_id;
                 } else {
                     tracing::warn!(
                         target: "navigation",
@@ -7069,7 +7093,7 @@ mod session_recovery_key_tests {
 
     fn recovery_state() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_RECOVERY.to_string();
+        state.shell.current_screen = ids::SESSION_RECOVERY.to_string();
         state.recovery.session_recovery_state.recovery_overlay = None;
         state
     }
@@ -7153,7 +7177,7 @@ mod session_list_key_tests {
 
     fn session_list_state() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         state
     }
 
@@ -7247,21 +7271,24 @@ mod navigate_to_tests {
     #[test]
     fn navigate_to_known_screen_updates_current() {
         let mut state = fresh_state();
-        let starting = state.current_screen.clone();
+        let starting = state.shell.current_screen.clone();
         EventHandler::process_event(AppEvent::NavigateTo(ids::ANALYTICS.to_string()), &mut state);
-        assert_eq!(state.current_screen, ids::ANALYTICS);
-        assert_eq!(state.previous_screen.as_deref(), Some(starting.as_str()));
+        assert_eq!(state.shell.current_screen, ids::ANALYTICS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(starting.as_str())
+        );
     }
 
     #[test]
     fn navigate_to_unknown_screen_does_not_change_current() {
         let mut state = fresh_state();
-        let starting = state.current_screen.clone();
+        let starting = state.shell.current_screen.clone();
         EventHandler::process_event(
             AppEvent::NavigateTo("definitely-not-a-real-screen".to_string()),
             &mut state,
         );
-        assert_eq!(state.current_screen, starting);
+        assert_eq!(state.shell.current_screen, starting);
     }
 
     #[test]
@@ -7313,16 +7340,19 @@ mod panel_back_tests {
     #[test]
     fn go_to_stats_saves_origin_and_panel_back_returns_there() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToStats, &mut state);
-        assert_eq!(state.current_screen, ids::ANALYTICS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::ANALYTICS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
         assert!(
-            state.previous_screen.is_none(),
+            state.shell.previous_screen.is_none(),
             "pop must consume the origin"
         );
     }
@@ -7333,7 +7363,7 @@ mod panel_back_tests {
     fn click_on_menu_bar_toggles_the_legend() {
         use ratatui::layout::Rect;
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         let mut ui = UiState::default();
         ui.menu_bar_area = Some(Rect::new(0, 20, 100, 6));
 
@@ -7442,7 +7472,7 @@ mod panel_back_tests {
     fn skill_manager_remove_on_empty_filtered_source_opens_source_remove() {
         use crate::components::skill_manager_screen::{SourceRow, UnitRow};
         let mut state = AppState::default();
-        state.current_screen = ids::SKILL_MANAGER.to_string();
+        state.shell.current_screen = ids::SKILL_MANAGER.to_string();
         // One source with zero units of its own, plus an unrelated unit
         // that `selected` happens to point at.
         state.skills.skill_manager_state.sources = vec![SourceRow {
@@ -7486,14 +7516,14 @@ mod panel_back_tests {
     #[test]
     fn go_to_hangar_saves_origin_and_panel_back_returns_there() {
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
 
         EventHandler::process_event(AppEvent::GoToHangar, &mut state);
-        assert_eq!(state.current_screen, ids::HANGAR);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        assert_eq!(state.shell.current_screen, ids::HANGAR);
+        assert_eq!(state.shell.previous_screen.as_deref(), Some(ids::HOME));
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::HOME);
+        assert_eq!(state.shell.current_screen, ids::HOME);
     }
 
     /// Regression for the stale-origin edge the review flagged: open a
@@ -7503,16 +7533,16 @@ mod panel_back_tests {
     #[test]
     fn hangar_does_not_pop_a_stale_origin_from_an_earlier_panel() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         EventHandler::process_event(AppEvent::GoToStats, &mut state); // previous=session_list
         EventHandler::process_event(AppEvent::GoToHomeScreen, &mut state); // leave without Esc
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
 
         EventHandler::process_event(AppEvent::GoToHangar, &mut state);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        assert_eq!(state.shell.previous_screen.as_deref(), Some(ids::HOME));
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             ids::HOME,
             "Hangar must not pop the stale session_list origin"
         );
@@ -7528,11 +7558,14 @@ mod panel_back_tests {
         use crossterm::event::KeyEvent;
 
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
-        assert_eq!(state.current_screen, ids::DAEMONS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::DAEMONS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         // The key dispatcher must turn Esc on the Daemons screen into PanelBack
         // (the pre-fix bug produced GoToHomeScreen, ignoring the saved origin).
@@ -7544,7 +7577,7 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             ids::SESSION_LIST,
             "Daemons must pop back to the screen it was opened from"
         );
@@ -7556,7 +7589,7 @@ mod panel_back_tests {
         use crossterm::event::KeyEvent;
 
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
 
         let event = EventHandler::handle_key_event(KeyEvent::from(Char('q')), &mut state);
@@ -7640,11 +7673,11 @@ mod panel_back_tests {
     #[test]
     fn panel_back_falls_back_to_home_when_no_origin() {
         let mut state = AppState::default();
-        state.current_screen = ids::DAEMONS.to_string();
-        state.previous_screen = None;
+        state.shell.current_screen = ids::DAEMONS.to_string();
+        state.shell.previous_screen = None;
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::HOME);
+        assert_eq!(state.shell.current_screen, ids::HOME);
     }
 
     /// Learnings (memory) is a plugin screen. Esc on it resolves to
@@ -7655,14 +7688,17 @@ mod panel_back_tests {
     #[test]
     fn go_to_learnings_saves_origin_and_panel_back_returns_there() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
-        assert_eq!(state.current_screen, ids::LEARNINGS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::LEARNINGS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
     }
 
     /// Same self-loop guard as stats: re-firing GoToLearnings while
@@ -7671,11 +7707,14 @@ mod panel_back_tests {
     #[test]
     fn reopening_learnings_does_not_overwrite_origin_with_itself() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
         EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
     }
 
     /// The session list advertises `m memory` on its menu legend — the
@@ -7683,7 +7722,7 @@ mod panel_back_tests {
     #[test]
     fn session_list_m_key_dispatches_go_to_learnings() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         let key = KeyEvent::new(Char('m'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(key, &mut state)
@@ -7702,13 +7741,13 @@ mod panel_back_tests {
     fn home_sidebar_memory_tile_opens_learnings() {
         use crate::components::sidebar::SidebarItem;
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
-        state.home_screen_v2_state.sidebar.select(SidebarItem::Memory);
+        state.shell.current_screen = ids::HOME.to_string();
+        state.shell.home_screen_v2_state.sidebar.select(SidebarItem::Memory);
 
         EventHandler::process_event(AppEvent::HomeScreenSidebarSelect, &mut state);
 
-        assert_eq!(state.current_screen, ids::LEARNINGS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        assert_eq!(state.shell.current_screen, ids::LEARNINGS);
+        assert_eq!(state.shell.previous_screen.as_deref(), Some(ids::HOME));
     }
 
     /// The MCP pool overlay opens on `p` (for *pool*), NOT `m` — `m` is
@@ -7718,7 +7757,7 @@ mod panel_back_tests {
     #[test]
     fn home_p_key_opens_mcp_overlay_and_m_stays_memory() {
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
 
         let p = KeyEvent::new(Char('p'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(p, &mut state)
@@ -7770,11 +7809,14 @@ mod panel_back_tests {
     #[test]
     fn reopening_panel_does_not_overwrite_origin_with_itself() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToStats, &mut state);
         EventHandler::process_event(AppEvent::GoToStats, &mut state);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
     }
 
     /// Skills uses GoToSkills (spawns a background load → needs a
@@ -7782,14 +7824,17 @@ mod panel_back_tests {
     #[tokio::test]
     async fn skills_back_returns_to_origin() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToSkills, &mut state);
-        assert_eq!(state.current_screen, ids::SKILLS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::SKILLS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         EventHandler::process_event(AppEvent::SkillsBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
     }
 }
 
@@ -7891,7 +7936,7 @@ mod text_input_guard_tests {
     #[test]
     fn global_h_still_toggles_help_outside_text_input() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HOME.to_string();
+        state.shell.current_screen = screen_ids::HOME.to_string();
 
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
             .expect("Shift+H outside text input must dispatch ToggleHelp");
@@ -7906,7 +7951,7 @@ mod text_input_guard_tests {
     #[test]
     fn global_h_still_toggles_help_during_config_navigation() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         // editing = false, api_key_input_mode = false by default
 
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
@@ -7921,7 +7966,7 @@ mod text_input_guard_tests {
     #[test]
     fn ctrl_v_in_config_text_popup_routes_to_clipboard_paste() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         state.config.config_popup_state.open_text(
             "Default Workspace",
             "Default directory for new sessions",
@@ -7946,7 +7991,7 @@ mod text_input_guard_tests {
     #[test]
     fn bracketed_paste_on_pick_repo_routes_to_filter() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
         state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::PickRepo,
             ..NewSessionState::default()
@@ -7997,7 +8042,7 @@ mod text_input_guard_tests {
     #[test]
     fn paste_outside_text_input_is_refused() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::SESSION_LIST.to_string();
+        state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
         assert!(!EventHandler::paste_into_text_input("abc", &mut state));
     }
 
@@ -8009,12 +8054,12 @@ mod text_input_guard_tests {
     #[test]
     fn esc_closes_help_inside_text_input_without_cancelling_form() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
         state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::PickRepo,
             ..NewSessionState::default()
         });
-        state.help_visible = true;
+        state.shell.help_visible = true;
 
         let evt =
             EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state)
@@ -8037,7 +8082,7 @@ mod text_input_guard_tests {
         use std::path::PathBuf;
 
         fn reset_text_context_state(state: &mut AppState) {
-            state.current_screen = screen_ids::HOME.to_string();
+            state.shell.current_screen = screen_ids::HOME.to_string();
             state.tmux.other_tmux_rename_mode = false;
             state.ssh.ssh_session_rename_mode = false;
             state.git_view.quick_commit_message = None;
@@ -8063,7 +8108,7 @@ mod text_input_guard_tests {
             screen_ids::ATTACHED_TERMINAL,
         ] {
             reset_text_context_state(&mut state);
-            state.current_screen = (*screen).to_string();
+            state.shell.current_screen = (*screen).to_string();
             assert!(
                 EventHandler::is_text_input_context(&state),
                 "screen `{}` must be treated as text input",
@@ -8076,14 +8121,14 @@ mod text_input_guard_tests {
         // categories list. Suppressing globals during plain navigation
         // would regress the help shortcut UX.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "Config without edit mode must NOT be treated as text input"
         );
 
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         state.config.config_screen_state.editing = true;
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -8091,7 +8136,7 @@ mod text_input_guard_tests {
         );
 
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         state.config.config_screen_state.api_key_input_mode = true;
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -8105,7 +8150,7 @@ mod text_input_guard_tests {
         // popup-open code path and stays valid if the popup_type
         // representation changes.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         state.config.config_popup_state.open_text("Title", "Desc", "key", "value");
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -8115,7 +8160,7 @@ mod text_input_guard_tests {
         // Negative control: a Choice popup is navigation-only (arrow
         // keys / Enter), so `H` should still toggle help.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         state.config.config_popup_state.open_choice(
             "Title",
             "Desc",
@@ -8164,7 +8209,7 @@ mod text_input_guard_tests {
 
         // Skills search overlay.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::SKILLS.to_string();
+        state.shell.current_screen = screen_ids::SKILLS.to_string();
         state.skills.skills_state.search_active = true;
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -8173,7 +8218,7 @@ mod text_input_guard_tests {
 
         // Session recovery filter bar.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+        state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
         state.recovery.session_recovery_state.search_active = true;
         assert!(
             EventHandler::is_text_input_context(&state),
@@ -8182,7 +8227,7 @@ mod text_input_guard_tests {
 
         // GitView commit-message mode.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::GIT_VIEW.to_string();
+        state.shell.current_screen = screen_ids::GIT_VIEW.to_string();
         let mut git_state = GitViewState::new(PathBuf::from("/tmp"));
         git_state.start_commit_message_input();
         state.git_view.git_view_state = Some(git_state);
@@ -8194,7 +8239,7 @@ mod text_input_guard_tests {
         // Negative control: GitView without commit mode active is NOT
         // a text input — it's a navigable screen.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::GIT_VIEW.to_string();
+        state.shell.current_screen = screen_ids::GIT_VIEW.to_string();
         state.git_view.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
         assert!(
             !EventHandler::is_text_input_context(&state),
@@ -8224,7 +8269,7 @@ mod text_input_guard_tests {
         // fallthrough short-circuit must stay off so Ctrl+C / Esc / q keep
         // working when the plugin is unavailable)...
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HANGAR.to_string();
+        state.shell.current_screen = screen_ids::HANGAR.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "plugin screen without the capture flag must NOT be text-input"
@@ -8284,7 +8329,7 @@ mod text_input_guard_tests {
         // The flag is scoped to the focused plugin screen: an unrelated
         // non-plugin screen with a stale entry is unaffected.
         let mut other = AppState::default();
-        other.current_screen = screen_ids::HOME.to_string();
+        other.shell.current_screen = screen_ids::HOME.to_string();
         other
             .plugins_host
             .plugin_captures_text
@@ -8306,7 +8351,7 @@ mod text_input_guard_tests {
         let text_steps = [NewSessionStep::PickRepo, NewSessionStep::Configure];
         for step in &text_steps {
             let mut state = AppState::default();
-            state.current_screen = screen_ids::NEW_SESSION.to_string();
+            state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
             state.new_session.new_session_state = Some(NewSessionState {
                 step: step.clone(),
                 ..NewSessionState::default()
@@ -8321,7 +8366,7 @@ mod text_input_guard_tests {
         // Sanity: the Creating step is a render-only spinner and must
         // NOT be treated as a text-input context.
         let mut state = AppState::default();
-        state.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
         state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::Creating,
             ..NewSessionState::default()
@@ -8350,7 +8395,7 @@ mod skill_manager_sync_keybind_tests {
     }
 
     fn switch_to_skill_manager(state: &mut AppState) {
-        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+        state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
     }
 
     /// AINB_HOME points at the supplied tempdir for the duration of
@@ -8480,10 +8525,10 @@ mod slash_command_dispatch_tests {
         // …and processing that event actually opens the learnings screen
         // (same end-state the `m` shortcut produces).
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HOME.to_string();
+        state.shell.current_screen = screen_ids::HOME.to_string();
         EventHandler::process_event(evt, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             screen_ids::LEARNINGS,
             "dispatching /recall must set current_screen to learnings"
         );
@@ -8500,10 +8545,10 @@ mod slash_command_dispatch_tests {
         );
 
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HOME.to_string();
+        state.shell.current_screen = screen_ids::HOME.to_string();
         EventHandler::process_event(evt, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             screen_ids::LEARNINGS,
             "dispatching /memory must set current_screen to learnings"
         );
@@ -8680,8 +8725,8 @@ mod session_composer_key_tests {
     /// The sessions screen with a LIVE Pal composer.
     fn composing() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
-        state.session_tab = SessionTab::Pal;
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.session_tab = SessionTab::Pal;
         state.fleet.pal_chat = Some(ChatHost::pal());
         assert!(
             state.session_composer_captures_text(),
@@ -8719,7 +8764,7 @@ mod session_composer_key_tests {
     #[test]
     fn the_same_keys_still_work_with_no_composer_open() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         assert!(matches!(
             press(&mut state, Char('d')),
             Some(AppEvent::DeleteSession)
@@ -8754,7 +8799,7 @@ mod session_composer_key_tests {
     fn esc_leaves_the_composer_for_a_pane_that_is_always_live() {
         let mut state = composing();
         press(&mut state, Esc);
-        assert_eq!(state.session_tab, SessionTab::Preview);
+        assert_eq!(state.shell.session_tab, SessionTab::Preview);
     }
 }
 
@@ -8775,7 +8820,7 @@ mod session_ask_key_tests {
     /// The sessions screen on the `ask` tab, with a structured ASK selected.
     fn asking() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         state.sessions.workspaces.clear();
         let mut workspace = Workspace::new("proj".to_string(), "/work/proj".into());
         let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
@@ -8800,7 +8845,7 @@ mod session_ask_key_tests {
         state.sessions.workspaces.push(workspace);
         state.sessions.selected_workspace_index = Some(0);
         state.sessions.selected_session_index = Some(0);
-        state.session_tab = SessionTab::Ask;
+        state.shell.session_tab = SessionTab::Ask;
         assert!(
             SessionTab::Ask.enabled(&state),
             "the fixture must open the ask tab"

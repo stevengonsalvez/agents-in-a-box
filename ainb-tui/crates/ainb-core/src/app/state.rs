@@ -555,7 +555,7 @@ impl AppState {
             Ok(client) => {
                 self.tmux.embed = Some(client);
                 self.tmux.embed_session = Some(name);
-                self.focused_pane = FocusedPane::Preview;
+                self.shell.focused_pane = FocusedPane::Preview;
                 if attached_elsewhere {
                     self.add_warning_notification(
                         "Note: session attached elsewhere — screen sizes may fight".to_string(),
@@ -698,8 +698,8 @@ impl AppState {
         }
         self.tmux.embed_session = None;
         self.tmux.observer_started_at = None;
-        if self.focused_pane == FocusedPane::Preview {
-            self.focused_pane = FocusedPane::Sessions;
+        if self.shell.focused_pane == FocusedPane::Preview {
+            self.shell.focused_pane = FocusedPane::Sessions;
         }
     }
 
@@ -725,7 +725,7 @@ impl AppState {
 
     /// True while an interactive embed is focused.
     pub fn is_interactive_pane(&self) -> bool {
-        self.tmux.embed.is_some() && self.focused_pane == FocusedPane::Preview
+        self.tmux.embed.is_some() && self.shell.focused_pane == FocusedPane::Preview
     }
 
     /// True when the selected terminal has a read-only observer client.
@@ -749,7 +749,7 @@ impl AppState {
             return false;
         }
         let exited = self.tmux.embed.as_ref().is_some_and(|e| e.has_exited());
-        let invisible = self.current_screen != screen_ids::SESSION_LIST;
+        let invisible = self.shell.current_screen != screen_ids::SESSION_LIST;
         let interactive = self.is_interactive_pane();
         let session = self.tmux.embed_session.clone();
         if exited || invisible {
@@ -3145,6 +3145,8 @@ pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, S
 
 #[derive(Debug)]
 pub struct AppState {
+    pub shell: Versioned<ShellSection>,
+
     pub fleet: Versioned<FleetSection>,
 
     pub tmux: Versioned<TmuxSection>,
@@ -3178,52 +3180,6 @@ pub struct AppState {
     pub recovery: Versioned<RecoverySection>,
 
     pub mcp_pool: Versioned<McpPoolSection>,
-
-    pub current_screen: ScreenId,
-    pub should_quit: bool,
-    pub help_visible: bool,
-    // Async action processing
-    pub pending_async_action: Option<AsyncAction>,
-    // Flag to track if user cancelled during async operation
-    pub async_operation_cancelled: bool,
-    // Confirmation dialog state
-    pub confirmation_dialog: Option<ConfirmationDialog>,
-    // Flag to force UI refresh after workspace changes
-    pub ui_needs_refresh: bool,
-
-    // Claude chat visibility toggle
-    pub focused_pane: FocusedPane,
-    // Git view state
-    pub previous_screen: Option<ScreenId>,
-    /// Last `ui.close_request` snapshot version consumed by
-    /// `tick_panel_close_requests`. The poll acts at most once per
-    /// plugin publish: a version is consumed (recorded here) on first
-    /// sight whether or not it triggered a navigation, so a close
-    /// request that arrives while the user is on a different screen is
-    /// absorbed instead of firing later.
-    pub last_panel_close_version: Option<u64>,
-    // Notification system
-    pub notifications: Vec<Notification>,
-    /// Sessions already told, on their CURRENT launch, that they started
-    /// without shared Codex remote control.
-    ///
-    /// The dedup key for `notify_codex_degraded`, cleared by
-    /// `begin_codex_launch` so the scope is one launch and not the session's
-    /// whole life. Kept here rather than checked against the live notification
-    /// list because notifications EXPIRE: a message-equality check would let
-    /// the same fact reappear minutes later.
-    codex_degrade_announced: std::collections::HashSet<Uuid>,
-    // Pending event to be processed in next loop iteration
-    pub pending_event: Option<crate::app::events::AppEvent>,
-
-    // AINB 2.0: Home screen and agent selection
-    pub home_screen_state: HomeScreenState,
-    pub home_screen_v2_state: HomeScreenV2State,
-
-    /// The active right-pane tab. Reconciled every frame against what is
-    /// actually available, so a tab cannot stay open on a pane that has gone
-    /// dead under the operator.
-    pub session_tab: crate::components::session_tabs::SessionTab,
 }
 
 /// Result of background workspace loading
@@ -3538,6 +3494,10 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            shell: Versioned::new(ShellSection {
+                home_screen_v2_state,
+                ..ShellSection::default()
+            }),
             fleet: Versioned::default(),
             tmux: Versioned::default(),
             log_streams: Versioned::default(),
@@ -3564,20 +3524,6 @@ impl Default for AppState {
             git_view: Versioned::default(),
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
-            current_screen: screen_ids::HOME.to_string(),
-            should_quit: false,
-            help_visible: false,
-            pending_async_action: None,
-            async_operation_cancelled: false,
-            confirmation_dialog: None,
-            ui_needs_refresh: false,
-            focused_pane: FocusedPane::Sessions,
-            previous_screen: None,
-            last_panel_close_version: None,
-            notifications: Vec::new(),
-            codex_degrade_announced: std::collections::HashSet::new(),
-            pending_event: None,
-
             // Initialize quick commit state
 
             // Initialize other tmux sessions
@@ -3585,8 +3531,6 @@ impl Default for AppState {
             // Initialize SSH sessions (separate section)
 
             // AINB 2.0: Home screen and agent selection
-            home_screen_state: HomeScreenState::default(),
-            home_screen_v2_state,
 
             // Onboarding wizard state (initialized to None, set during app init)
 
@@ -3620,7 +3564,6 @@ impl Default for AppState {
             // Background workspace loading state
 
             // Per-session attention markers, driven by ainb-hooks events.
-            session_tab: crate::components::session_tabs::SessionTab::default(),
         }
     }
 }
@@ -3746,11 +3689,11 @@ impl AppState {
                         match event {
                             Ok(ClaudeStreamingEvent::ContentBlockDelta { delta, .. }) => {
                                 chat_state.append_streaming_response(&delta.text);
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                             }
                             Ok(ClaudeStreamingEvent::MessageStop) => {
                                 chat_state.finish_streaming();
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                                 break;
                             }
                             Ok(ClaudeStreamingEvent::Error { error }) => {
@@ -3795,7 +3738,7 @@ impl AppState {
             }
         }
 
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
     }
 
     /// Start log streaming for a session when it becomes active
@@ -3849,7 +3792,7 @@ impl AppState {
     /// Clear live logs for a session
     pub fn clear_live_logs(&mut self, session_id: Uuid) {
         self.log_streams.live_logs.remove(&session_id);
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
     }
 
     /// Get total live log count across all sessions
@@ -4056,7 +3999,7 @@ impl AppState {
         state.refresh_auth_statuses();
 
         self.onboarding.onboarding_state = Some(state);
-        self.current_screen = screen_ids::ONBOARDING.to_string();
+        self.shell.current_screen = screen_ids::ONBOARDING.to_string();
     }
 
     /// Map a finished wizard `OnboardingState` onto the persisted
@@ -4167,7 +4110,7 @@ impl AppState {
 
         // Clean up and return to home
         self.onboarding.onboarding_state = None;
-        self.current_screen = screen_ids::HOME.to_string();
+        self.shell.current_screen = screen_ids::HOME.to_string();
 
         // New-user path: now that onboarding is done, offer to install
         // the ainb-hooks notification plugin (existing users get this at
@@ -4180,7 +4123,7 @@ impl AppState {
     /// Cancel onboarding and return to home (for factory reset scenario)
     pub fn cancel_onboarding(&mut self) {
         self.onboarding.onboarding_state = None;
-        self.current_screen = screen_ids::HOME.to_string();
+        self.shell.current_screen = screen_ids::HOME.to_string();
     }
 
     /// Leave the onboarding wizard and drop into the Setup menu.
@@ -4194,7 +4137,7 @@ impl AppState {
         use crate::components::setup_menu::SetupMenuState;
         self.onboarding.onboarding_state = None;
         self.onboarding.setup_menu_state = SetupMenuState::new();
-        self.current_screen = screen_ids::SETUP_MENU.to_string();
+        self.shell.current_screen = screen_ids::SETUP_MENU.to_string();
     }
 
     /// Refresh OAuth tokens using the refresh token
@@ -4573,8 +4516,9 @@ impl AppState {
                             // `load_real_workspaces` doesn't re-arm it — no loop.
                             // Guard on `None` so a user-queued action is never
                             // clobbered.
-                            if self.pending_async_action.is_none() {
-                                self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            if self.shell.pending_async_action.is_none() {
+                                self.shell.pending_async_action =
+                                    Some(AsyncAction::RefreshWorkspaces);
                             }
 
                             return true;
@@ -5973,7 +5917,7 @@ impl AppState {
     }
 
     pub fn select_session_list_row(&mut self, target: SessionListRowTarget) {
-        self.focused_pane = FocusedPane::Sessions;
+        self.shell.focused_pane = FocusedPane::Sessions;
 
         match target {
             SessionListRowTarget::WorkspaceHeader { workspace_idx } => {
@@ -6021,24 +5965,24 @@ impl AppState {
         is_down: bool,
         steps: usize,
     ) -> bool {
-        if self.current_screen != screen_ids::SESSION_LIST || self.help_visible {
+        if self.shell.current_screen != screen_ids::SESSION_LIST || self.shell.help_visible {
             return false;
         }
 
         if pane.contains_preview_point(x, y) {
-            self.focused_pane = FocusedPane::LiveLogs;
+            self.shell.focused_pane = FocusedPane::LiveLogs;
             return false;
         }
 
         let over_sessions = pane.contains_sessions_point(x, y) && !pane.collapsed;
         let should_scroll_sessions =
-            over_sessions || matches!(self.focused_pane, FocusedPane::Sessions);
+            over_sessions || matches!(self.shell.focused_pane, FocusedPane::Sessions);
 
         if !should_scroll_sessions {
             return false;
         }
 
-        self.focused_pane = FocusedPane::Sessions;
+        self.shell.focused_pane = FocusedPane::Sessions;
         for _ in 0..steps.max(1) {
             if is_down {
                 self.next_session();
@@ -6465,7 +6409,7 @@ impl AppState {
     }
 
     pub fn toggle_help(&mut self) {
-        self.help_visible = !self.help_visible;
+        self.shell.help_visible = !self.shell.help_visible;
     }
 
     pub fn toggle_expand_all_workspaces(&mut self) {
@@ -6876,19 +6820,19 @@ impl AppState {
     }
 
     pub fn toggle_claude_chat(&mut self) {
-        if self.current_screen == screen_ids::CLAUDE_CHAT {
+        if self.shell.current_screen == screen_ids::CLAUDE_CHAT {
             // Close Claude chat popup and return to main view
-            self.current_screen = screen_ids::SESSION_LIST.to_string();
+            self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
             self.claude_chat.claude_chat_visible = false;
         } else {
             // Open Claude chat popup
-            self.current_screen = screen_ids::CLAUDE_CHAT.to_string();
+            self.shell.current_screen = screen_ids::CLAUDE_CHAT.to_string();
             self.claude_chat.claude_chat_visible = true;
         }
     }
 
     pub fn quit(&mut self) {
-        self.should_quit = true;
+        self.shell.should_quit = true;
     }
 
     pub fn show_delete_confirmation(&mut self, session_id: Uuid) {
@@ -6900,7 +6844,7 @@ impl AppState {
         // Check for uncommitted changes in the session's worktree
         let warning = self.check_session_uncommitted_warning(session_id);
 
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Delete Session".to_string(),
             message: "Are you sure you want to delete this session? This will stop the container and remove the git worktree.".to_string(),
             confirm_action: ConfirmAction::DeleteSession(session_id),
@@ -6924,7 +6868,7 @@ impl AppState {
 
         let warning = self.check_session_uncommitted_warning(session_id);
 
-        self.confirmation_dialog = Some(stop_or_delete_dialog(
+        self.shell.confirmation_dialog = Some(stop_or_delete_dialog(
             "Stop or Delete Session".to_string(),
             "Stop keeps the worktree and resumes later. Delete removes the worktree.".to_string(),
             warning,
@@ -7006,7 +6950,7 @@ impl AppState {
         let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, count);
         let summary = Self::format_bulk_session_summary(&id_names);
 
-        self.confirmation_dialog = Some(if stoppable.len() == count {
+        self.shell.confirmation_dialog = Some(if stoppable.len() == count {
             stop_or_delete_dialog(
                 format!("Stop or Delete {count} Session(s)"),
                 format!(
@@ -7242,7 +7186,7 @@ impl AppState {
     /// open abtop; only "Enable" also runs the setup, and "Don't ask again"
     /// suppresses the offer permanently.
     pub fn show_abtop_setup_prompt(&mut self) {
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Enable abtop rate-limit tracking?".to_string(),
             message: "abtop can show Claude rate-limit usage (5-hour + weekly \
                       windows). This installs a StatusLine hook into \
@@ -7276,7 +7220,7 @@ impl AppState {
             "Showing kill confirmation for other tmux session: {}",
             session_name
         );
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Session".to_string(),
             message: format!(
                 "Are you sure you want to kill tmux session '{}'?",
@@ -7299,7 +7243,7 @@ impl AppState {
         let count = session_names.len();
         info!("Showing kill confirmation for {count} other tmux sessions");
         let listed = truncate_list(session_names.iter().cloned());
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Sessions".to_string(),
             message: format!(
                 "Kill {count} tmux session(s): {listed}?\nThese are not managed by ainb, so \
@@ -7325,7 +7269,7 @@ impl AppState {
     pub fn maybe_prompt_notify_install(&mut self) {
         use ainb_plugin_notifyd::{InstallPrompt, Paths, prompt_state};
 
-        if self.confirmation_dialog.is_some() {
+        if self.shell.confirmation_dialog.is_some() {
             return;
         }
         let Ok(paths) = Paths::from_home() else {
@@ -7362,7 +7306,7 @@ impl AppState {
             ),
             InstallPrompt::None => return,
         };
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title,
             message,
             // Binary mode is unused here; tri-option drives the choice.
@@ -7399,7 +7343,7 @@ impl AppState {
             "Showing kill confirmation for SSH session: {} (display: {})",
             session_name, display_text
         );
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill SSH Session".to_string(),
             message: format!(
                 "Are you sure you want to kill SSH session '{}'?",
@@ -7434,7 +7378,7 @@ impl AppState {
             "Showing kill confirmation for workspace shell: {} in {}",
             shell_name, workspace_name
         );
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill Shell Session".to_string(),
             message: format!(
                 "Are you sure you want to kill shell '{}' in workspace '{}'?",
@@ -7454,7 +7398,7 @@ impl AppState {
         if let Some(session_id) = self.get_selected_session_id() {
             // Only fetch if we haven't already fetched logs for this session
             if self.log_streams.last_logs_session_id != Some(session_id) {
-                self.pending_async_action = Some(AsyncAction::FetchContainerLogs(session_id));
+                self.shell.pending_async_action = Some(AsyncAction::FetchContainerLogs(session_id));
                 self.log_streams.last_logs_session_id = Some(session_id);
             }
         }
@@ -7579,8 +7523,8 @@ impl AppState {
             // Clear attached session if we're currently attached to this session
             if self.sessions.attached_session_id == Some(session_id) {
                 self.sessions.attached_session_id = None;
-                self.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
-                self.ui_needs_refresh = true;
+                self.shell.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
+                self.shell.ui_needs_refresh = true;
             }
 
             let container_manager = ContainerManager::new().await?;
@@ -7701,7 +7645,7 @@ impl AppState {
     }
 
     pub fn cancel_new_session(&mut self) {
-        // INVARIANT: must NOT clear `self.notifications`. Callers post an error
+        // INVARIANT: must NOT clear `self.shell.notifications`. Callers post an error
         // toast immediately before cancelling (e.g. the worktree-create failure
         // arm in `create_session_from_configure`) and rely on it surviving the
         // teardown — clearing here would re-introduce the silent-flash bug
@@ -7712,14 +7656,15 @@ impl AppState {
         // previous screen was recorded — matches the pre-redesign
         // contract for the legacy 13-step wizard's Cancel path.
         let prev = self
+            .shell
             .previous_screen
             .take()
             .unwrap_or_else(|| screen_ids::SESSION_LIST.to_string());
-        self.current_screen = prev;
+        self.shell.current_screen = prev;
         // Also clear any pending async actions to prevent race conditions
-        self.pending_async_action = None;
+        self.shell.pending_async_action = None;
         // Set cancellation flag to prevent race conditions
-        self.async_operation_cancelled = true;
+        self.shell.async_operation_cancelled = true;
     }
 
     pub async fn create_session_from_configure(
@@ -7827,7 +7772,7 @@ impl AppState {
                 info!(
                     "Boss mode selected but authentication not set up, switching to auth setup view"
                 );
-                self.current_screen = screen_ids::AUTH_SETUP.to_string();
+                self.shell.current_screen = screen_ids::AUTH_SETUP.to_string();
                 self.onboarding.auth_setup_state = Some(AuthSetupState {
                     selected_method: AuthMethod::OAuth,
                     api_key_input: String::new(),
@@ -7967,7 +7912,7 @@ impl AppState {
                         session_id, e
                     );
                 }
-                self.ui_needs_refresh = true;
+                self.shell.ui_needs_refresh = true;
                 self.cancel_new_session();
             }
             Err(e) => {
@@ -7980,7 +7925,7 @@ impl AppState {
                 // tearing down the modal. Without this the error only hit the
                 // log and the modal closed silently — the user saw a flash and
                 // never learned why (Stevie 2026-06-06). cancel_new_session()
-                // leaves self.notifications intact, so the 5s toast survives.
+                // leaves self.shell.notifications intact, so the 5s toast survives.
                 // `{e:#}` for the same reason the `error!` above uses it: with
                 // `{e}` the toast showed only the outermost context and dropped
                 // the cause the user needs. The log and the screen must not
@@ -8202,7 +8147,7 @@ impl AppState {
                 let _ = tx.send((seq, payload));
             });
         }
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
     }
 
     /// Poll the background remote-repo pre-flight. Applies the verdict to the
@@ -8469,7 +8414,7 @@ impl AppState {
                 pick.git_auth_error = Some(auth_msg);
             }
         }
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
     }
 
     /// The clone itself runs on `spawn_blocking` because `git2` / `git` CLI
@@ -8494,7 +8439,7 @@ impl AppState {
             "Cloning {}/{}/{}…",
             parsed.host, parsed.owner, parsed.repo_name
         ));
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         let manager = match RemoteRepoManager::new() {
             Ok(m) => m,
@@ -8539,7 +8484,7 @@ impl AppState {
             parsed.repo_name,
             cache_path.display()
         ));
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
         Ok(cache_path)
     }
 
@@ -8566,7 +8511,7 @@ impl AppState {
         if let Some(ns) = self.new_session.new_session_state.as_mut() {
             ns.step = NewSessionStep::Creating;
         }
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         // tmux session name: `ssh-<host>-<port>` matches the convention parsed
         // by `auto-detect` in load_real_workspaces (search "name.starts_with(\"ssh-\")").
@@ -8593,7 +8538,7 @@ impl AppState {
                 session.status = crate::models::SessionStatus::Idle;
                 self.ssh.ssh_sessions.push(session);
                 self.add_info_notification(format!("SSH session ready: {}", display));
-                self.ui_needs_refresh = true;
+                self.shell.ui_needs_refresh = true;
                 // Refresh workspaces / sessions list so the new bucket entry is
                 // discoverable through the normal flow too.
                 self.load_real_workspaces().await;
@@ -9300,7 +9245,7 @@ impl AppState {
 
             // Reload workspaces to reflect changes
             self.load_real_workspaces().await;
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
 
             // Audit log the overall cleanup
             audit::audit_orphaned_cleanup(
@@ -9476,7 +9421,7 @@ impl AppState {
 
         // ALWAYS reload workspaces to ensure UI reflects the actual state
         self.load_real_workspaces().await;
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         result
     }
@@ -9943,7 +9888,7 @@ impl AppState {
 
         if result.is_ok() {
             self.load_real_workspaces().await;
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
         }
 
         result
@@ -10164,7 +10109,7 @@ impl AppState {
             let edits = std::mem::take(&mut self.hangar.pending_daemon_config_edits);
             self.set_hangar_daemon_config(edits).await;
         }
-        if let Some(action) = self.pending_async_action.take() {
+        if let Some(action) = self.shell.pending_async_action.take() {
             info!(
                 ">>> process_async_action() called with action: {:?}",
                 action
@@ -10188,7 +10133,7 @@ impl AppState {
                     }
                     // Refresh so the Stopped indicator is rendered.
                     self.load_real_workspaces().await;
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::ResumeSession(session_id, trigger) => {
                     if let Err(e) = self.resume_interactive_session(session_id, trigger).await {
@@ -10219,12 +10164,12 @@ impl AppState {
                     } else {
                         self.add_success_notification(format!("Resumed {} session(s)", resumed));
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkStopSessions(session_ids) => {
                     self.bulk_stop_sessions(session_ids).await;
                     self.load_real_workspaces().await;
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();
@@ -10251,7 +10196,7 @@ impl AppState {
                     } else {
                         self.add_success_notification(format!("Deleted {} session(s)", deleted));
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::RefreshWorkspaces => {
                     info!("Manual refresh triggered");
@@ -10262,7 +10207,7 @@ impl AppState {
                     invalidate_docker_probe_cache(&DOCKER_PROBE);
                     // Reload workspace data and force UI refresh
                     self.load_real_workspaces().await;
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::FetchContainerLogs(session_id) => {
                     info!("Fetching container logs for session {}", session_id);
@@ -10272,7 +10217,7 @@ impl AppState {
                             session_id, e
                         );
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::AttachToContainer(session_id) => {
                     info!("Attaching to container for session {}", session_id);
@@ -10282,20 +10227,20 @@ impl AppState {
                             session_id, e
                         );
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::AttachToTmuxSession(_session_id) => {
                     // NOTE: This action must be handled in main.rs where terminal access is available
                     // The terminal handle is needed to call attach_to_tmux_session
                     warn!("AttachToTmuxSession action should be handled in main loop, not here");
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::KillContainer(session_id) => {
                     info!("Killing container for session {}", session_id);
                     if let Err(e) = self.kill_container(session_id).await {
                         error!("Failed to kill container for session {}: {}", session_id, e);
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::AuthSetupOAuth => {
                     info!("Starting OAuth authentication setup");
@@ -10354,27 +10299,27 @@ impl AppState {
                 // PUT THE ACTION BACK so main loop can handle it
                 action @ AsyncAction::AttachToOtherTmux(_) => {
                     debug!("AttachToOtherTmux action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::AttachWitr => {
                     debug!("AttachWitr action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::AttachAbtop => {
                     debug!("AttachAbtop action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::SetupAbtopRateLimits => {
                     debug!("SetupAbtopRateLimits action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmuxSessions(_) => {
                     debug!("KillOtherTmuxSessions action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 AsyncAction::ConfirmOtherTmuxRename => {
                     info!("Executing Other tmux rename");
@@ -10383,7 +10328,7 @@ impl AppState {
                             self.add_success_notification(
                                 "Session renamed successfully".to_string(),
                             );
-                            self.ui_needs_refresh = true;
+                            self.shell.ui_needs_refresh = true;
                         }
                         Err(e) => {
                             warn!("Failed to rename session: {}", e);
@@ -10393,19 +10338,19 @@ impl AppState {
                 }
                 action @ AsyncAction::OpenWorkspaceShell { .. } => {
                     debug!("OpenWorkspaceShell action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::OpenShellAtPath(_) => {
                     debug!("OpenShellAtPath action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillWorkspaceShell(_) => {
                     debug!("KillWorkspaceShell action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::OpenInEditor(_) => {
                     debug!("OpenInEditor action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 AsyncAction::OnboardingInstallDep(dep_id) => {
                     use crate::components::onboarding::state::DepInstall;
@@ -10438,7 +10383,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::OnboardingCheckDeps => {
                     info!("Running onboarding dependency check");
@@ -10450,7 +10395,7 @@ impl AppState {
                             {
                                 onboarding_state.dependency_status = Some(status);
                                 onboarding_state.dependency_check_running = false;
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                             }
                         }
                         Err(e) => {
@@ -10506,7 +10451,7 @@ impl AppState {
                             self.add_error_notification(format!("preview task failed: {e}"));
                         }
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
             }
         }
@@ -10635,9 +10580,9 @@ impl AppState {
 
             // Success - transition to main view
             self.onboarding.auth_setup_state = None;
-            self.current_screen = screen_ids::SESSION_LIST.to_string();
+            self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
             self.check_current_directory_status();
-            self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+            self.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
         } else {
             println!("\n❌ Authentication failed!");
             println!("Press Enter to return to the authentication menu...");
@@ -10666,7 +10611,7 @@ impl AppState {
         );
 
         // Force UI refresh
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         Ok(())
     }
@@ -10790,9 +10735,9 @@ impl AppState {
 
         // Success - transition to main view
         self.onboarding.auth_setup_state = None;
-        self.current_screen = screen_ids::SESSION_LIST.to_string();
+        self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
         self.check_current_directory_status();
-        self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+        self.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
 
         Ok(())
     }
@@ -10839,7 +10784,7 @@ impl AppState {
                         running_session_count
                     )),
                 });
-                self.current_screen = screen_ids::AUTH_SETUP.to_string();
+                self.shell.current_screen = screen_ids::AUTH_SETUP.to_string();
             }
             return Ok(());
         }
@@ -10889,7 +10834,7 @@ impl AppState {
                 "🔄 Previous credentials cleared - please authenticate again".to_string(),
             ),
         });
-        self.current_screen = screen_ids::AUTH_SETUP.to_string();
+        self.shell.current_screen = screen_ids::AUTH_SETUP.to_string();
 
         info!("Re-authentication initiated - switched to auth setup view");
         Ok(())
@@ -10962,7 +10907,7 @@ impl AppState {
                         repo_branch_names,
                     );
 
-                    self.current_screen = screen_ids::NEW_SESSION.to_string();
+                    self.shell.current_screen = screen_ids::NEW_SESSION.to_string();
                     self.new_session.new_session_state = Some(NewSessionState {
                         step: NewSessionStep::Configure,
                         configure_state: Some(configure_state),
@@ -11031,8 +10976,8 @@ impl AppState {
 
             self.git_view.git_view_state = Some(git_state);
             // Store current view so we can return to it
-            self.previous_screen = Some(self.current_screen.clone());
-            self.current_screen = screen_ids::GIT_VIEW.to_string();
+            self.shell.previous_screen = Some(self.shell.current_screen.clone());
+            self.shell.current_screen = screen_ids::GIT_VIEW.to_string();
         } else {
             tracing::warn!("No session selected for git view");
         }
@@ -11049,7 +10994,8 @@ impl AppState {
             Ok(message) => {
                 tracing::info!("Git commit and push successful: {}", message);
                 // Set pending event to be processed in next loop iteration
-                self.pending_event = Some(crate::app::events::AppEvent::GitCommitSuccess(message));
+                self.shell.pending_event =
+                    Some(crate::app::events::AppEvent::GitCommitSuccess(message));
                 // Refresh git status after successful push
                 if let Some(git_state) = self.git_view.git_view_state.as_mut() {
                     if let Err(e) = git_state.refresh_git_status() {
@@ -11165,7 +11111,7 @@ impl AppState {
             Ok(success_message) => {
                 tracing::info!("Quick commit successful: {}", success_message);
                 // Set pending event to be processed in next loop iteration
-                self.pending_event = Some(crate::app::events::AppEvent::GitCommitSuccess(
+                self.shell.pending_event = Some(crate::app::events::AppEvent::GitCommitSuccess(
                     success_message,
                 ));
                 // Clear quick commit state
@@ -11211,7 +11157,7 @@ impl AppState {
         Self::log_notification(&notification);
 
         if coalesces(&notification.notification_type) {
-            if let Some(existing) = self.notifications.iter_mut().find(|n| {
+            if let Some(existing) = self.shell.notifications.iter_mut().find(|n| {
                 n.notification_type == notification.notification_type
                     && n.message == notification.message
             }) {
@@ -11220,10 +11166,10 @@ impl AppState {
             }
         }
 
-        self.notifications.push(notification);
-        let overflow = self.notifications.len().saturating_sub(MAX_STORED_NOTIFICATIONS);
+        self.shell.notifications.push(notification);
+        let overflow = self.shell.notifications.len().saturating_sub(MAX_STORED_NOTIFICATIONS);
         if overflow > 0 {
-            self.notifications.drain(..overflow);
+            self.shell.notifications.drain(..overflow);
         }
     }
 
@@ -11292,7 +11238,7 @@ impl AppState {
     /// to fix it. Only `create` is exempt, and only because it mints a fresh
     /// id, so per-session and per-launch already coincide there.
     pub fn begin_codex_launch(&mut self, session_id: Uuid) {
-        self.codex_degrade_announced.remove(&session_id);
+        self.shell.codex_degrade_announced.remove(&session_id);
     }
 
     /// Say ONCE per launch, on screen, that a Codex session started without shared remote
@@ -11311,7 +11257,7 @@ impl AppState {
         session_id: Uuid,
         degrade: crate::interactive::session_manager::SharedThreadDegrade,
     ) {
-        if !self.codex_degrade_announced.insert(session_id) {
+        if !self.shell.codex_degrade_announced.insert(session_id) {
             return;
         }
         self.add_info_notification(degrade.notice());
@@ -11321,7 +11267,12 @@ impl AppState {
     /// filling the notification queue while a scroll key repeats.
     pub fn notify_live_preview_no_scrollback(&mut self) {
         const MESSAGE: &str = "Live preview has no scrollback. Press A to interact.";
-        if !self.notifications.iter().any(|notification| notification.message == MESSAGE) {
+        if !self
+            .shell
+            .notifications
+            .iter()
+            .any(|notification| notification.message == MESSAGE)
+        {
             self.add_info_notification(MESSAGE.to_string());
         }
     }
@@ -11333,7 +11284,7 @@ impl AppState {
 
     /// Remove expired notifications
     pub fn cleanup_expired_notifications(&mut self) {
-        self.notifications.retain(|n| !n.is_expired());
+        self.shell.notifications.retain(|n| !n.is_expired());
     }
 
     /// Retire every notice currently on screen (`Ctrl+X`).
@@ -11348,18 +11299,18 @@ impl AppState {
         if !self.has_visible_notifications() {
             return false;
         }
-        self.notifications.clear();
+        self.shell.notifications.clear();
         true
     }
 
     /// Is at least one notice on screen right now?
     pub fn has_visible_notifications(&self) -> bool {
-        self.notifications.iter().any(|n| !n.is_expired())
+        self.shell.notifications.iter().any(|n| !n.is_expired())
     }
 
     /// Get current notifications (non-expired)
     pub fn get_current_notifications(&self) -> Vec<&Notification> {
-        self.notifications.iter().filter(|n| !n.is_expired()).collect()
+        self.shell.notifications.iter().filter(|n| !n.is_expired()).collect()
     }
 
     // ============================================================================
@@ -11697,8 +11648,8 @@ impl AppState {
     #[must_use]
     pub fn session_chat_open(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
-        self.current_screen == crate::app::screens::ids::SESSION_LIST
-            && matches!(self.session_tab, SessionTab::Thread | SessionTab::Pal)
+        self.shell.current_screen == crate::app::screens::ids::SESSION_LIST
+            && matches!(self.shell.session_tab, SessionTab::Thread | SessionTab::Pal)
     }
 
     /// Whether the hangar daemon is DOWN, as opposed to merely not answering.
@@ -11729,7 +11680,7 @@ impl AppState {
     /// one.
     #[must_use]
     pub fn pal_daemon_cta_open(&self) -> bool {
-        self.session_tab == crate::components::session_tabs::SessionTab::Pal
+        self.shell.session_tab == crate::components::session_tabs::SessionTab::Pal
             && self.hangar_daemon_not_running()
     }
 
@@ -11752,7 +11703,7 @@ impl AppState {
             // The right pane. `SessionTabNext` puts focus here whenever it
             // lands on a tab that takes input, and takes it away again when it
             // lands on one that does not.
-            && self.focused_pane == FocusedPane::LiveLogs
+            && self.shell.focused_pane == FocusedPane::LiveLogs
             && *self.fleet.daemon_start_cta.status() != crate::fleet::daemon_cta::CtaStatus::Starting
     }
 
@@ -11795,10 +11746,10 @@ impl AppState {
     #[must_use]
     pub fn session_tab_owns_keys(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
-        if self.current_screen != crate::app::screens::ids::SESSION_LIST {
+        if self.shell.current_screen != crate::app::screens::ids::SESSION_LIST {
             return false;
         }
-        match self.session_tab {
+        match self.shell.session_tab {
             SessionTab::Pal => self.fleet.pal_chat.is_some(),
             // A broadcast owns the keyboard whether or not a thread host has
             // been opened: the composer is there the moment rows are checked.
@@ -11821,10 +11772,10 @@ impl AppState {
     #[must_use]
     pub fn session_composer_captures_text(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
-        if self.session_tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
+        if self.shell.session_tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
             return self.fleet.broadcast.capturing();
         }
-        let host = match self.session_tab {
+        let host = match self.shell.session_tab {
             SessionTab::Pal => self.fleet.pal_chat.as_ref(),
             SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
@@ -11849,7 +11800,7 @@ impl AppState {
             SessionTab::Pal => {
                 let host = self.fleet.pal_chat.get_or_insert_with(ChatHost::pal);
                 if host.tick(now_ms) {
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 self.chat_host(tab)
             }
@@ -11865,7 +11816,7 @@ impl AppState {
                 }
                 if let Some((_, host)) = self.fleet.session_chat.as_mut() {
                     if host.tick(now_ms) {
-                        self.ui_needs_refresh = true;
+                        self.shell.ui_needs_refresh = true;
                     }
                 }
                 self.chat_host(tab)
@@ -12469,7 +12420,7 @@ impl AppState {
             changed = true;
         }
         if changed {
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
         }
     }
 
@@ -12570,7 +12521,7 @@ impl AppState {
         // Apply status-only updates for non-selected sessions
         for (session_id, claude_running) in status_updates {
             // Accumulate the change flag inside the session borrow, then
-            // touch `self.ui_needs_refresh` only after it ends (avoids a
+            // touch `self.shell.ui_needs_refresh` only after it ends (avoids a
             // borrow conflict between `find_session_mut` and `self`).
             let mut changed = false;
             if let Some(session) = self.find_session_mut(session_id) {
@@ -12586,7 +12537,7 @@ impl AppState {
                 }
             }
             if changed {
-                self.ui_needs_refresh = true;
+                self.shell.ui_needs_refresh = true;
             }
         }
 
@@ -12608,7 +12559,7 @@ impl AppState {
                 }
             }
 
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
         }
 
         // Now that per-session running/idle status is current, recompute each
@@ -12647,7 +12598,7 @@ impl AppState {
                         if let Some(workspace) = self.sessions.workspaces.get_mut(ws_idx) {
                             if let Some(shell) = workspace.shell_session.as_mut() {
                                 shell.preview_content = Some(content);
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                             }
                         }
                     }
@@ -13028,24 +12979,25 @@ impl AppState {
         else {
             return;
         };
-        if self.last_panel_close_version == Some(version) {
+        if self.shell.last_panel_close_version == Some(version) {
             return;
         }
-        self.last_panel_close_version = Some(version);
-        if !panel_close_matches(&self.current_screen, &payload, publisher.as_str()) {
+        self.shell.last_panel_close_version = Some(version);
+        if !panel_close_matches(&self.shell.current_screen, &payload, publisher.as_str()) {
             return;
         }
         let target = self
+            .shell
             .previous_screen
             .take()
             .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
         tracing::info!(
-            from = %self.current_screen,
+            from = %self.shell.current_screen,
             to = %target,
             "ui.close_request: closing plugin panel"
         );
-        self.current_screen = target;
-        self.ui_needs_refresh = true;
+        self.shell.current_screen = target;
+        self.shell.ui_needs_refresh = true;
     }
 }
 
@@ -13410,7 +13362,7 @@ impl App {
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
-        // `state.current_screen`) with the plugin id that owns it.
+        // `state.shell.current_screen`) with the plugin id that owns it.
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
@@ -13464,7 +13416,7 @@ impl App {
 
             // Visibility gate: only the plugin owning the focused screen
             // gets render kicks. `LayoutComponent::render` dispatches
-            // exactly `state.current_screen` through the screen registry,
+            // exactly `state.shell.current_screen` through the screen registry,
             // so a hidden screen's buffer is never painted — kicking its
             // renders only burns CPU. Concretely this stops (a) a
             // self-animating plugin (search spinner returning
@@ -13482,7 +13434,7 @@ impl App {
             // consume, so a hidden plugin's dirty flag survives until the
             // user opens the screen and the first tick after the switch
             // kicks the deferred paint.
-            if self.state.current_screen != *screen_id {
+            if self.state.shell.current_screen != *screen_id {
                 continue;
             }
 
@@ -13635,7 +13587,7 @@ impl App {
                 // watermark from a previous runtime so an equal-valued
                 // version can't mask a new close request. Init runs once
                 // today; this keeps any future runtime-restart path safe.
-                self.state.last_panel_close_version = None;
+                self.state.shell.last_panel_close_version = None;
                 // Keep the burndown usage snapshot live: watch provider
                 // session dirs and nudge session-reader to rescan on
                 // change, so "today" appears without the user pressing
@@ -13820,30 +13772,30 @@ impl App {
             }
             // Also load other tmux sessions (quick operation)
             self.state.load_other_tmux_sessions().await;
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
 
         // Check for completed background skills scan
         if self.state.check_skills_load_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
 
         // Check for completed background drift scan
         // (skill-manager v1.2 bead v12.E.4).
         if self.state.check_drift_load_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
         // Check for a completed base-branch refresh (Configure picker)
         if self.state.check_branch_refresh_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
         // Check for a completed remote-repo pre-flight (Configure screen)
         if self.state.check_repo_check_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
         // Check for a completed empty-remote initialization ([i] on Configure)
         if self.state.check_repo_init_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
 
         // Drain + lazily refresh the MCP pool overlay (no-op when closed).
@@ -13962,18 +13914,18 @@ impl App {
         }
 
         // Process any pending async actions
-        if self.state.pending_async_action.is_some() {
+        if self.state.shell.pending_async_action.is_some() {
             info!(
                 ">>> tick() detected pending_async_action: {:?}",
-                self.state.pending_async_action
+                self.state.shell.pending_async_action
             );
         }
         match self.state.process_async_action().await {
             Ok(()) => {
-                if self.state.pending_async_action.is_some() {
+                if self.state.shell.pending_async_action.is_some() {
                     info!(
                         ">>> After process_async_action, still pending: {:?}",
-                        self.state.pending_async_action
+                        self.state.shell.pending_async_action
                     );
                 }
             }
@@ -13981,13 +13933,13 @@ impl App {
                 warn!("Error processing async action: {}", e);
                 // Return to safe state if there was an error
                 // BUT don't interrupt onboarding wizard or setup menu
-                if self.state.current_screen != screen_ids::ONBOARDING
-                    && self.state.current_screen != screen_ids::SETUP_MENU
+                if self.state.shell.current_screen != screen_ids::ONBOARDING
+                    && self.state.shell.current_screen != screen_ids::SETUP_MENU
                 {
                     self.state.new_session.new_session_state = None;
-                    self.state.current_screen = screen_ids::SESSION_LIST.to_string();
+                    self.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
                 }
-                self.state.pending_async_action = None;
+                self.state.shell.pending_async_action = None;
             }
         }
 
@@ -14023,7 +13975,7 @@ impl App {
                     } else {
                         self.state.log_streams.log_last_updated.insert(attached_id, now);
                         // Set flag to refresh UI with new logs
-                        self.state.ui_needs_refresh = true;
+                        self.state.shell.ui_needs_refresh = true;
                     }
                 }
             }
@@ -14034,8 +13986,8 @@ impl App {
 
     /// Check if UI needs immediate refresh and clear the flag
     pub fn needs_ui_refresh(&mut self) -> bool {
-        if self.state.ui_needs_refresh {
-            self.state.ui_needs_refresh = false;
+        if self.state.shell.ui_needs_refresh {
+            self.state.shell.ui_needs_refresh = false;
             true
         } else {
             false
@@ -14057,7 +14009,7 @@ mod state_tests;
 #[cfg(test)]
 mod plugin_render_gate_tests {
     //! Visibility gate on the render-tick loop: only the plugin owning
-    //! `state.current_screen` gets render kicks. A hidden plugin's dirty
+    //! `state.shell.current_screen` gets render kicks. A hidden plugin's dirty
     //! flag must SURVIVE the gate (it is consumed by `take_render_dirty`
     //! only after the screen check) so the deferred first paint happens
     //! on the first tick after the user opens the screen.
@@ -14116,7 +14068,7 @@ mod plugin_render_gate_tests {
         let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
-        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = ids::SESSION_LIST.to_string();
         app.tick_plugin_renders(&mut ui);
         app.tick_plugin_renders(&mut ui);
 
@@ -14144,14 +14096,14 @@ mod plugin_render_gate_tests {
         let pid = PluginId::from("learnings");
 
         // Ticks while hidden: gated, dirty preserved (proved above).
-        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = ids::SESSION_LIST.to_string();
         app.tick_plugin_renders(&mut ui);
 
         // User opens the learnings screen. No allocated area is stashed yet,
         // so the tick must NOT kick: a (0, 0) seed kick made the plugin paint
         // its 80×24 fallback across the real (larger) area — the blank-flash
         // bug on first entry.
-        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.state.shell.current_screen = ids::LEARNINGS.to_string();
         app.tick_plugin_renders(&mut ui);
         assert!(
             !ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
@@ -14181,7 +14133,7 @@ mod plugin_render_gate_tests {
         let mut ui = crate::app::ui_state::UiState::default();
         let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
 
-        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.state.shell.current_screen = ids::LEARNINGS.to_string();
         // Focused screen has painted once (area known); the hidden one hasn't.
         ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (100, 30));
         app.tick_plugin_renders(&mut ui);
@@ -14216,7 +14168,7 @@ mod plugin_render_gate_tests {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut ui = crate::app::ui_state::UiState::default();
 
-        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.state.shell.current_screen = ids::LEARNINGS.to_string();
         ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
 
         // First tick kicks the render; the spawn attempt and its failure
@@ -15054,13 +15006,13 @@ mod codex_degrade_notice_tests {
     fn a_degraded_launch_is_announced_once_within_one_launch() {
         let mut state = AppState::new();
         let session = Uuid::new_v4();
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
 
-        let added: Vec<_> = state.notifications[before..]
+        let added: Vec<_> = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .collect();
@@ -15092,7 +15044,7 @@ mod codex_degrade_notice_tests {
     fn a_relaunch_of_the_same_session_is_announced_again() {
         let mut state = AppState::new();
         let session = Uuid::new_v4();
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         // Launch 1: degraded, announced, and not re-announced within itself.
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
@@ -15105,7 +15057,7 @@ mod codex_degrade_notice_tests {
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
 
-        let announced = state.notifications[before..]
+        let announced = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .count();
@@ -15126,11 +15078,11 @@ mod codex_degrade_notice_tests {
     fn a_first_launch_that_degraded_is_announced() {
         let mut state = AppState::new();
         let session = degraded_session(Some(SharedThreadDegrade::StoreBusy));
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.announce_created_session_degrade(&session);
 
-        let added: Vec<_> = state.notifications[before..]
+        let added: Vec<_> = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .collect();
@@ -15155,11 +15107,11 @@ mod codex_degrade_notice_tests {
     fn a_healthy_first_launch_is_silent() {
         let mut state = AppState::new();
         let session = degraded_session(None);
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.announce_created_session_degrade(&session);
 
-        let added = state.notifications[before..]
+        let added = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .count();
@@ -15193,12 +15145,12 @@ mod codex_degrade_notice_tests {
     #[test]
     fn a_second_session_gets_its_own_notice() {
         let mut state = AppState::new();
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.notify_codex_degraded(Uuid::new_v4(), SharedThreadDegrade::NoDaemon);
         state.notify_codex_degraded(Uuid::new_v4(), SharedThreadDegrade::NoDaemon);
 
-        let added = state.notifications[before..]
+        let added = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .count();

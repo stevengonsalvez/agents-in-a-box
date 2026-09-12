@@ -658,3 +658,74 @@ impl Default for FleetSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct ShellSection {
+    pub current_screen: ScreenId,
+    // Git view state
+    pub previous_screen: Option<ScreenId>,
+    pub should_quit: bool,
+    pub help_visible: bool,
+    // Flag to force UI refresh after workspace changes
+    pub ui_needs_refresh: bool,
+    // AINB 2.0: Home screen and agent selection
+    pub home_screen_state: HomeScreenState,
+    pub home_screen_v2_state: HomeScreenV2State,
+    // Notification system
+    pub notifications: Vec<Notification>,
+    // Confirmation dialog state
+    pub confirmation_dialog: Option<ConfirmationDialog>,
+    // Pending event to be processed in next loop iteration
+    pub pending_event: Option<crate::app::events::AppEvent>,
+    // Async action processing
+    pub pending_async_action: Option<AsyncAction>,
+    // Flag to track if user cancelled during async operation
+    pub async_operation_cancelled: bool,
+    /// Last `ui.close_request` snapshot version consumed by
+    /// `tick_panel_close_requests`. The poll acts at most once per
+    /// plugin publish: a version is consumed (recorded here) on first
+    /// sight whether or not it triggered a navigation, so a close
+    /// request that arrives while the user is on a different screen is
+    /// absorbed instead of firing later.
+    pub last_panel_close_version: Option<u64>,
+    /// The active right-pane tab. Reconciled every frame against what is
+    /// actually available, so a tab cannot stay open on a pane that has gone
+    /// dead under the operator.
+    pub session_tab: crate::components::session_tabs::SessionTab,
+    /// Sessions already told, on their CURRENT launch, that they started
+    /// without shared Codex remote control.
+    ///
+    /// The dedup key for `notify_codex_degraded`, cleared by
+    /// `begin_codex_launch` so the scope is one launch and not the session's
+    /// whole life. Kept here rather than checked against the live notification
+    /// list because notifications EXPIRE: a message-equality check would let
+    /// the same fact reappear minutes later.
+    pub(crate) codex_degrade_announced: std::collections::HashSet<Uuid>,
+    // Claude chat visibility toggle
+    pub focused_pane: FocusedPane,
+}
+
+impl Default for ShellSection {
+    fn default() -> Self {
+        Self {
+            current_screen: screen_ids::HOME.to_string(),
+            previous_screen: None,
+            should_quit: false,
+            help_visible: false,
+            ui_needs_refresh: false,
+            home_screen_state: HomeScreenState::default(),
+            // AppState::default builds this one and restores its sidebar
+            // width from the loaded config before handing it over.
+            home_screen_v2_state: HomeScreenV2State::new(),
+            notifications: Vec::new(),
+            confirmation_dialog: None,
+            pending_event: None,
+            pending_async_action: None,
+            async_operation_cancelled: false,
+            last_panel_close_version: None,
+            session_tab: crate::components::session_tabs::SessionTab::default(),
+            codex_degrade_announced: std::collections::HashSet::new(),
+            focused_pane: FocusedPane::Sessions,
+        }
+    }
+}

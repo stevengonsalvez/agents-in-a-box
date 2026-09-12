@@ -45,8 +45,8 @@ fn test_app_state_creation() {
     // AppState::new() should create an empty initial state
     assert!(state.sessions.workspaces.is_empty());
     assert!(state.sessions.selected_workspace_index.is_none());
-    assert!(!state.should_quit);
-    assert!(!state.help_visible);
+    assert!(!state.shell.should_quit);
+    assert!(!state.shell.help_visible);
 }
 
 #[test]
@@ -129,23 +129,23 @@ fn test_previous_workspace() {
 fn test_toggle_help() {
     let mut state = AppState::default();
 
-    assert!(!state.help_visible);
+    assert!(!state.shell.help_visible);
 
     state.toggle_help();
-    assert!(state.help_visible);
+    assert!(state.shell.help_visible);
 
     state.toggle_help();
-    assert!(!state.help_visible);
+    assert!(!state.shell.help_visible);
 }
 
 #[test]
 fn test_quit() {
     let mut state = AppState::default();
 
-    assert!(!state.should_quit);
+    assert!(!state.shell.should_quit);
 
     state.quit();
-    assert!(state.should_quit);
+    assert!(state.shell.should_quit);
 }
 
 #[test]

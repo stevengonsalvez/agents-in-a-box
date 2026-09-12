@@ -86,7 +86,7 @@ impl LiveLogsStreamComponent {
 
         // Show focus indicator
         use crate::app::state::FocusedPane;
-        let (border_color, title_color) = match state.focused_pane {
+        let (border_color, title_color) = match state.shell.focused_pane {
             FocusedPane::LiveLogs | FocusedPane::Preview => (SELECTION_GREEN, GOLD), // Focused
             FocusedPane::Sessions => (SUBDUED_BORDER, MUTED_GRAY),                   // Not focused
         };

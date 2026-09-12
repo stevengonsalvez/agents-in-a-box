@@ -122,7 +122,7 @@ mod tests {
 
         let missing = format!("ainb-missing-observer-{}", std::process::id());
         let mut state = state_with_other_tmux_sessions(&[missing.as_str()]);
-        state.current_screen = "session_list".to_string();
+        state.shell.current_screen = "session_list".to_string();
 
         assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -159,7 +159,7 @@ mod tests {
             state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3)
         );
-        assert!(state.notifications.iter().any(|notification| {
+        assert!(state.shell.notifications.iter().any(|notification| {
             notification.message.contains("Live preview unavailable for 'stale'")
         }));
     }
@@ -189,7 +189,7 @@ mod tests {
         assert!(created, "failed to create tmux session");
 
         let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
-        state.current_screen = "session_list".to_string();
+        state.shell.current_screen = "session_list".to_string();
         state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
         assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -238,7 +238,7 @@ mod tests {
         assert!(created, "failed to create tmux session");
 
         let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
-        state.current_screen = "session_list".to_string();
+        state.shell.current_screen = "session_list".to_string();
         state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
         assert!(!state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -279,7 +279,7 @@ mod tests {
         assert!(created, "failed to create tmux session");
 
         let mut state = state_with_other_tmux_sessions(&[active.as_str(), blocked.as_str()]);
-        state.current_screen = "session_list".to_string();
+        state.shell.current_screen = "session_list".to_string();
         assert!(!state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80));
@@ -303,6 +303,7 @@ mod tests {
 
         assert_eq!(
             state
+                .shell
                 .notifications
                 .iter()
                 .filter(|notification| {
@@ -338,7 +339,7 @@ mod tests {
 
         EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("bulk kill confirmation");
+        let dialog = state.shell.confirmation_dialog.as_ref().expect("bulk kill confirmation");
         assert_eq!(dialog.title, "Kill tmux Sessions");
         assert!(matches!(
             &dialog.confirm_action,
@@ -356,7 +357,7 @@ mod tests {
 
         EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("bulk kill confirmation");
+        let dialog = state.shell.confirmation_dialog.as_ref().expect("bulk kill confirmation");
         assert!(matches!(
             &dialog.confirm_action,
             ConfirmAction::KillOtherTmuxSessions(names)
@@ -372,6 +373,7 @@ mod tests {
         EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
         state
+            .shell
             .confirmation_dialog
             .as_mut()
             .expect("bulk kill confirmation")
@@ -380,7 +382,7 @@ mod tests {
 
         assert!(state.tmux.selected_other_tmux_sessions.is_empty());
         assert!(matches!(
-            state.pending_async_action,
+            state.shell.pending_async_action,
             Some(AsyncAction::KillOtherTmuxSessions(ref names))
                 if names == &vec!["alpha".to_string(), "beta".to_string()]
         ));
@@ -395,7 +397,7 @@ mod tests {
 
         state.show_delete_or_stop_confirmation(session_id);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("Dialog should be present");
+        let dialog = state.shell.confirmation_dialog.as_ref().expect("Dialog should be present");
         let opts = dialog.options.as_ref().expect("Tri-option dialog");
         assert_eq!(opts.len(), 3, "Stop / Delete / Cancel");
         assert_eq!(opts[0].label, "Stop");
@@ -463,7 +465,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let mut state = AppState::new();
         state.show_delete_confirmation(session_id);
-        let dialog = state.confirmation_dialog.as_ref().unwrap();
+        let dialog = state.shell.confirmation_dialog.as_ref().unwrap();
         assert!(dialog.options.is_none(), "Legacy binary dialog");
         assert!(!dialog.selected_option, "Default = No");
         assert!(matches!(
@@ -3297,7 +3299,7 @@ mod tests {
         use crate::app::state::WorkspaceLoadResult;
 
         let mut state = AppState::new();
-        state.pending_async_action = None;
+        state.shell.pending_async_action = None;
 
         // Simulate the startup background load completing.
         let tx = state.start_background_workspace_loading();
@@ -3307,7 +3309,7 @@ mod tests {
 
         assert!(updated, "applying the background result reports an update");
         assert_eq!(
-            state.pending_async_action,
+            state.shell.pending_async_action,
             Some(AsyncAction::RefreshWorkspaces),
             "fast startup load must enqueue a full refresh so stopped sessions surface"
         );
@@ -3319,14 +3321,14 @@ mod tests {
 
         let mut state = AppState::new();
         // A user-queued action is already pending when the load completes.
-        state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+        state.shell.pending_async_action = Some(AsyncAction::CleanupOrphaned);
 
         let tx = state.start_background_workspace_loading();
         tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
         state.check_workspace_loading_complete();
 
         assert_eq!(
-            state.pending_async_action,
+            state.shell.pending_async_action,
             Some(AsyncAction::CleanupOrphaned),
             "an already-queued action must not be overwritten by the refresh hand-off"
         );
@@ -3500,10 +3502,11 @@ mod tests {
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
             assert!(
-                state.pending_async_action.is_none(),
+                state.shell.pending_async_action.is_none(),
                 "bulk delete must not queue any action before the user confirms"
             );
-            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            let dialog =
+                state.shell.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
             let opts = dialog.options.as_ref().expect("tri-option dialog");
             assert_eq!(opts.len(), 3, "Stop all / Delete all / Cancel");
             assert_eq!(opts[0].label, "Stop all");
@@ -3535,8 +3538,9 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
-            assert!(state.pending_async_action.is_none());
-            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert!(state.shell.pending_async_action.is_none());
+            let dialog =
+                state.shell.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
             assert!(matches!(
                 &dialog.options.as_ref().expect("tri-option dialog")[0].action,
                 ConfirmAction::BulkStopSessions(got) if got == &ids
@@ -3552,7 +3556,8 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            let dialog =
+                state.shell.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
             assert_eq!(dialog.title, "Stop or Delete 2 Session(s)");
             assert!(
                 dialog.message.contains("2 session(s): alpha, beta"),
@@ -3577,14 +3582,14 @@ mod tests {
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(matches!(
-                state.pending_async_action,
+                state.shell.pending_async_action,
                 Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
             ));
             assert!(
                 state.sessions.selected_sessions.is_empty(),
                 "selection consumed"
             );
-            assert!(state.confirmation_dialog.is_none());
+            assert!(state.shell.confirmation_dialog.is_none());
         });
     }
 
@@ -3600,7 +3605,7 @@ mod tests {
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(matches!(
-                state.pending_async_action,
+                state.shell.pending_async_action,
                 Some(AsyncAction::BulkDeleteSessions(ref got)) if got == &ids
             ));
         });
@@ -3618,7 +3623,7 @@ mod tests {
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(
-                state.pending_async_action.is_none(),
+                state.shell.pending_async_action.is_none(),
                 "Cancel queues nothing"
             );
             assert_eq!(
@@ -3630,8 +3635,8 @@ mod tests {
             // Esc on a freshly-opened dialog is equally inert.
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
             EventHandler::process_event(AppEvent::ConfirmationCancel, &mut state);
-            assert!(state.confirmation_dialog.is_none());
-            assert!(state.pending_async_action.is_none());
+            assert!(state.shell.confirmation_dialog.is_none());
+            assert!(state.shell.pending_async_action.is_none());
             assert_eq!(state.sessions.selected_sessions.len(), 2);
         });
     }
@@ -3720,8 +3725,11 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            assert!(state.pending_async_action.is_none(), "still asks first");
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(
+                state.shell.pending_async_action.is_none(),
+                "still asks first"
+            );
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             assert!(dialog.options.is_none(), "no Stop option for Boss sessions");
             assert!(!dialog.selected_option, "Default = No");
             assert!(matches!(
@@ -3752,7 +3760,7 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             let opts = dialog.options.as_ref().expect("tri-option dialog");
             assert_eq!(dialog.selected_index, 0, "Stop is still the default");
             assert_eq!(opts[0].label, "Stop 2", "names how many Stop covers");
@@ -3793,7 +3801,7 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             let opts = dialog.options.as_ref().expect("tri-option dialog");
             assert!(
                 matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
@@ -3819,7 +3827,7 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             assert!(dialog.message.contains("unknown ("), "{}", dialog.message);
             assert!(
                 !dialog.message.contains(&stale.to_string()),
@@ -3866,6 +3874,7 @@ mod tests {
             state.bulk_stop_sessions(ids).await;
 
             let message = state
+                .shell
                 .notifications
                 .iter()
                 .map(|n| n.message.clone())
@@ -3901,7 +3910,7 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             assert!(dialog.options.is_none(), "nothing left to stop");
             assert!(!dialog.selected_option, "Default = No");
             assert!(
@@ -3941,7 +3950,7 @@ mod tests {
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(matches!(
-                state.pending_async_action,
+                state.shell.pending_async_action,
                 Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
             ));
             assert_eq!(
@@ -3959,8 +3968,8 @@ mod tests {
         with_ainb_home(|| {
             let mut state = AppState::new();
             state.show_bulk_delete_or_stop_confirmation(Vec::new());
-            assert!(state.confirmation_dialog.is_none());
-            assert!(state.pending_async_action.is_none());
+            assert!(state.shell.confirmation_dialog.is_none());
+            assert!(state.shell.pending_async_action.is_none());
         });
     }
 
@@ -4200,12 +4209,12 @@ mod tests {
             // `d` with rows checked, then Enter on the default option.
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
             assert!(
-                state.pending_async_action.is_none(),
+                state.shell.pending_async_action.is_none(),
                 "the keypress must not queue anything before the user confirms"
             );
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-            let queued = state.pending_async_action.take();
+            let queued = state.shell.pending_async_action.take();
             let stop_ids = match queued {
                 Some(AsyncAction::BulkStopSessions(stop_ids)) => stop_ids,
                 other => panic!("the default must be a stop, not {other:?}"),
@@ -4232,7 +4241,7 @@ mod tests {
                     matches!(session.status, SessionStatus::Stopped),
                     "session {id} is {:?}, not Stopped. Notifications: {:?}",
                     session.status,
-                    state.notifications.iter().map(|n| &n.message).collect::<Vec<_>>()
+                    state.shell.notifications.iter().map(|n| &n.message).collect::<Vec<_>>()
                 );
             }
         })

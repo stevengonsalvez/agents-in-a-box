@@ -31,7 +31,7 @@ async fn app_on_picker_from_session_list() -> App {
     app.state.load_mock_data();
     // Anchor the "opened from" screen so cancel/teardown returns here, the way
     // the real dispatcher records `previous_screen` on `n`.
-    app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+    app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
     let key_event = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
     if let Some(event) = EventHandler::handle_key_event(key_event, &mut app.state) {
@@ -58,7 +58,7 @@ async fn test_session_creation_shows_immediately() {
     );
 
     // The picker is open and owns its own state.
-    assert_eq!(app.state.current_screen, screen_ids::NEW_SESSION);
+    assert_eq!(app.state.shell.current_screen, screen_ids::NEW_SESSION);
     assert!(app.state.new_session.new_session_state.is_some());
     if let Some(ref session_state) = app.state.new_session.new_session_state {
         assert_eq!(
@@ -81,7 +81,7 @@ async fn test_session_creation_shows_immediately() {
     // CRITICAL: after creation completes the view must be back on SessionList
     // immediately (the bug showed stale/empty data before the refresh ran).
     assert_eq!(
-        app.state.current_screen,
+        app.state.shell.current_screen,
         screen_ids::SESSION_LIST,
         "Should return to SessionList immediately after session creation"
     );
@@ -101,7 +101,7 @@ async fn test_session_creation_shows_immediately() {
 
     // The success arm sets `ui_needs_refresh` so the main loop re-renders with
     // the freshly loaded workspaces. Exercise that mechanism directly.
-    app.state.ui_needs_refresh = true;
+    app.state.shell.ui_needs_refresh = true;
     assert!(
         app.needs_ui_refresh(),
         "UI refresh flag should be set and cleared by needs_ui_refresh() method"
@@ -122,7 +122,7 @@ async fn test_workspace_refresh_order() {
     app.state.cancel_new_session();
 
     // After teardown we are back on SessionList with workspace data present.
-    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+    assert_eq!(app.state.shell.current_screen, screen_ids::SESSION_LIST);
     assert!(app.state.new_session.new_session_state.is_none());
     assert!(
         !app.state.sessions.workspaces.is_empty(),
@@ -133,7 +133,7 @@ async fn test_workspace_refresh_order() {
     // developer's real checkout tree.
     app.state.load_mock_data();
     assert_eq!(
-        app.state.current_screen,
+        app.state.shell.current_screen,
         screen_ids::SESSION_LIST,
         "Should be in SessionList view with current workspace data loaded"
     );
@@ -151,7 +151,7 @@ async fn test_no_empty_homescreen_after_creation() {
     app.state.cancel_new_session();
 
     // CRITICAL: populated homescreen immediately, not an empty one.
-    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+    assert_eq!(app.state.shell.current_screen, screen_ids::SESSION_LIST);
     assert!(
         !app.state.sessions.workspaces.is_empty(),
         "REGRESSION: Homescreen shows empty after session creation - UI refresh bug has returned!"
@@ -159,7 +159,7 @@ async fn test_no_empty_homescreen_after_creation() {
 
     // No lingering session-creation state or queued async work.
     assert!(app.state.new_session.new_session_state.is_none());
-    assert!(app.state.pending_async_action.is_none());
+    assert!(app.state.shell.pending_async_action.is_none());
 }
 
 /// Test that session creation errors also handle refresh correctly. The error
@@ -175,7 +175,7 @@ async fn test_error_handling_with_correct_refresh() {
     app.state.cancel_new_session();
 
     // Even on error we return to SessionList with data visible.
-    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+    assert_eq!(app.state.shell.current_screen, screen_ids::SESSION_LIST);
     assert!(
         !app.state.sessions.workspaces.is_empty(),
         "Should still show workspace data after error"
@@ -186,7 +186,7 @@ async fn test_error_handling_with_correct_refresh() {
     );
     // The error notification survives the teardown (cancel must NOT clear it).
     assert!(
-        !app.state.notifications.is_empty(),
+        !app.state.shell.notifications.is_empty(),
         "Error notification should survive the modal teardown"
     );
 }
@@ -201,7 +201,7 @@ async fn test_ui_refresh_mechanism() {
     assert!(!app.needs_ui_refresh(), "Should not need refresh initially");
 
     // Set refresh flag (simulating successful session creation)
-    app.state.ui_needs_refresh = true;
+    app.state.shell.ui_needs_refresh = true;
 
     // First check should return true and clear flag
     assert!(
@@ -220,8 +220,8 @@ async fn test_ui_refresh_mechanism() {
     app.state.load_real_workspaces().await;
 
     // Test manual flag setting (as would happen during session creation)
-    app.state.ui_needs_refresh = true;
-    assert!(app.state.ui_needs_refresh, "Flag should be set");
+    app.state.shell.ui_needs_refresh = true;
+    assert!(app.state.shell.ui_needs_refresh, "Flag should be set");
 
     // Simulate the main loop checking for refresh.
     if app.needs_ui_refresh() {
@@ -230,7 +230,7 @@ async fn test_ui_refresh_mechanism() {
 
     // Flag should be cleared
     assert!(
-        !app.state.ui_needs_refresh,
+        !app.state.shell.ui_needs_refresh,
         "Flag should be cleared after check"
     );
 }

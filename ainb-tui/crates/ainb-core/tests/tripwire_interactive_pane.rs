@@ -115,7 +115,7 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
     // hand the whole terminal over to `AttachHandler` a frame after the embed
     // painted, and the operator would lose the TUI they were driving.
     assert!(
-        state.pending_async_action.is_none(),
+        state.shell.pending_async_action.is_none(),
         "in-pane attach must not route through the fullscreen AttachHandler"
     );
     // And it attached to the EXACT session, not a prefix match. `tmux -t name`
@@ -193,7 +193,7 @@ fn interactive_embed_width_follows_the_sidebar_state() {
     let mut state = AppState::new();
     // session_list is a split-pane (non-registry) screen, so layout takes the
     // split path that renders the preview/embed pane.
-    state.current_screen = "session_list".to_string();
+    state.shell.current_screen = "session_list".to_string();
     state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
     state.tmux.selected_other_tmux_index = Some(0);
     // Pin the sidebar to a known width: AppState::new() restores the
@@ -247,7 +247,7 @@ fn reentering_on_a_different_row_retargets_the_embed() {
     let second = new_session("retarget-b");
 
     let mut state = AppState::new();
-    state.current_screen = "session_list".to_string();
+    state.shell.current_screen = "session_list".to_string();
     state.tmux.other_tmux_sessions = vec![
         OtherTmuxSession::new(first.clone(), false, 1),
         OtherTmuxSession::new(second.clone(), false, 1),
@@ -307,7 +307,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     // session_list: the split-pane screen the embed lives on (poll_embed_exit
     // releases on any other screen) and the screen whose mouse handler owns
     // pane focus.
-    state.current_screen = "session_list".to_string();
+    state.shell.current_screen = "session_list".to_string();
     state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
     state.tmux.selected_other_tmux_index = Some(0);
     assert!(
@@ -413,7 +413,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
         &mut state,
         &mut ui,
     );
-    let host_mouse_back = state.focused_pane == FocusedPane::LiveLogs;
+    let host_mouse_back = state.shell.focused_pane == FocusedPane::LiveLogs;
 
     kill_session(&session);
 

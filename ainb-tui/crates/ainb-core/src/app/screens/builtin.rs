@@ -145,11 +145,11 @@ pub fn crossterm_to_protocol_key(
 /// has never painted) read `false`.
 #[must_use]
 pub fn focused_plugin_captures_text(state: &AppState) -> bool {
-    plugin_id_for_screen(&state.current_screen).is_some()
+    plugin_id_for_screen(&state.shell.current_screen).is_some()
         && state
             .plugins_host
             .plugin_captures_text
-            .get(&state.current_screen)
+            .get(&state.shell.current_screen)
             .copied()
             .unwrap_or(false)
 }
@@ -210,7 +210,7 @@ pub const PLUGINS_WITH_OWN_HELP: &[&str] = &["hangar-tui"];
 /// the per-frame `captures_text` flag alone is not a safe gate.
 #[must_use]
 pub fn plugin_owns_help_keys(state: &AppState) -> bool {
-    plugin_id_for_screen(&state.current_screen)
+    plugin_id_for_screen(&state.shell.current_screen)
         .is_some_and(|id| PLUGINS_WITH_OWN_HELP.contains(&id))
 }
 
@@ -223,7 +223,7 @@ pub fn forward_key_to_focused_plugin(
     state: &mut AppState,
     key: &crossterm::event::KeyEvent,
 ) -> EventOutcome {
-    let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
+    let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
         return EventOutcome::NotHandled;
     };
     let capturing = focused_plugin_captures_text(state);
@@ -241,7 +241,7 @@ pub fn forward_key_to_focused_plugin(
         return EventOutcome::Handled;
     };
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let delivered = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    let delivered = runtime.send_key(&pid, state.shell.current_screen.clone(), protocol_key);
     // A plugin whose render has blown its budget is holding the one mutex its
     // inline `handle_key` dispatch also needs, so the key WAS delivered and
     // will simply sit in its channel unserviced. That is indistinguishable from
@@ -342,7 +342,7 @@ pub fn forward_mouse_to_focused_plugin(
 ) -> EventOutcome {
     use ainb_plugin_runtime::MouseKind;
 
-    let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
+    let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
         return EventOutcome::NotHandled;
     };
     let Some(runtime) = state.plugins_host.plugin_runtime.as_ref() else {
@@ -362,8 +362,16 @@ pub fn forward_mouse_to_focused_plugin(
     // Translate absolute terminal coords → plugin-viewport coords. Drop
     // (still Handled) when the point falls outside the plugin's painted
     // rect rather than forwarding a click the plugin would mis-hit-test.
-    let origin = ui.plugin_render_origins.get(&state.current_screen).copied().unwrap_or((0, 0));
-    let area = ui.plugin_render_areas.get(&state.current_screen).copied().unwrap_or((0, 0));
+    let origin = ui
+        .plugin_render_origins
+        .get(&state.shell.current_screen)
+        .copied()
+        .unwrap_or((0, 0));
+    let area = ui
+        .plugin_render_areas
+        .get(&state.shell.current_screen)
+        .copied()
+        .unwrap_or((0, 0));
     let Some((col, row)) = click_to_viewport(mouse.col, mouse.row, origin, area) else {
         return EventOutcome::Handled;
     };
@@ -371,7 +379,7 @@ pub fn forward_mouse_to_focused_plugin(
     mouse.row = row;
 
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let _ = runtime.send_mouse(&pid, state.current_screen.clone(), mouse);
+    let _ = runtime.send_mouse(&pid, state.shell.current_screen.clone(), mouse);
     EventOutcome::Handled
 }
 
@@ -820,7 +828,7 @@ impl Screen for HomeScreen {
         self.component.render_with_loading(
             frame,
             area,
-            &state.home_screen_v2_state,
+            &state.shell.home_screen_v2_state,
             &state.sessions.workspaces,
             state.workspace_load.is_loading_workspaces,
             ui,
@@ -956,7 +964,7 @@ impl Screen for SetupMenuScreen {
         self.backdrop.render_with_loading(
             frame,
             area,
-            &state.home_screen_v2_state,
+            &state.shell.home_screen_v2_state,
             &state.sessions.workspaces,
             state.workspace_load.is_loading_workspaces,
             ui,
@@ -1309,7 +1317,7 @@ mod tests {
             ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
         let mut state = crate::app::state::AppState::default();
         state.plugins_host.plugin_runtime = Some(handle);
-        state.current_screen = ids::ANALYTICS.to_string();
+        state.shell.current_screen = ids::ANALYTICS.to_string();
 
         let mk = |code| CtEvent {
             code,
@@ -1362,7 +1370,7 @@ mod tests {
             ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
         let mut state = crate::app::state::AppState::default();
         state.plugins_host.plugin_runtime = Some(handle);
-        state.current_screen = ids::HANGAR.to_string();
+        state.shell.current_screen = ids::HANGAR.to_string();
 
         let mk = |code, mods| CtEvent {
             code,

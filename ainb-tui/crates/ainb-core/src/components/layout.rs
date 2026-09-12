@@ -259,7 +259,7 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
         }
     }
 
-    let home = &mut state.home_screen_v2_state;
+    let home = &mut state.shell.home_screen_v2_state;
     if ui.home_sidebar_rect.is_some() {
         home.last_sidebar_rect = ui.home_sidebar_rect;
     }
@@ -435,12 +435,12 @@ impl LayoutComponent {
         // alive. Gated on the screen for the same reason `DaemonsScreen::render`
         // was the only caller: an operator who never opens it never starts a
         // collector thread.
-        if state.current_screen == screen_ids::DAEMONS {
+        if state.shell.current_screen == screen_ids::DAEMONS {
             state.hangar.daemons_state.tick();
         }
 
         // Registry-routed screens return before any of this in `render`.
-        if self.screens.contains(&state.current_screen) {
+        if self.screens.contains(&state.shell.current_screen) {
             return;
         }
 
@@ -448,15 +448,15 @@ impl LayoutComponent {
         // can go dead under the operator (the ASK is answered, the cursor moves
         // off a session row) and leaving them on a stale pane shows a question
         // they can no longer act on.
-        let active = session_tabs::resolve(state, state.session_tab);
-        state.session_tab = active;
+        let active = session_tabs::resolve(state, state.shell.session_tab);
+        state.shell.session_tab = active;
 
         // Fold in whatever the answer worker reported. EVERY frame, not only on
         // the `ask` tab: the row's `SENT` chip is painted by the session list,
         // so an operator who sends and then switches tabs would otherwise watch
         // that chip stay SENT forever.
         if state.fleet.ask_state.tick() {
-            state.ui_needs_refresh = true;
+            state.shell.ui_needs_refresh = true;
         }
 
         // An attached embed owns the right pane outright, and `preview` is a
@@ -492,13 +492,13 @@ impl LayoutComponent {
                 // in-flight configure land without the operator pressing
                 // anything, exactly like the chat host's own tick.
                 if state.fleet.pal_dial.tick() {
-                    state.ui_needs_refresh = true;
+                    state.shell.ui_needs_refresh = true;
                 }
                 // The offer's own tick, for the same reason: the start runs on
                 // a detached worker, and its result has to reach the pane
                 // without the operator pressing anything else.
                 if state.fleet.daemon_start_cta.tick() {
-                    state.ui_needs_refresh = true;
+                    state.shell.ui_needs_refresh = true;
                 }
                 let _ = state.chat_host_for(active);
             }
@@ -510,7 +510,7 @@ impl LayoutComponent {
                 if state.broadcast_targets().is_empty() {
                     let _ = state.chat_host_for(active);
                 } else if state.fleet.broadcast.tick() {
-                    state.ui_needs_refresh = true;
+                    state.shell.ui_needs_refresh = true;
                 }
             }
         }
@@ -528,8 +528,11 @@ impl LayoutComponent {
         // (e.g. Config's auth-provider/config popups). Help overlay is
         // rendered post-screen as it's universal across full-screen views.
         let frame_size = frame.area();
-        if let Some(screen) = self.screens.get_mut(&state.current_screen) {
-            tracing::debug!("Rendering screen via registry: {}", state.current_screen);
+        if let Some(screen) = self.screens.get_mut(&state.shell.current_screen) {
+            tracing::debug!(
+                "Rendering screen via registry: {}",
+                state.shell.current_screen
+            );
             screen.render(frame, frame_size, state, ui);
             // Notifications must render on registry-routed screens too —
             // before this fix they only painted on the legacy
@@ -539,8 +542,8 @@ impl LayoutComponent {
             // bead v12.1.T3). Painted before the help overlay so the
             // help panel still wins z-order if both are visible.
             self.render_notifications(frame, frame_size, state);
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on {}", state.current_screen);
+            if state.shell.help_visible {
+                tracing::debug!("Rendering help overlay on {}", state.shell.current_screen);
                 self.help.render(frame, frame_size);
             }
             // The confirmation dialog is a universal, highest-priority
@@ -555,7 +558,7 @@ impl LayoutComponent {
             if let Some(ref overlay) = state.mcp_pool.mcp_overlay {
                 crate::components::mcp_overlay::render(frame, frame_size, overlay);
             }
-            if state.confirmation_dialog.is_some() {
+            if state.shell.confirmation_dialog.is_some() {
                 self.confirmation_dialog.render(frame, frame_size, state);
             }
             return;
@@ -612,7 +615,7 @@ impl LayoutComponent {
 
         // Already reconciled by `tick_before_draw` against what is actually
         // available, so this is a read of a settled value, not a second guess.
-        let active_tab = state.session_tab;
+        let active_tab = state.shell.session_tab;
 
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to
@@ -677,19 +680,19 @@ impl LayoutComponent {
         self.render_menu_bar(frame, main_layout[3], state);
 
         // Render help overlay if visible
-        if state.help_visible {
+        if state.shell.help_visible {
             self.help.render(frame, frame.area());
         }
 
         // Render new session overlay if visible
-        if state.current_screen == screen_ids::NEW_SESSION
-            || state.current_screen == screen_ids::SEARCH_WORKSPACE
+        if state.shell.current_screen == screen_ids::NEW_SESSION
+            || state.shell.current_screen == screen_ids::SEARCH_WORKSPACE
         {
             self.new_session.render(frame, frame.area(), state);
         }
 
         // Render Claude chat popup if visible
-        if state.current_screen == screen_ids::CLAUDE_CHAT {
+        if state.shell.current_screen == screen_ids::CLAUDE_CHAT {
             let popup_area = centered_rect(80, 80, frame.area());
             self.claude_chat.render(frame, popup_area, state);
         }
@@ -700,7 +703,7 @@ impl LayoutComponent {
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
-        if state.confirmation_dialog.is_some() {
+        if state.shell.confirmation_dialog.is_some() {
             self.confirmation_dialog.render(frame, frame.area(), state);
         }
 
@@ -732,7 +735,7 @@ impl LayoutComponent {
     ) {
         let border_color = if ui.sessions_pane.edge_highlighted() {
             GOLD
-        } else if state.focused_pane == crate::app::state::FocusedPane::Sessions {
+        } else if state.shell.focused_pane == crate::app::state::FocusedPane::Sessions {
             SELECTION_GREEN
         } else {
             SUBDUED_BORDER

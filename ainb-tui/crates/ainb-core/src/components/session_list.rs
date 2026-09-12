@@ -293,7 +293,7 @@ impl SessionListComponent {
 
         // Show focus indicator with premium colors
         use crate::app::state::FocusedPane;
-        let (border_color, is_focused) = match state.focused_pane {
+        let (border_color, is_focused) = match state.shell.focused_pane {
             FocusedPane::Sessions => (SELECTION_GREEN, true),
             FocusedPane::LiveLogs | FocusedPane::Preview => (SUBDUED_BORDER, false),
         };

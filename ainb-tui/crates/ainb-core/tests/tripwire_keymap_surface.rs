@@ -267,7 +267,7 @@ fn state_with_selected_stopped_managed_session() -> AppState {
     workspace.add_session(managed);
 
     let mut state = AppState::new();
-    state.current_screen = screen_ids::SESSION_LIST.to_string();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
     state.sessions.workspaces.push(workspace);
     state.sessions.selected_sessions.insert(selected_id);
     state

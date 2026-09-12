@@ -320,7 +320,7 @@ async fn tokio_main() -> Result<()> {
             }
 
             // Always clear pending async actions after init to ensure clean startup
-            app_state.state.pending_async_action = None;
+            app_state.state.shell.pending_async_action = None;
 
             // Flush any pending terminal events to prevent stray keypresses
             // from interfering with onboarding or initial view
@@ -522,7 +522,7 @@ async fn run_tui_loop(
         // Read-only preview is a real tmux client feeding the same vt100
         // parser used after input focus is granted. Keep it aligned with the
         // current selection and viewport before painting.
-        if app.state.current_screen == crate::app::screens::ids::SESSION_LIST
+        if app.state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
             && !app.state.is_interactive_pane()
         {
             let sz = terminal.size().unwrap_or(ratatui::layout::Size {
@@ -649,7 +649,8 @@ async fn run_tui_loop(
                         if app.state.is_interactive_pane() {
                             app.state.release_interactive_pane();
                         }
-                        if app.state.current_screen == crate::app::screens::ids::SESSION_LIST {
+                        if app.state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
+                        {
                             continue;
                         }
                     }
@@ -707,7 +708,7 @@ async fn run_tui_loop(
                     let palette_open_suppressed = colon
                         && !slash_palette.is_open()
                         && (crate::app::screens::builtin::plugin_id_for_screen(
-                            &app.state.current_screen,
+                            &app.state.shell.current_screen,
                         )
                         .is_some()
                             || crate::app::events::EventHandler::is_in_text_input_context(
@@ -740,7 +741,7 @@ async fn run_tui_loop(
                     // preview scroll mode would swallow navigation invisibly.
                     let observing_terminal = app.state.is_observing_selected_terminal();
                     match preview_scroll_route(
-                        &app.state.current_screen,
+                        &app.state.shell.current_screen,
                         layout.tmux_preview_mut().is_scroll_mode(),
                         observing_terminal,
                     ) {
@@ -936,13 +937,16 @@ async fn run_tui_loop(
                             let (col, row) = (mouse_event.column, mouse_event.row);
 
                             // Handle log history view clicks directly
-                            if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
+                            if app.state.shell.current_screen
+                                == crate::app::screens::ids::LOG_HISTORY
+                            {
                                 // Log history viewer takes full screen, starts at (0, 0)
                                 app.state
                                     .log_streams
                                     .log_history_state
                                     .handle_click(col, row, 0, 0);
-                            } else if app.state.current_screen == crate::app::screens::ids::GIT_VIEW
+                            } else if app.state.shell.current_screen
+                                == crate::app::screens::ids::GIT_VIEW
                                 && app.state.git_view.git_view_state.as_ref().is_some_and(|g| {
                                     g.active_tab == crate::components::git_view::GitTab::Review
                                 })
@@ -977,27 +981,40 @@ async fn run_tui_loop(
                             const SCROLL_LINES: usize = 3; // Lines per mouse wheel tick
                             let is_down = matches!(mouse_event.kind, MouseEventKind::ScrollDown);
 
-                            if app.state.current_screen == screen_ids::HOME {
+                            if app.state.shell.current_screen == screen_ids::HOME {
                                 // Scroll welcome panel on home screen (right side only)
                                 let sidebar_width = app
                                     .state
+                                    .shell
                                     .home_screen_v2_state
                                     .rendered_sidebar_width()
                                     .unwrap_or_else(|| {
-                                        app.state.home_screen_v2_state.sidebar.effective_width(
-                                            crossterm::terminal::size().unwrap_or((80, 24)).0,
-                                        )
+                                        app.state
+                                            .shell
+                                            .home_screen_v2_state
+                                            .sidebar
+                                            .effective_width(
+                                                crossterm::terminal::size().unwrap_or((80, 24)).0,
+                                            )
                                     });
                                 if mouse_event.column >= sidebar_width {
                                     for _ in 0..SCROLL_LINES {
                                         if is_down {
-                                            app.state.home_screen_v2_state.welcome.scroll_down();
+                                            app.state
+                                                .shell
+                                                .home_screen_v2_state
+                                                .welcome
+                                                .scroll_down();
                                         } else {
-                                            app.state.home_screen_v2_state.welcome.scroll_up();
+                                            app.state
+                                                .shell
+                                                .home_screen_v2_state
+                                                .welcome
+                                                .scroll_up();
                                         }
                                     }
                                 }
-                            } else if app.state.current_screen == screen_ids::GIT_VIEW {
+                            } else if app.state.shell.current_screen == screen_ids::GIT_VIEW {
                                 // Scroll git view content (markdown or diff)
                                 if let Some(ref mut git_state) = app.state.git_view.git_view_state {
                                     match git_state.active_tab {
@@ -1025,7 +1042,7 @@ async fn run_tui_loop(
                                         _ => {}
                                     }
                                 }
-                            } else if app.state.current_screen == screen_ids::LOG_HISTORY {
+                            } else if app.state.shell.current_screen == screen_ids::LOG_HISTORY {
                                 // Scroll log history viewer
                                 // Shift+Scroll = horizontal, normal scroll = vertical
                                 if mouse_event
@@ -1058,7 +1075,7 @@ async fn run_tui_loop(
                                             .scroll_up_by(SCROLL_LINES);
                                     }
                                 }
-                            } else if app.state.current_screen == screen_ids::SESSION_LIST
+                            } else if app.state.shell.current_screen == screen_ids::SESSION_LIST
                                 && app.state.scroll_session_list_by_mouse(
                                     &ui.sessions_pane,
                                     mouse_event.column,
@@ -1082,7 +1099,9 @@ async fn run_tui_loop(
                             let (col, row) = (mouse_event.column, mouse_event.row);
 
                             // Handle log history text selection drag
-                            if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
+                            if app.state.shell.current_screen
+                                == crate::app::screens::ids::LOG_HISTORY
+                            {
                                 app.state.log_streams.log_history_state.update_selection(col, row);
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragging { x: col, y: row },
@@ -1096,7 +1115,9 @@ async fn run_tui_loop(
                             let (col, row) = (mouse_event.column, mouse_event.row);
 
                             // Handle log history text selection end
-                            if app.state.current_screen == crate::app::screens::ids::LOG_HISTORY {
+                            if app.state.shell.current_screen
+                                == crate::app::screens::ids::LOG_HISTORY
+                            {
                                 app.state.log_streams.log_history_state.end_selection();
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragEnd { x: col, y: row },
@@ -1160,7 +1181,7 @@ async fn run_tui_loop(
         }
 
         // Process any pending events
-        if let Some(pending_event) = app.state.pending_event.take() {
+        if let Some(pending_event) = app.state.shell.pending_event.take() {
             EventHandler::process_event(pending_event, &mut app.state);
         }
 
@@ -1172,11 +1193,11 @@ async fn run_tui_loop(
 
         if last_app_tick.elapsed() >= app_tick_rate {
             // Update mascot animation on home screen
-            app.state.home_screen_v2_state.tick_mascot();
+            app.state.shell.home_screen_v2_state.tick_mascot();
 
             // Handle tmux-related async actions BEFORE app.tick() to get terminal access
             // IMPORTANT: Use match instead of multiple if-let with .take() to avoid dropping unmatched actions
-            if let Some(action) = app.state.pending_async_action.take() {
+            if let Some(action) = app.state.shell.pending_async_action.take() {
                 use crate::app::state::AsyncAction;
                 use tracing::{debug, error, info, warn};
 
@@ -1221,7 +1242,7 @@ async fn run_tui_loop(
 
                         // Refresh other tmux sessions list after detach
                         app.state.load_other_tmux_sessions().await;
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::AttachWitr => {
@@ -1275,7 +1296,7 @@ async fn run_tui_loop(
                                 ));
                             }
                         }
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::AttachAbtop => {
@@ -1337,7 +1358,7 @@ async fn run_tui_loop(
                                     .add_error_notification(format!("Failed to open abtop: {}", e));
                             }
                         }
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::SetupAbtopRateLimits => {
@@ -1378,8 +1399,8 @@ async fn run_tui_loop(
                             }
                         }
                         // Open abtop regardless of the setup outcome.
-                        app.state.pending_async_action = Some(AsyncAction::AttachAbtop);
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::KillOtherTmux(session_name) => {
@@ -1428,7 +1449,7 @@ async fn run_tui_loop(
 
                         // Refresh other tmux sessions list
                         app.state.load_other_tmux_sessions().await;
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::KillOtherTmuxSessions(session_names) => {
@@ -1490,7 +1511,7 @@ async fn run_tui_loop(
                         }
 
                         app.state.load_other_tmux_sessions().await;
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::OpenInEditor(workspace_path) => {
@@ -1562,7 +1583,7 @@ async fn run_tui_loop(
                                 )
                             } else {
                                 app.state.add_error_notification("Workspace not found".to_string());
-                                app.state.ui_needs_refresh = true;
+                                app.state.shell.ui_needs_refresh = true;
                                 continue;
                             }
                         };
@@ -1623,7 +1644,7 @@ async fn run_tui_loop(
                                     "Failed to create shell: {}",
                                     stderr
                                 ));
-                                app.state.ui_needs_refresh = true;
+                                app.state.shell.ui_needs_refresh = true;
                                 continue;
                             }
                             Err(e) => {
@@ -1632,7 +1653,7 @@ async fn run_tui_loop(
                                     "Failed to create shell: {}",
                                     e
                                 ));
-                                app.state.ui_needs_refresh = true;
+                                app.state.shell.ui_needs_refresh = true;
                                 continue;
                             }
                         }
@@ -1703,7 +1724,7 @@ async fn run_tui_loop(
                             }
                         }
 
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::OpenShellAtPath(repo_path) => {
@@ -1768,13 +1789,13 @@ async fn run_tui_loop(
                                         "Shell creation failed: {}",
                                         stderr
                                     ));
-                                    app.state.ui_needs_refresh = true;
+                                    app.state.shell.ui_needs_refresh = true;
                                     continue;
                                 }
                                 Err(e) => {
                                     error!("[ACTION] tmux command error: {}", e);
                                     app.state.add_error_notification(format!("Shell error: {}", e));
-                                    app.state.ui_needs_refresh = true;
+                                    app.state.shell.ui_needs_refresh = true;
                                     continue;
                                 }
                             }
@@ -1803,7 +1824,7 @@ async fn run_tui_loop(
                             }
                         }
 
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::KillWorkspaceShell(workspace_index) => {
@@ -1843,7 +1864,7 @@ async fn run_tui_loop(
 
                         // Refresh workspace list to ensure UI reflects the actual state
                         app.state.load_real_workspaces().await;
-                        app.state.ui_needs_refresh = true;
+                        app.state.shell.ui_needs_refresh = true;
                     }
 
                     AsyncAction::AttachToTmuxSession(session_id) => {
@@ -1883,13 +1904,13 @@ async fn run_tui_loop(
                                     "Session '{}' has no tmux session",
                                     session.name
                                 ));
-                                app.state.ui_needs_refresh = true;
+                                app.state.shell.ui_needs_refresh = true;
                                 None
                             }
                         } else {
                             error!("[ACTION] Session {} not found in workspaces", session_id);
                             app.state.add_error_notification("Session not found".to_string());
-                            app.state.ui_needs_refresh = true;
+                            app.state.shell.ui_needs_refresh = true;
                             None
                         };
 
@@ -1964,7 +1985,7 @@ async fn run_tui_loop(
                                 app.state.load_real_workspaces().await;
                             }
 
-                            app.state.ui_needs_refresh = true;
+                            app.state.shell.ui_needs_refresh = true;
                         }
                     }
 
@@ -1974,7 +1995,7 @@ async fn run_tui_loop(
                             "[ACTION] Passing through unhandled action in main loop: {:?}",
                             std::any::type_name_of_val(&other)
                         );
-                        app.state.pending_async_action = Some(other);
+                        app.state.shell.pending_async_action = Some(other);
                     }
                 }
             }
@@ -2001,7 +2022,7 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
-        if app.state.should_quit {
+        if app.state.shell.should_quit {
             break;
         }
     }

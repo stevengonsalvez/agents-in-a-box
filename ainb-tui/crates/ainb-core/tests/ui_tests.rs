@@ -38,7 +38,7 @@ impl UITestFramework {
         // Anchor the "main" screen to the session list so opening the picker
         // (`n`) records it as `previous_screen` and Escape returns here — the
         // session list is the home surface these tests treat as "main".
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -56,7 +56,7 @@ impl UITestFramework {
 
         // Load real workspaces to test the actual issue
         app.state.load_real_workspaces().await;
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -74,7 +74,7 @@ impl UITestFramework {
 
         // Create a large mock dataset to simulate the 353 repo scenario
         app.state.load_large_mock_data();
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -92,7 +92,7 @@ impl UITestFramework {
 
         // Use mock data but with slow search simulation
         app.state.load_mock_data();
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -154,7 +154,7 @@ impl UITestFramework {
 
     /// Get the current view
     pub fn current_screen(&self) -> &str {
-        self.app.state.current_screen.as_str()
+        self.app.state.shell.current_screen.as_str()
     }
 
     /// Check if new session state exists
@@ -169,7 +169,7 @@ impl UITestFramework {
 
     /// Check if help is visible
     pub const fn is_help_visible(&self) -> bool {
-        self.app.state.help_visible
+        self.app.state.shell.help_visible
     }
 
     /// Count of repo rows currently visible in the new-session picker after
@@ -236,7 +236,7 @@ mod tests {
         let mut ui = UITestFramework::new().await;
 
         // Initially should be in SessionList view
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // Press 'n' to open the unified repo picker
@@ -244,14 +244,14 @@ mod tests {
         ui.process_async().await.unwrap();
 
         // Should now be in the NewSession (PickRepo) view with session state
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
         assert!(ui.has_new_session_state());
 
         // Press Escape to cancel
         ui.press_key(KeyCode::Esc).unwrap();
 
         // Should return to SessionList view with no session state
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -264,14 +264,14 @@ mod tests {
         ui.process_async().await.unwrap();
 
         // Should be in NewSession view
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
         assert!(ui.has_new_session_state());
 
         // Press Escape to cancel
         ui.press_key(KeyCode::Esc).unwrap();
 
         // Should return to SessionList view
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -305,7 +305,7 @@ mod tests {
         ui.press_key(KeyCode::Char('n')).unwrap();
         ui.process_async().await.unwrap();
 
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
 
         // Seed deterministic rows so the filter assertion is independent of the
         // host's favorites/recents/repo-cache.
@@ -322,7 +322,7 @@ mod tests {
         );
 
         // Still on the picker with live session state.
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
         assert!(ui.has_new_session_state());
     }
 
@@ -332,7 +332,7 @@ mod tests {
         let mut ui = UITestFramework::new_with_real_workspaces().await;
 
         // Initially should be in SessionList view
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // Press 'n' to open the unified repo picker (reads favorites/recents +
@@ -344,7 +344,7 @@ mod tests {
         match ui.process_async().await {
             Ok(()) => {
                 // Should be in the NewSession (PickRepo) view
-                assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+                assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
                 assert!(ui.has_new_session_state());
 
                 // The picker reads its rows from on-disk persistence, so the
@@ -357,7 +357,7 @@ mod tests {
                 ui.press_key(KeyCode::Esc).unwrap();
 
                 // Should return to SessionList view
-                assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+                assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
                 assert!(!ui.has_new_session_state());
             }
             Err(e) => {
@@ -376,7 +376,7 @@ mod tests {
         ui.press_key(KeyCode::Char('n')).unwrap();
         ui.process_async().await.unwrap();
 
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
 
         // Seed a large row set and confirm every row is visible with no filter.
         ui.seed_picker_rows(200);
@@ -386,7 +386,7 @@ mod tests {
         for _ in 0..10 {
             ui.press_key(KeyCode::Down).unwrap();
         }
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
 
         // Filtering with a non-matching query collapses the visible set.
         ui.type_string("zzz").unwrap();
@@ -395,13 +395,13 @@ mod tests {
             0,
             "non-matching filter should hide every seeded row"
         );
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
 
         // Escape should work even with a large dataset. The filter still holds
         // "zzz", so the first Esc clears it and the second returns home.
         ui.press_key(KeyCode::Esc).unwrap();
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -415,17 +415,17 @@ mod tests {
 
         // Press 'n' to open the picker (screen switch is synchronous).
         ui.press_key(KeyCode::Char('n')).unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
 
         // Process async with a very short timeout to exercise timeout handling.
         let _ = ui.process_async_with_timeout(Duration::from_millis(1)).await;
 
         // Regardless of whether the tick completed or timed out, Escape from the
         // picker must return to a safe SessionList state.
-        if ui.current_screen() == screen_ids::NEW_SESSION {
+        if ui.shell.current_screen() == screen_ids::NEW_SESSION {
             ui.press_key(KeyCode::Esc).unwrap();
         }
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -434,25 +434,25 @@ mod tests {
         let mut ui = UITestFramework::new().await;
 
         // Start in SessionList
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
 
         // Open the repo picker, then escape straight back out (empty filter →
         // BackToHome on the first Esc).
         ui.press_key(KeyCode::Char('n')).unwrap();
         ui.process_async().await.unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
 
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // Re-open the picker and escape again — precedence holds across repeats.
         ui.press_key(KeyCode::Char('n')).unwrap();
         ui.process_async().await.unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
 
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -483,7 +483,7 @@ mod tests {
         }
 
         // Should always end up in a safe state
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
         assert!(!ui.is_help_visible());
     }
@@ -521,7 +521,7 @@ mod tests {
         // Escape should still work after filtering. The filter is now empty, so
         // a single Esc returns home (a non-empty filter would clear first).
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
     }
 
     #[tokio::test]
@@ -529,27 +529,27 @@ mod tests {
         let mut ui = UITestFramework::new().await;
 
         // Verify initial state
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
         assert!(!ui.is_help_visible());
 
         // Help toggles from SessionList and leaves the screen untouched.
         ui.press_key(KeyCode::Char('?')).unwrap();
         assert!(ui.is_help_visible());
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         ui.press_key(KeyCode::Esc).unwrap();
         assert!(!ui.is_help_visible());
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
 
         // Opening the picker is a consistent transition that establishes
         // session state; escaping tears it back down cleanly.
         ui.press_key(KeyCode::Char('n')).unwrap();
         ui.process_async().await.unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+        assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
         assert!(ui.has_new_session_state());
 
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
         assert!(!ui.is_help_visible());
     }
@@ -566,7 +566,7 @@ mod tests {
             // Open the repo picker and seed a large row set.
             ui.press_key(KeyCode::Char('n')).unwrap();
             ui.process_async().await.unwrap();
-            assert_eq!(ui.current_screen(), screen_ids::NEW_SESSION);
+            assert_eq!(ui.shell.current_screen(), screen_ids::NEW_SESSION);
             ui.seed_picker_rows(200);
 
             // Do some navigation
@@ -592,7 +592,7 @@ mod tests {
             ui.press_key(KeyCode::Esc).unwrap();
             ui.press_key(KeyCode::Esc).unwrap();
             assert_eq!(
-                ui.current_screen(),
+                ui.shell.current_screen(),
                 screen_ids::SESSION_LIST,
                 "Escape failed on iteration {iteration}"
             );
@@ -633,7 +633,7 @@ mod tests {
         }
 
         // Should end up in SessionList regardless of timing
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -654,11 +654,11 @@ mod tests {
             assert!(repo_count <= 200); // Our seeded dataset size
 
             ui.press_key(KeyCode::Esc).unwrap();
-            assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+            assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         }
 
         // Final verification
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
     }
 
@@ -674,7 +674,7 @@ mod tests {
 
         // Even if there are internal errors, escape should work
         ui.press_key(KeyCode::Esc).unwrap();
-        assert_eq!(ui.current_screen(), screen_ids::SESSION_LIST);
+        assert_eq!(ui.shell.current_screen(), screen_ids::SESSION_LIST);
         assert!(!ui.has_new_session_state());
 
         // UI should remain responsive
@@ -702,21 +702,21 @@ mod tests {
         // Create UI framework WITHOUT mocking (to test real auth)
         let mut ui = UITestFramework::new().await;
 
-        eprintln!("Initial view: {:?}", ui.current_screen());
+        eprintln!("Initial view: {:?}", ui.shell.current_screen());
         eprintln!("Has new_session_state: {}", ui.has_new_session_state());
 
         // Press 'n' key
         eprintln!("\n>>> Pressing 'N' key...");
         ui.press_key(KeyCode::Char('n')).unwrap();
 
-        eprintln!("After key press - view: {:?}", ui.current_screen());
+        eprintln!("After key press - view: {:?}", ui.shell.current_screen());
         eprintln!(
             "After key press - has_new_session_state: {}",
             ui.has_new_session_state()
         );
         eprintln!(
             "After key press - pending_async_action: {:?}",
-            ui.app.state.pending_async_action
+            ui.app.state.shell.pending_async_action
         );
 
         // Process async action
@@ -727,11 +727,11 @@ mod tests {
         }
 
         eprintln!("\nAfter process_async:");
-        eprintln!("  View: {:?}", ui.current_screen());
+        eprintln!("  View: {:?}", ui.shell.current_screen());
         eprintln!("  Has new_session_state: {}", ui.has_new_session_state());
         eprintln!(
             "  Pending async action: {:?}",
-            ui.app.state.pending_async_action
+            ui.app.state.shell.pending_async_action
         );
 
         if let Some(ref session_state) = ui.app.state.new_session.new_session_state {
@@ -740,10 +740,10 @@ mod tests {
 
         // This assertion should pass if the bug is fixed
         eprintln!("\n>>> Checking assertions...");
-        if ui.current_screen() != screen_ids::NEW_SESSION {
+        if ui.shell.current_screen() != screen_ids::NEW_SESSION {
             eprintln!(
                 "FAIL: Expected NewSession view, got: {:?}",
-                ui.current_screen()
+                ui.shell.current_screen()
             );
             eprintln!("This is the bug we're debugging!");
         }
@@ -757,7 +757,7 @@ mod tests {
         eprintln!("\n=== Test complete ===");
         eprintln!(
             "Expected view: NewSession, Actual: {:?}",
-            ui.current_screen()
+            ui.shell.current_screen()
         );
         eprintln!(
             "Expected new_session_state: true, Actual: {}",

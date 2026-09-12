@@ -76,7 +76,7 @@ impl HomeScreenComponent {
     }
 
     fn render_tiles(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let home_state = &state.home_screen_state;
+        let home_state = &state.shell.home_screen_state;
 
         // Create a 3-row grid layout for 7 tiles
         let rows = Layout::default()

@@ -1689,8 +1689,8 @@ mod tests {
     #[test]
     fn a_pane_offering_a_daemon_advertises_that_and_not_a_send() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         with_daemon(&mut state, false, true);
 
         assert!(state.pal_daemon_cta_open());
@@ -1714,8 +1714,8 @@ mod tests {
     #[test]
     fn an_unreachable_daemon_that_is_still_running_is_not_offered_a_start() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         with_daemon(&mut state, false, false);
 
         assert!(!state.hangar_daemon_not_running());
@@ -1734,8 +1734,8 @@ mod tests {
     #[test]
     fn a_pane_that_cannot_send_advertises_no_verb_at_all() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         // Daemon UP: this is not the offer's case, it is the one where the
         // conversation opened and its scope never resolved.
         with_daemon(&mut state, true, false);
@@ -1808,8 +1808,8 @@ mod tests {
     #[test]
     fn the_offer_neither_claims_enter_nor_advertises_it_from_the_session_list() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
         with_daemon(&mut state, false, true);
 
         assert!(
@@ -1832,8 +1832,8 @@ mod tests {
     #[test]
     fn a_start_in_flight_disarms_the_key_and_the_verb() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         with_daemon(&mut state, false, true);
         assert!(state.pal_daemon_cta_armed());
 
@@ -1890,7 +1890,7 @@ mod tests {
         assert_eq!(SessionTab::Ask.enter_verb_in(&state), "");
 
         // The chat case: a Pal whose scope the daemon never minted.
-        state.session_tab = SessionTab::Pal;
+        state.shell.session_tab = SessionTab::Pal;
         state.fleet.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
         with_daemon(&mut state, true, false);
         assert!(
