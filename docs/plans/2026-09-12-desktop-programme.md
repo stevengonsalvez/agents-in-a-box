@@ -68,7 +68,7 @@ flowchart TD
   end
   W0w --> R1
   P6 --> R1
-  SK3[spike 3 peer WS over tailnet, ssh -L]:::plan --> R1
+  SK3[spike 3 peer WS over tailnet, ssh -L]:::done --> R1
   SK2[spike 2 control-mode fidelity]:::plan --> R2
   SK7[spike 7 pause-after]:::done --> R2
 
@@ -101,7 +101,7 @@ Same DAG, terminal view:
  slice 3      │                        D1 ◀── P2   D2 ◀── P3   D3 ◀── P5  ◀──────┘      │
               │                        D4' updater + release matrix                     │
               ▼                                                                         ▼
- slice 5  R1 hosts + WS  ◀── W0-wire, P6, spike 3  ─▶  R2 emulator + floor ◀── spike 2, spike 7 ✓
+ slice 5  R1 hosts + WS  ◀── W0-wire, P6, spike 3 ✓ ─▶  R2 emulator + floor ◀── spike 2, spike 7 ✓
                                                              │
  slice 6                                              M1 mobile ◀── spikes 5, 6
 ```
@@ -132,8 +132,8 @@ Same DAG, terminal view:
 | D2 board, attention, answer, ACP card | 3 | planned | P3 | wdio answer journey | base spec D2 |
 | D3 review, inbox, settings, burndown, fallback cell | 3 | planned | P5 | full parity suite | base spec D3 |
 | D4' updater, release matrix (host switcher moved to R1) | 3 | planned | D3 | release-branch human-driver run | spec v1.3 amendment 26 |
-| spike 3 peer WS + Noise over tailnet and `ssh -L` | 5 | planned | none | 50 MB in 2 s both carriers; daemon survives desktop close | spec v1.3 spikes |
-| R1 HostId, WS listener, Noise IK, single-use invite, device registry, scopes, census, host switcher | 5 | planned | W0-wire, P6, spike 3 | two boxes in one UI; kill client mid-turn and resync; revoke closes socket 4403 | spec v1.3 R1 |
+| spike 3 peer WS + Noise over tailnet and `ssh -L` | 5 | **done, go for R1 with two contract changes** | none | 50 MB in 2 s both carriers; daemon survives desktop close | `research/2026-09-11_multi-surface_SPIKE-3-peer-ws-noise.md`. Real daemon 1.28.1 served `auth/hello`, `fleet/snapshot`, `fleet/subscribe` through the proxy on both carriers; `SIGKILL` mid-subscription, 60 s dead, resync in 124 ms (tailnet) / 128 ms (`ssh -L`), `replay_state: complete`, 601 events, no gap. 50 MiB **fails at the spec's 512 KiB per-stream window** (2.99 s tailnet, 1.86-2.55 s `ssh -L`) and **passes at the spec's 2 MiB ceiling** (0.85 s / 1.02-1.63 s). Noise is not the cause: it costs 5 percent on tailnet and is inside variance on `ssh -L`. Storm 50 clients, 200 connections, 600 resyncs, 0 failures, 7.8 MiB peak RSS per proxy |
+| R1 HostId, WS listener, Noise IK, single-use invite, device registry, scopes, census, host switcher | 5 | planned | W0-wire, P6, ~~spike 3~~ (done) | two boxes in one UI; kill client mid-turn and resync; revoke closes socket 4403; **per-stream ack window opens at 2 MiB or credit refills before the window drains**; **carrier and host id bound into the handshake transcript**; **host switcher carries a carrier column** | spec v1.3 R1, amended by spike 3 |
 | spike 2 control-mode emulator fidelity | 5 | planned | none | snapshot byte-equal after ANSI normalisation | spec v1.3 spikes |
 | R2 emulator, snapshot, per-viewer flow control, driver floor | 5 | planned | R1, spike 2 | 40x20 phone frame; two typists no interleave; resize count at most 2 | spec v1.3 R2 |
 | spikes 5, 6 phone crypto via uniffi, background socket lifetime | 6 | planned | none | | spec v1.3 spikes |
@@ -172,7 +172,7 @@ Lane rules: C adds no store migration until B's is on `v2`; only A edits `ainb-c
 | **W0-wire** | its only gate, S-B, is on `v2`; edits `HelloParams`, `rpc/mod.rs`, `answer.rs`, `hangar-client`, none of which slice-1 waves 2-4 touch | 1-2 weeks |
 | slice-1 gate repair (heatmap tripwire, burndown fixture) | named in the handoff's First Resume Work; blocks waves 2-4 | days |
 | #916 pane binding | daemon-only, touches `fleet.rs`, `rpc/mod.rs`, `atc.rs`, none of which slice 1 edits except `rpc/mod.rs` (S-B); coordinate that one file | days |
-| spike 3 | scratch prototype, no repo edits | 2-3 days |
+| ~~spike 3~~ | done 2026-09-12; scratch prototype, report + this row only | spent 1 day |
 | spike 2 | scratch prototype, picks the VT emulator crate | 2-3 days |
 | spikes 5, 6 | phone scratch project | 3 days |
 | `v2` takes `main` | merge, not rebase; keeps the 12 docs commits as they are | minutes |
