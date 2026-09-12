@@ -109,6 +109,13 @@ This one needs a live ASK. With the TUI open on the control center (`g`, then `C
 
 ## 8. Preview scroll, and Esc out of it (Phase 3, PR #945)
 
+The chords in steps 8 and 9 are not transcribed from the plan. They are what
+the binary itself prints:
+
+```
+./target/debug/ainb keymap list --format json | jq -r '.[] | select(.context=="preview_scroll" or .context=="session_list.logs_pane") | "\(.context) \(.event) \(.chord)"'
+```
+
 Session list (`s`), cursor on a session that has a live tmux pane, `preview` tab.
 
 ```
@@ -147,7 +154,7 @@ Home screen (`q` from the session list).
 
 Then `s` for the session list:
 
-- **Pass:** a click anywhere on the bottom keymap legend collapses it, the same as `⇧M`. A click on the collapsed hint row brings it back.
+- **Pass:** a click anywhere on the bottom keymap legend collapses it, exactly as the `M` binding does (the legend writes it `⇧M`). A click on the collapsed hint row brings it back.
 
 Every rect these four clicks hit test against now lives in `UiState`, published by the renderer after each draw instead of being written into `AppState` mid-frame. A stale or unpublished rect shows up here as a click that lands on nothing.
 
