@@ -12642,6 +12642,32 @@ impl AppState {
         }
     }
 
+    /// A local stopped observation means its tmux session is gone. A retained
+    /// Fleet `IDLE` row only means its last observed pane was quiet, so it must
+    /// not resurrect a stopped session into the Active filter. Fleet may still
+    /// confirm the stop with an explicit `EXITED` projection.
+    const fn lifecycle_projection_may_replace_local_status(
+        local: &crate::models::SessionStatus,
+        projected: &crate::models::SessionStatus,
+    ) -> bool {
+        !matches!(local, crate::models::SessionStatus::Stopped)
+            || matches!(projected, crate::models::SessionStatus::Stopped)
+    }
+
+    /// A local `SessionEnd` is a terminal fact. Fleet can briefly retain an
+    /// older live lifecycle after the pane is gone, so let only this explicit
+    /// local stop beat Fleet's otherwise-preferred lifecycle projection.
+    fn projected_session_status(
+        fleet: Option<crate::models::SessionStatus>,
+        local: Option<crate::models::SessionStatus>,
+    ) -> Option<crate::models::SessionStatus> {
+        if matches!(local, Some(crate::models::SessionStatus::Stopped)) {
+            local
+        } else {
+            fleet.or(local)
+        }
+    }
+
     /// Hangar metadata for the selected session, if identity correlation was
     /// unambiguous and Hangar observed at least one requested field.
     #[must_use]
@@ -12785,7 +12811,8 @@ impl AppState {
                     self.attention_baseline.get(&s.id).copied().unwrap_or(0),
                     &recent,
                 );
-                let projected_status = fleet_status.or(local_terminal_status);
+                let projected_status =
+                    Self::projected_session_status(fleet_status, local_terminal_status);
                 let cwd = s.workspace_path.trim_end_matches('/').to_string();
                 // Exact provider id wins. A cwd fallback is safe only if that
                 // cwd names one local session; sibling subagents otherwise
@@ -12915,6 +12942,10 @@ impl AppState {
                     // Do not erase it with a Fleet lifecycle projection that
                     // has no recovery/error detail of its own.
                     if !matches!(session.status, crate::models::SessionStatus::Error(_))
+                        && Self::lifecycle_projection_may_replace_local_status(
+                            &session.status,
+                            &status,
+                        )
                         && session.status != status
                     {
                         session.set_status(status);

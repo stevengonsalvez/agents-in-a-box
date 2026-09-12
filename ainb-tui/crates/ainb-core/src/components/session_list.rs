@@ -19,6 +19,9 @@ const DARK_BG: Color = Color::Rgb(25, 25, 35);
 const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
 const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
+/// Runtime model/effort is secondary to a session name, but must remain
+/// readable on a selected-row background without terminal-specific dimming.
+const METADATA_GRAY: Color = Color::Rgb(150, 150, 170);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 // Attention chips (`ASK` `APPROVE` `ERR` `DONE`). One colour per state,
 // shared with the age that trails it so a chip reads as one object.
@@ -763,7 +766,7 @@ impl SessionListComponent {
                         metadata_spans.push(Span::raw(" "));
                         metadata_spans.push(Span::styled(
                             truncate_text(&metadata, row_width.saturating_sub(prefix_width + 1)),
-                            Style::default().fg(MUTED_GRAY),
+                            Style::default().fg(METADATA_GRAY),
                         ));
                     }
                     let metadata_line = Line::from(metadata_spans);
@@ -1186,7 +1189,8 @@ fn session_list_name(session: &Session) -> String {
 /// observation is more precise than local `SessionStatus::Idle`, so it gets a
 /// dedicated `DONE` label rather than being collapsed into normal idle.
 fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str {
-    if matches!(
+    if matches!(session.status, SessionStatus::Idle)
+        && matches!(
         state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
         Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete)
     ) && state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false)
@@ -1577,6 +1581,24 @@ mod tests {
             .expect("unreachable daemon row");
         assert!(row.contains("IDLE"), "{row}");
         assert!(!row.contains("DONE"), "{row}");
+    }
+
+    #[test]
+    fn retained_fleet_done_never_relabels_a_stopped_session() {
+        let mut state = chip_state();
+        let session = state.workspaces[0].sessions[0].id;
+        state.workspaces[0].sessions[0].status = SessionStatus::Stopped;
+        state.workspaces[0].sessions[0].live_attention.clear();
+        state.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet_metadata.insert(
+            session,
+            crate::app::state::SessionFleetMetadata {
+                lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(session_lifecycle_label(&state, &state.workspaces[0].sessions[0]), "STOP");
     }
 
     #[test]
