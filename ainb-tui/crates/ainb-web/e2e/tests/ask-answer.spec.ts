@@ -93,16 +93,19 @@ function setAttentionRow(state: string, answeredBy: string | null, answer: strin
 // the still-open seeded row (this file runs single-worker, in declaration
 // order), and it puts the row back before the delivering journey below.
 //
-// The snapshot is frozen for the length of the test on purpose. `/api/snapshot`
-// is served from a cache the daemon refreshes every 2s and `renderNeeds`
-// rebuilds every card from scratch, so a snapshot that keeps listing the row is
-// exactly the condition under which the retirement has to survive. Without the
-// retired-id set, the very next render puts live option buttons back on a card
-// the daemon has already resolved.
+// Both data routes are pinned, because the dashboard has two render drivers and
+// only one of them is a fetch: `/api/snapshot` on boot and after an answer, and
+// the SSE stream on `/api/events`, whose every `snapshot` frame calls `render`.
+// Left live, the stream would drop the answered row and take the card with it,
+// and this test would be asserting about a card that is not there. Pinned to a
+// frozen frame instead, the row keeps arriving as open, which is exactly the
+// condition the retirement has to survive: without it the next render puts live
+// option buttons back on a row the daemon has already resolved.
 test("web dashboard retires a card the daemon says another surface answered", async ({
   page,
 }) => {
   let frozen: string | null = null;
+
   await page.route("**/api/snapshot*", async (route) => {
     if (frozen === null) {
       const res = await route.fetch();
@@ -112,6 +115,19 @@ test("web dashboard retires a card the daemon says another surface answered", as
       status: 200,
       contentType: "application/json",
       body: frozen,
+    });
+  });
+
+  // One `snapshot` frame per connection, then EOF. EventSource reconnects on
+  // its own, so this is a render every few seconds off the real code path
+  // rather than a stream the test has to keep open.
+  await page.route("**/api/events*", async (route) => {
+    await poll("frozen snapshot captured", 15_000, () => frozen !== null);
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      headers: { "cache-control": "no-cache" },
+      body: `event: snapshot\ndata: ${frozen}\n\n`,
     });
   });
 
@@ -135,15 +151,25 @@ test("web dashboard retires a card the daemon says another surface answered", as
     await expect(askCard.locator(".need-outcome")).toHaveText("answered by tui@e2e");
     await expect(askCard).toHaveAttribute("data-outcome", "already_answered");
 
-    // Past two full 2s poll cycles, with the frozen snapshot still listing the
-    // row as open: the card must STAY retired.
-    await page.waitForTimeout(5_000);
+    // Past a full 2s snapshot cycle, with the frozen frame still listing the
+    // row: the card must stay retired across those renders.
+    await page.waitForTimeout(2_500);
     await expect(askCard.locator(".need-actions")).toHaveCount(0);
     await expect(page.getByRole("button", { name: ANSWER_BUTTON })).toHaveCount(0);
-    await expect(askCard.locator(".need-outcome")).toHaveText("answered by tui@e2e");
+
+    // And the retirement is a hint, not a lock. The daemon may put the same id
+    // back — a winner whose delivery fails is reverted to `open` and re-raised
+    // (`answer.rs::reopen_on_failed_delivery`) — so once the hint has outlived
+    // two snapshot cycles the daemon's view wins again and the row a frozen
+    // frame still calls open becomes answerable. Holding it forever would
+    // strand a reopened card with no controls for the life of the tab.
+    await expect(page.getByRole("button", { name: ANSWER_BUTTON })).toBeVisible({
+      timeout: 20_000,
+    });
   } finally {
     // Hand the delivering journey below the open row it expects.
     setAttentionRow("open", null, null);
+    await page.unroute("**/api/events*");
     await page.unroute("**/api/snapshot*");
   }
 
