@@ -52,10 +52,10 @@ pub const CLAUDE_COMPATIBLE_FAMILY: [&str; 6] =
 /// The canonical event names the reducer understands.
 ///
 /// Committed as a list so a test can assert that every normalizer's output is
-/// one of them: a normalizer that invents a seventh name would otherwise fail
-/// silently, because `states_for_hook` answers `(None, None)` for anything it
-/// does not recognise and the row would simply never advance.
-pub const CANONICAL_EVENTS: [&str; 12] = [
+/// one of them: a normalizer that invents a thirteenth name would otherwise
+/// fail silently, because `states_for_hook` answers `(None, None)` for anything
+/// it does not recognise and the row would simply never advance.
+pub const CANONICAL_EVENTS: [&str; 14] = [
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
@@ -63,11 +63,46 @@ pub const CANONICAL_EVENTS: [&str; 12] = [
     "PostToolUseFailure",
     "PostToolBatch",
     "SubagentStart",
+    "TaskCreated",
     "AskUserQuestion",
     "PermissionRequest",
     "Notification",
     "Stop",
     "StopFailure",
+    "SessionEnd",
+];
+
+/// Names a provider emits that this daemon deliberately does not reduce.
+///
+/// These are KNOWN and inert, which is a different fact from unmapped, and the
+/// difference is the whole value of `status_unknown_event`. `ainb-hooks`
+/// registers 30 Claude events so the durable provider log is complete; only
+/// some of them describe a lifecycle transition. Counting the rest as unknown
+/// buried the one signal the counter exists for, "Codex 0.160 added
+/// `agent-turn-aborted`", under the highest-volume events in the log, and gave
+/// `ainb doctor` a section that was never empty and therefore never read.
+///
+/// A name here still passes through to the reducer unchanged and still asserts
+/// no transition. The only thing that changes is that it is not reported as a
+/// gap.
+pub const KNOWN_INERT: [&str; 17] = [
+    "ConfigChange",
+    "CwdChanged",
+    "Elicitation",
+    "ElicitationResult",
+    "FileChanged",
+    "InstructionsLoaded",
+    "MessageDisplay",
+    "PermissionDenied",
+    "PostCompact",
+    "PreCompact",
+    "Setup",
+    "SubagentStop",
+    "TaskCompleted",
+    "TeammateIdle",
+    "UserPromptExpansion",
+    "WorktreeCreate",
+    "WorktreeRemove",
 ];
 
 /// One provider event name the daemon could not map.
@@ -109,7 +144,11 @@ pub fn normalize(provider: &str, raw_event: &str) -> Option<&'static str> {
         .or_else(|| osc_frame(name))
         .or_else(|| session_state(name))
         .or_else(|| {
-            record_unknown(provider, name);
+            // Inert is not unknown. Only a name nobody has accounted for is
+            // worth an operator's attention.
+            if !KNOWN_INERT.contains(&name) {
+                record_unknown(provider, name);
+            }
             None
         })
 }
@@ -269,6 +308,74 @@ mod tests {
             assert!(
                 !matches!(mapped, Some("AskUserQuestion") | Some("PermissionRequest")),
                 "{name} mapped to {mapped:?}, which claims a human is needed"
+            );
+        }
+    }
+
+    /// Every name the hook plugin registers is accounted for: reduced, or
+    /// deliberately inert. Neither may be reported as a gap.
+    ///
+    /// This is the test that keeps `status_unknown_event` worth reading. The
+    /// plugin registers 30 Claude events so the durable log is complete, and
+    /// before `KNOWN_INERT` existed every one that carries no lifecycle meaning
+    /// was counted as unmapped, so the section was never empty on a healthy box
+    /// and the one signal it exists for was buried under `MessageDisplay`.
+    #[test]
+    fn every_registered_hook_event_is_accounted_for() {
+        reset_unknown_events();
+        // The names `plugins/ainb-hooks/.claude-plugin/plugin.json` registers.
+        const REGISTERED: [&str; 30] = [
+            "ConfigChange",
+            "CwdChanged",
+            "Elicitation",
+            "ElicitationResult",
+            "FileChanged",
+            "InstructionsLoaded",
+            "MessageDisplay",
+            "Notification",
+            "PermissionDenied",
+            "PermissionRequest",
+            "PostCompact",
+            "PostToolBatch",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PreCompact",
+            "PreToolUse",
+            "SessionEnd",
+            "SessionStart",
+            "Setup",
+            "Stop",
+            "StopFailure",
+            "SubagentStart",
+            "SubagentStop",
+            "TaskCompleted",
+            "TaskCreated",
+            "TeammateIdle",
+            "UserPromptExpansion",
+            "UserPromptSubmit",
+            "WorktreeCreate",
+            "WorktreeRemove",
+        ];
+        for name in REGISTERED {
+            normalize("claude", name);
+        }
+        assert_eq!(
+            unknown_events(),
+            Vec::new(),
+            "a healthy Claude box must report NO unknown events; anything here \
+             is a name to add to `CANONICAL_EVENTS` or to `KNOWN_INERT`"
+        );
+        reset_unknown_events();
+    }
+
+    /// The two lists must stay disjoint. A name in both would read as reduced
+    /// in one place and inert in another, and the reducer would win silently.
+    #[test]
+    fn canonical_and_inert_never_overlap() {
+        for name in CANONICAL_EVENTS {
+            assert!(
+                !KNOWN_INERT.contains(&name),
+                "{name} is both canonical and inert"
             );
         }
     }
