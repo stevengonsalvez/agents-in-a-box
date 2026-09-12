@@ -213,6 +213,12 @@ async fn stamp_from_daemon(rows: &mut Vec<NeedsRow>) {
     let Ok(status) = client.fleet_status().await else {
         return;
     };
+    // The T0 rollback. `legacy_classify_primary` restores the pre-T0 ordering:
+    // the local `classify()` scan above keeps its answer, and the daemon is
+    // consulted only for an agent that scan could not see at all (the `matched`
+    // branch below). Rolling back means giving up cross-surface parity for a
+    // release, which is the trade an operator is choosing when they set it.
+    let legacy_primary = crate::config::tunables::legacy_classify_primary();
     for status_row in &status.rows {
         // Correlate on cwd: the local tiers key sessions by working directory
         // (the fleet's cross-source dedupe key), and the daemon row carries the
@@ -224,6 +230,9 @@ async fn stamp_from_daemon(rows: &mut Vec<NeedsRow>) {
                 continue;
             }
             matched = true;
+            if legacy_primary {
+                continue;
+            }
             row.stamp_status(
                 tuple.0.to_string(),
                 tuple.1,

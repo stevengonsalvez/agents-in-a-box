@@ -1935,6 +1935,7 @@ mod tests {
                 file: "../presets.toml".to_string(),
             },
             fleet: FleetConfig {
+                status: crate::config::FleetStatusConfig::default(),
                 cost: CostBudgetConfig {
                     session_usd: Some(5.0),
                     group_usd: Some(25.0),

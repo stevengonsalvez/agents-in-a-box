@@ -263,6 +263,24 @@ impl AinbCliSource {
 /// the whole poll. This is the read half of the web-on-the-bus retarget — the
 /// old `ainb fleet needs` subprocess (which cold-booted a plugin runtime and
 /// capture-paned every session) is gone.
+///
+/// Whether the pre-T0 read ordering is in force, read from the environment.
+///
+/// `ainb` owns `[fleet.status] legacy_classify_primary` and bridges it into
+/// this variable at startup (`config::tunables::export_env_bridge`), because
+/// this crate deliberately does not depend on `ainb-core`. Unset means the T0
+/// ordering, which is the shipped default.
+fn legacy_classify_primary() -> bool {
+    matches!(
+        std::env::var("AINB_FLEET_LEGACY_CLASSIFY_PRIMARY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 async fn daemon_needs() -> Value {
     match crate::daemon::DaemonClient::from_env() {
         Ok(client) => match client.attention_list_fleet().await {
@@ -272,14 +290,25 @@ async fn daemon_needs() -> Value {
                 // print the same state for the same agent. A status read that
                 // fails leaves the cards unstamped rather than dropping them:
                 // an inbox row with no tier is still a question worth showing.
-                let status = client.fleet_status().await.unwrap_or_else(|e| {
-                    tracing::debug!(error = %e, "fleet/status unavailable; needs render unstamped");
-                    ainb_hangar_proto::agent_status::AgentStatusResult {
-                        rows: Vec::new(),
-                        head_revision: 0,
-                        unknown_events: Vec::new(),
-                    }
-                });
+                let empty = || ainb_hangar_proto::agent_status::AgentStatusResult {
+                    rows: Vec::new(),
+                    head_revision: 0,
+                    unknown_events: Vec::new(),
+                };
+                // The T0 rollback, read from the env because this crate has no
+                // config loader: `ainb` bridges
+                // `[fleet.status] legacy_classify_primary` into
+                // `AINB_FLEET_LEGACY_CLASSIFY_PRIMARY` at startup. Rolled back,
+                // the dashboard renders the inbox cards unstamped, exactly as it
+                // did before T0.
+                let status = if legacy_classify_primary() {
+                    empty()
+                } else {
+                    client.fleet_status().await.unwrap_or_else(|e| {
+                        tracing::debug!(error = %e, "fleet/status unavailable; needs render unstamped");
+                        empty()
+                    })
+                };
                 crate::daemon::attention_to_needs_with_status(&rows, &status.rows)
             }
             Err(e) => {
