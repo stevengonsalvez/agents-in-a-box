@@ -1001,21 +1001,11 @@ mod onboarding_context_coverage {
                 buf: String::new(),
             },
         ];
-        let steps = [
-            OnboardingStep::Welcome,
-            OnboardingStep::Source,
-            OnboardingStep::Role,
-            OnboardingStep::UseCase,
-            OnboardingStep::DependencyCheck,
-            OnboardingStep::GitDirectories,
-            OnboardingStep::Authentication,
-            OnboardingStep::OtelSetup,
-            OnboardingStep::EditorSelection,
-            OnboardingStep::Summary,
-        ];
-
+        // The shipped list, not a copy of it. A hand-written ten would go stale
+        // the moment an eleventh step lands, which is the exact failure this
+        // test exists to catch.
         let mut missing = Vec::new();
-        for step in &steps {
+        for step in OnboardingStep::all() {
             for pane in &panes {
                 for agent_pick_open in [false, true] {
                     for checked in [false, true] {
