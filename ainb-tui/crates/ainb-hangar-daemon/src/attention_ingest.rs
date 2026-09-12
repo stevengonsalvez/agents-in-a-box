@@ -484,7 +484,7 @@ impl AttentionIngest {
         // JSONL transcript from disk, and blocking I/O under the write lock
         // would starve the reconciler.
         let decision = self
-            .attention_decision(&line, semantic_event, &payload, now_ms)
+            .attention_decision(&line, raw_event, semantic_event, &payload, now_ms)
             .await;
 
         if !line.session_id.is_empty() {
@@ -616,9 +616,18 @@ impl AttentionIngest {
     /// fallback path) happens outside the write transaction that applies it.
     /// `Err(outcome)` is a short-circuit: the line yields no attention decision
     /// and the caller returns that outcome for the whole line.
+    /// `raw_event` is the provider's own event name, BEFORE
+    /// [`crate::fleet::canonical_hook_event_type`] folds it into the reducer's
+    /// vocabulary. Both are needed and they are not interchangeable: the
+    /// reducer wants to know a picker is open, so it maps
+    /// `PermissionRequest(AskUserQuestion)` onto `AskUserQuestion` and the two
+    /// become one token. The inbox has to tell them apart — one OPENS a
+    /// question, the other re-announces one that is already open — so it reads
+    /// the unfolded name.
     async fn attention_decision(
         &self,
         line: &HookEventLine,
+        raw_event: &str,
         semantic_event: &str,
         payload: &serde_json::Value,
         now_ms: i64,
@@ -648,7 +657,7 @@ impl AttentionIngest {
         // re-derived from the transcript. The distinction is load-bearing at the
         // stale-ASK gate below, so it travels with the context.
         let (context, from_hook_payload) =
-            match ask_context_from_hook_payload(provider, semantic_event, payload) {
+            match ask_context_from_hook_payload(provider, raw_event, semantic_event, payload) {
                 Some(ask) => (ask, true),
                 None => match permission_context_from_hook_payload(
                     provider,
@@ -942,12 +951,20 @@ fn session_from(line: &HookEventLine) -> Session {
 /// Claude-only, matching the producing hook and the reducer: the answer route a
 /// card advertises is the Claude structured broker, so another provider that
 /// happened to name a tool `AskUserQuestion` must not mint one.
+///
+/// `raw_event` is what makes "only the picker-OPEN event" enforceable.
+/// `semantic_event` cannot: the reducer deliberately folds
+/// `PermissionRequest(AskUserQuestion)` onto `AskUserQuestion` so a session's
+/// projection knows a picker is open, and that fold makes the re-announcement
+/// indistinguishable from the open. Gating on the raw `PreToolUse` keeps both
+/// consumers correct without either having to weaken its own contract.
 fn ask_context_from_hook_payload(
     agent: &str,
+    raw_event: &str,
     semantic_event: &str,
     envelope: &serde_json::Value,
 ) -> Option<NeedsContext> {
-    if agent != "claude" || semantic_event != "AskUserQuestion" {
+    if agent != "claude" || semantic_event != "AskUserQuestion" || raw_event != "PreToolUse" {
         return None;
     }
     let payload = envelope.get("payload")?;
