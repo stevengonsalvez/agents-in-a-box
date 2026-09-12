@@ -5,6 +5,7 @@
 **Format:** diagram-first, table-second, no prose paragraphs
 **Research:** research/2026-09-04_14-10-02_desktop-app-shared-core.md
 **Interview:** 9 rounds, all forks resolved by Stevie
+**Extended by:** `2026-09-11-multi-surface-decisions-spec.md` (D10-D18; D4's host switcher and transport move to its R1). **Execution view:** `2026-09-12-desktop-programme.md`. **Integration branch:** `v2`.
 
 ## Problem
 
