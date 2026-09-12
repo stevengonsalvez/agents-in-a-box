@@ -5,7 +5,7 @@
 #[cfg(test)]
 use super::keymap::test_key_codes::*;
 use crate::app::keymap::{
-    Chord, HostFlags, KeyAction, KeyContext, Keymap, UiAction, active_contexts,
+    Chord, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
 };
 use crate::app::{
     AppState,
@@ -1748,27 +1748,17 @@ impl EventHandler {
             }
             // A read-only mirror uses tmux's own scrollback, so entering the
             // host's scroll mode over it would swallow navigation invisibly.
-            UiAction::ScrollPreviewUp | UiAction::ScrollPreviewDown
+            UiAction::Scroll(ScrollAction::ScrollPreviewUp | ScrollAction::ScrollPreviewDown)
                 if state.is_observing_selected_terminal() =>
             {
                 state.notify_live_preview_no_scrollback();
                 None
             }
             // Scroll is renderer-local: queued for the host to apply against
-            // its `LayoutComponent`, never handed to the reducer.
-            UiAction::ScrollLogsUp
-            | UiAction::ScrollLogsDown
-            | UiAction::ScrollLogsToTop
-            | UiAction::ScrollLogsToBottom
-            | UiAction::ToggleAutoScroll
-            | UiAction::ScrollPreviewUp
-            | UiAction::ScrollPreviewDown
-            | UiAction::PreviewScrollUp
-            | UiAction::PreviewScrollDown
-            | UiAction::PreviewPageUp
-            | UiAction::PreviewPageDown
-            | UiAction::PreviewExitScroll => {
-                ui.queue(action);
+            // its `LayoutComponent`, never handed to the reducer. One arm, so a
+            // new `ScrollAction` cannot be left out of it.
+            UiAction::Scroll(scroll) => {
+                ui.queue(scroll);
                 None
             }
         }

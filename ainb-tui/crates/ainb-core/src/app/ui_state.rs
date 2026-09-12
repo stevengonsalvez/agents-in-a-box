@@ -16,7 +16,7 @@ use std::time::Instant;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
-use crate::app::keymap::UiAction;
+use crate::app::keymap::{ScrollAction, UiAction};
 use crate::app::screens::ScreenId;
 use crate::app::state::{
     AppState, AttachableRef, COLLAPSED_SESSIONS_SIDEBAR_WIDTH, DEFAULT_SESSIONS_SIDEBAR_WIDTH,
@@ -321,7 +321,7 @@ pub struct UiState {
     /// Scroll intents resolved from the keymap this iteration, drained by the
     /// run loop into [`Self::apply`]. The reducer never sees them: scrolling a
     /// pane is renderer-local by definition.
-    queued: Vec<UiAction>,
+    queued: Vec<ScrollAction>,
     /// Set when a `UiAction` changed something the user can see, so the run
     /// loop repaints without waiting for the animation floor.
     pub needs_redraw: bool,
@@ -364,12 +364,12 @@ impl UiState {
 
     /// Record a scroll intent the keymap resolved. Queued rather than applied
     /// on the spot because the key path does not hold the layout.
-    pub fn queue(&mut self, action: UiAction) {
+    pub fn queue(&mut self, action: ScrollAction) {
         self.queued.push(action);
     }
 
     /// Take everything queued since the last drain.
-    pub fn take_queued(&mut self) -> Vec<UiAction> {
+    pub fn take_queued(&mut self) -> Vec<ScrollAction> {
         std::mem::take(&mut self.queued)
     }
 
@@ -379,38 +379,36 @@ impl UiState {
     /// none of them ever reached the reducer with anything to say — they were
     /// routed straight back out to the `LayoutComponent`, which is what this
     /// does, without a round trip through core state.
-    pub fn apply(&mut self, action: UiAction, layout: &mut LayoutComponent, state: &AppState) {
+    pub fn apply(&mut self, action: ScrollAction, layout: &mut LayoutComponent, state: &AppState) {
         let total_logs = || state.live_logs.values().map(Vec::len).sum::<usize>();
         match action {
-            UiAction::ScrollLogsUp => layout.live_logs_mut().scroll_up(),
-            UiAction::ScrollLogsDown => layout.live_logs_mut().scroll_down(total_logs()),
-            UiAction::ScrollLogsToTop => layout.live_logs_mut().scroll_to_top(),
-            UiAction::ScrollLogsToBottom => layout.live_logs_mut().scroll_to_bottom(total_logs()),
-            UiAction::ToggleAutoScroll => layout.live_logs_mut().toggle_auto_scroll(),
+            ScrollAction::ScrollLogsUp => layout.live_logs_mut().scroll_up(),
+            ScrollAction::ScrollLogsDown => layout.live_logs_mut().scroll_down(total_logs()),
+            ScrollAction::ScrollLogsToTop => layout.live_logs_mut().scroll_to_top(),
+            ScrollAction::ScrollLogsToBottom => {
+                layout.live_logs_mut().scroll_to_bottom(total_logs())
+            }
+            ScrollAction::ToggleAutoScroll => layout.live_logs_mut().toggle_auto_scroll(),
             // Shift+arrow from the session list both ENTERS scroll mode and
             // moves, so one keypress on a live pane shows scrollback rather
             // than arming a mode the next keypress uses.
-            UiAction::ScrollPreviewUp | UiAction::ScrollPreviewDown => {
+            ScrollAction::ScrollPreviewUp | ScrollAction::ScrollPreviewDown => {
                 let preview = layout.tmux_preview_mut();
                 if !preview.is_scroll_mode() {
                     preview.enter_scroll_mode();
                 }
-                if action == UiAction::ScrollPreviewUp {
+                if action == ScrollAction::ScrollPreviewUp {
                     preview.scroll_up();
                 } else {
                     preview.scroll_down();
                 }
             }
             // Inside scroll mode the same keys move without re-entering.
-            UiAction::PreviewScrollUp => layout.tmux_preview_mut().scroll_up(),
-            UiAction::PreviewScrollDown => layout.tmux_preview_mut().scroll_down(),
-            UiAction::PreviewPageUp => layout.tmux_preview_mut().scroll_page_up(),
-            UiAction::PreviewPageDown => layout.tmux_preview_mut().scroll_page_down(),
-            UiAction::PreviewExitScroll => layout.tmux_preview_mut().exit_scroll_mode(),
-            // Every other `UiAction` is an app intent the reducer owns; it is
-            // translated to an `AppEvent` in `keymap_ui_event` and never
-            // reaches here.
-            _ => return,
+            ScrollAction::PreviewScrollUp => layout.tmux_preview_mut().scroll_up(),
+            ScrollAction::PreviewScrollDown => layout.tmux_preview_mut().scroll_down(),
+            ScrollAction::PreviewPageUp => layout.tmux_preview_mut().scroll_page_up(),
+            ScrollAction::PreviewPageDown => layout.tmux_preview_mut().scroll_page_down(),
+            ScrollAction::PreviewExitScroll => layout.tmux_preview_mut().exit_scroll_mode(),
         }
         self.needs_redraw = true;
     }

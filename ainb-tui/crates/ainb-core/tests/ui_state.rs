@@ -3,7 +3,7 @@
 
 #![allow(missing_docs)]
 
-use ainb::app::keymap::UiAction;
+use ainb::app::keymap::ScrollAction;
 use ainb::app::state::AppState;
 use ainb::app::ui_state::UiState;
 use ainb::components::LayoutComponent;
@@ -22,7 +22,7 @@ const SESSIONS_RECT: Rect = Rect {
     height: 20,
 };
 
-fn apply_all(ui: &mut UiState, layout: &mut LayoutComponent, actions: &[UiAction]) {
+fn apply_all(ui: &mut UiState, layout: &mut LayoutComponent, actions: &[ScrollAction]) {
     let state = AppState::new();
     for action in actions {
         ui.apply(*action, layout, &state);
@@ -43,9 +43,9 @@ fn logs_scroll_actions_walk_the_offset_and_flip_auto_scroll() {
         &mut ui,
         &mut layout,
         &[
-            UiAction::ScrollLogsDown,
-            UiAction::ScrollLogsDown,
-            UiAction::ScrollLogsDown,
+            ScrollAction::ScrollLogsDown,
+            ScrollAction::ScrollLogsDown,
+            ScrollAction::ScrollLogsDown,
         ],
     );
     assert_eq!(layout.live_logs_mut().scroll_offset(), 3);
@@ -55,21 +55,21 @@ fn logs_scroll_actions_walk_the_offset_and_flip_auto_scroll() {
     apply_all(
         &mut ui,
         &mut layout,
-        &[UiAction::ScrollLogsUp, UiAction::ScrollLogsUp],
+        &[ScrollAction::ScrollLogsUp, ScrollAction::ScrollLogsUp],
     );
     assert_eq!(layout.live_logs_mut().scroll_offset(), 1);
-    apply_all(&mut ui, &mut layout, &[UiAction::ScrollLogsUp; 4]);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ScrollLogsUp; 4]);
     assert_eq!(layout.live_logs_mut().scroll_offset(), 0);
 
     // `end` re-arms auto-scroll; `home` disarms it again.
-    apply_all(&mut ui, &mut layout, &[UiAction::ScrollLogsToBottom]);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ScrollLogsToBottom]);
     assert!(layout.live_logs_mut().auto_scroll());
-    apply_all(&mut ui, &mut layout, &[UiAction::ScrollLogsToTop]);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ScrollLogsToTop]);
     assert_eq!(layout.live_logs_mut().scroll_offset(), 0);
     assert!(!layout.live_logs_mut().auto_scroll());
 
     // `space` is the explicit toggle.
-    apply_all(&mut ui, &mut layout, &[UiAction::ToggleAutoScroll]);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ToggleAutoScroll]);
     assert!(layout.live_logs_mut().auto_scroll());
 
     assert!(
@@ -87,7 +87,7 @@ fn preview_scroll_actions_enter_and_exit_scroll_mode() {
 
     assert!(!layout.tmux_preview_mut().is_scroll_mode());
 
-    apply_all(&mut ui, &mut layout, &[UiAction::ScrollPreviewUp]);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ScrollPreviewUp]);
     assert!(
         layout.tmux_preview_mut().is_scroll_mode(),
         "shift+up must arm scroll mode on the same keypress that moves"
@@ -97,10 +97,10 @@ fn preview_scroll_actions_enter_and_exit_scroll_mode() {
         &mut ui,
         &mut layout,
         &[
-            UiAction::PreviewScrollUp,
-            UiAction::PreviewPageUp,
-            UiAction::PreviewScrollDown,
-            UiAction::PreviewPageDown,
+            ScrollAction::PreviewScrollUp,
+            ScrollAction::PreviewPageUp,
+            ScrollAction::PreviewScrollDown,
+            ScrollAction::PreviewPageDown,
         ],
     );
     assert!(
@@ -108,23 +108,33 @@ fn preview_scroll_actions_enter_and_exit_scroll_mode() {
         "the in-mode keys must not drop out of scroll mode"
     );
 
-    apply_all(&mut ui, &mut layout, &[UiAction::PreviewExitScroll]);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::PreviewExitScroll]);
     assert!(!layout.tmux_preview_mut().is_scroll_mode());
 }
 
-/// Reducer intents routed through the same enum must not touch the layout.
+/// A reducer intent cannot reach the layout at all.
+///
+/// This used to pass a `UiAction::SessionStartRename` to `apply` and assert it
+/// changed nothing, which only held because `apply` ended in a catch-all. The
+/// scroll variants are nested under `UiAction::Scroll` now and `apply` takes a
+/// `ScrollAction`, so handing it a reducer intent is a type error rather than a
+/// silent no-op. What is left to check is the other half of the old assertion:
+/// applying nothing leaves both the layout and the repaint flag alone.
 #[test]
-fn a_non_scroll_ui_action_leaves_the_layout_alone() {
+fn applying_no_scroll_leaves_the_layout_and_the_repaint_flag_alone() {
     let mut ui = UiState::default();
     let mut layout = LayoutComponent::new();
 
-    apply_all(&mut ui, &mut layout, &[UiAction::ScrollLogsDown]);
+    apply_all(&mut ui, &mut layout, &[ScrollAction::ScrollLogsDown]);
     ui.needs_redraw = false;
 
-    apply_all(&mut ui, &mut layout, &[UiAction::SessionStartRename]);
+    apply_all(&mut ui, &mut layout, &[]);
 
     assert_eq!(layout.live_logs_mut().scroll_offset(), 1);
-    assert!(!ui.needs_redraw, "a reducer intent is not a repaint reason");
+    assert!(
+        !ui.needs_redraw,
+        "no scroll applied is not a repaint reason"
+    );
 }
 
 /// The hit test resolves a click through the row heights the RENDER recorded,

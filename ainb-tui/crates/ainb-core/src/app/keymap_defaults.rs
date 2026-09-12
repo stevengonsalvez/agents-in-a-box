@@ -1,7 +1,7 @@
 //! Built-in keymap rows. Keep actions here, never in the renderer or CLI.
 
 use super::events::AppEvent;
-use super::keymap::{Binding, Chord, KeyAction, KeyContext, UiAction};
+use super::keymap::{Binding, Chord, KeyAction, KeyContext, ScrollAction, UiAction};
 
 fn app(
     ctx: KeyContext,
@@ -262,49 +262,49 @@ pub fn defaults() -> Vec<Binding> {
             Context::PreviewScroll,
             "exit",
             "esc",
-            KeyAction::Ui(UiAction::PreviewExitScroll),
+            KeyAction::Ui(UiAction::Scroll(ScrollAction::PreviewExitScroll)),
             "Exit preview scroll mode",
         ),
         action(
             Context::PreviewScroll,
             "up",
             "up",
-            KeyAction::Ui(UiAction::PreviewScrollUp),
+            KeyAction::Ui(UiAction::Scroll(ScrollAction::PreviewScrollUp)),
             "Scroll preview up",
         ),
         action(
             Context::PreviewScroll,
             "up_k",
             "k",
-            KeyAction::Ui(UiAction::PreviewScrollUp),
+            KeyAction::Ui(UiAction::Scroll(ScrollAction::PreviewScrollUp)),
             "Scroll preview up",
         ),
         action(
             Context::PreviewScroll,
             "down",
             "down",
-            KeyAction::Ui(UiAction::PreviewScrollDown),
+            KeyAction::Ui(UiAction::Scroll(ScrollAction::PreviewScrollDown)),
             "Scroll preview down",
         ),
         action(
             Context::PreviewScroll,
             "down_j",
             "j",
-            KeyAction::Ui(UiAction::PreviewScrollDown),
+            KeyAction::Ui(UiAction::Scroll(ScrollAction::PreviewScrollDown)),
             "Scroll preview down",
         ),
         action(
             Context::PreviewScroll,
             "page_up",
             "pageup",
-            KeyAction::Ui(UiAction::PreviewPageUp),
+            KeyAction::Ui(UiAction::Scroll(ScrollAction::PreviewPageUp)),
             "Scroll preview one page up",
         ),
         action(
             Context::PreviewScroll,
             "page_down",
             "pagedown",
-            KeyAction::Ui(UiAction::PreviewPageDown),
+            KeyAction::Ui(UiAction::Scroll(ScrollAction::PreviewPageDown)),
             "Scroll preview one page down",
         ),
         app(
@@ -607,18 +607,18 @@ pub fn defaults() -> Vec<Binding> {
         bottom: "end" => AppEvent::GoToBottom,
     );
     append_action_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("logs_pane")),
-        up: "up" => KeyAction::Ui(UiAction::ScrollLogsUp),
-        down: "down" => KeyAction::Ui(UiAction::ScrollLogsDown),
-        top: "home" => KeyAction::Ui(UiAction::ScrollLogsToTop),
-        bottom: "end" => KeyAction::Ui(UiAction::ScrollLogsToBottom),
-        toggle_auto_scroll: "space" => KeyAction::Ui(UiAction::ToggleAutoScroll),
+        up: "up" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsUp)),
+        down: "down" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsDown)),
+        top: "home" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsToTop)),
+        bottom: "end" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsToBottom)),
+        toggle_auto_scroll: "space" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ToggleAutoScroll)),
     );
     append_action_rows!(rows, Context::Screen("session_list", super::keymap::SubContext::Named("preview_pane")),
-        up: "up" => KeyAction::Ui(UiAction::ScrollLogsUp),
-        down: "down" => KeyAction::Ui(UiAction::ScrollLogsDown),
-        top: "home" => KeyAction::Ui(UiAction::ScrollLogsToTop),
-        bottom: "end" => KeyAction::Ui(UiAction::ScrollLogsToBottom),
-        toggle_auto_scroll: "space" => KeyAction::Ui(UiAction::ToggleAutoScroll),
+        up: "up" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsUp)),
+        down: "down" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsDown)),
+        top: "home" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsToTop)),
+        bottom: "end" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollLogsToBottom)),
+        toggle_auto_scroll: "space" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ToggleAutoScroll)),
     );
     append_app_rows!(rows, Context::screen("search_workspace"),
         cancel: "esc" => AppEvent::NewSessionCancel,
@@ -919,8 +919,8 @@ pub fn defaults() -> Vec<Binding> {
         abtop: "t" => AppEvent::GoToAbtop,
     );
     append_action_rows!(rows, Context::screen("session_list"),
-        preview_up: "shift+up" => KeyAction::Ui(UiAction::ScrollPreviewUp),
-        preview_down: "shift+down" => KeyAction::Ui(UiAction::ScrollPreviewDown),
+        preview_up: "shift+up" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollPreviewUp)),
+        preview_down: "shift+down" => KeyAction::Ui(UiAction::Scroll(ScrollAction::ScrollPreviewDown)),
         rename: "f2" => KeyAction::Ui(UiAction::SessionStartRename),
         headroom_or_help: "H" => KeyAction::Ui(UiAction::SessionHeadroomOrHelp),
         attach_one: "1" => KeyAction::Ui(UiAction::AttachSessionByPosition(1)),
