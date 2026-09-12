@@ -41,7 +41,7 @@ flowchart TD
   SD --> P1
 
   subgraph S4[slice 4: wire + status]
-    W0w[W0-wire D17 D18]:::plan
+    W0w[W0-wire D17 D18, in review]:::run
     T0d[T0-daemon D14]:::plan
     W0m[W0-mirror D15]:::plan
     T0s[T0-section agent_status]:::plan
@@ -123,7 +123,7 @@ Same DAG, terminal view:
 | P1 `ainb-app` extraction | 2 | planned | slice 1 merged | `cargo test -p ainb-app` runs the moved tests; tripwires green | base spec P1 |
 | P2-P5 screens | 2 | planned | P1 | per-screen tripwires green | base spec |
 | P6 client reconnect, web onto client, sessions.json to daemon | 2 | planned | P5 | web e2e green; TUI + web + CLI concurrent smoke | base spec |
-| W0-wire: `PROTOCOL_VERSION` in hello, capability catalogue, skew harness, op-id ledger, receipts | 4 | **ready to start** | S-B on `v2` (met 2026-09-12); coordinate `rpc/mod.rs` with nothing, S-C and S-D do not touch it | `MUTATING_METHODS` test, replay twice = one `created` one `replayed`, skew harness both ways | spec v1.3 W0-wire |
+| W0-wire: `PROTOCOL_VERSION` in hello, capability catalogue, skew harness, op-id ledger, receipts | 4 | **in review on `v2`** (2026-09-12) | S-B on `v2` (met 2026-09-12); `rpc/mod.rs` coordinated with nothing, S-C and S-D did not touch it | all three met: proto walk of the committed `MUTATING_METHODS` (93 entries) asserts each params struct embeds `MutationEnvelope`; daemon replay of every method gives one `created` + one `replayed` (92 of 93; `codex/session_ensure` answers a transient service-unavailable in a daemon fixture and asserts the abandon-and-retry contract instead), and a second principal gets `rejected{op_id_foreign}`; skew harness green both directions incl. the local leg. Contract in `docs/contracts/hangar-wire.md` | spec v1.3 W0-wire |
 | #916 pane binding without launcher env | 4 | planned | none | `env -i` hook test, no duplicate legacy row | issue open |
 | T0-daemon: status store on `fleet_session`, one txn per event, retention, normalizers, OSC schema | 4 | planned | spike 1 (done), #916 | identical tuples across CLI, web, TUI; silence never `done` | spec v1.3 T0-daemon |
 | W0-mirror: per-drain apply, scalar selectors, subscription filter, specta feature | 4 | planned | **P1 merged** | bench ceiling 12,800 runs, 32.5 ms per 1,000 frames, units = 125 | spec v1.3 W0-mirror |
