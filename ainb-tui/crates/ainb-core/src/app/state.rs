@@ -532,6 +532,22 @@ fn host_tmux_session_name() -> Option<&'static str> {
 }
 
 impl AppState {
+    /// Fold the poller's publish counter into the fleet section.
+    ///
+    /// `daemon_attention` and `fleet_snapshot` are `Arc<Mutex<..>>` the worker
+    /// writes through, so daemon-side news reaches the screen without anything
+    /// taking `&mut` on the section: a subscriber watching versions would never
+    /// hear about a new ASK. This reads the counter by `&` and writes the
+    /// versioned copy only when it moved, so exactly one bump lands per
+    /// publish, and none at all on a frame where the daemon said nothing.
+    pub fn refresh_daemon_attention_generation(&mut self) -> bool {
+        let published = self
+            .fleet
+            .daemon_attention_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.fleet.set_if_changed(|fleet| &mut fleet.daemon_attention_seen, published)
+    }
+
     /// Every section's current version, indexed by [`SectionId::index`].
     ///
     /// A surface keeps the array it last saw and compares; that is 19 integer
@@ -821,8 +837,15 @@ impl AppState {
     /// The render loop polls this as a repaint trigger: live PTY output
     /// arrives without host input, so the dirty-gate (perf bead `wai`) would
     /// otherwise hold the pane at the 250ms animation floor.
-    pub fn embed_take_dirty(&self) -> bool {
-        self.tmux.embed.as_ref().is_some_and(|e| e.take_dirty())
+    /// Take the embed's dirty flag, bumping the tmux section when it was set.
+    ///
+    /// The embed is the tmux section's own interior-mutability hole: the PTY
+    /// reader thread marks it dirty as bytes stream in, through a handle the
+    /// render path holds by `&`. Taking the flag through `update` means the
+    /// one place that learns "the pane changed" is also the place that says so
+    /// to a subscriber, and a frame with no new bytes still bumps nothing.
+    pub fn embed_take_dirty(&mut self) -> bool {
+        self.tmux.update(|tmux| tmux.embed.as_ref().is_some_and(|e| e.take_dirty()))
     }
 }
 
@@ -12618,7 +12641,9 @@ impl AppState {
             &self.fleet.daemon_attention,
             &self.fleet.fleet_snapshot,
             &self.fleet.attention_poll_running,
+            &self.fleet.daemon_attention_generation,
         );
+        self.refresh_daemon_attention_generation();
         self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)

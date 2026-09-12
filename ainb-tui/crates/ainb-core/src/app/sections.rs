@@ -605,6 +605,16 @@ pub struct FleetSection {
     /// Whether the attention poller thread is alive, so the render loop can
     /// start one without having to remember whether it already did.
     pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
+
+    /// The poller's publish counter, and the last value this section folded in.
+    ///
+    /// `daemon_attention` and `fleet_snapshot` are shared handles: the worker
+    /// writes through them without anything here taking `&mut`, so the section
+    /// version would never move for daemon-side news. The counter is read by
+    /// `&` like the cells, and `daemon_attention_seen` is the versioned copy
+    /// that `refresh_daemon_attention_generation` folds it into once a frame.
+    pub daemon_attention_generation: crate::fleet::attention_poll::Generation,
+    pub daemon_attention_seen: u64,
     /// Daemon attention rows whose cwd matched no row on this screen, counted
     /// for the header so the ONE attention surface never silently swallows a
     /// request it could not place.
@@ -652,6 +662,8 @@ impl Default for FleetSection {
             fleet_snapshot: Arc::new(Mutex::new(Vec::new())),
             fleet_metadata: HashMap::new(),
             attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            daemon_attention_seen: 0,
             attention_elsewhere: 0,
             attention_error_since: HashMap::new(),
             attention_local_since: HashMap::new(),
