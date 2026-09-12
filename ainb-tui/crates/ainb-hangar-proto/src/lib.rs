@@ -13,6 +13,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One status truth for every surface: the shared derivation of an agent's
+/// state, its evidence tier, its provenance and its evidence clock (D14).
+pub mod agent_status;
 pub mod auth;
 pub mod connections;
 pub mod dates;
