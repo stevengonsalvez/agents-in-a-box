@@ -1,10 +1,9 @@
-# G6 human checkpoint: slice 1, wave 1 plus S-C
+# G6 human checkpoint: slice 1
 
 **Date:** 2026-09-12
 **For:** Stevie, two terminals.
-**Covers:** the `[CHECKPOINT:human-verify]` for Phase 1 (keymap), the manual rows for S-A and S-B, and the manual row for S-C.
+**Covers:** the `[CHECKPOINT:human-verify]` for Phase 1 (keymap) and Phase 3 (scroll and mouse), the manual rows for S-A and S-B, and the manual row for S-C.
 **Also published as a page:** https://claude.ai/code/artifact/892c7758-68ef-48a3-831a-176386ac0657
-**Does not cover:** the Phase 3 checkpoint (scroll and mouse after the UiState seal). Phase 3 is not merged, so there is nothing to check yet; that half of G6 stays open.
 
 Every command below is literal. The paths and chord names were run against `ainb 1.28.2` from this branch, not copied from the plan.
 
@@ -107,6 +106,57 @@ This one needs a live ASK. With the TUI open on the control center (`g`, then `C
 
 - **Pass:** the TUI card disappears at once, and the title row reads `answered by web@<your host>` for about three seconds.
 - **Pass:** answering from the TUI instead closes the web card's options and reply box as soon as the request returns, with `answered by tui@<your host>` under the card.
+
+## 8. Preview scroll, and Esc out of it (Phase 3, PR #945)
+
+The chords in steps 8 and 9 are not transcribed from the plan. They are what
+the binary itself prints:
+
+```
+./target/debug/ainb keymap list --format json | jq -r '.[] | select(.context=="preview_scroll" or .context=="session_list.logs_pane") | "\(.context) \(.event) \(.chord)"'
+```
+
+Session list (`s`), cursor on a session that has a live tmux pane, `preview` tab.
+
+```
+shift+up
+```
+
+- **Pass:** the pane leaves the live tail and shows scrollback.
+- **Pass:** `up` / `k` / `down` / `j` / `pageup` / `pagedown` keep moving inside the pane, and the session cursor in the left list does NOT move while they do.
+- **Pass:** `esc` returns to the live tail, and does not quit the TUI.
+
+Before Phase 3 those six keys were `AppEvent` variants that the reducer handed straight back to the layout. They are `UiAction::Scroll` rows now and `UiState::apply` is the only thing that moves the pane. The reason `esc` cannot fall through to Quit is `preview_scroll_route` in `main.rs`; that is the part worth pressing twice.
+
+## 9. Logs scroll and auto-scroll (Phase 3)
+
+Same screen, a session with no tmux pane, so the right pane is the live log stream. The hint line at its foot reads `[Space]AutoScroll:ON`.
+
+Click once inside the right pane, then:
+
+```
+up  up  up
+```
+
+- **Pass:** the log scrolls back, and the hint now reads `AutoScroll:OFF`. Scrolling by hand turns the follow off; that is the point of it.
+- **Pass:** `space` flips the hint back to `ON`, and new lines resume pulling the view down.
+- **Pass:** `end` jumps to the newest line and leaves `AutoScroll:ON`; `home` jumps to the oldest and leaves it `OFF`.
+
+The click matters: focus follows the mouse into the right pane, and the scroll rows only resolve while that pane owns the keyboard.
+
+## 10. Mouse: three on the sidebar, one on the legend (Phase 3)
+
+Home screen (`q` from the session list).
+
+- **Pass:** a single click on a sidebar item selects it and moves focus to the sidebar.
+- **Pass:** a second click on the SAME item within 300 ms opens it, exactly as `enter` would. Slower than 300 ms and it stays a selection.
+- **Pass:** press on the sidebar's right-hand border and drag: the sidebar resizes under the cursor, and the width it is released at survives a quit and restart.
+
+Then `s` for the session list:
+
+- **Pass:** a click anywhere on the bottom keymap legend collapses it, exactly as the `M` binding does (the legend writes it `⇧M`). A click on the collapsed hint row brings it back.
+
+Every rect these four clicks hit test against now lives in `UiState`, published by the renderer after each draw instead of being written into `AppState` mid-frame. A stale or unpublished rect shows up here as a click that lands on nothing.
 
 ## What to do with the result
 
