@@ -2476,8 +2476,8 @@ mod tests {
         ));
 
         let projected = AppState::projected_session_status(
-            Some(SessionStatus::Idle),
-            Some(SessionStatus::Stopped),
+            Some((SessionStatus::Idle, 100)),
+            Some((SessionStatus::Stopped, 200)),
         );
         assert_eq!(projected, Some(SessionStatus::Stopped));
 
@@ -2492,12 +2492,41 @@ mod tests {
     }
 
     #[test]
-    fn attention_suppressed_while_generating() {
+    fn fresh_local_hook_beats_stale_fleet_lifecycle() {
+        use crate::models::SessionStatus;
+
+        assert_eq!(
+            AppState::projected_session_status(
+                Some((SessionStatus::Running, 1_000)),
+                Some((SessionStatus::Idle, 2_000)),
+            ),
+            Some(SessionStatus::Idle),
+            "a Stop hook must not be repainted RUN by a retained Fleet row"
+        );
+    }
+
+    #[test]
+    fn fresh_fleet_lifecycle_beats_an_older_local_hook() {
+        use crate::models::SessionStatus;
+
+        assert_eq!(
+            AppState::projected_session_status(
+                Some((SessionStatus::Running, 2_000)),
+                Some((SessionStatus::Idle, 1_000)),
+            ),
+            Some(SessionStatus::Running),
+            "a new Fleet observation may replace an older terminal hook"
+        );
+    }
+
+    #[test]
+    fn attention_survives_tmux_generating_observation() {
+        use crate::fleet::attention::AttentionKind;
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
             kind_of(CWD, Some("claude"), true, 0, NOW, &recent),
-            None,
-            "a generating session shows the busy dot, not an attention chip",
+            Some(AttentionKind::Approve),
+            "an explicit hook prompt beats tmux discovery's coarse busy observation",
         );
     }
 
@@ -2602,6 +2631,28 @@ mod tests {
             )
             .map(|chip| chip.kind),
             Some(AttentionKind::Wait)
+        );
+    }
+
+    #[test]
+    fn unidentified_codex_hook_never_binds_by_cwd() {
+        let mut event = rec("codex", CWD, "PermissionRequest", NOW - 100);
+        event.session_id = "unbound-codex-thread".into();
+        assert_eq!(
+            AppState::attention_for_session_identity(
+                CWD,
+                Some("codex"),
+                None,
+                true,
+                true,
+                false,
+                0,
+                NOW,
+                &[event],
+            )
+            .map(|chip| chip.kind),
+            None,
+            "a legacy row without an exact thread id stays unknown, never guessed by cwd"
         );
     }
 

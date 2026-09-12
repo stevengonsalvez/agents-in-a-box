@@ -2070,6 +2070,7 @@ mod tests {
                 direct_child_count: 2,
                 provider_session_id: None,
                 lifecycle: None,
+                lifecycle_updated_at: 0,
             },
         );
         let rendered = footer_text(&state, SessionTab::Preview, false);
