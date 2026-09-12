@@ -21,6 +21,7 @@ pub mod fleet;
 pub mod lifecycle;
 pub mod methods;
 pub mod pr_status;
+pub mod protocol;
 pub mod reprime;
 pub mod settings;
 pub mod snapshots;
