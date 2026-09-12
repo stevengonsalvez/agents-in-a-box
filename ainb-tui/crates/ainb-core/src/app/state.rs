@@ -3,6 +3,8 @@
 #![allow(dead_code)]
 
 use crate::app::SessionLoader;
+use crate::app::sections::*;
+use crate::app::versioned::Versioned;
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::claude::client::ClaudeChatManager;
 use crate::claude::types::ClaudeStreamingEvent;
@@ -3138,6 +3140,12 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub git_view: Versioned<GitViewSection>,
+
+    pub recovery: Versioned<RecoverySection>,
+
+    pub mcp_pool: Versioned<McpPoolSection>,
+
     pub workspaces: Vec<Workspace>,
     pub selected_workspace_index: Option<usize>,
     pub selected_session_index: Option<usize>,
@@ -3174,7 +3182,6 @@ pub struct AppState {
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
     // Shared MCP pool observability overlay (None = closed; no refresh runs).
-    pub mcp_overlay: Option<McpOverlayState>,
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -3206,8 +3213,6 @@ pub struct AppState {
     // count. `tmux attach-session` reports some startup failures asynchronously.
     observer_started_at: Option<Instant>,
     // Track if current directory is a git repository
-    pub is_current_dir_git_repo: bool,
-    // Track which session logs were last fetched to avoid unnecessary refetches
     pub last_logs_session_id: Option<Uuid>,
     // Track attached terminal state
     pub attached_session_id: Option<Uuid>,
@@ -3233,8 +3238,6 @@ pub struct AppState {
     // Channel sender for log streaming
     pub log_sender: Option<mpsc::UnboundedSender<(Uuid, LogEntry)>>,
     // Git view state
-    pub git_view_state: Option<crate::components::GitViewState>,
-    // Previous view for navigation (e.g., to return from GitView)
     pub previous_screen: Option<ScreenId>,
     /// Last `ui.close_request` snapshot version consumed by
     /// `tick_panel_close_requests`. The poll acts at most once per
@@ -3258,8 +3261,6 @@ pub struct AppState {
     pub pending_event: Option<crate::app::events::AppEvent>,
 
     // Quick commit dialog state
-    pub quick_commit_message: Option<String>, // None = not in quick commit mode, Some = message being entered
-    pub quick_commit_cursor: usize,           // Cursor position in quick commit message
 
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
@@ -3318,8 +3319,6 @@ pub struct AppState {
     pub changelog_state: crate::components::ChangelogState,
 
     // Session recovery state (for orphaned agent sessions)
-    pub session_recovery_state: crate::components::SessionRecoveryState,
-
     /// Inbox screen state (ainb-hooks notifications: selection,
     /// filters, in-process SQLite store handle).
 
@@ -3873,6 +3872,9 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            git_view: Versioned::default(),
+            recovery: Versioned::default(),
+            mcp_pool: Versioned::default(),
             workspaces: Vec::new(),
             selected_workspace_index: None,
             selected_session_index: None,
@@ -3890,7 +3892,6 @@ impl Default for AppState {
             hangar_daemon_config_loaded: false,
             async_operation_cancelled: false,
             confirmation_dialog: None,
-            mcp_overlay: None,
             ui_needs_refresh: false,
             claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
@@ -3899,7 +3900,6 @@ impl Default for AppState {
             observer_pending: None,
             observer_failed_target: None,
             observer_started_at: None,
-            is_current_dir_git_repo: false,
             last_logs_session_id: None,
             attached_session_id: None,
             auth_setup_state: None,
@@ -3912,7 +3912,6 @@ impl Default for AppState {
             claude_manager: None,
             log_streaming_coordinator: None,
             log_sender: None,
-            git_view_state: None,
             previous_screen: None,
             last_panel_close_version: None,
             notifications: Vec::new(),
@@ -3920,10 +3919,6 @@ impl Default for AppState {
             pending_event: None,
 
             // Initialize quick commit state
-            quick_commit_message: None,
-            quick_commit_cursor: 0,
-
-            // Initialize tmux integration
             tmux_sessions: HashMap::new(),
             preview_update_task: None,
 
@@ -3970,7 +3965,6 @@ impl Default for AppState {
             changelog_state: crate::components::ChangelogState::new(),
 
             // Session recovery state (lazy-load when entering view)
-            session_recovery_state: crate::components::SessionRecoveryState::default(),
 
             // ainb-hooks inbox (lazy-opens SQLite on first refresh)
 
@@ -4699,10 +4693,10 @@ impl AppState {
         use std::env;
 
         if let Ok(current_dir) = env::current_dir() {
-            self.is_current_dir_git_repo =
+            self.git_view.is_current_dir_git_repo =
                 WorkspaceScanner::validate_workspace(&current_dir).unwrap_or(false);
 
-            if self.is_current_dir_git_repo {
+            if self.git_view.is_current_dir_git_repo {
                 info!(
                     "Current directory is a valid git repository: {:?}",
                     current_dir
@@ -4716,7 +4710,7 @@ impl AppState {
             }
         } else {
             warn!("Could not determine current directory");
-            self.is_current_dir_git_repo = false;
+            self.git_view.is_current_dir_git_repo = false;
         }
     }
 
@@ -5212,12 +5206,12 @@ impl AppState {
     /// Toggle the MCP pool overlay. Opening seeds config + fires the first
     /// fetch; closing drops the snapshot (and thus all refresh activity).
     pub fn toggle_mcp_overlay(&mut self) {
-        if self.mcp_overlay.is_some() {
-            self.mcp_overlay = None;
+        if self.mcp_pool.mcp_overlay.is_some() {
+            self.mcp_pool.mcp_overlay = None;
             return;
         }
         let config = crate::config::AppConfig::load().unwrap_or_default();
-        self.mcp_overlay = Some(McpOverlayState {
+        self.mcp_pool.mcp_overlay = Some(McpOverlayState {
             pool_enabled: config.mcp_pool.enabled,
             daemon_running: false,
             servers: Vec::new(),
@@ -5232,11 +5226,11 @@ impl AppState {
     }
 
     pub fn close_mcp_overlay(&mut self) {
-        self.mcp_overlay = None;
+        self.mcp_pool.mcp_overlay = None;
     }
 
     pub fn mcp_overlay_move(&mut self, delta: i32) {
-        if let Some(o) = self.mcp_overlay.as_mut() {
+        if let Some(o) = self.mcp_pool.mcp_overlay.as_mut() {
             if o.servers.is_empty() {
                 return;
             }
@@ -5249,7 +5243,7 @@ impl AppState {
     /// in flight (the one-outstanding-request guard). The blocking control
     /// socket call runs on the blocking pool so the executor never stalls.
     pub fn spawn_mcp_fetch(&mut self) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
         if o.fetch_rx.is_some() {
@@ -5277,7 +5271,7 @@ impl AppState {
     /// `try_recv` never waits, and no fetch is spawned when one is pending or
     /// the cadence is disabled. Called from the 250ms app tick.
     pub fn check_mcp_overlay(&mut self) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
 
@@ -5326,7 +5320,7 @@ impl AppState {
     /// import + control-socket calls run on the blocking pool and the result
     /// (summary + fresh snapshot) is delivered through the overlay channel.
     pub fn mcp_import(&mut self, to_user: bool) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
         let (tx, rx) = mpsc::unbounded_channel();
@@ -5357,7 +5351,7 @@ impl AppState {
     /// change as soon as the stop completes (no immediate-fetch race that
     /// reads pre-stop state).
     fn mcp_stop_then_refresh<F: FnOnce() + Send + 'static>(&mut self, stop: F) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
         let (tx, rx) = mpsc::unbounded_channel();
@@ -11340,7 +11334,7 @@ impl AppState {
             // Build the Warp-style Code Review model for the default Review tab.
             git_state.refresh_review();
 
-            self.git_view_state = Some(git_state);
+            self.git_view.git_view_state = Some(git_state);
             // Store current view so we can return to it
             self.previous_screen = Some(self.current_screen.clone());
             self.current_screen = screen_ids::GIT_VIEW.to_string();
@@ -11350,7 +11344,7 @@ impl AppState {
     }
 
     pub fn git_commit_and_push(&mut self) {
-        let result = if let Some(git_state) = self.git_view_state.as_mut() {
+        let result = if let Some(git_state) = self.git_view.git_view_state.as_mut() {
             git_state.commit_and_push()
         } else {
             return;
@@ -11362,7 +11356,7 @@ impl AppState {
                 // Set pending event to be processed in next loop iteration
                 self.pending_event = Some(crate::app::events::AppEvent::GitCommitSuccess(message));
                 // Refresh git status after successful push
-                if let Some(git_state) = self.git_view_state.as_mut() {
+                if let Some(git_state) = self.git_view.git_view_state.as_mut() {
                     if let Err(e) = git_state.refresh_git_status() {
                         tracing::error!("Failed to refresh git status after push: {}", e);
                         self.add_warning_notification(
@@ -11380,7 +11374,7 @@ impl AppState {
 
     // Quick commit dialog methods
     pub fn is_in_quick_commit_mode(&self) -> bool {
-        self.quick_commit_message.is_some()
+        self.git_view.quick_commit_message.is_some()
     }
 
     pub fn start_quick_commit(&mut self) {
@@ -11391,8 +11385,8 @@ impl AppState {
             let git_dir = workspace_path.join(".git");
 
             if git_dir.exists() {
-                self.quick_commit_message = Some(String::new());
-                self.quick_commit_cursor = 0;
+                self.git_view.quick_commit_message = Some(String::new());
+                self.git_view.quick_commit_cursor = 0;
                 self.add_info_notification(
                     "📝 Enter commit message and press Enter to commit & push".to_string(),
                 );
@@ -11407,43 +11401,49 @@ impl AppState {
     }
 
     pub fn cancel_quick_commit(&mut self) {
-        self.quick_commit_message = None;
-        self.quick_commit_cursor = 0;
+        self.git_view.quick_commit_message = None;
+        self.git_view.quick_commit_cursor = 0;
         self.add_info_notification("❌ Quick commit cancelled".to_string());
     }
 
     pub fn add_char_to_quick_commit(&mut self, ch: char) {
-        if let Some(ref mut message) = self.quick_commit_message {
-            message.insert(self.quick_commit_cursor, ch);
-            self.quick_commit_cursor += 1;
+        // One `get_mut` for the section, then two field borrows of the inner
+        // struct: the buffer and its cursor are the same section, so taking
+        // them one at a time through `DerefMut` would borrow the whole section
+        // twice.
+        let git_view = self.git_view.get_mut();
+        if let Some(message) = git_view.quick_commit_message.as_mut() {
+            message.insert(git_view.quick_commit_cursor, ch);
+            git_view.quick_commit_cursor += 1;
         }
     }
 
     pub fn backspace_quick_commit(&mut self) {
-        if let Some(ref mut message) = self.quick_commit_message {
-            if self.quick_commit_cursor > 0 {
-                self.quick_commit_cursor -= 1;
-                message.remove(self.quick_commit_cursor);
+        let git_view = self.git_view.get_mut();
+        if let Some(message) = git_view.quick_commit_message.as_mut() {
+            if git_view.quick_commit_cursor > 0 {
+                git_view.quick_commit_cursor -= 1;
+                message.remove(git_view.quick_commit_cursor);
             }
         }
     }
 
     pub fn move_quick_commit_cursor_left(&mut self) {
-        if self.quick_commit_cursor > 0 {
-            self.quick_commit_cursor -= 1;
+        if self.git_view.quick_commit_cursor > 0 {
+            self.git_view.quick_commit_cursor -= 1;
         }
     }
 
     pub fn move_quick_commit_cursor_right(&mut self) {
-        if let Some(ref message) = self.quick_commit_message {
-            if self.quick_commit_cursor < message.len() {
-                self.quick_commit_cursor += 1;
+        if let Some(ref message) = self.git_view.quick_commit_message {
+            if self.git_view.quick_commit_cursor < message.len() {
+                self.git_view.quick_commit_cursor += 1;
             }
         }
     }
 
     pub fn confirm_quick_commit(&mut self) {
-        if let Some(ref message) = self.quick_commit_message {
+        if let Some(ref message) = self.git_view.quick_commit_message {
             if message.trim().is_empty() {
                 self.add_warning_notification("⚠️ Commit message cannot be empty".to_string());
                 return;
@@ -11460,8 +11460,8 @@ impl AppState {
         } else {
             tracing::warn!("Quick commit failed: no session selected");
             self.add_error_notification("❌ No session selected for commit".to_string());
-            self.quick_commit_message = None;
-            self.quick_commit_cursor = 0;
+            self.git_view.quick_commit_message = None;
+            self.git_view.quick_commit_cursor = 0;
             return;
         };
 
@@ -11474,8 +11474,8 @@ impl AppState {
                     success_message,
                 ));
                 // Clear quick commit state
-                self.quick_commit_message = None;
-                self.quick_commit_cursor = 0;
+                self.git_view.quick_commit_message = None;
+                self.git_view.quick_commit_cursor = 0;
             }
             Err(e) => {
                 tracing::error!("Quick commit failed: {}", e);

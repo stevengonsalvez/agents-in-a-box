@@ -438,7 +438,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     if state.confirmation_dialog.is_some() {
         contexts.push(KeyContext::ConfirmDialog);
     }
-    if state.mcp_overlay.is_some() {
+    if state.mcp_pool.mcp_overlay.is_some() {
         contexts.push(KeyContext::McpOverlay);
     }
     if state.other_tmux_rename_mode {
@@ -565,7 +565,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::GIT_VIEW => {
-                if let Some(git) = &state.git_view_state {
+                if let Some(git) = &state.git_view.git_view_state {
                     if git.is_in_commit_mode() {
                         contexts.push(KeyContext::Screen(screen, SubContext::Named("commit")));
                     } else if matches!(git.active_tab, crate::components::git_view::GitTab::Review)
@@ -584,11 +584,11 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
             }
             screen_ids::SESSION_RECOVERY => {
-                if state.session_recovery_state.recovery_overlay.is_some() {
+                if state.recovery.session_recovery_state.recovery_overlay.is_some() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("overlay")));
-                } else if state.session_recovery_state.search_active {
+                } else if state.recovery.session_recovery_state.search_active {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
-                } else if !state.session_recovery_state.search_query.is_empty() {
+                } else if !state.recovery.session_recovery_state.search_query.is_empty() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("filtered")));
                 }
             }

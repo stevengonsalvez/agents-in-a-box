@@ -549,7 +549,7 @@ impl LayoutComponent {
             // on the HomeScreen).
             // MCP pool overlay paints above the screen, below a confirmation
             // dialog (so a stop confirmation sits on top of it).
-            if let Some(ref overlay) = state.mcp_overlay {
+            if let Some(ref overlay) = state.mcp_pool.mcp_overlay {
                 crate::components::mcp_overlay::render(frame, frame_size, overlay);
             }
             if state.confirmation_dialog.is_some() {
@@ -692,7 +692,7 @@ impl LayoutComponent {
         }
 
         // MCP pool overlay (above the screen, below the confirmation dialog).
-        if let Some(ref overlay) = state.mcp_overlay {
+        if let Some(ref overlay) = state.mcp_pool.mcp_overlay {
             crate::components::mcp_overlay::render(frame, frame.size(), overlay);
         }
 
@@ -1330,11 +1330,11 @@ impl LayoutComponent {
 
         // Render input field with block cursor
         let empty_string = String::new();
-        let commit_message = state.quick_commit_message.as_ref().unwrap_or(&empty_string);
+        let commit_message = state.git_view.quick_commit_message.as_ref().unwrap_or(&empty_string);
 
         // Create spans with cursor visualization
         let (before_cursor, after_cursor) =
-            commit_message.split_at(state.quick_commit_cursor.min(commit_message.len()));
+            commit_message.split_at(state.git_view.quick_commit_cursor.min(commit_message.len()));
 
         let input_line = Line::from(vec![
             Span::styled(before_cursor, Style::default().fg(SOFT_WHITE)),

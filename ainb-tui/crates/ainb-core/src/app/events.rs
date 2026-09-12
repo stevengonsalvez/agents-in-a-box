@@ -1340,7 +1340,7 @@ impl EventHandler {
         let skills_text_active =
             state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
         let recovery_text_active = state.current_screen == screen_ids::SESSION_RECOVERY
-            && state.session_recovery_state.search_active;
+            && state.recovery.session_recovery_state.search_active;
         // SkillManager add-source / search prompt — when its input
         // overlay is open the user is typing a URI or filter, which
         // routinely contains `:` (e.g. `gh:owner/repo`,
@@ -1354,7 +1354,12 @@ impl EventHandler {
                     b.mode == crate::components::skill_manager_screen::BrowseMode::Query
                 }));
         let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
-            && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
+            && state
+                .git_view
+                .git_view_state
+                .as_ref()
+                .map(|gv| gv.is_in_commit_mode())
+                .unwrap_or(false);
 
         // Config is multi-mode — only the states that accept free-form
         // character input count as text-entry. Plain navigation of
@@ -1551,14 +1556,18 @@ impl EventHandler {
                 Some(AppEvent::ConfigSearchChar(character))
             }
             screen_ids::GIT_VIEW
-                if state.git_view_state.as_ref().is_some_and(|git| git.is_in_commit_mode()) =>
+                if state
+                    .git_view
+                    .git_view_state
+                    .as_ref()
+                    .is_some_and(|git| git.is_in_commit_mode()) =>
             {
                 Some(AppEvent::GitViewCommitInputChar(character))
             }
             screen_ids::SKILLS if state.skills_state.search_active => {
                 Some(AppEvent::SkillsSearchChar(character))
             }
-            screen_ids::SESSION_RECOVERY if state.session_recovery_state.search_active => {
+            screen_ids::SESSION_RECOVERY if state.recovery.session_recovery_state.search_active => {
                 Some(AppEvent::SessionRecoverySearchChar(character))
             }
             screen_ids::SKILL_MANAGER if state.skill_manager_state.input.is_some() => {
@@ -2307,7 +2316,7 @@ impl EventHandler {
             AppEvent::McpOverlayRefresh => state.spawn_mcp_fetch(),
             AppEvent::McpOverlayStopServer => {
                 if let Some(name) =
-                    state.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
+                    state.mcp_pool.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
                 {
                     state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
                         title: "Stop MCP server".to_string(),
@@ -2324,6 +2333,7 @@ impl EventHandler {
             }
             AppEvent::McpOverlayStopDaemon => {
                 let (servers, sessions) = state
+                    .mcp_pool
                     .mcp_overlay
                     .as_ref()
                     .map(|o| {
@@ -3337,26 +3347,26 @@ impl EventHandler {
                 tracing::info!(
                     "Git view state after show: current_screen = {:?}, git_state = {}",
                     state.current_screen,
-                    state.git_view_state.is_some()
+                    state.git_view.git_view_state.is_some()
                 );
             }
             AppEvent::GitViewSwitchTab => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.switch_tab();
                 }
             }
             AppEvent::GitViewNextFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.next_file();
                 }
             }
             AppEvent::GitViewPrevFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.previous_file();
                 }
             }
             AppEvent::GitViewScrollUp => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     match git_state.active_tab {
                         crate::components::git_view::GitTab::Review => {
                             git_state.review_scroll_up(1)
@@ -3370,7 +3380,7 @@ impl EventHandler {
                 }
             }
             AppEvent::GitViewScrollDown => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     match git_state.active_tab {
                         crate::components::git_view::GitTab::Review => {
                             git_state.review_scroll_down(1)
@@ -3384,71 +3394,71 @@ impl EventHandler {
                 }
             }
             AppEvent::GitReviewToggleCollapse => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_toggle_collapse();
                 }
             }
             AppEvent::GitReviewExpandContext => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_expand_context();
                 }
             }
             AppEvent::GitReviewNextHunk => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_next_hunk();
                 }
             }
             AppEvent::GitReviewPrevHunk => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_prev_hunk();
                 }
             }
             AppEvent::GitReviewNextReviewFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_next_file();
                 }
             }
             AppEvent::GitReviewPrevReviewFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_prev_file();
                 }
             }
             AppEvent::GitReviewSidebarUp => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_sidebar_up();
                 }
             }
             AppEvent::GitReviewSidebarDown => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_sidebar_down();
                 }
             }
             AppEvent::GitReviewExpandAllFolders => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_expand_all_folders();
                 }
             }
             AppEvent::GitReviewCollapseAllFolders => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_collapse_all_folders();
                 }
             }
             AppEvent::GitViewNextCommit => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     if git_state.selected_commit_index < git_state.commits.len().saturating_sub(1) {
                         git_state.selected_commit_index += 1;
                     }
                 }
             }
             AppEvent::GitViewPrevCommit => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     if git_state.selected_commit_index > 0 {
                         git_state.selected_commit_index -= 1;
                     }
                 }
             }
             AppEvent::GitViewShowCommitDiff => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     // Get the selected commit hash
                     if let Some(commit) = git_state.commits.get(git_state.selected_commit_index) {
                         let commit_hash = commit.hash_short.clone();
@@ -3475,17 +3485,17 @@ impl EventHandler {
                 }
             }
             AppEvent::GitViewToggleFolder => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.toggle_folder();
                 }
             }
             AppEvent::GitViewExpandAll => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.expand_all_folders();
                 }
             }
             AppEvent::GitViewCollapseAll => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.collapse_all_folders();
                 }
             }
@@ -3498,12 +3508,12 @@ impl EventHandler {
                     .previous_screen
                     .take()
                     .unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
-                state.git_view_state = None;
+                state.git_view.git_view_state = None;
             }
             // Commit message input events
             AppEvent::GitViewStartCommit => {
                 tracing::info!("Processing GitViewStartCommit event");
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     tracing::info!("Git state found, starting commit message input");
                     git_state.start_commit_message_input();
                     state.add_info_notification(
@@ -3514,27 +3524,27 @@ impl EventHandler {
                 }
             }
             AppEvent::GitViewCommitInputChar(ch) => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.add_char_to_commit_message(ch);
                 }
             }
             AppEvent::GitViewCommitBackspace => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.backspace_commit_message();
                 }
             }
             AppEvent::GitViewCommitCursorLeft => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.move_commit_cursor_left();
                 }
             }
             AppEvent::GitViewCommitCursorRight => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.move_commit_cursor_right();
                 }
             }
             AppEvent::GitViewCommitCancel => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.cancel_commit_message_input();
                 }
             }
@@ -3573,7 +3583,7 @@ impl EventHandler {
                 state.add_success_notification(format!("✅ {}", message));
                 // Exit git view and return to home screen
                 state.current_screen = crate::app::screens::ids::HOME.to_string();
-                state.git_view_state = None;
+                state.git_view.git_view_state = None;
                 tracing::info!("Returned to home screen after successful commit");
             }
             // AINB 2.0: Home screen events
@@ -3663,7 +3673,7 @@ impl EventHandler {
                         Self::process_event(AppEvent::GoToDaemons, state);
                     }
                     SidebarItem::Recovery => {
-                        state.session_recovery_state.refresh();
+                        state.recovery.session_recovery_state.refresh();
                         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                     }
                     SidebarItem::Mcp => {
@@ -4996,7 +5006,7 @@ impl EventHandler {
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
-                state.session_recovery_state.refresh();
+                state.recovery.session_recovery_state.refresh();
                 state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
             } // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
@@ -5825,27 +5835,27 @@ impl EventHandler {
             AppEvent::SessionRecoverySearchStart => {
                 // Reuse cancel to drop any prior query and re-anchor the
                 // selection, then take focus.
-                state.session_recovery_state.search_cancel();
-                state.session_recovery_state.search_active = true;
+                state.recovery.session_recovery_state.search_cancel();
+                state.recovery.session_recovery_state.search_active = true;
             }
             AppEvent::SessionRecoverySearchChar(c) => {
-                state.session_recovery_state.search_push(c);
+                state.recovery.session_recovery_state.search_push(c);
             }
             AppEvent::SessionRecoverySearchBackspace => {
-                state.session_recovery_state.search_pop();
+                state.recovery.session_recovery_state.search_pop();
             }
             AppEvent::SessionRecoverySearchClose => {
                 // Query is preserved so the narrowed list stays actionable.
-                state.session_recovery_state.search_active = false;
+                state.recovery.session_recovery_state.search_active = false;
             }
             AppEvent::SessionRecoverySearchCancel => {
-                state.session_recovery_state.search_cancel();
+                state.recovery.session_recovery_state.search_cancel();
             }
             AppEvent::SessionRecoveryBack => {
                 // If overlay is showing, dismiss it first
-                if state.session_recovery_state.recovery_overlay.is_some() {
+                if state.recovery.session_recovery_state.recovery_overlay.is_some() {
                     tracing::debug!("Dismissing recovery overlay");
-                    state.session_recovery_state.dismiss_overlay();
+                    state.recovery.session_recovery_state.dismiss_overlay();
                 } else {
                     tracing::debug!("Session recovery back");
                     state.current_screen = screen_ids::HOME.to_string();
@@ -5853,17 +5863,18 @@ impl EventHandler {
             }
             AppEvent::SessionRecoveryNext => {
                 tracing::debug!("Session recovery next");
-                state.session_recovery_state.next();
+                state.recovery.session_recovery_state.next();
             }
             AppEvent::SessionRecoveryPrev => {
                 tracing::debug!("Session recovery prev");
-                state.session_recovery_state.previous();
+                state.recovery.session_recovery_state.previous();
             }
             AppEvent::SessionRecoveryResume => {
                 tracing::debug!("Session recovery resume");
-                if state.session_recovery_state.has_multi_selection() {
+                if state.recovery.session_recovery_state.has_multi_selection() {
                     // Bulk resume all multi-selected items
-                    let (resumed, failed) = state.session_recovery_state.resume_multi_selected();
+                    let (resumed, failed) =
+                        state.recovery.session_recovery_state.resume_multi_selected();
                     if failed == 0 {
                         state.add_success_notification(format!("Resumed {} sessions", resumed));
                     } else {
@@ -5874,21 +5885,30 @@ impl EventHandler {
                     }
                 } else {
                     // Single item resume (worktree or session)
-                    let (name, result) = if state.session_recovery_state.is_worktree_selected() {
-                        let name = state
-                            .session_recovery_state
-                            .selected_worktree()
-                            .map(|w| w.name.clone())
-                            .unwrap_or_default();
-                        (name, state.session_recovery_state.resume_worktree())
-                    } else {
-                        let name = state
-                            .session_recovery_state
-                            .selected()
-                            .map(|s| s.session.clone())
-                            .unwrap_or_default();
-                        (name, state.session_recovery_state.resume_selected())
-                    };
+                    let (name, result) =
+                        if state.recovery.session_recovery_state.is_worktree_selected() {
+                            let name = state
+                                .recovery
+                                .session_recovery_state
+                                .selected_worktree()
+                                .map(|w| w.name.clone())
+                                .unwrap_or_default();
+                            (
+                                name,
+                                state.recovery.session_recovery_state.resume_worktree(),
+                            )
+                        } else {
+                            let name = state
+                                .recovery
+                                .session_recovery_state
+                                .selected()
+                                .map(|s| s.session.clone())
+                                .unwrap_or_default();
+                            (
+                                name,
+                                state.recovery.session_recovery_state.resume_selected(),
+                            )
+                        };
 
                     let overlay_result = match result {
                         Ok(ref tmux_name) => {
@@ -5910,7 +5930,7 @@ impl EventHandler {
                         Err(e) => (format!("Failed: {}", e), false),
                     };
 
-                    state.session_recovery_state.recovery_overlay =
+                    state.recovery.session_recovery_state.recovery_overlay =
                         Some(crate::components::session_recovery::RecoveryOverlay {
                             title,
                             results: vec![overlay_result],
@@ -5925,8 +5945,8 @@ impl EventHandler {
             AppEvent::SessionRecoveryArchive => {
                 tracing::debug!("Session recovery archive/delete");
                 // Use delete_selected() which handles both sessions (archive) and worktrees (delete)
-                let is_worktree = state.session_recovery_state.is_worktree_selected();
-                match state.session_recovery_state.delete_selected() {
+                let is_worktree = state.recovery.session_recovery_state.is_worktree_selected();
+                match state.recovery.session_recovery_state.delete_selected() {
                     Ok(()) => {
                         if is_worktree {
                             state.add_info_notification("Worktree deleted".to_string());
@@ -5945,15 +5965,15 @@ impl EventHandler {
             }
             AppEvent::SessionRecoveryRefresh => {
                 tracing::debug!("Session recovery refresh");
-                state.session_recovery_state.refresh();
+                state.recovery.session_recovery_state.refresh();
             }
             AppEvent::SessionRecoveryToggleView => {
                 tracing::debug!("Session recovery toggle view");
-                state.session_recovery_state.toggle_view_mode();
+                state.recovery.session_recovery_state.toggle_view_mode();
             }
             AppEvent::SessionRecoveryRecoverAll => {
                 tracing::info!("Session recovery: recovering all worktrees");
-                let result = state.session_recovery_state.recover_all_worktrees();
+                let result = state.recovery.session_recovery_state.recover_all_worktrees();
                 let total = result.succeeded.len() + result.failed.len();
                 if result.failed.is_empty() {
                     state.add_info_notification(format!(
@@ -5970,21 +5990,22 @@ impl EventHandler {
                 }
             }
             AppEvent::SessionRecoveryToggleSelect => {
-                state.session_recovery_state.toggle_select();
-                let count = state.session_recovery_state.selected_items.len();
+                state.recovery.session_recovery_state.toggle_select();
+                let count = state.recovery.session_recovery_state.selected_items.len();
                 if count > 0 {
                     state.add_info_notification(format!("{} items selected", count));
                 }
             }
             AppEvent::SessionRecoveryDeleteSelected => {
-                let count = state.session_recovery_state.selected_items.len();
+                let count = state.recovery.session_recovery_state.selected_items.len();
                 if count == 0 {
                     state.add_info_notification(
                         "No items selected. Use Space to select items first.".to_string(),
                     );
                 } else {
                     tracing::info!("Session recovery: deleting {} selected items", count);
-                    let (deleted, failed) = state.session_recovery_state.delete_multi_selected();
+                    let (deleted, failed) =
+                        state.recovery.session_recovery_state.delete_multi_selected();
                     if failed == 0 {
                         state.add_info_notification(format!("Deleted {} items", deleted));
                     } else {
@@ -6980,7 +7001,7 @@ mod session_recovery_key_tests {
     fn recovery_state() -> AppState {
         let mut state = AppState::default();
         state.current_screen = ids::SESSION_RECOVERY.to_string();
-        state.session_recovery_state.recovery_overlay = None;
+        state.recovery.session_recovery_state.recovery_overlay = None;
         state
     }
 
@@ -7002,7 +7023,7 @@ mod session_recovery_key_tests {
     #[test]
     fn typing_a_query_does_not_trigger_panel_actions() {
         let mut state = recovery_state();
-        state.session_recovery_state.search_active = true;
+        state.recovery.session_recovery_state.search_active = true;
         for c in ['d', 'D', 'A', 'r', 'R', ' ', 'j', 'k'] {
             assert!(
                 matches!(key(&mut state, c), Some(AppEvent::SessionRecoverySearchChar(got)) if got == c),
@@ -7017,8 +7038,8 @@ mod session_recovery_key_tests {
     #[test]
     fn escape_clears_an_applied_filter_before_leaving_the_screen() {
         let mut state = recovery_state();
-        state.session_recovery_state.search_query = "zzzz".to_string();
-        state.session_recovery_state.search_active = false;
+        state.recovery.session_recovery_state.search_query = "zzzz".to_string();
+        state.recovery.session_recovery_state.search_active = false;
 
         let esc = KeyEvent::new(Esc, KeyModifiers::NONE);
         assert!(matches!(
@@ -7027,7 +7048,7 @@ mod session_recovery_key_tests {
         ));
 
         // Second Esc, with no filter left to drop, leaves as it always did.
-        state.session_recovery_state.search_query.clear();
+        state.recovery.session_recovery_state.search_query.clear();
         assert!(matches!(
             EventHandler::handle_key_event(esc, &mut state),
             Some(AppEvent::SessionRecoveryBack)
@@ -7039,7 +7060,7 @@ mod session_recovery_key_tests {
     #[test]
     fn escape_cancels_and_enter_keeps_the_filter() {
         let mut state = recovery_state();
-        state.session_recovery_state.search_active = true;
+        state.recovery.session_recovery_state.search_active = true;
         assert!(matches!(
             EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state),
             Some(AppEvent::SessionRecoverySearchCancel)
@@ -7648,7 +7669,7 @@ mod panel_back_tests {
     #[test]
     fn mcp_overlay_import_key_dispatches() {
         let mut state = AppState::default();
-        state.mcp_overlay = Some(crate::app::state::McpOverlayState {
+        state.mcp_pool.mcp_overlay = Some(crate::app::state::McpOverlayState {
             pool_enabled: true,
             daemon_running: true,
             servers: vec![],
@@ -7945,13 +7966,13 @@ mod text_input_guard_tests {
             state.current_screen = screen_ids::HOME.to_string();
             state.other_tmux_rename_mode = false;
             state.ssh_session_rename_mode = false;
-            state.quick_commit_message = None;
+            state.git_view.quick_commit_message = None;
             state.auth_provider_popup_state.show_popup = false;
             state.config_screen_state = Default::default();
             state.config_popup_state = Default::default();
             state.skills_state.search_active = false;
-            state.session_recovery_state.search_active = false;
-            state.git_view_state = None;
+            state.recovery.session_recovery_state.search_active = false;
+            state.git_view.git_view_state = None;
         }
 
         // AppState construction refreshes session recovery from disk. Reuse one
@@ -8043,7 +8064,7 @@ mod text_input_guard_tests {
                 s.ssh_session_rename_mode = true
             }),
             ("quick_commit_message", |s| {
-                s.quick_commit_message = Some(String::new())
+                s.git_view.quick_commit_message = Some(String::new())
             }),
             ("auth_provider_popup", |s| {
                 s.auth_provider_popup_state.show_popup = true
@@ -8079,7 +8100,7 @@ mod text_input_guard_tests {
         // Session recovery filter bar.
         reset_text_context_state(&mut state);
         state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
-        state.session_recovery_state.search_active = true;
+        state.recovery.session_recovery_state.search_active = true;
         assert!(
             EventHandler::is_text_input_context(&state),
             "Session recovery search_active must be treated as text input"
@@ -8090,7 +8111,7 @@ mod text_input_guard_tests {
         state.current_screen = screen_ids::GIT_VIEW.to_string();
         let mut git_state = GitViewState::new(PathBuf::from("/tmp"));
         git_state.start_commit_message_input();
-        state.git_view_state = Some(git_state);
+        state.git_view.git_view_state = Some(git_state);
         assert!(
             EventHandler::is_text_input_context(&state),
             "GitView commit-message mode must be treated as text input"
@@ -8100,7 +8121,7 @@ mod text_input_guard_tests {
         // a text input — it's a navigable screen.
         reset_text_context_state(&mut state);
         state.current_screen = screen_ids::GIT_VIEW.to_string();
-        state.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
+        state.git_view.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
         assert!(
             !EventHandler::is_text_input_context(&state),
             "GitView outside commit mode must NOT be treated as text input"

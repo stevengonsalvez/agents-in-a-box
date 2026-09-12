@@ -745,7 +745,7 @@ impl Screen for GitViewScreen {
         ids::GIT_VIEW
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        if let Some(ref git_state) = state.git_view_state {
+        if let Some(ref git_state) = state.git_view.git_view_state {
             GitViewComponent::render(frame, area, git_state);
         }
     }
@@ -758,7 +758,7 @@ impl Screen for SessionRecoveryScreen {
         ids::SESSION_RECOVERY
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
-        SessionRecovery::render(frame, area, &state.session_recovery_state, ui);
+        SessionRecovery::render(frame, area, &state.recovery.session_recovery_state, ui);
     }
 }
 
