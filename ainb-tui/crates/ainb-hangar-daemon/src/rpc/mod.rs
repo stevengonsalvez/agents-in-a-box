@@ -1536,10 +1536,7 @@ async fn handle(
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::FLEET_NEGOTIATE => handle_fleet_negotiate(req, health).await,
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
-        methods::FLEET_STATUS => crate::fleet::status_rows(pool)
-            .await
-            .map_err(|error| store_err(&error))
-            .and_then(|result| to_value(&result)),
+        methods::FLEET_STATUS => handle_fleet_status(pool).await,
         // Receiver registration occurs in `serve_conn` before this snapshot is
         // read. The ack carries its exact head, then the forwarder drains rows
         // committed after that head before waiting for live wakeups.
@@ -1861,6 +1858,21 @@ async fn handle_fleet_usage_summary(req: &RpcRequest) -> Result<serde_json::Valu
     let params: FleetUsageSummaryParams = parse_params(req, "{ period? }")?;
     let summary = crate::fleet_usage::summary(params.period).await;
     to_value(&summary)
+}
+
+/// Return the one D14 status derivation: every agent's state, provenance, tier
+/// and evidence clock, derived once here so no surface folds its own.
+///
+/// Capability-gated like every other fleet read. D17 makes a new method a
+/// capability precisely so the protocol integer can stay still, and the clients
+/// this exists for are the desktop and the phone, which have to be able to ask
+/// whether a daemon serves it.
+async fn handle_fleet_status(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::FLEET_CAPABILITY_STATUS_READ;
+
+    require_fleet_capability(FLEET_CAPABILITY_STATUS_READ)?;
+    let result = crate::fleet::status_rows(pool).await.map_err(|error| store_err(&error))?;
+    to_value(&result)
 }
 
 /// Return the rich usage dashboard with 53-week history, heatmap, forecast,

@@ -308,6 +308,7 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     // APPENDED, never spliced: the catalogue is append-only and a committed
     // file records the order, so a new string goes after every existing one.
     CAP_ATTENTION_FENCE,
+    crate::fleet::FLEET_CAPABILITY_STATUS_READ,
 ];
 
 /// Whether this build advertises `id`.
