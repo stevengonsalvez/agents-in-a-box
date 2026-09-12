@@ -15,10 +15,10 @@ distribution requirement belongs with D4 planning, not this P0 plus S run.
 
 ## Portable Repository State
 
-- Branch: `anthias`
-- Head: `2e6492b3 test(core): isolate Burndown session origin`
-- Working tree: clean at handoff capture
-- Current local commits before this handoff: seven ahead of `origin/anthias`
+- Branch: `v2`
+- Base: rebased onto `origin/v2`
+- Working tree: clean after replay
+- P0 plus S commits: replayed from `anthias` without changing `anthias`
 - Beads: `agents-in-a-box-j6b` and `agents-in-a-box-j6b.2` remain `in_progress`
 
 Recent completed work includes:
@@ -69,7 +69,7 @@ historical evidence only.
 
 Before dispatching a Claude worker on the new machine:
 
-1. Open Orca against the checked-out `anthias` branch after this handoff is pushed.
+1. Open Orca against the checked-out `v2` branch after this handoff is pushed.
 2. Run `claude login` in an Orca terminal and accept the trusted-workspace prompt.
 3. Run `orca account add --agent claude`.
 4. Verify `orca account list --json` reports one active Claude account.
