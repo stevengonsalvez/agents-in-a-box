@@ -69,7 +69,7 @@ flowchart TD
   W0w --> R1
   P6 --> R1
   SK3[spike 3 peer WS over tailnet, ssh -L]:::done --> R1
-  SK2[spike 2 control-mode fidelity]:::plan --> R2
+  SK2[spike 2 control-mode fidelity]:::done --> R2
   SK7[spike 7 pause-after]:::done --> R2
 
   subgraph S6[slice 6: mobile]
@@ -101,7 +101,7 @@ Same DAG, terminal view:
  slice 3      │                        D1 ◀── P2   D2 ◀── P3   D3 ◀── P5  ◀──────┘      │
               │                        D4' updater + release matrix                     │
               ▼                                                                         ▼
- slice 5  R1 hosts + WS  ◀── W0-wire, P6, spike 3 ✓ ─▶  R2 emulator + floor ◀── spike 2, spike 7 ✓
+ slice 5  R1 hosts + WS  ◀── W0-wire, P6, spike 3 ✓ ─▶  R2 emulator + floor ◀── spikes 2 ✓, 7 ✓
                                                              │
  slice 6                                              M1 mobile ◀── spikes 5, 6
 ```
@@ -134,8 +134,8 @@ Same DAG, terminal view:
 | D4' updater, release matrix (host switcher moved to R1) | 3 | planned | D3 | release-branch human-driver run | spec v1.3 amendment 26 |
 | spike 3 peer WS + Noise over tailnet and `ssh -L` | 5 | **done, go for R1 with two contract changes** | none | 50 MB in 2 s both carriers; daemon survives desktop close | `research/2026-09-11_multi-surface_SPIKE-3-peer-ws-noise.md`. Real daemon 1.28.1 served `auth/hello`, `fleet/snapshot`, `fleet/subscribe` through the proxy on both carriers; `SIGKILL` mid-subscription, 60 s dead, resync in 124 ms (tailnet) / 128 ms (`ssh -L`), `replay_state: complete`, 601 events, no gap. 50 MiB **fails at the spec's 512 KiB per-stream window** (2.99 s tailnet, 1.86-2.55 s `ssh -L`) and **passes at the spec's 2 MiB ceiling** (0.85 s / 1.02-1.63 s). Noise is not the cause: it costs 5 percent on tailnet and is inside variance on `ssh -L`. Storm 50 clients, 200 connections, 600 resyncs, 0 failures, 7.8 MiB peak RSS per proxy |
 | R1 HostId, WS listener, Noise IK, single-use invite, device registry, scopes, census, host switcher | 5 | planned | W0-wire, P6, ~~spike 3~~ (done) | two boxes in one UI; kill client mid-turn and resync; revoke closes socket 4403; **per-stream ack window opens at 2 MiB or credit refills before the window drains**; **carrier and host id bound into the handshake transcript**; **host switcher carries a carrier column** | spec v1.3 R1, amended by spike 3 |
-| spike 2 control-mode emulator fidelity | 5 | planned | none | snapshot byte-equal after ANSI normalisation | spec v1.3 spikes |
-| R2 emulator, snapshot, per-viewer flow control, driver floor | 5 | planned | R1, spike 2 | 40x20 phone frame; two typists no interleave; resize count at most 2 | spec v1.3 R2 |
+| spike 2 control-mode emulator fidelity | 5 | **done 2026-09-12** | | met: the byte stream reassembled from `%extended-output` is byte-identical to a direct `portable-pty` on 8 fixtures at 120x40 and 40x20, and all 64 snapshot comparisons are equal, so no normalisation was needed. Two live agent TUIs (`claude`, `codex`) and a 53 MB flood match `capture-pane` on 40 of 40 rows once seeded. Crate: `wezterm-term` at `unicode_version: 14`, the only candidate whose cell advance matches tmux on all 13 probe glyphs and the only one at 413 KB per emulator (vt100 3,955 KB, alacritty 3,097 KB). vt100 is out: it does not home the cursor on DECSTBM and has no OSC 8 model | `research/2026-09-11_multi-surface_SPIKE-2-control-mode-fidelity.md` |
+| R2 emulator, snapshot, per-viewer flow control, driver floor | 5 | planned | R1 (spike 2 met 2026-09-12) | 40x20 phone frame; two typists no interleave; resize count at most 2. Spike 2 adds: emulator is `wezterm-term` at `unicode_version: 14`, live window stays 1,000 rows (413 KB per session, 40 MB at 100); parse the control stream as bytes, never as UTF-8 lines, because tmux splits graphemes across notifications; recognise `%pause` and `%continue` inside command reply blocks; seed every pane from `capture-pane -e` before tailing and re-seed on `%continue` (40 of 40 rows wrong without it, 11.7 MB dropped); issue `capture-pane` on the control stream so the snapshot is ordered against the tail; the daemon's control client never sends `refresh-client -C`, and daemon-created sessions set `window-size manual` | spec v1.3 R2 + spike 2 report |
 | spikes 5, 6 phone crypto via uniffi, background socket lifetime | 6 | planned | none | | spec v1.3 spikes |
 | M1 Expo companion, interactive terminal behind `mobile+type` | 6 | planned | R2, W0-wire, spikes 5, 6 | answer a banner in two taps, foreground | spec v1.3 M1 |
 | v2 → main | | planned | agreed cut, at latest M1 | | |
