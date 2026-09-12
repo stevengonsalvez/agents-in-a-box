@@ -158,6 +158,12 @@ pub const CAP_SOCKET_VERSIONED: &str = "hangar.socket.versioned";
 pub const CAP_CONNECTIONS_REGISTRY: &str = "hangar.connections.registry";
 /// Capability: the converged attention inbox — list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
+/// Capability: the wire attention row carries its `version`, so a client can
+/// fence `attention/answer` on the row it actually read (D18).
+///
+/// A client that does not see this string is talking to a daemon whose rows
+/// report `0`, and must send no fence rather than a fence it made up.
+pub const CAP_ATTENTION_FENCE: &str = "hangar.attention.fence";
 /// Capability: workspace event subscription with a durable cursor.
 pub const CAP_WORKSPACE_SUBSCRIBE: &str = "hangar.workspace.subscribe";
 /// Capability: issue read surface, including search and the activity timeline.
@@ -299,6 +305,9 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     crate::fleet::FLEET_CAPABILITY_RUNTIME_READ,
     crate::fleet::FLEET_CAPABILITY_USAGE_READ,
     crate::fleet::FLEET_CAPABILITY_DASHBOARD_READ,
+    // APPENDED, never spliced: the catalogue is append-only and a committed
+    // file records the order, so a new string goes after every existing one.
+    CAP_ATTENTION_FENCE,
 ];
 
 /// Whether this build advertises `id`.

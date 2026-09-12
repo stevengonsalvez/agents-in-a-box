@@ -2785,6 +2785,7 @@ mod tests {
             degraded: false,
             created_at: 0,
             channels,
+            version: 1,
         }
     }
 

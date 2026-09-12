@@ -68,3 +68,4 @@ fleet.transcript.read
 fleet.runtime.read
 fleet.usage.read
 fleet.dashboard.read
+hangar.attention.fence

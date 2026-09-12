@@ -9969,6 +9969,7 @@ mod answer_verdict_tests {
             degraded: false,
             created_at: 1,
             channels: ainb_hangar_proto::ChannelSet::NONE,
+            version: 1,
         }
     }
 
@@ -10154,6 +10155,7 @@ mod inbox_attention_key_tests {
             degraded: false,
             created_at: 1,
             channels: ainb_hangar_proto::ChannelSet::NONE,
+            version: 1,
         }
     }
 

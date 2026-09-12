@@ -463,6 +463,7 @@ mod tests {
             degraded: false,
             created_at: 1000,
             channels,
+            version: 1,
         }
     }
 
