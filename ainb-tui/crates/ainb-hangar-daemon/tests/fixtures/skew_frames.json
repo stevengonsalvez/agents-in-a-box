@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "The committed wire frames the D17 skew harness drives (spec D17, amendment 21).",
+    "Each string is a VERBATIM frame one participant emits. They are committed",
+    "rather than constructed so a change to either side's encoder shows up as a",
+    "diff in this file and not as a green test against a moved goalpost.",
+    "<TOKEN> is substituted with the fixture daemon's real token at runtime;",
+    "nothing else is templated."
+  ],
+  "n_minus_1_client_hello_params": "{\"token\":\"<TOKEN>\"}",
+  "n_minus_1_daemon_hello_ack": "{}",
+  "n_minus_1_daemon_attention_list_result": "{\"attention\":[]}",
+  "swift_client_hello_params": "{\"capabilities\":[\"hangar.auth.hello.negotiated\",\"hangar.mutation.op_id\",\"hangar.mutation.receipt\",\"hangar.socket.versioned\"],\"protocol\":{\"max\":1,\"min\":1},\"token\":\"<TOKEN>\"}",
+  "swift_negotiated_ack_sample": "{\"protocol\":{\"min\":1,\"max\":1},\"selected\":1,\"capabilities\":[\"hangar.auth.hello.negotiated\",\"hangar.mutation.op_id\"],\"daemon_version\":\"0.1.0\"}"
+}

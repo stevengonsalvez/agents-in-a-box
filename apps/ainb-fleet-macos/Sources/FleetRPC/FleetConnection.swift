@@ -112,9 +112,32 @@ actor FleetConnection {
         guard !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FleetConnectionError.emptyToken
         }
-        struct EmptyResult: Decodable {}
-        _ = try await request("auth/hello", params: AuthHelloParams(token: token), result: EmptyResult.self)
+        let hello = try await request(
+            "auth/hello",
+            params: AuthHelloParams(token: token),
+            result: AuthHelloResult.self
+        )
+        // A daemon whose range does not overlap ours answers an error frame,
+        // which `request` already throws on, so reaching here means a version
+        // both ends can speak. What is recorded is which one.
+        negotiatedProtocol = hello.selectedOrLegacy
+        daemonCapabilities = hello.capabilities
         authenticated = true
+    }
+
+    /// The Hangar protocol version this connection settled on (D17).
+    ///
+    /// `1` against a daemon that does not negotiate, which is the honest
+    /// reading of a bare `{}` ack.
+    private(set) var negotiatedProtocol: UInt32 = 1
+
+    /// The daemon's capability catalogue, as declared in the hello reply.
+    /// Empty against a daemon that predates the negotiation.
+    private(set) var daemonCapabilities: [String] = []
+
+    /// Whether the connected daemon advertised `capability`.
+    func daemonAdvertises(_ capability: String) -> Bool {
+        daemonCapabilities.contains(capability)
     }
 
     func negotiate(

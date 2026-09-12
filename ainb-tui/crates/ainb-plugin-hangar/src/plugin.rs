@@ -2915,6 +2915,7 @@ impl HangarPlugin {
                     expected_version,
                     request_id,
                     action,
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 };
                 self.send_fleet_rpc(
                     host,
@@ -2936,6 +2937,7 @@ impl HangarPlugin {
                     target_keys: recipient_keys,
                     text,
                     idempotency_key,
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 };
                 self.send_fleet_rpc(
                     host,
@@ -6696,6 +6698,7 @@ mod tests {
             cwd: format!("/work/{id}"),
             workspace_id: None,
             kind: "ask_user_question".to_string(),
+            version: 1,
             payload: serde_json::json!({
                 "kind": "ASK",
                 "context": { "question": "q", "options": [{ "label": "y" }] }
@@ -10050,6 +10053,7 @@ mod answer_verdict_tests {
             degraded: false,
             created_at: 1,
             channels: ainb_hangar_proto::ChannelSet::NONE,
+            version: 1,
         }
     }
 
@@ -10235,6 +10239,7 @@ mod inbox_attention_key_tests {
             degraded: false,
             created_at: 1,
             channels: ainb_hangar_proto::ChannelSet::NONE,
+            version: 1,
         }
     }
 

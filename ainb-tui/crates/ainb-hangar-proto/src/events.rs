@@ -1109,8 +1109,22 @@ pub struct AttentionRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<String>,
     /// The request family wire token (`ask_user_question` / `approval` /
-    /// `codex_request_user` / `error` / `waiting` / `escalation`).
+    /// `codex_request_user` / `error` / `waiting` / `escalation` /
+    /// `delivery_unconfirmed`).
     pub kind: String,
+    /// The D18 fence value for `attention/answer`: the row version this
+    /// snapshot was taken at.
+    ///
+    /// A client that sends it back in its mutation envelope is answering the
+    /// row it actually read; one that has moved on is refused rather than
+    /// delivered. Without this field the fence is unreachable end to end,
+    /// because `attention/list` is where a client learns the value.
+    ///
+    /// Additive: `0` from a daemon that predates the field, which every
+    /// fence-aware client reads as "this daemon has no fence to honour".
+    /// Gated by [`crate::protocol::CAP_ATTENTION_FENCE`].
+    #[serde(default)]
+    pub version: i64,
     /// The full serialised request-context JSON the card renders.
     pub payload: String,
     /// `true` when sourced from the degraded pane-classifier fallback (unhooked

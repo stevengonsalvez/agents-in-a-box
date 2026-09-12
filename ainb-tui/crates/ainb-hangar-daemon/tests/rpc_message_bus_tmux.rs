@@ -128,6 +128,21 @@ impl Client {
 /// A message to a live tmux session is submitted through the hardened literal
 /// send path, resolves DELIVERED, and a replay of the same `request_id` submits
 /// NOTHING further (I1's one-submit half).
+/// The result with the D18 mutation ack stripped.
+///
+/// The PAYLOAD of a replay is identical to the first answer: that is the
+/// guarantee these tests exist for. The ack deliberately is not: it is the one
+/// field that tells a client whether its own attempt executed or was served
+/// from the ledger, so it is asserted separately rather than folded into an
+/// equality that would have to ignore it.
+fn without_ack(result: &serde_json::Value) -> serde_json::Value {
+    let mut value = result.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove(ainb_hangar_proto::mutation::ACK_KEY);
+    }
+    value
+}
+
 #[tokio::test]
 async fn message_to_a_live_tmux_session_submits_once_and_resolves_delivered() {
     let dir = tempfile::tempdir().unwrap();
@@ -201,8 +216,20 @@ async fn message_to_a_live_tmux_session_submits_once_and_resolves_delivered() {
 
     let second = client.call(methods::FLEET_MESSAGE_SEND, params).await;
     assert_eq!(
-        first["result"], second["result"],
+        without_ack(&first["result"]),
+        without_ack(&second["result"]),
         "the replay answers identically"
+    );
+    assert_eq!(first["result"]["mutation"]["outcome"], "created", "{first}");
+    assert_eq!(
+        second["result"]["mutation"]["outcome"], "replayed",
+        "{second}"
+    );
+    // The receipt followed the delivery it describes: a prompt that really
+    // reached the pane is `delivered`, not `failed`.
+    assert_eq!(
+        first["result"]["mutation"]["receipt"], "delivered",
+        "{first}"
     );
     let after_replay = std::fs::read_to_string(&log).unwrap();
     assert_eq!(

@@ -194,6 +194,7 @@ pub fn chat_page_blocking(
                         kind: FleetChannelKind::Pal,
                         name: "copilot".to_string(),
                         recipients: None,
+                        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                     })
                     .await
                     .map_err(|error| ChatPageFailure::new(ChatOpenStep::CreatingChannel, error))?
@@ -224,6 +225,7 @@ pub fn chat_page_blocking(
                 provider,
                 cwd,
                 scope_key: Some(scope.clone()),
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             })
         };
         // Deliberately unnamed, BOTH halves: this call wants THE Pal
@@ -374,6 +376,7 @@ pub fn chat_cancel_turns_blocking(session_keys: Vec<String>) -> Result<String, S
                     expected_version: session.version,
                     request_id: format!("fleet-chat-cancel-{}", uuid::Uuid::new_v4()),
                     action: ControlAction::Interrupt,
+                    mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
                 })
                 .await;
             match receipt {
@@ -621,6 +624,7 @@ pub fn answer_via_daemon_blocking(attention_id: String, answer: String) -> Resul
                 answer,
                 answered_by: "tui".to_string(),
                 is_answer: true,
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             })
             .await
             .map_err(|error| format!("attention/answer via {socket}: {error}"))?;
@@ -703,6 +707,7 @@ pub fn broadcast_blocking(
                 target_keys,
                 text,
                 idempotency_key,
+                mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
             })
             .await
             .map(|result| result.receipts)

@@ -1984,6 +1984,7 @@ async fn attention_row_to_wire(
         cwd: row.cwd,
         workspace_id: row.workspace_id,
         kind: row.kind.as_str().to_string(),
+        version: row.version,
         payload: row.payload,
         degraded: row.degraded,
         created_at: row.created_at,

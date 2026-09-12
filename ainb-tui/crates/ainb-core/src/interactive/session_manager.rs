@@ -374,6 +374,7 @@ pub(crate) async fn ensure_codex_remote_thread(
         model: model.map(str::to_owned),
         thread_id: existing_thread_id,
         skip_permissions,
+        mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
     };
     ensure_codex_remote_thread_with(
         // Ephemeral: `ainb run` prints its summary and exits, while the daemon
@@ -635,6 +636,7 @@ pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Res
     client
         .codex_session_discard(ainb_hangar_proto::fleet::CodexSessionDiscardParams {
             session_id: session_id.to_string(),
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         })
         .await
         .map_err(|error| anyhow::anyhow!("discard failed Codex thread: {error}"))?;

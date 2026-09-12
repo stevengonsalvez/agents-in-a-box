@@ -2,7 +2,7 @@ name: Fleet macOS contract
 
 on:
   push:
-    branches: [main]
+    branches: [main, v2]
     paths:
       - "apps/ainb-fleet-macos/**"
       - "ainb-tui/crates/ainb-hangar-proto/**"
@@ -21,7 +21,7 @@ on:
       - "ainb-tui/Cargo.lock"
       - ".github/workflows/fleet-macos-contract.yml"
   pull_request:
-    branches: [main]
+    branches: [main, v2]
     paths:
       - "apps/ainb-fleet-macos/**"
       - "ainb-tui/crates/ainb-hangar-proto/**"
