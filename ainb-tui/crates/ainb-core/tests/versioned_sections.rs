@@ -98,23 +98,59 @@ fn an_event_that_changes_nothing_bumps_nothing() {
     );
 }
 
+/// One whole frame, in the order `main.rs` runs it.
+///
+/// Driving only `render` would test the half of the frame that CANNOT mutate,
+/// because Phase 3 sealed it behind `&AppState`. The mutation lives in the two
+/// bookends, so a draw test that skips them proves nothing.
+fn draw_one_frame(state: &mut AppState, ui: &mut UiState, layout: &mut LayoutComponent) {
+    let mut terminal = Terminal::new(TestBackend::new(160, 48)).expect("test terminal");
+    layout.tick_before_draw(state);
+    terminal.draw(|frame| layout.render(frame, state, ui)).expect("draw");
+    ainb::components::layout::publish_after_draw(state, ui);
+}
+
 #[test]
 fn a_draw_bumps_no_section() {
-    let state = AppState::default();
+    let mut state = AppState::default();
     let mut ui = UiState::default();
     let mut layout = LayoutComponent::new();
-    let mut terminal = Terminal::new(TestBackend::new(160, 48)).expect("test terminal");
+
+    // The first frame is allowed to move things: rects have never been
+    // published, tabs have never been reconciled. It is the steady state that
+    // has to be quiet, because that is every frame after the first.
+    draw_one_frame(&mut state, &mut ui, &mut layout);
 
     let seen = state.versions();
-    terminal.draw(|frame| layout.render(frame, &state, &mut ui)).expect("draw");
-    terminal
-        .draw(|frame| layout.render(frame, &state, &mut ui))
-        .expect("second draw");
+    draw_one_frame(&mut state, &mut ui, &mut layout);
+    draw_one_frame(&mut state, &mut ui, &mut layout);
 
     let bumped = state.changed_since(&seen);
     assert!(
         bumped.is_empty(),
-        "drawing bumped {bumped:?}; the render path is mutating core state again"
+        "two settled frames bumped {bumped:?}; the draw path is writing unconditionally again"
+    );
+}
+
+#[test]
+fn a_draw_on_the_session_list_bumps_no_section() {
+    // The session list is where the frame does its real work: the tab
+    // reconcile, the answer worker fold, the rect publishes.
+    let mut state = state_with_a_selected_session();
+    state.shell.current_screen = ainb::app::screens::ids::SESSION_LIST.to_string();
+    let mut ui = UiState::default();
+    let mut layout = LayoutComponent::new();
+
+    draw_one_frame(&mut state, &mut ui, &mut layout);
+
+    let seen = state.versions();
+    draw_one_frame(&mut state, &mut ui, &mut layout);
+    draw_one_frame(&mut state, &mut ui, &mut layout);
+
+    let bumped = state.changed_since(&seen);
+    assert!(
+        bumped.is_empty(),
+        "two settled session-list frames bumped {bumped:?}"
     );
 }
 
@@ -178,4 +214,142 @@ fn a_selection_driven_rename_bumps_its_own_section() {
         bumped.contains(&SectionId::SessionLabels),
         "expected SessionLabels in {bumped:?}"
     );
+}
+
+#[test]
+fn every_section_moves_its_own_slot_and_only_its_own() {
+    // One writer per section, so all nineteen slots are exercised rather than
+    // the four a handful of events happen to touch. A slot wired to the wrong
+    // field, or two sections sharing one counter, fails here.
+    #[allow(clippy::type_complexity)]
+    let writers: Vec<(SectionId, Box<dyn Fn(&mut AppState)>)> = vec![
+        (
+            SectionId::Sessions,
+            Box::new(|s: &mut AppState| s.sessions.shell_selected = true),
+        ),
+        (
+            SectionId::SessionLabels,
+            Box::new(|s: &mut AppState| s.session_labels.session_label_rename_mode = true),
+        ),
+        (
+            SectionId::Tmux,
+            Box::new(|s: &mut AppState| s.tmux.other_tmux_expanded = true),
+        ),
+        (
+            SectionId::Ssh,
+            Box::new(|s: &mut AppState| s.ssh.ssh_sessions_expanded = true),
+        ),
+        (
+            SectionId::GitView,
+            Box::new(|s: &mut AppState| s.git_view.is_current_dir_git_repo = true),
+        ),
+        (
+            SectionId::WorkspaceLoad,
+            Box::new(|s: &mut AppState| s.workspace_load.is_loading_workspaces = true),
+        ),
+        (
+            SectionId::NewSession,
+            Box::new(|s: &mut AppState| s.new_session.branch_refresh_seq += 1),
+        ),
+        (
+            SectionId::Logs,
+            Box::new(|s: &mut AppState| s.log_streams.last_logs_session_id = None),
+        ),
+        (
+            SectionId::ClaudeChat,
+            Box::new(|s: &mut AppState| s.claude_chat.claude_chat_visible = true),
+        ),
+        (
+            SectionId::Fleet,
+            Box::new(|s: &mut AppState| s.fleet.attention_elsewhere = 7),
+        ),
+        (
+            SectionId::Hangar,
+            Box::new(|s: &mut AppState| s.hangar.hangar_daemon_config_loaded = true),
+        ),
+        (
+            SectionId::McpPool,
+            Box::new(|s: &mut AppState| s.mcp_pool.mcp_overlay = None),
+        ),
+        // InboxSection has no fields yet, so an explicit `get_mut` is the only
+        // thing that can move it. That is what the assertion is for: the slot
+        // is wired, and nothing else shares it.
+        (
+            SectionId::Inbox,
+            Box::new(|s: &mut AppState| {
+                let _ = s.inbox.get_mut();
+            }),
+        ),
+        (
+            SectionId::PluginsHost,
+            Box::new(|s: &mut AppState| {
+                s.plugins_host.plugin_captures_text.insert("demo".to_string(), true);
+            }),
+        ),
+        (
+            SectionId::Config,
+            Box::new(|s: &mut AppState| s.config.app_config.ui_preferences.show_git_status = true),
+        ),
+        (
+            SectionId::Skills,
+            Box::new(|s: &mut AppState| s.skills.skills_state.loading = true),
+        ),
+        (
+            SectionId::Recovery,
+            Box::new(|s: &mut AppState| s.recovery.session_recovery_state.loading = true),
+        ),
+        (
+            SectionId::Onboarding,
+            Box::new(|s: &mut AppState| s.onboarding.setup_menu_state.selected_index = 1),
+        ),
+        (
+            SectionId::Shell,
+            Box::new(|s: &mut AppState| s.shell.should_quit = true),
+        ),
+    ];
+
+    assert_eq!(
+        writers.len(),
+        SectionId::COUNT,
+        "every section needs a writer here, or its slot is untested"
+    );
+
+    for (id, write) in writers {
+        let mut state = AppState::default();
+        let seen = state.versions();
+        write(&mut state);
+        assert_eq!(
+            state.changed_since(&seen),
+            vec![id],
+            "writing {id:?} did not move exactly its own slot"
+        );
+    }
+}
+
+#[test]
+fn a_daemon_publish_bumps_fleet_even_though_it_arrives_through_an_arc() {
+    // The poller writes into `Arc<Mutex<..>>` cells the render path only reads
+    // by `&`, so without the folded generation a new ASK would never move the
+    // fleet version and a subscriber would never hear about it.
+    use std::sync::atomic::Ordering;
+
+    let mut state = AppState::default();
+    let seen = state.versions();
+
+    assert!(
+        !state.refresh_daemon_attention_generation(),
+        "folding an unchanged generation bumped"
+    );
+    assert!(state.changed_since(&seen).is_empty());
+
+    state.fleet.daemon_attention_generation.fetch_add(1, Ordering::Release);
+    assert!(
+        state.refresh_daemon_attention_generation(),
+        "a publish the section had not seen reported no change"
+    );
+    assert_eq!(state.changed_since(&seen), vec![SectionId::Fleet]);
+
+    let settled = state.versions();
+    assert!(!state.refresh_daemon_attention_generation());
+    assert!(state.changed_since(&settled).is_empty());
 }
