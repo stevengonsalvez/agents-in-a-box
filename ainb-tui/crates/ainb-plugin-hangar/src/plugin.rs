@@ -1300,6 +1300,12 @@ impl HangarPlugin {
             if self.answer_in_flight.as_deref() == Some(attention_id.as_str()) {
                 self.answer_in_flight = None;
             }
+            // Forgetting the wire id means this surface's own reply, when it
+            // arrives, is no longer recognised as an answer reply and falls to
+            // the catch-all arm in `on_daemon_response`, which only keeps the
+            // link alive. That loses nothing: the board already reflects the
+            // outcome, and `on_daemon_event` armed `fetch_pending` above, so the
+            // reconciling `attention/list` still runs.
             self.answers_in_flight.retain(|_, id| id != attention_id);
         }
         let names_may_move = names_may_move(&event);
@@ -1544,17 +1550,23 @@ impl HangarPlugin {
         // answer was sent, remembered at send time (the cursor may have moved
         // since). A reply with nothing in flight (a restart mid-answer) falls
         // back to the selected card.
-        let card = self
-            .answer_in_flight
-            .take()
+        let answered = self.answer_in_flight.take();
+        let card = answered
+            .clone()
             .or_else(|| self.screens.control_center.selected_id().map(str::to_string));
         // A lost race is the same fact as the broadcast event, arriving by the
         // other road: this surface's answer was refused because someone else's
         // landed. Retire the card here too, in case this reply beat the event.
+        //
+        // Keyed to the id that was actually ANSWERED, never the fallback: with
+        // nothing in flight the fallback is whatever the cursor happens to be
+        // on, and retiring that would delete a live card the operator is
+        // reading. A note pointed at the wrong card is a cosmetic mistake; a
+        // retirement pointed at the wrong card loses a question.
         if let Some(ainb_hangar_proto::snapshots::AnswerResult::AlreadyAnswered { by }) =
             verdict.as_ref()
         {
-            if let Some(id) = card.as_deref() {
+            if let Some(id) = answered.as_deref() {
                 self.screens.control_center.retire_answered(id, by, now_ms_clock());
             }
         }
