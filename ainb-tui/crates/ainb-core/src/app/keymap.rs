@@ -668,14 +668,39 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     contexts
 }
 
-/// UI-owned command declared in the table while Phase 3 still owns mutation in main.
+/// A renderer-local scroll intent.
+///
+/// Split out of [`UiAction`] so that both halves of the scroll path can be
+/// exhaustive matches. They were two hand-written lists of the same twelve
+/// variants, one in `events.rs` deciding what to queue and one in
+/// `UiState::apply` deciding what to do, each ending in a catch-all. A
+/// thirteenth variant added to one list and missed in the other is a key that
+/// silently does nothing, which is the failure this nesting makes impossible:
+/// the compiler now names the arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UiAction {
+pub enum ScrollAction {
+    ScrollLogsUp,
+    ScrollLogsDown,
+    ScrollLogsToTop,
+    ScrollLogsToBottom,
+    ToggleAutoScroll,
+    ScrollPreviewUp,
+    ScrollPreviewDown,
     PreviewScrollUp,
     PreviewScrollDown,
     PreviewPageUp,
     PreviewPageDown,
     PreviewExitScroll,
+}
+
+/// Renderer-local command: it is applied to the ratatui host's `UiState` and
+/// `LayoutComponent` and never reaches the reducer, because scroll position is
+/// not something the product knows.
+#[derive(Debug, Clone)]
+pub enum UiAction {
+    /// Renderer-local scrolling, applied against the host layout. Nested rather
+    /// than flattened so the two matches that handle it stay exhaustive.
+    Scroll(ScrollAction),
     SessionComposerEnter,
     SessionComposerBackspace,
     SessionComposerEscape,

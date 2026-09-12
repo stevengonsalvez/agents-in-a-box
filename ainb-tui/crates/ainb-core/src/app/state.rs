@@ -25,7 +25,6 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use chrono;
-use ratatui::layout::Rect;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -694,7 +693,6 @@ impl AppState {
         }
         self.embed_session = None;
         self.observer_started_at = None;
-        self.embed_pane_area = None;
         if self.focused_pane == FocusedPane::Preview {
             self.focused_pane = FocusedPane::Sessions;
         }
@@ -779,254 +777,18 @@ impl AppState {
     }
 }
 
+// The sessions pane's geometry, hover and drag state is renderer-local and
+// lives in `app::ui_state` after the Phase 3 seal. Re-exported here because
+// `SessionListRowTarget` below and the mouse reducer are its callers.
+pub use crate::app::ui_state::SessionsPaneState;
+pub use crate::app::ui_state::UiState;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListRowTarget {
     WorkspaceHeader { workspace_idx: usize },
     SshHeader,
     OtherTmuxHeader,
     Attachable(AttachableRef),
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionsPaneState {
-    pub preferred_width: u16,
-    pub collapsed: bool,
-    resize_active: bool,
-    edge_hovered: bool,
-    last_sessions_rect: Option<Rect>,
-    last_preview_rect: Option<Rect>,
-    last_list_scroll_offset: usize,
-    /// Physical terminal-line height for each logical `ListItem` from the
-    /// latest render. Session rows have metadata on a second line, while
-    /// headers and separators remain one line; mouse hit-testing needs this
-    /// mapping rather than assuming one item equals one terminal row.
-    last_list_item_heights: Vec<usize>,
-    last_attachable_click: Option<(AttachableRef, Instant)>,
-    filter_toggle_area: Option<Rect>,
-}
-
-impl Default for SessionsPaneState {
-    fn default() -> Self {
-        Self {
-            preferred_width: DEFAULT_SESSIONS_SIDEBAR_WIDTH,
-            collapsed: false,
-            resize_active: false,
-            edge_hovered: false,
-            last_sessions_rect: None,
-            last_preview_rect: None,
-            last_list_scroll_offset: 0,
-            last_list_item_heights: Vec::new(),
-            last_attachable_click: None,
-            filter_toggle_area: None,
-        }
-    }
-}
-
-impl SessionsPaneState {
-    pub fn restore(&mut self, width: Option<u16>, collapsed: bool) {
-        if let Some(width) = width {
-            self.preferred_width = width.max(MIN_SESSIONS_SIDEBAR_WIDTH);
-        }
-        self.collapsed = collapsed;
-    }
-
-    pub fn set_layout(&mut self, sessions_rect: Rect, preview_rect: Rect) {
-        self.last_sessions_rect = Some(sessions_rect);
-        self.last_preview_rect = Some(preview_rect);
-    }
-
-    pub fn set_list_scroll_offset(&mut self, offset: usize) {
-        self.last_list_scroll_offset = offset;
-    }
-
-    pub fn set_list_item_heights(&mut self, heights: Vec<usize>) {
-        self.last_list_item_heights = heights;
-    }
-
-    pub fn set_filter_toggle_area(&mut self, area: Rect) {
-        self.filter_toggle_area = Some(area);
-    }
-
-    pub fn is_on_filter_toggle(&self, x: u16, y: u16) -> bool {
-        self.filter_toggle_area.is_some_and(|area| {
-            x >= area.x
-                && x < area.x.saturating_add(area.width)
-                && y >= area.y
-                && y < area.y.saturating_add(area.height)
-        })
-    }
-
-    pub fn last_content_width(&self) -> Option<u16> {
-        Some(self.last_sessions_rect?.width.saturating_add(self.last_preview_rect?.width))
-    }
-
-    pub fn effective_width(&self, terminal_width: u16) -> u16 {
-        if self.collapsed {
-            return COLLAPSED_SESSIONS_SIDEBAR_WIDTH.min(terminal_width);
-        }
-
-        Self::clamp_width(self.preferred_width, terminal_width)
-    }
-
-    pub fn clamp_width(width: u16, terminal_width: u16) -> u16 {
-        if terminal_width <= COLLAPSED_SESSIONS_SIDEBAR_WIDTH {
-            return terminal_width;
-        }
-
-        let max_width = terminal_width.saturating_sub(SESSIONS_PREVIEW_RESERVE);
-        if max_width < MIN_SESSIONS_SIDEBAR_WIDTH {
-            return terminal_width.saturating_sub(1).max(1);
-        }
-
-        width.clamp(MIN_SESSIONS_SIDEBAR_WIDTH, max_width)
-    }
-
-    pub fn expanded_width(&self, terminal_width: u16) -> u16 {
-        Self::clamp_width(self.preferred_width, terminal_width)
-    }
-
-    pub fn edge_highlighted(&self) -> bool {
-        self.edge_hovered || self.resize_active
-    }
-
-    pub fn is_on_edge(&self, x: u16, y: u16) -> bool {
-        if self.collapsed {
-            return false;
-        }
-
-        let Some(rect) = self.last_sessions_rect else {
-            return false;
-        };
-        if y < rect.y || y >= rect.y.saturating_add(rect.height) || rect.width == 0 {
-            return false;
-        }
-
-        let edge_x = rect.x.saturating_add(rect.width.saturating_sub(1));
-        x.abs_diff(edge_x) <= 1
-    }
-
-    pub fn is_on_toggle(&self, x: u16, y: u16) -> bool {
-        let Some(rect) = self.last_sessions_rect else {
-            return false;
-        };
-        if rect.width == 0 {
-            return false;
-        }
-
-        let on_x = x >= rect.x && x < rect.x.saturating_add(rect.width);
-        if !on_x {
-            return false;
-        }
-
-        if self.collapsed {
-            // Expanded pane puts `[-]` in the block title on the top border.
-            // Collapsed rail renders `[+]` as first content row inside the block.
-            return y == rect.y || y == rect.y.saturating_add(1);
-        }
-
-        y == rect.y
-    }
-
-    pub fn contains_sessions_point(&self, x: u16, y: u16) -> bool {
-        let Some(rect) = self.last_sessions_rect else {
-            return false;
-        };
-        x >= rect.x
-            && x < rect.x.saturating_add(rect.width)
-            && y >= rect.y
-            && y < rect.y.saturating_add(rect.height)
-    }
-
-    pub fn contains_preview_point(&self, x: u16, y: u16) -> bool {
-        let Some(rect) = self.last_preview_rect else {
-            return false;
-        };
-        x >= rect.x
-            && x < rect.x.saturating_add(rect.width)
-            && y >= rect.y
-            && y < rect.y.saturating_add(rect.height)
-    }
-
-    pub fn row_index_at(&self, x: u16, y: u16) -> Option<usize> {
-        if self.collapsed {
-            return None;
-        }
-        let rect = self.last_sessions_rect?;
-        if x < rect.x
-            || x >= rect.x.saturating_add(rect.width)
-            || y <= rect.y
-            || y >= rect.y.saturating_add(rect.height.saturating_sub(1))
-        {
-            return None;
-        }
-
-        let mut item_index = self.last_list_scroll_offset;
-        let mut line_in_view = usize::from(y - rect.y - 1);
-        while let Some(&height) = self.last_list_item_heights.get(item_index) {
-            let height = height.max(1);
-            if line_in_view < height {
-                return Some(item_index);
-            }
-            line_in_view = line_in_view.saturating_sub(height);
-            item_index += 1;
-        }
-        None
-    }
-
-    pub fn record_row_click(&mut self, target: SessionListRowTarget, now: Instant) -> bool {
-        let SessionListRowTarget::Attachable(target) = target else {
-            self.last_attachable_click = None;
-            return false;
-        };
-
-        let double_click = self
-            .last_attachable_click
-            .map(|(last_target, last_at)| {
-                last_target == target
-                    && now.saturating_duration_since(last_at) <= SESSIONS_ROW_DOUBLE_CLICK_WINDOW
-            })
-            .unwrap_or(false);
-        self.last_attachable_click = Some((target, now));
-        double_click
-    }
-
-    pub fn begin_resize(&mut self, x: u16, y: u16) -> bool {
-        if self.is_on_edge(x, y) {
-            self.resize_active = true;
-            self.edge_hovered = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn drag_resize(&mut self, x: u16, terminal_width: u16) {
-        if !self.resize_active || self.collapsed {
-            return;
-        }
-
-        let Some(rect) = self.last_sessions_rect else {
-            return;
-        };
-        let requested = x.saturating_sub(rect.x).saturating_add(1);
-        self.preferred_width = Self::clamp_width(requested, terminal_width);
-    }
-
-    pub fn finish_resize(&mut self) -> bool {
-        let was_active = self.resize_active;
-        self.resize_active = false;
-        was_active
-    }
-
-    pub fn update_hover(&mut self, x: u16, y: u16) {
-        self.edge_hovered = self.is_on_edge(x, y);
-    }
-
-    pub fn toggle_collapsed(&mut self) {
-        self.collapsed = !self.collapsed;
-        self.resize_active = false;
-        self.edge_hovered = false;
-    }
 }
 
 // View enum was replaced in Phase 2a by ScreenId (String) + the screens::ids
@@ -3443,16 +3205,6 @@ pub struct AppState {
     // A spawned observer must survive briefly before it clears a prior retry
     // count. `tmux attach-session` reports some startup failures asynchronously.
     observer_started_at: Option<Instant>,
-    // Interior screen rect (inside the border) the embed's PseudoTerminal
-    // occupies, published by the interactive render branch each frame. Drives
-    // mouse-coordinate translation into 1-based pane-local SGR sequences.
-    // None whenever the embed is not rendering.
-    pub embed_pane_area: Option<Rect>,
-    // Bottom keymap-legend rect (or its collapsed hint row), published each
-    // frame on the Sessions screen so a mouse click on it toggles visibility.
-    pub menu_bar_area: Option<Rect>,
-    // Mouse/layout state for the Sessions split pane.
-    pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
     pub is_current_dir_git_repo: bool,
     // Track which session logs were last fetched to avoid unnecessary refetches
@@ -3591,34 +3343,6 @@ pub struct AppState {
     /// re-parses `favorites.yaml` or opens a git repo per frame.
     pub favorite_workspace_paths: HashSet<PathBuf>,
 
-    /// Last `(width, height)` `PluginScreen::render` was handed for each
-    /// screen id. `tick_plugin_renders` reads this and forwards it to
-    /// `handle.render(..)` so the plugin paints at the actual allocated
-    /// size instead of falling back to its hard-coded default. One-frame
-    /// stale is fine — the first frame still uses the plugin's fallback,
-    /// every subsequent frame matches the host's layout.
-    pub plugin_render_areas: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
-
-    /// Top-left `(x, y)` origin `PluginScreen::render` painted each screen
-    /// id at, stashed alongside `plugin_render_areas`. The mouse forwarder
-    /// (`forward_mouse_to_focused_plugin`) subtracts this from the absolute
-    /// terminal click coordinates so the plugin receives a click in its own
-    /// viewport space (`(0, 0)` = top-left of its buffer). Separate from
-    /// `plugin_render_areas` to keep that tuple's `(width, height)` meaning
-    /// unchanged for the render-tick loop.
-    pub plugin_render_origins: std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
-
-    /// Viewport `(width, height)` the last `plugin/render` kick used for
-    /// each screen id. `tick_plugin_renders` forces a fresh render kick
-    /// whenever the live area (from `plugin_render_areas`) differs from
-    /// this — covering the first paint (the seed `(0, 0)` render becomes
-    /// the real allocated size once `PluginScreen::render` runs) and any
-    /// later resize. Without this, a plugin screen whose dirty flag was
-    /// already consumed at `(0, 0)` (e.g. one with no host-published
-    /// snapshot to re-mark it) would paint blank forever.
-    pub plugin_last_render_viewport:
-        std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
-
     /// Whether each plugin-owned screen's focused surface is currently capturing
     /// free text (a title/filter/compose/search/API-key input), as reported by
     /// its last frame's `RenderResult.captures_text`. Refreshed every tick by
@@ -3652,19 +3376,6 @@ pub struct AppState {
     /// owns the underlying `Runtime` via `plugin_runtime_owner` so the
     /// tokio executor is torn down when `App` drops.
     pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
-
-    /// Cached result of `detect_statusline_status()` paired with the time
-    /// it was read. Refreshed lazily through
-    /// [`AppState::statusline_status_cached`] on a 15s TTL so the global
-    /// `W` shortcut and host-side statusline CTAs don't re-read
-    /// `~/.claude/settings.json` on every render or keystroke.
-    ///
-    /// Invalidated explicitly after the install event fires so the CTA
-    /// flips state on the very next frame instead of waiting out the TTL.
-    pub statusline_status_cache: Option<(
-        Option<crate::cli::statusline_install::StatuslineStatus>,
-        Instant,
-    )>,
 
     /// Background poller for the live OAuth-window snapshot. The render
     /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
@@ -4161,12 +3872,6 @@ impl Default for AppState {
         });
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
-        let mut sessions_pane_state = SessionsPaneState::default();
-        sessions_pane_state.restore(
-            app_config.ui_preferences.sessions_sidebar_width,
-            app_config.ui_preferences.sessions_sidebar_collapsed.unwrap_or(false),
-        );
-
         Self {
             workspaces: Vec::new(),
             selected_workspace_index: None,
@@ -4194,9 +3899,6 @@ impl Default for AppState {
             observer_pending: None,
             observer_failed_target: None,
             observer_started_at: None,
-            embed_pane_area: None,
-            menu_bar_area: None,
-            sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,
             attached_session_id: None,
@@ -4278,14 +3980,9 @@ impl Default for AppState {
             // Fleet control panel (reads current_state on entry/tick)
             pending_plugin_renders: std::collections::HashMap::new(),
             favorite_workspace_paths: HashSet::new(),
-            plugin_render_areas: std::collections::HashMap::new(),
-            plugin_render_origins: std::collections::HashMap::new(),
-            plugin_last_render_viewport: std::collections::HashMap::new(),
             plugin_captures_text: std::collections::HashMap::new(),
             plugin_render_errors: std::collections::HashMap::new(),
             plugin_runtime: None,
-
-            statusline_status_cache: None,
 
             live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
@@ -4374,26 +4071,8 @@ impl AppState {
         Self::default()
     }
 
-    /// Read the statusline status with a TTL-bounded cache.
-    ///
-    /// The first call (or any call after the cache has expired) re-reads
-    /// `~/.claude/settings.json`; subsequent calls within
-    /// [`STATUSLINE_STATUS_CACHE_TTL_SECS`] return the memoised value.
-    /// Returns `None` only when status detection itself failed (IO/JSON
-    /// error) — in that case both the global `W` shortcut and the
-    /// top-of-Stats card no-op rather than guessing.
-    pub fn statusline_status_cached(
-        &mut self,
-    ) -> Option<crate::cli::statusline_install::StatuslineStatus> {
-        Self::statusline_status_cached_inner(
-            &mut self.statusline_status_cache,
-            std::time::Duration::from_secs(STATUSLINE_STATUS_CACHE_TTL_SECS),
-            Instant::now(),
-            crate::cli::statusline_install::detect_statusline_status,
-        )
-    }
-
-    /// Test seam for [`statusline_status_cached`]. Lets unit tests inject
+    /// Test seam for [`crate::app::ui_state::UiState::statusline_status`], which
+    /// owns the cache itself. Lets unit tests inject
     /// a clock and a fake detector to verify TTL coalescing without
     /// touching the filesystem.
     pub(crate) fn statusline_status_cached_inner<F>(
@@ -4416,13 +4095,6 @@ impl AppState {
         let fresh = detect().ok();
         *cache = Some((fresh.clone(), now));
         fresh
-    }
-
-    /// Drop the cached statusline status so the next reader re-detects.
-    /// Called after the install event lands so the CTA flips on the very
-    /// next frame instead of waiting out the TTL.
-    pub fn invalidate_statusline_status_cache(&mut self) {
-        self.statusline_status_cache = None;
     }
 
     /// Get the log directory path for the log history viewer
@@ -6662,8 +6334,13 @@ impl AppState {
         }
     }
 
-    pub fn session_list_row_at_mouse(&self, x: u16, y: u16) -> Option<SessionListRowTarget> {
-        let row_index = self.sessions_pane_state.row_index_at(x, y)?;
+    pub fn session_list_row_at_mouse(
+        &self,
+        pane: &SessionsPaneState,
+        x: u16,
+        y: u16,
+    ) -> Option<SessionListRowTarget> {
+        let row_index = pane.row_index_at(x, y)?;
         self.session_list_row_target(row_index)
     }
 
@@ -6710,6 +6387,7 @@ impl AppState {
     /// scroll behavior.
     pub fn scroll_session_list_by_mouse(
         &mut self,
+        pane: &SessionsPaneState,
         x: u16,
         y: u16,
         is_down: bool,
@@ -6719,13 +6397,12 @@ impl AppState {
             return false;
         }
 
-        if self.sessions_pane_state.contains_preview_point(x, y) {
+        if pane.contains_preview_point(x, y) {
             self.focused_pane = FocusedPane::LiveLogs;
             return false;
         }
 
-        let over_sessions = self.sessions_pane_state.contains_sessions_point(x, y)
-            && !self.sessions_pane_state.collapsed;
+        let over_sessions = pane.contains_sessions_point(x, y) && !pane.collapsed;
         let should_scroll_sessions =
             over_sessions || matches!(self.focused_pane, FocusedPane::Sessions);
 
@@ -14015,7 +13692,7 @@ impl App {
     /// Drive plugin-owned screens. Returns `true` if a fresh plugin frame was
     /// drained into `pending_plugin_renders` this tick, so the render loop can
     /// treat that as a reason to repaint (perf: bead `wai` dirty-gate).
-    pub fn tick_plugin_renders(&mut self) -> bool {
+    pub fn tick_plugin_renders(&mut self, ui: &mut UiState) -> bool {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
@@ -14105,8 +13782,7 @@ impl App {
             // Viewport comes from the previous frame's allocated area
             // (stashed by `PluginScreen::render`); (0, 0) means that render
             // hasn't happened yet.
-            let (width, height) =
-                self.state.plugin_render_areas.get(*screen_id).copied().unwrap_or((0, 0));
+            let (width, height) = ui.plugin_render_areas.get(*screen_id).copied().unwrap_or((0, 0));
 
             // No allocated area stashed yet — the very first entry to this
             // screen, before `PluginScreen::render` has run once. Kicking now
@@ -14129,7 +13805,7 @@ impl App {
             // re-marked dirty by that publish, but a screen with no such
             // feed (e.g. `witr` before a scan) would otherwise stay blank
             // forever after its dirty flag was consumed at `(0, 0)`.
-            let last_viewport = self.state.plugin_last_render_viewport.get(*screen_id).copied();
+            let last_viewport = ui.plugin_last_render_viewport.get(*screen_id).copied();
             let viewport_changed = last_viewport != Some((width, height));
 
             // Kick the next render when something has actually changed
@@ -14150,9 +13826,7 @@ impl App {
                 continue;
             }
 
-            self.state
-                .plugin_last_render_viewport
-                .insert((*screen_id).to_string(), (width, height));
+            ui.plugin_last_render_viewport.insert((*screen_id).to_string(), (width, height));
 
             let viewport = ainb_plugin_runtime::Viewport { width, height };
             // The frame lands in the cache for `try_recv_render`; the
@@ -14718,17 +14392,18 @@ mod plugin_render_gate_tests {
     #[test]
     fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let mut ui = crate::app::ui_state::UiState::default();
         let handle = app.state.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         app.state.current_screen = ids::SESSION_LIST.to_string();
-        app.tick_plugin_renders();
-        app.tick_plugin_renders();
+        app.tick_plugin_renders(&mut ui);
+        app.tick_plugin_renders(&mut ui);
 
         // No kick: `plugin_last_render_viewport` is only written when a
         // render is dispatched.
         assert!(
-            !app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            !ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
             "hidden screen must not receive a render kick"
         );
         // The registration-seeded dirty flag survived both ticks, so the
@@ -14744,30 +14419,31 @@ mod plugin_render_gate_tests {
     #[test]
     fn dirty_plugin_kick_deferred_until_viewport_known() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let mut ui = crate::app::ui_state::UiState::default();
         let handle = app.state.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         // Ticks while hidden: gated, dirty preserved (proved above).
         app.state.current_screen = ids::SESSION_LIST.to_string();
-        app.tick_plugin_renders();
+        app.tick_plugin_renders(&mut ui);
 
         // User opens the learnings screen. No allocated area is stashed yet,
         // so the tick must NOT kick: a (0, 0) seed kick made the plugin paint
         // its 80×24 fallback across the real (larger) area — the blank-flash
         // bug on first entry.
         app.state.current_screen = ids::LEARNINGS.to_string();
-        app.tick_plugin_renders();
+        app.tick_plugin_renders(&mut ui);
         assert!(
-            !app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            !ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
             "no render kick before the real viewport is known"
         );
 
         // The draw pass stashes the allocated area (what `PluginScreen::render`
         // does) → the next tick kicks at full size and consumes the flag.
-        app.state.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
-        app.tick_plugin_renders();
+        ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
+        app.tick_plugin_renders(&mut ui);
         assert_eq!(
-            app.state.plugin_last_render_viewport.get(ids::LEARNINGS),
+            ui.plugin_last_render_viewport.get(ids::LEARNINGS),
             Some(&(120, 40)),
             "first tick with a known viewport must kick at the real size"
         );
@@ -14782,19 +14458,20 @@ mod plugin_render_gate_tests {
     #[test]
     fn only_the_focused_plugin_screen_is_kicked() {
         let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
+        let mut ui = crate::app::ui_state::UiState::default();
         let handle = app.state.plugin_runtime.clone().expect("handle wired");
 
         app.state.current_screen = ids::LEARNINGS.to_string();
         // Focused screen has painted once (area known); the hidden one hasn't.
-        app.state.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (100, 30));
-        app.tick_plugin_renders();
+        ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (100, 30));
+        app.tick_plugin_renders(&mut ui);
 
         assert!(
-            app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
             "focused plugin screen must be kicked"
         );
         assert!(
-            !app.state.plugin_last_render_viewport.contains_key(ids::ANALYTICS),
+            !ui.plugin_last_render_viewport.contains_key(ids::ANALYTICS),
             "unfocused plugin screen must not be kicked"
         );
         assert!(
@@ -14817,16 +14494,17 @@ mod plugin_render_gate_tests {
         // `app_with_plugins` registers against /nonexistent/plugin-binary,
         // which is exactly the post-upgrade state.
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
+        let mut ui = crate::app::ui_state::UiState::default();
 
         app.state.current_screen = ids::LEARNINGS.to_string();
-        app.state.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
+        ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
 
         // First tick kicks the render; the spawn attempt and its failure
         // happen on the runtime's executor, so poll a bounded number of
         // ticks for the outcome rather than assuming one is enough.
         let mut recorded = None;
         for _ in 0..200 {
-            app.tick_plugin_renders();
+            app.tick_plugin_renders(&mut ui);
             if let Some(err) = app.state.plugin_render_errors.get(ids::LEARNINGS) {
                 recorded = Some(err.clone());
                 break;

@@ -2,6 +2,7 @@
 // Displays log files in a list and shows color-coded log entries with filtering
 // Supports both JSONL (new) and plain text (legacy) log formats
 
+use crate::app::ui_state::UiState;
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -684,7 +685,13 @@ impl LogHistoryViewerComponent {
     }
 
     /// Render the log history viewer
-    pub fn render(&self, frame: &mut Frame, area: Rect, state: &mut LogHistoryViewerState) {
+    pub fn render(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &LogHistoryViewerState,
+        ui: &mut UiState,
+    ) {
         // Main container
         let container = Block::default()
             .title(Line::from(vec![
@@ -721,9 +728,9 @@ impl LogHistoryViewerComponent {
             .split(inner);
 
         // Store log entries area for mouse coordinate mapping
-        state.log_entries_area = Some(layout[1]);
+        ui.log_entries_area = Some(layout[1]);
 
-        self.render_session_list(frame, layout[0], state);
+        self.render_session_list(frame, layout[0], state, ui);
         self.render_log_entries(frame, layout[1], state);
     }
 
@@ -732,7 +739,8 @@ impl LogHistoryViewerComponent {
         &self,
         frame: &mut Frame,
         area: Rect,
-        state: &mut LogHistoryViewerState,
+        state: &LogHistoryViewerState,
+        ui: &mut UiState,
     ) {
         let is_focused = state.focus == LogViewerFocus::SessionList;
         let border_color = if is_focused {
@@ -807,7 +815,10 @@ impl LogHistoryViewerComponent {
             )
             .highlight_symbol("▶ ");
 
-        frame.render_stateful_widget(list, area, &mut state.session_list_state);
+        // Core owns which row is selected; the widget's own scroll offset is
+        // the renderer's, so the paint runs against a mirror of the selection.
+        ui.log_history_list.select(state.session_list_state.selected());
+        frame.render_stateful_widget(list, area, &mut ui.log_history_list);
     }
 
     /// Render the log entries

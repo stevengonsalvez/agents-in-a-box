@@ -1,0 +1,4 @@
+sleep 1500
+capture t1
+sleep 1500
+capture t2

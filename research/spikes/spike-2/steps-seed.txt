@@ -1,0 +1,5 @@
+seed
+sleep 2000
+capture seeded
+sleep 2000
+capture seeded2
