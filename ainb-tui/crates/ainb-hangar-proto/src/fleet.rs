@@ -1183,6 +1183,14 @@ pub struct FleetActionParams {
     pub request_id: String,
     /// Typed action.
     pub action: ControlAction,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Durable action delivery status.
@@ -1319,6 +1327,14 @@ pub struct FleetStartParams {
     /// Optional initial prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `fleet/start`.
@@ -1350,6 +1366,14 @@ pub struct CodexSessionEnsureParams {
     /// Preserve Interactive's explicit yolo launch semantics at thread creation.
     #[serde(default)]
     pub skip_permissions: bool,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `codex/session_ensure`.
@@ -1369,6 +1393,14 @@ pub struct CodexSessionEnsureResult {
 pub struct CodexSessionDiscardParams {
     /// Failed Interactive session identity whose reservation is discarded.
     pub session_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `codex/session_discard`.
@@ -1389,6 +1421,14 @@ pub struct FleetBroadcastParams {
     pub text: String,
     /// Idempotency boundary shared across recipient actions.
     pub idempotency_key: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `fleet/broadcast`.
@@ -1511,6 +1551,14 @@ pub struct FleetAcpSessionCreateParams {
     /// Scope to bind; the daemon mints `session:<session_key>` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_key: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `fleet/acp_session_create`.
@@ -1570,6 +1618,14 @@ pub struct FleetMessageSendParams {
     pub text: String,
     /// Client idempotency token; replay with different content is rejected.
     pub request_id: String,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Per-recipient delivery state, reusing the durable receipt vocabulary.
@@ -1753,6 +1809,14 @@ pub struct FleetTranscriptPruneParams {
     /// Explicit acknowledgement that the rows are to be deleted unexported.
     #[serde(default)]
     pub no_export: bool,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `fleet/transcript_prune`.
@@ -1884,6 +1948,14 @@ pub struct FleetChannelCreateParams {
     /// Member session keys, at most [`FLEET_CHANNEL_RECIPIENTS_MAX`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recipients: Option<Vec<String>>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `fleet/channel_create`.
@@ -2029,6 +2101,14 @@ pub struct FleetPalConfigureParams {
     /// System prompt, at most [`FLEET_PAL_PERSONA_MAX`] bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `fleet/pal_configure`.
@@ -2146,6 +2226,14 @@ pub struct FleetConfirmAnswerParams {
     /// Approve, deny, or approve with edited arguments.
     #[serde(flatten)]
     pub answer: FleetConfirmAnswer,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// Result for `fleet/confirm_answer`.
@@ -2199,6 +2287,14 @@ pub struct FleetPalGateParams {
     /// place that has to be right.
     #[serde(default)]
     pub arguments: serde_json::Map<String, serde_json::Value>,
+    /// The D18 mutation envelope: the client-minted opaque op id this call is
+    /// deduplicated by, and the state the client believed it was acting on.
+    ///
+    /// Flattened, so the wire object stays `{ ..fields.., op_id?, fence? }`,
+    /// and both members are absent-by-default so a pre-W0-wire client's frame
+    /// still decodes unchanged.
+    #[serde(flatten)]
+    pub mutation: crate::mutation::MutationEnvelope,
 }
 
 /// What the guardrail decided about one tool call.
@@ -2624,6 +2720,7 @@ mod tests {
             provider: Some("claude-agent-acp".to_string()),
             cwd: Some("/repo".to_string()),
             scope_key: None,
+            mutation: crate::mutation::MutationEnvelope::default(),
         });
         // An omitted provider is the shape the chat page sends: it wants the
         // scope's session, not a named engine.
@@ -2631,6 +2728,7 @@ mod tests {
             provider: None,
             cwd: Some("/repo".to_string()),
             scope_key: Some("channel:c1".to_string()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         });
         // Neither named: the whole get-or-create, which is what a chat client
         // attaching to a standing session sends. Naming either half is how the
@@ -2639,6 +2737,7 @@ mod tests {
             provider: None,
             cwd: None,
             scope_key: Some("channel:c1".to_string()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         });
         round_trip(&FleetAcpSessionCreateResult {
             session_key: "acp:01J0KEY".to_string(),
@@ -2657,6 +2756,7 @@ mod tests {
             origin_message_id: None,
             text: "hello".to_string(),
             request_id: "req-1".to_string(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         });
         round_trip(&FleetMessageSendParams {
             scope_key: None,
@@ -2665,6 +2765,7 @@ mod tests {
             origin_message_id: Some("01J0ORIGIN".to_string()),
             text: "hello".to_string(),
             request_id: "req-1".to_string(),
+            mutation: crate::mutation::MutationEnvelope::default(),
         });
         // An older client omits the key entirely; that must still decode, and
         // it must mean the operator rather than failing the frame.
@@ -2719,6 +2820,7 @@ mod tests {
             provider: None,
             cwd: None,
             scope_key: Some("channel:c1".to_string()),
+            mutation: crate::mutation::MutationEnvelope::default(),
         })
         .expect("params serialize");
         assert_eq!(
