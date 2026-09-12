@@ -340,12 +340,14 @@ impl UiState {
     ///
     /// The probe reads `~/.claude/settings.json`; the status bar asks for it
     /// once a frame and the `W` shortcut once a keystroke, so without the TTL
-    /// both would pay a filesystem read every time. `state` is taken (and
-    /// ignored) so the call site reads as a projection of app state rather than
-    /// a free-floating global.
+    /// both would pay a filesystem read every time.
+    ///
+    /// It took an `&AppState` it never read, to make the call site look like a
+    /// projection of app state. It is not one: nothing here depends on app
+    /// state, and a parameter that exists to suggest otherwise is worse than
+    /// no parameter.
     pub fn statusline_status(
         &mut self,
-        _state: &AppState,
     ) -> Option<crate::cli::statusline_install::StatuslineStatus> {
         AppState::statusline_status_cached_inner(
             &mut self.statusline_status_cache,

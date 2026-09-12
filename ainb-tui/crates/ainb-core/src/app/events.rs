@@ -1460,7 +1460,7 @@ impl EventHandler {
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
         let live_source = state.fleet.live_window_watcher.snapshot().source;
-        let status = ui.statusline_status(state);
+        let status = ui.statusline_status();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
 
@@ -2412,6 +2412,14 @@ impl EventHandler {
             // Applied in the main loop: the sidebar's collapsed flag is
             // renderer state (`UiState::sessions_pane`), which the reducer does
             // not hold. Same path the [-]/[+] mouse glyph takes.
+            // The sidebar's collapsed flag is renderer state, so the host
+            // applies it in the main loop where `UiState` is in scope and
+            // persists it. Same shape as EnterInteractivePane below: the arm
+            // exists for exhaustiveness, not to do nothing quietly.
+            // The sidebar's collapsed flag is renderer state, so the host
+            // applies it in the main loop where `UiState` is in scope and
+            // persists it there. The arm exists for exhaustiveness, not to do
+            // nothing quietly.
             AppEvent::ToggleSessionsSidebar => {}
             // Entering the interactive embed is handled in the main loop (it needs
             // the terminal size and the embed lives in the event loop) — no-op here.

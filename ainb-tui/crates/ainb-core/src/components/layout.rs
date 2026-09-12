@@ -1454,7 +1454,7 @@ pub fn build_live_status_spans(
     use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
 
-    let status = ui.statusline_status(state);
+    let status = ui.statusline_status();
     let decision = state.config.app_config.ui_preferences.statusline_decision;
 
     // Trust the cache: if Tier1 data is flowing — whether it came from
