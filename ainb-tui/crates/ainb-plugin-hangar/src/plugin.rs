@@ -8848,6 +8848,9 @@ mod tests {
             session_key: "claude:ask".into(),
             provider: "claude".into(),
             provider_session_id: Some("provider-claude:ask".into()),
+            // A fixture pane is bound; `pane_unbound` is the case these
+            // screens render differently, so it is named where it is meant.
+            pane_binding: "bound".into(),
             current_request_fingerprint: None,
             current_request: None,
             lifecycle_state: "IDLE".into(),
@@ -9480,6 +9483,9 @@ mod tests {
             session_key: key.into(),
             provider: "claude".into(),
             provider_session_id: None,
+            // A fixture pane is bound; `pane_unbound` is the case these
+            // screens render differently, so it is named where it is meant.
+            pane_binding: "bound".into(),
             current_request_fingerprint: None,
             current_request: None,
             lifecycle_state: "IDLE".into(),

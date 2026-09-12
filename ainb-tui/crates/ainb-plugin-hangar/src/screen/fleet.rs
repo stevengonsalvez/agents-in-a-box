@@ -4152,6 +4152,9 @@ mod tests {
             session_key: key.into(),
             provider: provider.into(),
             provider_session_id: Some(format!("provider-{key}")),
+            // A fixture pane is bound; `pane_unbound` is the case these
+            // screens render differently, so it is named where it is meant.
+            pane_binding: "bound".into(),
             current_request_fingerprint: None,
             current_request: None,
             lifecycle_state: lifecycle.into(),
@@ -6085,6 +6088,7 @@ mod tests {
                 provider,
                 provider_session_id: None,
                 tmux_target: None,
+                pane_binding: ainb_hangar_proto::fleet::PaneBinding::NotApplicable,
                 process_start_fingerprint: None,
                 cwd: "/work".into(),
                 display_name: None,
@@ -6130,6 +6134,7 @@ mod tests {
             provider: FleetProvider::Codex,
             provider_session_id: Some("thread-1".into()),
             tmux_target: Some("codex-1:0.0".into()),
+            pane_binding: ainb_hangar_proto::fleet::PaneBinding::Bound,
             process_start_fingerprint: None,
             cwd: "/work/shared".into(),
             display_name: Some("codex-1".into()),
