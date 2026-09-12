@@ -233,6 +233,7 @@ body {
 }
 .need.answering { opacity: 0.6; }
 .need[data-outcome="already_answered"] { border-color: var(--amber); }
+.need-outcome { margin-top: 6px; font-size: 12px; color: var(--amber); }
 .need[data-outcome="ambiguous"], .need[data-outcome="failed"] { border-color: var(--red); }
 
 /* ── Cost ───────────────────────────────────────────── */

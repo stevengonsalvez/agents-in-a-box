@@ -77,6 +77,105 @@ async function poll(
   }
 }
 
+// Write the seeded attention row directly, to stand in for another surface
+// winning the answer race. The daemon's first-answer-wins guard reads this row,
+// so flipping it here is what makes the browser's POST lose.
+function setAttentionRow(state: string, answeredBy: string | null, answer: string | null): void {
+  const col = (v: string | null) => (v === null ? "NULL" : `'${v}'`);
+  execFileSync("sqlite3", [
+    HANGAR_DB,
+    `UPDATE attention SET state='${state}', answered_by=${col(answeredBy)}, ` +
+      `answer=${col(answer)} WHERE id='${ASK_ID}';`,
+  ]);
+}
+
+// S-C, the loser's half of first-answer-wins. Declared FIRST so it runs against
+// the still-open seeded row (this file runs single-worker, in declaration
+// order), and it puts the row back before the delivering journey below.
+//
+// Both data routes are pinned, because the dashboard has two render drivers and
+// only one of them is a fetch: `/api/snapshot` on boot and after an answer, and
+// the SSE stream on `/api/events`, whose every `snapshot` frame calls `render`.
+// Left live, the stream would drop the answered row and take the card with it,
+// and this test would be asserting about a card that is not there. Pinned to a
+// frozen frame instead, the row keeps arriving as open, which is exactly the
+// condition the retirement has to survive: without it the next render puts live
+// option buttons back on a row the daemon has already resolved.
+test("web dashboard retires a card the daemon says another surface answered", async ({
+  page,
+}) => {
+  let frozen: string | null = null;
+
+  await page.route("**/api/snapshot*", async (route) => {
+    if (frozen === null) {
+      const res = await route.fetch();
+      frozen = await res.text();
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: frozen,
+    });
+  });
+
+  // One `snapshot` frame per connection, then EOF. EventSource reconnects on
+  // its own, so this is a render every few seconds off the real code path
+  // rather than a stream the test has to keep open.
+  await page.route("**/api/events*", async (route) => {
+    await poll("frozen snapshot captured", 15_000, () => frozen !== null);
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      headers: { "cache-control": "no-cache" },
+      body: `event: snapshot\ndata: ${frozen}\n\n`,
+    });
+  });
+
+  await page.goto(`/?token=${encodeURIComponent(WEB_TOKEN)}`);
+
+  const askCard = page.locator(".need", { hasText: ASK_QUESTION });
+  await expect(askCard).toBeVisible();
+  const pickButton = page.getByRole("button", { name: ANSWER_BUTTON });
+  await expect(pickButton).toBeVisible();
+
+  // Another surface wins while this browser is still looking at the card.
+  setAttentionRow("answered", "tui@e2e", "1");
+  expect(attentionRow()).toBe("answered|tui@e2e|1");
+
+  try {
+    await pickButton.click();
+
+    // The controls are gone and the winner is named, without waiting for any
+    // snapshot to drop the row.
+    await expect(askCard.locator(".need-actions")).toHaveCount(0);
+    await expect(askCard.locator(".need-outcome")).toHaveText("answered by tui@e2e");
+    await expect(askCard).toHaveAttribute("data-outcome", "already_answered");
+
+    // Past a full 2s snapshot cycle, with the frozen frame still listing the
+    // row: the card must stay retired across those renders.
+    await page.waitForTimeout(2_500);
+    await expect(askCard.locator(".need-actions")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: ANSWER_BUTTON })).toHaveCount(0);
+
+    // And the retirement is a hint, not a lock. The daemon may put the same id
+    // back — a winner whose delivery fails is reverted to `open` and re-raised
+    // (`answer.rs::reopen_on_failed_delivery`) — so once the hint has outlived
+    // two snapshot cycles the daemon's view wins again and the row a frozen
+    // frame still calls open becomes answerable. Holding it forever would
+    // strand a reopened card with no controls for the life of the tab.
+    await expect(page.getByRole("button", { name: ANSWER_BUTTON })).toBeVisible({
+      timeout: 20_000,
+    });
+  } finally {
+    // Hand the delivering journey below the open row it expects.
+    setAttentionRow("open", null, null);
+    await page.unroute("**/api/events*");
+    await page.unroute("**/api/snapshot*");
+  }
+
+  expect(attentionRow()).toBe("open||");
+});
+
 test("web dashboard answers a seeded ASK: render → click ② → delivered + answered(by=web)", async ({
   page,
 }) => {

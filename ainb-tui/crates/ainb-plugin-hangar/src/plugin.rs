@@ -1289,6 +1289,25 @@ impl HangarPlugin {
             }
             self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
+        // S-C: the daemon's first-answer-wins guard has resolved this row, so
+        // the card is dead now, not at the next `attention/list` snapshot. Retire
+        // it and say who won; leaving it up keeps an option key on screen that
+        // can only lose the same race again.
+        if let HangarEvent::AttentionAnswered { attention_id, by } = &event {
+            self.screens.control_center.retire_answered(attention_id, by, now_ms_clock());
+            // The answer we have in flight is about a card that is gone; its
+            // verdict must not land as a note on whatever is selected now.
+            if self.answer_in_flight.as_deref() == Some(attention_id.as_str()) {
+                self.answer_in_flight = None;
+            }
+            // Forgetting the wire id means this surface's own reply, when it
+            // arrives, is no longer recognised as an answer reply and falls to
+            // the catch-all arm in `on_daemon_response`, which only keeps the
+            // link alive. That loses nothing: the board already reflects the
+            // outcome, and `on_daemon_event` armed `fetch_pending` above, so the
+            // reconciling `attention/list` still runs.
+            self.answers_in_flight.retain(|_, id| id != attention_id);
+        }
         let names_may_move = names_may_move(&event);
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
@@ -1531,10 +1550,26 @@ impl HangarPlugin {
         // answer was sent, remembered at send time (the cursor may have moved
         // since). A reply with nothing in flight (a restart mid-answer) falls
         // back to the selected card.
-        let card = self
-            .answer_in_flight
-            .take()
+        let answered = self.answer_in_flight.take();
+        let card = answered
+            .clone()
             .or_else(|| self.screens.control_center.selected_id().map(str::to_string));
+        // A lost race is the same fact as the broadcast event, arriving by the
+        // other road: this surface's answer was refused because someone else's
+        // landed. Retire the card here too, in case this reply beat the event.
+        //
+        // Keyed to the id that was actually ANSWERED, never the fallback: with
+        // nothing in flight the fallback is whatever the cursor happens to be
+        // on, and retiring that would delete a live card the operator is
+        // reading. A note pointed at the wrong card is a cosmetic mistake; a
+        // retirement pointed at the wrong card loses a question.
+        if let Some(ainb_hangar_proto::snapshots::AnswerResult::AlreadyAnswered { by }) =
+            verdict.as_ref()
+        {
+            if let Some(id) = answered.as_deref() {
+                self.screens.control_center.retire_answered(id, by, now_ms_clock());
+            }
+        }
         let Some(note) = answer_verdict_note(verdict.as_ref(), resp.error.as_ref()) else {
             self.screens.control_center.clear_note();
             return;
@@ -6642,6 +6677,54 @@ mod tests {
         assert!(
             p.fetch_pending,
             "a non-transcript event must arm the reconciling re-fetch"
+        );
+    }
+
+    /// S-C: an `AttentionAnswered` push must retire the card here and now, over
+    /// the real event frame, not merely in the reducer. The snapshot re-pull it
+    /// also arms is a reconciliation, not the mechanism: until it lands the
+    /// board would otherwise still offer option keys for a row the daemon has
+    /// already resolved.
+    #[test]
+    fn an_attention_answered_push_retires_the_card_over_the_wire() {
+        use ainb_hangar_proto::events::{AttentionRow, EVENT_METHOD};
+
+        let mut p = HangarPlugin::new();
+        let open = |id: &str| AttentionRow {
+            id: id.to_string(),
+            session_id: format!("sess-{id}"),
+            cwd: format!("/work/{id}"),
+            workspace_id: None,
+            kind: "ask_user_question".to_string(),
+            payload: serde_json::json!({
+                "kind": "ASK",
+                "context": { "question": "q", "options": [{ "label": "y" }] }
+            })
+            .to_string(),
+            degraded: false,
+            created_at: 100,
+            channels: ainb_hangar_proto::ChannelSet::NONE,
+        };
+        p.screens.control_center.set_attention(&[open("a"), open("b")]);
+        p.answer_in_flight = Some("b".to_string());
+
+        p.on_daemon_event(&serde_json::json!({
+            "method": EVENT_METHOD,
+            "params": serde_json::to_value(&HangarEvent::AttentionAnswered {
+                attention_id: "b".to_string(),
+                by: "web@box".to_string(),
+            })
+            .unwrap(),
+        }));
+
+        assert!(
+            p.screens.control_center.cards().iter().all(|card| card.id != "b"),
+            "the answered card must be gone before the reconciling snapshot lands"
+        );
+        assert!(
+            p.answer_in_flight.is_none(),
+            "the in-flight answer was about that card; its verdict must not \
+             land as a note on whatever is selected now"
         );
     }
 
