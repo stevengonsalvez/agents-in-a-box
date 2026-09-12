@@ -548,33 +548,49 @@ impl AppState {
         self.fleet.set_if_changed(|fleet| &mut fleet.daemon_attention_seen, published)
     }
 
+    /// One section's current version.
+    ///
+    /// The single place that maps a [`SectionId`] to its field. `versions()`
+    /// walks [`SectionId::ALL`] through this rather than hand-listing the
+    /// nineteen in array order, so a new section cannot be added to the enum
+    /// and silently left out of the array, or land in the wrong slot.
+    #[must_use]
+    pub fn section_version(&self, id: SectionId) -> u64 {
+        match id {
+            SectionId::Sessions => self.sessions.version(),
+            SectionId::SessionLabels => self.session_labels.version(),
+            SectionId::Tmux => self.tmux.version(),
+            SectionId::Ssh => self.ssh.version(),
+            SectionId::GitView => self.git_view.version(),
+            SectionId::WorkspaceLoad => self.workspace_load.version(),
+            SectionId::NewSession => self.new_session.version(),
+            SectionId::Logs => self.log_streams.version(),
+            SectionId::ClaudeChat => self.claude_chat.version(),
+            SectionId::Fleet => self.fleet.version(),
+            SectionId::Hangar => self.hangar.version(),
+            SectionId::McpPool => self.mcp_pool.version(),
+            SectionId::Inbox => self.inbox.version(),
+            SectionId::PluginsHost => self.plugins_host.version(),
+            SectionId::Config => self.config.version(),
+            SectionId::Skills => self.skills.version(),
+            SectionId::Recovery => self.recovery.version(),
+            SectionId::Onboarding => self.onboarding.version(),
+            SectionId::Shell => self.shell.version(),
+        }
+    }
+
     /// Every section's current version, indexed by [`SectionId::index`].
     ///
     /// A surface keeps the array it last saw and compares; that is 19 integer
     /// compares, against a diff of 117 fields of which several are SQLite
     /// handles and channel receivers that cannot be compared at all.
+    #[must_use]
     pub fn versions(&self) -> SectionVersions {
-        [
-            self.sessions.version(),
-            self.session_labels.version(),
-            self.tmux.version(),
-            self.ssh.version(),
-            self.git_view.version(),
-            self.workspace_load.version(),
-            self.new_session.version(),
-            self.log_streams.version(),
-            self.claude_chat.version(),
-            self.fleet.version(),
-            self.hangar.version(),
-            self.mcp_pool.version(),
-            self.inbox.version(),
-            self.plugins_host.version(),
-            self.config.version(),
-            self.skills.version(),
-            self.recovery.version(),
-            self.onboarding.version(),
-            self.shell.version(),
-        ]
+        let mut out: SectionVersions = [0; SectionId::COUNT];
+        for id in SectionId::ALL {
+            out[id.index()] = self.section_version(id);
+        }
+        out
     }
 
     /// Which sections have been borrowed mutably since `seen` was taken.
@@ -582,6 +598,7 @@ impl AppState {
     /// "Borrowed mutably", not "changed": a `&mut` that writes the same value
     /// back still counts. Over-reporting costs a surface one redundant send,
     /// and is the direction this is allowed to be wrong in.
+    #[must_use]
     pub fn changed_since(&self, seen: &SectionVersions) -> Vec<SectionId> {
         let now = self.versions();
         SectionId::ALL
@@ -11119,6 +11136,12 @@ impl AppState {
         // struct: the buffer and its cursor are the same section, so taking
         // them one at a time through `DerefMut` would borrow the whole section
         // twice.
+        // The guard reads through `Deref` first: `get_mut` bumps whether or not
+        // the body runs, and a keystroke outside quick-commit mode changes
+        // nothing.
+        if self.git_view.quick_commit_message.is_none() {
+            return;
+        }
         let git_view = self.git_view.get_mut();
         if let Some(message) = git_view.quick_commit_message.as_mut() {
             message.insert(git_view.quick_commit_cursor, ch);
@@ -11127,6 +11150,9 @@ impl AppState {
     }
 
     pub fn backspace_quick_commit(&mut self) {
+        if self.git_view.quick_commit_message.is_none() || self.git_view.quick_commit_cursor == 0 {
+            return;
+        }
         let git_view = self.git_view.get_mut();
         if let Some(message) = git_view.quick_commit_message.as_mut() {
             if git_view.quick_commit_cursor > 0 {
@@ -13659,11 +13685,12 @@ impl App {
                 // The rows and the table they read defaults from are one
                 // section now, so the plugin list is cloned out before the
                 // section is borrowed mutably.
-                let plugins = self.state.config.app_config.plugins.clone();
-                self.state
-                    .config
-                    .config_screen_state
-                    .apply_plugin_manifests(&manifests, &plugins);
+                self.state.config.update(|config| {
+                    config
+                        .config_screen_state
+                        .apply_plugin_manifests(&manifests, &config.app_config.plugins);
+                    true
+                });
 
                 // A fresh runtime means a fresh snapshot store whose
                 // version counter restarts at 0 — drop any version
