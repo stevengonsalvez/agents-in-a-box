@@ -475,6 +475,12 @@ impl AttentionRepo {
     /// winner. Returns the number of rows reverted (`1` when the caller's claim
     /// was undone, `0` when the row had already moved on).
     ///
+    /// `version` advances here as it does on every other state change (D18,
+    /// migration 0097). A reopened row is NOT the row the losing client read:
+    /// it was answered and un-answered in between, and a fenced answer written
+    /// against the pre-flip version is by definition acting on a stale read.
+    /// The client re-lists and answers the row it can now see.
+    ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the update fails.
@@ -486,7 +492,8 @@ impl AttentionRepo {
     ) -> Result<u64, sqlx::Error> {
         let res = sqlx::query(
             "UPDATE attention \
-             SET state = 'open', answered_by = NULL, answer = NULL, answered_at = NULL \
+             SET state = 'open', answered_by = NULL, answer = NULL, answered_at = NULL, \
+                 version = version + 1 \
              WHERE id = ? AND state = 'answered' AND answered_by = ? AND answered_at = ?",
         )
         .bind(id)
