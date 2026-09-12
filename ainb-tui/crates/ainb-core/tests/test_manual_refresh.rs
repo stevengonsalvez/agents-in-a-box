@@ -20,7 +20,7 @@ async fn test_manual_refresh_key() {
     // Load initial mock data
     app.state.load_mock_data();
     go_to_session_list(&mut app);
-    let initial_workspace_count = app.state.workspaces.len();
+    let initial_workspace_count = app.state.sessions.workspaces.len();
     assert!(
         initial_workspace_count > 0,
         "Should have initial workspaces"
@@ -68,7 +68,7 @@ async fn test_manual_refresh_key() {
 async fn test_refresh_from_session_list_view() {
     let mut app = App::new();
     app.state.load_mock_data();
-    let _initial_workspace_count = app.state.workspaces.len();
+    let _initial_workspace_count = app.state.sessions.workspaces.len();
 
     // Navigate to the SessionList view (manual refresh lives here).
     go_to_session_list(&mut app);

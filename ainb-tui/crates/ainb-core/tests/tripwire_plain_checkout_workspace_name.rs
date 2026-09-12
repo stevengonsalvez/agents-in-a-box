@@ -84,6 +84,7 @@ fn seed(store: &mut SessionStore, tmux_name: &str, worktree: &Path, name: &str) 
 
 fn workspace_of(state: &AppState, id: Uuid) -> Option<(String, PathBuf)> {
     state
+        .sessions
         .workspaces
         .iter()
         .find(|w| w.sessions.iter().any(|s| s.id == id))
@@ -220,7 +221,7 @@ async fn plain_checkout_session_renders_repo_name_not_broken() {
     );
 
     assert_eq!(
-        state.workspaces.iter().filter(|w| w.name == "myrepo").count(),
+        state.sessions.workspaces.iter().filter(|w| w.name == "myrepo").count(),
         1,
         "exactly one workspace row for the repo"
     );
@@ -233,9 +234,9 @@ async fn plain_checkout_session_renders_repo_name_not_broken() {
         "a worktree inside no git repository must not be rendered as a workspace"
     );
     assert!(
-        !state.workspaces.iter().any(|w| w.name == "(broken)"),
+        !state.sessions.workspaces.iter().any(|w| w.name == "(broken)"),
         "no (broken) workspace should exist: {:?}",
-        state.workspaces.iter().map(|w| w.name.clone()).collect::<Vec<_>>()
+        state.sessions.workspaces.iter().map(|w| w.name.clone()).collect::<Vec<_>>()
     );
 
     // ── User-visible proof: render the real session list ──────────────────

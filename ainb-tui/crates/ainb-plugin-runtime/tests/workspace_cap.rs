@@ -120,10 +120,10 @@ fn default_workspace_used_when_active_not_set() {
     // And the list marks acme active + default, default-row not active.
     let lv = list_logic(&store);
     let list: WorkspaceListResult = serde_json::from_value(lv).unwrap();
-    let acme = list.workspaces.iter().find(|w| w.id == "01ID_ACME").unwrap();
+    let acme = list.sessions.workspaces.iter().find(|w| w.id == "01ID_ACME").unwrap();
     assert!(acme.active, "acme is the effective active via default");
     assert!(acme.default, "acme is the default");
-    let def = list.workspaces.iter().find(|w| w.id == "01ID_DEFAULT").unwrap();
+    let def = list.sessions.workspaces.iter().find(|w| w.id == "01ID_DEFAULT").unwrap();
     assert!(!def.active);
     assert!(!def.default);
 }
@@ -312,7 +312,7 @@ fn create_appends_and_lists_new_workspace() {
 
     let list: WorkspaceListResult = serde_json::from_value(list_logic(&store)).unwrap();
     assert!(
-        list.workspaces.iter().any(|w| w.slug == "beta"),
+        list.sessions.workspaces.iter().any(|w| w.slug == "beta"),
         "the new workspace shows in the list"
     );
 }
@@ -339,7 +339,7 @@ fn delete_removes_workspace_from_catalogue() {
 
     let list: WorkspaceListResult = serde_json::from_value(list_logic(&store)).unwrap();
     assert!(
-        !list.workspaces.iter().any(|w| w.id == "01ID_ACME"),
+        !list.sessions.workspaces.iter().any(|w| w.id == "01ID_ACME"),
         "the deleted workspace is gone from the list"
     );
 }
@@ -357,7 +357,7 @@ fn delete_active_workspace_is_refused() {
     assert_eq!(err.code, errors::INVALID_PARAMS);
     // Still present — nothing was mutated.
     let list: WorkspaceListResult = serde_json::from_value(list_logic(&store)).unwrap();
-    assert!(list.workspaces.iter().any(|w| w.id == "01ID_DEFAULT"));
+    assert!(list.sessions.workspaces.iter().any(|w| w.id == "01ID_DEFAULT"));
 }
 
 /// The list result carries the lockdown hint so a plugin can hide its create
@@ -372,7 +372,7 @@ fn list_reports_creation_disabled() {
     let list: WorkspaceListResult = serde_json::from_value(locked_value.clone()).unwrap();
     assert!(list.creation_disabled, "the lockdown must reach the plugin");
     assert_eq!(
-        list.workspaces.len(),
+        list.sessions.workspaces.len(),
         catalogue().len(),
         "the lockdown hides no rows — it only hides the create affordance"
     );
@@ -407,7 +407,7 @@ fn create_surfaces_lockdown_code() {
     // …and nothing was folded into the catalogue.
     let list: WorkspaceListResult = serde_json::from_value(list_logic(&store)).unwrap();
     assert!(
-        !list.workspaces.iter().any(|w| w.slug == "beta"),
+        !list.sessions.workspaces.iter().any(|w| w.slug == "beta"),
         "a refused create must not appear in the catalogue"
     );
 

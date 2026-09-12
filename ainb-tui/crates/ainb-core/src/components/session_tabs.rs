@@ -217,9 +217,9 @@ impl SessionTab {
                 // set, so it needs no cursor session at all.
                 if !state.broadcast_targets().is_empty() {
                     None
-                } else if state.selected_sessions.is_empty() && !has_session {
+                } else if state.sessions.selected_sessions.is_empty() && !has_session {
                     Some("select a session first")
-                } else if !state.selected_sessions.is_empty() {
+                } else if !state.sessions.selected_sessions.is_empty() {
                     // Rows ARE checked, but not one of them has a scope.
                     Some("no checked session has fired a hook yet, so none can be reached")
                 } else if state.selected_session_chat_key().is_none() {
@@ -1504,16 +1504,16 @@ mod tests {
         select: bool,
     ) -> AppState {
         let mut state = AppState::new();
-        state.workspaces.clear();
+        state.sessions.workspaces.clear();
         let mut workspace = Workspace::new("proj".to_string(), "/work/proj".into());
         let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
         session.status = SessionStatus::Idle;
         session.live_attention = chips;
         session.errors = errors;
         workspace.add_session(session);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = select.then_some(0);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = select.then_some(0);
         state
     }
 
@@ -1852,7 +1852,8 @@ mod tests {
     #[test]
     fn ticking_a_tabs_host_and_painting_it_resolve_to_the_same_conversation() {
         let mut state = state_with(Vec::new(), true);
-        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        state.sessions.workspaces[0].sessions[0].provider_session_id =
+            Some("hook-sess-1".to_string());
 
         for tab in ALL_TABS {
             let ticked = state.chat_host_for(tab).map(std::ptr::from_ref);
@@ -1944,7 +1945,7 @@ mod tests {
             SessionTab::Thread.disabled_reason(&selected),
             Some("this session has not fired a hook yet, so its thread has no scope"),
         );
-        selected.workspaces[0].sessions[0].provider_session_id = Some("abc".to_string());
+        selected.sessions.workspaces[0].sessions[0].provider_session_id = Some("abc".to_string());
         assert!(SessionTab::Thread.enabled(&selected));
     }
 
@@ -1954,9 +1955,10 @@ mod tests {
         // has never heard of: an empty timeline forever against a real daemon,
         // with every unit test still green.
         let mut state = state_with(Vec::new(), true);
-        state.workspaces[0].sessions[0].tmux_session_name = Some("tmux_proj".to_string());
+        state.sessions.workspaces[0].sessions[0].tmux_session_name = Some("tmux_proj".to_string());
         assert_eq!(state.selected_session_chat_key(), None);
-        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        state.sessions.workspaces[0].sessions[0].provider_session_id =
+            Some("hook-sess-1".to_string());
         assert_eq!(
             state.selected_session_chat_key().as_deref(),
             Some("claude:hook-sess-1")
@@ -1982,7 +1984,8 @@ mod tests {
             true,
         );
         // The thread needs a scope before it is reachable.
-        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        state.sessions.workspaces[0].sessions[0].provider_session_id =
+            Some("hook-sess-1".to_string());
         let state = state;
         let mut seen = vec![SessionTab::Preview];
         let mut at = SessionTab::Preview;
@@ -2061,7 +2064,7 @@ mod tests {
     #[test]
     fn selected_footer_shows_observed_model_effort_and_direct_children() {
         let mut state = state_with(Vec::new(), true);
-        let id = state.workspaces[0].sessions[0].id;
+        let id = state.sessions.workspaces[0].sessions[0].id;
         state.fleet_metadata.insert(
             id,
             crate::app::state::SessionFleetMetadata {

@@ -232,7 +232,7 @@ impl HomeScreenComponent {
         frame.render_widget(block, area);
 
         // Show recent session or placeholder
-        let recent_text = if let Some(workspace) = state.workspaces.first() {
+        let recent_text = if let Some(workspace) = state.sessions.workspaces.first() {
             if let Some(session) = workspace.sessions.first() {
                 let status_icon = if session.status.is_running() { "" } else { "" };
                 format!(

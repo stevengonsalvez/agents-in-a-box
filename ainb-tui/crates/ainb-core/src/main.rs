@@ -1533,7 +1533,9 @@ async fn run_tui_loop(
 
                         // Get workspace info
                         let (workspace_path, workspace_name, existing_shell) = {
-                            if let Some(workspace) = app.state.workspaces.get(workspace_index) {
+                            if let Some(workspace) =
+                                app.state.sessions.workspaces.get(workspace_index)
+                            {
                                 (
                                     workspace.path.clone(),
                                     workspace.name.clone(),
@@ -1559,7 +1561,9 @@ async fn run_tui_loop(
                             );
                             let name = shell.tmux_session_name.clone();
                             // Store the new shell in workspace
-                            if let Some(workspace) = app.state.workspaces.get_mut(workspace_index) {
+                            if let Some(workspace) =
+                                app.state.sessions.workspaces.get_mut(workspace_index)
+                            {
                                 workspace.set_shell_session(shell);
                             }
                             (name, true)
@@ -1636,7 +1640,7 @@ async fn run_tui_loop(
                                 Ok(output) if output.status.success() => {
                                     // Update stored working_dir for state consistency
                                     if let Some(workspace) =
-                                        app.state.workspaces.get_mut(workspace_index)
+                                        app.state.sessions.workspaces.get_mut(workspace_index)
                                     {
                                         if let Some(shell) = workspace.get_shell_session_mut() {
                                             shell.set_working_dir(dir.clone());
@@ -1662,7 +1666,9 @@ async fn run_tui_loop(
                         }
 
                         // Update shell's last accessed time
-                        if let Some(workspace) = app.state.workspaces.get_mut(workspace_index) {
+                        if let Some(workspace) =
+                            app.state.sessions.workspaces.get_mut(workspace_index)
+                        {
                             if let Some(shell) = workspace.get_shell_session_mut() {
                                 shell.touch();
                             }
@@ -1794,7 +1800,7 @@ async fn run_tui_loop(
 
                         // Extract info first to avoid borrow issues
                         let shell_info = if let Some(workspace) =
-                            app.state.workspaces.get_mut(workspace_index)
+                            app.state.sessions.workspaces.get_mut(workspace_index)
                         {
                             if let Some(shell) = workspace.shell_session.take() {
                                 Some((shell.tmux_session_name.clone(), workspace.name.clone()))
@@ -1833,12 +1839,13 @@ async fn run_tui_loop(
                         );
                         debug!(
                             "[ACTION] Looking for session in {} workspaces",
-                            app.state.workspaces.len()
+                            app.state.sessions.workspaces.len()
                         );
 
                         // Get session to find tmux session name
                         let tmux_session_name = if let Some(session) = app
                             .state
+                            .sessions
                             .workspaces
                             .iter()
                             .flat_map(|w| &w.sessions)
@@ -1876,7 +1883,7 @@ async fn run_tui_loop(
                             app.state.release_interactive_pane();
 
                             // Mark session as attached
-                            for workspace in &mut app.state.workspaces {
+                            for workspace in &mut app.state.sessions.workspaces {
                                 for session in &mut workspace.sessions {
                                     if session.id == session_id {
                                         session.mark_attached();
@@ -1921,7 +1928,7 @@ async fn run_tui_loop(
                             }
 
                             // Mark session as detached
-                            for workspace in &mut app.state.workspaces {
+                            for workspace in &mut app.state.sessions.workspaces {
                                 for session in &mut workspace.sessions {
                                     if session.id == session_id {
                                         session.mark_detached();

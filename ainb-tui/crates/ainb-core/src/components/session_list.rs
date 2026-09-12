@@ -234,8 +234,11 @@ pub struct SessionListComponent {
 }
 
 fn selected_row_target(state: &AppState) -> Option<SessionListRowTarget> {
-    if let Some(workspace_idx) = state.selected_workspace_index {
-        return match (state.selected_session_index, state.shell_selected) {
+    if let Some(workspace_idx) = state.sessions.selected_workspace_index {
+        return match (
+            state.sessions.selected_session_index,
+            state.sessions.shell_selected,
+        ) {
             (Some(session_idx), _) => Some(SessionListRowTarget::Attachable(
                 AttachableRef::WorkspaceSession {
                     workspace_idx,
@@ -304,6 +307,7 @@ impl SessionListComponent {
         // all their sessions to the filter (and have no shell) are dropped
         // from the rendered list, so the header should match.
         let workspace_count = state
+            .sessions
             .workspaces
             .iter()
             .filter(|w| {
@@ -317,7 +321,7 @@ impl SessionListComponent {
         // here would tell the operator there is more waiting on them than there
         // is. Counts ROWS, so a session with both an ASK and an APPROVE is one
         // session needing one human.
-        let needs_you = needs_you_count(state.workspaces.iter().flat_map(|w| {
+        let needs_you = needs_you_count(state.sessions.workspaces.iter().flat_map(|w| {
             w.sessions
                 .iter()
                 .filter(|s| state.session_passes_filter(s))
@@ -351,7 +355,7 @@ impl SessionListComponent {
             ),
             Span::raw(if needs_you_label.is_empty() { "" } else { " " }),
         ];
-        let filter_label = format!("F [{}]", state.session_filter.label());
+        let filter_label = format!("F [{}]", state.sessions.session_filter.label());
         let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}){needs_you_label} ");
         ui.sessions_pane.set_filter_toggle_area(Rect::new(
             area.x.saturating_add(1 + title_prefix.chars().count() as u16),
@@ -563,7 +567,7 @@ impl SessionListComponent {
         let mut items = Vec::new();
 
         // Favorite status is precomputed off the render path into
-        // `state.favorite_workspace_paths` (see
+        // `state.sessions.favorite_workspace_paths` (see
         // `AppState::recompute_favorite_workspaces`), so this hot loop does an
         // O(1) set lookup instead of re-parsing favorites.yaml and opening a
         // git repo per workspace on every frame. (perf: beads 9ov + 8rn)
@@ -572,8 +576,9 @@ impl SessionListComponent {
         // divergence would attach the wrong session for a given digit.
         let mut attach_no: usize = 0;
 
-        for (workspace_idx, workspace) in state.workspaces.iter().enumerate() {
-            let is_selected_workspace = state.selected_workspace_index == Some(workspace_idx);
+        for (workspace_idx, workspace) in state.sessions.workspaces.iter().enumerate() {
+            let is_selected_workspace =
+                state.sessions.selected_workspace_index == Some(workspace_idx);
             // Apply the session filter (Shift+F cycles): only count sessions
             // that pass the predicate so the workspace `(N)` matches what the
             // user actually sees rendered below.
@@ -590,7 +595,7 @@ impl SessionListComponent {
             }
 
             // Determine expand state: expanded if selected OR if expand_all is true
-            let is_expanded = is_selected_workspace || state.expand_all_workspaces;
+            let is_expanded = is_selected_workspace || state.sessions.expand_all_workspaces;
 
             let workspace_symbol = if total_count == 0 {
                 "▷"
@@ -618,7 +623,7 @@ impl SessionListComponent {
             // Favorite status: O(1) lookup against the precomputed cache
             // (resolved off the render path in
             // `AppState::recompute_favorite_workspaces`). No git2 / YAML here.
-            let is_favorite = state.favorite_workspace_paths.contains(&workspace.path);
+            let is_favorite = state.sessions.favorite_workspace_paths.contains(&workspace.path);
             let star_indicator = if is_favorite { "\u{f005} " } else { "" }; // fa-star, 1-cell
 
             let workspace_line = Line::from(vec![
@@ -664,8 +669,8 @@ impl SessionListComponent {
                     *title_counts.entry(session_list_name(session)).or_default() += 1;
                 }
                 for (visible_pos, &(session_idx, session)) in visible.iter().enumerate() {
-                    let is_selected_session =
-                        is_selected_workspace && state.selected_session_index == Some(session_idx);
+                    let is_selected_session = is_selected_workspace
+                        && state.sessions.selected_session_index == Some(session_idx);
                     let is_last_session = visible_pos == visible_len - 1;
 
                     // Tree line characters with subdued color
@@ -700,7 +705,7 @@ impl SessionListComponent {
                     let branch_color = state_color;
                     let agent_icon = session.agent_type.icon();
                     let agent_color = agent_brand_color(&session.agent_type);
-                    let is_multi_selected = state.selected_sessions.contains(&session.id);
+                    let is_multi_selected = state.sessions.selected_sessions.contains(&session.id);
                     let title = session_list_name(session);
                     let collision_id = session_collision_id(
                         session,
@@ -798,8 +803,8 @@ impl SessionListComponent {
                 // Render workspace shell (single shell per workspace)
                 if let Some(shell_session) = &workspace.shell_session {
                     let is_selected_shell = is_selected_workspace
-                        && state.selected_session_index.is_none()
-                        && state.shell_selected;
+                        && state.sessions.selected_session_index.is_none()
+                        && state.sessions.shell_selected;
 
                     // Shell is always last
                     let tree_prefix = "└─";
@@ -847,7 +852,7 @@ impl SessionListComponent {
             }
 
             let session_count = state.ssh.ssh_sessions.len();
-            let is_selected_ssh = state.selected_workspace_index.is_none()
+            let is_selected_ssh = state.sessions.selected_workspace_index.is_none()
                 && state.selected_other_tmux_index.is_none()
                 && state.ssh.selected_ssh_session_index.is_some();
 
@@ -957,7 +962,7 @@ impl SessionListComponent {
             }
 
             let session_count = state.other_tmux_sessions.len();
-            let is_selected_other = state.selected_workspace_index.is_none()
+            let is_selected_other = state.sessions.selected_workspace_index.is_none()
                 && state.selected_other_tmux_index.is_some();
 
             let other_symbol = if state.other_tmux_expanded {
@@ -966,7 +971,7 @@ impl SessionListComponent {
                 "▶"
             };
 
-            let header_color = if state.selected_workspace_index.is_none() {
+            let header_color = if state.sessions.selected_workspace_index.is_none() {
                 CORNFLOWER_BLUE
             } else {
                 MUTED_GRAY
@@ -1155,9 +1160,9 @@ impl SessionListComponent {
         let mut count = 0;
 
         // Count workspace items
-        for workspace in &state.workspaces {
+        for workspace in &state.sessions.workspaces {
             count += 1; // Workspace header
-            if state.expand_all_workspaces {
+            if state.sessions.expand_all_workspaces {
                 count += workspace.sessions.len();
                 if workspace.shell_session.is_some() {
                     count += 1;
@@ -1167,7 +1172,7 @@ impl SessionListComponent {
 
         // Count "SSH Sessions" section items
         if !state.ssh.ssh_sessions.is_empty() {
-            if !state.workspaces.is_empty() {
+            if !state.sessions.workspaces.is_empty() {
                 count += 1; // Empty separator line
             }
             count += 1; // "SSH Sessions" header
@@ -1179,7 +1184,7 @@ impl SessionListComponent {
         // Count "Other tmux" section items
         if !state.other_tmux_sessions.is_empty() {
             let has_items_above =
-                !state.workspaces.is_empty() || !state.ssh.ssh_sessions.is_empty();
+                !state.sessions.workspaces.is_empty() || !state.ssh.ssh_sessions.is_empty();
             if has_items_above {
                 count += 1; // Empty separator line
             }
@@ -1381,6 +1386,7 @@ mod tests {
     /// badge, without the mouse-hit-area bookkeeping `render` also does.
     fn panel_title_for_test(state: &AppState) -> String {
         let workspaces = state
+            .sessions
             .workspaces
             .iter()
             .filter(|w| {
@@ -1388,7 +1394,7 @@ mod tests {
                     || w.shell_session.is_some()
             })
             .count();
-        let needs_you = needs_you_count(state.workspaces.iter().flat_map(|w| {
+        let needs_you = needs_you_count(state.sessions.workspaces.iter().flat_map(|w| {
             w.sessions
                 .iter()
                 .filter(|s| state.session_passes_filter(s))
@@ -1405,8 +1411,8 @@ mod tests {
     /// an APPROVE, a DONE, and a quiet row.
     fn chip_state() -> AppState {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.expand_all_workspaces = true;
+        state.sessions.workspaces.clear();
+        state.sessions.expand_all_workspaces = true;
         let mut workspace = Workspace::new("agents-in-a-box".to_string(), "/tmp/aib".into());
         let rows: [(&str, Vec<SessionAttention>); 5] = [
             (
@@ -1445,17 +1451,17 @@ mod tests {
             session.live_attention = chips;
             workspace.add_session(session);
         }
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = Some(0);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
         state
     }
 
     #[test]
     fn sidebar_shows_observed_model_and_effort_on_each_session_row() {
         let mut state = chip_state();
-        let first = state.workspaces[0].sessions[0].id;
-        let second = state.workspaces[0].sessions[1].id;
+        let first = state.sessions.workspaces[0].sessions[0].id;
+        let second = state.sessions.workspaces[0].sessions[1].id;
         state.fleet_metadata.insert(
             first,
             crate::app::state::SessionFleetMetadata {
@@ -1500,7 +1506,7 @@ mod tests {
     #[test]
     fn sidebar_keeps_model_effort_on_its_own_line_at_narrow_width() {
         let mut state = chip_state();
-        let first = state.workspaces[0].sessions[0].id;
+        let first = state.sessions.workspaces[0].sessions[0].id;
         state.fleet_metadata.insert(
             first,
             crate::app::state::SessionFleetMetadata {
@@ -1521,12 +1527,13 @@ mod tests {
     #[test]
     fn sidebar_shows_lifecycle_words_separate_from_attention() {
         let mut state = chip_state();
-        state.workspaces[0].sessions[0].status = SessionStatus::Running;
-        state.workspaces[0].sessions[1].status = SessionStatus::Idle;
-        state.workspaces[0].sessions[2].status = SessionStatus::Stopped;
-        state.workspaces[0].sessions[3].status = SessionStatus::Error("lost transport".into());
+        state.sessions.workspaces[0].sessions[0].status = SessionStatus::Running;
+        state.sessions.workspaces[0].sessions[1].status = SessionStatus::Idle;
+        state.sessions.workspaces[0].sessions[2].status = SessionStatus::Stopped;
+        state.sessions.workspaces[0].sessions[3].status =
+            SessionStatus::Error("lost transport".into());
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[2]),
+            session_lifecycle_label(&state, &state.sessions.workspaces[0].sessions[2]),
             "STOP"
         );
 
@@ -1548,8 +1555,8 @@ mod tests {
     #[test]
     fn sidebar_uses_fleet_turn_complete_for_done_gutter() {
         let mut state = chip_state();
-        let session = state.workspaces[0].sessions[0].id;
-        state.workspaces[0].sessions[0].live_attention.clear();
+        let session = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].live_attention.clear();
         state.daemon_attention.lock().unwrap().reachable = true;
         state.fleet_metadata.insert(
             session,
@@ -1577,7 +1584,7 @@ mod tests {
     #[test]
     fn stale_or_contradicted_fleet_done_never_overrides_live_status() {
         let mut state = chip_state();
-        let session = state.workspaces[0].sessions[0].id;
+        let session = state.sessions.workspaces[0].sessions[0].id;
         state.fleet_metadata.insert(
             session,
             crate::app::state::SessionFleetMetadata {
@@ -1602,7 +1609,7 @@ mod tests {
 
         // A retained snapshot cannot drive lifecycle after daemon reachability
         // is lost, even when no current attention chip exists.
-        state.workspaces[0].sessions[0].live_attention.clear();
+        state.sessions.workspaces[0].sessions[0].live_attention.clear();
         state.daemon_attention.lock().unwrap().reachable = false;
         let unreachable = render_panel(&mut state, 100, 16);
         let row = unreachable
@@ -1616,9 +1623,9 @@ mod tests {
     #[test]
     fn retained_fleet_done_never_relabels_a_stopped_session() {
         let mut state = chip_state();
-        let session = state.workspaces[0].sessions[0].id;
-        state.workspaces[0].sessions[0].status = SessionStatus::Stopped;
-        state.workspaces[0].sessions[0].live_attention.clear();
+        let session = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].status = SessionStatus::Stopped;
+        state.sessions.workspaces[0].sessions[0].live_attention.clear();
         state.daemon_attention.lock().unwrap().reachable = true;
         state.fleet_metadata.insert(
             session,
@@ -1629,7 +1636,7 @@ mod tests {
         );
 
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            session_lifecycle_label(&state, &state.sessions.workspaces[0].sessions[0]),
             "STOP"
         );
     }
@@ -1710,10 +1717,11 @@ mod tests {
     #[test]
     fn a_row_with_both_an_ask_and_an_err_paints_the_ask_first() {
         let mut state = chip_state();
-        state.workspaces[0].sessions[1].live_attention = crate::fleet::attention::normalise(vec![
-            SessionAttention::local(AttentionKind::Err, CHIP_NOW - 9 * 60_000),
-            SessionAttention::local(AttentionKind::Ask, CHIP_NOW - 40_000),
-        ]);
+        state.sessions.workspaces[0].sessions[1].live_attention =
+            crate::fleet::attention::normalise(vec![
+                SessionAttention::local(AttentionKind::Err, CHIP_NOW - 9 * 60_000),
+                SessionAttention::local(AttentionKind::Ask, CHIP_NOW - 40_000),
+            ]);
         let rendered = render_panel(&mut state, 100, 16);
         let row = rendered
             .lines()
@@ -1839,7 +1847,7 @@ mod tests {
     #[test]
     fn a_quiet_fleet_shows_no_badge() {
         let mut state = chip_state();
-        for session in &mut state.workspaces[0].sessions {
+        for session in &mut state.sessions.workspaces[0].sessions {
             session.live_attention.clear();
         }
         let rendered = render_panel(&mut state, 100, 16);
@@ -1852,9 +1860,9 @@ mod tests {
     #[test]
     fn selection_uses_visible_row_when_stopped_sessions_are_filtered() {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.session_filter = SessionFilter::ActiveOnly;
-        state.expand_all_workspaces = true;
+        state.sessions.workspaces.clear();
+        state.sessions.session_filter = SessionFilter::ActiveOnly;
+        state.sessions.expand_all_workspaces = true;
 
         let mut workspace = Workspace::new("workspace".to_string(), "/tmp/workspace".into());
         let stopped = Session::new("stopped".to_string(), "/tmp/workspace".to_string());
@@ -1862,9 +1870,9 @@ mod tests {
         running.status = SessionStatus::Running;
         workspace.add_session(stopped);
         workspace.add_session(running);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = Some(1);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(1);
 
         let mut list = SessionListComponent::new();
         list.update_selection(&state);
@@ -1919,13 +1927,13 @@ mod tests {
         assert!(matches!(session.status, SessionStatus::Stopped));
 
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.expand_all_workspaces = true;
-        state.session_filter = SessionFilter::All;
+        state.sessions.workspaces.clear();
+        state.sessions.expand_all_workspaces = true;
+        state.sessions.session_filter = SessionFilter::All;
         let mut workspace = Workspace::new("ws".to_string(), "/tmp/ainb-stopped-label".into());
         workspace.add_session(session);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
 
         let mut list = SessionListComponent::new();
         let mut ui = crate::app::ui_state::UiState::default();
@@ -1966,8 +1974,8 @@ mod tests {
     #[test]
     fn narrow_duplicate_rows_keep_their_short_id_visible() {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.expand_all_workspaces = true;
+        state.sessions.workspaces.clear();
+        state.sessions.expand_all_workspaces = true;
 
         let mut workspace = Workspace::new("ws".to_string(), "/tmp/ws".into());
         let mut first = Session::new("first".to_string(), "/tmp/ws/first".to_string());
@@ -1981,7 +1989,7 @@ mod tests {
         let second_id = second.id.to_string()[..8].to_string();
         workspace.add_session(first);
         workspace.add_session(second);
-        state.workspaces.push(workspace);
+        state.sessions.workspaces.push(workspace);
 
         let painted = render_panel(&mut state, 24, 8);
         assert!(

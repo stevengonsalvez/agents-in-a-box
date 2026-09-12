@@ -51,7 +51,7 @@ async fn app_on_picker_from_session_list() -> App {
 async fn test_session_creation_shows_immediately() {
     let mut app = app_on_picker_from_session_list().await;
 
-    let initial_workspace_count = app.state.workspaces.len();
+    let initial_workspace_count = app.state.sessions.workspaces.len();
     assert!(
         initial_workspace_count > 0,
         "Should have some initial workspaces for test"
@@ -95,7 +95,7 @@ async fn test_session_creation_shows_immediately() {
     // The key fix: workspaces stay loaded (not wiped) across the teardown so the
     // homescreen renders current data, not an empty placeholder.
     assert!(
-        !app.state.workspaces.is_empty(),
+        !app.state.sessions.workspaces.is_empty(),
         "Workspaces should be loaded and visible immediately"
     );
 
@@ -125,7 +125,7 @@ async fn test_workspace_refresh_order() {
     assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
     assert!(app.state.new_session.new_session_state.is_none());
     assert!(
-        !app.state.workspaces.is_empty(),
+        !app.state.sessions.workspaces.is_empty(),
         "Workspace data should be loaded and available after refresh"
     );
 
@@ -144,7 +144,7 @@ async fn test_workspace_refresh_order() {
 async fn test_no_empty_homescreen_after_creation() {
     let mut app = app_on_picker_from_session_list().await;
 
-    let has_initial_data = !app.state.workspaces.is_empty();
+    let has_initial_data = !app.state.sessions.workspaces.is_empty();
     assert!(has_initial_data, "Test requires initial workspace data");
 
     // Genuine creation teardown.
@@ -153,7 +153,7 @@ async fn test_no_empty_homescreen_after_creation() {
     // CRITICAL: populated homescreen immediately, not an empty one.
     assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
     assert!(
-        !app.state.workspaces.is_empty(),
+        !app.state.sessions.workspaces.is_empty(),
         "REGRESSION: Homescreen shows empty after session creation - UI refresh bug has returned!"
     );
 
@@ -177,7 +177,7 @@ async fn test_error_handling_with_correct_refresh() {
     // Even on error we return to SessionList with data visible.
     assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
     assert!(
-        !app.state.workspaces.is_empty(),
+        !app.state.sessions.workspaces.is_empty(),
         "Should still show workspace data after error"
     );
     assert!(

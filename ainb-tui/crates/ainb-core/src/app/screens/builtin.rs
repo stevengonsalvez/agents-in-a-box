@@ -821,7 +821,7 @@ impl Screen for HomeScreen {
             frame,
             area,
             &state.home_screen_v2_state,
-            &state.workspaces,
+            &state.sessions.workspaces,
             state.workspace_load.is_loading_workspaces,
             ui,
         );
@@ -957,7 +957,7 @@ impl Screen for SetupMenuScreen {
             frame,
             area,
             &state.home_screen_v2_state,
-            &state.workspaces,
+            &state.sessions.workspaces,
             state.workspace_load.is_loading_workspaces,
             ui,
         );

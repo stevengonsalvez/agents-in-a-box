@@ -399,3 +399,39 @@ impl Default for NewSessionSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct SessionsSection {
+    pub workspaces: Vec<Workspace>,
+    pub selected_workspace_index: Option<usize>,
+    pub selected_session_index: Option<usize>,
+    pub shell_selected: bool, // Whether the workspace shell is currently selected
+    pub selected_sessions: HashSet<Uuid>, // Multi-selected session IDs for bulk operations
+    pub expand_all_workspaces: bool, // When true, show all sessions across all workspaces
+    pub session_filter: SessionFilter, // View filter for Interactive sessions (Shift+F to cycle)
+    // Track attached terminal state
+    pub attached_session_id: Option<Uuid>,
+    /// Cache of workspace paths that are currently favorited (starred).
+    /// Computed by `recompute_favorite_workspaces()` whenever the workspace
+    /// list or the favorites store changes — NOT in the render path. The
+    /// session-list render reads this set with an O(1) lookup, so it never
+    /// re-parses `favorites.yaml` or opens a git repo per frame.
+    pub favorite_workspace_paths: HashSet<PathBuf>,
+}
+
+impl Default for SessionsSection {
+    fn default() -> Self {
+        Self {
+            workspaces: Vec::new(),
+            selected_workspace_index: None,
+            selected_session_index: None,
+            shell_selected: false,
+            selected_sessions: HashSet::new(),
+            expand_all_workspaces: true, // Default to expanded view
+            // AppState::default overwrites this from the loaded config.
+            session_filter: crate::app::state::SessionFilter::default(),
+            attached_session_id: None,
+            favorite_workspace_paths: HashSet::new(),
+        }
+    }
+}

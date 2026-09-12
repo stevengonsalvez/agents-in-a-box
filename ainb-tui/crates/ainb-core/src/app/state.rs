@@ -679,7 +679,7 @@ impl AppState {
     fn selected_session_attached_elsewhere(&self) -> bool {
         if self.is_ssh_session_selected() {
             self.selected_ssh_session().map(|s| s.is_attached).unwrap_or(false)
-        } else if self.shell_selected {
+        } else if self.sessions.shell_selected {
             false
         } else if self.is_other_tmux_selected() {
             self.selected_other_tmux_session().map(|s| s.attached).unwrap_or(false)
@@ -709,9 +709,10 @@ impl AppState {
             self.selected_ssh_session().and_then(|s| s.tmux_session_name.clone())
         } else if self.is_other_tmux_selected() {
             self.selected_other_tmux_session().map(|s| s.name.clone())
-        } else if self.shell_selected {
-            self.selected_workspace_index
-                .and_then(|i| self.workspaces.get(i))
+        } else if self.sessions.shell_selected {
+            self.sessions
+                .selected_workspace_index
+                .and_then(|i| self.sessions.workspaces.get(i))
                 .and_then(|w| w.shell_session.as_ref())
                 .map(|sh| sh.tmux_session_name.clone())
         } else {
@@ -3140,6 +3141,8 @@ pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, S
 
 #[derive(Debug)]
 pub struct AppState {
+    pub sessions: Versioned<SessionsSection>,
+
     pub new_session: Versioned<NewSessionSection>,
 
     pub workspace_load: Versioned<WorkspaceLoadSection>,
@@ -3166,13 +3169,6 @@ pub struct AppState {
 
     pub mcp_pool: Versioned<McpPoolSection>,
 
-    pub workspaces: Vec<Workspace>,
-    pub selected_workspace_index: Option<usize>,
-    pub selected_session_index: Option<usize>,
-    pub shell_selected: bool, // Whether the workspace shell is currently selected
-    pub selected_sessions: HashSet<Uuid>, // Multi-selected session IDs for bulk operations
-    pub expand_all_workspaces: bool, // When true, show all sessions across all workspaces
-    pub session_filter: SessionFilter, // View filter for Interactive sessions (Shift+F to cycle)
     pub current_screen: ScreenId,
     pub should_quit: bool,
     pub logs: HashMap<Uuid, Vec<String>>,
@@ -3212,8 +3208,6 @@ pub struct AppState {
     observer_started_at: Option<Instant>,
     // Track if current directory is a git repository
     pub last_logs_session_id: Option<Uuid>,
-    // Track attached terminal state
-    pub attached_session_id: Option<Uuid>,
     // Track when logs were last updated for each session
     pub log_last_updated: HashMap<Uuid, std::time::Instant>,
     // Track the last time we checked for log updates globally
@@ -3272,13 +3266,6 @@ pub struct AppState {
 
     // Log history viewer state
     pub log_history_state: crate::components::LogHistoryViewerState,
-
-    /// Cache of workspace paths that are currently favorited (starred).
-    /// Computed by `recompute_favorite_workspaces()` whenever the workspace
-    /// list or the favorites store changes — NOT in the render path. The
-    /// session-list render reads this set with an O(1) lookup, so it never
-    /// re-parses `favorites.yaml` or opens a git repo per frame.
-    pub favorite_workspace_paths: HashSet<PathBuf>,
 
     /// Background poller for the live OAuth-window snapshot. The render
     /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
@@ -3708,6 +3695,7 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            sessions: Versioned::default(),
             new_session: Versioned::default(),
             workspace_load: Versioned::default(),
             session_labels: Versioned::default(),
@@ -3730,13 +3718,6 @@ impl Default for AppState {
             git_view: Versioned::default(),
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
-            workspaces: Vec::new(),
-            selected_workspace_index: None,
-            selected_session_index: None,
-            shell_selected: false,
-            selected_sessions: HashSet::new(),
-            expand_all_workspaces: true, // Default to expanded view
-            session_filter,
             current_screen: screen_ids::HOME.to_string(),
             should_quit: false,
             logs: HashMap::new(),
@@ -3752,7 +3733,6 @@ impl Default for AppState {
             observer_failed_target: None,
             observer_started_at: None,
             last_logs_session_id: None,
-            attached_session_id: None,
             log_last_updated: HashMap::new(),
             last_log_check: None,
             last_token_refresh_check: None,
@@ -3802,8 +3782,6 @@ impl Default for AppState {
             // Daemons observability (collects health on first/periodic render)
 
             // Fleet control panel (reads current_state on entry/tick)
-            favorite_workspace_paths: HashSet::new(),
-
             live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
             // Skills browser state
@@ -4020,6 +3998,7 @@ impl AppState {
         if let Some(coordinator) = &mut self.log_streaming_coordinator {
             // Find the session to get container info
             let session_info = self
+                .sessions
                 .workspaces
                 .iter()
                 .flat_map(|w| &w.sessions)
@@ -4537,13 +4516,14 @@ impl AppState {
             std::path::PathBuf,
             crate::models::ShellSession,
         > = self
+            .sessions
             .workspaces
             .iter()
             .filter_map(|w| w.shell_session.clone().map(|s| (w.path.clone(), s)))
             .collect();
 
         // Clear existing workspaces before loading to prevent duplicates
-        self.workspaces.clear();
+        self.sessions.workspaces.clear();
 
         // Check and refresh OAuth tokens if needed (only if Docker is available)
         let home_dir = dirs::home_dir();
@@ -4604,7 +4584,7 @@ impl AppState {
                 "Restoring {} preserved shell sessions",
                 preserved_shells.len()
             );
-            for workspace in &mut self.workspaces {
+            for workspace in &mut self.sessions.workspaces {
                 if let Some(shell) = preserved_shells.get(&workspace.path) {
                     // Only restore if the tmux session still exists
                     let check = tokio::process::Command::new("tmux")
@@ -4637,9 +4617,9 @@ impl AppState {
 
         // Reset selection state before setting new selection
         // This is critical to avoid stale indices after refresh that break navigation
-        self.selected_workspace_index = None;
-        self.selected_session_index = None;
-        self.shell_selected = false;
+        self.sessions.selected_workspace_index = None;
+        self.sessions.selected_session_index = None;
+        self.sessions.shell_selected = false;
         self.ssh.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
@@ -4714,7 +4694,7 @@ impl AppState {
                                 workspaces.len()
                             );
 
-                            self.workspaces = workspaces;
+                            self.sessions.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
                             self.workspace_load.workspace_load_error = None;
 
@@ -4726,7 +4706,7 @@ impl AppState {
 
                             // Populate tmux_sessions HashMap for Interactive mode sessions
                             // This is needed for update_tmux_previews() to capture pane content
-                            for workspace in &self.workspaces {
+                            for workspace in &self.sessions.workspaces {
                                 for session in &workspace.sessions {
                                     if session.mode == crate::models::SessionMode::Interactive {
                                         // Use tmux_session_name if available, otherwise generate from session name
@@ -4752,9 +4732,9 @@ impl AppState {
                             );
 
                             // Set initial selection
-                            self.selected_workspace_index = None;
-                            self.selected_session_index = None;
-                            self.shell_selected = false;
+                            self.sessions.selected_workspace_index = None;
+                            self.sessions.selected_session_index = None;
+                            self.sessions.shell_selected = false;
                             self.ssh.selected_ssh_session_index = None;
                             self.selected_other_tmux_index = None;
 
@@ -4849,12 +4829,12 @@ impl AppState {
     pub fn recompute_favorite_workspaces(&mut self) {
         let favorites = crate::config::FavoritesStore::load();
         let mut starred: HashSet<PathBuf> = HashSet::new();
-        for workspace in &self.workspaces {
+        for workspace in &self.sessions.workspaces {
             if Self::workspace_is_favorite(&workspace.path, &favorites) {
                 starred.insert(workspace.path.clone());
             }
         }
-        self.favorite_workspace_paths = starred;
+        self.sessions.favorite_workspace_paths = starred;
     }
 
     /// True if `path` is favorited, by local-path match or by the repo's git
@@ -5396,11 +5376,11 @@ impl AppState {
                 match loader.load_active_sessions().await {
                     Ok(mut workspaces) => {
                         // Append to existing workspaces instead of replacing
-                        self.workspaces.append(&mut workspaces);
+                        self.sessions.workspaces.append(&mut workspaces);
                         info!(
                             "Loaded {} Boss mode workspaces (total: {})",
                             workspaces.len(),
-                            self.workspaces.len()
+                            self.sessions.workspaces.len()
                         );
                     }
                     Err(e) => {
@@ -5479,12 +5459,13 @@ impl AppState {
                     };
 
                     // Remove any stale entries for this session (e.g., added by Boss-mode loader)
-                    for workspace in &mut self.workspaces {
+                    for workspace in &mut self.sessions.workspaces {
                         workspace.sessions.retain(|s| s.id != interactive_session.session_id);
                     }
 
                     let workspace_key = canonical_key(workspace_path);
                     if let Some(workspace) = self
+                        .sessions
                         .workspaces
                         .iter_mut()
                         .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
@@ -5498,7 +5479,7 @@ impl AppState {
                             workspace_path.to_path_buf(),
                         );
                         workspace.sessions.push(session);
-                        self.workspaces.push(workspace);
+                        self.sessions.workspaces.push(workspace);
                     }
 
                     // Store tmux session for attach operations
@@ -5566,6 +5547,7 @@ impl AppState {
             let workspace_key = canonical_key(&workspace_path);
 
             if let Some(workspace) = self
+                .sessions
                 .workspaces
                 .iter_mut()
                 .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
@@ -5581,7 +5563,7 @@ impl AppState {
                     );
                 let mut workspace = crate::models::Workspace::new(workspace_name, workspace_path);
                 workspace.sessions.push(stopped);
-                self.workspaces.push(workspace);
+                self.sessions.workspaces.push(workspace);
             }
         }
     }
@@ -5668,6 +5650,7 @@ impl AppState {
 
         // Collect tmux names that appear in loaded workspaces (successfully matched)
         let matched_tmux_names: std::collections::HashSet<&str> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|ws| ws.sessions.iter())
@@ -5842,7 +5825,7 @@ impl AppState {
                 // Then, try parent directory match (for worktree subdirectories)
                 let mut matched_workspace_idx = None;
 
-                for (idx, workspace) in self.workspaces.iter().enumerate() {
+                for (idx, workspace) in self.sessions.workspaces.iter().enumerate() {
                     // Skip workspaces that already have a shell session
                     if workspace.shell_session.is_some() {
                         continue;
@@ -5872,9 +5855,9 @@ impl AppState {
                     // Create a ShellSession for this detected session
                     let shell = ShellSession {
                         id: uuid::Uuid::new_v4(),
-                        name: format!("🐚 {}", self.workspaces[idx].name),
+                        name: format!("🐚 {}", self.sessions.workspaces[idx].name),
                         tmux_session_name: session_name.to_string(),
-                        workspace_path: self.workspaces[idx].path.clone(),
+                        workspace_path: self.sessions.workspaces[idx].path.clone(),
                         working_dir: session_path.clone(),
                         created_at: chrono::Utc::now(),
                         last_accessed: chrono::Utc::now(),
@@ -5884,10 +5867,10 @@ impl AppState {
 
                     info!(
                         "Auto-detected shell session '{}' for workspace '{}'",
-                        session_name, self.workspaces[idx].name
+                        session_name, self.sessions.workspaces[idx].name
                     );
 
-                    self.workspaces[idx].set_shell_session(shell);
+                    self.sessions.workspaces[idx].set_shell_session(shell);
                     detected_count += 1;
                 } else {
                     debug!(
@@ -5949,13 +5932,13 @@ impl AppState {
 
         workspace2.add_session(session4);
 
-        self.workspaces.push(workspace1);
-        self.workspaces.push(workspace2);
+        self.sessions.workspaces.push(workspace1);
+        self.sessions.workspaces.push(workspace2);
 
         // Reset selection state before setting new selection
-        self.selected_workspace_index = None;
-        self.selected_session_index = None;
-        self.shell_selected = false;
+        self.sessions.selected_workspace_index = None;
+        self.sessions.selected_session_index = None;
+        self.sessions.shell_selected = false;
         self.ssh.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
 
@@ -5973,29 +5956,29 @@ impl AppState {
                 format!("test-project-{:03}", i),
                 format!("/Users/user/projects/test-project-{:03}", i).into(),
             );
-            self.workspaces.push(workspace);
+            self.sessions.workspaces.push(workspace);
         }
 
         info!(
             "Loaded large mock dataset with {} workspaces",
-            self.workspaces.len()
+            self.sessions.workspaces.len()
         );
     }
 
     pub fn selected_session(&self) -> Option<&Session> {
-        let workspace_idx = self.selected_workspace_index?;
-        let session_idx = self.selected_session_index?;
-        self.workspaces.get(workspace_idx)?.sessions.get(session_idx)
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        let session_idx = self.sessions.selected_session_index?;
+        self.sessions.workspaces.get(workspace_idx)?.sessions.get(session_idx)
     }
 
     /// Toggle multi-select for the currently highlighted session
     pub fn toggle_select_session(&mut self) {
         if let Some(session) = self.selected_session() {
             let id = session.id;
-            if self.selected_sessions.contains(&id) {
-                self.selected_sessions.remove(&id);
+            if self.sessions.selected_sessions.contains(&id) {
+                self.sessions.selected_sessions.remove(&id);
             } else {
-                self.selected_sessions.insert(id);
+                self.sessions.selected_sessions.insert(id);
             }
         } else if self.is_other_tmux_selected() {
             self.toggle_select_other_tmux_session();
@@ -6029,17 +6012,23 @@ impl AppState {
     pub fn selected_session_ids_in_order(&self) -> Vec<Uuid> {
         let mut seen: HashSet<Uuid> = HashSet::new();
         let mut ordered: Vec<Uuid> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| w.sessions.iter())
             .map(|s| s.id)
-            .filter(|id| self.selected_sessions.contains(id) && seen.insert(*id))
+            .filter(|id| self.sessions.selected_sessions.contains(id) && seen.insert(*id))
             .collect();
         // Ids that resolve to no session have no list position, so they are
         // sorted rather than left in HashSet order, which Rust randomises per
         // process and would make the dialog text differ run to run.
-        let mut orphans: Vec<Uuid> =
-            self.selected_sessions.iter().copied().filter(|id| !seen.contains(id)).collect();
+        let mut orphans: Vec<Uuid> = self
+            .sessions
+            .selected_sessions
+            .iter()
+            .copied()
+            .filter(|id| !seen.contains(id))
+            .collect();
         orphans.sort();
         ordered.extend(orphans);
         ordered
@@ -6058,16 +6047,16 @@ impl AppState {
     }
 
     pub fn selected_shell_session(&self) -> Option<&crate::models::ShellSession> {
-        if !self.shell_selected {
+        if !self.sessions.shell_selected {
             return None;
         }
-        let workspace_idx = self.selected_workspace_index?;
-        self.workspaces.get(workspace_idx)?.shell_session.as_ref()
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        self.sessions.workspaces.get(workspace_idx)?.shell_session.as_ref()
     }
 
     pub fn selected_workspace(&self) -> Option<&Workspace> {
-        let workspace_idx = self.selected_workspace_index?;
-        self.workspaces.get(workspace_idx)
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        self.sessions.workspaces.get(workspace_idx)
     }
 
     /// Every attachable leaf row in the *current* render order.
@@ -6076,9 +6065,10 @@ impl AppState {
     pub fn attachable_items_in_order(&self) -> Vec<AttachableRef> {
         let mut out = Vec::new();
 
-        for (workspace_idx, workspace) in self.workspaces.iter().enumerate() {
-            let is_selected_workspace = self.selected_workspace_index == Some(workspace_idx);
-            let is_expanded = is_selected_workspace || self.expand_all_workspaces;
+        for (workspace_idx, workspace) in self.sessions.workspaces.iter().enumerate() {
+            let is_selected_workspace =
+                self.sessions.selected_workspace_index == Some(workspace_idx);
+            let is_expanded = is_selected_workspace || self.sessions.expand_all_workspaces;
 
             // Match session_list: workspaces with no visible content are hidden
             // entirely, and collapsed workspaces don't contribute their leaves.
@@ -6127,30 +6117,30 @@ impl AppState {
                 workspace_idx,
                 session_idx,
             } => {
-                self.selected_workspace_index = Some(workspace_idx);
-                self.selected_session_index = Some(session_idx);
-                self.shell_selected = false;
+                self.sessions.selected_workspace_index = Some(workspace_idx);
+                self.sessions.selected_session_index = Some(session_idx);
+                self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
             }
             AttachableRef::WorkspaceShell { workspace_idx } => {
-                self.selected_workspace_index = Some(workspace_idx);
-                self.selected_session_index = None;
-                self.shell_selected = true;
+                self.sessions.selected_workspace_index = Some(workspace_idx);
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = true;
                 self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
             }
             AttachableRef::SshSession { ssh_idx } => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
                 self.selected_other_tmux_index = None;
                 self.ssh.selected_ssh_session_index = Some(ssh_idx);
             }
             AttachableRef::OtherTmux { other_idx } => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = Some(other_idx);
             }
@@ -6172,24 +6162,24 @@ impl AppState {
 
         match target {
             SessionListRowTarget::WorkspaceHeader { workspace_idx } => {
-                self.selected_workspace_index = Some(workspace_idx);
-                self.selected_session_index = None;
-                self.shell_selected = false;
+                self.sessions.selected_workspace_index = Some(workspace_idx);
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
             }
             SessionListRowTarget::SshHeader => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
                 self.selected_other_tmux_index = None;
                 self.ssh.selected_ssh_session_index = None;
                 self.ssh.ssh_sessions_expanded = !self.ssh.ssh_sessions_expanded;
             }
             SessionListRowTarget::OtherTmuxHeader => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
                 self.ssh.selected_ssh_session_index = None;
                 self.selected_other_tmux_index = None;
                 self.other_tmux_expanded = !self.other_tmux_expanded;
@@ -6248,9 +6238,10 @@ impl AppState {
     pub fn session_list_row_target(&self, row_index: usize) -> Option<SessionListRowTarget> {
         let mut current_row = 0usize;
 
-        for (workspace_idx, workspace) in self.workspaces.iter().enumerate() {
-            let is_selected_workspace = self.selected_workspace_index == Some(workspace_idx);
-            let is_expanded = is_selected_workspace || self.expand_all_workspaces;
+        for (workspace_idx, workspace) in self.sessions.workspaces.iter().enumerate() {
+            let is_selected_workspace =
+                self.sessions.selected_workspace_index == Some(workspace_idx);
+            let is_expanded = is_selected_workspace || self.sessions.expand_all_workspaces;
 
             let visible_sessions: Vec<(usize, &Session)> = workspace
                 .sessions
@@ -6374,7 +6365,7 @@ impl AppState {
         }
 
         // If nothing is selected, try SSH sessions first, then "Other tmux"
-        if self.selected_workspace_index.is_none() {
+        if self.sessions.selected_workspace_index.is_none() {
             if !self.ssh.ssh_sessions.is_empty() {
                 self.ssh.selected_ssh_session_index = Some(0);
                 return;
@@ -6384,12 +6375,12 @@ impl AppState {
             }
         }
 
-        if let Some(workspace_idx) = self.selected_workspace_index {
-            if let Some(workspace) = self.workspaces.get(workspace_idx) {
+        if let Some(workspace_idx) = self.sessions.selected_workspace_index {
+            if let Some(workspace) = self.sessions.workspaces.get(workspace_idx) {
                 // Currently on shell session?
-                if self.shell_selected {
+                if self.sessions.shell_selected {
                     // Shell is last in workspace - try next workspace first
-                    self.shell_selected = false;
+                    self.sessions.shell_selected = false;
                     self.move_to_next_workspace_first_item(workspace_idx);
                     return;
                 }
@@ -6397,7 +6388,7 @@ impl AppState {
                 // Currently in regular sessions. Find the next *visible*
                 // session (skipping any that the active filter hides) so j/k
                 // doesn't land on a row that isn't rendered.
-                if let Some(session_idx) = self.selected_session_index {
+                if let Some(session_idx) = self.sessions.selected_session_index {
                     let next_visible = workspace
                         .sessions
                         .iter()
@@ -6406,11 +6397,11 @@ impl AppState {
                         .find(|(_, s)| self.session_passes_filter(s))
                         .map(|(i, _)| i);
                     if let Some(next_idx) = next_visible {
-                        self.selected_session_index = Some(next_idx);
+                        self.sessions.selected_session_index = Some(next_idx);
                         self.queue_logs_fetch();
                     } else if workspace.shell_session.is_some() {
-                        self.selected_session_index = None;
-                        self.shell_selected = true;
+                        self.sessions.selected_session_index = None;
+                        self.sessions.shell_selected = true;
                     } else {
                         self.move_to_next_workspace_first_item(workspace_idx);
                     }
@@ -6418,10 +6409,10 @@ impl AppState {
                     let first_visible =
                         workspace.sessions.iter().position(|s| self.session_passes_filter(s));
                     if let Some(first_idx) = first_visible {
-                        self.selected_session_index = Some(first_idx);
+                        self.sessions.selected_session_index = Some(first_idx);
                         self.queue_logs_fetch();
                     } else if workspace.shell_session.is_some() {
-                        self.shell_selected = true;
+                        self.sessions.shell_selected = true;
                     }
                 }
             }
@@ -6429,9 +6420,9 @@ impl AppState {
     }
 
     fn select_workspace_item(&mut self, workspace_idx: usize, session_idx: Option<usize>) {
-        self.selected_workspace_index = Some(workspace_idx);
-        self.selected_session_index = session_idx;
-        self.shell_selected = session_idx.is_none();
+        self.sessions.selected_workspace_index = Some(workspace_idx);
+        self.sessions.selected_session_index = session_idx;
+        self.sessions.shell_selected = session_idx.is_none();
         self.ssh.selected_ssh_session_index = None;
         self.selected_other_tmux_index = None;
         if session_idx.is_some() {
@@ -6440,7 +6431,7 @@ impl AppState {
     }
 
     fn select_first_visible_workspace_item_from(&mut self, start: usize) -> bool {
-        let target = self.workspaces.iter().enumerate().skip(start).find_map(
+        let target = self.sessions.workspaces.iter().enumerate().skip(start).find_map(
             |(workspace_idx, workspace)| {
                 workspace
                     .sessions
@@ -6459,7 +6450,7 @@ impl AppState {
     }
 
     fn select_last_visible_workspace_item_before(&mut self, end: usize) -> bool {
-        let target = self.workspaces.iter().enumerate().take(end).rev().find_map(
+        let target = self.sessions.workspaces.iter().enumerate().take(end).rev().find_map(
             |(workspace_idx, workspace)| {
                 workspace.shell_session.as_ref().map(|_| (workspace_idx, None)).or_else(|| {
                     workspace
@@ -6479,7 +6470,7 @@ impl AppState {
     }
 
     fn select_first_visible_workspace_item_before(&mut self, end: usize) -> bool {
-        let target = self.workspaces.iter().enumerate().take(end).rev().find_map(
+        let target = self.sessions.workspaces.iter().enumerate().take(end).rev().find_map(
             |(workspace_idx, workspace)| {
                 workspace
                     .sessions
@@ -6505,18 +6496,18 @@ impl AppState {
 
         // No more workspaces - move to SSH sessions if available
         if !self.ssh.ssh_sessions.is_empty() {
-            self.selected_workspace_index = None;
-            self.selected_session_index = None;
-            self.shell_selected = false;
+            self.sessions.selected_workspace_index = None;
+            self.sessions.selected_session_index = None;
+            self.sessions.shell_selected = false;
             self.ssh.selected_ssh_session_index = Some(0);
             return;
         }
 
         // No SSH sessions - move to "Other tmux" if available
         if !self.other_tmux_sessions.is_empty() {
-            self.selected_workspace_index = None;
-            self.selected_session_index = None;
-            self.shell_selected = false;
+            self.sessions.selected_workspace_index = None;
+            self.sessions.selected_session_index = None;
+            self.sessions.shell_selected = false;
             self.selected_other_tmux_index = Some(0);
         }
         // Else: stay at current position (no wrap)
@@ -6534,7 +6525,7 @@ impl AppState {
                 if !self.ssh.ssh_sessions.is_empty() {
                     self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 } else {
-                    self.select_last_visible_workspace_item_before(self.workspaces.len());
+                    self.select_last_visible_workspace_item_before(self.sessions.workspaces.len());
                 }
             }
             return;
@@ -6548,13 +6539,13 @@ impl AppState {
             } else {
                 // At first SSH session - move back to workspaces
                 self.ssh.selected_ssh_session_index = None;
-                self.select_last_visible_workspace_item_before(self.workspaces.len());
+                self.select_last_visible_workspace_item_before(self.sessions.workspaces.len());
             }
             return;
         }
 
         // If nothing is selected, try SSH sessions, then "Other tmux"
-        if self.selected_workspace_index.is_none() {
+        if self.sessions.selected_workspace_index.is_none() {
             if !self.ssh.ssh_sessions.is_empty() {
                 self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 return;
@@ -6564,18 +6555,18 @@ impl AppState {
             }
         }
 
-        if let Some(workspace_idx) = self.selected_workspace_index {
-            if let Some(workspace) = self.workspaces.get(workspace_idx) {
+        if let Some(workspace_idx) = self.sessions.selected_workspace_index {
+            if let Some(workspace) = self.sessions.workspaces.get(workspace_idx) {
                 // Currently on shell session?
-                if self.shell_selected {
+                if self.sessions.shell_selected {
                     if let Some(session_idx) = workspace
                         .sessions
                         .iter()
                         .rposition(|session| self.session_passes_filter(session))
                     {
                         // Go back to last regular session
-                        self.shell_selected = false;
-                        self.selected_session_index = Some(session_idx);
+                        self.sessions.shell_selected = false;
+                        self.sessions.selected_session_index = Some(session_idx);
                         self.queue_logs_fetch();
                     }
                     // Else: stay at shell session (it's the only item)
@@ -6585,7 +6576,7 @@ impl AppState {
                 // Currently in regular sessions. Find the previous *visible*
                 // session under the active filter so k doesn't land on a
                 // hidden row.
-                if let Some(session_idx) = self.selected_session_index {
+                if let Some(session_idx) = self.sessions.selected_session_index {
                     let prev_visible = workspace
                         .sessions
                         .iter()
@@ -6595,7 +6586,7 @@ impl AppState {
                         .find(|(_, s)| self.session_passes_filter(s))
                         .map(|(i, _)| i);
                     if let Some(prev_idx) = prev_visible {
-                        self.selected_session_index = Some(prev_idx);
+                        self.sessions.selected_session_index = Some(prev_idx);
                         self.queue_logs_fetch();
                     } else {
                         // At first session - try to move to previous workspace's last item
@@ -6608,9 +6599,9 @@ impl AppState {
     }
 
     pub fn next_workspace(&mut self) {
-        if !self.workspaces.is_empty() {
-            let current = self.selected_workspace_index.unwrap_or(0);
-            let start = (current + 1) % self.workspaces.len();
+        if !self.sessions.workspaces.is_empty() {
+            let current = self.sessions.selected_workspace_index.unwrap_or(0);
+            let start = (current + 1) % self.sessions.workspaces.len();
             if !self.select_first_visible_workspace_item_from(start) && start > 0 {
                 self.select_first_visible_workspace_item_from(0);
             }
@@ -6618,17 +6609,17 @@ impl AppState {
     }
 
     pub fn previous_workspace(&mut self) {
-        if !self.workspaces.is_empty() {
-            let current = self.selected_workspace_index.unwrap_or(0);
+        if !self.sessions.workspaces.is_empty() {
+            let current = self.sessions.selected_workspace_index.unwrap_or(0);
             if !self.select_first_visible_workspace_item_before(current) {
-                self.select_first_visible_workspace_item_before(self.workspaces.len());
+                self.select_first_visible_workspace_item_before(self.sessions.workspaces.len());
             }
         }
     }
 
     pub fn select_first_visible_session_in_current_workspace(&mut self) {
-        let session_idx = self.selected_workspace_index.and_then(|workspace_idx| {
-            self.workspaces.get(workspace_idx).and_then(|workspace| {
+        let session_idx = self.sessions.selected_workspace_index.and_then(|workspace_idx| {
+            self.sessions.workspaces.get(workspace_idx).and_then(|workspace| {
                 workspace
                     .sessions
                     .iter()
@@ -6636,15 +6627,15 @@ impl AppState {
             })
         });
         if let Some(session_idx) = session_idx {
-            self.selected_session_index = Some(session_idx);
-            self.shell_selected = false;
+            self.sessions.selected_session_index = Some(session_idx);
+            self.sessions.shell_selected = false;
             self.queue_logs_fetch();
         }
     }
 
     pub fn select_last_visible_session_in_current_workspace(&mut self) {
-        let session_idx = self.selected_workspace_index.and_then(|workspace_idx| {
-            self.workspaces.get(workspace_idx).and_then(|workspace| {
+        let session_idx = self.sessions.selected_workspace_index.and_then(|workspace_idx| {
+            self.sessions.workspaces.get(workspace_idx).and_then(|workspace| {
                 workspace
                     .sessions
                     .iter()
@@ -6652,8 +6643,8 @@ impl AppState {
             })
         });
         if let Some(session_idx) = session_idx {
-            self.selected_session_index = Some(session_idx);
-            self.shell_selected = false;
+            self.sessions.selected_session_index = Some(session_idx);
+            self.sessions.shell_selected = false;
             self.queue_logs_fetch();
         }
     }
@@ -6663,7 +6654,7 @@ impl AppState {
     }
 
     pub fn toggle_expand_all_workspaces(&mut self) {
-        self.expand_all_workspaces = !self.expand_all_workspaces;
+        self.sessions.expand_all_workspaces = !self.sessions.expand_all_workspaces;
     }
 
     /// Hide/show the Sessions bottom keymap legend (⇧M) and persist the choice.
@@ -6683,29 +6674,29 @@ impl AppState {
     /// Cycle the session-status filter (Shift+F): All → ActiveOnly → StoppedOnly → All.
     /// Resets the session selection so it doesn't point to a now-hidden row.
     pub fn cycle_session_filter(&mut self) {
-        self.session_filter = self.session_filter.next();
-        self.config.app_config.ui_preferences.session_filter = self.session_filter;
+        self.sessions.session_filter = self.sessions.session_filter.next();
+        self.config.app_config.ui_preferences.session_filter = self.sessions.session_filter;
         if let Err(e) = self.config.app_config.save() {
             warn!("Failed to persist session filter: {}", e);
         }
         // Selection indices are positional over the *displayed* list. Resetting
         // to the first session of the first workspace is simplest and matches
         // what `load_real_workspaces` already does after a refresh.
-        self.selected_session_index = None;
-        self.shell_selected = false;
-        if let Some(idx) = self.selected_workspace_index {
+        self.sessions.selected_session_index = None;
+        self.sessions.shell_selected = false;
+        if let Some(idx) = self.sessions.selected_workspace_index {
             // Clamp workspace index too, in case the active workspace gets
             // hidden (no sessions match the filter and no shell).
-            if self.workspaces.get(idx).map(|w| {
+            if self.sessions.workspaces.get(idx).map(|w| {
                 w.sessions.iter().any(|s| self.session_passes_filter(s))
                     || w.shell_session.is_some()
             }) != Some(true)
             {
-                let new_idx = self.workspaces.iter().position(|w| {
+                let new_idx = self.sessions.workspaces.iter().position(|w| {
                     w.sessions.iter().any(|s| self.session_passes_filter(s))
                         || w.shell_session.is_some()
                 });
-                self.selected_workspace_index = new_idx;
+                self.sessions.selected_workspace_index = new_idx;
             }
         }
         self.workspace_load.last_preview_update = None;
@@ -6722,7 +6713,7 @@ impl AppState {
         if !matches!(session.mode, SessionMode::Interactive) {
             return true;
         }
-        match self.session_filter {
+        match self.sessions.session_filter {
             SessionFilter::All => true,
             SessionFilter::ActiveOnly => !matches!(session.status, SessionStatus::Stopped),
             SessionFilter::StoppedOnly => matches!(session.status, SessionStatus::Stopped),
@@ -6750,7 +6741,7 @@ impl AppState {
 
     /// Check if the selection is in the "Other tmux" section
     pub fn is_other_tmux_selected(&self) -> bool {
-        self.selected_other_tmux_index.is_some() && self.selected_workspace_index.is_none()
+        self.selected_other_tmux_index.is_some() && self.sessions.selected_workspace_index.is_none()
     }
 
     /// Start rename mode for the selected "Other tmux" session
@@ -6843,7 +6834,7 @@ impl AppState {
     /// Check if the selection is in the "SSH Sessions" section
     pub fn is_ssh_session_selected(&self) -> bool {
         self.ssh.selected_ssh_session_index.is_some()
-            && self.selected_workspace_index.is_none()
+            && self.sessions.selected_workspace_index.is_none()
             && self.selected_other_tmux_index.is_none()
     }
 
@@ -6918,9 +6909,10 @@ impl AppState {
 
     /// Open durable-label editing for the selected managed or SSH session.
     pub fn start_session_label_rename(&mut self) {
-        let target = if let (Some(workspace_idx), Some(session_idx)) =
-            (self.selected_workspace_index, self.selected_session_index)
-        {
+        let target = if let (Some(workspace_idx), Some(session_idx)) = (
+            self.sessions.selected_workspace_index,
+            self.sessions.selected_session_index,
+        ) {
             Some(AttachableRef::WorkspaceSession {
                 workspace_idx,
                 session_idx,
@@ -6939,6 +6931,7 @@ impl AppState {
                 workspace_idx,
                 session_idx,
             } => self
+                .sessions
                 .workspaces
                 .get(workspace_idx)
                 .and_then(|workspace| workspace.sessions.get(session_idx))
@@ -6993,6 +6986,7 @@ impl AppState {
                 workspace_idx,
                 session_idx,
             } => self
+                .sessions
                 .workspaces
                 .get_mut(workspace_idx)
                 .and_then(|workspace| workspace.sessions.get_mut(session_idx)),
@@ -7603,6 +7597,7 @@ impl AppState {
     /// Show confirmation dialog for killing a workspace shell session
     pub fn show_kill_shell_confirmation(&mut self, workspace_index: usize) {
         let shell_name = self
+            .sessions
             .workspaces
             .get(workspace_index)
             .and_then(|w| w.shell_session.as_ref())
@@ -7610,6 +7605,7 @@ impl AppState {
             .unwrap_or_else(|| "shell".to_string());
 
         let workspace_name = self
+            .sessions
             .workspaces
             .get(workspace_index)
             .map(|w| w.name.clone())
@@ -7647,17 +7643,22 @@ impl AppState {
 
     /// Get the ID of the currently selected session without borrowing self
     pub fn get_selected_session_id(&self) -> Option<Uuid> {
-        let workspace_idx = self.selected_workspace_index?;
-        let session_idx = self.selected_session_index?;
-        self.workspaces.get(workspace_idx)?.sessions.get(session_idx).map(|s| s.id)
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        let session_idx = self.sessions.selected_session_index?;
+        self.sessions
+            .workspaces
+            .get(workspace_idx)?
+            .sessions
+            .get(session_idx)
+            .map(|s| s.id)
     }
 
     /// Get a reference to the currently selected session
     pub fn get_selected_session(&self) -> Option<&crate::models::Session> {
-        let workspace_idx = self.selected_workspace_index?;
-        let session_idx = self.selected_session_index?;
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        let session_idx = self.sessions.selected_session_index?;
 
-        self.workspaces.get(workspace_idx)?.sessions.get(session_idx)
+        self.sessions.workspaces.get(workspace_idx)?.sessions.get(session_idx)
     }
 
     /// Attach to a container session using docker exec with proper terminal handling
@@ -7669,6 +7670,7 @@ impl AppState {
 
         // Find the session to get container ID
         let container_id = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -7741,6 +7743,7 @@ impl AppState {
 
         // Find the session to get container ID
         let container_id = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -7755,8 +7758,8 @@ impl AppState {
             );
 
             // Clear attached session if we're currently attached to this session
-            if self.attached_session_id == Some(session_id) {
-                self.attached_session_id = None;
+            if self.sessions.attached_session_id == Some(session_id) {
+                self.sessions.attached_session_id = None;
                 self.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
                 self.ui_needs_refresh = true;
             }
@@ -7810,6 +7813,7 @@ impl AppState {
 
         // Find the session to get container ID
         let container_id = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -7844,6 +7848,7 @@ impl AppState {
 
         // Find the session to get container ID and update recent_logs
         let container_id = self
+            .sessions
             .workspaces
             .iter_mut()
             .flat_map(|w| &mut w.sessions)
@@ -7860,6 +7865,7 @@ impl AppState {
 
             // Update the session's recent_logs field
             if let Some(session) = self
+                .sessions
                 .workspaces
                 .iter_mut()
                 .flat_map(|w| &mut w.sessions)
@@ -8867,6 +8873,7 @@ impl AppState {
 
         // Check if worktree exists from the previous session
         let existing_worktree_path = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -9182,24 +9189,29 @@ impl AppState {
 
                 // Find or create workspace for this repo
                 if let Some((ws_idx, workspace)) =
-                    self.workspaces.iter_mut().enumerate().find(|(_, w)| {
+                    self.sessions.workspaces.iter_mut().enumerate().find(|(_, w)| {
                         std::path::Path::new(&w.path).canonicalize().ok()
                             == repo_path.canonicalize().ok()
                     })
                 {
                     workspace.sessions.push(session);
-                    // Auto-select the new session so the list scrolls to show it
-                    self.selected_workspace_index = Some(ws_idx);
-                    self.selected_session_index = Some(workspace.sessions.len() - 1);
+                    // Auto-select the new session so the list scrolls to show it.
+                    // The workspace is borrowed out of this same section, so the
+                    // two cursors are set through one `get_mut` rather than two.
+                    let session_index = workspace.sessions.len() - 1;
+                    let sessions = self.sessions.get_mut();
+                    sessions.selected_workspace_index = Some(ws_idx);
+                    sessions.selected_session_index = Some(session_index);
                 } else {
                     // Create new workspace
                     let mut workspace =
                         crate::models::Workspace::new(workspace_name, repo_path.to_path_buf());
                     workspace.sessions.push(session);
-                    self.workspaces.push(workspace);
+                    self.sessions.workspaces.push(workspace);
                     // Auto-select the new workspace and session
-                    self.selected_workspace_index = Some(self.workspaces.len() - 1);
-                    self.selected_session_index = Some(0);
+                    self.sessions.selected_workspace_index =
+                        Some(self.sessions.workspaces.len() - 1);
+                    self.sessions.selected_session_index = Some(0);
                 }
 
                 // Store tmux session for attach operations
@@ -9371,7 +9383,7 @@ impl AppState {
         let mut orphaned_sessions = Vec::new();
 
         // Collect all session IDs from all workspaces
-        for workspace in &self.workspaces {
+        for workspace in &self.sessions.workspaces {
             for session in &workspace.sessions {
                 // Check if this session's name starts with "orphaned-"
                 if session.name.starts_with("orphaned-") {
@@ -9394,7 +9406,7 @@ impl AppState {
             info!("Removing orphaned session state: {}", session_id);
 
             // Remove from workspaces
-            for workspace in &mut self.workspaces {
+            for workspace in &mut self.sessions.workspaces {
                 workspace.sessions.retain(|s| s.id != *session_id);
             }
 
@@ -9874,7 +9886,7 @@ impl AppState {
                 // The row was unchecked optimistically when the user confirmed.
                 // It is still running, so put the check back rather than making
                 // the user hunt for it.
-                self.selected_sessions.insert(id);
+                self.sessions.selected_sessions.insert(id);
             } else {
                 stopped += 1;
             }
@@ -10403,7 +10415,7 @@ impl AppState {
                             failed += 1;
                             // Still there, so keep it checked: the row was
                             // unchecked optimistically on confirmation.
-                            self.selected_sessions.insert(id);
+                            self.sessions.selected_sessions.insert(id);
                         } else {
                             deleted += 1;
                         }
@@ -10967,8 +10979,12 @@ impl AppState {
     /// Handle re-authentication of Claude credentials
     async fn handle_reauthenticate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Check if any sessions are currently running
-        let running_session_count =
-            self.workspaces.iter().map(|w| w.running_sessions().len()).sum::<usize>();
+        let running_session_count = self
+            .sessions
+            .workspaces
+            .iter()
+            .map(|w| w.running_sessions().len())
+            .sum::<usize>();
 
         if running_session_count > 0 {
             warn!(
@@ -11065,7 +11081,7 @@ impl AppState {
         info!("Initiating restart UI flow for session {}", session_id);
 
         // Find the session in our workspace list
-        let session_info = self.workspaces.iter().find_map(|workspace| {
+        let session_info = self.sessions.workspaces.iter().find_map(|workspace| {
             workspace
                 .sessions
                 .iter()
@@ -12100,10 +12116,11 @@ impl AppState {
     }
 
     fn checked_sessions(&self) -> impl Iterator<Item = &crate::models::Session> {
-        self.workspaces
+        self.sessions
+            .workspaces
             .iter()
             .flat_map(|workspace| workspace.sessions.iter())
-            .filter(|session| self.selected_sessions.contains(&session.id))
+            .filter(|session| self.sessions.selected_sessions.contains(&session.id))
     }
 
     /// One session's `provider:<agent session>` chat key, when it has one.
@@ -12297,6 +12314,7 @@ impl AppState {
             .map(|cell| cell.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let fleet_metadata: HashMap<Uuid, SessionFleetMetadata> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.sessions.iter())
@@ -12314,6 +12332,7 @@ impl AppState {
         // through their provider-session identity.
         let mut claimed_attention_ids: HashSet<String> = HashSet::new();
         let sessions_per_cwd: HashMap<String, usize> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.sessions.iter())
@@ -12342,7 +12361,7 @@ impl AppState {
             Option<crate::models::SessionStatus>,
             Option<String>,
         )> = Vec::new();
-        for ws in &self.workspaces {
+        for ws in &self.sessions.workspaces {
             for s in &ws.sessions {
                 // Snapshot metadata remains useful while a daemon is briefly
                 // down, but lifecycle must be live: a retained old EXITED may
@@ -12673,6 +12692,7 @@ impl AppState {
 
         for (session_id, tmux_session) in &self.tmux_sessions {
             let should_update = self
+                .sessions
                 .workspaces
                 .iter()
                 .flat_map(|w| &w.sessions)
@@ -12783,9 +12803,10 @@ impl AppState {
         self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)
-        let selected_workspace_idx = self.selected_workspace_index;
+        let selected_workspace_idx = self.sessions.selected_workspace_index;
         if let Some(ws_idx) = selected_workspace_idx {
             if let Some(tmux_name) = self
+                .sessions
                 .workspaces
                 .get(ws_idx)
                 .and_then(|w| w.shell_session.as_ref())
@@ -12799,7 +12820,7 @@ impl AppState {
                 };
                 match capture_pane(&tmux_name, opts).await {
                     Ok(content) => {
-                        if let Some(workspace) = self.workspaces.get_mut(ws_idx) {
+                        if let Some(workspace) = self.sessions.workspaces.get_mut(ws_idx) {
                             if let Some(shell) = workspace.shell_session.as_mut() {
                                 shell.preview_content = Some(content);
                                 self.ui_needs_refresh = true;
@@ -13137,7 +13158,7 @@ impl AppState {
 
     /// Helper to find a session by ID across all workspaces
     fn find_session(&self, session_id: uuid::Uuid) -> Option<&crate::models::session::Session> {
-        for workspace in &self.workspaces {
+        for workspace in &self.sessions.workspaces {
             for session in &workspace.sessions {
                 if session.id == session_id {
                     return Some(session);
@@ -13152,7 +13173,7 @@ impl AppState {
         &mut self,
         session_id: uuid::Uuid,
     ) -> Option<&mut crate::models::session::Session> {
-        for workspace in &mut self.workspaces {
+        for workspace in &mut self.sessions.workspaces {
             for session in &mut workspace.sessions {
                 if session.id == session_id {
                     return Some(session);
@@ -13919,6 +13940,7 @@ impl App {
             // Collect session info for streaming
             let sessions: Vec<(Uuid, String, String, crate::models::SessionMode)> = self
                 .state
+                .sessions
                 .workspaces
                 .iter()
                 .flat_map(|w| &w.sessions)
@@ -14158,7 +14180,7 @@ impl App {
             self.state.last_log_check = Some(now);
 
             // If we have an attached session, fetch its logs
-            if let Some(attached_id) = self.state.attached_session_id {
+            if let Some(attached_id) = self.state.sessions.attached_session_id {
                 // Check if we should update this session's logs (don't spam updates)
                 let should_update_session = self
                     .state

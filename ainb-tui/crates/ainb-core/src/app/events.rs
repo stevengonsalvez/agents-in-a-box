@@ -1793,11 +1793,11 @@ impl EventHandler {
         }
         // Checked managed rows remain the action target even after the cursor
         // moves to a terminal, SSH, shell, or Other tmux row.
-        if !state.selected_sessions.is_empty() {
+        if !state.sessions.selected_sessions.is_empty() {
             Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
         } else if state.is_ssh_session_selected()
             || state.is_other_tmux_selected()
-            || state.shell_selected
+            || state.sessions.shell_selected
         {
             Some(AppEvent::AttachTmuxSession)
         } else if let Some(session) = state.selected_session() {
@@ -1815,7 +1815,7 @@ impl EventHandler {
     fn resume_selected_session(state: &AppState) -> Option<AppEvent> {
         use crate::models::SessionStatus;
 
-        if !state.selected_sessions.is_empty() {
+        if !state.sessions.selected_sessions.is_empty() {
             Some(AppEvent::ResumeSelectedSessions("r".to_string()))
         } else if let Some(session) = state.selected_session() {
             let interactive = crate::app::state::is_stoppable_interactive(session);
@@ -2461,7 +2461,7 @@ impl EventHandler {
             }
             AppEvent::CycleSessionFilter => {
                 state.cycle_session_filter();
-                let label = match state.session_filter {
+                let label = match state.sessions.session_filter {
                     crate::app::state::SessionFilter::All => "all sessions",
                     crate::app::state::SessionFilter::ActiveOnly => "active only",
                     crate::app::state::SessionFilter::StoppedOnly => "stopped only",
@@ -2509,7 +2509,8 @@ impl EventHandler {
                 // here (2026-05-22). `picker_local_paths` also drops entries
                 // whose directory no longer exists, so a repo deleted since
                 // the last scan can't appear as a selectable dead row.
-                let local_paths = picker_local_paths(RepositoryCache::load(), &state.workspaces);
+                let local_paths =
+                    picker_local_paths(RepositoryCache::load(), &state.sessions.workspaces);
 
                 // Refresh the cache off the UI thread so a newly-created repo
                 // surfaces on a later open. `scan()` is read-through: instant
@@ -2680,9 +2681,9 @@ impl EventHandler {
                 tracing::info!("[ACTION] Processing AttachTmuxSession event");
                 tracing::debug!(
                     "[ACTION] State: workspace_idx={:?}, session_idx={:?}, shell_selected={}, is_ssh={}, ssh_idx={:?}, is_other_tmux={}, other_tmux_idx={:?}",
-                    state.selected_workspace_index,
-                    state.selected_session_index,
-                    state.shell_selected,
+                    state.sessions.selected_workspace_index,
+                    state.sessions.selected_session_index,
+                    state.sessions.shell_selected,
                     state.is_ssh_session_selected(),
                     state.ssh.selected_ssh_session_index,
                     state.is_other_tmux_selected(),
@@ -2719,10 +2720,10 @@ impl EventHandler {
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
                     }
-                } else if state.shell_selected {
+                } else if state.sessions.shell_selected {
                     // Shell session selected - attach to its tmux session
-                    if let Some(workspace_idx) = state.selected_workspace_index {
-                        if let Some(workspace) = state.workspaces.get(workspace_idx) {
+                    if let Some(workspace_idx) = state.sessions.selected_workspace_index {
+                        if let Some(workspace) = state.sessions.workspaces.get(workspace_idx) {
                             if let Some(shell) = &workspace.shell_session {
                                 let session_name = shell.tmux_session_name.clone();
                                 tracing::info!(
@@ -2754,8 +2755,8 @@ impl EventHandler {
                 } else {
                     tracing::warn!(
                         "[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
-                        state.selected_workspace_index,
-                        state.selected_session_index
+                        state.sessions.selected_workspace_index,
+                        state.sessions.selected_session_index
                     );
                     // Says what to do, not just what failed. A notice that
                     // lives for a minute and can be dismissed has room for
@@ -2770,7 +2771,7 @@ impl EventHandler {
             }
             AppEvent::DetachSession => {
                 // Clear attached session and return to home screen
-                state.attached_session_id = None;
+                state.sessions.attached_session_id = None;
                 state.current_screen = screen_ids::HOME.to_string();
                 state.ui_needs_refresh = true;
             }
@@ -2780,7 +2781,7 @@ impl EventHandler {
                 tracing::debug!("DetachTmuxSession event received (no-op)");
             }
             AppEvent::KillContainer => {
-                if let Some(session_id) = state.attached_session_id {
+                if let Some(session_id) = state.sessions.attached_session_id {
                     state.pending_async_action = Some(AsyncAction::KillContainer(session_id));
                 }
             }
@@ -2802,14 +2803,14 @@ impl EventHandler {
                 tracing::info!("[ACTION] Processing DeleteSession event");
                 tracing::debug!(
                     "[ACTION] Delete state: workspace_idx={:?}, session_idx={:?}, shell_selected={}, is_other_tmux={}, other_tmux_idx={:?}",
-                    state.selected_workspace_index,
-                    state.selected_session_index,
-                    state.shell_selected,
+                    state.sessions.selected_workspace_index,
+                    state.sessions.selected_session_index,
+                    state.sessions.shell_selected,
                     state.is_other_tmux_selected(),
                     state.selected_other_tmux_index
                 );
 
-                let managed_count = state.selected_sessions.len();
+                let managed_count = state.sessions.selected_sessions.len();
                 let other_names = state.selected_other_tmux_names_in_order();
                 let other_count = other_names.len();
 
@@ -2864,10 +2865,11 @@ impl EventHandler {
                             state.selected_other_tmux_index
                         );
                     }
-                } else if state.shell_selected {
+                } else if state.sessions.shell_selected {
                     // Shell session selected - show kill shell confirmation
-                    if let Some(workspace_idx) = state.selected_workspace_index {
+                    if let Some(workspace_idx) = state.sessions.selected_workspace_index {
                         if state
+                            .sessions
                             .workspaces
                             .get(workspace_idx)
                             .and_then(|w| w.shell_session.as_ref())
@@ -2891,9 +2893,9 @@ impl EventHandler {
                 } else {
                     tracing::warn!(
                         "[ACTION] DeleteSession: No item to delete (workspace_idx={:?}, session_idx={:?}, shell={}, other_tmux_idx={:?})",
-                        state.selected_workspace_index,
-                        state.selected_session_index,
-                        state.shell_selected,
+                        state.sessions.selected_workspace_index,
+                        state.sessions.selected_session_index,
+                        state.sessions.shell_selected,
                         state.selected_other_tmux_index
                     );
                     state.add_warning_notification("No session selected to delete".to_string());
@@ -2901,8 +2903,8 @@ impl EventHandler {
             }
             AppEvent::ToggleSelectSession => {
                 state.toggle_select_session();
-                let count =
-                    state.selected_sessions.len() + state.selected_other_tmux_sessions.len();
+                let count = state.sessions.selected_sessions.len()
+                    + state.selected_other_tmux_sessions.len();
                 if count > 0 {
                     state.add_success_notification(format!(
                         "{} session(s) selected — Enter to start, Shift+D to delete",
@@ -2911,7 +2913,7 @@ impl EventHandler {
                 }
             }
             AppEvent::DeleteSelectedSessions => {
-                let managed_count = state.selected_sessions.len();
+                let managed_count = state.sessions.selected_sessions.len();
                 let other_names = state.selected_other_tmux_names_in_order();
                 let other_count = other_names.len();
                 if managed_count == 0 && other_count == 0 {
@@ -2947,7 +2949,7 @@ impl EventHandler {
                 // multi-selected, start every resumable one, not just the
                 // highlighted row. Running selections are skipped so we never
                 // kill+recreate a live tmux session.
-                let total_selected = state.selected_sessions.len();
+                let total_selected = state.sessions.selected_sessions.len();
                 let ids = state.selected_resumable_session_ids();
                 if ids.is_empty() {
                     state.add_warning_notification(format!(
@@ -2967,7 +2969,7 @@ impl EventHandler {
                     ));
                     state.pending_async_action =
                         Some(AsyncAction::BulkResumeSessions(ids, trigger));
-                    state.selected_sessions.clear();
+                    state.sessions.selected_sessions.clear();
                 }
             }
             AppEvent::OpenInEditor => {
@@ -2985,7 +2987,7 @@ impl EventHandler {
             }
             AppEvent::OpenQuickShell => {
                 // Open workspace shell and optionally cd to session's worktree
-                if let Some(workspace_idx) = state.selected_workspace_index {
+                if let Some(workspace_idx) = state.sessions.selected_workspace_index {
                     // Get target directory - session worktree if selected, otherwise workspace root
                     let target_dir = if let Some(session) = state.selected_session() {
                         // Session selected - cd to its worktree
@@ -3140,7 +3142,7 @@ impl EventHandler {
                                 // silently dropping the rest would make the user
                                 // re-select them.
                                 for id in &session_ids {
-                                    state.selected_sessions.remove(id);
+                                    state.sessions.selected_sessions.remove(id);
                                 }
                                 state.pending_async_action =
                                     Some(AsyncAction::BulkDeleteSessions(session_ids));
@@ -3151,7 +3153,7 @@ impl EventHandler {
                                     session_ids.len()
                                 ));
                                 for id in &session_ids {
-                                    state.selected_sessions.remove(id);
+                                    state.sessions.selected_sessions.remove(id);
                                 }
                                 state.pending_async_action =
                                     Some(AsyncAction::BulkStopSessions(session_ids));
@@ -3813,10 +3815,11 @@ impl EventHandler {
             }
             AppEvent::StarSelectedWorkspace => {
                 tracing::info!("StarSelectedWorkspace event triggered");
-                if let Some(workspace_idx) = state.selected_workspace_index {
+                if let Some(workspace_idx) = state.sessions.selected_workspace_index {
                     // Clone the bits we need so the immutable borrow of `state`
                     // ends before we notify (which borrows `state` mutably).
                     if let Some((workspace_name, workspace_path)) = state
+                        .sessions
                         .workspaces
                         .get(workspace_idx)
                         .map(|w| (w.name.clone(), w.path.clone()))
@@ -8773,7 +8776,7 @@ mod session_ask_key_tests {
     fn asking() -> AppState {
         let mut state = AppState::default();
         state.current_screen = ids::SESSION_LIST.to_string();
-        state.workspaces.clear();
+        state.sessions.workspaces.clear();
         let mut workspace = Workspace::new("proj".to_string(), "/work/proj".into());
         let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
         session.status = SessionStatus::Idle;
@@ -8794,9 +8797,9 @@ mod session_ask_key_tests {
                 .over_tmux(),
         ];
         workspace.add_session(session);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = Some(0);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
         state.session_tab = SessionTab::Ask;
         assert!(
             SessionTab::Ask.enabled(&state),

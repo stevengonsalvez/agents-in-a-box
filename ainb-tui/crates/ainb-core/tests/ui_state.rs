@@ -144,8 +144,8 @@ fn applying_no_scroll_leaves_the_layout_and_the_repaint_flag_alone() {
 #[test]
 fn mouse_hit_test_resolves_a_click_through_the_painted_row_map() {
     let mut state = AppState::new();
-    state.selected_workspace_index = Some(0);
-    state.selected_session_index = Some(0);
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
 
     let mut workspace = Workspace::new("repo".to_string(), "/tmp/repo".into());
     for index in 0..3 {
@@ -154,7 +154,7 @@ fn mouse_hit_test_resolves_a_click_through_the_painted_row_map() {
             "/tmp/repo".to_string(),
         ));
     }
-    state.workspaces = vec![workspace];
+    state.sessions.workspaces = vec![workspace];
 
     let mut ui = UiState::default();
     ui.sessions_pane.set_layout(SESSIONS_RECT, Rect::new(40, 3, 80, 20));
@@ -197,7 +197,7 @@ fn mouse_hit_test_resolves_a_click_through_the_painted_row_map() {
         .session_list_row_at_mouse(&ui.sessions_pane, 8, SESSIONS_RECT.y + 3)
         .expect("a session row");
     state.select_session_list_row(target);
-    assert_eq!(state.selected_session_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(0));
 }
 
 /// The seal itself: no `Rect` survives in `AppState`. A geometry field there is

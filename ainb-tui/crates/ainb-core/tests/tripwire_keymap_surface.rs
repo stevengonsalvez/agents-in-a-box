@@ -268,8 +268,8 @@ fn state_with_selected_stopped_managed_session() -> AppState {
 
     let mut state = AppState::new();
     state.current_screen = screen_ids::SESSION_LIST.to_string();
-    state.workspaces.push(workspace);
-    state.selected_sessions.insert(selected_id);
+    state.sessions.workspaces.push(workspace);
+    state.sessions.selected_sessions.insert(selected_id);
     state
 }
 
@@ -309,13 +309,13 @@ fn selected_managed_sessions_resume_after_cursor_moves_to_attachable_rows() {
     );
 
     let mut shell = state_with_selected_stopped_managed_session();
-    shell.workspaces[0].set_shell_session(ShellSession::new_workspace_shell(
+    shell.sessions.workspaces[0].set_shell_session(ShellSession::new_workspace_shell(
         PathBuf::from("/tmp/workspace"),
         "workspace",
     ));
-    shell.selected_workspace_index = Some(0);
-    shell.selected_session_index = None;
-    shell.shell_selected = true;
+    shell.sessions.selected_workspace_index = Some(0);
+    shell.sessions.selected_session_index = None;
+    shell.sessions.shell_selected = true;
     assert!(
         is_bulk_resume_on_enter(enter_event(&mut shell)),
         "selected managed sessions must resume before a shell cursor attaches"

@@ -146,7 +146,7 @@ impl LiveLogsStreamComponent {
         } else {
             // Aggregate logs from all active sessions
             let mut all_logs = Vec::new();
-            for workspace in &state.workspaces {
+            for workspace in &state.sessions.workspaces {
                 for session in &workspace.sessions {
                     if let Some(logs) = state.live_logs.get(&session.id) {
                         all_logs.extend(logs.iter().cloned());
