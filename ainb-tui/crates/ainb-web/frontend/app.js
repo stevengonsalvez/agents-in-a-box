@@ -129,6 +129,26 @@
     return Array.isArray(opts) ? opts : [];
   }
 
+  // Attention rows the daemon has told us are already answered, keyed by id,
+  // with the surface that won. `/api/snapshot` is served from a cache the
+  // daemon refreshes every 2s, and `renderNeeds` rebuilds every card from
+  // scratch, so a row retired here comes back with live controls on the very
+  // next render until that snapshot catches up. This is what keeps it retired
+  // across those renders; an id leaves the set once the snapshot stops listing
+  // the row, so nothing accumulates and a reopened row is answerable again.
+  const answeredElsewhere = new Map();
+
+  // Paint a card as retired: no controls, and the winner named under it.
+  function markAnswered(card, by) {
+    card.classList.remove("answering");
+    card.dataset.outcome = "already_answered";
+    card.querySelectorAll(".need-actions").forEach((n) => n.remove());
+    if (!card.querySelector(".need-outcome")) {
+      const note = el("div", "need-outcome", `answered by ${by}`);
+      card.querySelector(".need-body")?.appendChild(note);
+    }
+  }
+
   // POST an answer for one attention row through the daemon (D18). The daemon
   // runs the first-answer-wins + C1 guards and performs the ONE verified send;
   // on any resolution the row leaves the open inbox, so we re-pull the snapshot
@@ -149,11 +169,9 @@
       // rather than leaving a live-looking form for the up-to-2s it takes the
       // poller's next snapshot to drop the card, and name the winner.
       if (data && data.outcome === "already_answered") {
-        card.classList.remove("answering");
-        card.querySelectorAll(".need-actions").forEach((n) => n.remove());
         const by = (data && data.by) || "another surface";
-        const note = el("div", "need-outcome", `answered by ${by}`);
-        card.querySelector(".need-body")?.appendChild(note);
+        answeredElsewhere.set(attentionId, by);
+        markAnswered(card, by);
       }
       // Reconcile from the source of truth (an answered row drops from the inbox).
       loadOnce().then(render).catch(() => {});
@@ -167,6 +185,12 @@
     const host = $("needs");
     host.replaceChildren();
     const list = Array.isArray(needs) ? needs : [];
+    // Drop retirements the snapshot has caught up with, so the set tracks the
+    // open inbox rather than growing for the life of the tab.
+    const live = new Set(list.map((r) => r.attentionId).filter(Boolean));
+    for (const id of [...answeredElsewhere.keys()]) {
+      if (!live.has(id)) answeredElsewhere.delete(id);
+    }
     // Count only the actionable kinds for the headline stat.
     const attn = list.filter((r) => ["ASK", "ERR", "WAIT"].includes(needKind(r)));
     $("stat-needs").textContent = attn.length;
@@ -221,6 +245,9 @@
 
       card.appendChild(body);
       host.appendChild(card);
+      // Re-apply a retirement this render would otherwise have undone.
+      const retiredBy = answeredElsewhere.get(row.attentionId);
+      if (retiredBy) markAnswered(card, retiredBy);
     }
   }
 
