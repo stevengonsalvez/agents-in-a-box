@@ -530,6 +530,25 @@ impl FleetRepo {
             let fleet = Self::apply_event_in_tx(&mut tx, event, None).await?;
             let mut closed = Vec::new();
             let mut raised = false;
+            // A replayed event is a no-op, projection included. The event id is
+            // the idempotency key for the WHOLE step, not just for the
+            // `fleet_event` insert, and the inbox half is not idempotent on its
+            // own: the raise dedups on its request key, but the close does not.
+            //
+            // Replaying a `Stop` therefore closed the very card the first pass
+            // raised from it. A `Stop` both raises an idle card and returns the
+            // session to `NONE`, so on the second pass the raise was suppressed
+            // as a duplicate while the close ran again and took the card with
+            // it. A lost cursor, which re-reads `events.jsonl` from zero, is
+            // enough to hit it.
+            if fleet.duplicate {
+                tx.commit().await?;
+                return Ok(ApplyFleetEventWithAttention {
+                    fleet,
+                    raised,
+                    closed,
+                });
+            }
             if let Some(projection) = projection {
                 if projection.close_open_asks {
                     let stale =

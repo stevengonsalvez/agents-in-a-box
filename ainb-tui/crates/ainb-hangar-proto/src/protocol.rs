@@ -350,8 +350,10 @@ mod tests {
         }
         assert_eq!(
             crate::fleet::FLEET_PROTOCOL_CAPABILITY_IDS.len(),
-            25,
-            "D17 names 25 fleet ids; the append rule is written against that count"
+            26,
+            "D17 names 26 fleet ids; the append rule is written against that count. \
+             Bumping this is the conscious act the guard exists to require: 26 is \
+             25 plus `fleet.status.read`, the D14 status derivation"
         );
     }
 
