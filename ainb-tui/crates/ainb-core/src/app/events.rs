@@ -1674,30 +1674,30 @@ impl EventHandler {
             }
             PalRetry => None,
             UiAction::DaemonsCloseOverlay => {
-                state.daemons_state.close_overlay();
+                state.hangar.daemons_state.close_overlay();
                 None
             }
             UiAction::DaemonsCloseAndBack => {
-                state.daemons_state.close_all_overlays();
+                state.hangar.daemons_state.close_all_overlays();
                 Some(AppEvent::PanelBack)
             }
             UiAction::DaemonsConfirmMenu => {
-                state.daemons_state.confirm_menu();
-                if let Some(session) = state.daemons_state.take_attach_request() {
+                state.hangar.daemons_state.confirm_menu();
+                if let Some(session) = state.hangar.daemons_state.take_attach_request() {
                     state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session));
                 }
                 None
             }
             UiAction::DaemonsOpenMenu => {
-                state.daemons_state.open_menu();
+                state.hangar.daemons_state.open_menu();
                 None
             }
             UiAction::DaemonsMoveOverlay(delta) => {
-                state.daemons_state.move_menu(delta);
+                state.hangar.daemons_state.move_menu(delta);
                 None
             }
             UiAction::DaemonsMoveSelection(delta) => {
-                state.daemons_state.move_selection(delta);
+                state.hangar.daemons_state.move_selection(delta);
                 None
             }
             UiAction::SkillManagerSyncOrConflict => {
@@ -2201,7 +2201,7 @@ impl EventHandler {
         // for both. Queue them before the early return, so a save that touched
         // only daemon rows still writes.
         let queued_for_daemon = applied.daemon.len();
-        state.pending_daemon_config_edits.append(&mut applied.daemon);
+        state.hangar.pending_daemon_config_edits.append(&mut applied.daemon);
         if !dirty_before && applied.external.is_empty() {
             state.config_screen_state.mark_saved();
             return Ok(PersistOutcome {
@@ -2358,12 +2358,14 @@ impl EventHandler {
             // from anywhere. cwd's .mcp.json is still pulled in as a source.
             // Additive (never overwrites), so it fires without a confirmation.
             AppEvent::McpOverlayImport => state.mcp_import(true),
-            AppEvent::DaemonsRefresh => state.daemons_state.force_collect(),
+            AppEvent::DaemonsRefresh => state.hangar.daemons_state.force_collect(),
             // Kept next to the two hook events it belongs with.
             AppEvent::DaemonsRepairHooks => state
+                .hangar
                 .daemons_state
                 .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install),
             AppEvent::DaemonsPinHookBinary => state
+                .hangar
                 .daemons_state
                 .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::PinRunning),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
@@ -4989,7 +4991,7 @@ impl EventHandler {
                 // the collector — it does no disk I/O on the event loop.
                 // MCP, Headroom, Hangar and notifyd are rows in that same
                 // collect, so there is nothing else to arm.
-                state.daemons_state.arm();
+                state.hangar.daemons_state.arm();
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
@@ -8526,8 +8528,12 @@ mod hangar_daemon_persist_tests {
             );
             EventHandler::persist_config_screen(&mut state).expect("second persist");
 
-            let queued: Vec<&str> =
-                state.pending_daemon_config_edits.iter().map(|(k, _)| k.as_str()).collect();
+            let queued: Vec<&str> = state
+                .hangar
+                .pending_daemon_config_edits
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect();
             assert_eq!(
                 queued.len(),
                 2,

@@ -98,3 +98,35 @@ impl Default for ClaudeChatSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct HangarSection {
+    /// Hangar daemon `(daemon_config key, raw value)` edits waiting to be
+    /// written to the daemon's SQLite table.
+    ///
+    /// A queue of its own rather than an `AsyncAction`: that slot holds exactly
+    /// one action and is drained once per app tick, so two settings edits
+    /// confirmed inside the same 250 ms tick would silently lose the first
+    /// while toasting success for both. Appended to, drained in
+    /// `process_async_action`.
+    pub pending_daemon_config_edits: Vec<(String, String)>,
+    /// Whether the Hangar daemon's stored `daemon_config` values have been read
+    /// into the settings rows yet.
+    ///
+    /// A one-shot of its own rather than a seeded `pending_async_action`: that
+    /// slot holds ONE keystroke-driven action, so pre-filling it both races the
+    /// first keystroke and makes "no action is pending" untestable.
+    pub hangar_daemon_config_loaded: bool,
+    /// Daemons screen state (cached runtime-health snapshot + poll tick).
+    pub daemons_state: crate::components::daemons::DaemonsState,
+}
+
+impl Default for HangarSection {
+    fn default() -> Self {
+        Self {
+            pending_daemon_config_edits: Vec::new(),
+            hangar_daemon_config_loaded: false,
+            daemons_state: crate::components::daemons::DaemonsState::default(),
+        }
+    }
+}

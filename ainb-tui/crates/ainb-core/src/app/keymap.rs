@@ -656,7 +656,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
             }
             screen_ids::DAEMONS => {
-                let sub = if state.daemons_state.has_overlay() {
+                let sub = if state.hangar.daemons_state.has_overlay() {
                     "overlay"
                 } else {
                     "list"

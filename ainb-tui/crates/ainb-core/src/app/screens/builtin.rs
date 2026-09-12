@@ -776,7 +776,7 @@ impl Screen for DaemonsScreen {
         ids::DAEMONS
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        crate::components::daemons::render(frame, area, &state.daemons_state);
+        crate::components::daemons::render(frame, area, &state.hangar.daemons_state);
     }
 }
 

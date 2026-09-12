@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub hangar: Versioned<HangarSection>,
+
     pub claude_chat: Versioned<ClaudeChatSection>,
 
     pub git_view: Versioned<GitViewSection>,
@@ -3163,22 +3165,6 @@ pub struct AppState {
     pub new_session_state: Option<NewSessionState>,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
-    /// Hangar daemon `(daemon_config key, raw value)` edits waiting to be
-    /// written to the daemon's SQLite table.
-    ///
-    /// A queue of its own rather than an `AsyncAction`: that slot holds exactly
-    /// one action and is drained once per app tick, so two settings edits
-    /// confirmed inside the same 250 ms tick would silently lose the first
-    /// while toasting success for both. Appended to, drained in
-    /// `process_async_action`.
-    pub pending_daemon_config_edits: Vec<(String, String)>,
-    /// Whether the Hangar daemon's stored `daemon_config` values have been read
-    /// into the settings rows yet.
-    ///
-    /// A one-shot of its own rather than a seeded `pending_async_action`: that
-    /// slot holds ONE keystroke-driven action, so pre-filling it both races the
-    /// first keystroke and makes "no action is pending" untestable.
-    pub hangar_daemon_config_loaded: bool,
     // Flag to track if user cancelled during async operation
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
@@ -3309,9 +3295,6 @@ pub struct AppState {
 
     // Changelog viewer state
     pub changelog_state: crate::components::ChangelogState,
-
-    /// Daemons screen state (cached runtime-health snapshot + poll tick).
-    pub daemons_state: crate::components::daemons::DaemonsState,
 
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
@@ -3857,6 +3840,7 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            hangar: Versioned::default(),
             claude_chat: Versioned::default(),
             git_view: Versioned::default(),
             recovery: Versioned::default(),
@@ -3874,8 +3858,6 @@ impl Default for AppState {
             help_visible: false,
             new_session_state: None,
             pending_async_action: None,
-            pending_daemon_config_edits: Vec::new(),
-            hangar_daemon_config_loaded: false,
             async_operation_cancelled: false,
             confirmation_dialog: None,
             ui_needs_refresh: false,
@@ -3952,7 +3934,6 @@ impl Default for AppState {
             // ainb-hooks inbox (lazy-opens SQLite on first refresh)
 
             // Daemons observability (collects health on first/periodic render)
-            daemons_state: crate::components::daemons::DaemonsState::default(),
 
             // Fleet control panel (reads current_state on entry/tick)
             pending_plugin_renders: std::collections::HashMap::new(),
@@ -10457,12 +10438,12 @@ impl AppState {
         // Once, on the first app tick: the `Hangar Daemon` settings rows are
         // seeded with coded defaults synchronously (the store is async and the
         // screen is not), and this replaces them with what is actually stored.
-        if !self.hangar_daemon_config_loaded {
-            self.hangar_daemon_config_loaded = true;
+        if !self.hangar.hangar_daemon_config_loaded {
+            self.hangar.hangar_daemon_config_loaded = true;
             self.load_hangar_daemon_config().await;
         }
-        if !self.pending_daemon_config_edits.is_empty() {
-            let edits = std::mem::take(&mut self.pending_daemon_config_edits);
+        if !self.hangar.pending_daemon_config_edits.is_empty() {
+            let edits = std::mem::take(&mut self.hangar.pending_daemon_config_edits);
             self.set_hangar_daemon_config(edits).await;
         }
         if let Some(action) = self.pending_async_action.take() {

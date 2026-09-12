@@ -436,7 +436,7 @@ impl LayoutComponent {
         // was the only caller: an operator who never opens it never starts a
         // collector thread.
         if state.current_screen == screen_ids::DAEMONS {
-            state.daemons_state.tick();
+            state.hangar.daemons_state.tick();
         }
 
         // Registry-routed screens return before any of this in `render`.
