@@ -333,6 +333,48 @@ async fn the_versioned_alias_and_the_plain_socket_are_one_daemon() {
     assert!(client.attention_list_fleet().await.unwrap().is_empty());
 }
 
+/// The versioned alias is PREFERRED, not trusted.
+///
+/// The daemon creates it best-effort and never re-checks it, and the directory
+/// is the operator's own home — so every same-uid process, including an agent
+/// this daemon spawned, can unlink it and listen on the path instead. The first
+/// frame a client sends is the daemon bearer token, so preferring that path
+/// blind would hand the token to whoever got there first.
+#[tokio::test]
+async fn a_squatted_versioned_alias_is_not_dialled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, token) = start_daemon_n(dir.path()).await;
+
+    let alias =
+        rpc::versioned_socket_path_in(dir.path(), ainb_hangar_proto::protocol::PROTOCOL_VERSION);
+    assert!(
+        alias.exists(),
+        "the daemon must publish {}",
+        alias.display()
+    );
+    assert_eq!(
+        ainb_hangar_client::socket_path_in(dir.path()),
+        alias,
+        "the daemon's own alias is the preferred path"
+    );
+
+    // Somebody else takes the path and listens on it.
+    std::fs::remove_file(&alias).unwrap();
+    let _squatter = std::os::unix::net::UnixListener::bind(&alias).unwrap();
+    assert_eq!(
+        ainb_hangar_client::socket_path_in(dir.path()),
+        socket,
+        "a squatted alias must not be dialled: the first frame is the token"
+    );
+
+    // And the client still reaches the real daemon over the plain path.
+    let client = ainb_hangar_client::DaemonClient::with_parts(
+        ainb_hangar_client::socket_path_in(dir.path()),
+        token,
+    );
+    assert!(client.attention_list_fleet().await.unwrap().is_empty());
+}
+
 /// The anti-drift gate for the Swift leg.
 ///
 /// The Rust harness and the Swift test suite each hold a copy of the same

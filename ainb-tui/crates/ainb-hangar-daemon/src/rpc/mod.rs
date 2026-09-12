@@ -295,10 +295,15 @@ fn link_versioned_sockets(socket_path: &Path) {
         // removes the LINK, never a target.
         let _ = std::fs::remove_file(&alias);
         if let Err(e) = std::os::unix::fs::symlink(name, &alias) {
-            tracing::debug!(
+            // WARN, not debug. A missing alias is not cosmetic: clients prefer
+            // it, so an absent one is the exact condition under which some
+            // other same-uid process could create a file at that path and
+            // receive tokens. An operator has to be able to see that happened.
+            tracing::warn!(
                 error = %e,
                 alias = %alias.display(),
-                "hangar rpc: could not create the versioned socket alias"
+                "hangar rpc: could not publish the versioned socket alias; \
+                 clients will fall back to the unversioned path"
             );
         }
     }
