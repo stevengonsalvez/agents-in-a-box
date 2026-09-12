@@ -2740,8 +2740,11 @@ mod tests {
     fn needs_row(session_id: &str) -> NeedsRow {
         use crate::fleet::read::{IdleContext, NeedsContext, RouteHint};
         use crate::fleet::types::{Session, SessionSource};
-        NeedsRow {
-            session: Session {
+        // Built through `make_row`, not as a literal: the D14 status stamp
+        // fields are added by the reader that holds the daemon's status read,
+        // and a literal here would have to be edited every time one lands.
+        crate::fleet::read::needs::make_row(
+            Session {
                 id: session_id.into(),
                 cwd: format!("/tmp/{session_id}"),
                 pid: None,
@@ -2756,16 +2759,12 @@ mod tests {
                 summary: None,
                 last_seen_ms: None,
             },
-            context: NeedsContext::Idle(IdleContext {
+            NeedsContext::Idle(IdleContext {
                 idle_minutes: 9,
                 last_assistant_text: None,
             }),
-            route_hint: RouteHint::Tmux,
-            enrich_key: String::new(),
-            enriched: None,
-            need_enrich: false,
-            source: None,
-        }
+            RouteHint::Tmux,
+        )
     }
 
     /// A minimal open attention row for `session_id` routed to `channels`.

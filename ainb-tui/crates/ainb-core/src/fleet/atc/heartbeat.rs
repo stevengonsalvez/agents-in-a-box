@@ -306,33 +306,25 @@ mod tests {
     }
 
     fn err_row(id: &str, tmux: &str, pattern: &str) -> NeedsRow {
-        NeedsRow {
-            session: session(id, tmux),
-            context: NeedsContext::Err(ErrContext {
+        crate::fleet::read::needs::make_row(
+            session(id, tmux),
+            NeedsContext::Err(ErrContext {
                 pattern: pattern.into(),
                 snippet: "overloaded_error: please retry".into(),
             }),
-            route_hint: RouteHint::Tmux,
-            enrich_key: String::new(),
-            enriched: None,
-            need_enrich: false,
-            source: None,
-        }
+            RouteHint::Tmux,
+        )
     }
 
     fn idle_row(id: &str, tmux: &str, mins: i64) -> NeedsRow {
-        NeedsRow {
-            session: session(id, tmux),
-            context: NeedsContext::Idle(IdleContext {
+        crate::fleet::read::needs::make_row(
+            session(id, tmux),
+            NeedsContext::Idle(IdleContext {
                 idle_minutes: mins,
                 last_assistant_text: None,
             }),
-            route_hint: RouteHint::Tmux,
-            enrich_key: String::new(),
-            enriched: None,
-            need_enrich: false,
-            source: None,
-        }
+            RouteHint::Tmux,
+        )
     }
 
     #[test]
@@ -383,20 +375,16 @@ mod tests {
 
     fn ask_row(id: &str, tmux: &str, question: &str) -> NeedsRow {
         use crate::fleet::read::AskUserQuestionData;
-        NeedsRow {
-            session: session(id, tmux),
-            context: NeedsContext::Ask(AskUserQuestionData {
+        crate::fleet::read::needs::make_row(
+            session(id, tmux),
+            NeedsContext::Ask(AskUserQuestionData {
                 question: question.into(),
                 header: None,
                 options: Vec::new(),
                 multi_select: false,
             }),
-            route_hint: RouteHint::Tmux,
-            enrich_key: String::new(),
-            enriched: None,
-            need_enrich: false,
-            source: None,
-        }
+            RouteHint::Tmux,
+        )
     }
 
     // --- Fix 3: CODE-enforced cap (not advisory) -----------------------------
