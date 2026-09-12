@@ -3183,7 +3183,6 @@ pub struct AppState {
     pub async_operation_cancelled: bool,
     // Confirmation dialog state
     pub confirmation_dialog: Option<ConfirmationDialog>,
-    // Shared MCP pool observability overlay (None = closed; no refresh runs).
     // Flag to force UI refresh after workspace changes
     pub ui_needs_refresh: bool,
 
@@ -3255,8 +3254,6 @@ pub struct AppState {
     // Pending event to be processed in next loop iteration
     pub pending_event: Option<crate::app::events::AppEvent>,
 
-    // Quick commit dialog state
-
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
     pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
@@ -3313,15 +3310,8 @@ pub struct AppState {
     // Changelog viewer state
     pub changelog_state: crate::components::ChangelogState,
 
-    // Session recovery state (for orphaned agent sessions)
-    /// Inbox screen state (ainb-hooks notifications: selection,
-    /// filters, in-process SQLite store handle).
-
     /// Daemons screen state (cached runtime-health snapshot + poll tick).
     pub daemons_state: crate::components::daemons::DaemonsState,
-
-    /// Fleet control-panel state (cached `current_state` rows + selection +
-    /// shared action-feedback cell).
 
     /// WireBuffers freshly drained from plugins, keyed by screen id.
     /// `App::tick_plugin_renders` populates this before each frame so
