@@ -211,15 +211,16 @@ pub enum AppEvent {
     GitReviewExpandAllFolders, // e — expand all folders
     GitReviewCollapseAllFolders, // E — collapse all folders
     // Tmux integration events
-    AttachTmuxSession,    // Attach to tmux session (full-screen)
-    EnterInteractivePane, // Attach in-place: interactive embedded tmux pane
-    DetachTmuxSession,    // Detach from tmux session
-    EnterScrollMode,      // Enter scroll mode in tmux preview
-    ExitScrollMode,       // Exit scroll mode in tmux preview
-    ScrollPreviewUp,      // Scroll tmux preview up
-    ScrollPreviewDown,    // Scroll tmux preview down
-    ToggleExpandAll,      // Toggle expand/collapse all workspaces
-    ToggleSessionMenuBar, // Hide/show the Sessions bottom keymap legend (⇧M)
+    AttachTmuxSession,     // Attach to tmux session (full-screen)
+    EnterInteractivePane,  // Attach in-place: interactive embedded tmux pane
+    DetachTmuxSession,     // Detach from tmux session
+    EnterScrollMode,       // Enter scroll mode in tmux preview
+    ExitScrollMode,        // Exit scroll mode in tmux preview
+    ScrollPreviewUp,       // Scroll tmux preview up
+    ScrollPreviewDown,     // Scroll tmux preview down
+    ToggleExpandAll,       // Toggle expand/collapse all workspaces
+    ToggleSessionMenuBar,  // Hide/show the Sessions bottom keymap legend (⇧M)
+    ToggleSessionMetadata, // Toggle compact model/effort titles (v)
     // Other tmux rename events
     OtherTmuxStartRename, // Start rename mode for selected "Other tmux" session
     OtherTmuxRenameChar(char), // Character input for rename
@@ -2531,6 +2532,9 @@ impl EventHandler {
             KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
             // Hide/show the bottom keymap legend to reclaim vertical space.
             KeyCode::Char('M') => Some(AppEvent::ToggleSessionMenuBar),
+            // `m` and ⇧M are occupied. A persistent toggle works in terminals
+            // that cannot report a held key's release event.
+            KeyCode::Char('v') => Some(AppEvent::ToggleSessionMetadata),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
             // k skills, m memory, t abtop — same set
@@ -3874,6 +3878,7 @@ impl EventHandler {
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
             AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
+            AppEvent::ToggleSessionMetadata => state.toggle_session_metadata(),
             AppEvent::ToggleSessionsSidebar => {
                 // Same path the [-]/[+] mouse glyph takes: flip + persist the
                 // preference so the choice survives restarts.
@@ -9149,6 +9154,18 @@ mod panel_back_tests {
             matches!(evt, AppEvent::GoToLearnings),
             "`m` must map to GoToLearnings, got {evt:?}"
         );
+    }
+
+    #[test]
+    fn session_list_v_key_toggles_compact_model_metadata() {
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        let event = EventHandler::handle_key_event(key, &mut state)
+            .expect("v on the session list dispatches metadata toggle");
+        assert!(matches!(event, AppEvent::ToggleSessionMetadata));
+        EventHandler::process_event(event, &mut state);
+        assert!(state.show_session_metadata);
     }
 
     /// Activating the Memory tile on the home sidebar (Enter) must open the
