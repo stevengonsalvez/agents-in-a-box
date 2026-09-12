@@ -146,7 +146,7 @@ One Orca worktree per lane, one `claude` agent each, goal prompt from `docs/plan
 
 | lane | goal | env | branch | agent handle |
 |---|---|---|---|---|
-| A | `2026-09-12-p0-closure.md`: slice-1 gates green (#925), waves 2-4, G6 handed over | claude-hetzner | `stevengonsalvez/p0-closure` PR #933 (nit fixed, checks running), `stevengonsalvez/s-c-card-retirement` PR #936 (re-review running) | `term_f52c61ee-95c2-4878-beb8-aaf8b8de6abd` |
+| A | `2026-09-12-p0-closure.md`: slice-1 gates green (#925), waves 2-4, G6 handed over | claude-hetzner | `stevengonsalvez/p0-closure` PR #933 (nit fixed, checks running), `stevengonsalvez/s-c-card-retirement` PR #936 (sent back a second time, two majors in the retired-id map) | `term_f52c61ee-95c2-4878-beb8-aaf8b8de6abd` |
 | B | `2026-09-12-w0-wire.md`: protocol version, capabilities, skew harness, op-id ledger | claude-gcp | `stevengonsalvez/w0-wire`, draft PR #935 | `term_b78264e2-f6ba-4492-9391-333275ef7b16` (the original session; it had not died, the runtime reissued handles, and a duplicate relaunch was stood down and closed 2026-09-12) |
 | C | `2026-09-12-status-t0.md`: #916 pane binding, then T0-daemon, plus the three red daemon tests from #925 | claude-gcp | `feat/916-pane-binding`, draft PR #934 | `term_49ad9b50-e253-497d-ad2c-62059f021b16` (the idle original was closed 2026-09-12, this is the only lane C session) |
 | D | `2026-09-12-spike-2-emulator.md`: control-mode emulator fidelity | claude-hetzner | `stevengonsalvez/spike-2-emulator`, **merged PR #931**, nits follow-up **merged PR #938**, done | closed |
