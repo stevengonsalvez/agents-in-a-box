@@ -376,8 +376,6 @@ impl KeyContext {
     }
 }
 
-/// Mirror host dispatch precedence without allowing renderer state into `AppState`.
-#[must_use]
 /// Which `onboarding.*` sub-context the wizard is in.
 ///
 /// Lifted out of [`active_contexts`] so it can be enumerated: every step of the
@@ -411,6 +409,8 @@ pub(crate) fn onboarding_sub_context(
     }
 }
 
+/// Mirror host dispatch precedence without allowing renderer state into `AppState`.
+#[must_use]
 pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     let mut contexts = Vec::new();
     let mut text_context_pushed = false;
