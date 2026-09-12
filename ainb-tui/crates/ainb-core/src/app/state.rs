@@ -11865,9 +11865,18 @@ impl AppState {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match tab {
             SessionTab::Pal => {
-                let host = self.fleet.pal_chat.get_or_insert_with(ChatHost::pal);
-                if host.tick(now_ms) {
-                    self.shell.ui_needs_refresh = true;
+                // Runs every frame, so the bump is gated on the two things that
+                // are real changes: opening the conversation, and a tick that
+                // reports it moved.
+                let mut ticked = false;
+                self.fleet.update(|fleet| {
+                    let opened = fleet.pal_chat.is_none();
+                    let host = fleet.pal_chat.get_or_insert_with(ChatHost::pal);
+                    ticked = host.tick(now_ms);
+                    opened || ticked
+                });
+                if ticked {
+                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 self.chat_host(tab)
             }
@@ -11878,13 +11887,18 @@ impl AppState {
                 // reading it, and a cached host keeps polling the daemon for it.
                 let stale =
                     self.fleet.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
-                if stale {
-                    self.fleet.session_chat = Some((key.clone(), ChatHost::thread(key)));
-                }
-                if let Some((_, host)) = self.fleet.session_chat.as_mut() {
-                    if host.tick(now_ms) {
-                        self.shell.ui_needs_refresh = true;
+                let mut ticked = false;
+                self.fleet.update(|fleet| {
+                    if stale {
+                        fleet.session_chat = Some((key.clone(), ChatHost::thread(key)));
                     }
+                    if let Some((_, host)) = fleet.session_chat.as_mut() {
+                        ticked = host.tick(now_ms);
+                    }
+                    stale || ticked
+                });
+                if ticked {
+                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 self.chat_host(tab)
             }

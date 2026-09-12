@@ -302,6 +302,14 @@ pub struct UiState {
     /// run loop applies it once the frame is out. Cleared before every draw so
     /// a size from a frame that no longer paints the embed cannot be replayed.
     pub embed_desired_size: Option<(u16, u16)>,
+
+    /// The size the embed was last resized to.
+    ///
+    /// Renderer-local so the resize can be skipped when the layout recomputes
+    /// the same size, which it does on almost every frame. Without it
+    /// `publish_after_draw` takes `&mut` on the tmux section every single
+    /// frame and that section then reads as "changed" forever.
+    pub last_embed_size: Option<(u16, u16)>,
     /// Sidebar rect the HomeScreen last painted, and the welcome panel's
     /// `(content_height, visible_height)`. Both are measurements of what was
     /// drawn, so only a draw can know them; [`crate::components::layout::publish_after_draw`]

@@ -253,19 +253,40 @@ fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
 /// and this hands it back once the frame is out — which is exactly when the
 /// hit tests and scroll clamps that read them next run.
 pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
-    if let Some((rows, cols)) = ui.embed_desired_size.take() {
-        if let Some(embed) = state.tmux.embed.as_mut() {
-            let _ = embed.resize(rows, cols);
+    // Everything here runs on EVERY painted frame and almost always recomputes
+    // the value it already published. Each write is therefore compare-then-set:
+    // an unconditional `&mut` would bump the tmux, shell and logs sections once
+    // a frame, and a section that changes every frame tells a subscriber
+    // nothing at all.
+    if let Some(size) = ui.embed_desired_size.take() {
+        if ui.last_embed_size != Some(size) {
+            let (rows, cols) = size;
+            if let Some(embed) = state.tmux.get_mut().embed.as_mut() {
+                let _ = embed.resize(rows, cols);
+                ui.last_embed_size = Some(size);
+            }
         }
     }
 
-    let home = &mut state.shell.home_screen_v2_state;
     if ui.home_sidebar_rect.is_some() {
-        home.last_sidebar_rect = ui.home_sidebar_rect;
+        state.shell.set_if_changed(
+            |shell| &mut shell.home_screen_v2_state.last_sidebar_rect,
+            ui.home_sidebar_rect,
+        );
     }
-    (home.welcome.content_height, home.welcome.visible_height) = ui.welcome_viewport;
+    state.shell.set_if_changed(
+        |shell| &mut shell.home_screen_v2_state.welcome.content_height,
+        ui.welcome_viewport.0,
+    );
+    state.shell.set_if_changed(
+        |shell| &mut shell.home_screen_v2_state.welcome.visible_height,
+        ui.welcome_viewport.1,
+    );
 
-    state.log_streams.log_history_state.log_entries_area = ui.log_entries_area;
+    state.log_streams.set_if_changed(
+        |logs| &mut logs.log_history_state.log_entries_area,
+        ui.log_entries_area,
+    );
 }
 
 pub struct LayoutComponent {
@@ -449,14 +470,14 @@ impl LayoutComponent {
         // off a session row) and leaving them on a stale pane shows a question
         // they can no longer act on.
         let active = session_tabs::resolve(state, state.shell.session_tab);
-        state.shell.session_tab = active;
+        state.shell.set_if_changed(|shell| &mut shell.session_tab, active);
 
         // Fold in whatever the answer worker reported. EVERY frame, not only on
         // the `ask` tab: the row's `SENT` chip is painted by the session list,
         // so an operator who sends and then switches tabs would otherwise watch
         // that chip stay SENT forever.
-        if state.fleet.ask_state.tick() {
-            state.shell.ui_needs_refresh = true;
+        if state.fleet.update(|fleet| fleet.ask_state.tick()) {
+            state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
         }
 
         // An attached embed owns the right pane outright, and `preview` is a
@@ -474,7 +495,7 @@ impl LayoutComponent {
                 // unfocused — no cursor, no caret, and the operator's first
                 // characters fall through to the session shortcuts.
                 if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
-                    state.fleet.ask_state.retarget(&chip);
+                    state.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
                 }
             }
             SessionTab::Log => {
@@ -491,14 +512,14 @@ impl LayoutComponent {
                 // The dial ticks with the pane, so the registry read and any
                 // in-flight configure land without the operator pressing
                 // anything, exactly like the chat host's own tick.
-                if state.fleet.pal_dial.tick() {
-                    state.shell.ui_needs_refresh = true;
+                if state.fleet.update(|fleet| fleet.pal_dial.tick()) {
+                    state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 // The offer's own tick, for the same reason: the start runs on
                 // a detached worker, and its result has to reach the pane
                 // without the operator pressing anything else.
-                if state.fleet.daemon_start_cta.tick() {
-                    state.shell.ui_needs_refresh = true;
+                if state.fleet.update(|fleet| fleet.daemon_start_cta.tick()) {
+                    state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 let _ = state.chat_host_for(active);
             }
@@ -509,8 +530,8 @@ impl LayoutComponent {
                 // private thread.
                 if state.broadcast_targets().is_empty() {
                     let _ = state.chat_host_for(active);
-                } else if state.fleet.broadcast.tick() {
-                    state.shell.ui_needs_refresh = true;
+                } else if state.fleet.update(|fleet| fleet.broadcast.tick()) {
+                    state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
             }
         }
