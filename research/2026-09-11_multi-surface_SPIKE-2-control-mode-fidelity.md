@@ -353,7 +353,12 @@ into a live emulator, 120x40, 1,000-row window:
 | wezterm | 53.1 MB | 33,621 | 0 | 9 ms | 3.80 s | 4.40 s | 6.5 MB | 8.00 s | **0/40** |
 | wezterm14 | 53.1 MB | 33,616 | 0 | 5 ms | 3.53 s | 4.17 s | 6.1 MB | 7.71 s | **0/40** |
 
-All [fact]. Read three things off this table. First, **the flood never tripped
+All [fact]. The delivered figure is exact, not rounded: the file is 52,428,800
+bytes with 671,544 newlines, the pty turns each `LF` into `CRLF`, and the feed
+delivered 53,100,344 bytes, which is 52,428,800 + 671,544 to the byte. Nothing
+was lost or duplicated across 33,000 notifications. [fact]
+
+Read three things off this table. First, **the flood never tripped
 `pause-after=2` for any crate**: buffering age peaked at 9 ms against a 2,000 ms
 threshold, so a daemon-speed reader is nowhere near the flow-control boundary.
 Second, **the tmux server costs about twice the most expensive emulator** (7.5
