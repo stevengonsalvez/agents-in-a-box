@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.4] - 2026-09-12
+### Fixed
+- make sidebar status authoritative
+
+
 ## [1.28.2] - 2026-09-11
 ### Added
 - **fleet-macos**: add signed Sparkle updates
