@@ -98,6 +98,17 @@ async fn hook(
 /// The projection a real ask carries: raise one card, keyed so a re-firing
 /// collapses onto it.
 fn raise(sequence: usize, now_ms: i64) -> AttentionProjection {
+    raise_kind(AttentionKind::AskUserQuestion, sequence, now_ms)
+}
+
+/// The same, for any kind the apply path is expected to close.
+///
+/// `waiting` is the one that matters and the one that was missing: a Codex
+/// approval arrives over the hook route and raises a `waiting` card, and when
+/// `sweep_once` stopped mutating, the in-transaction close became its only
+/// remaining closer. A replay built only from `ask_user_question` proved
+/// nothing about it.
+fn raise_kind(kind: AttentionKind, sequence: usize, now_ms: i64) -> AttentionProjection {
     AttentionProjection {
         session_id: SESSION_ID.to_string(),
         close_open_asks: false,
@@ -109,7 +120,7 @@ fn raise(sequence: usize, now_ms: i64) -> AttentionProjection {
             session_id: SESSION_ID.to_string(),
             cwd: CWD.to_string(),
             workspace_id: None,
-            kind: AttentionKind::AskUserQuestion,
+            kind,
             payload: r#"{"kind":"ASK","context":{"question":"one truth?"}}"#.to_string(),
             degraded: false,
             created_at: now_ms,
@@ -280,6 +291,93 @@ async fn a_discovered_pane_row_claims_only_inferred_authority() {
     );
 }
 
+/// The upgrade path for the authority repair (migration 0098).
+///
+/// Demoting the discovery event to `inferred` is correct and, on its own,
+/// strands every row the old code already stamped: `should_replace` ranks
+/// authority before it compares clocks, so an inferred observation over a
+/// stored `authoritative` is refused, and a tier-5 row has no hook behind it to
+/// correct it. The row would pin at whatever it held at upgrade, forever, and
+/// nothing would look broken.
+///
+/// This plants a row exactly as the old code left it and asserts a later scan
+/// moves it.
+#[tokio::test]
+async fn a_row_stamped_by_the_old_authoritative_scan_can_still_be_advanced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+
+    let discovered = discovered_idle();
+    let key = discovered.session_key.to_string();
+
+    // What the pre-0098 code wrote: a tier-5 row claiming authority over the
+    // three groups a pane scan only infers.
+    sqlx::query(
+        "INSERT INTO fleet_session \
+            (session_key, provider, provider_session_id, cwd, tmux_target, \
+             lifecycle_state, attention_state, transport_health, management_state, \
+             lifecycle_authority, attention_authority, transport_authority, \
+             lifecycle_updated_at, attention_updated_at, transport_updated_at, \
+             discovered_at, last_observed_at) \
+         VALUES (?, 'claude', NULL, ?, ?, 'RUNNING', 'NONE', 'HEALTHY', 'DEGRADED', \
+                 'authoritative', 'authoritative', 'authoritative', ?, ?, ?, ?, ?)",
+    )
+    .bind(&key)
+    .bind(CWD)
+    .bind(PANE)
+    .bind(BASE_MS)
+    .bind(BASE_MS)
+    .bind(BASE_MS)
+    .bind(BASE_MS)
+    .bind(BASE_MS)
+    .execute(store.pool())
+    .await
+    .expect("plant a pre-upgrade row");
+
+    // The repair, as migration 0098 applies it.
+    sqlx::query(
+        "UPDATE fleet_session \
+         SET lifecycle_authority = 'inferred', attention_authority = 'inferred', \
+             transport_authority = 'inferred' \
+         WHERE provider_session_id IS NULL \
+           AND (lifecycle_authority = 'authoritative' \
+             OR attention_authority = 'authoritative' \
+             OR transport_authority = 'authoritative')",
+    )
+    .execute(store.pool())
+    .await
+    .expect("apply the 0098 repair");
+
+    // A later scan of the same pane, now reading finished.
+    reconcile_discovered_panes(
+        store.pool(),
+        &EventBroker::new().sink(),
+        vec![discovered],
+        BASE_MS + 60_000,
+        ReconcilePass::Panes,
+    )
+    .await
+    .expect("discovery reconciles");
+
+    let row = FleetRepo::get_session(store.pool(), &key)
+        .await
+        .expect("session query")
+        .expect("the row survived");
+    assert_eq!(
+        row.lifecycle_state, "TURN_COMPLETE",
+        "an upgraded tier-5 row must still be advanceable by the scan that owns it"
+    );
+    assert_eq!(
+        (
+            row.lifecycle_authority.as_str(),
+            row.attention_authority.as_str(),
+            row.transport_authority.as_str()
+        ),
+        ("inferred", "inferred", "inferred"),
+        "and it must not re-claim the authority the repair removed"
+    );
+}
+
 /// Completion is a claim, and only a terminal event may make it.
 ///
 /// The sequences below are pseudo-random ORDERS of non-terminal events, with
@@ -388,10 +486,21 @@ async fn a_thousand_event_replay_leaves_no_projection_drift() {
     for sequence in 0..1_000_usize {
         let now = BASE_MS + sequence as i64 * 1_000;
         let asking = sequence % 2 == 0;
-        let (event, tool) = if asking {
+        // Alternate the two kinds the apply path must close. A replay built
+        // only from `ask_user_question` stayed green while the in-transaction
+        // close read `kind = 'ask_user_question'` and left every `waiting` card
+        // open forever, which is exactly the drift this asserts against.
+        let ask_kind = if sequence % 4 == 0 {
+            AttentionKind::AskUserQuestion
+        } else {
+            AttentionKind::Waiting
+        };
+        let (event, tool) = if !asking {
+            ("Stop", None)
+        } else if ask_kind == AttentionKind::AskUserQuestion {
             ("AskUserQuestion", Some("AskUserQuestion"))
         } else {
-            ("Stop", None)
+            ("Notification", None)
         };
         hook(
             &store,
@@ -400,7 +509,7 @@ async fn a_thousand_event_replay_leaves_no_projection_drift() {
             tool,
             now,
             Some(if asking {
-                raise(sequence, now)
+                raise_kind(ask_kind, sequence, now)
             } else {
                 release(now)
             }),
