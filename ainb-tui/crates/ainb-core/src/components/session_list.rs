@@ -654,6 +654,14 @@ impl SessionListComponent {
                     .filter(|(_, s)| state.session_passes_filter(s))
                     .collect();
                 let visible_len = visible.len();
+                // A Git branch is not session identity: two agents can work
+                // the same branch concurrently. Keep normal rows clean, but
+                // make a collision explicitly distinguishable instead of
+                // rendering two visually identical entries.
+                let mut title_counts = std::collections::HashMap::<String, usize>::new();
+                for (_, session) in &visible {
+                    *title_counts.entry(session_list_name(session)).or_default() += 1;
+                }
                 for (visible_pos, &(session_idx, session)) in visible.iter().enumerate() {
                     let is_selected_session =
                         is_selected_workspace && state.selected_session_index == Some(session_idx);
@@ -692,6 +700,11 @@ impl SessionListComponent {
                     let agent_icon = session.agent_type.icon();
                     let agent_color = agent_brand_color(&session.agent_type);
                     let is_multi_selected = state.selected_sessions.contains(&session.id);
+                    let title = session_list_name(session);
+                    let collision_id = session_collision_id(
+                        session,
+                        title_counts.get(&title).copied().unwrap_or_default() > 1,
+                    );
 
                     let checkbox = ballot_checkbox(is_multi_selected);
 
@@ -717,7 +730,7 @@ impl SessionListComponent {
                     // truncate a tree or status decoration instead.
                     let name_span_index = title_spans.len();
                     title_spans.push(Span::styled(
-                        session_list_name(session),
+                        title.clone(),
                         Style::default().fg(branch_color).add_modifier(if is_selected_session {
                             Modifier::BOLD
                         } else {
@@ -729,8 +742,7 @@ impl SessionListComponent {
                         Style::default().fg(WARNING_ORANGE),
                     ));
                     debug_assert_eq!(
-                        title_spans[name_span_index].content,
-                        session_list_name(session),
+                        title_spans[name_span_index].content, title,
                         "name_span_index must track the session-name span"
                     );
                     // The chip whose answer is still in flight, if it is on
@@ -761,11 +773,19 @@ impl SessionListComponent {
                         Span::raw("     "),
                         Span::styled(agent_icon.to_string(), Style::default().fg(agent_color)),
                     ];
+                    if let Some(identity) = collision_id {
+                        // Metadata has an independent second-line budget. Put
+                        // collision identity first there so a narrow title can
+                        // still yield to the fixed right status/ASK gutter.
+                        metadata_spans.push(Span::raw(" "));
+                        metadata_spans
+                            .push(Span::styled(identity, Style::default().fg(METADATA_GRAY)));
+                    }
                     if let Some(metadata) = session_model_effort_label(state, session) {
                         let prefix_width: usize = metadata_spans.iter().map(Span::width).sum();
-                        metadata_spans.push(Span::raw(" "));
+                        metadata_spans.push(Span::raw(" · "));
                         metadata_spans.push(Span::styled(
-                            truncate_text(&metadata, row_width.saturating_sub(prefix_width + 1)),
+                            truncate_text(&metadata, row_width.saturating_sub(prefix_width + 3)),
                             Style::default().fg(METADATA_GRAY),
                         ));
                     }
@@ -1185,15 +1205,23 @@ fn session_list_name(session: &Session) -> String {
         .unwrap_or_else(|| session.branch_name.clone())
 }
 
+/// Same-workspace title collisions need stable identity. It belongs on the
+/// independent metadata line so a blocking status chip always wins on narrow
+/// terminals.
+fn session_collision_id(session: &Session, has_collision: bool) -> Option<String> {
+    has_collision.then(|| format!("#{}", &session.id.to_string()[..8]))
+}
+
 /// Compact process/turn lifecycle word for the sidebar. Fleet's completed-turn
 /// observation is more precise than local `SessionStatus::Idle`, so it gets a
 /// dedicated `DONE` label rather than being collapsed into normal idle.
 fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str {
     if matches!(session.status, SessionStatus::Idle)
         && matches!(
-        state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
-        Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete)
-    ) && state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false)
+            state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
+            Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete)
+        )
+        && state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false)
         && session.live_attention.is_empty()
     {
         return "DONE";
@@ -1598,7 +1626,10 @@ mod tests {
             },
         );
 
-        assert_eq!(session_lifecycle_label(&state, &state.workspaces[0].sessions[0]), "STOP");
+        assert_eq!(
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            "STOP"
+        );
     }
 
     #[test]
@@ -1910,5 +1941,49 @@ mod tests {
         session.display_name = Some("RPC flake".to_string());
 
         assert_eq!(session_list_name(&session), "RPC flake · fix/rpc-acp-flake");
+    }
+
+    #[test]
+    fn colliding_session_titles_include_a_stable_short_identity() {
+        let mut session = Session::new("workspace".to_string(), "/tmp/workspace".to_string());
+        session.branch_name = "freeman/hosted-entitlement-issuer".to_string();
+
+        assert_eq!(session_collision_id(&session, false), None);
+        assert_eq!(
+            session_collision_id(&session, true),
+            Some(format!("#{}", &session.id.to_string()[..8]))
+        );
+    }
+
+    #[test]
+    fn narrow_duplicate_rows_keep_their_short_id_visible() {
+        let mut state = AppState::new();
+        state.workspaces.clear();
+        state.expand_all_workspaces = true;
+
+        let mut workspace = Workspace::new("ws".to_string(), "/tmp/ws".into());
+        let mut first = Session::new("first".to_string(), "/tmp/ws/first".to_string());
+        first.branch_name = "freeman/hosted-entitlement-issuer".to_string();
+        first
+            .live_attention
+            .push(SessionAttention::local(AttentionKind::Approve, CHIP_NOW));
+        let first_id = first.id.to_string()[..8].to_string();
+        let mut second = Session::new("second".to_string(), "/tmp/ws/second".to_string());
+        second.branch_name = first.branch_name.clone();
+        let second_id = second.id.to_string()[..8].to_string();
+        workspace.add_session(first);
+        workspace.add_session(second);
+        state.workspaces.push(workspace);
+
+        let painted = render_panel(&mut state, 24, 8);
+        assert!(
+            painted.contains(&format!("#{first_id}")),
+            "painted: {painted}"
+        );
+        assert!(
+            painted.contains(&format!("#{second_id}")),
+            "painted: {painted}"
+        );
+        assert!(painted.contains("APPROVE"), "painted: {painted}");
     }
 }
