@@ -4,6 +4,7 @@
 **Interview date:** 2026-09-11, 3 rounds, 11 forks, all resolved by Stevie
 **Version:** 1.3 (1.1 amended 2026-09-11 after a distinguished-engineer critique, verdict CAUTION 8/10, 30 amendments folded, see `research/2026-09-11_multi-surface_CRITIQUE-amendments.md`; 1.2 folds spikes 1 and 7; 1.3 folds spikes 4, 8, 9 and the provider daemon-reuse hazard)
 **Extends:** docs/plans/2026-09-04-desktop-shared-core-spec.md (D1-D9 stay locked; this adds D10-D18 and phases W0, T0, R1, R2, M1)
+**Execution view:** `docs/plans/2026-09-12-desktop-programme.md` (one DAG over both specs, node states, gates)
 **Integration branch:** `v2` (cut from `main` 2026-09-11). Every phase PR from this spec and the base spec targets `v2`, not `main`; `v2` merges to `main` as a whole when M1 or an earlier agreed cut lands.
 **Research:** research/2026-09-11_multi-surface_*.md (gitignored dir, `git add -f`)
 **Format:** diagram-first, tables second, no prose paragraphs
