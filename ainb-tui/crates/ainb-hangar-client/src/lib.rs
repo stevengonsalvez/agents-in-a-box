@@ -123,45 +123,22 @@ impl DaemonError {
 
 /// The daemon unix socket path.
 ///
-/// D17: a client dials the VERSIONED path `hangar-v<N>.sock` when the daemon
-/// serves one, else the unversioned `hangar.sock`. Both names resolve to one
-/// inode — the versioned one is a symlink the daemon creates beside its bind
-/// target — so this is not a second socket, it is a statement about which
-/// protocol the thing on the other end speaks.
-///
-/// The unversioned fallback is what keeps a client that predates the symlink,
-/// or one talking to a daemon that could not create it, working unchanged.
+/// D17: the versioned alias `hangar-v<N>.sock` when the daemon published one
+/// and it is verifiably the daemon's own symlink, else the unversioned
+/// `hangar.sock`. The verification lives in
+/// [`ainb_hangar_core::socket::dial_path_in`] — one copy, shared with
+/// `ainb-web`, because the FIRST frame on this socket is the daemon token and a
+/// path that any same-uid process can squat must not be preferred blind.
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
     let home = ainb_hangar_core::hangar_home()?;
     Some(socket_path_in(&home))
 }
 
-/// [`socket_path`] against an explicit home. Split out so the preference order
-/// is testable without touching the environment.
+/// [`socket_path`] against an explicit home.
 #[must_use]
 pub fn socket_path_in(home: &std::path::Path) -> PathBuf {
-    let versioned = home.join(format!(
-        "hangar-v{}.sock",
-        ainb_hangar_proto::protocol::PROTOCOL_VERSION
-    ));
-    if versioned.exists() {
-        return versioned;
-    }
-    home.join("hangar.sock")
-}
-
-/// Mint a fresh 128-bit op id from the OS CSPRNG (D18).
-///
-/// Opaque by contract: the daemon compares and stores it and never parses one,
-/// so there is no timestamp inside and a client with a wrong clock is never
-/// rejected for skew.
-#[must_use]
-pub fn mint_op_id() -> ainb_hangar_proto::mutation::OpId {
-    use rand::RngCore as _;
-    let mut bytes = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    ainb_hangar_proto::mutation::OpId::from_bytes(bytes)
+    ainb_hangar_core::socket::dial_path_in(home, ainb_hangar_proto::protocol::PROTOCOL_VERSION)
 }
 
 /// Client for stateless daemon RPCs and persistent Fleet subscription.
@@ -381,7 +358,9 @@ impl DaemonClient {
         // instead of delivering. A caller that wants retry-idempotence supplies
         // its own id and keeps it across the retry.
         if params.mutation.op_id.is_none() {
-            params.mutation.op_id = Some(mint_op_id());
+            params.mutation.op_id = Some(ainb_hangar_proto::mutation::OpId::from_bytes(
+                ainb_hangar_core::opid::mint_bytes(),
+            ));
         }
         let value = serde_json::to_value(params).expect("AnswerParams serializes");
         let result = self.call(methods::ATTENTION_ANSWER, value).await?;
