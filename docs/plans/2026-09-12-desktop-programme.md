@@ -4,7 +4,7 @@
 **Role:** execution view. The two specs are locked decision records; this doc is the single place that says what runs, in what order, behind which gate, and what is done. Edit it in the same PR that flips a node.
 **Wraps:** `2026-09-04-desktop-shared-core-spec.md` (D1-D9, phases P0-P6, S, D1-D4) and `2026-09-11-multi-surface-decisions-spec.md` (D10-D18, phases W0, T0, R1, R2, M1).
 **Integration branch:** `v2`. Every node lands as a PR to `v2`; `v2` merges to `main` as a whole at an agreed cut. `main` keeps moving (10 commits since the cut on 2026-09-11); `v2` takes `main` back by merge before each slice starts.
-**Grounding:** node states below were read from `git` and `gh` on 2026-09-12 against `v2` at `54266dcd` (96 commits of slice-1 work replayed from `anthias` and pushed directly, plus the P0 handoff `2026-09-12-p0-surface-safety-handoff.md`); re-ground before trusting.
+**Grounding:** node states below were read from `git` and `gh` on 2026-09-12 against `v2` at `d57527f4` (slice-1 wave 1 replayed from `anthias`, the P0 handoff, `main` merged in by PR #926, lane goal prompts under `docs/plans/goals/`); re-ground before trusting.
 
 ## The DAG
 
@@ -139,6 +139,20 @@ Same DAG, terminal view:
 | spikes 5, 6 phone crypto via uniffi, background socket lifetime | 6 | planned | none | | spec v1.3 spikes |
 | M1 Expo companion, interactive terminal behind `mobile+type` | 6 | planned | R2, W0-wire, spikes 5, 6 | answer a banner in two taps, foreground | spec v1.3 M1 |
 | v2 → main | | planned | agreed cut, at latest M1 | | |
+
+## Live lanes (spawned 2026-09-12)
+
+One Orca worktree per lane, one `claude` agent each, goal prompt from `docs/plans/goals/`. Read a lane with `orca terminal read --terminal <handle> --environment <env> --json`.
+
+| lane | goal | env | branch | agent handle |
+|---|---|---|---|---|
+| A | `2026-09-12-p0-closure.md`: slice-1 gates green (#925), waves 2-4, G6 handed over | claude-hetzner | `stevengonsalvez/p0-closure` | `term_f52c61ee-95c2-4878-beb8-aaf8b8de6abd` |
+| B | `2026-09-12-w0-wire.md`: protocol version, capabilities, skew harness, op-id ledger | claude-gcp | `stevengonsalvez/w0-wire` | `term_d93b7b6f-a5ca-48cd-9413-8cff5c43dc56` |
+| C | `2026-09-12-status-t0.md`: #916 pane binding, then T0-daemon | claude-gcp | `stevengonsalvez/status-t0` | `term_c506c96f-562e-4d1a-a01e-07997cefbd8d` |
+| D | `2026-09-12-spike-2-emulator.md`: control-mode emulator fidelity | claude-hetzner | `stevengonsalvez/spike-2-emulator` | `term_54e23808-417a-4aa8-8705-18dc21f8a4ce` |
+| E | `2026-09-12-spike-3-peer-ws.md`: peer WS + Noise over tailnet and ssh -L | claude-gcp | `stevengonsalvez/spike-3-peer-ws` | `term_5c4413a6-e28b-4ccf-95bf-f5de96b063d9` |
+
+Lane rules: C adds no store migration until B's is on `v2`; only A edits `ainb-core/src/app/*`; spikes never touch crates; every lane merges `origin/v2` before touching a file `main` changed.
 
 ## Plan slices and their `/plan` inputs
 
