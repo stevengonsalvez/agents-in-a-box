@@ -173,6 +173,12 @@ pub mod materialise;
 /// agents and enqueues a task for every match, so a user `@`-mentioning an agent
 /// in a comment spawns that agent's task.
 pub mod mentions;
+/// The 7-day / 100k-row retention sweep over the op-id ledger (D18).
+///
+/// Two stages: expire the stored reply but keep the key, so a late retry is
+/// answered `unknown{op_expired}` rather than executed again; then delete the
+/// tombstone at a second, wider bound.
+pub mod mutation_retention;
 /// Raise-time notification-channel resolution (tcp T5): read the notify rules for
 /// a `(kind, workspace)` and return the [`ChannelSet`](ainb_hangar_core::channel::ChannelSet)
 /// the daemon stamps onto the row + event, computed once at emit.
@@ -1056,6 +1062,12 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
             crate::fleet_retention::spawn_retention_sweeper(store.pool().clone());
         let _fleet_provider_retention =
             crate::fleet_provider_retention::spawn_provider_retention_sweeper(store.pool().clone());
+        // D18's 7 d / 100k bound on the op-id ledger. Same reasoning as the two
+        // above, and the same evidence: the ledger holds a serialized reply per
+        // mutation, so without a caller for `retain` it is another table that
+        // only grows.
+        let _mutation_retention =
+            crate::mutation_retention::spawn_mutation_retention_sweeper(store.pool().clone());
 
         // Managed Codex transport starts independently from daemon readiness. A
         // missing or incompatible Codex binary leaves hook and tmux observation
