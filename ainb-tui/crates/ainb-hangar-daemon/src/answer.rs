@@ -992,6 +992,9 @@ mod tests {
     use ainb_fleet_core::types::SessionSource;
     use ainb_hangar_store::Store;
     use ainb_hangar_store::repo::attention::{AttentionKind, NewAttention};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TRANSCRIPT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
     /// The payload shape the hook ingest stores for a real `AskUserQuestion`
     /// (captured live from Claude Code 2.1.257).
@@ -1617,10 +1620,12 @@ mod tests {
     }
     fn plant_transcript(name: &str) -> (TxFixture, std::path::PathBuf) {
         use std::io::Write;
+        let fixture_id = NEXT_TRANSCRIPT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
         let cwd = format!(
-            "/ainb-test-answer-c1/{}/{}",
+            "/ainb-test-answer-c1/{}/{}/{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            fixture_id,
         );
         let mut dir = dirs::home_dir().expect("home dir");
         dir.push(".claude");
