@@ -315,3 +315,37 @@ impl Default for ConfigSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct WorkspaceLoadSection {
+    // Background workspace loading state
+    pub is_loading_workspaces: bool,
+    pub workspace_load_error: Option<String>,
+    pub workspace_load_started: Option<Instant>,
+    /// Channel receiver for background workspace loading results
+    pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+    // Periodic session snapshot tracking
+    pub last_snapshot_time: Option<Instant>,
+    // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
+    pub last_preview_update: Option<Instant>,
+    // Throttle for the cheaper non-selected-session status sweep. Status
+    // (running/idle) is not time-critical, so it polls on a longer cadence than
+    // the selected session's live preview — one `capture-pane` subprocess per
+    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
+    // every 5s preview refresh. (perf: bead 9pb)
+    pub last_status_check: Option<Instant>,
+}
+
+impl Default for WorkspaceLoadSection {
+    fn default() -> Self {
+        Self {
+            is_loading_workspaces: false,
+            workspace_load_error: None,
+            workspace_load_started: None,
+            workspace_load_receiver: None,
+            last_snapshot_time: None,
+            last_preview_update: None,
+            last_status_check: None,
+        }
+    }
+}

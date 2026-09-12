@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub workspace_load: Versioned<WorkspaceLoadSection>,
+
     pub config: Versioned<ConfigSection>,
 
     pub session_labels: Versioned<SessionLabelsSection>,
@@ -3316,26 +3318,6 @@ pub struct AppState {
     pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
     /// Current repo-init generation.
     pub repo_init_seq: u64,
-
-    // Periodic session snapshot tracking
-    pub last_snapshot_time: Option<Instant>,
-
-    // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
-    pub last_preview_update: Option<Instant>,
-
-    // Throttle for the cheaper non-selected-session status sweep. Status
-    // (running/idle) is not time-critical, so it polls on a longer cadence than
-    // the selected session's live preview — one `capture-pane` subprocess per
-    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
-    // every 5s preview refresh. (perf: bead 9pb)
-    pub last_status_check: Option<Instant>,
-
-    // Background workspace loading state
-    pub is_loading_workspaces: bool,
-    pub workspace_load_error: Option<String>,
-    pub workspace_load_started: Option<Instant>,
-    /// Channel receiver for background workspace loading results
-    pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
 
     /// Per-session "cleared up to" timestamp (epoch ms). A hook event
     /// only marks a session if its `ts` is newer than this. Defaults to
@@ -3759,6 +3741,7 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            workspace_load: Versioned::default(),
             session_labels: Versioned::default(),
             ssh: Versioned::default(),
             onboarding: Versioned::new(OnboardingSection {
@@ -3870,17 +3853,10 @@ impl Default for AppState {
             repo_init_seq: 0,
 
             // Periodic session snapshot tracking
-            last_snapshot_time: None,
 
             // Throttled tmux preview updates
-            last_preview_update: None,
-            last_status_check: None,
 
             // Background workspace loading state
-            is_loading_workspaces: false,
-            workspace_load_error: None,
-            workspace_load_started: None,
-            workspace_load_receiver: None,
 
             // Per-session attention markers, driven by ainb-hooks events.
             attention_baseline: HashMap::new(),
@@ -4733,21 +4709,21 @@ impl AppState {
         &mut self,
     ) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.workspace_load_receiver = Some(rx);
-        self.is_loading_workspaces = true;
-        self.workspace_load_started = Some(Instant::now());
-        self.workspace_load_error = None;
+        self.workspace_load.workspace_load_receiver = Some(rx);
+        self.workspace_load.is_loading_workspaces = true;
+        self.workspace_load.workspace_load_started = Some(Instant::now());
+        self.workspace_load.workspace_load_error = None;
         tx
     }
 
     /// Check for completed background workspace loading and apply results
     /// Returns true if workspaces were updated
     pub fn check_workspace_loading_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.workspace_load_receiver {
+        if let Some(ref mut receiver) = self.workspace_load.workspace_load_receiver {
             match receiver.try_recv() {
                 Ok(result) => {
-                    self.is_loading_workspaces = false;
-                    self.workspace_load_receiver = None;
+                    self.workspace_load.is_loading_workspaces = false;
+                    self.workspace_load.workspace_load_receiver = None;
 
                     match result {
                         WorkspaceLoadResult::Success(mut workspaces) => {
@@ -4779,7 +4755,7 @@ impl AppState {
 
                             self.workspaces = workspaces;
                             self.ssh.ssh_sessions = ssh_sessions;
-                            self.workspace_load_error = None;
+                            self.workspace_load.workspace_load_error = None;
 
                             // Resolve favorite status once per workspace now
                             // that the list changed, so the session-list render
@@ -4856,7 +4832,7 @@ impl AppState {
                         }
                         WorkspaceLoadResult::Error(err) => {
                             warn!("Background workspace loading failed: {}", err);
-                            self.workspace_load_error = Some(err.clone());
+                            self.workspace_load.workspace_load_error = Some(err.clone());
                             self.add_warning_notification(format!(
                                 "Failed to load sessions: {}",
                                 err
@@ -4865,7 +4841,7 @@ impl AppState {
                         }
                         WorkspaceLoadResult::Timeout => {
                             warn!("Background workspace loading timed out");
-                            self.workspace_load_error =
+                            self.workspace_load.workspace_load_error =
                                 Some("Docker operation timed out".to_string());
                             self.add_warning_notification(
                                 "Docker is slow - sessions may be incomplete".to_string(),
@@ -4876,13 +4852,14 @@ impl AppState {
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {
                     // Still loading, check for timeout
-                    if let Some(started) = self.workspace_load_started {
+                    if let Some(started) = self.workspace_load.workspace_load_started {
                         if started.elapsed().as_secs() > Self::DOCKER_TIMEOUT_SECS * 3 {
                             // Hard timeout - stop waiting
                             warn!("Workspace loading hard timeout reached");
-                            self.is_loading_workspaces = false;
-                            self.workspace_load_receiver = None;
-                            self.workspace_load_error = Some("Loading timed out".to_string());
+                            self.workspace_load.is_loading_workspaces = false;
+                            self.workspace_load.workspace_load_receiver = None;
+                            self.workspace_load.workspace_load_error =
+                                Some("Loading timed out".to_string());
                             self.add_warning_notification(
                                 "Session loading timed out - using cached data".to_string(),
                             );
@@ -4892,9 +4869,10 @@ impl AppState {
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // Channel closed without result - error
-                    self.is_loading_workspaces = false;
-                    self.workspace_load_receiver = None;
-                    self.workspace_load_error = Some("Loading task failed".to_string());
+                    self.workspace_load.is_loading_workspaces = false;
+                    self.workspace_load.workspace_load_receiver = None;
+                    self.workspace_load.workspace_load_error =
+                        Some("Loading task failed".to_string());
                     return true;
                 }
             }
@@ -6295,7 +6273,7 @@ impl AppState {
                 self.previous_session();
             }
         }
-        self.last_preview_update = None;
+        self.workspace_load.last_preview_update = None;
         true
     }
 
@@ -6762,7 +6740,7 @@ impl AppState {
                 self.selected_workspace_index = new_idx;
             }
         }
-        self.last_preview_update = None;
+        self.workspace_load.last_preview_update = None;
     }
 
     /// Predicate used by both rendering and counts so the displayed list and
@@ -12679,24 +12657,24 @@ impl AppState {
         // This prevents spawning N tmux capture-pane subprocesses per tick
         const PREVIEW_INTERVAL_SECS: u64 = 5;
         let now = std::time::Instant::now();
-        if let Some(last) = self.last_preview_update {
+        if let Some(last) = self.workspace_load.last_preview_update {
             if now.duration_since(last).as_secs() < PREVIEW_INTERVAL_SECS {
                 return Ok(());
             }
         }
-        self.last_preview_update = Some(now);
+        self.workspace_load.last_preview_update = Some(now);
 
         // Non-selected sessions only need a status (running/idle) refresh, which
         // is not time-critical — sweep them on a longer cadence so we don't
         // spawn one `capture-pane` per non-selected session on every 5s preview
         // refresh. (perf: bead 9pb)
         const STATUS_INTERVAL_SECS: u64 = 20;
-        let do_status_check = match self.last_status_check {
+        let do_status_check = match self.workspace_load.last_status_check {
             Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
             None => true,
         };
         if do_status_check {
-            self.last_status_check = Some(now);
+            self.workspace_load.last_status_check = Some(now);
         }
 
         // updates: (session_id, content, claude_running) for the selected session.
@@ -14107,12 +14085,13 @@ impl App {
         // Periodic session snapshot (every 30 minutes)
         let should_snapshot = self
             .state
+            .workspace_load
             .last_snapshot_time
             .map(|last| now.duration_since(last).as_secs() >= 1800)
             .unwrap_or(true);
 
         if should_snapshot {
-            self.state.last_snapshot_time = Some(now);
+            self.state.workspace_load.last_snapshot_time = Some(now);
             tokio::spawn(async {
                 match crate::app::snapshot::SnapshotManager::take_snapshot().await {
                     Ok(snapshot) => {

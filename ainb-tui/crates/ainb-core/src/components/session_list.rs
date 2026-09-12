@@ -1068,7 +1068,7 @@ impl SessionListComponent {
             // "we haven't looked yet". Spinner matches the one used in
             // the home screen's recent-activity strip so the two
             // surfaces share a vocabulary.
-            let empty_line = if state.is_loading_workspaces {
+            let empty_line = if state.workspace_load.is_loading_workspaces {
                 let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let frame_idx = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

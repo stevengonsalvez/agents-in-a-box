@@ -822,7 +822,7 @@ impl Screen for HomeScreen {
             area,
             &state.home_screen_v2_state,
             &state.workspaces,
-            state.is_loading_workspaces,
+            state.workspace_load.is_loading_workspaces,
             ui,
         );
     }
@@ -958,7 +958,7 @@ impl Screen for SetupMenuScreen {
             area,
             &state.home_screen_v2_state,
             &state.workspaces,
-            state.is_loading_workspaces,
+            state.workspace_load.is_loading_workspaces,
             ui,
         );
         self.setup_menu.render(frame, area, &state.onboarding.setup_menu_state);

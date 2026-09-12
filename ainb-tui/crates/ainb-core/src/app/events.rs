@@ -2459,19 +2459,19 @@ impl EventHandler {
             }
             AppEvent::NextSession => {
                 state.next_session();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::PreviousSession => {
                 state.previous_session();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::NextWorkspace => {
                 state.next_workspace();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::PreviousWorkspace => {
                 state.previous_workspace();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::GoToTop => {
                 state.select_first_visible_session_in_current_workspace();
