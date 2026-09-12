@@ -752,6 +752,19 @@ async fn run_tui_loop(
                         }
                     }
 
+                    // Plugin screens own every non-reserved key after the
+                    // interactive and slash-palette precedence above. Forward
+                    // before host dispatch so navigation cannot consume plugin
+                    // input such as Hangar's Ctrl+P palette shortcut.
+                    if let crate::app::screens::EventOutcome::Handled =
+                        crate::app::screens::builtin::forward_key_to_focused_plugin(
+                            &mut app.state,
+                            &key_event,
+                        )
+                    {
+                        continue;
+                    }
+
                     if let Some(app_event) = EventHandler::handle_key_event_with_keymap(
                         key_event,
                         &mut app.state,
