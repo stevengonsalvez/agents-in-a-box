@@ -98,6 +98,7 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             .expect("inbox")
             .into_iter()
             .map(|row| ainb_hangar_proto::events::AttentionRow {
+                version: row.version,
                 id: row.id,
                 session_id: row.session_id,
                 cwd: row.cwd,
@@ -128,42 +129,13 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         "GET /api/needs must report the daemon's tuple"
     );
 
-    // Surface 3: `ainb fleet needs --format json`. The CLI stamps the same five
-    // fields onto its row, so a consumer parsing its JSON reads the same agent
-    // the panel drew.
-    let mut cli_row = ainb_fleet_core::fleet::read::needs::make_row(
-        ainb_fleet_core::types::Session {
-            id: SESSION_KEY.to_string(),
-            cwd: CWD.to_string(),
-            pid: None,
-            git_root: None,
-            tmux_session: None,
-            workspace_name: None,
-            worktree_path: None,
-            peer_id: None,
-            bg_job_id: None,
-            transcript_path: None,
-            sources: vec![ainb_fleet_core::types::SessionSource::Ainb],
-            summary: None,
-            last_seen_ms: Some(daemon_row.evidence_observed_at),
-        },
-        ainb_fleet_core::fleet::read::needs::NeedsContext::Wait(
-            ainb_fleet_core::fleet::read::needs::WaitContext {
-                marker: "needs input:".to_string(),
-                text: "blocked on a human".to_string(),
-            },
-        ),
-        ainb_fleet_core::fleet::read::needs::RouteHint::None,
-    );
-    cli_row.stamp_status(
-        expected.0.to_string(),
-        expected.1,
-        expected.2,
-        expected.3,
-        expected.4,
-        daemon_row.pane_unbound,
-    );
-    let json = serde_json::to_value(&cli_row).expect("the CLI row serializes");
+    // Surface 3: `ainb fleet needs --format json`, driven through the real
+    // correlation. The local row is built as the local tiers build one, with no
+    // status fields on it; `stamp_rows` is what must put the daemon's tuple
+    // there.
+    let mut cli_rows = vec![local_row(SESSION_ID, CWD)];
+    ainb::cli::fleet::needs::stamp_rows(&mut cli_rows, &status.rows);
+    let json = serde_json::to_value(&cli_rows[0]).expect("the CLI row serializes");
     assert_eq!(
         (
             json["session_key"].as_str().unwrap(),
@@ -174,6 +146,125 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         ),
         expected,
         "`ainb fleet needs --format json` must report the daemon's tuple"
+    );
+}
+
+/// One local row as the local tiers produce it: identity and cwd, and none of
+/// the status fields the daemon owns.
+fn local_row(session_id: &str, cwd: &str) -> ainb_fleet_core::fleet::read::needs::NeedsRow {
+    ainb_fleet_core::fleet::read::needs::make_row(
+        ainb_fleet_core::types::Session {
+            id: session_id.to_string(),
+            cwd: cwd.to_string(),
+            pid: None,
+            git_root: None,
+            tmux_session: None,
+            workspace_name: None,
+            worktree_path: None,
+            peer_id: None,
+            bg_job_id: None,
+            transcript_path: None,
+            sources: vec![ainb_fleet_core::types::SessionSource::Ainb],
+            summary: None,
+            last_seen_ms: None,
+        },
+        ainb_fleet_core::fleet::read::needs::NeedsContext::Wait(
+            ainb_fleet_core::fleet::read::needs::WaitContext {
+                marker: "needs input:".to_string(),
+                text: "blocked on a human".to_string(),
+            },
+        ),
+        ainb_fleet_core::fleet::read::needs::RouteHint::None,
+    )
+}
+
+/// Two agents in one directory must not be given each other's identity.
+///
+/// `stamp_from_daemon` used to correlate on `cwd` alone and stamp EVERY
+/// matching local row, with no break, so both rows took the last daemon row's
+/// `session_key`, state, tier and clock. One agent's state printed for another,
+/// and the same `session_key` appeared twice in a read whose whole purpose is
+/// one row per agent. Multi-agent-in-one-repo is the case #916 itself treats as
+/// ambiguous, so it is the case this must get right.
+#[test]
+fn two_agents_in_one_directory_keep_their_own_identity() {
+    use ainb_hangar_proto::agent_status::{
+        AgentState, AgentStatusRow, Provenance, Tier,
+    };
+    use ainb_hangar_proto::fleet::FleetProvider;
+
+    let row = |id: &str, state: AgentState, at: i64| AgentStatusRow {
+        session_key: format!("claude:{id}"),
+        provider: FleetProvider::Claude,
+        cwd: CWD.to_string(),
+        display_name: None,
+        state,
+        provenance: Provenance::Hook,
+        tier: Tier::Hook,
+        evidence_observed_at: at,
+        has_open_request: state == AgentState::Waiting,
+        pane_unbound: false,
+    };
+
+    let mut rows = vec![local_row("agent-a", CWD), local_row("agent-b", CWD)];
+    let status = vec![
+        row("agent-a", AgentState::Waiting, 111),
+        row("agent-b", AgentState::Working, 222),
+    ];
+    ainb::cli::fleet::needs::stamp_rows(&mut rows, &status);
+
+    assert_eq!(rows.len(), 2, "no phantom row for an agent already present");
+    let stamped: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.session.id.as_str(),
+                r.session_key.as_deref(),
+                r.state.as_deref(),
+                r.evidence_observed_at,
+            )
+        })
+        .collect();
+    assert_eq!(
+        stamped,
+        vec![
+            ("agent-a", Some("claude:agent-a"), Some("waiting"), Some(111)),
+            ("agent-b", Some("claude:agent-b"), Some("working"), Some(222)),
+        ],
+        "each row must carry ITS OWN agent's tuple, not the last daemon row's"
+    );
+}
+
+/// And when identity cannot decide it, the row is left alone rather than
+/// guessed at. An unstamped row is visibly degraded; a wrongly stamped one is
+/// not visible at all.
+#[test]
+fn an_ambiguous_directory_leaves_the_row_unstamped() {
+    use ainb_hangar_proto::agent_status::{
+        AgentState, AgentStatusRow, Provenance, Tier,
+    };
+    use ainb_hangar_proto::fleet::FleetProvider;
+
+    // Two daemon rows in one cwd, and a local row whose id matches neither.
+    let row = |id: &str| AgentStatusRow {
+        session_key: format!("codex:{id}"),
+        provider: FleetProvider::Codex,
+        cwd: CWD.to_string(),
+        display_name: None,
+        state: AgentState::Working,
+        provenance: Provenance::Hook,
+        tier: Tier::Hook,
+        evidence_observed_at: 1,
+        has_open_request: false,
+        pane_unbound: false,
+    };
+    let mut rows = vec![local_row("something-else", CWD)];
+    ainb::cli::fleet::needs::stamp_rows(&mut rows, &[row("x"), row("y")]);
+
+    assert_eq!(rows.len(), 1, "neither daemon row is `waiting`, so none is added");
+    assert_eq!(
+        rows[0].session_key, None,
+        "an ambiguous cwd must not be treated as evidence of identity"
     );
 }
 
