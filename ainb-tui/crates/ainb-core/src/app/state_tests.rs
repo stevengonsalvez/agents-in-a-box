@@ -2406,6 +2406,35 @@ mod tests {
     }
 
     #[test]
+    fn stale_fleet_idle_cannot_reactivate_a_locally_stopped_session() {
+        use crate::models::SessionStatus;
+
+        assert!(!AppState::lifecycle_projection_may_replace_local_status(
+            &SessionStatus::Stopped,
+            &SessionStatus::Idle,
+        ));
+        assert!(AppState::lifecycle_projection_may_replace_local_status(
+            &SessionStatus::Stopped,
+            &SessionStatus::Stopped,
+        ));
+
+        let projected = AppState::projected_session_status(
+            Some(SessionStatus::Idle),
+            Some(SessionStatus::Stopped),
+        );
+        assert_eq!(projected, Some(SessionStatus::Stopped));
+
+        let mut state = AppState::new();
+        state.session_filter = crate::app::state::SessionFilter::ActiveOnly;
+        let mut session = Session::new("ended".to_string(), CWD.to_string());
+        session.status = projected.expect("terminal stop projects");
+        assert!(
+            !state.session_passes_filter(&session),
+            "a locally confirmed stop is absent from Active"
+        );
+    }
+
+    #[test]
     fn attention_suppressed_while_generating() {
         let recent = vec![rec("claude", CWD, "PermissionRequest", NOW - 1000)];
         assert_eq!(
