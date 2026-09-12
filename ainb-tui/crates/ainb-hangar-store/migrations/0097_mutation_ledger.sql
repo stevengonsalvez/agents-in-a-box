@@ -177,3 +177,43 @@ CREATE INDEX idx_attention_open
 CREATE UNIQUE INDEX idx_attention_open_request_key
     ON attention (session_id, request_key)
     WHERE state = 'open' AND request_key IS NOT NULL;
+
+-- ── notify_rule: the same seventh kind ──────────────────────────────────────
+--
+-- `attention.kind` and `notify_rule.kind` are two CHECKs over ONE vocabulary,
+-- and widening only the first is how a kind becomes raisable but unroutable:
+-- `hangar/notify_rule_set` validates against the proto enum, passes, and then
+-- dies on a constraint violation that surfaces as a store fault rather than a
+-- clean rejection. So the rule table is rebuilt with the same list. No default
+-- row is inserted for the new kind: a `delivery_unconfirmed` row is for an
+-- operator sitting at a surface, and pushing it to a phone before anyone has
+-- asked for that is a decision for whoever turns the routing on.
+
+CREATE TABLE notify_rule_new (
+    workspace_id TEXT REFERENCES workspace(id),
+    kind         TEXT NOT NULL CHECK (kind IN (
+                     'ask_user_question',
+                     'approval',
+                     'codex_request_user',
+                     'error',
+                     'waiting',
+                     'escalation',
+                     'delivery_unconfirmed'
+                 )),
+    channels     TEXT NOT NULL
+);
+
+INSERT INTO notify_rule_new (workspace_id, kind, channels)
+SELECT workspace_id, kind, channels FROM notify_rule;
+
+DROP TABLE notify_rule;
+
+ALTER TABLE notify_rule_new RENAME TO notify_rule;
+
+CREATE UNIQUE INDEX idx_notify_rule_global
+    ON notify_rule (kind)
+    WHERE workspace_id IS NULL;
+
+CREATE UNIQUE INDEX idx_notify_rule_workspace
+    ON notify_rule (workspace_id, kind)
+    WHERE workspace_id IS NOT NULL;
