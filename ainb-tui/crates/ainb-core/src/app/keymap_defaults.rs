@@ -1082,6 +1082,63 @@ pub fn defaults() -> Vec<Binding> {
         config_upper: "T" => AppEvent::OnboardingInstallConfig,
     );
 
+    // The dependency step AFTER a check has run. `active_contexts` splits it
+    // from `dependency` on `dependency_status.is_some()`, and the split had no
+    // table of its own, so every key on the screen an operator actually reaches
+    // (the check runs on the first Enter) resolved nothing. Same rows as
+    // `dependency` except Enter, which advances instead of re-checking, exactly
+    // as the pre-table dispatcher branched on the same condition.
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("dependency_ready")),
+        enter: "enter" => AppEvent::OnboardingNext,
+        back: "esc" => AppEvent::OnboardingBack,
+        up: "up" => AppEvent::OnboardingDepCursorUp,
+        left: "left" => AppEvent::OnboardingDepCursorUp,
+        down: "down" => AppEvent::OnboardingDepCursorDown,
+        right: "right" => AppEvent::OnboardingDepCursorDown,
+        check: "r" => AppEvent::OnboardingCheckDeps,
+        install: "i" => AppEvent::OnboardingInstallFocusedDep,
+        install_config: "t" => AppEvent::OnboardingInstallConfig,
+        script: "g" => AppEvent::OnboardingScriptPrompt,
+        script_upper: "G" => AppEvent::OnboardingScriptPrompt,
+        install_upper: "I" => AppEvent::OnboardingInstallFocusedDep,
+        config_upper: "T" => AppEvent::OnboardingInstallConfig,
+    );
+
+    // The wizard's first screen. The pre-table dispatcher handled Welcome in its
+    // catch-all arm, which is why it was easy to lose: there was no `Welcome =>`
+    // to port. Losing it means a first run opens on a screen where Enter does
+    // nothing.
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("welcome")),
+        next: "enter" => AppEvent::OnboardingNext,
+        next_right: "right" => AppEvent::OnboardingNext,
+        menu: "esc" => AppEvent::OnboardingToMenu,
+        back: "left" => AppEvent::OnboardingBack,
+        back_backspace: "backspace" => AppEvent::OnboardingBack,
+        back_up: "up" => AppEvent::OnboardingBack,
+    );
+
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("editor")),
+        next: "enter" => AppEvent::OnboardingNext,
+        next_right: "right" => AppEvent::OnboardingNext,
+        menu: "esc" => AppEvent::OnboardingToMenu,
+        back: "left" => AppEvent::OnboardingBack,
+        back_backspace: "backspace" => AppEvent::OnboardingBack,
+        previous: "up" => AppEvent::OnboardingEditorUp,
+        previous_k: "k" => AppEvent::OnboardingEditorUp,
+        next_item: "down" => AppEvent::OnboardingEditorDown,
+        next_item_j: "j" => AppEvent::OnboardingEditorDown,
+    );
+
+    // Enter FINISHES here rather than advancing: Summary is the last step.
+    append_app_rows!(rows, Context::Screen("onboarding", super::keymap::SubContext::Named("summary")),
+        finish: "enter" => AppEvent::OnboardingFinish,
+        finish_right: "right" => AppEvent::OnboardingFinish,
+        menu: "esc" => AppEvent::OnboardingToMenu,
+        back: "left" => AppEvent::OnboardingBack,
+        back_backspace: "backspace" => AppEvent::OnboardingBack,
+        back_up: "up" => AppEvent::OnboardingBack,
+    );
+
     append_app_rows!(rows, Context::Screen("setup_menu", super::keymap::SubContext::Named("menu")),
         back: "esc" => AppEvent::SetupMenuBack,
         previous: "up" => AppEvent::SetupMenuUp,

@@ -361,12 +361,51 @@ impl KeyContext {
                 Self::Screen("onboarding", SubContext::Named("auth_agents"))
             }
             "onboarding.otel" => Self::Screen("onboarding", SubContext::Named("otel")),
+            "onboarding.dependency_ready" => {
+                Self::Screen("onboarding", SubContext::Named("dependency_ready"))
+            }
+            "onboarding.welcome" => Self::Screen("onboarding", SubContext::Named("welcome")),
+            "onboarding.editor" => Self::Screen("onboarding", SubContext::Named("editor")),
+            "onboarding.summary" => Self::Screen("onboarding", SubContext::Named("summary")),
             "setup_menu.menu" => Self::Screen("setup_menu", SubContext::Named("menu")),
             "setup_menu.confirm" => Self::Screen("setup_menu", SubContext::Named("confirm")),
             "daemons.overlay" => Self::Screen("daemons", SubContext::Named("overlay")),
             "daemons.list" => Self::Screen("daemons", SubContext::Named("list")),
             _ => return None,
         })
+    }
+}
+
+/// Which `onboarding.*` sub-context the wizard is in.
+///
+/// Lifted out of [`active_contexts`] so it can be enumerated: every step of the
+/// wizard has to resolve to a sub-context the table actually has rows for, and
+/// four of them did not. A free function over the four inputs that decide it is
+/// something a test can walk exhaustively; a match buried in a 600-line
+/// dispatcher is not.
+pub(crate) fn onboarding_sub_context(
+    step: &crate::components::onboarding::OnboardingStep,
+    auth_pane: &crate::components::onboarding::AuthPane,
+    agent_pick_open: bool,
+    dependencies_checked: bool,
+) -> &'static str {
+    use crate::components::onboarding::{AuthPane, OnboardingStep};
+
+    match step {
+        OnboardingStep::GitDirectories => "git_directories",
+        OnboardingStep::Source | OnboardingStep::Role | OnboardingStep::UseCase => "questions",
+        OnboardingStep::DependencyCheck if agent_pick_open => "dependency_agent",
+        OnboardingStep::DependencyCheck if dependencies_checked => "dependency_ready",
+        OnboardingStep::DependencyCheck => "dependency",
+        OnboardingStep::Authentication => match auth_pane {
+            AuthPane::KeyEntry { .. } => "auth_key",
+            AuthPane::MethodPicker { .. } => "auth_method",
+            AuthPane::AgentList => "auth_agents",
+        },
+        OnboardingStep::OtelSetup => "otel",
+        OnboardingStep::EditorSelection => "editor",
+        OnboardingStep::Summary => "summary",
+        OnboardingStep::Welcome => "welcome",
     }
 }
 
@@ -598,33 +637,13 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::ONBOARDING => {
-                use crate::components::onboarding::{AuthPane, OnboardingStep};
-
                 if let Some(onboarding) = &state.onboarding_state {
-                    let sub = match onboarding.current_step {
-                        OnboardingStep::GitDirectories => "git_directories",
-                        OnboardingStep::Source | OnboardingStep::Role | OnboardingStep::UseCase => {
-                            "questions"
-                        }
-                        OnboardingStep::DependencyCheck if onboarding.agent_pick_open => {
-                            "dependency_agent"
-                        }
-                        OnboardingStep::DependencyCheck
-                            if onboarding.dependency_status.is_some() =>
-                        {
-                            "dependency_ready"
-                        }
-                        OnboardingStep::DependencyCheck => "dependency",
-                        OnboardingStep::Authentication => match onboarding.auth_pane {
-                            AuthPane::KeyEntry { .. } => "auth_key",
-                            AuthPane::MethodPicker { .. } => "auth_method",
-                            AuthPane::AgentList => "auth_agents",
-                        },
-                        OnboardingStep::OtelSetup => "otel",
-                        OnboardingStep::EditorSelection => "editor",
-                        OnboardingStep::Summary => "summary",
-                        OnboardingStep::Welcome => "welcome",
-                    };
+                    let sub = onboarding_sub_context(
+                        &onboarding.current_step,
+                        &onboarding.auth_pane,
+                        onboarding.agent_pick_open,
+                        onboarding.dependency_status.is_some(),
+                    );
                     contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
                 }
             }
@@ -946,5 +965,89 @@ impl Keymap {
         self.bindings = bindings.into_iter().map(|(_, binding)| binding).collect();
 
         Self::new(self.bindings)
+    }
+}
+
+#[cfg(test)]
+mod onboarding_context_coverage {
+    use super::*;
+    use crate::components::onboarding::{AuthAgent, AuthPane, OnboardingStep};
+
+    /// Every sub-context the wizard can put the resolver in must have rows.
+    ///
+    /// Four did not. `active_contexts` pushed `welcome`, `summary`, `editor` and
+    /// `dependency_ready`, and the default table had no bindings under any of
+    /// them, so on those screens every key fell through to Global: `Enter` on
+    /// the first screen of a first run did nothing at all.
+    ///
+    /// The parity fixture could not catch it, because it was generated from the
+    /// table rather than from the screens, so a context with no rows produced no
+    /// rows to compare. This walks the steps instead, which is the direction
+    /// that fails when a screen is dropped.
+    #[test]
+    fn every_onboarding_step_resolves_to_a_context_with_bindings() {
+        let keymap = Keymap::defaults();
+        let with_rows: std::collections::HashSet<KeyContext> =
+            keymap.bindings().map(|binding| binding.ctx.clone()).collect();
+
+        let panes = [
+            AuthPane::AgentList,
+            AuthPane::MethodPicker {
+                agent: AuthAgent::Claude,
+                cursor: 0,
+            },
+            AuthPane::KeyEntry {
+                agent: AuthAgent::Claude,
+                buf: String::new(),
+            },
+        ];
+        // The shipped list, not a copy of it. A hand-written ten would go stale
+        // the moment an eleventh step lands, which is the exact failure this
+        // test exists to catch.
+        let mut missing = Vec::new();
+        for step in OnboardingStep::all() {
+            for pane in &panes {
+                for agent_pick_open in [false, true] {
+                    for checked in [false, true] {
+                        let sub = onboarding_sub_context(step, pane, agent_pick_open, checked);
+                        let ctx = KeyContext::Screen(
+                            crate::app::screens::ids::ONBOARDING,
+                            SubContext::Named(sub),
+                        );
+                        if !with_rows.contains(&ctx) && !missing.contains(&sub) {
+                            missing.push(sub);
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "onboarding sub-contexts the wizard can reach with no bindings at all: {missing:?}. \
+             Every key on those screens falls through to Global."
+        );
+    }
+
+    /// The two screens whose `Enter` is not `OnboardingNext`, pinned by name so a
+    /// future table edit cannot quietly make Summary advance instead of finish.
+    #[test]
+    fn enter_advances_the_wizard_and_finishes_it_on_summary() {
+        let keymap = Keymap::defaults();
+        let enter = Chord::parse("enter").expect("enter parses");
+        let resolve = |sub: &'static str| {
+            let ctx =
+                KeyContext::Screen(crate::app::screens::ids::ONBOARDING, SubContext::Named(sub));
+            match keymap.resolve(&[ctx], &enter) {
+                Some(KeyAction::App(event)) => format!("{event:?}"),
+                other => panic!("enter on onboarding.{sub} resolved to {other:?}"),
+            }
+        };
+
+        assert_eq!(resolve("welcome"), "OnboardingNext");
+        assert_eq!(resolve("editor"), "OnboardingNext");
+        assert_eq!(resolve("dependency_ready"), "OnboardingNext");
+        assert_eq!(resolve("dependency"), "OnboardingCheckDeps");
+        assert_eq!(resolve("summary"), "OnboardingFinish");
     }
 }
