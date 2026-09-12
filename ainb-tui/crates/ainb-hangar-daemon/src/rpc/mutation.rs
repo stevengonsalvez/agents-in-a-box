@@ -34,8 +34,9 @@
 
 use ainb_hangar_proto::mutation::{
     ACK_KEY, MutatingMethod, MutationAck, MutationStatus, MutationTier, OpId,
-    REASON_ALREADY_ANSWERED_BY, REASON_EFFECTS_AMBIGUOUS, REASON_OP_EXPIRED, REASON_OP_ID_FOREIGN,
-    ReceiptState,
+    REASON_ALREADY_ANSWERED_BY, REASON_EFFECTS_AMBIGUOUS, REASON_LEDGER_SATURATED,
+    REASON_NO_TARGET, REASON_NOT_DELIVERED, REASON_OP_EXPIRED, REASON_OP_ID_FOREIGN,
+    REASON_REPLY_LOST, ReceiptState,
 };
 use ainb_hangar_proto::{RpcError, RpcRequest, methods};
 use ainb_hangar_store::repo::mutation_ledger::{
@@ -250,9 +251,13 @@ fn with_error_ack(mut error: RpcError, ack: &MutationAck) -> RpcError {
 /// it really did mutate.
 ///
 /// `attention/answer` is the only method whose result enum carries refusals: it
-/// predates D18 and reports "somebody else won" and "your read is stale" as
-/// tagged outcomes rather than RPC errors, because a new variant on that enum
-/// would be a decode error on every N-1 client.
+/// predates D18 and reports every non-delivery as a tagged outcome rather than
+/// an RPC error, because a new variant on that enum would be a decode error on
+/// every N-1 client.
+///
+/// All four non-delivered outcomes belong here. What they share is the only
+/// thing that matters to the ledger: the answer was not applied, and the SAME
+/// op id must be free to deliver on a later attempt.
 fn refusal_reason(method: &str, value: &Value) -> Option<&'static str> {
     if method != methods::ATTENTION_ANSWER {
         return None;
@@ -261,13 +266,32 @@ fn refusal_reason(method: &str, value: &Value) -> Option<&'static str> {
         // Somebody else answered, or the fence named a version the row has
         // moved past. Both mean this answer was NOT applied.
         "already_answered" | "ambiguous" => Some(REASON_ALREADY_ANSWERED_BY),
+        // The claim was compensated: the row was flipped, the send failed, and
+        // the row went back to `open`. Nothing was applied, and the operator is
+        // expected to answer it again — so recording this as the op id's reply
+        // would replay the failure at every retry and never deliver.
+        "delivery_failed" => Some(REASON_NOT_DELIVERED),
+        // Nothing was claimed and nothing was sent. The target may be live
+        // again in a second, and the row is still open.
+        "no_target" => Some(REASON_NO_TARGET),
         _ => None,
     }
 }
 
-/// Map a store fault onto the wire, matching the dispatcher's own mapping.
+/// Map a ledger fault onto the wire with a FIXED message.
+///
+/// The dispatcher's own `store_err` forwards the SQLite text, which is right
+/// for a handler whose query a caller shaped. These are the ledger's own
+/// statements: their text describes the daemon's schema — table names, CHECK
+/// bodies, constraint names — and none of it is a caller's business or any use
+/// to one. The detail goes to the log, where an operator can read it.
 fn store_error(error: &sqlx::Error) -> RpcError {
-    super::store_err(error)
+    tracing::warn!(error = %error, "mutation ledger store fault");
+    RpcError {
+        code: super::STORE_UNAVAILABLE,
+        message: "the mutation ledger could not be reached; nothing was recorded".to_string(),
+        data: None,
+    }
 }
 
 /// Whether an error means "nothing happened, ask again" rather than "this is
@@ -344,6 +368,21 @@ fn settled(entry: &MutatingMethod, outcome: &ClaimOutcome) -> Option<Result<Valu
                 &ack,
             )))
         }
+        ClaimOutcome::Saturated { rows } => {
+            let ack = MutationAck::rejected(REASON_LEDGER_SATURATED);
+            tracing::warn!(
+                method = %entry.method,
+                rows,
+                "a principal reached its mutation-ledger ceiling; refusing new op ids"
+            );
+            Some(Err(ack_error(
+                ainb_hangar_proto::mutation::MUTATION_REJECTED,
+                "this credential is holding too many un-retired operations; \
+                 retry after the ledger retention sweep"
+                    .to_string(),
+                &ack,
+            )))
+        }
         ClaimOutcome::Replay(row) => Some(replay(row)),
     }
 }
@@ -387,12 +426,32 @@ fn replay(row: &LedgerRow) -> Result<Value, RpcError> {
     match row.reply.as_deref().and_then(stored::decode) {
         Some(Ok(value)) => Ok(with_ack(value, &ack)),
         Some(Err(error)) => Err(with_error_ack(error, &ack)),
-        None => Err(ack_error(
+        // No body, and two very different reasons for that. An EXPIRED row
+        // aged out and the daemon can say nothing about it. A row the boot
+        // sweep resolved from its own receipt knows exactly what happened and
+        // has only lost the payload — reporting that as `op_expired` would
+        // tell a client its delivered answer might never have run.
+        None if row.expired => Err(ack_error(
             ainb_hangar_proto::mutation::MUTATION_UNKNOWN,
-            "this op id committed but its reply is no longer stored; could not confirm, \
-             check the session"
+            "this op id has aged out of the ledger; could not confirm, check the session"
                 .to_string(),
             &MutationAck::unknown(REASON_OP_EXPIRED, receipt),
+        )),
+        None => Err(ack_error(
+            ainb_hangar_proto::mutation::MUTATION_UNKNOWN,
+            "this op id already ran and its outcome is known, but the daemon stopped \
+             before storing the reply"
+                .to_string(),
+            &MutationAck {
+                outcome: Some(ainb_hangar_proto::mutation::MutationOutcome::Replayed),
+                status: if row.status == ainb_hangar_store::repo::mutation_ledger::STATUS_REJECTED {
+                    MutationStatus::Rejected
+                } else {
+                    MutationStatus::Accepted
+                },
+                reason: Some(REASON_REPLY_LOST.to_string()),
+                receipt,
+            },
         )),
     }
 }

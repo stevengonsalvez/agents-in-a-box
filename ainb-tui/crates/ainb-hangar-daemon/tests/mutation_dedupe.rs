@@ -105,6 +105,7 @@ async fn every_mutating_method_replays_exactly_once() {
     let events = broker.sink();
     let mut deduplicated = 0usize;
     let mut transient: Vec<&str> = Vec::new();
+    let mut refused: Vec<&str> = Vec::new();
 
     for (index, entry) in MUTATING_METHODS.iter().enumerate() {
         let mut params: serde_json::Value = serde_json::from_str(entry.sample_params)
@@ -124,6 +125,32 @@ async fn every_mutating_method_replays_exactly_once() {
         )
         .await;
         let second = dispatch(&store, &events, &Caller::Operator, entry.method, params).await;
+
+        if refusal(&first).is_some() {
+            // A handler that REFUSED did not mutate, so the ledger keeps no row
+            // and the SAME op id stays free to deliver on a later attempt. Both
+            // dispatches must therefore look identical and neither may claim a
+            // replay — the opposite of the dedupe contract, and correct.
+            assert_eq!(
+                ack(&first)["status"],
+                "rejected",
+                "{} refused and must say so: {first}",
+                entry.method
+            );
+            assert!(
+                ack(&second)["outcome"] != "replayed",
+                "{} refused, so nothing may be replayed: {second}",
+                entry.method
+            );
+            assert_eq!(
+                without_ack(second.clone()),
+                without_ack(first.clone()),
+                "{} did not answer its retry the same way",
+                entry.method
+            );
+            refused.push(entry.method);
+            continue;
+        }
 
         if is_transient(&first) {
             // The OTHER half of the contract, asserted just as hard. A store
@@ -176,14 +203,46 @@ async fn every_mutating_method_replays_exactly_once() {
     // (`codex/session_ensure`, whose remote control is deliberately never
     // started). A second silent hole fails the gate.
     eprintln!(
-        "deduplicated {deduplicated} of {} mutating methods; transient in this fixture: {transient:?}",
+        "deduplicated {deduplicated} of {} mutating methods; \
+         transient: {transient:?}; refused: {refused:?}",
         MUTATING_METHODS.len()
     );
-    assert!(
-        deduplicated >= MUTATING_METHODS.len() - 1,
-        "only {deduplicated} of {} methods reached the ledger; transient: {transient:?}",
-        MUTATING_METHODS.len()
+    // NAMED, not counted. A count leaves room for one hole to close while
+    // another opens; naming the exceptions means a new one fails the gate and
+    // has to be justified in the same change.
+    assert_eq!(
+        transient,
+        vec!["codex/session_ensure"],
+        "the only method allowed to answer transiently is the one whose remote \
+         control this fixture deliberately never starts"
     );
+    assert_eq!(
+        refused,
+        vec!["attention/answer"],
+        "the only method allowed to refuse here is the one with no live session \
+         to answer into; a refusal is not recorded, by design"
+    );
+    assert_eq!(
+        deduplicated,
+        MUTATING_METHODS.len() - transient.len() - refused.len(),
+        "every other method must reach the ledger"
+    );
+}
+
+/// Whether this response is a refusal the ledger deliberately did NOT record.
+///
+/// Keyed on the D18 reason vocabulary, not on `status: rejected` alone: a
+/// RECORDED rejection (an `INVALID_PARAMS` stored as that op id's answer)
+/// is also `rejected`, and it replays — which is the opposite contract.
+fn refusal(response: &serde_json::Value) -> Option<String> {
+    let reason = ack(response)["reason"].as_str()?.to_string();
+    [
+        ainb_hangar_proto::mutation::REASON_ALREADY_ANSWERED_BY,
+        ainb_hangar_proto::mutation::REASON_NOT_DELIVERED,
+        ainb_hangar_proto::mutation::REASON_NO_TARGET,
+    ]
+    .contains(&reason.as_str())
+    .then_some(reason)
 }
 
 /// The two codes that mean "nothing happened, ask again": `SQLite` contention and
@@ -203,18 +262,24 @@ async fn a_second_principal_replaying_an_op_id_is_rejected() {
     let broker = EventBroker::new();
     let events = broker.sink();
 
+    // `fleet/message_send`, and the choice is forced from both sides: the test
+    // needs a method whose outcome is RECORDED (an answer with no live session
+    // is a refusal, which by design leaves no row to collide with) AND one the
+    // Pal credential is allowed to call at all. That is the intersection.
+    //
+    // Its op id rides on `request_id`, which IS the op id for that family
+    // (amendment 19), so this also exercises the alias.
     let params = serde_json::json!({
-        "attention_id": "att-foreign",
-        "answer": "yes",
-        "answered_by": "tui",
-        "op_id": "op-shared-across-principals",
+        "targets": ["fleet-sample"],
+        "text": "ship it",
+        "request_id": "op-shared-across-principals",
     });
 
     let mine = dispatch(
         &store,
         &events,
         &Caller::Operator,
-        ainb_hangar_proto::methods::ATTENTION_ANSWER,
+        ainb_hangar_proto::methods::FLEET_MESSAGE_SEND,
         params.clone(),
     )
     .await;
@@ -227,7 +292,7 @@ async fn a_second_principal_replaying_an_op_id_is_rejected() {
         &Caller::Pal {
             scope_key: "channel:01JHARNESS".to_string(),
         },
-        ainb_hangar_proto::methods::ATTENTION_ANSWER,
+        ainb_hangar_proto::methods::FLEET_MESSAGE_SEND,
         params,
     )
     .await;
@@ -248,18 +313,20 @@ async fn the_same_op_id_with_a_different_body_is_rejected() {
     let store = Store::open_in(dir.path()).await.unwrap();
     let broker = EventBroker::new();
     let events = broker.sink();
-    let method = ainb_hangar_proto::methods::ATTENTION_ANSWER;
+    // Same reasoning as the foreign-principal test: a recorded outcome is the
+    // precondition for a body-mismatch collision.
+    let method = ainb_hangar_proto::methods::HANGAR_ISSUE_UPDATE;
 
     let yes = serde_json::json!({
-        "attention_id": "att-body",
-        "answer": "yes",
-        "answered_by": "tui",
+        "workspace_id": "ws-sample",
+        "issue_id": "iss-sample",
+        "state": "todo",
         "op_id": "op-body-fingerprint",
     });
     let no = serde_json::json!({
-        "attention_id": "att-body",
-        "answer": "no",
-        "answered_by": "tui",
+        "workspace_id": "ws-sample",
+        "issue_id": "iss-sample",
+        "state": "doing",
         "op_id": "op-body-fingerprint",
     });
 

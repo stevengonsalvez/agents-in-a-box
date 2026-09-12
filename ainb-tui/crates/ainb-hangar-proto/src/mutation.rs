@@ -84,6 +84,27 @@ pub const REASON_CONFLICT: &str = "conflict";
 /// Reason: the daemon died between `writing` and the reply, so the bytes may
 /// or may not have reached the PTY.
 pub const REASON_EFFECTS_AMBIGUOUS: &str = "effects_ambiguous";
+/// Reason: the operation's outcome is known, but its exact reply body is not.
+///
+/// A daemon that died between a terminal receipt and the reply record knows
+/// WHAT happened — the receipt is the evidence — and cannot reproduce the
+/// body it would have sent. The status axis still carries the real outcome, so
+/// a client learns "this was applied" and only loses the payload.
+pub const REASON_REPLY_LOST: &str = "reply_lost";
+/// Reason: this principal is holding too many un-retired ledger rows.
+///
+/// A refusal rather than a silent execution: running without a ledger row would
+/// drop the very guarantee the row provides. Retention clears it.
+pub const REASON_LEDGER_SATURATED: &str = "ledger_saturated";
+/// Reason: no live target matched, so nothing was claimed and nothing was sent.
+pub const REASON_NO_TARGET: &str = "no_target";
+/// Reason: the mutation reached its target and the provider confirmed that
+/// nothing landed.
+///
+/// Distinct from [`REASON_EFFECTS_AMBIGUOUS`] on the axis a client acts on:
+/// ambiguous means "do not retry, go and look", while this means "nothing
+/// happened, retrying is safe".
+pub const REASON_NOT_DELIVERED: &str = "not_delivered";
 
 /// The reserved key under which the daemon attaches a [`MutationAck`] to an
 /// object-shaped mutation result.
@@ -103,6 +124,16 @@ pub const ACK_KEY: &str = "mutation";
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct OpId(String);
+
+/// Whether `c` may appear in an op id.
+///
+/// ASCII alphanumerics plus the four separators the existing `request_id`
+/// values use. Deliberately excludes everything that changes the meaning of a
+/// log line or a JSON payload the id is interpolated into.
+#[must_use]
+pub const fn is_op_id_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-')
+}
 
 /// The longest op id the ledger will store. 32 hex characters is the minted
 /// shape; the cap exists so a peer cannot make the primary key unbounded.
@@ -124,6 +155,19 @@ impl OpId {
                 "an op id must be at most {OP_ID_MAX_LEN} bytes, got {}",
                 value.len()
             ));
+        }
+        // The charset is narrow because an op id does not stay inside the
+        // ledger: it is logged, and it is embedded in the
+        // `delivery_unconfirmed` attention payload an operator reads. A value
+        // carrying newlines, control characters or quote marks can forge a log
+        // line or reshape that payload, and an opaque identifier has no reason
+        // to contain any of them.
+        //
+        // Wide enough for the minted 32 hex characters AND every legacy
+        // `request_id` spelling the fleet family already uses, which is why
+        // this is not simply `is_ascii_hexdigit`.
+        if !value.chars().all(is_op_id_char) {
+            return Err("an op id may contain only letters, digits and `_ . : -`".to_string());
         }
         Ok(Self(value))
     }
@@ -1294,6 +1338,30 @@ mod tests {
     fn op_id_parsing_bounds_the_key() {
         assert!(OpId::parse("").is_err());
         assert!(OpId::parse("x".repeat(OP_ID_MAX_LEN + 1)).is_err());
+        // The id reaches logs and an operator-facing payload, so anything that
+        // could forge either is refused at the boundary.
+        for hostile in [
+            "op\nlevel=error msg=forged",
+            "op\"},\"kind\":\"approval",
+            "op with spaces",
+            "op\u{0}nul",
+            "op/../../etc",
+        ] {
+            assert!(
+                OpId::parse(hostile).is_err(),
+                "an op id must refuse {hostile:?}"
+            );
+        }
+        // And every spelling the fleet family already sends still parses.
+        for legacy in [
+            "action-request-001",
+            "message:9f2c",
+            "broadcast_001",
+            "01M2B59P5EMG1AZS20WB6E99QP",
+            "sha256.abc",
+        ] {
+            assert!(OpId::parse(legacy).is_ok(), "{legacy} must still parse");
+        }
         assert_eq!(
             OpId::parse("action-request-001").unwrap().as_str(),
             "action-request-001"
