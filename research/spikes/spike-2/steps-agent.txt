@@ -1,0 +1,9 @@
+seed
+sleep 1200
+capture s0
+cmd send-keys -t %0 Down
+sleep 1200
+capture s1
+cmd send-keys -t %0 Up
+sleep 1500
+capture s2

@@ -4,6 +4,10 @@ Ran 2026-09-12. Question: does a Rust VT emulator fed by tmux control mode
 reproduce a live agent screen byte-equal to the same program driven through a
 direct PTY, and which crate should R2 use?
 
+The filename carries 2026-09-11 to sit with the rest of the multi-surface spike
+set, which was commissioned that day. Every measurement here was taken on
+2026-09-12.
+
 All work on a private tmux server, socket `ainb-spike2`, every command carries
 `-L ainb-spike2 -f /dev/null`. Sessions killed by exact name. No repo code was
 touched; the harness lives in the session scratchpad.
@@ -58,8 +62,8 @@ three, and it gets one margin case wrong. Both are acceptable; see the rationale
 | agents | `claude` 2.1.269, `codex-cli` 0.148.0, real TUIs, 120x40 |
 
 Both feeds run the same fixture with the same environment (`TERM=xterm-256color`,
-`LANG=LC_ALL=C.UTF-8`) and the same geometry, so the program under test cannot
-tell them apart.
+`LANG=C.UTF-8`, `LC_ALL=C.UTF-8`) and the same geometry, so the program under
+test cannot tell them apart.
 
 ## 1. Feed fidelity: control mode vs a direct PTY
 
@@ -265,11 +269,35 @@ of the glyph on that row, in a TUI that draws box borders by column. wezterm at
 its default Unicode 9 gets the ZWJ case right and the VS16 case wrong; the knob
 fixes it, and there is no equivalent knob in the other two.
 
-The residual f3/f8 text-grid rows for alacritty and wezterm14 in 3a are these
-same two glyphs plus one printing artefact: `capture-pane` emits a pad space for
-the second column of a width-2 grapheme and the harness's dump does not, so an
-identical grid reads as a differing line. Verdict for those rows: **cosmetic,
-harness-side**, superseded by the table above.
+The residual text-grid rows in 3a break down differently per crate, and lumping
+them together would hide the one that matters. Row by row, measured:
+
+| crate | fixture, size | rows | which rows | cause | verdict |
+|---|---|---|---|---|---|
+| alacritty | f3, both sizes | 2 | EMO, TAG | VS16 width 1 against tmux's 2; tag-sequence truncation | cosmetic |
+| wezterm14 | f3, 120x40 | 2 | EMO, TAG | pad-space artefact; tag-sequence truncation | cosmetic |
+| wezterm14 | f3, **40x20** | **4** | EMO, TAG, **STRD and the row below it** | pad-space, truncation, **and the section 3d margin defect** | **two rows are real** |
+| all | f8, both sizes | 1 to 2 | the VS16 and tag probe rows | as above | cosmetic |
+
+Two clarifications this table forces. First, wezterm14 has **no** width
+disagreement with tmux (3c: 13 of 13), so its EMO row is purely a printing
+artefact of this harness: `capture-pane` emits a pad space for the second column
+of a width-2 grapheme and the canonical dump does not, so an identical grid
+reads as a differing line. Alacritty's EMO row looks the same but is not the
+same thing: it is a genuine width disagreement.
+
+Second, wezterm14's jump from 2 rows to 4 at 40x20 is **not** an artefact. It is
+the section 3d last-column defect, and the exact rows are:
+
+```
+  r005 emu |STRD:abcdefghijklmnopqrstuvwxyz01234567中|
+  r005 tmx |STRD:abcdefghijklmnopqrstuvwxyz01234567|
+  r006 emu | after|
+  r006 tmx |中 after|
+```
+
+alacritty stays at 2 rows at the same size, which is what isolates the cause to
+wezterm rather than to the width model. [fact]
 
 The tag-sequence row is a third case where the crates are arguably ahead of
 tmux: tmux truncates U+1F3F4 plus six tag characters to five codepoints in its
@@ -291,10 +319,16 @@ the glyph. wezterm squeezes the glyph into columns 59-60, **destroying the
 narrow character already in column 59**. One cell of content is lost and the row
 is one column out of step with tmux until it is rewritten.
 
-**Verdict: real defect, cosmetic in effect, rare in practice** (it needs a
-double-width glyph to land on exactly the last column). It does not lose the
-line, only one cell, and the next full repaint clears it. Not a blocker, but it
-is the one thing to watch if a CJK-heavy agent UI ever looks one column off.
+**Verdict: real defect, cosmetic in effect, and narrower terminals hit it more
+often.** It costs one cell, not the line, and the next full repaint clears it.
+It is not a blocker. But "rare" needs qualifying: across the fixture set it fired
+in 1 of 8 fixtures and **only at 40x20, never at 120x40** (section 3a), because
+the fewer the columns the likelier a double-width glyph lands on the last one.
+40x20 is the phone frame R2 explicitly targets, so this is most likely exactly
+where R2 meets it. Watch for a CJK-heavy agent UI reading one column off on the
+phone surface; if it becomes visible the fix belongs upstream in `wezterm-term`,
+not in a workaround. [fact for the fixture counts, inference for the frequency
+argument]
 
 ### 3e. Feature surface [fact]
 
@@ -344,7 +378,11 @@ plus cluster runs rather than a fixed array of fat cells per scrollback row.
 [inference for the mechanism, fact for the numbers]
 
 CPU, `cat` of a 50 MB file in a pane, delivered end to end through control mode
-into a live emulator, 120x40, 1,000-row window:
+into a live emulator, 120x40, 1,000-row window. The file is the RSS workload
+repeated to 50 MB, so it is **attributed** content: 256-colour and truecolor SGR
+runs, bold and reverse, CJK and emoji, not plain text. (The plain monotonic
+counter, `f10-flood.sh`, appears only in section 5, where loss has to be
+countable token by token.)
 
 | crate | delivered | notifications | pauses | max age | emulator CPU | process CPU | process RSS | tmux server CPU | grid vs tmux |
 |---|---|---|---|---|---|---|---|---|---|
@@ -394,8 +432,8 @@ full of, box-drawn panels next to emoji and CJK. It is also the only crate that
 fits 100 sessions in 40 MB rather than 300 to 390 MB, which decides whether the
 live window stays at 1,000 rows or has to be cut. It has OSC 8 and title state
 built in. The two costs are real and both are survivable: it parses at 24 MB/s
-instead of 94, which is 16% of a core against a tmux server already burning
-twice that, and it mishandles a double-width glyph landing on the very last
+instead of 94, which on the 50 MB run in 3f is 3.53 s of CPU against the 7.71 s
+the tmux server spent delivering the same bytes, and it mishandles a double-width glyph landing on the very last
 column, which costs one cell until the next repaint. vt100 is out on DECSTBM
 alone, before OSC 8 and before memory. alacritty is the fallback if wezterm's
 git-only distribution is unacceptable: it is fast, correct on margins, and its
@@ -477,6 +515,63 @@ Two parser details that spike 7 did not surface, both measured here:
   [fact, reproduced]
 - `%pause` likewise. Both must be recognised wherever they appear in the stream.
 
+### What a `capture-pane` re-seed does and does not carry [fact]
+
+The 0 of 40 results above are text-row comparisons, so on their own they do not
+prove that a re-seed restores everything an emulator holds. Measured separately,
+with a fixture that enters the alternate screen, sets a window title, hides the
+cursor, turns on mouse reporting and paints an OSC 8 hyperlink, then dumping the
+emulator's whole canonical state rather than its text:
+
+| state | tmux | after a grid-only re-seed | after the complete re-seed |
+|---|---|---|---|
+| OSC 8 hyperlink | present | **present** | present |
+| SGR attributes | present | present | present |
+| alternate screen | on | **off** | on |
+| window title | `spike2 altlink` | **`wezterm`** (crate default) | `spike2 altlink` |
+| cursor visibility | hidden | **shown** | hidden |
+| cursor position | 3, 9 | 3, 9 | 3, 9 |
+| mouse reporting | on | **off** | on |
+
+So `capture-pane -p -e` carries more than SGR: it emits OSC 8 verbatim, which is
+worth knowing given section 3e treats hyperlinks as load-bearing.
+
+```
+capture-pane -p -e -t %0 | sed -n 2p
+^[]8;;https://example.invalid/seed^[\SEEDLINK^[]8;;^[\ plain
+```
+
+What it does not carry is everything tmux keeps outside the character grid. All
+of it is available as a format string on the same control connection, so the fix
+costs one extra `display-message`:
+
+```
+#{alternate_on} #{cursor_flag} #{cursor_y} #{cursor_x}
+#{scroll_region_upper} #{scroll_region_lower}
+#{keypad_cursor_flag} #{keypad_flag} #{wrap_flag} #{origin_flag} #{insert_flag}
+#{mouse_standard_flag} #{mouse_button_flag} #{mouse_any_flag}
+#{mouse_sgr_flag} #{mouse_utf8_flag} #{pane_title}
+```
+
+Order matters, and three orderings are load-bearing:
+
+1. `ESC[?1049h` or `l` **before** the grid, or the rows paint into the wrong
+   buffer and the primary screen is corrupt when the app exits alt mode.
+2. `ESC[r` and `ESC[?6l` before the grid, so the repaint is not clipped by a
+   scroll region or reinterpreted by origin mode; the real region and origin mode
+   go back **after**.
+3. the cursor position after DECSTBM (which homes the cursor) and before
+   re-enabling origin mode (which changes what `CUP` means).
+
+With that sequence the right-hand column above is exact on all four crate
+configurations. One honest limit: tmux's mouse flags are coarser than the modes
+they describe. The fixture set `1000`, `1002` and `1006`, and tmux reported
+`mouse_any_flag=1`, so the reconstruction turns on `1003` as well and the
+emulator reports `AnyMotion` where the app asked for button tracking. The daemon
+already parses the byte stream, so it should track `DECSET` itself and use the
+tmux flags only for the cold-start seed. [fact for the flag values, inference for
+the remedy]
+
 ## 6. Decision input
 
 ### Does R2 proceed on the tmux hybrid as specified? Yes. [fact-backed]
@@ -503,10 +598,15 @@ stays closed. Its remaining trigger is native Windows, unchanged.
 4. **Parse the control stream as bytes.** tmux splits multi-byte graphemes
    across notifications under load, 98 lines in 14,349 in one capture. A UTF-8
    line reader fails only under load, which is the worst way to find out.
-5. **Re-seed by replay, not by API.** `ESC[H ESC[2J` then one absolute-positioned
-   row per `capture-pane -e` line, then restore the cursor from `#{cursor_y}` and
-   `#{cursor_x}`. Exact on all four crate configurations, no crate-specific reset
-   needed.
+5. **Re-seed by replay, and replay more than the grid.** `capture-pane -e`
+   carries SGR and OSC 8 but nothing outside the character grid, so a grid-only
+   replay silently drops the alternate-screen flag, the title, cursor visibility
+   and mouse reporting. Restore them from tmux formats in the same round trip,
+   in this order: `ESC[?1049h/l`, title, `ESC[r` and `ESC[?6l`, the grid rows,
+   then the real scroll region, the modes, the cursor position, origin mode, and
+   cursor visibility last. Exact on all four crate configurations, no
+   crate-specific reset API needed. Track `DECSET` from the byte stream rather
+   than trusting `#{mouse_any_flag}`, which over-reports.
 6. **Order the snapshot against the tail by issuing `capture-pane` on the control
    stream itself.** The reply lands in the same ordered stream as `%output`, so
    the daemon knows precisely which bytes the snapshot already contains. This is
@@ -552,16 +652,19 @@ comparisons, 24 live agent captures and a 53 MB flood.
   the plain reading of D10. [fact]
 - vt100 does not home the cursor on DECSTBM, which quietly corrupts any TUI that
   uses a scroll region. [fact]
-- wezterm-term uses one ninth the memory of the other two at the same live-window
-  depth, and is four times slower per byte. Both were larger effects than
-  expected, in opposite directions. [fact]
+- wezterm-term uses 7.5x less memory than alacritty and 9.6x less than vt100 at
+  the same live-window depth, and is four times slower per byte. Both were larger
+  effects than expected, in opposite directions. [fact]
 - `remain-on-exit on` adds a "Pane is dead" banner that scrolls the grid by one
   row, which silently corrupts any `capture-pane` reference taken that way. The
   reference runs here hold the pane open with a trailing `sleep` instead. [fact]
 
 ## Artefacts
 
-Under the session scratchpad, `.../scratchpad/spike2/`:
+Parked in the repo at `research/spikes/spike-2/` (force-added; `research/` is
+gitignored). Every script locates itself, so the tree runs from wherever it is
+checked out. Build products and captures land in `target/` and `out/`, both
+ignored by the directory's own `.gitignore`.
 
 ```
 Cargo.toml Cargo.lock          pinned crate set, incl. the wezterm git rev
@@ -580,25 +683,39 @@ fixtures/f6-scroll.sh          60 lines of plain scroll
 fixtures/f7-decstbm.sh         DECSTBM cursor-home probe
 fixtures/f8-widthprobe.sh      per-glyph column advance
 fixtures/f9-live.sh            long-lived repainting panel
-fixtures/f10-flood.sh          bounded monotonic counter flood
+fixtures/f10-flood.sh          bounded monotonic counter flood, section 5 only
+fixtures/f11-altlink.sh        alt screen + title + mouse + OSC 8, for the re-seed test
+make-workload.py               the attributed workload and the 50 MB flood file
 run-matrix2.sh                 sections 1 and 3a
 capture-ref.sh compare-ref.py  tmux capture-pane reference and differ
 width-probe.sh                 section 3c
 margin-probe.sh                section 3d
 geom-proof.sh                  section 4
-flood2.sh flood-all.sh         section 3f CPU
+flood2.sh flood-all.sh         section 3f, 50 MB end to end through the feed
+bench-all.sh                   section 3f, RSS at 1 and 100, and parse throughput
 pause-run.sh                   section 5
+seedstate.sh fmtprobe.sh       section 5, what a re-seed carries
 live-agent.sh live-run.sh      section 2
+steps-*.txt                    the driving scripts each live run replays
 out/                           every .bin .ctl .chunks .snap .refdiff .diff
 ```
 
-Reproduce the headline result:
+Reproduce, from `research/spikes/spike-2/`:
 
 ```sh
 cargo build --release
-bash run-matrix2.sh        # feed fidelity + crate fidelity, both sizes
-bash width-probe.sh        # per-glyph cell advance vs tmux
-bash geom-proof.sh         # window geometry, four cells
-bash live-agent.sh claude claude
-bash pause-run.sh wezterm14
+bash run-matrix2.sh                  # sections 1 and 3a, both sizes
+bash width-probe.sh                  # section 3c, cell advance against tmux
+bash margin-probe.sh                 # section 3d, wide glyph at the margin
+bash geom-proof.sh                   # section 4, four geometry cells
+bash bench-all.sh                    # section 3f, RSS and parse throughput
+bash flood-all.sh                    # section 3f, 50 MB through the feed
+bash pause-run.sh wezterm14          # section 5, pause and resume
+bash seedstate.sh                    # section 5, what a re-seed carries
+bash live-agent.sh claude claude     # section 2, live agent TUI
 ```
+
+`bench-all.sh` and `flood-all.sh` regenerate `out/workload.bin` and the 50 MB
+`out/flood50.bin` when absent, so nothing large is committed and the numbers stay
+reproducible. Every script drives the private `ainb-spike2` socket and kills its
+sessions by exact name.
