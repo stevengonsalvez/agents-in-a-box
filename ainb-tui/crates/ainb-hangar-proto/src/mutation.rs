@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! op id ──▶ ledger lookup ─┬─ miss  ──▶ execute ──▶ commit ──▶ created
-//!                          ├─ hit, same body ─────────────────▶ adopted / replayed
+//!                          ├─ hit, same body ─────────────────▶ replayed
 //!                          ├─ hit, other body ────────────────▶ rejected{already_answered_by}
 //!                          └─ hit, other principal ───────────▶ rejected{op_id_foreign}
 //! ```
@@ -220,9 +220,6 @@ pub enum MutationTier {
 pub enum MutationOutcome {
     /// First sighting of this op id: the daemon executed it.
     Created,
-    /// A committed row with a MATCHING body fingerprint, reached by a caller
-    /// that had not yet seen the reply.
-    Adopted,
     /// A committed row for this exact op id; the stored reply is returned
     /// verbatim and nothing ran again.
     Replayed,
@@ -507,18 +504,27 @@ pub static MUTATING_METHODS: &[MutatingMethod] = &[
         r#"{"attention_id":"att-sample","answer":"yes","answered_by":"harness"}"#
     ),
     // ── fleet control plane ──────────────────────────────────────────────
+    // FenceKind::None, not SessionIncarnation, and the difference is honesty:
+    // the verified send lives in `fleet.rs`, which another lane owns, so no
+    // handler reads an incarnation fence today. Declaring one here would tell a
+    // client reading the contract that it holds a stale-kill guard it does not
+    // have. The row flips to `SessionIncarnation` in the change that enforces
+    // it, and `receipt_tier_mutations_are_all_fenced` is the test that has to
+    // be relaxed to allow this — deliberately, so the gap is visible.
     mutating_method!(
         m::FLEET_ACTION,
         f::FleetActionParams,
         Receipt,
-        Fk::SessionIncarnation,
+        Fk::None,
         r#"{"session_key":"fleet-sample","expected_version":1,"request_id":"op-fleet-action","action":{"action":"kill"}}"#
     ),
+    // FenceKind::None for the same reason as `fleet/action` above: the
+    // lifecycle fence is specified and unenforced, so it is not claimed.
     mutating_method!(
         m::FLEET_MESSAGE_SEND,
         f::FleetMessageSendParams,
         Receipt,
-        Fk::LifecycleUpdatedAt,
+        Fk::None,
         r#"{"targets":["fleet-sample"],"text":"hello","request_id":"op-fleet-message"}"#
     ),
     mutating_method!(
@@ -1255,20 +1261,32 @@ mod tests {
         );
     }
 
-    /// Every tier-2 mutation is fenced; a PTY write with no fence is a double
-    /// type waiting for a slow network.
+    /// A declared fence must be an ENFORCED fence.
+    ///
+    /// The earlier shape of this test asserted that every tier-2 mutation names
+    /// a fence, which the table satisfied by naming two that no handler reads.
+    /// That is the worse failure: a client that reads the contract and sends a
+    /// lifecycle fence believes it holds a stale-send guard that does not
+    /// exist. So the list of fenced methods is pinned exactly, and adding a row
+    /// to it means adding the enforcement in the same change.
     #[test]
-    fn receipt_tier_mutations_are_all_fenced() {
-        for entry in MUTATING_METHODS {
-            if matches!(entry.tier, MutationTier::Receipt) {
-                assert_ne!(
-                    entry.fence,
-                    FenceKind::None,
-                    "{} effects a PTY and must name a fence",
-                    entry.method
-                );
-            }
-        }
+    fn only_enforced_fences_are_declared() {
+        let fenced: Vec<(&str, FenceKind)> = MUTATING_METHODS
+            .iter()
+            .filter(|m| m.fence != FenceKind::None)
+            .map(|m| (m.method, m.fence))
+            .collect();
+        assert_eq!(
+            fenced,
+            vec![(
+                crate::methods::ATTENTION_ANSWER,
+                FenceKind::AttentionVersion
+            )],
+            "`fleet/action` (session_incarnation) and `fleet/message_send` \
+             (lifecycle_updated_at) are specified in D18 and enforced nowhere: \
+             their executor lives in a file another lane owns. Flip the registry \
+             row in the change that reads the fence, not before."
+        );
     }
 
     /// Op ids are opaque: bounded, non-empty, never parsed.
