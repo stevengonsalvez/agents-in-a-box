@@ -18,7 +18,7 @@
 //! code that could race two connections.
 
 use ainb_hangar_core::channel::ChannelSet;
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 /// The request family an [`AttentionRow`] is about — the `kind` column,
 /// CHECK-constrained to these six by migration 0025.
@@ -233,6 +233,101 @@ impl AttentionRepo {
         .execute(pool)
         .await?;
         Ok(res.rows_affected() == 1)
+    }
+
+    /// [`AttentionRepo::insert_if_absent`] inside a CALLER-OWNED transaction.
+    ///
+    /// This is what makes the `attention` row a PROJECTION rather than a second
+    /// record (D14). The fleet event, the `fleet_session` state it reduces to,
+    /// and the inbox row that state implies all commit together, so no reader
+    /// can ever observe a session the store says is asking with no card, or a
+    /// card with no asking session. The two used to be written by two
+    /// independent transactions and drifted to 732 open rows against 7 waiting
+    /// sessions, the oldest 25 days stale.
+    ///
+    /// The caller's transaction must already hold the write lock (open it with
+    /// `BEGIN IMMEDIATE`), for the same reason
+    /// [`crate::repo::fleet::FleetRepo::apply_event_in_tx`] documents.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the insert fails.
+    pub async fn insert_if_absent_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        row: &NewAttention,
+        request_key: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query(
+            "INSERT OR IGNORE INTO attention \
+             (id, session_id, cwd, workspace_id, kind, payload, state, degraded, created_at, \
+              raise_transcript, channels, request_key) \
+             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.id)
+        .bind(&row.session_id)
+        .bind(&row.cwd)
+        .bind(&row.workspace_id)
+        .bind(row.kind.as_str())
+        .bind(&row.payload)
+        .bind(i64::from(row.degraded))
+        .bind(row.created_at)
+        .bind(&row.raise_transcript)
+        .bind(row.channels.to_db())
+        .bind(request_key)
+        .execute(&mut **tx)
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// [`AttentionRepo::open_ask_ids_for_session`] inside a caller-owned
+    /// transaction, so the stale-ASK close and the raise that replaces it are
+    /// one atomic step rather than a window in which both cards are open.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn open_ask_ids_for_session_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        session_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id FROM attention \
+             WHERE session_id = ? AND kind = 'ask_user_question' AND state = 'open' \
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&mut **tx)
+        .await?;
+        rows.iter().map(|r| r.try_get("id")).collect()
+    }
+
+    /// [`AttentionRepo::mark_answered_if_open`] inside a caller-owned
+    /// transaction. Still first-answer-wins: the `state = 'open'` predicate is
+    /// what a surface racing on the same row loses against, and holding the
+    /// write lock does not change that contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn mark_answered_if_open_in_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        id: &str,
+        answered_by: &str,
+        answer: &str,
+        answered_at: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE attention \
+             SET state = 'answered', answered_by = ?, answer = ?, answered_at = ? \
+             WHERE id = ? AND state = 'open'",
+        )
+        .bind(answered_by)
+        .bind(answer)
+        .bind(answered_at)
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(res.rows_affected())
     }
 
     /// List OPEN attention rows for a workspace scope, oldest first.
@@ -492,6 +587,59 @@ impl AttentionRepo {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the update fails.
+    /// Count the rows on which the inbox and `fleet_session.attention_state`
+    /// disagree, WITHOUT changing anything (D14).
+    ///
+    /// Once the two are written by one apply path in one transaction, a
+    /// non-zero count here is a defect in that path, not a backlog to clear.
+    /// Closing rows to make the number go down is how the old sweep hid the
+    /// defect for 25 days: it mutated, so the drift never showed up as drift.
+    /// This only measures, and the caller only logs.
+    ///
+    /// Two directions are counted separately because they have different
+    /// causes: an open card whose session is not asking means a raise outlived
+    /// its request; an asking session with no open card means a raise was lost.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if either count fails.
+    pub async fn drift_against_fleet_session(
+        pool: &SqlitePool,
+    ) -> Result<AttentionDrift, sqlx::Error> {
+        // An `approval` row is deliberately excluded from the first direction
+        // for the same reason `close_unclaimed_open` excludes it: an ACP
+        // permission is owned by the pool's parked responder, not by a
+        // `fleet_session` attention state, so it is not evidence of drift.
+        let open_without_asking_session: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM attention a \
+             WHERE a.state = 'open' \
+               AND a.kind IN ('ask_user_question', 'waiting', 'error') \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM fleet_session f \
+                   WHERE f.provider_session_id = a.session_id \
+                     AND f.attention_state != 'NONE' \
+               )",
+        )
+        .fetch_one(pool)
+        .await?;
+        let asking_session_without_open: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM fleet_session f \
+             WHERE f.attention_state IN ('ASK', 'APPROVAL') \
+               AND f.provider_session_id IS NOT NULL \
+               AND f.visible = 1 AND f.superseded_by IS NULL \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM attention a \
+                   WHERE a.session_id = f.provider_session_id AND a.state = 'open' \
+               )",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(AttentionDrift {
+            open_without_asking_session,
+            asking_session_without_open,
+        })
+    }
+
     pub async fn close_unclaimed_open(
         pool: &SqlitePool,
         older_than_ms: i64,
@@ -521,6 +669,26 @@ impl AttentionRepo {
         .execute(pool)
         .await?;
         Ok(res.rows_affected())
+    }
+}
+
+/// How far the inbox and `fleet_session.attention_state` have drifted apart.
+///
+/// Zero in both directions is the contract the single apply path exists to
+/// keep. Anything else names which half lost a write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttentionDrift {
+    /// Open cards whose session is not in an attention state.
+    pub open_without_asking_session: i64,
+    /// Sessions in `ASK`/`APPROVAL` with no open card.
+    pub asking_session_without_open: i64,
+}
+
+impl AttentionDrift {
+    /// True when the two records agree exactly.
+    #[must_use]
+    pub fn is_clean(self) -> bool {
+        self.open_without_asking_session == 0 && self.asking_session_without_open == 0
     }
 }
 
