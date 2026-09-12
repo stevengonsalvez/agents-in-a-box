@@ -14,6 +14,11 @@ if (!webUrl) {
 
 export default defineConfig({
   testDir: "./tests",
+  // The record suite has its own config and its own runner, and its specs read
+  // SCREENSHOT_DIR at import time. Collected here they throw before a single
+  // test runs, which is why `scripts/hangar/run_web_e2e.sh` could not reach the
+  // journey at all.
+  testIgnore: /.*\.record\.spec\.ts/,
   fullyParallel: false,
   workers: 1,
   retries: 0,
