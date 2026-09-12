@@ -1565,6 +1565,19 @@ impl EventHandler {
             screen_ids::SKILL_MANAGER if state.skill_manager_state.input.is_some() => {
                 Some(AppEvent::SkillManagerInputChar(character))
             }
+            // The browse overlay's Query phase is a free-form buffer: `/`, `:`
+            // and spaces all belong in the query. `browse_query` rows in the
+            // table own only the non-printable keys (tab, enter, esc,
+            // backspace), so without this branch every typed character was
+            // resolved as `KeyAction::Text` and then dropped here, which is
+            // what broke `[b]` search after the dispatcher moved to the table.
+            screen_ids::SKILL_MANAGER
+                if state.skill_manager_state.browse.as_ref().is_some_and(|browse| {
+                    browse.mode == crate::components::skill_manager_screen::BrowseMode::Query
+                }) =>
+            {
+                Some(AppEvent::SkillManagerBrowseInputChar(character))
+            }
             screen_ids::AUTH_SETUP
                 if state
                     .auth_setup_state
