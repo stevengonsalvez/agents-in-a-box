@@ -349,3 +349,53 @@ impl Default for WorkspaceLoadSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct NewSessionSection {
+    // New session creation state
+    pub new_session_state: Option<NewSessionState>,
+    // Usage analytics state: removed. Burndown plugin owns usage state
+    // (provider, period, filters, zoom). Host no longer reads or writes
+    // `usage_state` / `usage_load_receiver`. Statusline-related state
+    // (live_window_watcher, statusline_status_cache) stays in core
+    // because that's a host CLI install concern, not a plugin one.
+    /// Background base-branch refresh for the Configure picker. The fetch +
+    /// re-list runs on `spawn_blocking`; the result lands here and is applied
+    /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
+    /// generation guard — results from a closed/reopened picker are dropped.
+    pub branch_refresh_receiver: Option<
+        mpsc::UnboundedReceiver<(
+            u64,
+            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
+        )>,
+    >,
+    /// Current branch-refresh generation (bumped on every picker open).
+    pub branch_refresh_seq: u64,
+    /// Background remote-repo pre-flight for the Configure screen (ls-remote
+    /// at open: does the repo exist, does it have branches). Applied by
+    /// `check_repo_check_complete` on the next tick; the `u64` is a
+    /// generation guard so a stale check can't stamp a newer Configure form.
+    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
+    /// Current repo-check generation (bumped on every Configure open).
+    pub repo_check_seq: u64,
+    /// Background empty-remote initialization (`[i]` on Configure: README +
+    /// initial commit + push). `Ok(branch)` carries the branch the commit
+    /// landed on. Applied by `check_repo_init_complete` on the next tick.
+    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
+    /// Current repo-init generation.
+    pub repo_init_seq: u64,
+}
+
+impl Default for NewSessionSection {
+    fn default() -> Self {
+        Self {
+            new_session_state: None,
+            branch_refresh_receiver: None,
+            branch_refresh_seq: 0,
+            repo_check_receiver: None,
+            repo_check_seq: 0,
+            repo_init_receiver: None,
+            repo_init_seq: 0,
+        }
+    }
+}

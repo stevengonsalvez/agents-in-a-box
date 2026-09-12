@@ -59,8 +59,8 @@ async fn test_session_creation_shows_immediately() {
 
     // The picker is open and owns its own state.
     assert_eq!(app.state.current_screen, screen_ids::NEW_SESSION);
-    assert!(app.state.new_session_state.is_some());
-    if let Some(ref session_state) = app.state.new_session_state {
+    assert!(app.state.new_session.new_session_state.is_some());
+    if let Some(ref session_state) = app.state.new_session.new_session_state {
         assert_eq!(
             session_state.step,
             NewSessionStep::PickRepo,
@@ -88,7 +88,7 @@ async fn test_session_creation_shows_immediately() {
 
     // Session state should be cleared.
     assert!(
-        app.state.new_session_state.is_none(),
+        app.state.new_session.new_session_state.is_none(),
         "New session state should be cleared after creation"
     );
 
@@ -123,7 +123,7 @@ async fn test_workspace_refresh_order() {
 
     // After teardown we are back on SessionList with workspace data present.
     assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
-    assert!(app.state.new_session_state.is_none());
+    assert!(app.state.new_session.new_session_state.is_none());
     assert!(
         !app.state.workspaces.is_empty(),
         "Workspace data should be loaded and available after refresh"
@@ -158,7 +158,7 @@ async fn test_no_empty_homescreen_after_creation() {
     );
 
     // No lingering session-creation state or queued async work.
-    assert!(app.state.new_session_state.is_none());
+    assert!(app.state.new_session.new_session_state.is_none());
     assert!(app.state.pending_async_action.is_none());
 }
 
@@ -181,7 +181,7 @@ async fn test_error_handling_with_correct_refresh() {
         "Should still show workspace data after error"
     );
     assert!(
-        app.state.new_session_state.is_none(),
+        app.state.new_session.new_session_state.is_none(),
         "Should clear session state on error"
     );
     // The error notification survives the teardown (cancel must NOT clear it).

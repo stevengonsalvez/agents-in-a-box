@@ -81,6 +81,7 @@ async fn test_n_key_triggers_new_session() {
     // Should have navigated to the NEW_SESSION screen at the PickRepo step.
     assert_eq!(state.current_screen, screen_ids::NEW_SESSION);
     let ns = state
+        .new_session
         .new_session_state
         .as_ref()
         .expect("new_session_state should be primed after pressing 'n'");

@@ -1232,6 +1232,7 @@ impl EventHandler {
         // picker.
         let on_pick_repo = state.current_screen == crate::app::screens::ids::NEW_SESSION
             && state
+                .new_session
                 .new_session_state
                 .as_ref()
                 .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
@@ -1316,6 +1317,7 @@ impl EventHandler {
         // own focus.
         let new_session_text_active = state.current_screen == screen_ids::NEW_SESSION
             && state
+                .new_session
                 .new_session_state
                 .as_ref()
                 .map(|s| matches!(s.step, NewSessionStep::PickRepo | NewSessionStep::Configure))
@@ -1977,12 +1979,14 @@ impl EventHandler {
         // Phase 5 (new-session redesign): Configure screen — own key handler.
         // Process BEFORE PickRepo so the step check stays linear.
         let on_configure = state
+            .new_session
             .new_session_state
             .as_ref()
             .map(|s| s.step == NewSessionStep::Configure)
             .unwrap_or(false);
         if on_configure {
             let outcome = state
+                .new_session
                 .new_session_state
                 .as_mut()
                 .and_then(|s| s.configure_state.as_mut())
@@ -2004,12 +2008,14 @@ impl EventHandler {
         // `&mut` borrow on `pick_repo_state` without fighting the immutable
         // borrow used by the following component state handling.
         let on_pick_repo = state
+            .new_session
             .new_session_state
             .as_ref()
             .map(|s| s.step == NewSessionStep::PickRepo)
             .unwrap_or(false);
         if on_pick_repo {
             let outcome = state
+                .new_session
                 .new_session_state
                 .as_mut()
                 .and_then(|s| s.pick_repo_state.as_mut())
@@ -2022,6 +2028,7 @@ impl EventHandler {
                     // Checking (user pressed Enter to retry auth).
                     use crate::components::new_session::pick_repo::GitAuthStatus;
                     let needs_recheck = state
+                        .new_session
                         .new_session_state
                         .as_ref()
                         .and_then(|ns| ns.pick_repo_state.as_ref())
@@ -2048,6 +2055,7 @@ impl EventHandler {
                     match Self::get_clipboard_text() {
                         Ok(text) => {
                             if let Some(pick) = state
+                                .new_session
                                 .new_session_state
                                 .as_mut()
                                 .and_then(|s| s.pick_repo_state.as_mut())
@@ -2068,8 +2076,11 @@ impl EventHandler {
                     // (finding #3) so arrow/Esc no longer write on every
                     // keypress. Best-effort — non-fatal IO error.
                     use crate::config::session_defaults::SessionDefaults;
-                    if let Some(pick) =
-                        state.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
+                    if let Some(pick) = state
+                        .new_session
+                        .new_session_state
+                        .as_ref()
+                        .and_then(|ns| ns.pick_repo_state.as_ref())
                     {
                         let path = SessionDefaults::default_path();
                         if let Err(err) = pick.defaults.save_to(&path) {
@@ -2081,7 +2092,7 @@ impl EventHandler {
                     // dropping him on Home even when he opened it from
                     // Sessions (2026-05-22). Fall back to Home if no
                     // previous screen recorded.
-                    state.new_session_state = None;
+                    state.new_session.new_session_state = None;
                     let prev = state
                         .previous_screen
                         .take()
@@ -2109,6 +2120,7 @@ impl EventHandler {
                     };
                     if needs_auth_check {
                         if let Some(pick) = state
+                            .new_session
                             .new_session_state
                             .as_mut()
                             .and_then(|ns| ns.pick_repo_state.as_mut())
@@ -2130,7 +2142,7 @@ impl EventHandler {
         // Phase 6 (new-session redesign): the only steps remaining are
         // PickRepo (handled above), Configure (handled above), and Creating —
         // the in-flight state which only accepts Esc to cancel.
-        if let Some(ref session_state) = state.new_session_state {
+        if let Some(ref session_state) = state.new_session.new_session_state {
             match session_state.step {
                 NewSessionStep::Configure => None, // handled above
                 NewSessionStep::PickRepo => None,  // handled above
@@ -2524,7 +2536,7 @@ impl EventHandler {
                     pick_repo_state: Some(PickRepoState::from_disk(&local_paths)),
                     ..Default::default()
                 };
-                state.new_session_state = Some(ns);
+                state.new_session.new_session_state = Some(ns);
                 state.previous_screen = Some(state.current_screen.clone());
                 state.current_screen = crate::app::screens::ids::NEW_SESSION.to_string();
                 tracing::debug!(
@@ -2543,8 +2555,11 @@ impl EventHandler {
                 state.cancel_new_session();
             }
             AppEvent::PickRepoPaste(text) => {
-                if let Some(pick) =
-                    state.new_session_state.as_mut().and_then(|s| s.pick_repo_state.as_mut())
+                if let Some(pick) = state
+                    .new_session
+                    .new_session_state
+                    .as_mut()
+                    .and_then(|s| s.pick_repo_state.as_mut())
                 {
                     pick.append_filter(&text);
                 }
@@ -2557,6 +2572,7 @@ impl EventHandler {
                 use crate::app::state::NewSessionStep;
                 use crate::config::session_defaults::SessionDefaults;
                 let (repo_label, prompt_text) = state
+                    .new_session
                     .new_session_state
                     .as_ref()
                     .and_then(|ns| ns.configure_state.as_ref())
@@ -2581,6 +2597,7 @@ impl EventHandler {
                         // from open time; mutations elsewhere are invisible
                         // to it.
                         if let Some(pick) = state
+                            .new_session
                             .new_session_state
                             .as_mut()
                             .and_then(|ns| ns.pick_repo_state.as_mut())
@@ -2589,7 +2606,7 @@ impl EventHandler {
                         }
                     }
                 }
-                if let Some(ns) = state.new_session_state.as_mut() {
+                if let Some(ns) = state.new_session.new_session_state.as_mut() {
                     ns.configure_state = None;
                     ns.step = NewSessionStep::PickRepo;
                 }
@@ -2626,7 +2643,7 @@ impl EventHandler {
                 // Move into the Creating step so the in-flight UI is shown
                 // until the async create resolves. Keep `configure_state`
                 // intact — `create_session_from_configure` reads it.
-                if let Some(ns) = state.new_session_state.as_mut() {
+                if let Some(ns) = state.new_session.new_session_state.as_mut() {
                     ns.step = crate::app::state::NewSessionStep::Creating;
                 }
                 state.pending_async_action = Some(AsyncAction::CreateSessionFromConfigure(spec));
@@ -7927,7 +7944,7 @@ mod text_input_guard_tests {
     fn bracketed_paste_on_pick_repo_routes_to_filter() {
         let mut state = AppState::default();
         state.current_screen = screen_ids::NEW_SESSION.to_string();
-        state.new_session_state = Some(NewSessionState {
+        state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::PickRepo,
             ..NewSessionState::default()
         });
@@ -7990,7 +8007,7 @@ mod text_input_guard_tests {
     fn esc_closes_help_inside_text_input_without_cancelling_form() {
         let mut state = AppState::default();
         state.current_screen = screen_ids::NEW_SESSION.to_string();
-        state.new_session_state = Some(NewSessionState {
+        state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::PickRepo,
             ..NewSessionState::default()
         });
@@ -8287,7 +8304,7 @@ mod text_input_guard_tests {
         for step in &text_steps {
             let mut state = AppState::default();
             state.current_screen = screen_ids::NEW_SESSION.to_string();
-            state.new_session_state = Some(NewSessionState {
+            state.new_session.new_session_state = Some(NewSessionState {
                 step: step.clone(),
                 ..NewSessionState::default()
             });
@@ -8302,7 +8319,7 @@ mod text_input_guard_tests {
         // NOT be treated as a text-input context.
         let mut state = AppState::default();
         state.current_screen = screen_ids::NEW_SESSION.to_string();
-        state.new_session_state = Some(NewSessionState {
+        state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::Creating,
             ..NewSessionState::default()
         });

@@ -22,7 +22,7 @@ impl NewSessionComponent {
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState) {
-        if let Some(ref session_state) = state.new_session_state {
+        if let Some(ref session_state) = state.new_session.new_session_state {
             // Create a centered popup
             let popup_area = self.centered_rect(80, 70, area);
 

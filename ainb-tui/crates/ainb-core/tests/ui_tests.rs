@@ -159,12 +159,12 @@ impl UITestFramework {
 
     /// Check if new session state exists
     pub const fn has_new_session_state(&self) -> bool {
-        self.app.state.new_session_state.is_some()
+        self.app.state.new_session.new_session_state.is_some()
     }
 
     /// Get new session state step if it exists
     pub fn new_session_step(&self) -> Option<&NewSessionStep> {
-        self.app.state.new_session_state.as_ref().map(|s| &s.step)
+        self.app.state.new_session.new_session_state.as_ref().map(|s| &s.step)
     }
 
     /// Check if help is visible
@@ -182,6 +182,7 @@ impl UITestFramework {
     pub fn filtered_repos_count(&self) -> usize {
         self.app
             .state
+            .new_session
             .new_session_state
             .as_ref()
             .and_then(|s| s.pick_repo_state.as_ref())
@@ -199,6 +200,7 @@ impl UITestFramework {
         let Some(pick) = self
             .app
             .state
+            .new_session
             .new_session_state
             .as_mut()
             .and_then(|s| s.pick_repo_state.as_mut())
@@ -732,7 +734,7 @@ mod tests {
             ui.app.state.pending_async_action
         );
 
-        if let Some(ref session_state) = ui.app.state.new_session_state {
+        if let Some(ref session_state) = ui.app.state.new_session.new_session_state {
             eprintln!("  New session step: {:?}", session_state.step);
         }
 

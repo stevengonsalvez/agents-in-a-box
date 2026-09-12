@@ -3136,10 +3136,12 @@ impl SessionFilter {
 
 /// Payload of the Configure remote-repo pre-flight: generation guard + the
 /// `ls-remote` branch listing (or the error string to show on the form).
-type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
+pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub new_session: Versioned<NewSessionSection>,
+
     pub workspace_load: Versioned<WorkspaceLoadSection>,
 
     pub config: Versioned<ConfigSection>,
@@ -3175,8 +3177,6 @@ pub struct AppState {
     pub should_quit: bool,
     pub logs: HashMap<Uuid, Vec<String>>,
     pub help_visible: bool,
-    // New session creation state
-    pub new_session_state: Option<NewSessionState>,
     // Async action processing
     pub pending_async_action: Option<AsyncAction>,
     // Flag to track if user cancelled during async operation
@@ -3285,39 +3285,6 @@ pub struct AppState {
     /// calling `live_window::current()` directly — Tier 2's JSONL walk
     /// would otherwise stall input handling on every frame.
     pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
-
-    // Usage analytics state: removed. Burndown plugin owns usage state
-    // (provider, period, filters, zoom). Host no longer reads or writes
-    // `usage_state` / `usage_load_receiver`. Statusline-related state
-    // (live_window_watcher, statusline_status_cache) stays in core
-    // because that's a host CLI install concern, not a plugin one.
-    /// Background base-branch refresh for the Configure picker. The fetch +
-    /// re-list runs on `spawn_blocking`; the result lands here and is applied
-    /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
-    /// generation guard — results from a closed/reopened picker are dropped.
-    pub branch_refresh_receiver: Option<
-        mpsc::UnboundedReceiver<(
-            u64,
-            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
-        )>,
-    >,
-    /// Current branch-refresh generation (bumped on every picker open).
-    pub branch_refresh_seq: u64,
-
-    /// Background remote-repo pre-flight for the Configure screen (ls-remote
-    /// at open: does the repo exist, does it have branches). Applied by
-    /// `check_repo_check_complete` on the next tick; the `u64` is a
-    /// generation guard so a stale check can't stamp a newer Configure form.
-    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
-    /// Current repo-check generation (bumped on every Configure open).
-    pub repo_check_seq: u64,
-
-    /// Background empty-remote initialization (`[i]` on Configure: README +
-    /// initial commit + push). `Ok(branch)` carries the branch the commit
-    /// landed on. Applied by `check_repo_init_complete` on the next tick.
-    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
-    /// Current repo-init generation.
-    pub repo_init_seq: u64,
 
     /// Per-session "cleared up to" timestamp (epoch ms). A hook event
     /// only marks a session if its `ts` is newer than this. Defaults to
@@ -3741,6 +3708,7 @@ impl Default for AppState {
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
+            new_session: Versioned::default(),
             workspace_load: Versioned::default(),
             session_labels: Versioned::default(),
             ssh: Versioned::default(),
@@ -3773,7 +3741,6 @@ impl Default for AppState {
             should_quit: false,
             logs: HashMap::new(),
             help_visible: false,
-            new_session_state: None,
             pending_async_action: None,
             async_operation_cancelled: false,
             confirmation_dialog: None,
@@ -3843,14 +3810,8 @@ impl Default for AppState {
 
             // Skill-manager screen state (spec §10.1)
             // Configure base-branch picker background refresh
-            branch_refresh_receiver: None,
-            branch_refresh_seq: 0,
             // Configure remote-repo pre-flight (ls-remote at open)
-            repo_check_receiver: None,
-            repo_check_seq: 0,
             // Configure empty-remote initialization ([i] → README + push)
-            repo_init_receiver: None,
-            repo_init_seq: 0,
 
             // Periodic session snapshot tracking
 
@@ -5278,7 +5239,11 @@ impl AppState {
         use crate::git::branch_list::{self, BranchEntry};
         use crate::git::repo_source::RepoSource;
 
-        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         else {
             return;
         };
@@ -5319,10 +5284,10 @@ impl AppState {
 
         // Background refresh — generation-guarded so a stale result can't
         // repopulate a closed/reopened picker.
-        self.branch_refresh_seq += 1;
-        let seq = self.branch_refresh_seq;
+        self.new_session.branch_refresh_seq += 1;
+        let seq = self.new_session.branch_refresh_seq;
         let (tx, rx) = mpsc::unbounded_channel();
-        self.branch_refresh_receiver = Some(rx);
+        self.new_session.branch_refresh_receiver = Some(rx);
         tokio::spawn(async move {
             let join = tokio::task::spawn_blocking(move || -> Result<Vec<BranchEntry>, String> {
                 match list_path {
@@ -5361,26 +5326,29 @@ impl AppState {
     pub fn check_branch_refresh_complete(&mut self) -> bool {
         use crate::components::new_session::configure::PickerBranchEntry;
 
-        let Some(ref mut receiver) = self.branch_refresh_receiver else {
+        let Some(ref mut receiver) = self.new_session.branch_refresh_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.branch_refresh_receiver = None;
+                self.new_session.branch_refresh_receiver = None;
                 return false;
             }
         };
-        self.branch_refresh_receiver = None;
-        if seq != self.branch_refresh_seq {
+        self.new_session.branch_refresh_receiver = None;
+        if seq != self.new_session.branch_refresh_seq {
             // A newer picker session superseded this refresh.
             return false;
         }
 
         let mut warn_msg: Option<String> = None;
-        if let Some(cfg) =
-            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        if let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         {
             let existing = cfg.existing_branches.clone();
             // Capture the fresh branch names for the base-off "⚠ exists" guard
@@ -7912,7 +7880,7 @@ impl AppState {
         // arm in `create_session_from_configure`) and rely on it surviving the
         // teardown — clearing here would re-introduce the silent-flash bug
         // (Stevie 2026-06-06).
-        self.new_session_state = None;
+        self.new_session.new_session_state = None;
         // Return to whichever screen the user opened new-session from
         // (Home / Sessions / …). Falls back to SESSION_LIST if no
         // previous screen was recorded — matches the pre-redesign
@@ -8043,7 +8011,7 @@ impl AppState {
                     ),
                     show_cursor: false,
                 });
-                self.new_session_state = None;
+                self.new_session.new_session_state = None;
                 return;
             }
         } else {
@@ -8085,7 +8053,7 @@ impl AppState {
 
         // Mark step = Creating so the existing render machinery (legacy.rs)
         // picks up the in-flight UI.
-        if let Some(ns) = self.new_session_state.as_mut() {
+        if let Some(ns) = self.new_session.new_session_state.as_mut() {
             ns.step = NewSessionStep::Creating;
         }
 
@@ -8312,8 +8280,11 @@ impl AppState {
         use crate::config::session_defaults::SessionDefaults;
         use crate::git::repo_source::head_branch;
 
-        if let Some(pick) =
-            self.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
+        if let Some(pick) = self
+            .new_session
+            .new_session_state
+            .as_ref()
+            .and_then(|ns| ns.pick_repo_state.as_ref())
         {
             let path = SessionDefaults::default_path();
             if let Err(err) = pick.defaults.save_to(&path) {
@@ -8369,7 +8340,7 @@ impl AppState {
             existing_branches,
             repo_branch_names,
         );
-        if let Some(ns) = self.new_session_state.as_mut() {
+        if let Some(ns) = self.new_session.new_session_state.as_mut() {
             ns.configure_state = Some(cfg);
             ns.step = NewSessionStep::Configure;
         }
@@ -8386,10 +8357,10 @@ impl AppState {
         // decision — the two must agree or the form waits on a verdict that
         // never comes.
         if source.is_remote() {
-            self.repo_check_seq += 1;
-            let seq = self.repo_check_seq;
+            self.new_session.repo_check_seq += 1;
+            let seq = self.new_session.repo_check_seq;
             let (tx, rx) = mpsc::unbounded_channel();
-            self.repo_check_receiver = Some(rx);
+            self.new_session.repo_check_receiver = Some(rx);
             tokio::spawn(async move {
                 let join = tokio::task::spawn_blocking(move || {
                     crate::git::RemoteRepoManager::new()
@@ -8417,23 +8388,27 @@ impl AppState {
     pub fn check_repo_check_complete(&mut self) -> bool {
         use crate::components::new_session::configure::RepoCheck;
 
-        let Some(ref mut receiver) = self.repo_check_receiver else {
+        let Some(ref mut receiver) = self.new_session.repo_check_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.repo_check_receiver = None;
+                self.new_session.repo_check_receiver = None;
                 return false;
             }
         };
-        self.repo_check_receiver = None;
-        if seq != self.repo_check_seq {
+        self.new_session.repo_check_receiver = None;
+        if seq != self.new_session.repo_check_seq {
             // A newer Configure form superseded this check.
             return false;
         }
-        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         else {
             return false;
         };
@@ -8497,6 +8472,7 @@ impl AppState {
     /// verdict lands via `check_repo_init_complete`.
     pub fn initialize_remote_repo(&mut self) {
         let Some(source) = self
+            .new_session
             .new_session_state
             .as_ref()
             .and_then(|ns| ns.configure_state.as_ref())
@@ -8504,10 +8480,10 @@ impl AppState {
         else {
             return;
         };
-        self.repo_init_seq += 1;
-        let seq = self.repo_init_seq;
+        self.new_session.repo_init_seq += 1;
+        let seq = self.new_session.repo_init_seq;
         let (tx, rx) = mpsc::unbounded_channel();
-        self.repo_init_receiver = Some(rx);
+        self.new_session.repo_init_receiver = Some(rx);
         tokio::spawn(async move {
             let join = tokio::task::spawn_blocking(move || {
                 let manager = crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
@@ -8530,24 +8506,27 @@ impl AppState {
     pub fn check_repo_init_complete(&mut self) -> bool {
         use crate::components::new_session::configure::RepoCheck;
 
-        let Some(ref mut receiver) = self.repo_init_receiver else {
+        let Some(ref mut receiver) = self.new_session.repo_init_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.repo_init_receiver = None;
+                self.new_session.repo_init_receiver = None;
                 return false;
             }
         };
-        self.repo_init_receiver = None;
-        if seq != self.repo_init_seq {
+        self.new_session.repo_init_receiver = None;
+        if seq != self.new_session.repo_init_seq {
             return false;
         }
         let mut toast: Option<Result<String, String>> = None;
-        if let Some(cfg) =
-            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        if let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         {
             // Apply-side state gate (mirrors check_repo_check_complete): only
             // a form that is actually Initializing takes the verdict. Without
@@ -8641,8 +8620,11 @@ impl AppState {
                 }
             };
 
-        if let Some(pick) =
-            self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
+        if let Some(pick) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.pick_repo_state.as_mut())
         {
             if auth_ok {
                 tracing::info!("GitHub auth check passed");
@@ -8755,7 +8737,7 @@ impl AppState {
         };
 
         // Mark step = Creating so the in-flight UI is shown until tmux returns.
-        if let Some(ns) = self.new_session_state.as_mut() {
+        if let Some(ns) = self.new_session.new_session_state.as_mut() {
             ns.step = NewSessionStep::Creating;
         }
         self.ui_needs_refresh = true;
@@ -11144,7 +11126,7 @@ impl AppState {
                     );
 
                     self.current_screen = screen_ids::NEW_SESSION.to_string();
-                    self.new_session_state = Some(NewSessionState {
+                    self.new_session.new_session_state = Some(NewSessionState {
                         step: NewSessionStep::Configure,
                         configure_state: Some(configure_state),
                         ..Default::default()
@@ -14155,7 +14137,7 @@ impl App {
                 if self.state.current_screen != screen_ids::ONBOARDING
                     && self.state.current_screen != screen_ids::SETUP_MENU
                 {
-                    self.state.new_session_state = None;
+                    self.state.new_session.new_session_state = None;
                     self.state.current_screen = screen_ids::SESSION_LIST.to_string();
                 }
                 self.state.pending_async_action = None;
