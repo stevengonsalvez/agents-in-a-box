@@ -241,7 +241,8 @@ async fn plain_checkout_session_renders_repo_name_not_broken() {
     // ── User-visible proof: render the real session list ──────────────────
     let mut list = SessionListComponent::new();
     let mut term = Terminal::new(TestBackend::new(120, 40)).expect("test terminal");
-    term.draw(|f| list.render(f, f.area(), &mut state)).expect("draw");
+    let mut ui = ainb::app::ui_state::UiState::default();
+    term.draw(|f| list.render(f, f.area(), &state, &mut ui)).expect("draw");
     let painted: String = term
         .backend()
         .buffer()

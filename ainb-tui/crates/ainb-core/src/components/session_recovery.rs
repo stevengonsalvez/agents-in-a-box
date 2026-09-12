@@ -2,12 +2,13 @@
 // Displays orphaned sessions (tmux dead, worktree exists) and orphaned worktrees (broken symlinks, no container)
 // Allows resume/cleanup actions for both types
 
+use crate::app::ui_state::UiState;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, BorderType, Borders, List, ListItem, Paragraph, Tabs, Wrap},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -209,8 +210,6 @@ pub struct SessionRecoveryState {
     pub selected_index: usize,
     /// Multi-select: indices of items marked for bulk operations
     pub selected_items: HashSet<usize>,
-    /// List state for rendering
-    pub list_state: ListState,
     /// Whether data is being loaded
     pub loading: bool,
     /// Last error message
@@ -262,7 +261,6 @@ impl SessionRecoveryState {
             view_mode: RecoveryViewMode::default(),
             selected_index: 0,
             selected_items: HashSet::new(),
-            list_state: ListState::default(),
             loading: false,
             last_error: None,
             action_result: None,
@@ -405,11 +403,6 @@ impl SessionRecoveryState {
         // Marks are view positions, not identities: a query change silently
         // re-points them at other rows, and `D` deletes worktrees. Drop them.
         self.selected_items.clear();
-        let count = self.current_view_count();
-        self.list_state.select(if count == 0 { None } else { Some(0) });
-        // list_state owns the scroll offset and it survives a shrink, so a
-        // narrowed list would otherwise render scrolled past its own end.
-        *self.list_state.offset_mut() = 0;
     }
 
     /// Toggle to next view mode
@@ -417,8 +410,6 @@ impl SessionRecoveryState {
         self.view_mode = self.view_mode.next();
         self.selected_index = 0;
         self.selected_items.clear();
-        let count = self.current_view_count();
-        self.list_state.select(if count == 0 { None } else { Some(0) });
     }
 
     /// Refresh the list of orphaned sessions and worktrees
@@ -460,11 +451,6 @@ impl SessionRecoveryState {
         if count > 0 && self.selected_index >= count {
             self.selected_index = count - 1;
         }
-        self.list_state.select(if count == 0 {
-            None
-        } else {
-            Some(self.selected_index)
-        });
     }
 
     /// Load orphaned sessions from ~/.claude/agents/
@@ -850,7 +836,6 @@ impl SessionRecoveryState {
         if self.is_on_separator() {
             self.selected_index = (self.selected_index + 1) % count;
         }
-        self.list_state.select(Some(self.selected_index));
     }
 
     pub fn previous(&mut self) {
@@ -871,7 +856,6 @@ impl SessionRecoveryState {
                 self.selected_index -= 1;
             }
         }
-        self.list_state.select(Some(self.selected_index));
     }
 
     /// Get the selected session (only valid when not in worktree selection)
@@ -1451,18 +1435,23 @@ impl SessionRecoveryState {
 pub struct SessionRecovery;
 
 impl SessionRecovery {
-    pub fn render(frame: &mut Frame, area: Rect, state: &mut SessionRecoveryState) {
+    pub fn render(frame: &mut Frame, area: Rect, state: &SessionRecoveryState, ui: &mut UiState) {
         // Main layout: list on left, details on right
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(area);
 
-        Self::render_session_list(frame, chunks[0], state);
+        Self::render_session_list(frame, chunks[0], state, ui);
         Self::render_session_details(frame, chunks[1], state);
     }
 
-    fn render_session_list(frame: &mut Frame, area: Rect, state: &mut SessionRecoveryState) {
+    fn render_session_list(
+        frame: &mut Frame,
+        area: Rect,
+        state: &SessionRecoveryState,
+        ui: &mut UiState,
+    ) {
         // Visible counts, not raw ones: a header saying (5) over a filtered
         // list of 1 reads as a broken filter.
         let session_count = state.visible_sessions().len();
@@ -1632,7 +1621,15 @@ impl SessionRecovery {
         let items = Self::build_list_items(state, layout[2].width);
         let list = List::new(items);
 
-        frame.render_stateful_widget(list, layout[2], &mut state.list_state);
+        // Selection is core's; only the scroll offset is the widget's own.
+        // The clamp is what `after_query_change` used to do by resetting the
+        // offset: a filter can shrink the list under a scrolled viewport, and
+        // an offset past the end paints an empty pane.
+        let list_state = &mut ui.session_recovery_list;
+        list_state.select((total_count > 0).then_some(state.selected_index));
+        let offset = list_state.offset_mut();
+        *offset = (*offset).min(total_count.saturating_sub(1));
+        frame.render_stateful_widget(list, layout[2], list_state);
 
         // Render recovery overlay on top if present
         if let Some(ref overlay) = state.recovery_overlay {
@@ -2312,10 +2309,11 @@ mod tests {
 
     /// Render the panel and return the buffer as lines, so a row assertion can
     /// name the row rather than only ask whether text exists somewhere.
-    fn render_to_lines(state: &mut SessionRecoveryState, w: u16, h: u16) -> Vec<String> {
+    fn render_to_lines(state: &SessionRecoveryState, w: u16, h: u16) -> Vec<String> {
+        let mut ui = crate::app::ui_state::UiState::default();
         let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
         terminal
-            .draw(|frame| SessionRecovery::render(frame, frame.area(), state))
+            .draw(|frame| SessionRecovery::render(frame, frame.area(), state, &mut ui))
             .expect("draw");
         let buf = terminal.backend().buffer().clone();
         (0..h)

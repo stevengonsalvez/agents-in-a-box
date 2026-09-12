@@ -1267,23 +1267,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn invalidate_statusline_status_cache_forces_refresh() {
-        use crate::cli::statusline_install::StatuslineStatus;
-
-        let mut state = AppState::new();
-        // Seed the cache directly with a stale value.
-        state.statusline_status_cache =
-            Some((Some(StatuslineStatus::NotConfigured), Instant::now()));
-        assert!(state.statusline_status_cache.is_some());
-
-        state.invalidate_statusline_status_cache();
-        assert!(
-            state.statusline_status_cache.is_none(),
-            "invalidation must drop the cached entry"
-        );
-    }
-
     // ========================================================================
     // Config "Default Workspace" round-trip
     //

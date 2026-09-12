@@ -127,7 +127,11 @@ impl WelcomePanelComponent {
         Self
     }
 
-    pub fn render(&self, frame: &mut Frame, area: Rect, state: &mut WelcomePanelState) {
+    /// Paint the panel and report the `(content_height, visible_height)` it
+    /// measured. Only a paint can know either — the first is the wrapped line
+    /// count, the second the block interior — and the scroll clamp needs both,
+    /// so they are returned rather than written back through `state`.
+    pub fn render(&self, frame: &mut Frame, area: Rect, state: &WelcomePanelState) -> (u16, u16) {
         // Border color based on focus
         let border_color = if state.is_focused {
             CORNFLOWER_BLUE
@@ -158,8 +162,8 @@ impl WelcomePanelComponent {
 
         // Parse and render markdown content
         let lines = self.parse_markdown(&state.content);
-        state.content_height = lines.len() as u16;
-        state.visible_height = inner.height;
+        let content_height = lines.len() as u16;
+        let visible_height = inner.height;
 
         // Create paragraph with scroll
         let paragraph = Paragraph::new(lines)
@@ -169,16 +173,16 @@ impl WelcomePanelComponent {
         frame.render_widget(paragraph, inner);
 
         // Render scrollbar if content overflows
-        if state.content_height > state.visible_height {
+        if content_height > visible_height {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("▲"))
                 .end_symbol(Some("▼"))
                 .track_symbol(Some("│"))
                 .thumb_symbol("█");
 
-            let mut scrollbar_state = ScrollbarState::new(state.content_height as usize)
+            let mut scrollbar_state = ScrollbarState::new(content_height as usize)
                 .position(state.scroll_offset as usize)
-                .viewport_content_length(state.visible_height as usize);
+                .viewport_content_length(visible_height as usize);
 
             // Scrollbar area (right edge of inner)
             let scrollbar_area = Rect {
@@ -210,6 +214,8 @@ impl WelcomePanelComponent {
                 frame.render_widget(indicator, indicator_area);
             }
         }
+
+        (content_height, visible_height)
     }
 
     /// Parse markdown-like content into styled lines

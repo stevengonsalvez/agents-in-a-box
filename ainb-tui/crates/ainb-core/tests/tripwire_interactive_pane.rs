@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use ainb::app::events::{AppEvent, EventHandler};
 use ainb::app::state::{AppState, FocusedPane};
+use ainb::app::ui_state::UiState;
 use ainb::components::{LayoutComponent, TmuxPreviewPane};
 use ainb::models::OtherTmuxSession;
 use ainb::tmux::{encode_key_event, encode_mouse_event};
@@ -19,6 +20,20 @@ use crossterm::event::{
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+
+/// One host frame, exactly as `run_tui_loop` drives it: tick the live state
+/// machines, paint against `&AppState`, then apply what only the paint could
+/// measure (the embed resize, the pane rects).
+fn draw_frame(
+    term: &mut Terminal<TestBackend>,
+    layout: &mut LayoutComponent,
+    state: &mut AppState,
+    ui: &mut UiState,
+) {
+    layout.tick_before_draw(state);
+    term.draw(|f| layout.render(f, state, ui)).expect("draw");
+    ainb::components::layout::publish_after_draw(state, ui);
+}
 
 fn tmux_available() -> bool {
     Command::new("tmux")
@@ -183,7 +198,8 @@ fn interactive_embed_width_follows_the_sidebar_state() {
     // Pin the sidebar to a known width: AppState::new() restores the
     // developer's persisted preference from the real config, which would make
     // the expected interior widths env-dependent.
-    state.sessions_pane_state.restore(Some(40), false);
+    let mut ui = UiState::default();
+    ui.sessions_pane.restore(Some(40), false);
     assert!(
         state.enter_interactive_pane(28, 80),
         "enter_interactive_pane"
@@ -194,12 +210,12 @@ fn interactive_embed_width_follows_the_sidebar_state() {
 
     // 40-col sidebar: the embed gets the remaining pane interior —
     // 120 − 40 − 2 (border) = 78 — NOT a forced near-full-width expansion.
-    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    draw_frame(&mut term, &mut layout, &mut state, &mut ui);
     let (_, cols_with_sidebar) = state.embed.as_ref().expect("embed").size();
 
     // Pre-collapsed rail (what `B` toggles): near-full width — 120 − 5 − 2.
-    state.sessions_pane_state.collapsed = true;
-    term.draw(|f| layout.render(f, &mut state)).expect("draw");
+    ui.sessions_pane.collapsed = true;
+    draw_frame(&mut term, &mut layout, &mut state, &mut ui);
     let (_, cols_with_rail) = state.embed.as_ref().expect("embed").size();
 
     state.release_interactive_pane();
@@ -301,9 +317,10 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     // One full layout render publishes embed_pane_area + the sessions/preview
     // rects the mouse handler consults.
     let mut layout = LayoutComponent::new();
+    let mut ui = UiState::default();
     let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
-    term.draw(|f| layout.render(f, &mut state)).expect("draw");
-    let inner = state
+    draw_frame(&mut term, &mut layout, &mut state, &mut ui);
+    let inner = ui
         .embed_pane_area
         .expect("interactive render must publish the embed pane interior");
 
@@ -317,7 +334,11 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     );
 
     // ── (a) mouse click through the real state-level handler: swallowed ──
-    let click = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: px, y: py }, &mut state);
+    let click = EventHandler::handle_mouse_event(
+        AppEvent::MouseClick { x: px, y: py },
+        &mut state,
+        &mut ui,
+    );
     let click_swallowed = click.is_none();
     let still_interactive_after_click = state.is_interactive_pane() && state.embed.is_some();
 
@@ -330,7 +351,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     // path the intercept uses and that the byte lands in the live session.
     let marker = format!("TRIPWIRE_BOUNDARY_{}", std::process::id());
     let pre_frame = {
-        term.draw(|f| layout.render(f, &mut state)).expect("draw");
+        draw_frame(&mut term, &mut layout, &mut state, &mut ui);
         buffer_text(&term)
     };
     assert!(
@@ -354,7 +375,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut colon_reached_pty = false;
     while Instant::now() < deadline {
-        term.draw(|f| layout.render(f, &mut state)).expect("draw");
+        draw_frame(&mut term, &mut layout, &mut state, &mut ui);
         if buffer_text(&term).contains(&marker) {
             colon_reached_pty = true;
             break;
@@ -384,8 +405,12 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     state.release_interactive_pane();
     // Next frame re-lays-out the normal split; (80,10) sits in the preview
     // pane, so a click there must move focus to LiveLogs.
-    term.draw(|f| layout.render(f, &mut state)).expect("draw");
-    let _ = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: px, y: py }, &mut state);
+    draw_frame(&mut term, &mut layout, &mut state, &mut ui);
+    let _ = EventHandler::handle_mouse_event(
+        AppEvent::MouseClick { x: px, y: py },
+        &mut state,
+        &mut ui,
+    );
     let host_mouse_back = state.focused_pane == FocusedPane::LiveLogs;
 
     kill_session(&session);

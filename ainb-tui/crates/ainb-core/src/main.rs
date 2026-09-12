@@ -438,6 +438,12 @@ async fn run_tui_loop(
     layout: &mut LayoutComponent,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
+    // The ratatui host's own state: geometry, scroll offsets, hover, and the
+    // status bar's TTL cache. Lives here, beside the `LayoutComponent`, because
+    // none of it survives this process or crosses to another surface.
+    let mut ui = crate::app::ui_state::UiState::default();
+    ui.restore(&app.state.app_config);
+
     let (keymap, keymap_warning) = Keymap::load_user();
     if let Some(warning) = keymap_warning {
         app.state.add_warning_notification(warning);
@@ -502,7 +508,7 @@ async fn run_tui_loop(
         // directly.
         // A fresh plugin frame is a reason to repaint even if nothing else
         // changed (e.g. a self-animating plugin screen).
-        if app.tick_plugin_renders() {
+        if app.tick_plugin_renders(&mut ui) {
             needs_redraw = true;
         }
 
@@ -523,7 +529,7 @@ async fn run_tui_loop(
                 width: 80,
                 height: 24,
             });
-            let sidebar = app.state.sessions_pane_state.effective_width(sz.width);
+            let sidebar = ui.sessions_pane.effective_width(sz.width);
             let (rows, cols) = crate::components::layout::interactive_embed_size(
                 sz.width,
                 sz.height,
@@ -552,10 +558,16 @@ async fn run_tui_loop(
             needs_redraw = true;
         }
 
+        needs_redraw |= std::mem::take(&mut ui.needs_redraw);
+
         if needs_redraw {
+            // Everything the draw path used to tick inside `terminal.draw`.
+            // Under the same dirty gate the draw is, so these keep the cadence
+            // they had when they lived in `render`.
+            layout.tick_before_draw(&mut app.state);
             let draw_start = Instant::now();
             match terminal.draw(|frame| {
-                layout.render(frame, &mut app.state);
+                layout.render(frame, &app.state, &mut ui);
             }) {
                 Ok(_) => {
                     crate::perf::record_draw(draw_start.elapsed());
@@ -565,6 +577,9 @@ async fn run_tui_loop(
                     if let Some(key_at) = pending_key_at.take() {
                         crate::perf::record_key_to_render(key_at.elapsed());
                     }
+                    // The embed resize and three pane rects could only be
+                    // measured by the frame that just went out.
+                    crate::components::layout::publish_after_draw(&mut app.state, &mut ui);
                     needs_redraw = false;
                 }
                 // Transient frame-write failure (e.g. EINTR over a flaky SSH
@@ -723,33 +738,26 @@ async fn run_tui_loop(
                     // A read-only terminal uses tmux's own scrollback; host
                     // preview scroll mode would swallow navigation invisibly.
                     let observing_terminal = app.state.is_observing_selected_terminal();
-                    let preview = layout.tmux_preview_mut();
                     match preview_scroll_route(
                         &app.state.current_screen,
-                        preview.is_scroll_mode(),
+                        layout.tmux_preview_mut().is_scroll_mode(),
                         observing_terminal,
                     ) {
-                        PreviewScrollRoute::Clear => preview.exit_scroll_mode(),
+                        PreviewScrollRoute::Clear => {
+                            ui.apply(UiAction::PreviewExitScroll, layout, &app.state);
+                        }
                         PreviewScrollRoute::Handle => {
                             match keymap.resolve(&[KeyContext::PreviewScroll], &chord) {
-                                Some(KeyAction::Ui(UiAction::PreviewExitScroll)) => {
-                                    preview.exit_scroll_mode();
-                                    continue; // Don't process ESC as Quit
-                                }
-                                Some(KeyAction::Ui(UiAction::PreviewScrollUp)) => {
-                                    preview.scroll_up();
-                                    continue; // Don't let event handler navigate sessions
-                                }
-                                Some(KeyAction::Ui(UiAction::PreviewScrollDown)) => {
-                                    preview.scroll_down();
-                                    continue; // Don't let event handler navigate sessions
-                                }
-                                Some(KeyAction::Ui(UiAction::PreviewPageUp)) => {
-                                    preview.scroll_page_up();
-                                    continue;
-                                }
-                                Some(KeyAction::Ui(UiAction::PreviewPageDown)) => {
-                                    preview.scroll_page_down();
+                                // Don't let ESC fall through as Quit, or the
+                                // arrows navigate sessions behind the pane.
+                                Some(KeyAction::Ui(
+                                    action @ (UiAction::PreviewExitScroll
+                                    | UiAction::PreviewScrollUp
+                                    | UiAction::PreviewScrollDown
+                                    | UiAction::PreviewPageUp
+                                    | UiAction::PreviewPageDown),
+                                )) => {
+                                    ui.apply(action, layout, &app.state);
                                     continue;
                                 }
                                 _ => {} // Let other keys pass through to event handler
@@ -771,65 +779,35 @@ async fn run_tui_loop(
                         continue;
                     }
 
-                    if let Some(app_event) = EventHandler::handle_key_event_with_keymap(
+                    let resolved = EventHandler::handle_key_event_with_keymap(
                         key_event,
                         &mut app.state,
                         &keymap,
-                    ) {
+                        &mut ui,
+                    );
+                    // Scroll intents the table resolved never reach the reducer.
+                    for action in ui.take_queued() {
+                        ui.apply(action, layout, &app.state);
+                    }
+                    if let Some(app_event) = resolved {
                         // Handle scroll events for live logs and tmux preview
                         use crate::app::events::AppEvent;
                         match app_event {
-                            AppEvent::ScrollLogsUp => {
-                                layout.live_logs_mut().scroll_up();
+                            // The sidebar's collapsed flag is renderer state,
+                            // so the host applies it. Persisted here for the
+                            // same reason the [-]/[+] mouse glyph persists it.
+                            AppEvent::ToggleSessionsSidebar => {
+                                ui.sessions_pane.toggle_collapsed();
+                                EventHandler::persist_sessions_pane_preferences(
+                                    &mut app.state,
+                                    &ui,
+                                );
                             }
-                            AppEvent::ScrollLogsDown => {
-                                let total_logs =
-                                    app.state.live_logs.values().map(|v| v.len()).sum::<usize>();
-                                layout.live_logs_mut().scroll_down(total_logs);
-                            }
-                            AppEvent::ScrollLogsToTop => {
-                                layout.live_logs_mut().scroll_to_top();
-                            }
-                            AppEvent::ScrollLogsToBottom => {
-                                let total_logs =
-                                    app.state.live_logs.values().map(|v| v.len()).sum::<usize>();
-                                layout.live_logs_mut().scroll_to_bottom(total_logs);
-                            }
-                            AppEvent::ToggleAutoScroll => {
-                                layout.live_logs_mut().toggle_auto_scroll();
-                            }
-                            // Tmux preview scroll events
-                            AppEvent::ScrollPreviewUp => {
-                                if app.state.is_observing_selected_terminal() {
-                                    app.state.notify_live_preview_no_scrollback();
-                                } else {
-                                    let preview = layout.tmux_preview_mut();
-                                    if !preview.is_scroll_mode() {
-                                        preview.enter_scroll_mode();
-                                    }
-                                    preview.scroll_up();
-                                }
-                            }
-                            AppEvent::ScrollPreviewDown => {
-                                if app.state.is_observing_selected_terminal() {
-                                    app.state.notify_live_preview_no_scrollback();
-                                } else {
-                                    let preview = layout.tmux_preview_mut();
-                                    if !preview.is_scroll_mode() {
-                                        preview.enter_scroll_mode();
-                                    }
-                                    preview.scroll_down();
-                                }
-                            }
-                            AppEvent::EnterScrollMode => {
-                                if app.state.is_observing_selected_terminal() {
-                                    app.state.notify_live_preview_no_scrollback();
-                                } else {
-                                    layout.tmux_preview_mut().enter_scroll_mode();
-                                }
-                            }
-                            AppEvent::ExitScrollMode => {
-                                layout.tmux_preview_mut().exit_scroll_mode();
+                            AppEvent::UsageWireStatusline => {
+                                EventHandler::process_event(app_event, &mut app.state);
+                                // settings.json just changed; drop the TTL cache
+                                // so the CTA flips on the very next frame.
+                                ui.invalidate_statusline_status();
                             }
                             AppEvent::EnterInteractivePane => {
                                 // Size the embed to the EXACT interactive
@@ -842,8 +820,7 @@ async fn run_tui_loop(
                                     width: 80,
                                     height: 24,
                                 });
-                                let sidebar =
-                                    app.state.sessions_pane_state.effective_width(sz.width);
+                                let sidebar = ui.sessions_pane.effective_width(sz.width);
                                 let (rows, cols) =
                                     crate::components::layout::interactive_embed_size(
                                         sz.width,
@@ -877,8 +854,12 @@ async fn run_tui_loop(
                                         last_app_tick = Instant::now();
                                         // Force UI refresh
                                         terminal.draw(|frame| {
-                                            layout.render(frame, &mut app.state);
+                                            layout.render(frame, &app.state, &mut ui);
                                         })?;
+                                        crate::components::layout::publish_after_draw(
+                                            &mut app.state,
+                                            &mut ui,
+                                        );
                                     }
                                     Err(e) => {
                                         error!(">>> Error during immediate tick: {}", e);
@@ -906,8 +887,7 @@ async fn run_tui_loop(
                     // without it ignore the sequences). Everything else is
                     // swallowed.
                     if app.state.is_interactive_pane() {
-                        let write_failed = app
-                            .state
+                        let write_failed = ui
                             .embed_pane_area
                             .zip(app.state.embed.as_ref())
                             .and_then(|(inner, client)| {
@@ -930,6 +910,7 @@ async fn run_tui_loop(
                     if matches!(
                         crate::app::screens::builtin::forward_mouse_to_focused_plugin(
                             &mut app.state,
+                            &ui,
                             &mouse_event,
                         ),
                         crate::app::screens::EventOutcome::Handled
@@ -958,6 +939,7 @@ async fn run_tui_loop(
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseClick { x: col, y: row },
                                 &mut app.state,
+                                &mut ui,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
@@ -969,6 +951,7 @@ async fn run_tui_loop(
                                     y: mouse_event.row,
                                 },
                                 &mut app.state,
+                                &mut ui,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
@@ -1050,6 +1033,7 @@ async fn run_tui_loop(
                                 }
                             } else if app.state.current_screen == screen_ids::SESSION_LIST
                                 && app.state.scroll_session_list_by_mouse(
+                                    &ui.sessions_pane,
                                     mouse_event.column,
                                     mouse_event.row,
                                     is_down,
@@ -1059,17 +1043,12 @@ async fn run_tui_loop(
                                 // Session-list scrolling was handled in-memory.
                             } else {
                                 // Default: scroll live logs
-                                if is_down {
-                                    let total_logs = app
-                                        .state
-                                        .live_logs
-                                        .values()
-                                        .map(|v| v.len())
-                                        .sum::<usize>();
-                                    layout.live_logs_mut().scroll_down(total_logs);
+                                let action = if is_down {
+                                    UiAction::ScrollLogsDown
                                 } else {
-                                    layout.live_logs_mut().scroll_up();
-                                }
+                                    UiAction::ScrollLogsUp
+                                };
+                                ui.apply(action, layout, &app.state);
                             }
                         }
                         MouseEventKind::Drag(MouseButton::Left) => {
@@ -1081,6 +1060,7 @@ async fn run_tui_loop(
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragging { x: col, y: row },
                                 &mut app.state,
+                                &mut ui,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
@@ -1094,6 +1074,7 @@ async fn run_tui_loop(
                             } else if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseDragEnd { x: col, y: row },
                                 &mut app.state,
+                                &mut ui,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
@@ -1103,6 +1084,7 @@ async fn run_tui_loop(
                             if let Some(app_event) = EventHandler::handle_mouse_event(
                                 AppEvent::MouseMove { x: col, y: row },
                                 &mut app.state,
+                                &mut ui,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }

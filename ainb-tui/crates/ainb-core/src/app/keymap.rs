@@ -668,9 +668,20 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     contexts
 }
 
-/// UI-owned command declared in the table while Phase 3 still owns mutation in main.
+/// Renderer-local command: it is applied to the ratatui host's `UiState` and
+/// `LayoutComponent` and never reaches the reducer, because scroll position is
+/// not something the product knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiAction {
+    ScrollLogsUp,
+    ScrollLogsDown,
+    ScrollLogsToTop,
+    ScrollLogsToBottom,
+    ToggleAutoScroll,
+    /// Shift+arrow from the session list: enters preview scroll mode if it is
+    /// not already on, then moves. `PreviewScroll*` below are the in-mode keys.
+    ScrollPreviewUp,
+    ScrollPreviewDown,
     PreviewScrollUp,
     PreviewScrollDown,
     PreviewPageUp,

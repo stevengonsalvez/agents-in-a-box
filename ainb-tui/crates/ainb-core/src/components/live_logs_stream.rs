@@ -343,6 +343,19 @@ impl LiveLogsStreamComponent {
         self.auto_scroll = !self.auto_scroll;
     }
 
+    /// Lines the viewport is scrolled back by. Read by the `UiAction` contract
+    /// test, which is the only thing outside this component that needs it.
+    #[must_use]
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Whether new lines pin the viewport to the bottom.
+    #[must_use]
+    pub fn auto_scroll(&self) -> bool {
+        self.auto_scroll
+    }
+
     /// Toggle timestamp display
     pub fn toggle_timestamps(&mut self) {
         self.show_timestamps = !self.show_timestamps;
