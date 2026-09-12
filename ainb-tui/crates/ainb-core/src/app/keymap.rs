@@ -448,10 +448,10 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     if state.ssh.ssh_session_rename_mode {
         contexts.push(KeyContext::SshRename);
     }
-    if state.session_label_rename_mode {
+    if state.session_labels.session_label_rename_mode {
         contexts.push(KeyContext::SessionRename);
     }
-    if state.session_context_menu.is_some() {
+    if state.session_labels.session_context_menu.is_some() {
         contexts.push(KeyContext::SessionContextMenu);
     }
     if state.help_visible {

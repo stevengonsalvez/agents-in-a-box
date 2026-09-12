@@ -1531,7 +1531,7 @@ impl EventHandler {
         if state.ssh.ssh_session_rename_mode {
             return Some(AppEvent::SshSessionRenameChar(character));
         }
-        if state.session_label_rename_mode {
+        if state.session_labels.session_label_rename_mode {
             return Some(AppEvent::SessionLabelRenameChar(character));
         }
         if state.is_in_quick_commit_mode() {

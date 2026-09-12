@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub session_labels: Versioned<SessionLabelsSection>,
+
     pub ssh: Versioned<SshSection>,
 
     pub onboarding: Versioned<OnboardingSection>,
@@ -3259,14 +3261,6 @@ pub struct AppState {
     pub other_tmux_rename_mode: bool,
     /// Buffer for the new name being typed during rename
     pub other_tmux_rename_buffer: String,
-
-    /// Persistent store for durable session labels.
-    pub session_label_store: SessionLabelStore,
-    /// Durable-label text popup state for managed and SSH sessions.
-    pub session_label_rename_mode: bool,
-    pub session_label_rename_buffer: String,
-    pub session_label_rename_target: Option<AttachableRef>,
-    pub session_context_menu: Option<SessionContextMenu>,
 
     // AINB 2.0: Home screen and agent selection
     pub home_screen_state: HomeScreenState,
@@ -3770,6 +3764,7 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            session_labels: Versioned::default(),
             ssh: Versioned::default(),
             onboarding: Versioned::new(OnboardingSection {
                 // The popup's provider rows come from the config this function
@@ -3834,11 +3829,6 @@ impl Default for AppState {
             other_tmux_rename_buffer: String::new(),
 
             // Initialize SSH sessions (separate section)
-            session_label_store: SessionLabelStore::load(),
-            session_label_rename_mode: false,
-            session_label_rename_buffer: String::new(),
-            session_label_rename_target: None,
-            session_context_menu: None,
 
             // AINB 2.0: Home screen and agent selection
             home_screen_state: HomeScreenState::default(),
@@ -5519,8 +5509,10 @@ impl AppState {
                 for interactive_session in sessions {
                     live_tmux_names.insert(interactive_session.tmux_session_name.clone());
                     let mut session = interactive_session.to_session_model();
-                    if let Some(label) =
-                        self.session_label_store.get(&interactive_session.tmux_session_name)
+                    if let Some(label) = self
+                        .session_labels
+                        .session_label_store
+                        .get(&interactive_session.tmux_session_name)
                     {
                         session.display_name = Some(label.clone());
                     }
@@ -5619,7 +5611,10 @@ impl AppState {
                 continue;
             };
 
-            let stopped = Self::stopped_session_from_metadata(metadata, &self.session_label_store);
+            let stopped = Self::stopped_session_from_metadata(
+                metadata,
+                &self.session_labels.session_label_store,
+            );
             // Group by the actual source repository (matches Phase 1's
             // grouping above). The previous `worktree_path.parent()` key was
             // always the shared `~/.agents-in-a-box/worktrees/` dir, which
@@ -5799,7 +5794,8 @@ impl AppState {
                     }
 
                     // Restore display_name from persistent store
-                    if let Some(preserved_name) = self.session_label_store.get(&name) {
+                    if let Some(preserved_name) = self.session_labels.session_label_store.get(&name)
+                    {
                         ssh_session.display_name = Some(preserved_name.clone());
                     }
 
@@ -6965,8 +6961,8 @@ impl AppState {
 
                 // Persist to disk
                 if let Some(key) = tmux_name {
-                    self.session_label_store.set(key, session.display_name.clone());
-                    if let Err(e) = self.session_label_store.save() {
+                    self.session_labels.session_label_store.set(key, session.display_name.clone());
+                    if let Err(e) = self.session_labels.session_label_store.save() {
                         warn!("Failed to save session labels: {}", e);
                     }
                 }
@@ -7011,36 +7007,37 @@ impl AppState {
                 .and_then(|session| session.display_name.clone()),
             _ => None,
         };
-        self.session_label_rename_target = Some(target);
-        self.session_label_rename_buffer = current.unwrap_or_default();
-        self.session_label_rename_mode = true;
+        self.session_labels.session_label_rename_target = Some(target);
+        self.session_labels.session_label_rename_buffer = current.unwrap_or_default();
+        self.session_labels.session_label_rename_mode = true;
     }
 
     pub fn cancel_session_label_rename(&mut self) {
-        self.session_label_rename_mode = false;
-        self.session_label_rename_buffer.clear();
-        self.session_label_rename_target = None;
+        self.session_labels.session_label_rename_mode = false;
+        self.session_labels.session_label_rename_buffer.clear();
+        self.session_labels.session_label_rename_target = None;
     }
 
     pub fn session_label_rename_char(&mut self, c: char) {
-        if self.session_label_rename_mode {
-            self.session_label_rename_buffer.push(c);
+        if self.session_labels.session_label_rename_mode {
+            self.session_labels.session_label_rename_buffer.push(c);
         }
     }
 
     pub fn session_label_rename_backspace(&mut self) {
-        if self.session_label_rename_mode {
-            self.session_label_rename_buffer.pop();
+        if self.session_labels.session_label_rename_mode {
+            self.session_labels.session_label_rename_buffer.pop();
         }
     }
 
     /// Validate, persist, and immediately render a durable session label.
     pub fn confirm_session_label_rename(&mut self) {
-        let Some(target) = self.session_label_rename_target else {
+        let Some(target) = self.session_labels.session_label_rename_target else {
             return self.cancel_session_label_rename();
         };
-        let label = match crate::config::normalize_session_label(&self.session_label_rename_buffer)
-        {
+        let label = match crate::config::normalize_session_label(
+            &self.session_labels.session_label_rename_buffer,
+        ) {
             Ok(label) => label,
             Err(error) => {
                 self.add_error_notification(error);
@@ -7065,8 +7062,8 @@ impl AppState {
         });
 
         if let Some(tmux_name) = tmux_name {
-            self.session_label_store.set(tmux_name, label);
-            if let Err(error) = self.session_label_store.save() {
+            self.session_labels.session_label_store.set(tmux_name, label);
+            if let Err(error) = self.session_labels.session_label_store.save() {
                 self.add_error_notification(format!("Failed to save session label: {error}"));
                 return;
             }
@@ -7076,14 +7073,14 @@ impl AppState {
 
     pub fn open_session_context_menu(&mut self, target: AttachableRef) {
         self.select_attachable(target);
-        self.session_context_menu = Some(SessionContextMenu {
+        self.session_labels.session_context_menu = Some(SessionContextMenu {
             target,
             selected: 0,
         });
     }
 
     pub fn close_session_context_menu(&mut self) {
-        self.session_context_menu = None;
+        self.session_labels.session_context_menu = None;
     }
 
     pub fn session_context_actions(&self) -> &'static [SessionContextAction] {
@@ -7102,7 +7099,7 @@ impl AppState {
             SessionContextAction::EditLabel,
             SessionContextAction::Delete,
         ];
-        match self.session_context_menu.map(|menu| menu.target) {
+        match self.session_labels.session_context_menu.map(|menu| menu.target) {
             Some(AttachableRef::SshSession { .. }) => SSH,
             _ => MANAGED,
         }
@@ -7110,13 +7107,13 @@ impl AppState {
 
     pub fn session_context_next(&mut self, delta: isize) {
         let len = self.session_context_actions().len();
-        if let Some(menu) = self.session_context_menu.as_mut() {
+        if let Some(menu) = self.session_labels.session_context_menu.as_mut() {
             menu.selected = (menu.selected as isize + delta).rem_euclid(len as isize) as usize;
         }
     }
 
     pub fn take_session_context_action(&mut self) -> Option<SessionContextAction> {
-        let selected = self.session_context_menu?.selected;
+        let selected = self.session_labels.session_context_menu?.selected;
         let action = self.session_context_actions().get(selected).copied();
         self.close_session_context_menu();
         action
@@ -8183,8 +8180,10 @@ impl AppState {
                         .find_session(session_id)
                         .and_then(|session| session.tmux_session_name.clone());
                     if let Some(tmux_name) = tmux_name {
-                        self.session_label_store.set(tmux_name, Some(prefix.clone()));
-                        if let Err(error) = self.session_label_store.save() {
+                        self.session_labels
+                            .session_label_store
+                            .set(tmux_name, Some(prefix.clone()));
+                        if let Err(error) = self.session_labels.session_label_store.save() {
                             self.add_error_notification(format!(
                                 "Session started but prefix could not be saved: {error}"
                             ));
@@ -9216,8 +9215,10 @@ impl AppState {
 
                 // Convert to Session model and add to workspaces
                 let mut session = interactive_session.to_session_model();
-                if let Some(label) =
-                    self.session_label_store.get(&interactive_session.tmux_session_name)
+                if let Some(label) = self
+                    .session_labels
+                    .session_label_store
+                    .get(&interactive_session.tmux_session_name)
                 {
                     session.display_name = Some(label.clone());
                 }

@@ -267,3 +267,26 @@ impl Default for SshSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct SessionLabelsSection {
+    /// Persistent store for durable session labels.
+    pub session_label_store: SessionLabelStore,
+    /// Durable-label text popup state for managed and SSH sessions.
+    pub session_label_rename_mode: bool,
+    pub session_label_rename_buffer: String,
+    pub session_label_rename_target: Option<AttachableRef>,
+    pub session_context_menu: Option<SessionContextMenu>,
+}
+
+impl Default for SessionLabelsSection {
+    fn default() -> Self {
+        Self {
+            session_label_store: SessionLabelStore::load(),
+            session_label_rename_mode: false,
+            session_label_rename_buffer: String::new(),
+            session_label_rename_target: None,
+            session_context_menu: None,
+        }
+    }
+}

@@ -383,7 +383,7 @@ impl SessionListComponent {
                     .title_bottom(
                         if state.ssh.ssh_session_rename_mode
                             || state.other_tmux_rename_mode
-                            || state.session_label_rename_mode
+                            || state.session_labels.session_label_rename_mode
                         {
                             // Rename mode help (SSH or Other tmux)
                             Line::from(vec![
@@ -476,7 +476,7 @@ impl SessionListComponent {
 
         frame.render_stateful_widget(list, area, &mut self.list_state);
 
-        if state.session_label_rename_mode {
+        if state.session_labels.session_label_rename_mode {
             let width = area.width.min(54);
             let height = 7;
             let popup = Rect::new(
@@ -496,7 +496,7 @@ impl SessionListComponent {
             frame.render_widget(block, popup);
             let text = format!(
                 "Durable name, Git branch unchanged\n\n{}|\n\nEnter save   Esc cancel   blank clears",
-                state.session_label_rename_buffer
+                state.session_labels.session_label_rename_buffer
             );
             frame.render_widget(
                 Paragraph::new(text).style(Style::default().fg(SOFT_WHITE).bg(DARK_BG)),
@@ -504,7 +504,7 @@ impl SessionListComponent {
             );
         }
 
-        if let Some(menu) = state.session_context_menu {
+        if let Some(menu) = state.session_labels.session_context_menu {
             let actions = state.session_context_actions();
             let width = area.width.min(30);
             let height = (actions.len() as u16 + 3).min(area.height);
