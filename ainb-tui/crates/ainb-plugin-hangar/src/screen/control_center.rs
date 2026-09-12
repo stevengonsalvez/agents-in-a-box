@@ -526,9 +526,17 @@ impl ControlCenterState {
     /// snapshot leaves a live-looking card, and its option keys still send
     /// answers that can only lose the same race again.
     ///
-    /// Returns `true` when a card was actually removed, which is also the only
-    /// case that raises the toast: a retirement for a row this board never
-    /// showed is not news to the human reading it.
+    /// Returns `true` when a card was actually removed.
+    ///
+    /// The toast is narrower than the retirement. The daemon also emits
+    /// `AttentionAnswered` when it closes a stale ASK the human answered inside
+    /// the tmux session, stamped `resolved:session` rather than a surface
+    /// (`attention_ingest.rs`), and that is the common path: the card must still
+    /// go, but "answered by resolved:session" is noise about the operator's own
+    /// keystroke. A surface's provenance is `<kind>@<host>` (S-B 3b), so the `@`
+    /// is what separates "another surface beat you to it", which is worth
+    /// saying, from "you answered it yourself", which is not. A retirement for a
+    /// row this board never showed says nothing either way.
     pub fn retire_answered(&mut self, attention_id: &str, by: &str, now_ms: i64) -> bool {
         let before = self.cards.len();
         self.cards.retain(|card| card.id != attention_id);
@@ -547,7 +555,9 @@ impl ControlCenterState {
         if self.note.as_ref().is_some_and(|(id, _)| id == attention_id) {
             self.note = None;
         }
-        self.answered_toast = Some((format!("answered by {by}"), now_ms + ANSWERED_TOAST_MS));
+        if by.contains('@') {
+            self.answered_toast = Some((format!("answered by {by}"), now_ms + ANSWERED_TOAST_MS));
+        }
         self.clamp_option_cursor();
         true
     }
@@ -1575,6 +1585,31 @@ mod tests {
         assert!(
             !title_row_text(&buf).contains("answered by"),
             "the toast is gone after its window"
+        );
+    }
+
+    #[test]
+    fn a_stale_ask_closed_in_the_session_retires_without_a_toast() {
+        // The daemon stamps `resolved:session` when it closes an ASK the human
+        // answered inside the tmux pane. That is the operator's own keystroke,
+        // not another surface beating them to it, so the card goes and nothing
+        // is announced. A surface always carries `<kind>@<host>`.
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[
+            row("a", "ask_user_question", 100, &ask_payload("q", &["y"])),
+            row("b", "ask_user_question", 200, &ask_payload("q2", &["z"])),
+        ]);
+
+        assert!(state.retire_answered("b", "resolved:session", 1_000));
+
+        assert!(
+            state.cards().iter().all(|card| card.id != "b"),
+            "the card still has to go: the row is closed either way"
+        );
+        assert_eq!(
+            state.answered_toast(1_000),
+            None,
+            "answering in the session must not report itself as another surface"
         );
     }
 
