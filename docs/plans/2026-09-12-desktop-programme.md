@@ -146,10 +146,10 @@ One Orca worktree per lane, one `claude` agent each, goal prompt from `docs/plan
 
 | lane | goal | env | branch | agent handle |
 |---|---|---|---|---|
-| A | `2026-09-12-p0-closure.md`: slice-1 gates green (#925), waves 2-4, G6 handed over | claude-hetzner | `stevengonsalvez/p0-closure` PR #933 (one blocking nit), `stevengonsalvez/s-c-card-retirement` PR #936 (sent back) | `term_f52c61ee-95c2-4878-beb8-aaf8b8de6abd` |
-| B | `2026-09-12-w0-wire.md`: protocol version, capabilities, skew harness, op-id ledger | claude-gcp | `stevengonsalvez/w0-wire`, draft PR #935 | `term_d5543262-c7ee-4988-a489-467fec38ced0` (relaunched 2026-09-12 after the first process died) |
-| C | `2026-09-12-status-t0.md`: #916 pane binding, then T0-daemon, plus the three red daemon tests from #925 | claude-gcp | `feat/916-pane-binding`, draft PR #934 | `term_49ad9b50-e253-497d-ad2c-62059f021b16` (relaunched 2026-09-12) |
-| D | `2026-09-12-spike-2-emulator.md`: control-mode emulator fidelity | claude-hetzner | `stevengonsalvez/spike-2-emulator`, **merged PR #931**; nits follow-up pending | `term_54e23808-417a-4aa8-8705-18dc21f8a4ce` |
+| A | `2026-09-12-p0-closure.md`: slice-1 gates green (#925), waves 2-4, G6 handed over | claude-hetzner | `stevengonsalvez/p0-closure` PR #933 (nit fixed, checks running), `stevengonsalvez/s-c-card-retirement` PR #936 (re-review running) | `term_f52c61ee-95c2-4878-beb8-aaf8b8de6abd` |
+| B | `2026-09-12-w0-wire.md`: protocol version, capabilities, skew harness, op-id ledger | claude-gcp | `stevengonsalvez/w0-wire`, draft PR #935 | `term_b78264e2-f6ba-4492-9391-333275ef7b16` (the original session; it had not died, the runtime reissued handles, and a duplicate relaunch was stood down and closed 2026-09-12) |
+| C | `2026-09-12-status-t0.md`: #916 pane binding, then T0-daemon, plus the three red daemon tests from #925 | claude-gcp | `feat/916-pane-binding`, draft PR #934 | `term_49ad9b50-e253-497d-ad2c-62059f021b16` (the idle original was closed 2026-09-12, this is the only lane C session) |
+| D | `2026-09-12-spike-2-emulator.md`: control-mode emulator fidelity | claude-hetzner | `stevengonsalvez/spike-2-emulator`, **merged PR #931**, nits follow-up **merged PR #938**, done | closed |
 | E | `2026-09-12-spike-3-peer-ws.md`: peer WS + Noise over tailnet and ssh -L | claude-gcp | `stevengonsalvez/spike-3-peer-ws`, **merged PR #930, done** | closed |
 
 Lane rules: gcp lanes commit with the explicit `git -c commit.gpgsign=false commit` and the orchestrator re-signs at merge (the GPG passphrase is not cached on gcp); hetzner lanes sign with `git -c gpg.format=openpgp -c user.signingkey=907EC78C72C6AFF6 commit -S`; C adds no store migration until B's is on `v2`; only A edits `ainb-core/src/app/*`; spikes never touch crates; every lane merges `origin/v2` before touching a file `main` changed.
