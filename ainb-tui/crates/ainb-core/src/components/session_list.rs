@@ -670,8 +670,8 @@ impl SessionListComponent {
                     // Tree line characters with subdued color
                     let tree_prefix = if is_last_session { "└─" } else { "├─" };
 
-                    let status_indicator = session.status.indicator();
                     let lifecycle_label = session_lifecycle_label(state, session);
+                    let status_indicator = session_lifecycle_indicator(lifecycle_label);
 
                     // Git changes (controlled by show_git_status config)
                     let changes_text = if state.app_config.ui_preferences.show_git_status
@@ -682,19 +682,12 @@ impl SessionListComponent {
                         String::new()
                     };
 
-                    // Session state drives the row colour so active vs stopped
-                    // reads at a glance: running = green, idle = soft white,
-                    // stopped = muted grey, error = red. The selected row is
-                    // always green (reinforced by the ▶ arrow + highlight bar).
+                    // Agent state drives the row colour. A discoverable tmux
+                    // shell alone is `LIVE` (muted), never green `RUN`.
                     let state_color = if is_selected_session {
                         SELECTION_GREEN
                     } else {
-                        match session.status {
-                            SessionStatus::Running => SELECTION_GREEN,
-                            SessionStatus::Idle => SOFT_WHITE,
-                            SessionStatus::Stopped => MUTED_GRAY,
-                            SessionStatus::Error(_) => Color::Rgb(230, 100, 100),
-                        }
+                        session_lifecycle_color(lifecycle_label)
                     };
                     let branch_color = state_color;
                     let agent_icon = session.agent_type.icon();
@@ -710,10 +703,36 @@ impl SessionListComponent {
 
                     // The row's live attention chips, already in precedence
                     // order (ASK, WAIT, APPROVE, ERR, DONE). Recomputed each refresh
-                    // from the hook events and the session's own status; empty
-                    // while the agent is generating, because nothing is waiting
-                    // on a human then.
+                    // from hook events and status. Explicit hook evidence beats
+                    // tmux discovery's coarse "process exists" observation.
                     let session_alert = session.live_attention.as_slice();
+                    // The sending state belongs to the full chip list: the
+                    // primary chip moves into the lifecycle cell below, but
+                    // must still read `SENT` until its answer is delivered.
+                    let sending =
+                        session_alert.iter().find(|chip| state.ask_state.is_sending(chip));
+                    let primary_chip =
+                        session_alert.first().filter(|chip| chip.kind.label() == lifecycle_label);
+                    // A primary attention state replaces the lifecycle word,
+                    // but retains its age in that one gutter cell. `ASK 40s`
+                    // is readable at a glance; dropping the chip entirely
+                    // would turn it into the unhelpful bare `ASK`.
+                    let lifecycle_display = primary_chip
+                        .map(|chip| {
+                            format!(
+                                "{} {}",
+                                chip_label(chip, sending),
+                                format_age(now_ms, chip.since_ms)
+                            )
+                        })
+                        .unwrap_or_else(|| lifecycle_label.to_string());
+                    // The primary attention state is the right-hand status
+                    // itself. Do not render `WAIT  WAIT 3m`; retain any
+                    // secondary state (for example `ASK  APPROVE`) after it.
+                    let gutter_alert = primary_chip
+                        .is_some()
+                        .then(|| &session_alert[1..])
+                        .unwrap_or(session_alert);
 
                     // Line one contains only stable session identity. Status lives
                     // in a fixed right gutter so it is readable as a column while
@@ -750,14 +769,20 @@ impl SessionListComponent {
                     // session cannot render every other session's chip as
                     // SENT, and this one keeps reading SENT after the operator
                     // has navigated to a different question.
-                    let sending =
-                        session_alert.iter().find(|chip| state.ask_state.is_sending(chip));
                     push_status_gutter(
                         &mut title_spans,
                         status_indicator,
-                        lifecycle_label,
-                        Style::default().fg(state_color),
-                        session_alert,
+                        &lifecycle_display,
+                        Style::default().fg(
+                            if primary_chip.is_some_and(|chip| {
+                                sending.is_some_and(|target| std::ptr::eq(target, chip))
+                            }) {
+                                GOLD
+                            } else {
+                                session_lifecycle_color(lifecycle_label)
+                            },
+                        ),
+                        gutter_alert,
                         now_ms,
                         row_width,
                         name_span_index,
@@ -1212,10 +1237,22 @@ fn session_collision_id(session: &Session, has_collision: bool) -> Option<String
     has_collision.then(|| format!("#{}", &session.id.to_string()[..8]))
 }
 
-/// Compact process/turn lifecycle word for the sidebar. Fleet's completed-turn
-/// observation is more precise than local `SessionStatus::Idle`, so it gets a
-/// dedicated `DONE` label rather than being collapsed into normal idle.
+/// Compact agent-state word for the sidebar.
+///
+/// `SessionStatus::Running` is seeded from tmux discovery, so it means only
+/// that a pane was found. Never paint that as `RUN`: an attachable shell may be
+/// quiet, waiting, or already complete. Explicit hook attention wins, then an
+/// authoritative Fleet lifecycle; a live pane with neither is honestly `LIVE`.
 fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str {
+    // A stopped session has no attachable pane. It must never retain an old
+    // chip in its right gutter while refresh is catching up.
+    if matches!(session.status, SessionStatus::Stopped) {
+        return "STOP";
+    }
+    if let Some(chip) = session.live_attention.first() {
+        return chip.kind.label();
+    }
+
     if matches!(session.status, SessionStatus::Idle)
         && matches!(
             state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
@@ -1228,10 +1265,49 @@ fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str 
     }
 
     match session.status {
-        SessionStatus::Running => "RUN",
+        SessionStatus::Running => {
+            let fleet_is_live =
+                state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false);
+            match fleet_is_live
+                .then(|| {
+                    state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle)
+                })
+                .flatten()
+            {
+                Some(
+                    ainb_hangar_proto::fleet::LifecycleState::Starting
+                    | ainb_hangar_proto::fleet::LifecycleState::Running,
+                ) => "RUN",
+                _ => "LIVE",
+            }
+        }
         SessionStatus::Idle => "IDLE",
         SessionStatus::Stopped => "STOP",
         SessionStatus::Error(_) => "ERR",
+    }
+}
+
+/// One-cell marker for the sidebar's agent state. This is deliberately derived
+/// from the displayed state rather than `SessionStatus::indicator()`: the
+/// latter reports tmux discovery and would paint a green busy dot next to WAIT.
+fn session_lifecycle_indicator(label: &str) -> &'static str {
+    match label {
+        "RUN" => "●",
+        "ERR" => "✗",
+        "STOP" => "\u{ead1}",
+        _ => "○",
+    }
+}
+
+/// Agent-state colour shared by the title and right-hand status word.
+fn session_lifecycle_color(label: &str) -> Color {
+    match label {
+        "RUN" | "DONE" => SELECTION_GREEN,
+        "ASK" | "APPROVE" | "ERR" => ALERT_PERMISSION_RED,
+        "WAIT" => ALERT_WAITING_AMBER,
+        "LIVE" | "STOP" => MUTED_GRAY,
+        "IDLE" => SOFT_WHITE,
+        _ => MUTED_GRAY,
     }
 }
 
@@ -1517,12 +1593,38 @@ mod tests {
     }
 
     #[test]
+    fn selected_ask_keeps_its_red_status_gutter() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut state = chip_state();
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("terminal");
+        let mut list = SessionListComponent::new();
+        terminal
+            .draw(|frame| list.render(frame, frame.area(), &mut state))
+            .expect("draw sessions panel");
+        let buffer = terminal.backend().buffer();
+        let ask = (0..buffer.area.height).find_map(|y| {
+            (0..buffer.area.width.saturating_sub(2)).find_map(|x| {
+                (buffer[(x, y)].symbol() == "A"
+                    && buffer[(x + 1, y)].symbol() == "S"
+                    && buffer[(x + 2, y)].symbol() == "K")
+                    .then_some((x, y))
+            })
+        });
+        let (x, y) = ask.expect("selected ASK is painted");
+        assert_eq!(buffer[(x, y)].fg, ALERT_PERMISSION_RED);
+    }
+
+    #[test]
     fn sidebar_shows_lifecycle_words_separate_from_attention() {
         let mut state = chip_state();
         state.workspaces[0].sessions[0].status = SessionStatus::Running;
         state.workspaces[0].sessions[1].status = SessionStatus::Idle;
         state.workspaces[0].sessions[2].status = SessionStatus::Stopped;
         state.workspaces[0].sessions[3].status = SessionStatus::Error("lost transport".into());
+        for session in &mut state.workspaces[0].sessions {
+            session.live_attention.clear();
+        }
         assert_eq!(
             session_lifecycle_label(&state, &state.workspaces[0].sessions[2]),
             "STOP"
@@ -1530,7 +1632,7 @@ mod tests {
 
         let rendered = render_panel(&mut state, 140, 16);
         for (name, lifecycle) in [
-            ("ainb/acp-chat", "RUN"),
+            ("ainb/acp-chat", "LIVE"),
             ("ainb/disk-clean", "IDLE"),
             ("ainb/site-build", "ERR"),
             ("ainb/quiet", "IDLE"),
@@ -1541,6 +1643,34 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} session row renders: {rendered}"));
             assert!(row.contains(lifecycle), "{name} shows {lifecycle}: {row}");
         }
+    }
+
+    #[test]
+    fn sidebar_only_calls_a_session_run_with_authoritative_work_evidence() {
+        let mut state = chip_state();
+        let session = state.workspaces[0].sessions[0].id;
+        state.workspaces[0].sessions[0].live_attention.clear();
+        state.workspaces[0].sessions[0].status = SessionStatus::Running;
+
+        assert_eq!(
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            "LIVE",
+            "tmux discovery alone is only attachability"
+        );
+
+        state.fleet_metadata.insert(
+            session,
+            crate::app::state::SessionFleetMetadata {
+                lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::Running),
+                ..Default::default()
+            },
+        );
+        state.daemon_attention.lock().unwrap().reachable = true;
+        assert_eq!(
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            "RUN",
+            "authoritative Fleet active-work lifecycle permits RUN"
+        );
     }
 
     #[test]
@@ -1592,10 +1722,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("ainb/acp-chat"))
             .expect("ask session row");
-        assert!(
-            ask_row.contains("IDLE") && ask_row.contains("ASK"),
-            "{ask_row}"
-        );
+        assert!(ask_row.contains("ASK"), "{ask_row}");
         assert!(!ask_row.contains("DONE"), "{ask_row}");
 
         // A retained snapshot cannot drive lifecycle after daemon reachability
@@ -1761,9 +1888,10 @@ mod tests {
     }
 
     /// Chip words are never abbreviated, at any width the panel can be dragged
-    /// to. The session NAME is what gives way.
+    /// to. Removing duplicated lifecycle text keeps ordinary session names
+    /// readable at the narrow default width.
     #[test]
-    fn chip_words_survive_a_width_the_name_does_not() {
+    fn chip_words_and_names_survive_the_narrow_default_width() {
         let mut state = chip_state();
         let rendered = render_panel(&mut state, 42, 16);
         for word in ["ASK 40s", "ERR 9m", "APPROVE 3m", "DONE 1m"] {
@@ -1773,8 +1901,8 @@ mod tests {
             );
         }
         assert!(
-            rendered.contains('\u{2026}'),
-            "the session name is what truncates instead: {rendered}"
+            rendered.contains("ainb/api-stats"),
+            "name stays whole: {rendered}"
         );
     }
 
@@ -1960,6 +2088,7 @@ mod tests {
         let mut state = AppState::new();
         state.workspaces.clear();
         state.expand_all_workspaces = true;
+        state.session_filter = SessionFilter::All;
 
         let mut workspace = Workspace::new("ws".to_string(), "/tmp/ws".into());
         let mut first = Session::new("first".to_string(), "/tmp/ws/first".to_string());

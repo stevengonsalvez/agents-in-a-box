@@ -77,6 +77,8 @@ pub struct SessionFleetMetadata {
     pub provider_session_id: Option<String>,
     /// Exact Fleet lifecycle, omitted when Fleet has no observation.
     pub lifecycle: Option<ainb_hangar_proto::fleet::LifecycleState>,
+    /// Timestamp paired with `lifecycle`, used to reject an older snapshot.
+    pub lifecycle_updated_at: i64,
 }
 
 /// Ephemeral state for the keyboard-accessible right-click context menu.
@@ -12030,9 +12032,10 @@ impl AppState {
     /// `recent` MUST be newest-first (as [`Store::recent_since`] returns
     /// it). The marker is the kind implied by the newest user-facing
     /// event for this session's `(cwd, agent)` whose `ts` is strictly
-    /// newer than `baseline_ms` — unless the agent is currently
-    /// `generating` (suppressed; the `●` busy dot covers it) or the only
-    /// match is a terminal lifecycle event. Returns `None`
+    /// newer than `baseline_ms`, unless the only match is a terminal lifecycle
+    /// event. A hook notification is explicit evidence and is deliberately
+    /// not suppressed by tmux discovery's coarse `generating` observation.
+    /// Returns `None`
     /// (blank — no marker) when nothing qualifies, which is the common
     /// case for an idle session with no pending hook event.
     /// The one-line message a hook payload carried, if it carried one.
@@ -12121,13 +12124,16 @@ impl AppState {
         cwd_fallback_requires_unidentified_id: bool,
         generating: bool,
         baseline_ms: i64,
-        now_ms: i64,
+        _now_ms: i64,
         recent: &[ainb_plugin_notifyd::NotificationRecord],
     ) -> Option<SessionAttention> {
         use ainb_plugin_notifyd::{AlertKind, classify_attention};
-        if generating {
-            return None;
-        }
+        // A hook notification is explicit evidence, not the old quiet-pane
+        // heuristic. In particular, a session can retain its tmux process
+        // while Claude is blocked at an idle/permission prompt. Suppressing
+        // that WAIT because discovery initially called the process `Running`
+        // made every attachable quiet session look like active work.
+        let _ = generating;
         let agent = agent?;
         let cwd = session_cwd.trim_end_matches('/');
 
@@ -12238,6 +12244,7 @@ impl AppState {
             baseline_ms,
             recent,
         )
+        .map(|(status, _)| status)
     }
 
     /// Identity-safe terminal lifecycle lookup; mirrors attention lookup.
@@ -12249,7 +12256,7 @@ impl AppState {
         cwd_fallback_requires_unidentified_id: bool,
         baseline_ms: i64,
         recent: &[ainb_plugin_notifyd::NotificationRecord],
-    ) -> Option<crate::models::SessionStatus> {
+    ) -> Option<(crate::models::SessionStatus, i64)> {
         let agent = agent?;
         let cwd = session_cwd.trim_end_matches('/');
         let newest = recent.iter().find(|record| {
@@ -12265,9 +12272,9 @@ impl AppState {
             )
         })?;
         match newest.raw_event.as_str() {
-            "SessionEnd" => Some(crate::models::SessionStatus::Stopped),
+            "SessionEnd" => Some((crate::models::SessionStatus::Stopped, newest.ts)),
             "Stop" | "agentStop" | "agent-turn-complete" | "task_complete" => {
-                Some(crate::models::SessionStatus::Idle)
+                Some((crate::models::SessionStatus::Idle, newest.ts))
             }
             _ => None,
         }
@@ -12657,6 +12664,7 @@ impl AppState {
                 provider_session_id,
                 lifecycle: (row.lifecycle != ainb_hangar_proto::fleet::LifecycleState::Unknown)
                     .then_some(row.lifecycle),
+                lifecycle_updated_at: row.lifecycle_updated_at,
             })
     }
 
@@ -12686,17 +12694,20 @@ impl AppState {
             || matches!(projected, crate::models::SessionStatus::Stopped)
     }
 
-    /// A local `SessionEnd` is a terminal fact. Fleet can briefly retain an
-    /// older live lifecycle after the pane is gone, so let only this explicit
-    /// local stop beat Fleet's otherwise-preferred lifecycle projection.
+    /// A hook is the session's own latest lifecycle fact. Fleet is useful when
+    /// hooks have not observed the session, but must not turn a just-stopped
+    /// agent back into `RUN`: a live tmux server is attachability, not work.
     fn projected_session_status(
-        fleet: Option<crate::models::SessionStatus>,
-        local: Option<crate::models::SessionStatus>,
+        fleet: Option<(crate::models::SessionStatus, i64)>,
+        local: Option<(crate::models::SessionStatus, i64)>,
     ) -> Option<crate::models::SessionStatus> {
-        if matches!(local, Some(crate::models::SessionStatus::Stopped)) {
-            local
-        } else {
-            fleet.or(local)
+        match (fleet, local) {
+            (Some((fleet, fleet_at)), Some((local, local_at))) => {
+                Some(if local_at >= fleet_at { local } else { fleet })
+            }
+            (Some((fleet, _)), None) => Some(fleet),
+            (None, Some((local, _))) => Some(local),
+            (None, None) => None,
         }
     }
 
@@ -12815,17 +12826,19 @@ impl AppState {
                 let fleet_status = daemon
                     .reachable
                     .then(|| {
-                        fleet_metadata
-                            .get(&s.id)
-                            .and_then(|metadata| metadata.lifecycle)
-                            .and_then(Self::session_status_for_fleet_lifecycle)
+                        fleet_metadata.get(&s.id).and_then(|metadata| {
+                            metadata
+                                .lifecycle
+                                .and_then(Self::session_status_for_fleet_lifecycle)
+                                .map(|status| (status, metadata.lifecycle_updated_at))
+                        })
                     })
                     .flatten();
                 // Persisted identity is authoritative. Older local rows have
                 // none, so use only the Fleet ID that `fleet_metadata_for`
                 // correlated exactly by its persisted provider id. Never infer
                 // an id from tmux or cwd.
-                let provider_session_id = s.provider_session_id.clone().or_else(|| {
+                let known_provider_session_id = s.provider_session_id.clone().or_else(|| {
                     fleet_metadata
                         .get(&s.id)
                         .and_then(|metadata| metadata.provider_session_id.clone())
@@ -12834,6 +12847,7 @@ impl AppState {
                     .get(&s.workspace_path.trim_end_matches('/').to_string())
                     .copied()
                     == Some(1);
+                let provider_session_id = known_provider_session_id;
                 let local_terminal_status = Self::local_terminal_status_for_session_identity(
                     &s.workspace_path,
                     Self::agent_hook_name(s.agent_type),

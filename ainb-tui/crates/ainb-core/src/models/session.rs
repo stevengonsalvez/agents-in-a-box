@@ -657,8 +657,9 @@ pub struct Session {
     ///
     /// A row can carry MORE THAN ONE: an ASK arriving while an ERR is still
     /// open shows both, and only the ASK is counted in the header badge (see
-    /// [`crate::fleet::attention::needs_you_count`]). Empty while the agent is
-    /// actively generating — nothing is waiting on a human then.
+    /// [`crate::fleet::attention::needs_you_count`]). Explicit hook evidence
+    /// remains visible even while tmux discovery sees a live process;
+    /// `Running` there means attachability, not proof of work.
     ///
     /// Transient — never persisted; set in `AppState::refresh_attention_markers`.
     #[serde(skip)]
