@@ -357,6 +357,21 @@ fn message(id: &str) -> NewFleetMessage {
 
 // ---------------------------------------------------------------------- tests
 
+/// The result with the D18 mutation ack stripped.
+///
+/// The PAYLOAD of a replay is identical to the first answer — that is the
+/// guarantee these tests exist for. The ack deliberately is not: it is the one
+/// field that tells a client whether its own attempt executed or was served
+/// from the ledger, so it is asserted separately rather than folded into an
+/// equality that would have to ignore it.
+fn without_ack(result: &serde_json::Value) -> serde_json::Value {
+    let mut value = result.clone();
+    if let Some(object) = value.as_object_mut() {
+        object.remove(ainb_hangar_proto::mutation::ACK_KEY);
+    }
+    value
+}
+
 /// I1: the same `request_id` with the same content returns the identical
 /// response and submits once; the same id with different content is rejected.
 #[tokio::test]
@@ -375,8 +390,16 @@ async fn double_send_is_idempotent_and_a_mismatched_replay_is_rejected() {
     assert!(first["error"].is_null(), "first send must ack: {first}");
     let second = client.call(methods::FLEET_MESSAGE_SEND, params).await;
     assert_eq!(
-        first["result"], second["result"],
+        without_ack(&first["result"]),
+        without_ack(&second["result"]),
         "a replayed send answers identically"
+    );
+    // `request_id` IS the op id for this family (D18 amendment 19), so the
+    // second call is a ledger replay and says so. Same answer, honest ack.
+    assert_eq!(first["result"]["mutation"]["outcome"], "created", "{first}");
+    assert_eq!(
+        second["result"]["mutation"]["outcome"], "replayed",
+        "{second}"
     );
 
     let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM fleet_message")
@@ -402,9 +425,24 @@ async fn double_send_is_idempotent_and_a_mismatched_replay_is_rejected() {
             }),
         )
         .await;
+    // `request_id` IS the op id for this family, so the generic mutation ledger
+    // now refuses the reuse BEFORE the handler's own check is reached. The fact
+    // is the same one the old `invalid_params` carried — this id already
+    // committed a different body — and it is now said in the D18 vocabulary,
+    // with a code a client can branch on without reading message text.
     assert_eq!(
-        mismatched["error"]["code"], -32602,
-        "a reused request_id with different content is invalid_params: {mismatched}"
+        mismatched["error"]["code"],
+        ainb_hangar_proto::mutation::MUTATION_REJECTED,
+        "a reused request_id with different content is rejected: {mismatched}"
+    );
+    assert_eq!(
+        mismatched["error"]["data"]["mutation"]["reason"],
+        ainb_hangar_proto::mutation::REASON_ALREADY_ANSWERED_BY,
+        "{mismatched}"
+    );
+    assert!(
+        mismatched["error"]["data"]["mutation"]["outcome"].is_null(),
+        "nothing of this caller's ran, so no outcome may be named: {mismatched}"
     );
 }
 

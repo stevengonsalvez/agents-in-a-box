@@ -330,8 +330,15 @@ impl MutationEnvelope {
 /// under [`ACK_KEY`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MutationAck {
-    /// What happened to the operation.
-    pub outcome: MutationOutcome,
+    /// What happened to the operation, when the operation ran at all.
+    ///
+    /// ABSENT for a refusal the ledger made before any handler was reached — a
+    /// foreign op id, an aged-out row, an attempt still in flight. Naming one
+    /// of the three outcomes there would be a lie in the direction that matters
+    /// most: a client reading `replayed` concludes its earlier attempt
+    /// committed, when in fact nothing of its own has ever run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<MutationOutcome>,
     /// What happened to the request.
     pub status: MutationStatus,
     /// The machine-readable reason, for a non-accepted status.
@@ -347,7 +354,7 @@ impl MutationAck {
     #[must_use]
     pub const fn created() -> Self {
         Self {
-            outcome: MutationOutcome::Created,
+            outcome: Some(MutationOutcome::Created),
             status: MutationStatus::Accepted,
             reason: None,
             receipt: None,
@@ -358,18 +365,32 @@ impl MutationAck {
     #[must_use]
     pub const fn replayed(receipt: Option<ReceiptState>) -> Self {
         Self {
-            outcome: MutationOutcome::Replayed,
+            outcome: Some(MutationOutcome::Replayed),
             status: MutationStatus::Accepted,
             reason: None,
             receipt,
         }
     }
 
-    /// The ack for a refusal.
+    /// The ack for a refusal the ledger made before any handler ran.
+    ///
+    /// No outcome: this caller's operation did not execute, and will not.
     #[must_use]
     pub fn rejected(reason: &str) -> Self {
         Self {
-            outcome: MutationOutcome::Replayed,
+            outcome: None,
+            status: MutationStatus::Rejected,
+            reason: Some(reason.to_string()),
+            receipt: None,
+        }
+    }
+
+    /// The ack for a refusal of an operation that DID run and was refused on
+    /// its own terms, so the refusal is this attempt's answer.
+    #[must_use]
+    pub fn refused(outcome: MutationOutcome, reason: &str) -> Self {
+        Self {
+            outcome: Some(outcome),
             status: MutationStatus::Rejected,
             reason: Some(reason.to_string()),
             receipt: None,
@@ -377,10 +398,13 @@ impl MutationAck {
     }
 
     /// The ack for an effect the daemon cannot establish.
+    ///
+    /// No outcome either: "unknown" is precisely the statement that the daemon
+    /// cannot say which of the three happened.
     #[must_use]
     pub fn unknown(reason: &str, receipt: Option<ReceiptState>) -> Self {
         Self {
-            outcome: MutationOutcome::Replayed,
+            outcome: None,
             status: MutationStatus::Unknown,
             reason: Some(reason.to_string()),
             receipt,
@@ -1289,10 +1313,22 @@ mod tests {
             json,
             serde_json::json!({"outcome":"created","status":"accepted"})
         );
+        // No `outcome`: a foreign op id is a refusal of something this caller
+        // never ran, and claiming `replayed` would tell it the opposite.
         let json = serde_json::to_value(MutationAck::rejected(REASON_OP_ID_FOREIGN)).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"outcome":"replayed","status":"rejected","reason":"op_id_foreign"})
+            serde_json::json!({"status":"rejected","reason":"op_id_foreign"})
+        );
+        // A refusal the HANDLER produced does name the attempt that produced it.
+        let json = serde_json::to_value(MutationAck::refused(
+            MutationOutcome::Created,
+            "turn_advanced",
+        ))
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"outcome":"created","status":"rejected","reason":"turn_advanced"})
         );
         let json = serde_json::to_value(MutationAck::unknown(
             REASON_EFFECTS_AMBIGUOUS,
@@ -1301,7 +1337,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"outcome":"replayed","status":"unknown","reason":"effects_ambiguous","receipt":"unknown"})
+            serde_json::json!({"status":"unknown","reason":"effects_ambiguous","receipt":"unknown"})
         );
     }
 

@@ -296,7 +296,17 @@ fn settled(entry: &MutatingMethod, outcome: &ClaimOutcome) -> Option<Result<Valu
         }
         ClaimOutcome::InFlight(row) => {
             let receipt = row.receipt_state.as_deref().and_then(ReceiptState::from_token);
-            let ack = MutationAck::unknown(REASON_EFFECTS_AMBIGUOUS, receipt);
+            // `replayed`, and the receipt state, is exactly what D18 says a
+            // retry against a `claimed` or `writing` receipt gets: this op id
+            // IS this caller's, and an earlier attempt of it is in flight. The
+            // status is `unknown` because the EFFECT is unknown, not because
+            // the operation is a stranger.
+            let ack = MutationAck {
+                outcome: Some(ainb_hangar_proto::mutation::MutationOutcome::Replayed),
+                status: MutationStatus::Unknown,
+                reason: Some(REASON_EFFECTS_AMBIGUOUS.to_string()),
+                receipt,
+            };
             Some(Err(ack_error(
                 ainb_hangar_proto::mutation::MUTATION_UNKNOWN,
                 "an earlier attempt at this op id has not answered; could not confirm, \
@@ -325,11 +335,23 @@ fn replay(row: &LedgerRow) -> Result<Value, RpcError> {
             "this mutation's effect could not be established; could not confirm, \
              check the session"
                 .to_string(),
-            &MutationAck::unknown(reason, receipt),
+            &MutationAck {
+                outcome: Some(ainb_hangar_proto::mutation::MutationOutcome::Replayed),
+                status: MutationStatus::Unknown,
+                reason: Some(reason.to_string()),
+                receipt,
+            },
         ));
     }
+    // A stored rejection IS this op id's answer, produced by an earlier attempt
+    // of this caller's own operation, so the replay names the attempt it came
+    // from. That is the opposite case from a refusal the ledger makes before
+    // any handler runs, which names no outcome at all.
     let ack = if row.status == ainb_hangar_store::repo::mutation_ledger::STATUS_REJECTED {
-        MutationAck::rejected(row.reason.as_deref().unwrap_or(REASON_ALREADY_ANSWERED_BY))
+        MutationAck::refused(
+            ainb_hangar_proto::mutation::MutationOutcome::Replayed,
+            row.reason.as_deref().unwrap_or(REASON_ALREADY_ANSWERED_BY),
+        )
     } else {
         MutationAck::replayed(receipt)
     };
@@ -421,7 +443,7 @@ where
                 .as_deref()
                 .and_then(ReceiptState::from_token);
             let ack = MutationAck {
-                outcome: ainb_hangar_proto::mutation::MutationOutcome::Created,
+                outcome: Some(ainb_hangar_proto::mutation::MutationOutcome::Created),
                 status: MutationStatus::Accepted,
                 reason: None,
                 receipt,
@@ -429,9 +451,20 @@ where
             Ok(with_ack(value.clone(), &ack))
         }
         Err(error) if is_transient(error.code) => {
-            // Nothing ran to completion and nothing was written: drop the claim
-            // so the retry the caller is about to make is a real retry.
-            let _ = MutationLedgerRepo::abandon(pool, &key).await;
+            // Nothing ran to completion, so the retry the caller is about to
+            // make should be a real retry — but only if nothing can have left.
+            // `abandon` refuses to drop a row whose receipt reached `writing`
+            // (bytes may already be in a terminal), and that row is left for the
+            // boot sweep to resolve as `unknown` instead.
+            match MutationLedgerRepo::abandon(pool, &key).await {
+                Ok(0) => tracing::warn!(
+                    op_id = %key.op_id,
+                    method = %req.method,
+                    "a mutation failed transiently after its writing boundary; \
+                     the claim is kept and resolves as unknown"
+                ),
+                Ok(_) | Err(_) => {}
+            }
             result
         }
         Err(error) => {
@@ -452,7 +485,7 @@ where
             Err(with_error_ack(
                 error.clone(),
                 &MutationAck {
-                    outcome: ainb_hangar_proto::mutation::MutationOutcome::Created,
+                    outcome: Some(ainb_hangar_proto::mutation::MutationOutcome::Created),
                     status: MutationStatus::Rejected,
                     reason: Some(error.code.to_string()),
                     receipt: None,
