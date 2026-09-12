@@ -182,7 +182,7 @@ final class CanonicalFixtureTests: XCTestCase {
     ///
     /// A pre-W0-wire CLIENT sends `{ token }` and nothing else; a pre-W0-wire
     /// DAEMON answers `{}`. Neither may be a decoding error, or a mixed-version
-    /// pair stops talking on the handshake — the one exchange that has to work
+    /// pair stops talking on the handshake, the one exchange that has to work
     /// before anything can report why it does not.
     func testLegacyHelloFramesStillDecode() throws {
         let legacyClientFrame = #"{"token":"fixture-token"}"#

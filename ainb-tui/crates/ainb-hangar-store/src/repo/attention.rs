@@ -389,7 +389,7 @@ impl AttentionRepo {
     /// This is the tier-2 claim: the flip and the mutation receipt that
     /// describes it commit together or not at all. A receipt written after the
     /// flip, through the event outbox, would inherit that outbox's crash loss
-    /// window — which is the exact window the receipt exists to close.
+    /// window, which is the exact window the receipt exists to close.
     ///
     /// `expected_version` of `None` keeps today's behaviour (open is the whole
     /// fence), so a client that has not been taught to send one is unaffected.
@@ -635,7 +635,7 @@ impl AttentionRepo {
 /// made the ONE unreadable row fail the whole query. That is a downgrade
 /// hazard rather than a hypothetical: two binaries share one database file on
 /// a box mid-upgrade, and the moment an N daemon writes a kind that N-1 has
-/// never heard of, N-1's entire attention list dies — so an operator running
+/// never heard of, N-1's entire attention list dies, so an operator running
 /// the older TUI loses every card, not just the new one.
 ///
 /// Skipping the row instead degrades to "the old build cannot see the new

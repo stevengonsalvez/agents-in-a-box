@@ -15,7 +15,7 @@
 //!
 //! "daemon N-1" is a fixture, not an old binary, and deliberately so: pinning a
 //! released tag would test whatever that tag happened to do, whereas the frames
-//! in `tests/fixtures/skew_frames.json` are the CONTRACT — the exact bytes a
+//! in `tests/fixtures/skew_frames.json` are the CONTRACT: the exact bytes a
 //! pre-W0-wire daemon answers. A change to either side shows up as a diff in
 //! that file rather than as a green test against a moved goalpost.
 //!
@@ -235,7 +235,7 @@ async fn the_swift_client_frame_is_accepted_by_daemon_n() {
     }
 }
 
-/// Leg 6: the N-1 client frame — a bare `{ token }` — against daemon N.
+/// Leg 6: the N-1 client frame (a bare `{ token }`) against daemon N.
 ///
 /// This is the leg an app-store phone lives on. A daemon that required the new
 /// members would refuse a client that cannot be upgraded.
@@ -336,7 +336,7 @@ async fn the_versioned_alias_and_the_plain_socket_are_one_daemon() {
 /// The versioned alias is PREFERRED, not trusted.
 ///
 /// The daemon creates it best-effort and never re-checks it, and the directory
-/// is the operator's own home — so every same-uid process, including an agent
+/// is the operator's own home, so every same-uid process, including an agent
 /// this daemon spawned, can unlink it and listen on the path instead. The first
 /// frame a client sends is the daemon bearer token, so preferring that path
 /// blind would hand the token to whoever got there first.

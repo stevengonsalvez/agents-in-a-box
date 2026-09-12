@@ -6,7 +6,7 @@
 //!    registry is dispatched twice with one op id. The first execution is
 //!    `created`; the second is `replayed` and returns the first reply verbatim.
 //! 2. **An op id belongs to its principal.** A second principal presenting the
-//!    same op id is `rejected{op_id_foreign}` — never a second execution under
+//!    same op id is `rejected{op_id_foreign}`, never a second execution under
 //!    somebody else's identity.
 //! 3. **A different body is a different operation.** The same op id with a
 //!    changed body is `rejected{already_answered_by}`, not a silent overwrite.
@@ -49,8 +49,8 @@ fn request(method: &str, params: serde_json::Value) -> RpcRequest {
 /// The ack the daemon attached, from either half of the envelope.
 ///
 /// A mutation that succeeded carries it beside its result; one that was refused
-/// carries it in `error.data`. Both are the same contract — "what happened to
-/// your op id" — so the assertions read the same either way.
+/// carries it in `error.data`. Both are the same contract ("what happened to
+/// your op id"), so the assertions read the same either way.
 fn ack(response: &serde_json::Value) -> serde_json::Value {
     if let Some(found) = response.get("result").and_then(|r| r.get(ACK_KEY)) {
         return found.clone();
@@ -130,7 +130,7 @@ async fn every_mutating_method_replays_exactly_once() {
             // A handler that REFUSED did not mutate, so the ledger keeps no row
             // and the SAME op id stays free to deliver on a later attempt. Both
             // dispatches must therefore look identical and neither may claim a
-            // replay — the opposite of the dedupe contract, and correct.
+            // replay: the opposite of the dedupe contract, and correct.
             assert_eq!(
                 ack(&first)["status"],
                 "rejected",
@@ -156,7 +156,7 @@ async fn every_mutating_method_replays_exactly_once() {
             // The OTHER half of the contract, asserted just as hard. A store
             // fault or an unavailable service means nothing ran, so the claim
             // is abandoned and the retry the caller is about to make is a real
-            // retry — pinning a transient failure to an op id forever would be
+            // retry: pinning a transient failure to an op id forever would be
             // the worse bug. Both dispatches must therefore look identical and
             // carry no ack at all.
             assert_eq!(
@@ -233,7 +233,7 @@ async fn every_mutating_method_replays_exactly_once() {
 ///
 /// Keyed on the D18 reason vocabulary, not on `status: rejected` alone: a
 /// RECORDED rejection (an `INVALID_PARAMS` stored as that op id's answer)
-/// is also `rejected`, and it replays — which is the opposite contract.
+/// is also `rejected`, and it replays, which is the opposite contract.
 fn refusal(response: &serde_json::Value) -> Option<String> {
     let reason = ack(response)["reason"].as_str()?.to_string();
     [

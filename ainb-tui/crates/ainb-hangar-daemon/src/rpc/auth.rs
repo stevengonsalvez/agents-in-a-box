@@ -329,7 +329,7 @@ pub async fn authenticate_first_frame(
         ));
     };
     // D17: version before credential. A build this daemon cannot speak is not
-    // an authentication failure and must not be reported as one — the remedy
+    // an authentication failure and must not be reported as one: the remedy
     // is a different binary, never a different token, and a client that
     // conflates the two retries forever with a credential that was fine.
     let Some(selected) = negotiate(params.protocol, ProtocolRange::supported()) else {

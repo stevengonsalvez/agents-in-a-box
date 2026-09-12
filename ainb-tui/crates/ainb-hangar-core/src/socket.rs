@@ -8,7 +8,7 @@
 //!
 //! The alias is created best-effort at bind and never re-checked by the daemon.
 //! The directory is the operator's own `$HOME`, so every process running as
-//! that user can write there — including an agent this daemon itself spawned.
+//! that user can write there, including an agent this daemon itself spawned.
 //! Any of them can unlink the alias and listen on the path instead, and the
 //! very first frame a client sends to it is the daemon bearer token.
 //!
@@ -21,8 +21,8 @@
 //!   a link pointing elsewhere, missing)       ──▶ dial hangar.sock
 //! ```
 //!
-//! This is not a security boundary on its own — a same-uid attacker can also
-//! replace `hangar.sock` — and it is not meant to be. It removes the EXTRA
+//! This is not a security boundary on its own, a same-uid attacker can also
+//! replace `hangar.sock`, and it is not meant to be. It removes the EXTRA
 //! surface the versioned alias would otherwise add for free: without the check,
 //! a path the daemon may legitimately have failed to create is a path clients
 //! prefer, which is the easiest possible thing to squat.
@@ -66,7 +66,7 @@ pub fn dial_path_in(home: &Path, version: u32) -> PathBuf {
 #[must_use]
 pub fn alias_is_trustworthy(alias: &Path, plain: &Path) -> bool {
     let Ok(target) = std::fs::read_link(alias) else {
-        // Missing, or present but NOT a symlink — a socket or a regular file at
+        // Missing, or present but NOT a symlink: a socket or a regular file at
         // that path is precisely the squat this check exists to refuse.
         return false;
     };
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!(dial_path_in(dir.path(), 1), plain);
     }
 
-    /// A symlink pointing somewhere else is refused too — the target is what
+    /// A symlink pointing somewhere else is refused too: the target is what
     /// makes the alias the daemon's, not the fact that it is a link.
     #[test]
     fn an_alias_pointing_elsewhere_is_refused() {

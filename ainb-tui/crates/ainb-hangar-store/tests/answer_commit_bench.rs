@@ -1,6 +1,6 @@
 //! Commit-only latency for the answer write path (spike 8, W0-wire gate).
 //!
-//! Spike 8 measured today's shape — three transactions per event — at a
+//! Spike 8 measured today's shape, three transactions per event, at a
 //! commit-only p50 of **0.40 ms**, and one transaction per event at 0.14 ms
 //! (`research/2026-09-11_multi-surface_SPIKE-8-sqlite-write-path.md`, section
 //! "Decision input"). W0-wire adds a mutation receipt to the answer's claim.

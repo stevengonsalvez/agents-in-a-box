@@ -43,7 +43,7 @@ pub const UNAUTHORIZED: i32 = -32000;
 /// Params of an [`crate::methods::AUTH_HELLO`] request.
 ///
 /// This is the FINAL shape (D17): `{ token, surface?, protocol, capabilities,
-/// device? }`. It reaches it once, in W0-wire, and R1 adds nothing to hello —
+/// device? }`. It reaches it once, in W0-wire, and R1 adds nothing to hello,
 /// the phase that introduces off-box devices fills in [`Self::device`], which
 /// is why the member is here from the start rather than bolted on later.
 ///
@@ -64,7 +64,7 @@ pub struct HelloParams {
     pub surface: Option<SurfaceInfo>,
     /// The protocol versions this client can speak (D17).
     ///
-    /// Defaults to [`ProtocolRange::legacy`] — version 1 and only 1 — because
+    /// Defaults to [`ProtocolRange::legacy`], version 1 and only 1, because
     /// that is what a client that does not send the member is.
     #[serde(default = "ProtocolRange::legacy")]
     pub protocol: ProtocolRange,
@@ -100,7 +100,7 @@ pub struct DeviceInfo {
 /// Result of a successful [`crate::methods::AUTH_HELLO`].
 ///
 /// Pre-W0-wire daemons answer a bare `{}`, which decodes into this struct as
-/// the legacy range with an empty catalogue — the honest reading of a daemon
+/// the legacy range with an empty catalogue: the honest reading of a daemon
 /// that cannot tell you what it serves. That is the N-1-daemon leg of the skew
 /// matrix, and it is why every member defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -202,7 +202,7 @@ mod tests {
     }
 
     /// The N-1 client leg of the skew matrix: a bare `{ token }` frame is what
-    /// every pre-W0-wire client sends, and it must still decode — as version 1
+    /// every pre-W0-wire client sends, and it must still decode, as version 1
     /// with nothing declared, never as an error.
     #[test]
     fn a_bare_token_frame_decodes_as_a_legacy_client() {

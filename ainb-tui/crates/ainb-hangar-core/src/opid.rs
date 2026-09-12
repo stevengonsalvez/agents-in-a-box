@@ -2,7 +2,7 @@
 //!
 //! Split from the op id TYPE, which lives in `ainb-hangar-proto`, because the
 //! two are different concerns and only one of them needs a dependency. Proto is
-//! pure data — serde and nothing else, by its own discipline — so it cannot own
+//! pure data (serde and nothing else, by its own discipline), so it cannot own
 //! a CSPRNG; this crate already has one for token minting.
 //!
 //! So: this decides where the randomness comes from, and
@@ -14,7 +14,7 @@
 ///
 /// 128 bits because two devices minting concurrently for the rest of the decade
 /// will not collide, and because the ledger's foreign-principal rule covers the
-/// case that actually happens — an id REUSED rather than guessed.
+/// case that actually happens, an id REUSED rather than guessed.
 #[must_use]
 pub fn mint_bytes() -> [u8; 16] {
     use rand::RngCore as _;

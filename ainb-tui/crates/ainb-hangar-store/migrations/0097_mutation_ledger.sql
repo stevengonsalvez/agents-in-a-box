@@ -3,13 +3,13 @@
 --
 -- Three things land together because they are one contract:
 --
---   1. `mutation_ledger` — the durable record of every mutation, keyed
+--   1. `mutation_ledger`, the durable record of every mutation, keyed
 --      `(host_id, principal, op_id)`, holding the serialized reply so a retry
 --      after a lost reply is a READ, never a second execution.
---   2. `attention.version` — the fence `attention/answer` is fenced on. The
+--   2. `attention.version`, the fence `attention/answer` is fenced on. The
 --      table had no optimistic-concurrency column at all, so "the row I read"
 --      and "the row I am answering" could only be compared by state.
---   3. `attention.kind = 'delivery_unconfirmed'` — the row a `writing` receipt
+--   3. `attention.kind = 'delivery_unconfirmed'`, the row a `writing` receipt
 --      becomes at boot. Widening a CHECK needs a table rebuild in SQLite, so
 --      this migration does the rebuild and carries every existing column,
 --      index and row across.
@@ -32,7 +32,7 @@
 -- D18 wants "7 days or 100k rows, whichever first" AND "a retry after eviction
 -- returns unknown{op_expired}". A hard DELETE cannot do both: once the row is
 -- gone the daemon cannot tell an evicted op from one it has never seen, and
--- would happily execute it a second time. So stage one EXPIRES a row — drops
+-- would happily execute it a second time. So stage one EXPIRES a row, drops
 -- the stored reply, which is all the bulk, and sets `expired = 1`, leaving a
 -- ~60-byte tombstone that still answers "you already sent this, I no longer
 -- know what happened". Stage two deletes tombstones past a second, wider bound.
@@ -64,7 +64,7 @@ CREATE TABLE mutation_ledger (
     -- the wire vocabulary has no word for: `in_flight`, the row a claim
     -- inserts BEFORE the handler runs. That row is what serialises two sockets
     -- retrying the same op id, and a row still `in_flight` at boot is a daemon
-    -- that died mid-handler — resolved to `unknown{effects_ambiguous}` by the
+    -- that died mid-handler, resolved to `unknown{effects_ambiguous}` by the
     -- boot sweep, never re-executed.
     status           TEXT NOT NULL CHECK (status IN (
                          'in_flight', 'accepted', 'rejected', 'unknown'
@@ -93,7 +93,7 @@ CREATE TABLE mutation_ledger (
 -- UNIQUE, not a plain index, and that is the whole mutual exclusion. The
 -- primary key contains `principal`, so two principals racing one op id collide
 -- on nothing: each inserts under its own key and each is told `Fresh`, and both
--- execute. A SELECT-then-INSERT cannot close that — they are two autocommit
+-- execute. A SELECT-then-INSERT cannot close that, they are two autocommit
 -- statements, and the window between them is exactly where the race lives.
 --
 -- One op id is one operation on this host, whoever presents it. The second

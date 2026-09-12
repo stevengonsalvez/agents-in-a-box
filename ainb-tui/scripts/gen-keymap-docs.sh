@@ -23,7 +23,7 @@ fi
 [[ -x "$BIN" ]] || { echo "[gen-keymap-docs] binary not found: $BIN" >&2; exit 1; }
 # The docs site parses every page in docs/ as a content collection entry and
 # REQUIRES a `title` in the frontmatter. The binary's `--format md` output is a
-# plain markdown body on purpose — other consumers read it — so the frontmatter
+# plain markdown body on purpose, other consumers read it, so the frontmatter
 # is written here, exactly as gen-cli-reference.sh writes its own.
 {
   cat <<'PREAMBLE'

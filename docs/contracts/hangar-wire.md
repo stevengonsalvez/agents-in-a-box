@@ -28,7 +28,7 @@ amendments 15-21.
 change would misread the wire: a method or field is removed, a field's meaning
 changes, or framing / auth / crypto changes. A new method, a new optional field
 and a new event kind are capability strings, not bumps. That is what lets an
-app-store phone — which cannot be force-upgraded — keep working.
+app-store phone, which cannot be force-upgraded, keep working.
 
 **The catalogue is a committed file.** `capabilities.catalogue` is append-only;
 `ainb-hangar-proto/tests/capability_catalogue.rs` fails if a string is removed,
@@ -101,9 +101,9 @@ reports `0`, and a client must then send no fence rather than one it invented.
 
 ### Two tiers
 
-1. **Dedupe** — every mutation, at dispatch. The ledger row stores the
+1. **Dedupe**, every mutation, at dispatch. The ledger row stores the
    serialized reply and a replay returns it verbatim.
-2. **Receipt** — the PTY-effecting mutations only: `attention/answer`,
+2. **Receipt**, the PTY-effecting mutations only: `attention/answer`,
    `fleet/action`, `fleet/message_send`. (`terminal/input` joins in R2, when the
    method exists.) Adding a handler to this tier is a checklist item, not a
    default, and `ainb-hangar-proto/src/mutation.rs` has a test that fails when
@@ -111,7 +111,7 @@ reports `0`, and a client must then send no fence rather than one it invented.
 
 ### What the daemon answers
 
-The reply carries a `mutation` ack — beside the result on success, inside
+The reply carries a `mutation` ack, beside the result on success, inside
 `error.data` on a refusal. It is additive: an N-1 client deserializes its own
 result type and never sees it.
 
@@ -136,7 +136,7 @@ claimed ──▶ writing ──▶ delivered | failed
    └────────────┴──▶ (daemon dies) ──▶ unknown{effects_ambiguous}
 ```
 
-`claimed` is written in the SAME SQLite transaction as the state flip — never
+`claimed` is written in the SAME SQLite transaction as the state flip, never
 through the event outbox, which has a documented crash loss window. `writing`
 is committed immediately before the first byte reaches the PTY.
 
@@ -144,7 +144,7 @@ At boot (`receipt_sweep::run`, before the socket accepts anything):
 
 | Found | Done |
 | --- | --- |
-| receipt `writing` | `unknown{effects_ambiguous}`, plus an attention row of kind `delivery_unconfirmed` naming the answer. Not reopened (a retry could double-type), not closed silently — only an operator closes it. |
+| receipt `writing` | `unknown{effects_ambiguous}`, plus an attention row of kind `delivery_unconfirmed` naming the answer. Not reopened (a retry could double-type), not closed silently, only an operator closes it. |
 | receipt `claimed` | `writing` never committed, so no byte can have left: the attention row is reopened, exactly as a failed send already compensates. |
 | any other `in_flight` claim | `unknown{effects_ambiguous}`. Never re-executed. |
 
@@ -173,7 +173,7 @@ is also a downgrade question.
 
 | Step | Effect on an N-1 binary |
 | --- | --- |
-| `attention.kind = 'delivery_unconfirmed'` (migration 0097) | A reader that does not know the kind **skips that row**. Older builds shipped before this tolerance fail their whole attention list once an N daemon writes one — which cannot be fixed retroactively, only for the next new kind. |
+| `attention.kind = 'delivery_unconfirmed'` (migration 0097) | A reader that does not know the kind **skips that row**. Older builds shipped before this tolerance fail their whole attention list once an N daemon writes one, which cannot be fixed retroactively, only for the next new kind. |
 | `attention.version`, `mutation_ledger` (migration 0097) | Additive columns and a new table; an N-1 binary ignores both. |
 
 ## Test seams
@@ -193,5 +193,5 @@ any other way.
 
 Commit-only p50 for the answer write path. Gate: at or below **0.40 ms**, which
 is spike 8's measured p50 for the three-transactions-per-event shape this
-replaces. `#[ignore]` by default — a latency assertion on a shared runner is a
+replaces. `#[ignore]` by default, a latency assertion on a shared runner is a
 flake generator, and a muted gate is worse than a deliberate one.

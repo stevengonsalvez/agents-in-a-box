@@ -110,7 +110,7 @@ pub async fn mark_active_receipt(
 /// The reply shape stored in the ledger.
 ///
 /// Tagged rather than "the result value or null", because a rejection is a
-/// legitimate terminal outcome that a replay has to reproduce exactly — a
+/// legitimate terminal outcome that a replay has to reproduce exactly, a
 /// client retrying a refused mutation must get the refusal again, not a second
 /// execution that might now succeed.
 mod stored {
@@ -163,14 +163,14 @@ pub fn principal_of(caller: &Caller) -> String {
 ///
 /// Amendment 19: `FleetActionParams::request_id` IS the op id for the fleet
 /// family and `fleet_action_receipt` IS its ledger. W0-wire renames nothing on
-/// the wire, so the envelope's `op_id` is an ALIAS — a client that already
+/// the wire, so the envelope's `op_id` is an ALIAS, a client that already
 /// sends `request_id` is already deduplicated, without changing a byte.
 /// # Errors
 ///
 /// The reason the presented id cannot be an op id. The caller answers
 /// `INVALID_PARAMS`: an id longer than [`OpId`]'s bound would otherwise reach
 /// the ledger's own `length(op_id) <= 128` CHECK, surface as an internal error,
-/// and be classified retryable — inviting a client to retry forever on a
+/// and be classified retryable, inviting a client to retry forever on a
 /// request that can never succeed, with raw SQLite text in the reply.
 pub fn op_id_of(method: &str, params: &Value) -> Result<Option<OpId>, String> {
     let Some(object) = params.as_object() else {
@@ -268,7 +268,7 @@ fn refusal_reason(method: &str, value: &Value) -> Option<&'static str> {
         "already_answered" | "ambiguous" => Some(REASON_ALREADY_ANSWERED_BY),
         // The claim was compensated: the row was flipped, the send failed, and
         // the row went back to `open`. Nothing was applied, and the operator is
-        // expected to answer it again — so recording this as the op id's reply
+        // expected to answer it again, so recording this as the op id's reply
         // would replay the failure at every retry and never deliver.
         "delivery_failed" => Some(REASON_NOT_DELIVERED),
         // Nothing was claimed and nothing was sent. The target may be live
@@ -282,8 +282,8 @@ fn refusal_reason(method: &str, value: &Value) -> Option<&'static str> {
 ///
 /// The dispatcher's own `store_err` forwards the SQLite text, which is right
 /// for a handler whose query a caller shaped. These are the ledger's own
-/// statements: their text describes the daemon's schema — table names, CHECK
-/// bodies, constraint names — and none of it is a caller's business or any use
+/// statements: their text describes the daemon's schema (table names, CHECK
+/// bodies, constraint names) and none of it is a caller's business or any use
 /// to one. The detail goes to the log, where an operator can read it.
 fn store_error(error: &sqlx::Error) -> RpcError {
     tracing::warn!(error = %error, "mutation ledger store fault");
@@ -393,7 +393,7 @@ fn settled(entry: &MutatingMethod, outcome: &ClaimOutcome) -> Option<Result<Valu
 /// That row is a mutation the boot sweep resolved after a crash: there is no
 /// reply because nothing ever answered, and reporting it as an aged-out op id
 /// would tell the client the wrong thing about a very specific, very bad
-/// moment — bytes that may or may not have reached a terminal.
+/// moment, bytes that may or may not have reached a terminal.
 fn replay(row: &LedgerRow) -> Result<Value, RpcError> {
     let receipt = row.receipt_state.as_deref().and_then(ReceiptState::from_token);
     if row.status == ainb_hangar_store::repo::mutation_ledger::STATUS_UNKNOWN {
@@ -429,7 +429,7 @@ fn replay(row: &LedgerRow) -> Result<Value, RpcError> {
         // No body, and two very different reasons for that. An EXPIRED row
         // aged out and the daemon can say nothing about it. A row the boot
         // sweep resolved from its own receipt knows exactly what happened and
-        // has only lost the payload — reporting that as `op_expired` would
+        // has only lost the payload: reporting that as `op_expired` would
         // tell a client its delivered answer might never have run.
         None if row.expired => Err(ack_error(
             ainb_hangar_proto::mutation::MUTATION_UNKNOWN,
@@ -520,7 +520,7 @@ where
     // returned `Ok`: `attention/answer` reports a lost race and a stale fence
     // inside its result enum rather than as an RPC error. Recording those as
     // `accepted` tells a client branching on `mutation.status` that a refused
-    // answer was applied — and, because the body fingerprint strips the fence,
+    // answer was applied. And because the body fingerprint strips the fence,
     // a client that re-reads the fence and retries under the same op id would
     // get that refusal replayed forever and never deliver.
     if let Ok(value) = &result {
@@ -567,7 +567,7 @@ where
         }
         Err(error) if is_transient(error.code) => {
             // Nothing ran to completion, so the retry the caller is about to
-            // make should be a real retry — but only if nothing can have left.
+            // make should be a real retry, but only if nothing can have left.
             // `abandon` refuses to drop a row whose receipt reached `writing`
             // (bytes may already be in a terminal), and that row is left for the
             // boot sweep to resolve as `unknown` instead.
@@ -673,7 +673,7 @@ mod tests {
 
     /// The proto crate's bound is enforced HERE, at the boundary. Left to the
     /// ledger's own `length(op_id) <= 128` CHECK it would surface as an
-    /// internal error, which the guard classifies retryable — inviting a client
+    /// internal error, which the guard classifies retryable, inviting a client
     /// to retry forever on a request that can never succeed.
     #[test]
     fn an_over_long_op_id_is_refused_at_the_boundary() {

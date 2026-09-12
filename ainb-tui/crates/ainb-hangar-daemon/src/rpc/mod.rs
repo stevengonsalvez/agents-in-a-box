@@ -1705,8 +1705,8 @@ async fn handle_fleet_action(
     // above `execute_fleet_action`, rather than beside the `send-keys` itself:
     // the executor lives in `fleet.rs`, which another lane owns, and nothing
     // between this line and the first PTY byte writes to a terminal. So the
-    // invariant the receipt needs — `writing` is durable BEFORE any byte can
-    // leave — holds exactly as it does for `attention/answer`.
+    // invariant the receipt needs (`writing` is durable BEFORE any byte can
+    // leave) holds exactly as it does for `attention/answer`.
     let now_ms = SystemClock.now_ms();
     mutation::mark_active_receipt(
         pool,

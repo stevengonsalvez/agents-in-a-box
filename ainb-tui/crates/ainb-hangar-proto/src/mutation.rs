@@ -22,10 +22,10 @@
 //!
 //! ## Two tiers, deliberately
 //!
-//! 1. [`MutationTier::Dedupe`] — every mutation. The ledger stores the
+//! 1. [`MutationTier::Dedupe`]: every mutation. The ledger stores the
 //!    serialized reply; a replay returns it byte-for-byte. This is enough
 //!    whenever the only cost of a double execution is a duplicated row.
-//! 2. [`MutationTier::Receipt`] — the PTY-effecting mutations only. These type
+//! 2. [`MutationTier::Receipt`]: the PTY-effecting mutations only. These type
 //!    into somebody's terminal, so a double execution is a second `yes` on an
 //!    agent about to run a command. They carry a receipt whose lifecycle is
 //!    written in the SAME `SQLite` transaction as the state flip, never through
@@ -87,7 +87,7 @@ pub const REASON_EFFECTS_AMBIGUOUS: &str = "effects_ambiguous";
 /// Reason: the operation's outcome is known, but its exact reply body is not.
 ///
 /// A daemon that died between a terminal receipt and the reply record knows
-/// WHAT happened — the receipt is the evidence — and cannot reproduce the
+/// WHAT happened (the receipt is the evidence) and cannot reproduce the
 /// body it would have sent. The status axis still carries the real outcome, so
 /// a client learns "this was applied" and only loses the payload.
 pub const REASON_REPLY_LOST: &str = "reply_lost";
@@ -373,7 +373,7 @@ impl MutationEnvelope {
 pub struct MutationAck {
     /// What happened to the operation, when the operation ran at all.
     ///
-    /// ABSENT for a refusal the ledger made before any handler was reached — a
+    /// ABSENT for a refusal the ledger made before any handler was reached, a
     /// foreign op id, an aged-out row, an attempt still in flight. Naming one
     /// of the three outcomes there would be a lie in the direction that matters
     /// most: a client reading `replayed` concludes its earlier attempt
@@ -554,7 +554,7 @@ pub static MUTATING_METHODS: &[MutatingMethod] = &[
     // client reading the contract that it holds a stale-kill guard it does not
     // have. The row flips to `SessionIncarnation` in the change that enforces
     // it, and `receipt_tier_mutations_are_all_fenced` is the test that has to
-    // be relaxed to allow this — deliberately, so the gap is visible.
+    // be relaxed to allow this, deliberately, so the gap is visible.
     mutating_method!(
         m::FLEET_ACTION,
         f::FleetActionParams,

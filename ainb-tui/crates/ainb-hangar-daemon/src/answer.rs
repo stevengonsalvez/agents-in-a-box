@@ -66,8 +66,8 @@ pub fn answered_by(connection: &ConnectionRow) -> String {
 /// for, and it cannot be reproduced by returning an error: an error is recorded
 /// as that op id's answer, whereas a SIGKILL records nothing. Parking the task
 /// lets a test abort it at exactly that instant, leaving the durable state a
-/// killed daemon leaves — receipt `writing`, ledger row `in_flight`, attention
-/// row `answered` — and nothing else.
+/// killed daemon leaves: receipt `writing`, ledger row `in_flight`, attention
+/// row `answered`, and nothing else.
 #[cfg(any(test, feature = "test-support"))]
 static STALL_AT_WRITE_BOUNDARY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -93,7 +93,7 @@ async fn stall_at_write_boundary() {}
 ///
 /// The second crash window, and a narrower one: `delivered` is committed here,
 /// and the dispatcher records the reply several awaits later. A daemon killed
-/// in between leaves `status = in_flight` beside `receipt_state = delivered` —
+/// in between leaves `status = in_flight` beside `receipt_state = delivered`,
 /// an outcome that IS known, sitting under a status that says it is not.
 #[cfg(any(test, feature = "test-support"))]
 static STALL_AFTER_DELIVERY: std::sync::atomic::AtomicBool =
@@ -121,7 +121,7 @@ async fn stall_after_delivery() {}
 ///
 /// The last-mile transport is a real `tmux send-keys` with a composer-ingest
 /// gate, and standing one up is a test of THAT, not of the thing under test
-/// here — which is the first-answer-wins race and the receipt lifecycle above
+/// here, which is the first-answer-wins race and the receipt lifecycle above
 /// it. Faking the transport keeps the race test asserting one `Delivered` and
 /// one `AlreadyAnswered` rather than one `DeliveryFailed` and one
 /// `AlreadyAnswered`, which would pass while proving less.
@@ -282,8 +282,8 @@ fn fenced_version(params: &AnswerParams) -> Option<i64> {
 /// result: a second surface already flipped it and this one delivers nothing.
 ///
 /// The flip and the mutation receipt commit in ONE transaction (D18, amendment
-/// 17). That is not tidiness: a receipt written afterwards — and especially one
-/// written through the event outbox, which has a documented crash loss window —
+/// 17). That is not tidiness: a receipt written afterwards, and especially one
+/// written through the event outbox, which has a documented crash loss window,
 /// can disagree with the flip it describes, and the whole point of the receipt
 /// is to be the thing that cannot.
 async fn claim(
@@ -327,7 +327,7 @@ async fn claim(
     //   state == open   the FENCE did not match, so this caller is answering a
     //                   version of the request that no longer exists. Reporting
     //                   "already answered by unknown" there would be a lie in
-    //                   two directions at once — nobody answered it, and it is
+    //                   two directions at once: nobody answered it, and it is
     //                   still answerable.
     let row = AttentionRepo::get(pool, &params.attention_id).await?;
     let still_open = row.as_ref().is_some_and(|r| r.state == "open");

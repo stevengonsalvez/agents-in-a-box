@@ -126,7 +126,7 @@ impl DaemonError {
 /// D17: the versioned alias `hangar-v<N>.sock` when the daemon published one
 /// and it is verifiably the daemon's own symlink, else the unversioned
 /// `hangar.sock`. The verification lives in
-/// [`ainb_hangar_core::socket::dial_path_in`] — one copy, shared with
+/// [`ainb_hangar_core::socket::dial_path_in`], one copy, shared with
 /// `ainb-web`, because the FIRST frame on this socket is the daemon token and a
 /// path that any same-uid process can squat must not be preferred blind.
 #[must_use]

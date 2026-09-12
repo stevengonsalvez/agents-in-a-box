@@ -3,7 +3,7 @@
 //! D17's bump rule only works if removing a capability is loud: new methods and
 //! new event kinds are capability strings precisely so the protocol integer can
 //! stay still, which means a vanished string is the one change that silently
-//! breaks a client. A const array alone cannot enforce that — deleting a line
+//! breaks a client. A const array alone cannot enforce that, deleting a line
 //! from it compiles. A committed file that the array is diffed against can, and
 //! this is that diff.
 //!

@@ -3,7 +3,7 @@
 //! The ledger stores a serialized reply per mutation, so it grows with every
 //! write the daemon serves and bounds nothing on its own. D18 fixes the bound
 //! at 7 days or 100k rows, whichever comes first, and
-//! [`MutationLedgerRepo::retain`] implements it — but a retention policy with
+//! [`MutationLedgerRepo::retain`] implements it, but a retention policy with
 //! no caller is a comment. The sibling tables are the evidence: `fleet_event`
 //! reached 1.1M rows and 847 MB under no retention at all.
 //!

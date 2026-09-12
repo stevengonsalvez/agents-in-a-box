@@ -3,9 +3,9 @@
 //! Two different questions used to be answered by two different numbers, and a
 //! client had no way to ask the first one at all:
 //!
-//! * *"can this build talk to that build?"* — answered here, by
+//! * *"can this build talk to that build?"*, answered here, by
 //!   [`PROTOCOL_VERSION`] carried as a `{min, max}` range in `auth/hello`.
-//! * *"does that build serve the method I am about to call?"* — answered by a
+//! * *"does that build serve the method I am about to call?"*, answered by a
 //!   capability string in [`CAPABILITY_CATALOGUE`].
 //!
 //! ```text
@@ -22,7 +22,7 @@
 //! * a field's MEANING changes,
 //! * framing, auth, or crypto changes.
 //!
-//! A new method, a new optional field, and a new event kind are NOT bumps —
+//! A new method, a new optional field, and a new event kind are NOT bumps,
 //! they are capability strings. That rule is what lets an app-store phone keep
 //! working: it cannot be force-upgraded, so the integer has to move rarely
 //! enough that the range overlap survives a release the user never installed.
@@ -88,7 +88,7 @@ impl ProtocolRange {
     /// nothing else. Pinned to the literal `1` rather than to
     /// [`PROTOCOL_MIN_SUPPORTED`] so a future release that drops version 1 does
     /// not silently re-label those clients as speaking whatever the new floor
-    /// is — they would then negotiate a version they have never heard of.
+    /// is, they would then negotiate a version they have never heard of.
     #[must_use]
     pub const fn legacy() -> Self {
         Self { min: 1, max: 1 }
@@ -156,7 +156,7 @@ pub const CAP_SOCKET_VERSIONED: &str = "hangar.socket.versioned";
 /// Capability: the in-memory live surface registry (`hangar/connections_list`
 /// plus the `ConnectionsChanged` event).
 pub const CAP_CONNECTIONS_REGISTRY: &str = "hangar.connections.registry";
-/// Capability: the converged attention inbox — list, subscribe, answer.
+/// Capability: the converged attention inbox, list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
 /// Capability: the wire attention row carries its `version`, so a client can
 /// fence `attention/answer` on the row it actually read (D18).
@@ -168,32 +168,32 @@ pub const CAP_ATTENTION_FENCE: &str = "hangar.attention.fence";
 pub const CAP_WORKSPACE_SUBSCRIBE: &str = "hangar.workspace.subscribe";
 /// Capability: issue read surface, including search and the activity timeline.
 pub const CAP_ISSUE_READ: &str = "hangar.issue.read";
-/// Capability: issue write surface — update, labels, links, properties,
+/// Capability: issue write surface, update, labels, links, properties,
 /// reactions, subscriptions, delete.
 pub const CAP_ISSUE_WRITE: &str = "hangar.issue.write";
 /// Capability: board read surface.
 pub const CAP_BOARD_READ: &str = "hangar.board.read";
-/// Capability: board write surface — boards, columns, cards, dependencies.
+/// Capability: board write surface, boards, columns, cards, dependencies.
 pub const CAP_BOARD_WRITE: &str = "hangar.board.write";
 /// Capability: agent roster read surface.
 pub const CAP_AGENT_READ: &str = "hangar.agent.read";
-/// Capability: agent write surface — create, update, archive, delete.
+/// Capability: agent write surface, create, update, archive, delete.
 pub const CAP_AGENT_WRITE: &str = "hangar.agent.write";
 /// Capability: skill catalogue read surface.
 pub const CAP_SKILL_READ: &str = "hangar.skill.read";
-/// Capability: skill write surface — sync, attach, detach, enable.
+/// Capability: skill write surface, sync, attach, detach, enable.
 pub const CAP_SKILL_WRITE: &str = "hangar.skill.write";
-/// Capability: autopilot read surface — list, runs, versions, rosters.
+/// Capability: autopilot read surface, list, runs, versions, rosters.
 pub const CAP_AUTOPILOT_READ: &str = "hangar.autopilot.read";
-/// Capability: autopilot write surface — update, enable, triggers, rosters.
+/// Capability: autopilot write surface, update, enable, triggers, rosters.
 pub const CAP_AUTOPILOT_WRITE: &str = "hangar.autopilot.write";
 /// Capability: squad read surface.
 pub const CAP_SQUAD_READ: &str = "hangar.squad.read";
-/// Capability: squad write surface — create, membership, assign, fan-out.
+/// Capability: squad write surface, create, membership, assign, fan-out.
 pub const CAP_SQUAD_WRITE: &str = "hangar.squad.write";
 /// Capability: workspace membership read surface.
 pub const CAP_MEMBER_READ: &str = "hangar.member.read";
-/// Capability: workspace membership write surface — roles, removal, invites.
+/// Capability: workspace membership write surface, roles, removal, invites.
 pub const CAP_MEMBER_WRITE: &str = "hangar.member.write";
 /// Capability: the cross-surface inbox projection.
 pub const CAP_INBOX_READ: &str = "hangar.inbox.read";
@@ -231,7 +231,7 @@ pub const CAP_CODEX_SESSION: &str = "codex.session";
 /// The ONE capability catalogue: every string this build advertises.
 ///
 /// Ordered and APPEND-ONLY. The Hangar strings come first, then the fleet ids
-/// from [`crate::fleet::FLEET_PROTOCOL_CAPABILITY_IDS`] verbatim — D17's "its
+/// from [`crate::fleet::FLEET_PROTOCOL_CAPABILITY_IDS`] verbatim, D17's "its
 /// 25 ids append to the one catalogue". A test in this module asserts that
 /// every fleet id is present here, and
 /// `tests/capability_catalogue.rs` asserts against the COMMITTED
@@ -404,7 +404,7 @@ mod tests {
         }
     }
 
-    /// A peer that sent no `protocol` member speaks version 1 and only 1 —
+    /// A peer that sent no `protocol` member speaks version 1 and only 1,
     /// pinned to the literal, so dropping version 1 later cannot relabel it.
     #[test]
     fn the_legacy_range_is_exactly_version_one() {

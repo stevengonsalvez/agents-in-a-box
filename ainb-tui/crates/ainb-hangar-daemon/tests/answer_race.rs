@@ -24,7 +24,7 @@ use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttent
 use ainb_hangar_store::repo::mutation_ledger::{LedgerKey, MutationLedgerRepo};
 
 /// The forced-delivery seam and `$AINB_BIN` are process-global, and these two
-/// tests would otherwise disarm each other's seam mid-flight — which is exactly
+/// tests would otherwise disarm each other's seam mid-flight, which is exactly
 /// the flake it looks like: one test reporting `delivery_failed` because a
 /// sibling finished first.
 static SEAM: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -186,7 +186,7 @@ async fn two_surfaces_answering_one_row_yield_one_delivered_and_one_already_answ
 ///
 /// The refusal is `ambiguous`, not `already_answered`. Those are two different
 /// facts and the row proves it: nobody answered this one, and it is still
-/// answerable — telling the client "already answered by unknown" would be wrong
+/// answerable, telling the client "already answered by unknown" would be wrong
 /// in both directions at once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stale_fence_is_refused_with_the_row_still_open() {
@@ -231,7 +231,7 @@ async fn a_stale_fence_is_refused_with_the_row_still_open() {
     };
 
     // A fence naming a version the row never had is refused with the row still
-    // open — the guard runs before anything is delivered.
+    // open: the guard runs before anything is delivered.
     let stale = rpc::dispatch_as(
         store.pool(),
         &fenced("op-fence-stale", 99),

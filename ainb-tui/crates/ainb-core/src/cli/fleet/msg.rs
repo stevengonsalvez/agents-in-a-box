@@ -120,7 +120,7 @@ impl From<DaemonError> for CliFailure {
                     // Two codes, one fact. `request_id` IS the op id for this
                     // family (D18 amendment 19), so the dispatcher's generic
                     // ledger now refuses a reused id with a different body
-                    // BEFORE the handler's own check is reached — and that
+                    // BEFORE the handler's own check is reached, and that
                     // refusal must still exit `idempotency_conflict`, not the
                     // generic code, or a script that branches on the exit
                     // status silently stops distinguishing the two.

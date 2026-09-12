@@ -89,7 +89,7 @@ pub enum DaemonError {
     Decode(String),
 }
 
-/// The daemon unix socket path — the same target the TUI plugin dials. `None`
+/// The daemon unix socket path, the same target the TUI plugin dials. `None`
 /// when the home cannot be resolved.
 ///
 /// D17: the versioned alias when the daemon published one AND it verifiably

@@ -129,7 +129,7 @@ struct HangarProtocolRange: Codable, Equatable {
 /// The `auth/hello` reply.
 ///
 /// EVERY member is optional with a legacy default, because a pre-W0-wire daemon
-/// answers `{}` and that has to decode — it is the N-1-daemon leg of the skew
+/// answers `{}` and that has to decode, it is the N-1-daemon leg of the skew
 /// matrix, not an error.
 struct AuthHelloResult: Decodable, Equatable {
     let protocolRange: HangarProtocolRange

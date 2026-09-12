@@ -130,7 +130,7 @@ impl Client {
 /// NOTHING further (I1's one-submit half).
 /// The result with the D18 mutation ack stripped.
 ///
-/// The PAYLOAD of a replay is identical to the first answer — that is the
+/// The PAYLOAD of a replay is identical to the first answer: that is the
 /// guarantee these tests exist for. The ack deliberately is not: it is the one
 /// field that tells a client whether its own attempt executed or was served
 /// from the ledger, so it is asserted separately rather than folded into an

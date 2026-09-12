@@ -4,7 +4,7 @@
 //! case that cannot be simulated by returning an error: an error is RECORDED as
 //! that op id's answer, whereas a killed daemon records nothing. So the test
 //! parks the answer at its `writing` boundary, aborts the task at exactly that
-//! instant — leaving the durable state a SIGKILL leaves — and then boots a
+//! instant, leaving the durable state a SIGKILL leaves, and then boots a
 //! fresh daemon over the same database.
 //!
 //! ```text
@@ -181,7 +181,7 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
     assert_eq!(payload["op_id"], OP);
     assert_eq!(
         unconfirmed[0].state, "open",
-        "only an operator closes it — the daemon never does"
+        "only an operator closes it, the daemon never does"
     );
 
     // ── the retry ───────────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ async fn a_crash_between_claim_and_send_keys_is_surfaced_not_retried() {
 
 /// The OTHER half of the boot sweep, and the branch a bug had made dead code:
 /// a receipt still `claimed` never committed `writing`, so provably no byte
-/// reached the PTY — the answer was lost, and the row has to go back on the
+/// reached the PTY: the answer was lost, and the row has to go back on the
 /// operator's board.
 ///
 /// `AttentionRepo::reopen` scopes its revert to ONE claim with
@@ -294,7 +294,7 @@ async fn a_claimed_receipt_at_boot_reopens_its_attention_row() {
 /// The narrower crash window, and the one a sweep can get WRONG rather than
 /// merely miss: `delivered` is committed by the answer path, and the reply is
 /// recorded by the dispatcher several awaits later. A daemon killed in between
-/// leaves `status = in_flight` beside `receipt_state = delivered` — an outcome
+/// leaves `status = in_flight` beside `receipt_state = delivered`: an outcome
 /// that is known, under a status that says it is not.
 ///
 /// Routing that through the generic arm overwrote a CONFIRMED delivery with
@@ -377,8 +377,8 @@ async fn a_crash_after_delivery_keeps_the_outcome_its_receipt_recorded() {
         "a delivered answer must not raise delivery_unconfirmed: {rows:?}"
     );
 
-    // A retry replays the KNOWN outcome. The body is gone — the daemon died
-    // before storing it — but the status axis still says the answer was
+    // A retry replays the KNOWN outcome. The body is gone (the daemon died
+    // before storing it) but the status axis still says the answer was
     // applied, and the receipt says how. `op_expired` here would tell a client
     // its delivered answer might never have run at all.
     let response = rpc::dispatch_as(

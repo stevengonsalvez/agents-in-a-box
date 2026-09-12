@@ -180,7 +180,7 @@ async fn an_unanswered_claim_reads_as_in_flight() {
 }
 
 /// Amendment 17: a receipt still `writing` at boot, and any claim that never
-/// reached a terminal status, both resolve to `unknown` — and neither is
+/// reached a terminal status, both resolve to `unknown`, and neither is
 /// re-executed.
 #[tokio::test]
 async fn the_boot_sweep_finds_writing_and_in_flight_rows() {
@@ -362,7 +362,7 @@ async fn a_rolled_back_transaction_leaves_no_receipt() {
 /// second, so the fast-path SELECT always sees the winner. Two principals that
 /// truly race never see each other's row: `principal` is inside the primary
 /// key, so each insert lands under its own key and both callers are told
-/// `Fresh` — and both execute, under one op id, which is the exact double-fire
+/// `Fresh`, and both execute, under one op id, which is the exact double-fire
 /// the ledger exists to stop.
 ///
 /// The UNIQUE (host_id, op_id) index is what decides it. Exactly one `Fresh`,
@@ -405,7 +405,7 @@ async fn two_principals_racing_one_op_id_yield_exactly_one_fresh() {
         );
 
         // And exactly one row exists for that op id, under whichever principal
-        // won — never one per principal.
+        // won, never one per principal.
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mutation_ledger WHERE op_id = ?")
             .bind(&op)
             .fetch_one(store.pool())
@@ -418,7 +418,7 @@ async fn two_principals_racing_one_op_id_yield_exactly_one_fresh() {
 /// The ceiling retention cannot provide: a burst INSIDE the hourly window.
 ///
 /// Every deterministic outcome writes a row and its serialized reply, and a
-/// fresh op id per call makes every call a new row — so a caller that loops
+/// fresh op id per call makes every call a new row, so a caller that loops
 /// grows the ledger unbounded between sweeps. The cap is per principal, so one
 /// runaway credential cannot crowd out the operator's own.
 #[tokio::test]
