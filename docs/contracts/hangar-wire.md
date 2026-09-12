@@ -83,12 +83,21 @@ The fleet family renames nothing: `FleetActionParams.request_id`,
 
 ### Fences
 
-| Mutation | Fence | Stale means |
-| --- | --- | --- |
-| `attention/answer` | attention row `version`, and `state = open` | already answered: `rejected{already_answered_by}` |
-| `fleet/message_send`, prompt send | `fleet_session.lifecycle_updated_at` | the agent moved on: `rejected{turn_advanced}` |
-| `fleet/action{cancel, kill}` | `session_incarnation` | a different process owns the name: `rejected{incarnation_mismatch}` |
-| `device_revoke` (R1) | registry `version` | concurrent admin edit: `rejected{conflict}` |
+| Mutation | Fence | Enforced | Stale means |
+| --- | --- | --- | --- |
+| `attention/answer` | attention row `version`, and `state = open` | **yes** | already answered: `rejected{already_answered_by}` |
+| `fleet/message_send`, prompt send | `fleet_session.lifecycle_updated_at` | not yet | the agent moved on: `rejected{turn_advanced}` |
+| `fleet/action{cancel, kill}` | `session_incarnation` | not yet | a different process owns the name: `rejected{incarnation_mismatch}` |
+| `device_revoke` (R1) | registry `version` | not yet (R1) | concurrent admin edit: `rejected{conflict}` |
+
+Only the enforced row is declared in `MUTATING_METHODS`; the other two carry
+`FenceKind::None` until the handler that reads them lands, because a client that
+believes it holds a guard it does not have is worse off than one that knows it
+has none. `only_enforced_fences_are_declared` in `ainb-hangar-proto` pins that.
+
+The fence VALUE reaches a client on the wire `AttentionRow.version`, gated by
+the `hangar.attention.fence` capability. A daemon that does not advertise it
+reports `0`, and a client must then send no fence rather than one it invented.
 
 ### Two tiers
 
@@ -107,7 +116,7 @@ The reply carries a `mutation` ack — beside the result on success, inside
 result type and never sees it.
 
 ```json
-{ "outcome": "created" | "adopted" | "replayed",
+{ "outcome": "created" | "replayed",          // absent when nothing of yours ran
   "status":  "accepted" | "rejected" | "unknown",
   "reason":  "op_id_foreign" | "op_expired" | "already_answered_by" | "…",
   "receipt": "claimed" | "writing" | "delivered" | "failed" | "unknown" }
@@ -156,6 +165,16 @@ answerable `unknown{op_expired}`:
 
 A hard delete alone cannot do both: once the key is gone the daemon cannot tell
 a stale retry from a new operation, and would execute it a second time.
+
+## One-way store steps
+
+Two binaries can share one `hangar.db` during an upgrade, so a schema addition
+is also a downgrade question.
+
+| Step | Effect on an N-1 binary |
+| --- | --- |
+| `attention.kind = 'delivery_unconfirmed'` (migration 0097) | A reader that does not know the kind **skips that row**. Older builds shipped before this tolerance fail their whole attention list once an N daemon writes one — which cannot be fixed retroactively, only for the next new kind. |
+| `attention.version`, `mutation_ledger` (migration 0097) | Additive columns and a new table; an N-1 binary ignores both. |
 
 ## Test seams
 

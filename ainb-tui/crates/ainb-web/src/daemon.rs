@@ -572,6 +572,7 @@ mod tests {
             degraded: false,
             created_at: 1000,
             channels: ainb_hangar_proto::ChannelSet::NONE,
+            version: 1,
         }
     }
 

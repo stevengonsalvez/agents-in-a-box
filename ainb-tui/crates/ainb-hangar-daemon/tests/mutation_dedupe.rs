@@ -171,13 +171,16 @@ async fn every_mutating_method_replays_exactly_once() {
 
     // The gate is the COVERAGE, not just the per-method assertion: a registry
     // that quietly shrank, or a daemon fixture in which everything answered
-    // transiently, would otherwise pass with nothing proven.
+    // transiently, would otherwise pass with nothing proven. The floor is
+    // len() - 1 because exactly ONE method answers transiently in this fixture
+    // (`codex/session_ensure`, whose remote control is deliberately never
+    // started). A second silent hole fails the gate.
     eprintln!(
         "deduplicated {deduplicated} of {} mutating methods; transient in this fixture: {transient:?}",
         MUTATING_METHODS.len()
     );
     assert!(
-        deduplicated >= MUTATING_METHODS.len() - 4,
+        deduplicated >= MUTATING_METHODS.len() - 1,
         "only {deduplicated} of {} methods reached the ledger; transient: {transient:?}",
         MUTATING_METHODS.len()
     );
