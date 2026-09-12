@@ -5,7 +5,7 @@
 //! subscribers after the matching revision commits.
 
 use ainb_fleet_core::discover::{discover_all_tmux_panes, discover_from_tmux};
-use ainb_fleet_core::read::ModelInfo;
+use ainb_fleet_core::read::{ModelInfo, capture_pane};
 use ainb_fleet_core::types::{
     AttentionState, Confidence, FleetSession, LifecycleState, ManagementState, Provider,
     SessionKey, TransportHealth,
@@ -123,7 +123,7 @@ pub async fn reproject_claude_interview(
         let Ok(payload) = serde_json::from_str::<Value>(&event.payload) else {
             continue;
         };
-        let event_type = canonical_hook_event_type(&event.event_type, &payload);
+        let event_type = canonical_hook_event_type("claude", &event.event_type, &payload);
         let (_, attention) = states_for_hook(event_type, &payload);
         match attention {
             Some(AttentionState::Ask)
@@ -325,7 +325,11 @@ pub async fn apply_hook(
     let source_event_id = observation.event_id.clone();
     // Claude emits a PermissionRequest and then a generic notification around an
     // AskUserQuestion. They describe the same picker, not two operator actions.
-    let event_type = canonical_hook_event_type(observation.event_type, observation.payload);
+    let event_type = canonical_hook_event_type(
+        provider.as_str(),
+        observation.event_type,
+        observation.payload,
+    );
     let source_event_type = observation
         .payload
         .pointer("/payload/hook_event_name")
@@ -334,7 +338,8 @@ pub async fn apply_hook(
     let duplicate_claude_structured_permission = provider == Provider::Claude
         && source_event_type == "PermissionRequest"
         && claude_hook_tool_name(observation.payload) == Some("AskUserQuestion");
-    let preserve_active_request = (observation.event_type == "Notification"
+    let preserve_active_request = (provider == Provider::Claude
+        && observation.event_type.split(':').next() == Some("Notification")
         || duplicate_claude_structured_permission)
         && FleetRepo::get_session(pool, session_key.as_str())
             .await?
@@ -1418,7 +1423,44 @@ async fn reconcile_discovered_panes(
 
     let mut applied = 0;
     for (session, owner) in sessions.iter().zip(&owners) {
+        // Codex and Antigravity expose their current model/effort in the
+        // terminal status footer, but neither has a complete hook feed. Keep
+        // this bounded to one rendered line and these two providers: it is a
+        // direct observation of the running agent, not a guessed default.
+        // Once both fields are recorded, skip the subprocess entirely. Model
+        // selection is session setup metadata, while a 3s capture per pane is
+        // the hot reconciliation path on large fleets.
+        let tracked = (*owner).or_else(|| {
+            registered.iter().find(|row| row.session_key == session.session_key.as_str())
+        });
+        let status_model = if tracked.is_none_or(|row| !tmux_model_is_complete(row)) {
+            tmux_status_model(session).await
+        } else {
+            None
+        };
         if let Some(owner) = owner {
+            if let Some(model) = status_model.as_ref() {
+                if tmux_model_needs_update(owner, model) {
+                    match FleetRepo::apply_event(
+                        pool,
+                        &tmux_model_event(&owner.session_key, model, observed_at),
+                    )
+                    .await
+                    {
+                        Ok(result) => {
+                            if !result.duplicate {
+                                events.emit_fleet_revision(result.revision);
+                            }
+                            if result.applied {
+                                applied += 1;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(error = %error, "fleet tmux model observation failed")
+                        }
+                    }
+                }
+            }
             // The pane already has its row. Collapse a duplicate written under
             // the scan's own key ONLY when the snapshot in hand still shows one:
             // `supersede_session` opens an IMMEDIATE transaction, so calling
@@ -1442,10 +1484,13 @@ async fn reconcile_discovered_panes(
             continue;
         }
         let prior = FleetRepo::get_session(pool, session.session_key.as_str()).await?;
-        if prior.as_ref().is_some_and(|row| tmux_row_matches(row, session)) {
+        if prior
+            .as_ref()
+            .is_some_and(|row| tmux_row_matches(row, session, status_model.as_ref()))
+        {
             continue;
         }
-        let mut event = tmux_event(session, observed_at);
+        let mut event = tmux_event(session, status_model.as_ref(), observed_at);
         if prior.is_some() {
             event.event_id.push_str(&format!(":{observed_at}"));
         }
@@ -1783,13 +1828,22 @@ fn stable_pane_id(fingerprint: Option<&str>) -> String {
     }
 }
 
-fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
+fn tmux_row_matches(
+    row: &FleetSessionRow,
+    session: &FleetSession,
+    status_model: Option<&ModelInfo>,
+) -> bool {
     // A lifecycle set by a provider hook outranks this inferred tmux sample, so
     // the repo will never apply ours over it. Comparing them anyway would report
     // a permanent mismatch and append one no-op `fleet_event` per discovery
     // tick, forever, for every hook-backed session.
     let lifecycle_settled = row.lifecycle_authority == "authoritative"
         || row.lifecycle_state == state_token(session.lifecycle);
+    // The footer is a direct reading of this running provider's own UI. Keep
+    // checking it even after a hook wrote an earlier model pair so a live
+    // `/model` or effort change reaches the roster; stop only once both fields
+    // agree, which prevents a new Fleet event every discovery tick.
+    let model_settled = status_model.is_none_or(|model| !tmux_model_needs_update(row, model));
     row.provider == session.provider.as_str()
         && row.tmux_target == session.exact_tmux_target
         && row.process_start_fingerprint == session.process_start_fingerprint
@@ -1799,6 +1853,7 @@ fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
         && lifecycle_settled
         && row.attention_state == attention_token(session.attention)
         && row.transport_health == transport_token(session.transport_health)
+        && model_settled
 }
 
 /// How many 3s discovery ticks pass between full missing sweeps.
@@ -2236,7 +2291,11 @@ fn capabilities_for_tmux_state(row: &FleetSessionRow, available: bool) -> String
     with_tmux_capabilities(&serialized, available)
 }
 
-fn tmux_event(session: &FleetSession, observed_at: i64) -> NewFleetEvent {
+fn tmux_event(
+    session: &FleetSession,
+    status_model: Option<&ModelInfo>,
+    observed_at: i64,
+) -> NewFleetEvent {
     let payload = serde_json::to_string(session).unwrap_or_else(|_| "{}".to_string());
     NewFleetEvent {
         event_id: format!(
@@ -2246,7 +2305,10 @@ fn tmux_event(session: &FleetSession, observed_at: i64) -> NewFleetEvent {
         ),
         session_key: session.session_key.to_string(),
         observed_at,
-        authority: ObservationAuthority::Inferred,
+        // This is the provider's current status footer for this exact tmux
+        // pane. Treat its model pair as authoritative so it can complete the
+        // partial model-only observation Codex hooks provide.
+        authority: ObservationAuthority::Authoritative,
         event_type: "tmux_discovered".to_string(),
         payload,
         patch: FleetSessionPatch {
@@ -2261,6 +2323,134 @@ fn tmux_event(session: &FleetSession, observed_at: i64) -> NewFleetEvent {
             lifecycle_state: Some(state_token(session.lifecycle)),
             attention_state: Some(attention_token(session.attention)),
             transport_health: Some(transport_token(session.transport_health).to_string()),
+            model: status_model.and_then(|model| model.model.clone()),
+            reasoning_effort: status_model.and_then(|model| model.effort.clone()),
+            ..FleetSessionPatch::default()
+        },
+    }
+}
+
+/// Read model metadata from providers whose active terminal footer is their
+/// only complete, current runtime source.
+async fn tmux_status_model(session: &FleetSession) -> Option<ModelInfo> {
+    if !matches!(session.provider, Provider::Codex | Provider::Antigravity) {
+        return None;
+    }
+    let target = session.exact_tmux_target.as_deref()?;
+    let footer = capture_pane(target, 0).await.ok()?;
+    model_info_from_tmux_footer(session.provider, &footer)
+}
+
+/// Parse a provider-owned terminal footer into canonical model metadata.
+///
+/// This accepts only a model visibly present in the footer plus an explicit
+/// effort token. No provider gets a default model or default effort.
+fn model_info_from_tmux_footer(provider: Provider, footer: &str) -> Option<ModelInfo> {
+    // `capture-pane -S -0` includes the visible screen, not a reserved status
+    // channel. Only the final nonblank terminal row can be provider chrome;
+    // accepting a matching phrase from agent output would let untrusted text
+    // forge roster metadata.
+    let line = footer.lines().rev().find(|line| !line.trim().is_empty())?.trim();
+    let model = match provider {
+        Provider::Codex => {
+            let parts: Vec<_> = line.split('·').collect();
+            let first = parts.first()?.trim();
+            if parts.len() < 3 || !first.to_ascii_lowercase().starts_with("gpt-") {
+                return None;
+            }
+            let mut fields = first.split_whitespace();
+            let token: String = fields
+                .next()?
+                .chars()
+                .take_while(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+                })
+                .collect();
+            model_token(&token)?;
+            footer_effort(fields.next()?)?;
+            if fields.next().is_some() {
+                return None;
+            }
+            model_token(&token)?
+        }
+        Provider::Antigravity => {
+            let parts: Vec<_> = line.split('·').collect();
+            let first = parts.first()?.trim();
+            if parts.len() < 2 || !first.to_ascii_lowercase().starts_with("gemini ") {
+                return None;
+            }
+            let value = first
+                .split_whitespace()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("-")
+                .to_ascii_lowercase();
+            if first.split_whitespace().count() != 3 {
+                return None;
+            }
+            model_token(&value)?
+        }
+        _ => return None,
+    };
+    let effort_field = line.split('·').nth(1)?.trim();
+    if effort_field.split_whitespace().count() != 1 {
+        return None;
+    }
+    let effort = match provider {
+        Provider::Codex | Provider::Antigravity => footer_effort(effort_field)?,
+        _ => return None,
+    };
+    Some(ModelInfo {
+        model: Some(model),
+        effort: Some(effort),
+    })
+}
+
+fn footer_effort(line: &str) -> Option<String> {
+    line.split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::to_ascii_lowercase)
+        .find(|token| {
+            matches!(
+                token.as_str(),
+                "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        })
+}
+
+fn tmux_model_needs_update(row: &FleetSessionRow, observed: &ModelInfo) -> bool {
+    observed
+        .model
+        .as_deref()
+        .is_some_and(|model| row.model.as_deref() != Some(model))
+        || observed
+            .effort
+            .as_deref()
+            .is_some_and(|effort| row.reasoning_effort.as_deref() != Some(effort))
+}
+
+fn tmux_model_is_complete(row: &FleetSessionRow) -> bool {
+    row.model.is_some() && row.reasoning_effort.is_some()
+}
+
+fn tmux_model_event(session_key: &str, model: &ModelInfo, observed_at: i64) -> NewFleetEvent {
+    let fingerprint = format!(
+        "{}:{}",
+        model.model.as_deref().unwrap_or_default(),
+        model.effort.as_deref().unwrap_or_default()
+    );
+    NewFleetEvent {
+        event_id: format!(
+            "tmux:model:{session_key}:{observed_at}:{}",
+            fingerprint_bytes(fingerprint.as_bytes()),
+        ),
+        session_key: session_key.to_string(),
+        observed_at,
+        authority: ObservationAuthority::Inferred,
+        event_type: "tmux_model_observed".to_string(),
+        payload: fingerprint,
+        patch: FleetSessionPatch {
+            model: model.model.clone(),
+            reasoning_effort: model.effort.clone(),
             ..FleetSessionPatch::default()
         },
     }
@@ -2271,6 +2461,7 @@ fn parse_provider(value: &str) -> Provider {
         "claude" => Provider::Claude,
         "codex" => Provider::Codex,
         "copilot" => Provider::Copilot,
+        "antigravity" | "agy" => Provider::Antigravity,
         _ => Provider::Unknown,
     }
 }
@@ -2304,7 +2495,32 @@ fn states_for_hook(
     }
 }
 
-fn canonical_hook_event_type<'a>(event_type: &'a str, payload: &Value) -> &'a str {
+/// Normalize hook-specific spellings before reducing them into Fleet state.
+///
+/// `ainb-hooks` deliberately persists Codex's raw `type` token. That keeps the
+/// event log useful for provider debugging, but Fleet must not treat those
+/// tokens as unrelated telemetry: a Codex question, blocking wait, completed
+/// turn, and permission request are the same operator-facing facts as their
+/// Claude counterparts. Matcher suffixes are presentation/context only and do
+/// not alter lifecycle semantics.
+pub(crate) fn canonical_hook_event_type<'a>(
+    provider: &str,
+    event_type: &'a str,
+    payload: &Value,
+) -> &'a str {
+    let event_type = event_type.split(':').next().unwrap_or(event_type);
+    if provider.eq_ignore_ascii_case("codex") {
+        return match event_type {
+            "request_user_input" => "AskUserQuestion",
+            "wait_for_user" => "Notification",
+            "agent-turn-complete" | "agentStop" | "task_complete" => "Stop",
+            "PermissionRequest"
+            | "permission_request"
+            | "exec_approval_request"
+            | "apply_patch_approval_request" => "PermissionRequest",
+            _ => event_type,
+        };
+    }
     if event_type == "PermissionRequest"
         && claude_hook_tool_name(payload) == Some("AskUserQuestion")
     {
@@ -2548,6 +2764,68 @@ mod tests {
                 "{rejected:?} must clamp to never-observed, not reach the roster"
             );
         }
+    }
+
+    #[test]
+    fn terminal_footers_supply_codex_and_antigravity_model_effort() {
+        let codex = model_info_from_tmux_footer(
+            Provider::Codex,
+            "gpt-5.6-terra high · high · agents-in-a-box",
+        )
+        .expect("Codex footer has model and effort");
+        assert_eq!(
+            codex,
+            ModelInfo {
+                model: Some("gpt-5.6-terra".to_string()),
+                effort: Some("high".to_string()),
+            }
+        );
+
+        let antigravity =
+            model_info_from_tmux_footer(Provider::Antigravity, "Gemini 3.8 Flash · high")
+                .expect("Antigravity footer has model and effort");
+        assert_eq!(
+            antigravity,
+            ModelInfo {
+                model: Some("gemini-3.8-flash".to_string()),
+                effort: Some("high".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_footer_never_invents_missing_effort() {
+        assert!(model_info_from_tmux_footer(Provider::Codex, "gpt-5.6-terra").is_none());
+        assert!(model_info_from_tmux_footer(Provider::Antigravity, "Gemini 3.8 Flash").is_none());
+    }
+
+    #[test]
+    fn terminal_footer_rejects_agent_output_that_looks_like_metadata() {
+        assert!(
+            model_info_from_tmux_footer(Provider::Codex, "gpt-4 high · high\nregular shell prompt")
+                .is_none()
+        );
+        assert!(
+            model_info_from_tmux_footer(
+                Provider::Antigravity,
+                "please use Gemini 3.8 Flash · high"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_model_event_can_complete_a_partial_hook_pair() {
+        let event = tmux_model_event(
+            "codex:thread",
+            &ModelInfo {
+                model: Some("gpt-5.6-terra".to_string()),
+                effort: Some("high".to_string()),
+            },
+            1,
+        );
+        assert_eq!(event.authority, ObservationAuthority::Authoritative);
+        assert_eq!(event.patch.reasoning_effort.as_deref(), Some("high"));
     }
 
     /// The session under test for every model/effort capture case below.
@@ -2946,7 +3224,7 @@ mod tests {
             cwd: "/Users/dev/d/git/ai-coder-rules".to_string(),
             ..tmux_discovery_fixture()
         };
-        let event = tmux_event(&discovered, 1);
+        let event = tmux_event(&discovered, None, 1);
         FleetRepo::apply_event(store.pool(), &event).await.expect("discovery applies");
 
         let session = FleetRepo::get_session(store.pool(), &event.session_key)
@@ -3902,6 +4180,82 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_legacy_hook_tokens_normalize_to_shared_lifecycle_semantics() {
+        let payload = serde_json::json!({});
+        assert_eq!(
+            canonical_hook_event_type("codex", "request_user_input", &payload),
+            "AskUserQuestion"
+        );
+        assert_eq!(
+            canonical_hook_event_type("codex", "wait_for_user", &payload),
+            "Notification"
+        );
+        assert_eq!(
+            canonical_hook_event_type("codex", "agent-turn-complete", &payload),
+            "Stop"
+        );
+        assert_eq!(
+            canonical_hook_event_type("codex", "PermissionRequest:Bash", &payload),
+            "PermissionRequest"
+        );
+        assert_eq!(
+            canonical_hook_event_type("claude", "PermissionRequest", &payload),
+            "PermissionRequest",
+            "Codex aliases must not alter Claude's native permission semantics"
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_legacy_hooks_project_ask_wait_done_and_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let payload = serde_json::json!({ "payload": { "model": "gpt-5.6-sol" } });
+
+        for (event_id, event_type, observed_at, expected_lifecycle, expected_attention) in [
+            ("codex-ask", "request_user_input", 1, "IDLE", "ASK"),
+            ("codex-wait", "wait_for_user", 2, "IDLE", "WAITING"),
+            (
+                "codex-done",
+                "agent-turn-complete",
+                3,
+                "TURN_COMPLETE",
+                "NONE",
+            ),
+            (
+                "codex-approval",
+                "PermissionRequest:Bash",
+                4,
+                "IDLE",
+                "APPROVAL",
+            ),
+        ] {
+            apply_hook(
+                store.pool(),
+                &sink,
+                HookObservation {
+                    event_id: event_id.to_string(),
+                    provider: "codex",
+                    provider_session_id: "legacy-thread-1",
+                    cwd: "/repo",
+                    event_type,
+                    payload: &payload,
+                    observed_at,
+                    transcript_model: None,
+                },
+            )
+            .await
+            .expect("legacy Codex hook applies");
+            let session = FleetRepo::get_session(store.pool(), "codex:legacy-thread-1")
+                .await
+                .expect("read session")
+                .expect("Codex session present");
+            assert_eq!(session.lifecycle_state, expected_lifecycle, "{event_type}");
+            assert_eq!(session.attention_state, expected_attention, "{event_type}");
+        }
+    }
+
     #[tokio::test]
     async fn claude_interview_stays_answerable_through_permission_notification() {
         let dir = tempfile::tempdir().unwrap();
@@ -4403,7 +4757,9 @@ mod tests {
                 last_seen_ms: None,
                 version: 0,
             };
-            FleetRepo::apply_event(store.pool(), &tmux_event(&session, 100)).await.unwrap();
+            FleetRepo::apply_event(store.pool(), &tmux_event(&session, None, 100))
+                .await
+                .unwrap();
         }
 
         let payload = serde_json::json!({

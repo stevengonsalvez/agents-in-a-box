@@ -796,6 +796,11 @@ pub struct SessionsPaneState {
     last_sessions_rect: Option<Rect>,
     last_preview_rect: Option<Rect>,
     last_list_scroll_offset: usize,
+    /// Physical terminal-line height for each logical `ListItem` from the
+    /// latest render. Session rows have metadata on a second line, while
+    /// headers and separators remain one line; mouse hit-testing needs this
+    /// mapping rather than assuming one item equals one terminal row.
+    last_list_item_heights: Vec<usize>,
     last_attachable_click: Option<(AttachableRef, Instant)>,
     filter_toggle_area: Option<Rect>,
 }
@@ -810,6 +815,7 @@ impl Default for SessionsPaneState {
             last_sessions_rect: None,
             last_preview_rect: None,
             last_list_scroll_offset: 0,
+            last_list_item_heights: Vec::new(),
             last_attachable_click: None,
             filter_toggle_area: None,
         }
@@ -831,6 +837,10 @@ impl SessionsPaneState {
 
     pub fn set_list_scroll_offset(&mut self, offset: usize) {
         self.last_list_scroll_offset = offset;
+    }
+
+    pub fn set_list_item_heights(&mut self, heights: Vec<usize>) {
+        self.last_list_item_heights = heights;
     }
 
     pub fn set_filter_toggle_area(&mut self, area: Rect) {
@@ -950,7 +960,17 @@ impl SessionsPaneState {
             return None;
         }
 
-        Some(self.last_list_scroll_offset + usize::from(y - rect.y - 1))
+        let mut item_index = self.last_list_scroll_offset;
+        let mut line_in_view = usize::from(y - rect.y - 1);
+        while let Some(&height) = self.last_list_item_heights.get(item_index) {
+            let height = height.max(1);
+            if line_in_view < height {
+                return Some(item_index);
+            }
+            line_in_view = line_in_view.saturating_sub(height);
+            item_index += 1;
+        }
+        None
     }
 
     pub fn record_row_click(&mut self, target: SessionListRowTarget, now: Instant) -> bool {
@@ -1108,6 +1128,7 @@ pub(crate) const fn is_stoppable_interactive(session: &crate::models::session::S
                 | SessionAgentType::Codex
                 | SessionAgentType::Gemini
                 | SessionAgentType::Copilot
+                | SessionAgentType::Antigravity
         )
 }
 
@@ -4040,6 +4061,8 @@ impl Default for NewSessionState {
 struct ConfigureLaunchSnapshot {
     repo_source: crate::git::repo_source::RepoSource,
     branch_name: String,
+    /// Optional durable session prefix; Git branch remains unchanged.
+    session_prefix: Option<String>,
     skip_permissions: bool,
     mode: crate::models::SessionMode,
     boss_prompt: Option<String>,
@@ -8402,9 +8425,17 @@ impl AppState {
         } else {
             None
         };
+        let session_prefix = match crate::config::normalize_session_label(&spec.session_prefix) {
+            Ok(prefix) => prefix,
+            Err(error) => {
+                self.add_error_notification(error);
+                return;
+            }
+        };
         let snapshot = ConfigureLaunchSnapshot {
             repo_source: spec.repo_source.clone(),
             branch_name: spec.branch_worktree.clone(),
+            session_prefix,
             skip_permissions: preset.permissions.skip_all,
             mode,
             boss_prompt,
@@ -8580,6 +8611,21 @@ impl AppState {
             Ok(()) => {
                 info!("Session created successfully via configure flow");
                 self.load_real_workspaces().await;
+                if let Some(prefix) = snapshot.session_prefix.as_ref() {
+                    let tmux_name = self
+                        .find_session(session_id)
+                        .and_then(|session| session.tmux_session_name.clone());
+                    if let Some(tmux_name) = tmux_name {
+                        self.session_label_store.set(tmux_name, Some(prefix.clone()));
+                        if let Err(error) = self.session_label_store.save() {
+                            self.add_error_notification(format!(
+                                "Session started but prefix could not be saved: {error}"
+                            ));
+                        } else if let Some(session) = self.find_session_mut(session_id) {
+                            session.display_name = Some(prefix.clone());
+                        }
+                    }
+                }
                 if let Err(e) = self.start_log_streaming_for_session(session_id).await {
                     warn!(
                         "Failed to start log streaming for session {}: {}",
@@ -10237,6 +10283,37 @@ impl AppState {
         // The caller owns the workspace refresh so a bulk stop repaints once
         // instead of rescanning every workspace per session.
         result
+    }
+
+    /// Record the terminal fact discovered by a failed attach: the exact tmux
+    /// target no longer exists.  This is deliberately narrower than a generic
+    /// attach failure: nesting and terminal errors must leave a live row alone.
+    ///
+    /// Keeping the persisted metadata intact makes the row immediately
+    /// resumable and makes the next reload retain it under the Stopped filter.
+    pub(crate) fn mark_session_stopped_for_missing_tmux(
+        &mut self,
+        session_id: Uuid,
+        tmux_session_name: &str,
+    ) -> bool {
+        use crate::models::SessionStatus;
+
+        let matches_target = self
+            .find_session(session_id)
+            .is_some_and(|session| session.tmux_session_name.as_deref() == Some(tmux_session_name));
+        if !matches_target {
+            return false;
+        }
+
+        self.tmux_sessions.remove(&session_id);
+        if let Some(session) = self.find_session_mut(session_id) {
+            session.set_status(SessionStatus::Stopped);
+            session.is_attached = false;
+            // A dead pane cannot still be waiting for input. Keep historical
+            // errors for the Err tab, but remove actionable row chips.
+            session.live_attention.clear();
+        }
+        true
     }
 
     /// Soft-stop every session in `session_ids`.
@@ -12126,11 +12203,18 @@ impl AppState {
                         .unanswerable(crate::fleet::attention::Unanswerable::NativePicker),
                 );
             }
-            return Some(
-                SessionAttention::local(Self::chip_for_alert(kind), rec.ts).with_detail(
-                    payload.as_ref().and_then(Self::payload_message).unwrap_or_default(),
-                ),
-            );
+            // Legacy Codex emits an explicit request token. It is a question,
+            // not the generic unstructured wait that notifyd's toast class
+            // uses for both shapes. Keep this fallback aligned with Fleet's
+            // authoritative Codex reducer until its snapshot arrives.
+            let attention = if agent == "codex" && rec.raw_event == "request_user_input" {
+                AttentionKind::Ask
+            } else {
+                Self::chip_for_alert(kind)
+            };
+            return Some(SessionAttention::local(attention, rec.ts).with_detail(
+                payload.as_ref().and_then(Self::payload_message).unwrap_or_default(),
+            ));
         }
         None
     }
@@ -12590,6 +12674,32 @@ impl AppState {
         }
     }
 
+    /// A local stopped observation means its tmux session is gone. A retained
+    /// Fleet `IDLE` row only means its last observed pane was quiet, so it must
+    /// not resurrect a stopped session into the Active filter. Fleet may still
+    /// confirm the stop with an explicit `EXITED` projection.
+    const fn lifecycle_projection_may_replace_local_status(
+        local: &crate::models::SessionStatus,
+        projected: &crate::models::SessionStatus,
+    ) -> bool {
+        !matches!(local, crate::models::SessionStatus::Stopped)
+            || matches!(projected, crate::models::SessionStatus::Stopped)
+    }
+
+    /// A local `SessionEnd` is a terminal fact. Fleet can briefly retain an
+    /// older live lifecycle after the pane is gone, so let only this explicit
+    /// local stop beat Fleet's otherwise-preferred lifecycle projection.
+    fn projected_session_status(
+        fleet: Option<crate::models::SessionStatus>,
+        local: Option<crate::models::SessionStatus>,
+    ) -> Option<crate::models::SessionStatus> {
+        if matches!(local, Some(crate::models::SessionStatus::Stopped)) {
+            local
+        } else {
+            fleet.or(local)
+        }
+    }
+
     /// Hangar metadata for the selected session, if identity correlation was
     /// unambiguous and Hangar observed at least one requested field.
     #[must_use]
@@ -12733,7 +12843,8 @@ impl AppState {
                     self.attention_baseline.get(&s.id).copied().unwrap_or(0),
                     &recent,
                 );
-                let projected_status = fleet_status.or(local_terminal_status);
+                let projected_status =
+                    Self::projected_session_status(fleet_status, local_terminal_status);
                 let cwd = s.workspace_path.trim_end_matches('/').to_string();
                 // Exact provider id wins. A cwd fallback is safe only if that
                 // cwd names one local session; sibling subagents otherwise
@@ -12779,18 +12890,24 @@ impl AppState {
                 // Attaching advances this to "now" (see below).
                 let baseline = self.attention_baseline.get(&s.id).copied().unwrap_or(0);
                 let mut chips = Vec::new();
-                if let Some(chip) = Self::attention_for_session_identity(
-                    &s.workspace_path,
-                    Self::agent_hook_name(s.agent_type),
-                    provider_session_id.as_deref(),
-                    allow_unidentified_cwd,
-                    true,
-                    generating,
-                    baseline,
-                    now_ms,
-                    &recent,
-                ) {
-                    chips.push(chip);
+                // The exact tmux target is gone. A retained daemon snapshot
+                // can still describe an older ASK/WAIT, but it has no pane to
+                // receive an answer and must not resurrect an actionable chip.
+                let locally_stopped = matches!(s.status, crate::models::SessionStatus::Stopped);
+                if !locally_stopped {
+                    if let Some(chip) = Self::attention_for_session_identity(
+                        &s.workspace_path,
+                        Self::agent_hook_name(s.agent_type),
+                        provider_session_id.as_deref(),
+                        allow_unidentified_cwd,
+                        true,
+                        generating,
+                        baseline,
+                        now_ms,
+                        &recent,
+                    ) {
+                        chips.push(chip);
+                    }
                 }
                 // The daemon's rows for the same worktree. Added unconditionally,
                 // NOT gated on `generating`: the generating gate exists because
@@ -12799,7 +12916,7 @@ impl AppState {
                 // and an agent can be mid-turn and blocked on an approval at the
                 // same time — suppressing it there is how an operator ends up
                 // watching a spinner that is waiting on them.
-                if !daemon_rows.is_empty() {
+                if !locally_stopped && !daemon_rows.is_empty() {
                     chips.extend(daemon_rows.iter().cloned());
                 }
                 // The REASON, not a boolean. `SessionStatus::Error` has always
@@ -12863,12 +12980,30 @@ impl AppState {
                     // Do not erase it with a Fleet lifecycle projection that
                     // has no recovery/error detail of its own.
                     if !matches!(session.status, crate::models::SessionStatus::Error(_))
+                        && Self::lifecycle_projection_may_replace_local_status(
+                            &session.status,
+                            &status,
+                        )
                         && session.status != status
                     {
                         session.set_status(status);
                         changed = true;
                     }
                 }
+            }
+            // Stop is terminal for the pane, not for historical diagnostics.
+            // Do not rebuild live chips from a retained daemon snapshot, and
+            // do not overwrite the Err tab's history with an empty set.
+            if self.find_session(id).is_some_and(|session| {
+                matches!(session.status, crate::models::SessionStatus::Stopped)
+            }) {
+                if let Some(session) = self.find_session_mut(id) {
+                    if !session.live_attention.is_empty() {
+                        session.live_attention.clear();
+                        changed = true;
+                    }
+                }
+                continue;
             }
             if let Some(reason) = failure {
                 // ERR is a SECOND, independent chip, not a competitor: a
