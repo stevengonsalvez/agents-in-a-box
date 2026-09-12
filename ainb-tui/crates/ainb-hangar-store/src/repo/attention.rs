@@ -297,7 +297,7 @@ impl AttentionRepo {
                 .await?
             }
         };
-        rows.iter().map(row_from_sqlite).collect()
+        rows.iter().map(row_from_sqlite).filter_map(Result::transpose).collect()
     }
 
     /// List EVERY open attention row across every workspace (and the
@@ -320,7 +320,7 @@ impl AttentionRepo {
         )
         .fetch_all(pool)
         .await?;
-        rows.iter().map(row_from_sqlite).collect()
+        rows.iter().map(row_from_sqlite).filter_map(Result::transpose).collect()
     }
 
     /// Fetch a single attention row by id, `None` when it does not exist.
@@ -342,7 +342,7 @@ impl AttentionRepo {
         .bind(id)
         .fetch_optional(pool)
         .await?;
-        row.as_ref().map(row_from_sqlite).transpose()
+        row.as_ref().map(row_from_sqlite).transpose().map(Option::flatten)
     }
 
     /// Flip a row `open` → `answered`, but ONLY if it is still open.
@@ -604,7 +604,7 @@ impl AttentionRepo {
     ) -> Result<u64, sqlx::Error> {
         let res = sqlx::query(
             "UPDATE attention \
-             SET state = 'answered', answered_by = 'resolved:sweep', \
+             SET state = 'answered', version = version + 1, answered_by = 'resolved:sweep', \
                  answer = 'closed by reconcile: no session claims it', answered_at = ? \
              WHERE state = 'open' AND id IN ( \
                  SELECT a.id FROM attention a \
@@ -628,15 +628,31 @@ impl AttentionRepo {
     }
 }
 
-/// Map one raw `attention` row into an [`AttentionRow`].
-fn row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<AttentionRow, sqlx::Error> {
+/// Map one raw `attention` row into an [`AttentionRow`], or `None` for a row
+/// this build cannot read.
+///
+/// An unknown `kind` used to be a hard [`sqlx::Error::ColumnDecode`], which
+/// made the ONE unreadable row fail the whole query. That is a downgrade
+/// hazard rather than a hypothetical: two binaries share one database file on
+/// a box mid-upgrade, and the moment an N daemon writes a kind that N-1 has
+/// never heard of, N-1's entire attention list dies — so an operator running
+/// the older TUI loses every card, not just the new one.
+///
+/// Skipping the row instead degrades to "the old build cannot see the new
+/// card", which is true and survivable. The count is logged so the condition
+/// is visible rather than silent. Note this can only ever help the NEXT new
+/// kind: a binary already shipped without this tolerance still breaks.
+fn row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<Option<AttentionRow>, sqlx::Error> {
     let kind_token: String = row.try_get("kind")?;
-    let kind = AttentionKind::parse(&kind_token).ok_or_else(|| sqlx::Error::ColumnDecode {
-        index: "kind".to_string(),
-        source: format!("unknown attention kind {kind_token:?}").into(),
-    })?;
+    let Some(kind) = AttentionKind::parse(&kind_token) else {
+        tracing::debug!(
+            kind = %kind_token,
+            "attention row skipped: this build does not know its kind"
+        );
+        return Ok(None);
+    };
     let degraded: i64 = row.try_get("degraded")?;
-    Ok(AttentionRow {
+    Ok(Some(AttentionRow {
         id: row.try_get("id")?,
         session_id: row.try_get("session_id")?,
         cwd: row.try_get("cwd")?,
@@ -652,7 +668,7 @@ fn row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<AttentionRow, sqlx::
         answered_at: row.try_get("answered_at")?,
         raise_transcript: row.try_get("raise_transcript")?,
         channels: ChannelSet::from_db(&row.try_get::<String, _>("channels")?),
-    })
+    }))
 }
 
 #[cfg(test)]
