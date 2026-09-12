@@ -1711,26 +1711,48 @@ pub async fn reconcile_discovered_panes(
             continue;
         }
         let prior = FleetRepo::get_session(pool, session.session_key.as_str()).await?;
-        if prior
-            .as_ref()
-            .is_some_and(|row| tmux_row_matches(row, session, status_model.as_ref()))
-        {
-            continue;
-        }
-        let mut event = tmux_event(session, status_model.as_ref(), observed_at);
-        if prior.is_some() {
-            event.event_id.push_str(&format!(":{observed_at}"));
-        }
-        match FleetRepo::apply_event(pool, &event).await {
-            Ok(result) => {
-                if !result.duplicate {
-                    events.emit_fleet_revision(result.revision);
+        if !prior.as_ref().is_some_and(|row| tmux_row_matches(row, session)) {
+            let mut event = tmux_event(session, observed_at);
+            if prior.is_some() {
+                event.event_id.push_str(&format!(":{observed_at}"));
+            }
+            match FleetRepo::apply_event(pool, &event).await {
+                Ok(result) => {
+                    if !result.duplicate {
+                        events.emit_fleet_revision(result.revision);
+                    }
+                    if result.applied {
+                        applied += 1;
+                    }
                 }
-                if result.applied {
-                    applied += 1;
+                Err(error) => tracing::warn!(error = %error, "fleet tmux reconcile failed"),
+            }
+        }
+        // The footer model is its own observation at its own authority, so it is
+        // emitted whether or not the discovered row itself moved: a session can
+        // sit in one lifecycle state across a `/model` change. Emitted AFTER the
+        // discovered event so the row exists to carry it on first sight.
+        if let Some(model) = status_model.as_ref() {
+            if prior.as_ref().is_none_or(|row| tmux_model_needs_update(row, model)) {
+                match FleetRepo::apply_event(
+                    pool,
+                    &tmux_model_event(session.session_key.as_str(), model, observed_at),
+                )
+                .await
+                {
+                    Ok(result) => {
+                        if !result.duplicate {
+                            events.emit_fleet_revision(result.revision);
+                        }
+                        if result.applied {
+                            applied += 1;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "fleet tmux model observation failed")
+                    }
                 }
             }
-            Err(error) => tracing::warn!(error = %error, "fleet tmux reconcile failed"),
         }
     }
     if pass == ReconcilePass::Panes {
@@ -2055,22 +2077,40 @@ fn stable_pane_id(fingerprint: Option<&str>) -> String {
     }
 }
 
-fn tmux_row_matches(
-    row: &FleetSessionRow,
-    session: &FleetSession,
-    status_model: Option<&ModelInfo>,
-) -> bool {
+/// Whether the discovered row already says what this scan would say.
+///
+/// Only the groups [`tmux_event`] actually patches. The model pair is NOT one
+/// of them: it rides its own `tmux_model_observed` event, gated separately by
+/// [`tmux_model_needs_update`], so testing it here would report a mismatch that
+/// `tmux_event` cannot resolve and append one no-op `fleet_event` per discovery
+/// tick forever.
+fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
     // A lifecycle set by a provider hook outranks this inferred tmux sample, so
     // the repo will never apply ours over it. Comparing them anyway would report
     // a permanent mismatch and append one no-op `fleet_event` per discovery
     // tick, forever, for every hook-backed session.
-    let lifecycle_settled = row.lifecycle_authority == "authoritative"
-        || row.lifecycle_state == state_token(session.lifecycle);
-    // The footer is a direct reading of this running provider's own UI. Keep
-    // checking it even after a hook wrote an earlier model pair so a live
-    // `/model` or effort change reaches the roster; stop only once both fields
-    // agree, which prevents a new Fleet event every discovery tick.
-    let model_settled = status_model.is_none_or(|model| !tmux_model_needs_update(row, model));
+    // The same argument for every group a hook can own. `metadata` is excluded
+    // because a hook writes it on every line, so an inferred metadata patch can
+    // never land and the identity fields below are compared for a different
+    // reason: they decide whether this is even the same pane.
+    let settled = |authority: &str, stored: &str, observed: &str| {
+        authority == "authoritative" || stored == observed
+    };
+    let lifecycle_settled = settled(
+        &row.lifecycle_authority,
+        &row.lifecycle_state,
+        &state_token(session.lifecycle),
+    );
+    let attention_settled = settled(
+        &row.attention_authority,
+        &row.attention_state,
+        &attention_token(session.attention),
+    );
+    let transport_settled = settled(
+        &row.transport_authority,
+        &row.transport_health,
+        transport_token(session.transport_health),
+    );
     row.provider == session.provider.as_str()
         && row.tmux_target == session.exact_tmux_target
         && row.process_start_fingerprint == session.process_start_fingerprint
@@ -2078,9 +2118,8 @@ fn tmux_row_matches(
         && row.management_state == management_token(session.management)
         && row.confidence == confidence_token(session.confidence)
         && lifecycle_settled
-        && row.attention_state == attention_token(session.attention)
-        && row.transport_health == transport_token(session.transport_health)
-        && model_settled
+        && attention_settled
+        && transport_settled
 }
 
 /// How many 3s discovery ticks pass between full missing sweeps.
@@ -2518,11 +2557,7 @@ fn capabilities_for_tmux_state(row: &FleetSessionRow, available: bool) -> String
     with_tmux_capabilities(&serialized, available)
 }
 
-fn tmux_event(
-    session: &FleetSession,
-    status_model: Option<&ModelInfo>,
-    observed_at: i64,
-) -> NewFleetEvent {
+fn tmux_event(session: &FleetSession, observed_at: i64) -> NewFleetEvent {
     let payload = serde_json::to_string(session).unwrap_or_else(|_| "{}".to_string());
     NewFleetEvent {
         event_id: format!(
@@ -2532,10 +2567,15 @@ fn tmux_event(
         ),
         session_key: session.session_key.to_string(),
         observed_at,
-        // This is the provider's current status footer for this exact tmux
-        // pane. Treat its model pair as authoritative so it can complete the
-        // partial model-only observation Codex hooks provide.
-        authority: ObservationAuthority::Authoritative,
+        // Tier 5. A discovery scan infers lifecycle and attention from what a
+        // pane looks like, so it must never outrank the tier-0 hook that owns
+        // those groups (D14): a tier-5 `idle` landing on a tier-0 `waiting`
+        // would retract a question the agent is still blocked on.
+        //
+        // `apply_patch` applies one authority to every group a patch touches,
+        // so the model pair cannot ride along here at a different rank. It
+        // travels as its own `tmux_model_observed` event instead.
+        authority: ObservationAuthority::Inferred,
         event_type: "tmux_discovered".to_string(),
         payload,
         patch: FleetSessionPatch {
@@ -2550,8 +2590,6 @@ fn tmux_event(
             lifecycle_state: Some(state_token(session.lifecycle)),
             attention_state: Some(attention_token(session.attention)),
             transport_health: Some(transport_token(session.transport_health).to_string()),
-            model: status_model.and_then(|model| model.model.clone()),
-            reasoning_effort: status_model.and_then(|model| model.effort.clone()),
             ..FleetSessionPatch::default()
         },
     }
@@ -2659,6 +2697,20 @@ fn tmux_model_is_complete(row: &FleetSessionRow) -> bool {
     row.model.is_some() && row.reasoning_effort.is_some()
 }
 
+/// One model/effort reading taken from a provider's own terminal status footer.
+///
+/// Carried as its own event, not folded into [`tmux_event`], because the two
+/// carry different authority and `apply_patch` stamps one authority onto every
+/// group a patch touches. A discovery scan only INFERS lifecycle and attention,
+/// but the footer is the running provider printing its own model: tier 5 for
+/// the state groups, direct observation for the model pair.
+///
+/// Authoritative so it can land on the model group a hook already wrote.
+/// Codex's hooks carry effort without a model, so a hook-written pair is
+/// routinely half-empty, and an inferred event can never complete it —
+/// `should_replace` refuses a lower rank outright. Equal rank falls through to
+/// `observed_at`, so the newer reading wins and a live `/model` change reaches
+/// the roster instead of being pinned by the first hook that guessed.
 fn tmux_model_event(session_key: &str, model: &ModelInfo, observed_at: i64) -> NewFleetEvent {
     let fingerprint = format!(
         "{}:{}",
@@ -2672,7 +2724,7 @@ fn tmux_model_event(session_key: &str, model: &ModelInfo, observed_at: i64) -> N
         ),
         session_key: session_key.to_string(),
         observed_at,
-        authority: ObservationAuthority::Inferred,
+        authority: ObservationAuthority::Authoritative,
         event_type: "tmux_model_observed".to_string(),
         payload: fingerprint,
         patch: FleetSessionPatch {
@@ -3451,7 +3503,7 @@ mod tests {
             cwd: "/Users/dev/d/git/ai-coder-rules".to_string(),
             ..tmux_discovery_fixture()
         };
-        let event = tmux_event(&discovered, None, 1);
+        let event = tmux_event(&discovered, 1);
         FleetRepo::apply_event(store.pool(), &event).await.expect("discovery applies");
 
         let session = FleetRepo::get_session(store.pool(), &event.session_key)
@@ -4984,7 +5036,7 @@ mod tests {
                 last_seen_ms: None,
                 version: 0,
             };
-            FleetRepo::apply_event(store.pool(), &tmux_event(&session, None, 100))
+            FleetRepo::apply_event(store.pool(), &tmux_event(&session, 100))
                 .await
                 .unwrap();
         }
