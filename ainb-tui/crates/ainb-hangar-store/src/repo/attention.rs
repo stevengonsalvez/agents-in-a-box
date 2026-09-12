@@ -36,6 +36,13 @@ pub enum AttentionKind {
     Waiting,
     /// An ATC (or agent) escalation that needs a human.
     Escalation,
+    /// A PTY-effecting mutation whose receipt was still `writing` when the
+    /// daemon died (D18, amendment 17).
+    ///
+    /// The bytes may or may not have reached the terminal, so the row is NOT
+    /// reopened (a retry could double-type) and NOT closed silently. It names
+    /// the answer text and waits for an operator.
+    DeliveryUnconfirmed,
 }
 
 impl AttentionKind {
@@ -49,6 +56,7 @@ impl AttentionKind {
             Self::Error => "error",
             Self::Waiting => "waiting",
             Self::Escalation => "escalation",
+            Self::DeliveryUnconfirmed => "delivery_unconfirmed",
         }
     }
 
@@ -65,6 +73,7 @@ impl AttentionKind {
             "error" => Some(Self::Error),
             "waiting" => Some(Self::Waiting),
             "escalation" => Some(Self::Escalation),
+            "delivery_unconfirmed" => Some(Self::DeliveryUnconfirmed),
             _ => None,
         }
     }
@@ -142,6 +151,13 @@ pub struct AttentionRow {
     /// The PUSH channels this attention was routed to at raise time (tcp T5).
     /// Empty = board-only.
     pub channels: ChannelSet,
+    /// The D18 optimistic-concurrency fence (migration 0097).
+    ///
+    /// Bumped on every state change. A client that read version N and answers
+    /// at version N is answering the row it saw; anything else is a stale
+    /// answer, and for `attention/answer` that means somebody already replied
+    /// to the agent.
+    pub version: i64,
 }
 
 /// Stateless typed wrapper over the `attention` table.
@@ -258,7 +274,8 @@ impl AttentionRepo {
             Some(ws) => {
                 sqlx::query(
                     "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                            created_at, answered_by, answer, answered_at, raise_transcript, channels \
+                            created_at, answered_by, answer, answered_at, raise_transcript, channels, \
+                            version \
                      FROM attention \
                      WHERE state = 'open' AND workspace_id = ? \
                      ORDER BY created_at ASC, id ASC",
@@ -270,7 +287,8 @@ impl AttentionRepo {
             None => {
                 sqlx::query(
                     "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                            created_at, answered_by, answer, answered_at, raise_transcript, channels \
+                            created_at, answered_by, answer, answered_at, raise_transcript, channels, \
+                            version \
                      FROM attention \
                      WHERE state = 'open' AND workspace_id IS NULL \
                      ORDER BY created_at ASC, id ASC",
@@ -294,7 +312,8 @@ impl AttentionRepo {
     pub async fn list_fleet(pool: &SqlitePool) -> Result<Vec<AttentionRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                    created_at, answered_by, answer, answered_at, raise_transcript, channels \
+                    created_at, answered_by, answer, answered_at, raise_transcript, channels, \
+                            version \
              FROM attention \
              WHERE state = 'open' \
              ORDER BY created_at ASC, id ASC",
@@ -316,7 +335,8 @@ impl AttentionRepo {
     pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<AttentionRow>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                    created_at, answered_by, answer, answered_at, raise_transcript, channels \
+                    created_at, answered_by, answer, answered_at, raise_transcript, channels, \
+                            version \
              FROM attention WHERE id = ?",
         )
         .bind(id)
@@ -350,13 +370,90 @@ impl AttentionRepo {
     ) -> Result<u64, sqlx::Error> {
         let res = sqlx::query(
             "UPDATE attention \
-             SET state = 'answered', answered_by = ?, answer = ?, answered_at = ? \
+             SET state = 'answered', answered_by = ?, answer = ?, answered_at = ?, \
+                 version = version + 1 \
              WHERE id = ? AND state = 'open'",
         )
         .bind(answered_by)
         .bind(answer)
         .bind(answered_at)
         .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// [`Self::mark_answered_if_open`] inside a caller-owned transaction, and
+    /// fenced on the row `version` the client read (D18).
+    ///
+    /// This is the tier-2 claim: the flip and the mutation receipt that
+    /// describes it commit together or not at all. A receipt written after the
+    /// flip, through the event outbox, would inherit that outbox's crash loss
+    /// window — which is the exact window the receipt exists to close.
+    ///
+    /// `expected_version` of `None` keeps today's behaviour (open is the whole
+    /// fence), so a client that has not been taught to send one is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn mark_answered_if_open_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &str,
+        answered_by: &str,
+        answer: &str,
+        answered_at: i64,
+        expected_version: Option<i64>,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE attention \
+             SET state = 'answered', answered_by = ?, answer = ?, answered_at = ?, \
+                 version = version + 1 \
+             WHERE id = ? AND state = 'open' AND (? IS NULL OR version = ?)",
+        )
+        .bind(answered_by)
+        .bind(answer)
+        .bind(answered_at)
+        .bind(id)
+        .bind(expected_version)
+        .bind(expected_version)
+        .execute(&mut **tx)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Insert a `delivery_unconfirmed` row: a receipt that was still `writing`
+    /// when the daemon died (D18, amendment 17).
+    ///
+    /// Deliberately not an `insert_if_absent` on the raising session's request
+    /// key: this row is about the ANSWER, not the question, and the question's
+    /// own row was already flipped to `answered` by the claim that then died.
+    /// Only an operator closes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the insert fails.
+    pub async fn insert_delivery_unconfirmed(
+        pool: &SqlitePool,
+        id: &str,
+        session_id: &str,
+        cwd: &str,
+        workspace_id: Option<&str>,
+        payload: &str,
+        created_at: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "INSERT INTO attention \
+             (id, session_id, cwd, workspace_id, kind, payload, state, degraded, created_at) \
+             VALUES (?, ?, ?, ?, 'delivery_unconfirmed', ?, 'open', 0, ?) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(session_id)
+        .bind(cwd)
+        .bind(workspace_id)
+        .bind(payload)
+        .bind(created_at)
         .execute(pool)
         .await?;
         Ok(res.rows_affected())
@@ -542,6 +639,7 @@ fn row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<AttentionRow, sqlx::
         state: row.try_get("state")?,
         degraded: degraded != 0,
         created_at: row.try_get("created_at")?,
+        version: row.try_get("version")?,
         answered_by: row.try_get("answered_by")?,
         answer: row.try_get("answer")?,
         answered_at: row.try_get("answered_at")?,
