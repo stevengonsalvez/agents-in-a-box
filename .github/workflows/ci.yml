@@ -414,9 +414,20 @@ jobs:
           # Registry restore is useful; saving invokes the failing post-job pass.
           save-if: false
       - uses: taiki-e/install-action@nextest
+      # W0-wire (D17/D18) adds three more frozen-artifact suites, and they
+      # belong here for the same reason the other three do: each compares live
+      # code to a COMMITTED file, so it cannot legitimately flake, and a red one
+      # means the contract moved rather than the runner hiccuped.
+      #
+      #   skew_harness         the {daemon N, N-1} x {hangar-client, ainb-web,
+      #                        Swift fixture} matrix, both directions, plus the
+      #                        local leg (hangar.sock vs hangar-v<N>.sock)
+      #   capability_catalogue the removal-fails gate over capabilities.catalogue
+      #   mutation_dedupe      the walk over the committed MUTATING_METHODS list
       - run: >
           cargo nextest run --workspace --all-features --no-fail-fast
-          -E 'binary(argv_golden_matrix) + binary(migration_upgrade_full_chain) + package(ainb-plugin-cts-v2)'
+          -E 'binary(argv_golden_matrix) + binary(migration_upgrade_full_chain) + package(ainb-plugin-cts-v2)
+              + binary(skew_harness) + binary(capability_catalogue) + binary(mutation_dedupe)'
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
