@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub claude_chat: Versioned<ClaudeChatSection>,
+
     pub git_view: Versioned<GitViewSection>,
 
     pub recovery: Versioned<RecoverySection>,
@@ -3186,9 +3188,6 @@ pub struct AppState {
     pub ui_needs_refresh: bool,
 
     // Claude chat visibility toggle
-    pub claude_chat_visible: bool,
-
-    // Focus management for panes
     pub focused_pane: FocusedPane,
     // Live interactive embedded tmux-attach client for the preview pane.
     // Enforced invariants (focus can drift, so none of these are assumed):
@@ -3228,12 +3227,8 @@ pub struct AppState {
     // session is live but the proxy died).
     pub last_headroom_watchdog: Option<std::time::Instant>,
     // Claude chat integration
-    pub claude_chat_state: Option<ClaudeChatState>,
-    // Live logs from Docker containers
     pub live_logs: HashMap<Uuid, Vec<LogEntry>>,
     // Claude API client manager (when initialized)
-    pub claude_manager: Option<ClaudeChatManager>,
-    // Docker log streaming coordinator
     pub log_streaming_coordinator: Option<LogStreamingCoordinator>,
     // Channel sender for log streaming
     pub log_sender: Option<mpsc::UnboundedSender<(Uuid, LogEntry)>>,
@@ -3872,6 +3867,7 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            claude_chat: Versioned::default(),
             git_view: Versioned::default(),
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
@@ -3893,7 +3889,6 @@ impl Default for AppState {
             async_operation_cancelled: false,
             confirmation_dialog: None,
             ui_needs_refresh: false,
-            claude_chat_visible: false,
             focused_pane: FocusedPane::Sessions,
             embed: None,
             embed_session: None,
@@ -3907,9 +3902,7 @@ impl Default for AppState {
             last_log_check: None,
             last_token_refresh_check: None,
             last_headroom_watchdog: None,
-            claude_chat_state: None,
             live_logs: HashMap::new(),
-            claude_manager: None,
             log_streaming_coordinator: None,
             log_sender: None,
             previous_screen: None,
@@ -4108,8 +4101,8 @@ impl AppState {
                             Ok(()) => {
                                 let mut manager = ClaudeChatManager::new(client);
                                 manager.create_session(None);
-                                self.claude_manager = Some(manager);
-                                self.claude_chat_state = Some(ClaudeChatState::new());
+                                self.claude_chat.claude_manager = Some(manager);
+                                self.claude_chat.claude_chat_state = Some(ClaudeChatState::new());
                                 info!("Claude integration initialized successfully");
                                 Ok(())
                             }
@@ -4138,9 +4131,14 @@ impl AppState {
         &mut self,
         message: String,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let (Some(chat_state), Some(manager)) =
-            (&mut self.claude_chat_state, &mut self.claude_manager)
-        {
+        // The second split-borrow the plan called out: the chat state and its
+        // manager are one section now, so two separate `&mut` paths borrow that
+        // section twice. One `get_mut` bumps once and hands out both.
+        let claude_chat = self.claude_chat.get_mut();
+        if let (Some(chat_state), Some(manager)) = (
+            claude_chat.claude_chat_state.as_mut(),
+            claude_chat.claude_manager.as_mut(),
+        ) {
             chat_state.start_streaming(message.clone());
 
             // Start streaming response
@@ -7230,11 +7228,11 @@ impl AppState {
         if self.current_screen == screen_ids::CLAUDE_CHAT {
             // Close Claude chat popup and return to main view
             self.current_screen = screen_ids::SESSION_LIST.to_string();
-            self.claude_chat_visible = false;
+            self.claude_chat.claude_chat_visible = false;
         } else {
             // Open Claude chat popup
             self.current_screen = screen_ids::CLAUDE_CHAT.to_string();
-            self.claude_chat_visible = true;
+            self.claude_chat.claude_chat_visible = true;
         }
     }
 

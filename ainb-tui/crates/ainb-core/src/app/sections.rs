@@ -77,3 +77,24 @@ impl Default for GitViewSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct ClaudeChatSection {
+    pub claude_chat_visible: bool,
+
+    // Focus management for panes
+    pub claude_chat_state: Option<ClaudeChatState>,
+    // Live logs from Docker containers
+    pub claude_manager: Option<ClaudeChatManager>,
+    // Docker log streaming coordinator
+}
+
+impl Default for ClaudeChatSection {
+    fn default() -> Self {
+        Self {
+            claude_chat_visible: false,
+            claude_chat_state: None,
+            claude_manager: None,
+        }
+    }
+}

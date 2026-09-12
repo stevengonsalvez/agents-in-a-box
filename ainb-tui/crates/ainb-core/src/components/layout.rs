@@ -1087,7 +1087,7 @@ impl LayoutComponent {
         // top bar is now a dedicated, full-width live-quota line so both
         // providers fit (and degrade gracefully) instead of being squeezed
         // out by that duplicated content.
-        if state.claude_chat_visible {
+        if state.claude_chat.claude_chat_visible {
             status_spans.push(Span::styled("🗨️ ", Style::default().fg(SELECTION_GREEN)));
             status_spans.push(Span::styled("ON", Style::default().fg(SELECTION_GREEN)));
         } else {
