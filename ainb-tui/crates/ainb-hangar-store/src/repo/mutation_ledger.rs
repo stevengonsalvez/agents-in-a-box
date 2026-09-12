@@ -419,10 +419,15 @@ impl MutationLedgerRepo {
 
     /// Drop a claim whose handler produced no terminal outcome.
     ///
-    /// Used only where re-execution is provably safe: the handler failed
-    /// BEFORE touching any state (a parameter the dispatcher rejected, a store
-    /// fault on the very first read). Anything past that point resolves to
-    /// `unknown`, never to a deleted claim.
+    /// Used only where re-execution is provably safe, and the SQL is what makes
+    /// "provably" true rather than a comment: a row whose receipt has reached
+    /// `writing` is NEVER deleted, because `writing` is committed immediately
+    /// before the first byte reaches the PTY and deleting it would leave the
+    /// boot sweep nothing to surface and a retry free to type the answer a
+    /// second time. Those rows resolve to `unknown`, never to a deleted claim.
+    ///
+    /// Returns the number of rows dropped, so a caller can tell an abandoned
+    /// claim from one it must leave for the sweep.
     ///
     /// # Errors
     ///
@@ -433,7 +438,8 @@ impl MutationLedgerRepo {
     ) -> Result<u64, sqlx::Error> {
         let res = sqlx::query(
             "DELETE FROM mutation_ledger \
-             WHERE host_id = ? AND principal = ? AND op_id = ? AND status = 'in_flight'",
+             WHERE host_id = ? AND principal = ? AND op_id = ? AND status = 'in_flight' \
+               AND (receipt_state IS NULL OR receipt_state = 'claimed')",
         )
         .bind(&key.host_id)
         .bind(&key.principal)
@@ -616,10 +622,17 @@ impl MutationLedgerRepo {
 
     /// Every row that never reached a terminal outcome, oldest first.
     ///
-    /// Two shapes, one meaning: a `writing` receipt (bytes may have reached a
-    /// PTY) and an `in_flight` claim of any tier (the handler may have
-    /// committed). Both are `unknown{effects_ambiguous}` and neither may be
-    /// re-executed.
+    /// `status = 'in_flight'` is the whole predicate, and deliberately so. A
+    /// crash always leaves that status, because the reply is recorded in the
+    /// same step that leaves it — so every ambiguous row is caught. Selecting
+    /// on `receipt_state = 'writing'` as well would ALSO catch a settled row
+    /// that legitimately ends there: a `fleet/action` that returned `PENDING`
+    /// is accepted, its bytes are on their way, and the next boot would rewrite
+    /// that accepted row to `unknown` and raise a `delivery_unconfirmed` an
+    /// operator has to close by hand.
+    ///
+    /// The receipt state still decides WHAT the sweep does with a row; it just
+    /// does not decide which rows the sweep owns.
     ///
     /// # Errors
     ///
@@ -630,7 +643,7 @@ impl MutationLedgerRepo {
     ) -> Result<Vec<LedgerRow>, sqlx::Error> {
         let sql = format!(
             "SELECT {SELECT_COLUMNS} FROM mutation_ledger \
-             WHERE host_id = ? AND (status = 'in_flight' OR receipt_state = 'writing') \
+             WHERE host_id = ? AND status = 'in_flight' \
              ORDER BY created_at ASC, op_id ASC"
         );
         Ok(sqlx::query(&sql)
@@ -659,8 +672,7 @@ impl MutationLedgerRepo {
              SET status = 'unknown', reason = ?, \
                  receipt_state = CASE WHEN receipt_state IS NULL THEN NULL ELSE 'unknown' END, \
                  receipt_detail = COALESCE(?, receipt_detail), updated_at = ? \
-             WHERE host_id = ? AND principal = ? AND op_id = ? \
-               AND (status = 'in_flight' OR receipt_state = 'writing')",
+             WHERE host_id = ? AND principal = ? AND op_id = ? AND status = 'in_flight'",
         )
         .bind(reason)
         .bind(detail)
