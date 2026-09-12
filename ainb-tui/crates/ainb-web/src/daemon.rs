@@ -89,11 +89,32 @@ pub enum DaemonError {
     Decode(String),
 }
 
-/// The daemon unix socket path (`{hangar_home}/hangar.sock`) — the same target
-/// the TUI plugin dials. `None` when the home cannot be resolved.
+/// The daemon unix socket path — the same target the TUI plugin dials. `None`
+/// when the home cannot be resolved.
+///
+/// D17: the versioned alias `hangar-v<N>.sock` when the daemon published one,
+/// else the unversioned `hangar.sock`. One inode either way; the versioned name
+/// is how a client says which protocol it expects to find.
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
-    Some(ainb_hangar_core::hangar_home()?.join("hangar.sock"))
+    let home = ainb_hangar_core::hangar_home()?;
+    let versioned = home.join(format!(
+        "hangar-v{}.sock",
+        ainb_hangar_proto::protocol::PROTOCOL_VERSION
+    ));
+    if versioned.exists() {
+        return Some(versioned);
+    }
+    Some(home.join("hangar.sock"))
+}
+
+/// Mint a fresh 128-bit op id from the OS CSPRNG (D18).
+#[must_use]
+pub fn mint_op_id() -> ainb_hangar_proto::mutation::OpId {
+    use rand::RngCore as _;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    ainb_hangar_proto::mutation::OpId::from_bytes(bytes)
 }
 
 /// A stateless client for the daemon control plane. Cheap to clone (just a path
@@ -141,7 +162,13 @@ impl DaemonClient {
     /// Answer one open attention row (`attention/answer`). The daemon runs the
     /// first-answer-wins + C1 ambiguity guards and performs the verified
     /// last-mile send; the tagged [`AnswerResult`] says what happened.
-    pub async fn answer(&self, params: AnswerParams) -> Result<AnswerResult, DaemonError> {
+    pub async fn answer(&self, mut params: AnswerParams) -> Result<AnswerResult, DaemonError> {
+        // D18, same reasoning as the TUI client: no op id means no ledger row,
+        // no receipt, and nothing to surface if the daemon dies mid-delivery.
+        // Fresh per call so a re-answer of a reopened row really re-delivers.
+        if params.mutation.op_id.is_none() {
+            params.mutation.op_id = Some(mint_op_id());
+        }
         let value = serde_json::to_value(params).expect("AnswerParams serializes");
         let result = self.call(methods::ATTENTION_ANSWER, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
@@ -190,6 +217,9 @@ impl DaemonClient {
             json!({
                 "token": self.token,
                 "surface": { "kind": "web", "pid": std::process::id() },
+                // D17: declared, never assumed. An older daemon ignores both.
+                "protocol": ainb_hangar_proto::protocol::ProtocolRange::supported(),
+                "capabilities": ainb_hangar_proto::protocol::catalogue_strings(),
             }),
             1,
         )

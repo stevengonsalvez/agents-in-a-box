@@ -5,7 +5,7 @@ import XCTest
 final class CanonicalFixtureTests: XCTestCase {
     func testLocalWireSamplesDecodeAndRoundTripSemantically() throws {
         try assertJSON(
-            #"{"id":1,"jsonrpc":"2.0","method":"auth/hello","params":{"token":"fixture-token"}}"#,
+            #"{"id":1,"jsonrpc":"2.0","method":"auth/hello","params":{"capabilities":["hangar.auth.hello.negotiated","hangar.mutation.op_id","hangar.mutation.receipt","hangar.socket.versioned"],"protocol":{"max":1,"min":1},"token":"fixture-token"}}"#,
             as: RPCRequest<AuthHelloParams>.self
         )
         try assertJSON(
@@ -176,6 +176,42 @@ final class CanonicalFixtureTests: XCTestCase {
         XCTAssertThrowsError(try FleetWire.decoder().decode(FleetReplayState.self, from: Data(#"{"state":"snapshot_reset"}"#.utf8)))
         XCTAssertThrowsError(try FleetWire.decoder().decode(FleetReplayState.self, from: Data(#"{"state":"future"}"#.utf8)))
         XCTAssertThrowsError(try FleetWire.decoder().decode(FleetReplayState.self, from: Data(#"{"state":"snapshot_reset","reason":"bootstrap","extra":true}"#.utf8)))
+    }
+
+    /// The N-1 legs of the D17 skew matrix, both directions.
+    ///
+    /// A pre-W0-wire CLIENT sends `{ token }` and nothing else; a pre-W0-wire
+    /// DAEMON answers `{}`. Neither may be a decoding error, or a mixed-version
+    /// pair stops talking on the handshake — the one exchange that has to work
+    /// before anything can report why it does not.
+    func testLegacyHelloFramesStillDecode() throws {
+        let legacyClientFrame = #"{"token":"fixture-token"}"#
+        let params = try FleetWire.decoder()
+            .decode(AuthHelloParams.self, from: Data(legacyClientFrame.utf8))
+        XCTAssertEqual(params.token, "fixture-token")
+        XCTAssertEqual(params.protocolRange, .legacy)
+        XCTAssertTrue(params.capabilities.isEmpty)
+        XCTAssertNil(params.surface)
+
+        let legacyDaemonAck = "{}"
+        let ack = try FleetWire.decoder()
+            .decode(AuthHelloResult.self, from: Data(legacyDaemonAck.utf8))
+        XCTAssertEqual(ack.protocolRange, .legacy)
+        XCTAssertEqual(ack.selectedOrLegacy, 1)
+        XCTAssertTrue(ack.capabilities.isEmpty)
+        XCTAssertFalse(ack.advertises(HangarCapability.mutationOpID))
+    }
+
+    /// A CURRENT daemon's reply decodes with everything it declared.
+    func testNegotiatedHelloAckDecodes() throws {
+        let json = #"{"protocol":{"min":1,"max":1},"selected":1,"capabilities":["hangar.auth.hello.negotiated","hangar.mutation.op_id"],"daemon_version":"0.1.0"}"#
+        let ack = try FleetWire.decoder().decode(AuthHelloResult.self, from: Data(json.utf8))
+        XCTAssertEqual(ack.selected, 1)
+        XCTAssertEqual(ack.protocolRange, HangarProtocolRange(min: 1, max: 1))
+        XCTAssertEqual(ack.daemonVersion, "0.1.0")
+        XCTAssertTrue(ack.advertises(HangarCapability.authHelloNegotiated))
+        XCTAssertTrue(ack.advertises(HangarCapability.mutationOpID))
+        XCTAssertFalse(ack.advertises("hangar.not.a.capability"))
     }
 
     private func assertJSON<T: Codable>(_ json: String, as type: T.Type, file: StaticString = #filePath, line: UInt = #line) throws {

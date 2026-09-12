@@ -121,10 +121,47 @@ impl DaemonError {
     }
 }
 
-/// The daemon unix socket path (`{hangar_home}/hangar.sock`).
+/// The daemon unix socket path.
+///
+/// D17: a client dials the VERSIONED path `hangar-v<N>.sock` when the daemon
+/// serves one, else the unversioned `hangar.sock`. Both names resolve to one
+/// inode — the versioned one is a symlink the daemon creates beside its bind
+/// target — so this is not a second socket, it is a statement about which
+/// protocol the thing on the other end speaks.
+///
+/// The unversioned fallback is what keeps a client that predates the symlink,
+/// or one talking to a daemon that could not create it, working unchanged.
 #[must_use]
 pub fn socket_path() -> Option<PathBuf> {
-    Some(ainb_hangar_core::hangar_home()?.join("hangar.sock"))
+    let home = ainb_hangar_core::hangar_home()?;
+    Some(socket_path_in(&home))
+}
+
+/// [`socket_path`] against an explicit home. Split out so the preference order
+/// is testable without touching the environment.
+#[must_use]
+pub fn socket_path_in(home: &std::path::Path) -> PathBuf {
+    let versioned = home.join(format!(
+        "hangar-v{}.sock",
+        ainb_hangar_proto::protocol::PROTOCOL_VERSION
+    ));
+    if versioned.exists() {
+        return versioned;
+    }
+    home.join("hangar.sock")
+}
+
+/// Mint a fresh 128-bit op id from the OS CSPRNG (D18).
+///
+/// Opaque by contract: the daemon compares and stores it and never parses one,
+/// so there is no timestamp inside and a client with a wrong clock is never
+/// rejected for skew.
+#[must_use]
+pub fn mint_op_id() -> ainb_hangar_proto::mutation::OpId {
+    use rand::RngCore as _;
+    let mut bytes = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    ainb_hangar_proto::mutation::OpId::from_bytes(bytes)
 }
 
 /// Client for stateless daemon RPCs and persistent Fleet subscription.
@@ -332,7 +369,20 @@ impl DaemonClient {
 
     /// Answer one open attention row (`attention/answer`). The daemon runs the
     /// first-answer-wins + C1 guards and performs the verified last-mile send.
-    pub async fn answer(&self, params: AnswerParams) -> Result<AnswerResult, DaemonError> {
+    pub async fn answer(&self, mut params: AnswerParams) -> Result<AnswerResult, DaemonError> {
+        // D18: an answer with no op id gets no ledger row, and therefore no
+        // receipt - which means a daemon killed mid-`send-keys` leaves nothing
+        // to surface as `delivery_unconfirmed`. Minting one here turns that
+        // safety on for every local surface (TUI, CLI, bridge) with no
+        // call-site change.
+        //
+        // Fresh per call, deliberately: a DERIVED id would make an operator's
+        // second attempt at a reopened row replay the first attempt's failure
+        // instead of delivering. A caller that wants retry-idempotence supplies
+        // its own id and keeps it across the retry.
+        if params.mutation.op_id.is_none() {
+            params.mutation.op_id = Some(mint_op_id());
+        }
         let value = serde_json::to_value(params).expect("AnswerParams serializes");
         let result = self.call(methods::ATTENTION_ANSWER, value).await?;
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
@@ -677,7 +727,15 @@ impl DaemonClient {
     /// Encode the optional surface extension without widening every client call
     /// site's public parameter list.
     fn hello_params(&self) -> Value {
-        json!({ "token": self.token, "surface": self.surface })
+        json!({
+            "token": self.token,
+            "surface": self.surface,
+            // D17: what this build can speak, and what it understands. A daemon
+            // that predates the negotiation ignores both members and answers
+            // the same bare `{}` it always did.
+            "protocol": ainb_hangar_proto::protocol::ProtocolRange::supported(),
+            "capabilities": ainb_hangar_proto::protocol::catalogue_strings(),
+        })
     }
 
     async fn open_connections_subscription_inner(
