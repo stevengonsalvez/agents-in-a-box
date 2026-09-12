@@ -32,8 +32,11 @@ use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::token::{TokenKind, mint, sha256_hex};
-use ainb_hangar_proto::auth::{HelloParams, UNAUTHORIZED};
+use ainb_hangar_proto::auth::{DeviceInfo, HelloParams, HelloResult, UNAUTHORIZED};
 use ainb_hangar_proto::connections::SurfaceInfo;
+use ainb_hangar_proto::protocol::{
+    PROTOCOL_INCOMPATIBLE, ProtocolRange, catalogue_strings, negotiate,
+};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse, methods};
 use ainb_hangar_store::repo::token::SocketTokenRepo;
 use sqlx::SqlitePool;
@@ -71,6 +74,20 @@ pub struct AuthenticatedHello {
     pub caller: Caller,
     /// Optional client-declared surface metadata for the live registry.
     pub surface: Option<SurfaceInfo>,
+    /// The protocol version the two peers settled on (D17).
+    ///
+    /// Always a version this build serves: a connection whose range did not
+    /// overlap never reaches this struct, it is closed with
+    /// [`PROTOCOL_INCOMPATIBLE`].
+    pub protocol: u32,
+    /// The capability strings the CLIENT declared it understands.
+    ///
+    /// Advisory: the daemon does not gate on it. It exists so a surface census
+    /// can answer "which of my clients can already read the new event kind"
+    /// without auditing release notes.
+    pub capabilities: Vec<String>,
+    /// The paired device this connection belongs to (R1, off-box only).
+    pub device: Option<DeviceInfo>,
 }
 
 /// Every method a Pal connection may call, and nothing else.
@@ -308,28 +325,32 @@ pub async fn authenticate_first_frame(
     let Ok(params) = serde_json::from_value::<HelloParams>(req.params.clone()) else {
         return Err(unauthorized(
             req.id,
-            "auth/hello params must be { token, surface? }",
+            "auth/hello params must be { token, surface?, protocol?, capabilities?, device? }",
         ));
     };
+    // D17: version before credential. A build this daemon cannot speak is not
+    // an authentication failure and must not be reported as one — the remedy
+    // is a different binary, never a different token, and a client that
+    // conflates the two retries forever with a credential that was fine.
+    let Some(selected) = negotiate(params.protocol, ProtocolRange::supported()) else {
+        return Err(incompatible(req.id, params.protocol));
+    };
+
+    let settled = |caller: Caller| AuthenticatedHello {
+        caller,
+        surface: params.surface.clone(),
+        protocol: selected,
+        capabilities: params.capabilities.clone(),
+        device: params.device.clone(),
+    };
+
     // The Pal credential FIRST, and it is never the daemon token: a scoped
     // credential that also verified as the operator's would be no scope at all.
     if let Some(scope_key) = pal_scope_for(&params.token) {
-        return Ok((
-            ack(req.id),
-            AuthenticatedHello {
-                caller: Caller::Pal { scope_key },
-                surface: params.surface,
-            },
-        ));
+        return Ok((ack(req.id, selected), settled(Caller::Pal { scope_key })));
     }
     match SocketTokenRepo::verify(pool, &params.token).await {
-        Ok(true) => Ok((
-            ack(req.id),
-            AuthenticatedHello {
-                caller: Caller::Operator,
-                surface: params.surface,
-            },
-        )),
+        Ok(true) => Ok((ack(req.id, selected), settled(Caller::Operator))),
         Ok(false) => Err(unauthorized(req.id, "invalid daemon token")),
         Err(e) => {
             tracing::warn!(error = %e, "hangar rpc: socket-token lookup failed");
@@ -338,13 +359,51 @@ pub async fn authenticate_first_frame(
     }
 }
 
-/// The `{}` success envelope echoing `id`.
-fn ack(id: RpcId) -> RpcResponse {
+/// The success envelope echoing `id`, carrying what this daemon speaks.
+///
+/// A pre-W0-wire client deserializes this as the empty struct it always did
+/// (serde ignores members it does not know), so the added members cost that
+/// half of the skew matrix nothing.
+fn ack(id: RpcId, selected: u32) -> RpcResponse {
+    let result = HelloResult {
+        protocol: ProtocolRange::supported(),
+        selected: Some(selected),
+        capabilities: catalogue_strings(),
+        daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    };
     RpcResponse {
         jsonrpc: ainb_hangar_proto::jsonrpc_version(),
         id,
-        result: Some(serde_json::json!({})),
+        result: serde_json::to_value(result).ok(),
         error: None,
+    }
+}
+
+/// Refuse a connection whose protocol range does not overlap this build's.
+///
+/// The message names the fix, because the operator reading it is looking at
+/// two binaries and needs to know which one to move.
+fn incompatible(id: RpcId, client: ProtocolRange) -> RpcResponse {
+    let ours = ProtocolRange::supported();
+    RpcResponse {
+        jsonrpc: ainb_hangar_proto::jsonrpc_version(),
+        id,
+        result: None,
+        error: Some(RpcError {
+            code: PROTOCOL_INCOMPATIBLE,
+            message: format!(
+                "daemon protocol {}-{} cannot serve a client speaking {}-{}; \
+                 restart from the newer binary",
+                ours.min, ours.max, client.min, client.max
+            ),
+            data: serde_json::to_value(HelloResult {
+                protocol: ours,
+                selected: None,
+                capabilities: catalogue_strings(),
+                daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            })
+            .ok(),
+        }),
     }
 }
 

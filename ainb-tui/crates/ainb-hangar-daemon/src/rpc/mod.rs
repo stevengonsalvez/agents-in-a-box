@@ -258,7 +258,50 @@ pub fn bind(socket_path: &Path) -> std::io::Result<UnixListener> {
     }
     let listener = UnixListener::bind(socket_path)?;
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    link_versioned_sockets(socket_path);
     Ok(listener)
+}
+
+/// The versioned socket alias for protocol `version`: `hangar-v<N>.sock`.
+#[must_use]
+pub fn versioned_socket_path_in(store_dir: &Path, version: u32) -> PathBuf {
+    store_dir.join(format!("hangar-v{version}.sock"))
+}
+
+/// Point `hangar-v<N>.sock` at the real socket for every version served (D17).
+///
+/// The unversioned `hangar.sock` stays the bind target and keeps working, which
+/// is the whole reason this is a SYMLINK rather than a second bind: amendment
+/// 21's problem is that today's clients hardcode `hangar.sock`, and moving the
+/// socket to a versioned path orphans every one of them. So both names resolve
+/// to one inode, one listener, one flock singleton.
+///
+/// Best-effort by design. A daemon that cannot create an alias still serves
+/// every client that dials the real path, so a read-only or exotic filesystem
+/// degrades to "no versioned alias" rather than "no daemon".
+fn link_versioned_sockets(socket_path: &Path) {
+    let Some(dir) = socket_path.parent() else {
+        return;
+    };
+    let Some(name) = socket_path.file_name() else {
+        return;
+    };
+    for version in ainb_hangar_proto::protocol::PROTOCOL_MIN_SUPPORTED
+        ..=ainb_hangar_proto::protocol::PROTOCOL_VERSION
+    {
+        let alias = versioned_socket_path_in(dir, version);
+        // A stale alias from a previous daemon points at an unlinked inode, so
+        // it is replaced unconditionally. `remove_file` on a dangling symlink
+        // removes the LINK, never a target.
+        let _ = std::fs::remove_file(&alias);
+        if let Err(e) = std::os::unix::fs::symlink(name, &alias) {
+            tracing::debug!(
+                error = %e,
+                alias = %alias.display(),
+                "hangar rpc: could not create the versioned socket alias"
+            );
+        }
+    }
 }
 
 /// Idle read bound for a request/response connection (no live subscription).
