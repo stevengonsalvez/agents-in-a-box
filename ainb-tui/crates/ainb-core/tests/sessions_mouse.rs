@@ -4,11 +4,23 @@ use ainb::app::events::AppEvent;
 use ainb::app::screens::ids as screen_ids;
 use ainb::app::state::FocusedPane;
 use ainb::app::{AppState, EventHandler};
+use ainb::components::session_list::SessionListComponent;
 use ainb::models::{Session, Workspace};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use std::sync::Mutex;
 
 static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+/// The sessions panel rect the fixture pins, mirrored by the render below so
+/// hit-testing and painting agree on the same geometry.
+const SESSIONS_RECT: Rect = Rect {
+    x: 0,
+    y: 3,
+    width: 40,
+    height: 20,
+};
 
 fn state_with_sessions(count: usize) -> (tempfile::TempDir, AppState) {
     let temp_home = tempfile::tempdir().expect("temp home");
@@ -28,12 +40,42 @@ fn state_with_sessions(count: usize) -> (tempfile::TempDir, AppState) {
     }
     state.workspaces = vec![workspace];
 
-    state
-        .sessions_pane_state
-        .set_layout(Rect::new(0, 3, 40, 20), Rect::new(40, 3, 80, 20));
+    state.sessions_pane_state.set_layout(SESSIONS_RECT, Rect::new(40, 3, 80, 20));
     state.sessions_pane_state.set_list_scroll_offset(0);
+    // Hit-testing reads the per-item heights the renderer records, because a
+    // session row is taller than the one line a header takes. Painting the
+    // real component is the only way to get heights that match what the user
+    // clicks on; a fixture that assumed one row per line silently mapped every
+    // click onto the wrong session.
+    paint_session_list(&mut state);
 
     (temp_home, state)
+}
+
+/// Draw the real sessions panel once so `SessionsPaneState` carries the item
+/// heights and scroll offset of an actual frame.
+fn paint_session_list(state: &mut AppState) {
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+    let mut list = SessionListComponent::new();
+    terminal
+        .draw(|frame| list.render(frame, SESSIONS_RECT, state))
+        .expect("draw sessions panel");
+}
+
+/// First terminal row occupied by list row `row_index`, resolved through the
+/// same hit test the mouse handler uses. Tests name the row they mean instead
+/// of a `y` that goes stale the moment a row grows a second line.
+fn row_y(state: &AppState, row_index: usize) -> u16 {
+    let first = SESSIONS_RECT.y + 1;
+    let last = SESSIONS_RECT.y + SESSIONS_RECT.height - 1;
+    (first..last)
+        .find(|&y| state.sessions_pane_state.row_index_at(8, y) == Some(row_index))
+        .unwrap_or_else(|| panic!("list row {row_index} is not on screen"))
+}
+
+/// Row 0 is the workspace header, so session `n` is list row `n + 1`.
+fn session_row_y(state: &AppState, session_index: usize) -> u16 {
+    row_y(state, session_index + 1)
 }
 
 fn state_with_two_sessions() -> (tempfile::TempDir, AppState) {
@@ -45,8 +87,9 @@ fn sessions_mouse_click_selects_session_row_without_async_work() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state) = state_with_two_sessions();
 
-    // y=3 is the top border, y=4 workspace header, y=5 first session, y=6 second session.
-    let outcome = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
+    let second = session_row_y(&state, 1);
+    let outcome =
+        EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: second }, &mut state);
 
     assert!(outcome.is_none());
     assert_eq!(state.selected_workspace_index, Some(0));
@@ -59,8 +102,10 @@ fn sessions_mouse_double_click_attaches_selected_session_row() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state) = state_with_two_sessions();
 
-    let first = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
-    let second = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
+    let row = session_row_y(&state, 1);
+    let first = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: row }, &mut state);
+    let second =
+        EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: row }, &mut state);
 
     assert!(first.is_none());
     assert!(matches!(second, Some(AppEvent::AttachTmuxSession)));
@@ -73,8 +118,17 @@ fn sessions_mouse_double_click_requires_same_attachable_row() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state) = state_with_two_sessions();
 
-    let first = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 5 }, &mut state);
-    let second = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
+    let first_row = session_row_y(&state, 0);
+    let second_row = session_row_y(&state, 1);
+    let first =
+        EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: first_row }, &mut state);
+    let second = EventHandler::handle_mouse_event(
+        AppEvent::MouseClick {
+            x: 8,
+            y: second_row,
+        },
+        &mut state,
+    );
 
     assert!(first.is_none());
     assert!(second.is_none());
