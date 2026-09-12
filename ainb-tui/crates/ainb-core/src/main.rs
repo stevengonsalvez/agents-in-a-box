@@ -62,7 +62,7 @@ mod widgets;
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
 
-use app::keymap::{Chord, KeyAction, KeyContext, Keymap, UiAction};
+use app::keymap::{Chord, KeyAction, KeyContext, Keymap, ScrollAction, UiAction};
 use app::{App, EventHandler};
 use components::LayoutComponent;
 use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
@@ -744,19 +744,19 @@ async fn run_tui_loop(
                         observing_terminal,
                     ) {
                         PreviewScrollRoute::Clear => {
-                            ui.apply(UiAction::PreviewExitScroll, layout, &app.state);
+                            ui.apply(ScrollAction::PreviewExitScroll, layout, &app.state);
                         }
                         PreviewScrollRoute::Handle => {
                             match keymap.resolve(&[KeyContext::PreviewScroll], &chord) {
                                 // Don't let ESC fall through as Quit, or the
                                 // arrows navigate sessions behind the pane.
-                                Some(KeyAction::Ui(
-                                    action @ (UiAction::PreviewExitScroll
-                                    | UiAction::PreviewScrollUp
-                                    | UiAction::PreviewScrollDown
-                                    | UiAction::PreviewPageUp
-                                    | UiAction::PreviewPageDown),
-                                )) => {
+                                Some(KeyAction::Ui(UiAction::Scroll(
+                                    action @ (ScrollAction::PreviewExitScroll
+                                    | ScrollAction::PreviewScrollUp
+                                    | ScrollAction::PreviewScrollDown
+                                    | ScrollAction::PreviewPageUp
+                                    | ScrollAction::PreviewPageDown),
+                                ))) => {
                                     ui.apply(action, layout, &app.state);
                                     continue;
                                 }
@@ -852,7 +852,14 @@ async fn run_tui_loop(
                                     Ok(()) => {
                                         info!(">>> Immediate tick completed successfully");
                                         last_app_tick = Instant::now();
-                                        // Force UI refresh
+                                        // Force UI refresh. The tick runs here
+                                        // for the same reason it runs before the
+                                        // main draw: this frame would otherwise
+                                        // paint an unreconciled `session_tab`,
+                                        // skip the Ask pane's retarget, and read
+                                        // `chat_host` where the tick would have
+                                        // ticked `chat_host_for`.
+                                        layout.tick_before_draw(&mut app.state);
                                         terminal.draw(|frame| {
                                             layout.render(frame, &app.state, &mut ui);
                                         })?;
@@ -1044,9 +1051,9 @@ async fn run_tui_loop(
                             } else {
                                 // Default: scroll live logs
                                 let action = if is_down {
-                                    UiAction::ScrollLogsDown
+                                    ScrollAction::ScrollLogsDown
                                 } else {
-                                    UiAction::ScrollLogsUp
+                                    ScrollAction::ScrollLogsUp
                                 };
                                 ui.apply(action, layout, &app.state);
                             }
