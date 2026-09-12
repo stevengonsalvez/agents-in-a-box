@@ -144,6 +144,17 @@
       });
       const data = await res.json().catch(() => ({}));
       card.dataset.outcome = (data && data.outcome) || (res.ok ? "sent" : "failed");
+      // First-answer-wins loser: another surface already resolved this row, so
+      // the controls are dead the moment the daemon says so. Retire them here
+      // rather than leaving a live-looking form for the up-to-2s it takes the
+      // poller's next snapshot to drop the card, and name the winner.
+      if (data && data.outcome === "already_answered") {
+        card.classList.remove("answering");
+        card.querySelectorAll(".need-actions").forEach((n) => n.remove());
+        const by = (data && data.by) || "another surface";
+        const note = el("div", "need-outcome", `answered by ${by}`);
+        card.querySelector(".need-body")?.appendChild(note);
+      }
       // Reconcile from the source of truth (an answered row drops from the inbox).
       loadOnce().then(render).catch(() => {});
     } catch (_) {
