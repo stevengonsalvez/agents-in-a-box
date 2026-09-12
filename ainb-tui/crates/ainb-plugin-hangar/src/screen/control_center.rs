@@ -491,7 +491,14 @@ pub struct ControlCenterState {
     /// longer open (answered elsewhere, session gone). A swallowed refusal read
     /// as "I pressed 2 and nothing happened" while the agent stayed blocked.
     note: Option<(String, String)>,
+    /// A short "answered by <who>" toast and the epoch-ms it stops painting at,
+    /// set when a card is retired because another surface won the answer.
+    /// Unlike `note` it is not keyed to a card: the card it was about is gone.
+    answered_toast: Option<(String, i64)>,
 }
+
+/// How long the "answered by <who>" toast stays on the title row.
+const ANSWERED_TOAST_MS: i64 = 3_000;
 
 impl ControlCenterState {
     /// Surface an answer verdict the daemon returned instead of a delivery,
@@ -509,6 +516,50 @@ impl ControlCenterState {
     #[must_use]
     pub fn note(&self) -> Option<&str> {
         self.note.as_ref().map(|(_, n)| n.as_str())
+    }
+
+    /// Retire the card `attention_id` because `by` answered it somewhere else.
+    ///
+    /// The daemon's first-answer-wins guard has already resolved the row, so
+    /// the card here is dead the instant the `AttentionAnswered` event (or an
+    /// `AlreadyAnswered` verdict) says so. Waiting for the next `attention/list`
+    /// snapshot leaves a live-looking card, and its option keys still send
+    /// answers that can only lose the same race again.
+    ///
+    /// Returns `true` when a card was actually removed, which is also the only
+    /// case that raises the toast: a retirement for a row this board never
+    /// showed is not news to the human reading it.
+    pub fn retire_answered(&mut self, attention_id: &str, by: &str, now_ms: i64) -> bool {
+        let before = self.cards.len();
+        self.cards.retain(|card| card.id != attention_id);
+        let removed = self.cards.len() != before;
+        if !removed {
+            return false;
+        }
+        // Focus was on the card that just went away: fall to the first row, the
+        // same rule `set_attention` applies when a card is answered out from
+        // under the selection.
+        if self.selected_id.as_deref() == Some(attention_id) {
+            self.selected_id = self.cards.first().map(|card| card.id.clone());
+            self.option_cursor = 0;
+        }
+        // Any refusal note about this card is stale now.
+        if self.note.as_ref().is_some_and(|(id, _)| id == attention_id) {
+            self.note = None;
+        }
+        self.answered_toast = Some((format!("answered by {by}"), now_ms + ANSWERED_TOAST_MS));
+        self.clamp_option_cursor();
+        true
+    }
+
+    /// The live "answered by <who>" toast at `now_ms`, or `None` once it has
+    /// aged out.
+    #[must_use]
+    pub fn answered_toast(&self, now_ms: i64) -> Option<&str> {
+        self.answered_toast
+            .as_ref()
+            .filter(|(_, until)| now_ms < *until)
+            .map(|(text, _)| text.as_str())
     }
 
     /// Rebuild the board from an `attention/list` / `attention/subscribe`
@@ -807,7 +858,7 @@ pub fn render_control_center(
     state: &ControlCenterState,
     now_ms: i64,
 ) {
-    render_title(buf, area_w, top, state);
+    render_title(buf, area_w, top, state, now_ms);
     let body_top = top + 1;
     if body_top > bottom {
         return;
@@ -872,7 +923,13 @@ fn render_divider(buf: &mut WireBuffer, list_w: u16, top: u16, bottom: u16) {
 }
 
 /// Render the title row: `Control · N sessions · M need you` + the hotkey hint.
-fn render_title(buf: &mut WireBuffer, area_w: u16, row: u16, state: &ControlCenterState) {
+fn render_title(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    state: &ControlCenterState,
+    now_ms: i64,
+) {
     let total = state.cards.len();
     let need = state.needs_you_count();
     let mut x = put_str(buf, 0, row, "Control", GOLD, area_w);
@@ -887,6 +944,9 @@ fn render_title(buf: &mut WireBuffer, area_w: u16, row: u16, state: &ControlCent
     x = put_str(buf, x, row, &format!("{need} need you"), WAIT_AMBER, area_w);
     if let Some(note) = state.note() {
         x = put_str(buf, x, row, &format!("   ⚠ {note}"), ALERT_RED, area_w);
+    }
+    if let Some(toast) = state.answered_toast(now_ms) {
+        x = put_str(buf, x, row, &format!("   ✓ {toast}"), WAIT_AMBER, area_w);
     }
     // The hotkey hint next to the control (feedback_keybinding_hints_near_control).
     let hint = "C control-center";
@@ -1437,6 +1497,85 @@ mod tests {
             &ask_payload("q", &["y"]),
         )]);
         assert_eq!(state.selected_id(), Some("a"));
+    }
+
+    #[test]
+    fn another_surface_answering_retires_the_card_and_names_the_winner() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[
+            row("a", "ask_user_question", 100, &ask_payload("q", &["y"])),
+            row("b", "ask_user_question", 200, &ask_payload("q2", &["z"])),
+        ]);
+        while state.selected_id() != Some("b") {
+            state.select_next();
+        }
+        // A refusal about "b" is on screen when the event lands.
+        state.set_note("b", "not delivered (no live session)");
+
+        assert!(state.retire_answered("b", "web@box", 1_000));
+
+        assert!(
+            state.cards().iter().all(|card| card.id != "b"),
+            "the answered card must leave the board without waiting for a snapshot"
+        );
+        assert_eq!(
+            state.selected_id(),
+            Some("a"),
+            "focus falls to the first card, as it does on a snapshot"
+        );
+        assert!(state.note().is_none(), "the refusal about it is stale");
+        assert_eq!(state.answered_toast(1_000), Some("answered by web@box"));
+        assert_eq!(
+            state.answered_toast(1_000 + ANSWERED_TOAST_MS),
+            None,
+            "the toast ages out"
+        );
+    }
+
+    #[test]
+    fn retiring_a_card_this_board_never_had_changes_nothing() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[row(
+            "a",
+            "ask_user_question",
+            100,
+            &ask_payload("q", &["y"]),
+        )]);
+
+        assert!(!state.retire_answered("somewhere-else", "web@box", 1_000));
+
+        assert_eq!(state.cards().len(), 1);
+        assert_eq!(state.selected_id(), Some("a"));
+        assert_eq!(
+            state.answered_toast(1_000),
+            None,
+            "a retirement for a row this board never showed is not news"
+        );
+    }
+
+    #[test]
+    fn the_answered_toast_paints_on_the_title_row() {
+        let mut state = ControlCenterState::default();
+        state.set_attention(&[
+            row("a", "ask_user_question", 100, &ask_payload("q", &["y"])),
+            row("b", "ask_user_question", 200, &ask_payload("q2", &["z"])),
+        ]);
+        state.retire_answered("b", "web@box", 1_000);
+
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(140, 20);
+        render_control_center(&mut buf, 140, 0, 19, &state, 1_500);
+        assert!(
+            title_row_text(&buf).contains("answered by web@box"),
+            "the winner must be named on the title row: {:?}",
+            title_row_text(&buf)
+        );
+
+        let mut buf = ainb_plugin_sdk::WireBuffer::new(140, 20);
+        render_control_center(&mut buf, 140, 0, 19, &state, 1_000 + ANSWERED_TOAST_MS);
+        assert!(
+            !title_row_text(&buf).contains("answered by"),
+            "the toast is gone after its window"
+        );
     }
 
     #[test]
