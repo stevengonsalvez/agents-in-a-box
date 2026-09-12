@@ -147,8 +147,8 @@ One Orca worktree per lane, one `claude` agent each, goal prompt from `docs/plan
 
 | lane | goal | env | branch | agent handle |
 |---|---|---|---|---|
-| A | `2026-09-12-p0-closure.md`: slice-1 gates green (#925), waves 2-4, G6 handed over | claude-hetzner | `stevengonsalvez/p0-closure` **merged PR #933**, `stevengonsalvez/s-c-card-retirement` **merged PR #936**; Phase 3 and waves 2-4 in progress | `term_f52c61ee-95c2-4878-beb8-aaf8b8de6abd` |
-| B | `2026-09-12-w0-wire.md`: protocol version, capabilities, skew harness, op-id ledger | claude-gcp | `stevengonsalvez/w0-wire`, PR #935 sent back once (receipt-sweep reopen never matches, fence and retention gaps), back in draft | `term_577f77bd-ba69-47b0-9ed7-835aedc56beb` (resumed 2026-09-12 after a runtime restart killed the process) |
+| A | `2026-09-12-p0-closure.md`: slice-1 gates green (#925), waves 2-4, G6 handed over | claude-hetzner | **merged** #933, #936, #942 (G6 doc); `stevengonsalvez/phase3-uistate` PR #945 sent back once (tick missing before the forced draw, nested scroll action) | `term_f52c61ee-95c2-4878-beb8-aaf8b8de6abd` |
+| B | `2026-09-12-w0-wire.md`: protocol version, capabilities, skew harness, op-id ledger | claude-gcp | `stevengonsalvez/w0-wire`, PR #935 sent back twice: round 1 receipt-sweep reopen and fence gaps (fixed), round 2 adversarial: cross-principal claim race (principal inside the PK), boot sweep overwriting `delivered`, ledger growth from Pal-reachable no-op mutations, unverified `hangar-v1.sock` alias | `term_577f77bd-ba69-47b0-9ed7-835aedc56beb` |
 | C | `2026-09-12-status-t0.md`: #916 pane binding, then T0-daemon, plus the three red daemon tests from #925 | claude-gcp | `feat/916-pane-binding`, draft PR #934 (15 commits) | `term_49ad9b50-e253-497d-ad2c-62059f021b16` (the only lane C session) |
 | D | `2026-09-12-spike-2-emulator.md`: control-mode emulator fidelity | claude-hetzner | `stevengonsalvez/spike-2-emulator`, **merged PR #931**, nits follow-up **merged PR #938**, done | closed |
 | E | `2026-09-12-spike-3-peer-ws.md`: peer WS + Noise over tailnet and ssh -L | claude-gcp | `stevengonsalvez/spike-3-peer-ws`, **merged PR #930, done** | closed |
@@ -179,6 +179,8 @@ Lane rules: gcp lanes commit with the explicit `git -c commit.gpgsign=false comm
 | `v2` takes `main` | merge, not rebase; keeps the 12 docs commits as they are | minutes |
 
 ## Rules of the road
+
+- Review policy (2026-09-12): every PR gets an Opus code review before merge; slice-4 PRs get a second-family adversarial pass and a security pass when they flip ready (#935 got both, which found a race the first pass rated minor); status-store PRs get a distinguished-engineer critique; docs and Phase 3 PRs stay single review.
 
 - Base every PR on `v2`. A PR against `main` for this programme is a mistake; retarget it. Slice-1 wave 1 landed by direct push (a replay from `anthias`); from here every node lands by PR so its gate is visible in CI.
 - The P0 handoff's line "do not start P1-P6 or D1-D4" scopes that worker, not the programme: W0-wire, #916 and the spikes are free now per the table above.
