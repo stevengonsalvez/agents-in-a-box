@@ -40,8 +40,10 @@ use ainb_fleet_core::send::send;
 use ainb_fleet_core::types::{SendOutcome, Session};
 use ainb_hangar_proto::connections::ConnectionRow;
 use ainb_hangar_proto::events::HangarEvent;
+use ainb_hangar_proto::mutation::{Fence, ReceiptState};
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 use ainb_hangar_store::repo::attention::{AttentionRepo, AttentionRow};
+use ainb_hangar_store::repo::mutation_ledger::MutationLedgerRepo;
 use sqlx::SqlitePool;
 use std::time::{Duration, Instant};
 
@@ -56,6 +58,68 @@ use crate::events::EventSink;
 #[must_use]
 pub fn answered_by(connection: &ConnectionRow) -> String {
     format!("{}@{}", connection.surface.kind, connection.host)
+}
+
+/// Test seam: whether [`answer`] parks forever at the `writing` boundary.
+///
+/// A crash between the claim and `send-keys` is the case D18's receipt exists
+/// for, and it cannot be reproduced by returning an error: an error is recorded
+/// as that op id's answer, whereas a SIGKILL records nothing. Parking the task
+/// lets a test abort it at exactly that instant, leaving the durable state a
+/// killed daemon leaves — receipt `writing`, ledger row `in_flight`, attention
+/// row `answered` — and nothing else.
+#[cfg(any(test, feature = "test-support"))]
+static STALL_AT_WRITE_BOUNDARY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Arm or disarm the write-boundary stall. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_stall_at_write_boundary_for_test(armed: bool) {
+    STALL_AT_WRITE_BOUNDARY.store(armed, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+async fn stall_at_write_boundary() {
+    if STALL_AT_WRITE_BOUNDARY.load(std::sync::atomic::Ordering::SeqCst) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Compiled out entirely in a shipped daemon.
+#[cfg(not(any(test, feature = "test-support")))]
+async fn stall_at_write_boundary() {}
+
+/// Test seam: whether [`deliver`] reports a successful tmux delivery without a
+/// tmux.
+///
+/// The last-mile transport is a real `tmux send-keys` with a composer-ingest
+/// gate, and standing one up is a test of THAT, not of the thing under test
+/// here — which is the first-answer-wins race and the receipt lifecycle above
+/// it. Faking the transport keeps the race test asserting one `Delivered` and
+/// one `AlreadyAnswered` rather than one `DeliveryFailed` and one
+/// `AlreadyAnswered`, which would pass while proving less.
+#[cfg(any(test, feature = "test-support"))]
+static FORCE_DELIVERY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Arm or disarm the forced last-mile delivery. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_forced_delivery_for_test(armed: bool) {
+    FORCE_DELIVERY.store(armed, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn forced_delivery() -> Option<SendOutcome> {
+    FORCE_DELIVERY
+        .load(std::sync::atomic::Ordering::SeqCst)
+        .then(|| SendOutcome::Tmux {
+            tmux_session: "forced-test-pane".to_string(),
+        })
+}
+
+/// Compiled out entirely in a shipped daemon.
+#[cfg(not(any(test, feature = "test-support")))]
+const fn forced_delivery() -> Option<SendOutcome> {
+    None
 }
 
 /// The resolved delivery target for an answer, or a refusal.
@@ -138,57 +202,144 @@ pub async fn answer(
             // the still-blocked agent's request stays in the inbox and remains
             // answerable, rather than leaving the feed forever on a transient
             // tmux/broker miss.
+            // The `writing` boundary (D18, amendment 17): committed BEFORE any
+            // byte can reach the PTY, so a crash from here on is
+            // distinguishable from a crash before it. Its own transaction, not
+            // the claim's, because it has to be durable at this instant and the
+            // claim committed several awaits ago.
+            mark_receipt(pool, params, ReceiptState::Writing, None, now_ms).await;
+            stall_at_write_boundary().await;
             match deliver(&session, &row, &params.answer).await {
                 Ok(SendOutcome::Tmux { tmux_session }) => {
+                    let via = format!("tmux ({tmux_session})");
+                    mark_receipt(pool, params, ReceiptState::Delivered, Some(&via), now_ms).await;
                     emit_answered(events, params);
-                    Ok(AnswerResult::Delivered {
-                        via: format!("tmux ({tmux_session})"),
-                    })
+                    Ok(AnswerResult::Delivered { via })
                 }
                 Ok(SendOutcome::Broker { peer_id }) => {
+                    let via = format!("broker ({peer_id})");
+                    mark_receipt(pool, params, ReceiptState::Delivered, Some(&via), now_ms).await;
                     emit_answered(events, params);
-                    Ok(AnswerResult::Delivered {
-                        via: format!("broker ({peer_id})"),
-                    })
+                    Ok(AnswerResult::Delivered { via })
                 }
                 Ok(SendOutcome::Failed { reason }) => {
+                    mark_receipt(pool, params, ReceiptState::Failed, Some(&reason), now_ms).await;
                     reopen_on_failed_delivery(pool, events, &row, params, now_ms).await?;
                     Ok(AnswerResult::DeliveryFailed { reason })
                 }
                 Err(e) => {
+                    let reason = e.to_string();
+                    mark_receipt(pool, params, ReceiptState::Failed, Some(&reason), now_ms).await;
                     reopen_on_failed_delivery(pool, events, &row, params, now_ms).await?;
-                    Ok(AnswerResult::DeliveryFailed {
-                        reason: e.to_string(),
-                    })
+                    Ok(AnswerResult::DeliveryFailed { reason })
                 }
             }
         }
     }
 }
 
+/// The attention row `version` this answer claims to be acting on (D18).
+///
+/// `None` from a client that sent no fence, which keeps today's contract: open
+/// is the whole guard. A client that DID read a version gets it enforced, so
+/// answering a row that has moved since is refused rather than delivered.
+fn fenced_version(params: &AnswerParams) -> Option<i64> {
+    match params.mutation.fence {
+        Some(Fence::AttentionVersion { version }) => Some(version),
+        _ => None,
+    }
+}
+
 /// Claim the row for this answer (first-answer-wins). `Some` is the loser's
 /// result: a second surface already flipped it and this one delivers nothing.
+///
+/// The flip and the mutation receipt commit in ONE transaction (D18, amendment
+/// 17). That is not tidiness: a receipt written afterwards — and especially one
+/// written through the event outbox, which has a documented crash loss window —
+/// can disagree with the flip it describes, and the whole point of the receipt
+/// is to be the thing that cannot.
 async fn claim(
     pool: &SqlitePool,
     params: &AnswerParams,
     now_ms: i64,
 ) -> Result<Option<AnswerResult>, sqlx::Error> {
-    let flipped = AttentionRepo::mark_answered_if_open(
-        pool,
+    let mutation = crate::rpc::mutation::active();
+    let mut tx = pool.begin().await?;
+    let flipped = AttentionRepo::mark_answered_if_open_in_tx(
+        &mut tx,
         &params.attention_id,
         &params.answered_by,
         &params.answer,
         now_ms,
+        fenced_version(params),
     )
     .await?;
     if flipped > 0 {
+        if let Some(context) = &mutation {
+            MutationLedgerRepo::set_receipt_in_tx(
+                &mut tx,
+                &context.key,
+                ReceiptState::Claimed.token(),
+                Some(&receipt_detail(params, None)),
+                now_ms,
+            )
+            .await?;
+        }
+        tx.commit().await?;
         return Ok(None);
     }
+    // Nothing was claimed, so nothing is compensated: roll back rather than
+    // commit an empty transaction that would still bump the ledger clock.
+    tx.rollback().await?;
     let by = AttentionRepo::get(pool, &params.attention_id)
         .await?
         .and_then(|r| r.answered_by)
         .unwrap_or_else(|| "unknown".to_string());
     Ok(Some(AnswerResult::AlreadyAnswered { by }))
+}
+
+/// The receipt's `detail` column: JSON, always naming the attention row.
+///
+/// The boot sweep has only the ledger row to work from, and a
+/// `delivery_unconfirmed` alert that cannot say WHICH request it is about is an
+/// alert an operator cannot act on. So the attention id is written at claim
+/// time and re-written on every later transition, rather than being replaced by
+/// a bare "tmux (session)" string the sweep could not parse.
+fn receipt_detail(params: &AnswerParams, note: Option<&str>) -> String {
+    serde_json::json!({
+        "attention_id": params.attention_id,
+        "note": note,
+    })
+    .to_string()
+}
+
+/// Move this answer's receipt on, when the dispatcher claimed one.
+///
+/// Best-effort on the store fault: a receipt the daemon could not advance is a
+/// receipt the boot sweep will resolve as `unknown`, which is the honest answer
+/// and strictly better than failing a delivery that already happened.
+async fn mark_receipt(
+    pool: &SqlitePool,
+    params: &AnswerParams,
+    state: ReceiptState,
+    note: Option<&str>,
+    now_ms: i64,
+) {
+    let Some(context) = crate::rpc::mutation::active() else {
+        return;
+    };
+    let detail = receipt_detail(params, note);
+    if let Err(e) =
+        MutationLedgerRepo::set_receipt(pool, &context.key, state.token(), Some(&detail), now_ms)
+            .await
+    {
+        tracing::warn!(
+            error = %e,
+            op_id = %context.key.op_id,
+            state = state.token(),
+            "answer: could not advance the mutation receipt"
+        );
+    }
 }
 
 /// Answer a parked ACP `session/request_permission`: claim the row, then hand
@@ -453,6 +604,10 @@ async fn deliver(
 ) -> anyhow::Result<SendOutcome> {
     use ainb_fleet_core::read::capture_pane;
     use ainb_fleet_core::send::tmux_delivery_preferred;
+
+    if let Some(forced) = forced_delivery() {
+        return Ok(forced);
+    }
 
     let picker = picker_from_payload(&row.payload);
     let target = session.tmux_session.as_deref().filter(|_| tmux_delivery_preferred());
@@ -1730,6 +1885,7 @@ mod tests {
             answer: "x".into(),
             answered_by: "tui".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
         assert!(matches!(res, AnswerResult::NoTarget { .. }));
@@ -1751,6 +1907,7 @@ mod tests {
             answer: "second".into(),
             answered_by: "tui".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
         match res {
@@ -1773,6 +1930,7 @@ mod tests {
             answer: "option 2".into(),
             answered_by: "tui".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
 
         // Win the flip (as answer() does before the last-mile send).
@@ -1831,6 +1989,7 @@ mod tests {
             answer: "x".into(),
             answered_by: "tui".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
         assert!(
@@ -1885,6 +2044,7 @@ mod tests {
             answer: "sure, go ahead".into(),
             answered_by: "tui".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
         match res {
@@ -1919,6 +2079,7 @@ mod tests {
             answer: "Reject".into(),
             answered_by: "tui".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
         match res {
@@ -1942,6 +2103,7 @@ mod tests {
             answer: "Reject".into(),
             answered_by: "tui".into(),
             is_answer: true,
+            mutation: ainb_hangar_proto::mutation::MutationEnvelope::default(),
         };
         let res = answer(store.pool(), &sink, &params, 5000).await.unwrap();
         match res {

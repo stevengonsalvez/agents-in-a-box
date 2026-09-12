@@ -190,14 +190,6 @@ pub mod observability;
 /// parking, the expiry, the activity feed and Pal's authorship live
 /// here, because only the daemon owns the store and the event broker.
 pub mod pal;
-/// `gh`-backed PR status fetch behind an injectable seam (e38.34).
-///
-/// Fetches a captured PR's CI rollup + mergeability + merge state by shelling out
-/// to `gh pr view --json statusCheckRollup,mergeable,state` behind the
-/// [`pr_status::PrStatusProvider`] trait, so the task-detail badge can surface
-/// real check status and the refresh path can auto-move a merged PR's issue to
-/// Done. Every failure (absent / unauthenticated `gh`, no checks) degrades to an
-/// all-`Unknown` status — never a panic.
 pub mod pr_status;
 /// P5 agent profiles: the on-disk master store, the DB-index reconciler +
 /// fs-watch, and compile-on-dispatch of the tool-native files (D14-D16, T6).
@@ -217,6 +209,15 @@ pub mod profile;
 /// transcript buffer. Scoped to tasks bound to an issue (a `NULL`-issue chat task
 /// is skipped); best-effort (a write fault is logged, never blocks the task FSM).
 pub mod progress_comment;
+/// `gh`-backed PR status fetch behind an injectable seam (e38.34).
+///
+/// Fetches a captured PR's CI rollup + mergeability + merge state by shelling out
+/// to `gh pr view --json statusCheckRollup,mergeable,state` behind the
+/// [`pr_status::PrStatusProvider`] trait, so the task-detail badge can surface
+/// real check status and the refresh path can auto-move a merged PR's issue to
+/// Done. Every failure (absent / unauthenticated `gh`, no checks) degrades to an
+/// all-`Unknown` status — never a panic.
+pub mod receipt_sweep;
 /// The daemon-wide retry sweep: LLM-free auto-`continue` of transient API
 /// errors, capped and escalated through the same ledger and attention pipeline
 /// ATC uses, but needing no ATC instance to run.
@@ -939,6 +940,21 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         // rendering as answerable on every client for as long as the row exists,
         // and approving it returns a success receipt for a destructive tool call
         // with no waiter left to run it.
+        // D18 amendment 17: resolve every mutation receipt a prior daemon left
+        // mid-flight BEFORE the socket accepts anything, so no client can
+        // observe a half-resolved ledger. Never fatal: unresolved rows are
+        // recoverable on the next boot, a daemon that refuses to start is not.
+        match crate::receipt_sweep::run(store.pool()).await {
+            Ok(report) if report == crate::receipt_sweep::SweepReport::default() => {}
+            Ok(report) => tracing::warn!(
+                unconfirmed = report.unconfirmed,
+                reopened = report.reopened,
+                ambiguous = report.ambiguous,
+                "mutations left unresolved by a prior daemon"
+            ),
+            Err(error) => tracing::error!(%error, "could not resolve mutation receipts at boot"),
+        }
+
         match ainb_hangar_store::repo::fleet_chat::FleetConfirmRepo::sweep_expired(
             store.pool(),
             ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock),
