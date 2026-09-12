@@ -1,0 +1,9 @@
+sleep 300
+seed
+sleep 8000
+cmd refresh-client -A "%0:continue"
+sleep 25000
+capture after_continue_noreseed
+seed
+sleep 1000
+capture after_reseed

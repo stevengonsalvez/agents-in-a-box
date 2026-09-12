@@ -1,0 +1,14 @@
+[package]
+name = "spike2"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vt100 = "0.16"
+alacritty_terminal = "0.26"
+wezterm-term = { git = "https://github.com/wezterm/wezterm", rev = "2afb836403838c3ed7e09e5d570190adb054b607" }
+portable-pty = "0.9"
+anyhow = "1"
+
+[profile.release]
+debug = 1
