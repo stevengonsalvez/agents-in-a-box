@@ -238,6 +238,25 @@ fn kill_session(session: &str) {
     let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
+/// Press an idempotent navigation key until the screen it opens is on the
+/// pane. The frame the home poll matches is painted before the app is reading
+/// stdin, so a single press right after it is lost on a slow boot and the test
+/// then waits out its whole timeout on the screen it started from. Only safe
+/// for keys that are a no-op once their screen is up, per the tripwire skill:
+/// `s` and `i` both are. `Escape` is NOT, and stays a single press.
+fn send_nav_key_until<F>(session: &str, key: &str, deadline: Instant, mut ok: F) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    while Instant::now() < deadline {
+        send_key(session, key);
+        if let Some(cap) = poll_capture(session, Instant::now() + Duration::from_secs(3), &mut ok) {
+            return Some(cap);
+        }
+    }
+    None
+}
+
 #[test]
 fn esc_on_burndown_returns_to_home() {
     if !tmux_available() {
@@ -300,9 +319,8 @@ fn esc_on_burndown_returns_to_home() {
     );
 
     // Open burndown.
-    send_key(&session, "i");
     let burndown_deadline = Instant::now() + Duration::from_secs(90);
-    let on_burndown = poll_capture(&session, burndown_deadline, |c| {
+    let on_burndown = send_nav_key_until(&session, "i", burndown_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')
@@ -405,15 +423,26 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
         kill_session(&session);
         panic!("HomeScreen never rendered; last capture:\n---\n{last}\n---");
     }
-    send_key(&session, "s");
-
-    // Session-list chrome: the four-line menu legend is unique to this
-    // screen — `del-sel` only appears there. The seeded row must be on it
-    // too: an empty session list carries the same chrome, so without this the
-    // Esc assertion would prove nothing about returning to a real list.
+    // Two waits, deliberately, because `s` means two different things.
+    //
+    // On home it opens the session list, and it has to be re-pressed because
+    // the frame the home poll matched is painted before the app reads stdin.
+    // ON the session list it is `star`, which writes the favourites store and
+    // can reorder the rows, so the re-press must stop the moment the screen is
+    // up: `del-sel` is the four-line menu legend, and it appears nowhere else.
     let sessions_deadline = Instant::now() + Duration::from_secs(40);
+    if send_nav_key_until(&session, "s", sessions_deadline, |c| c.contains("del-sel")).is_none() {
+        let last = capture_pane(&session);
+        kill_session(&session);
+        panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
+    }
+
+    // The seeded row arrives with the workspace load, not with the keystroke,
+    // so this is a plain poll. It is a separate assertion because an empty
+    // session list carries the same chrome: without it the Esc assertion below
+    // would prove nothing about returning to a real list.
     if poll_capture(&session, sessions_deadline, |c| {
-        c.contains("del-sel") && c.contains("burndown-origin")
+        c.contains("burndown-origin")
     })
     .is_none()
     {
@@ -426,9 +455,8 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
     }
 
     // Open burndown from the session list.
-    send_key(&session, "i");
     let burndown_deadline = Instant::now() + Duration::from_secs(90);
-    if poll_capture(&session, burndown_deadline, |c| {
+    if send_nav_key_until(&session, "i", burndown_deadline, |c| {
         c.contains("Usage Analytics")
             && !c.contains("Waiting for session-reader plugin")
             && c.contains('$')
