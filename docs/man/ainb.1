@@ -78,6 +78,11 @@ Launch the TUI (default if no command given)
 .B ainb diff\-review
 Review a repository's uncommitted changes in the Code Review surface
 .TP
+.B ainb keymap
+List effective terminal shortcuts
+.br
+Subcommands: list
+.TP
 .B ainb run
 Spawn a new AI coding session
 .TP
@@ -221,9 +226,9 @@ Subcommands: run, stop, reap, restart, install, uninstall, status, list
 .B ainb hangar
 Hangar managed\-agents control plane (issue / task / beads / daemon)
 .br
-Subcommands: issue, task, beads, daemon, auth, config, skills, templates,
-agent, member, squad, autopilot, workspace, logs, property, comment, inbox,
-pipeline
+Subcommands: issue, task, beads, daemon, connections, auth, config, skills,
+templates, agent, member, squad, autopilot, workspace, logs, property,
+comment, inbox, pipeline
 .TP
 .B ainb rtk
 RTK (Rust Token Killer): compress CLI output in Claude Code via PreToolUse
