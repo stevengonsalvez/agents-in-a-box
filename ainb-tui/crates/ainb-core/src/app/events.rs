@@ -8193,7 +8193,10 @@ mod text_input_guard_tests {
         // Declare text-capture (as the plugin's frame would via
         // `RenderResult.captures_text`): now the host must treat it as
         // text-input and NOT convert `H` into a help toggle.
-        state.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        state
+            .plugins_host
+            .plugin_captures_text
+            .insert(screen_ids::HANGAR.to_string(), true);
         assert!(
             EventHandler::is_text_input_context(&state),
             "plugin screen WITH the capture flag must be treated as text-input"
@@ -8210,7 +8213,10 @@ mod text_input_guard_tests {
         // non-plugin screen with a stale entry is unaffected.
         let mut other = AppState::default();
         other.current_screen = screen_ids::HOME.to_string();
-        other.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        other
+            .plugins_host
+            .plugin_captures_text
+            .insert(screen_ids::HANGAR.to_string(), true);
         assert!(
             !EventHandler::is_text_input_context(&other),
             "capture flag for a background screen must not leak into HOME"

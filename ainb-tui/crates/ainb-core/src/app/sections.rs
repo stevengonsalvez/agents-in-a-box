@@ -130,3 +130,55 @@ impl Default for HangarSection {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct PluginsHostSection {
+    /// WireBuffers freshly drained from plugins, keyed by screen id.
+    /// `App::tick_plugin_renders` populates this before each frame so
+    /// `PluginScreen::render` can paint without needing access to the
+    /// plugin runtime (which lives on `App`, not `AppState`).
+    pub pending_plugin_renders:
+        std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
+    /// Whether each plugin-owned screen's focused surface is currently capturing
+    /// free text (a title/filter/compose/search/API-key input), as reported by
+    /// its last frame's `RenderResult.captures_text`. Refreshed every tick by
+    /// `tick_plugin_renders` from `RuntimeHandle::captures_text`.
+    ///
+    /// While the entry for `current_screen` is `true`, the host key dispatch
+    /// (`is_text_input_context` + the plugin key-forwarder) suppresses its own
+    /// global single-character shortcuts (`H`/`?`/`W`) and forwards `?`/`H` to
+    /// the plugin so keystrokes land in the input verbatim instead of toggling
+    /// help / wiring the statusline (8hx). Absent entry (never painted, or not a
+    /// plugin screen) reads as `false`.
+    pub plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
+    /// Last `plugin/render` failure per plugin-owned screen id, as reported by
+    /// the render oneshot that `tick_plugin_renders` now keeps instead of
+    /// dropping. Set on `RenderOutcome::RuntimeError` / `PluginError`, cleared
+    /// the moment a frame renders successfully.
+    ///
+    /// `PluginScreen::render` paints this instead of the "connecting…"
+    /// placeholder, which is the difference between a screen that explains it
+    /// cannot start the plugin and one that claims to be loading forever.
+    pub plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
+    /// Cheap Send + Clone façade onto the plugin runtime, populated by
+    /// `App::init`. `None` when running plugin-free (e.g. tests, or
+    /// installs that haven't completed bundled-plugin discovery yet).
+    ///
+    /// Lives on `AppState` rather than `App` so the key-dispatch path
+    /// in `app::events::handle_key_event` can forward keystrokes to
+    /// the focused plugin without needing access to `App`. `App` still
+    /// owns the underlying `Runtime` via `plugin_runtime_owner` so the
+    /// tokio executor is torn down when `App` drops.
+    pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
+}
+
+impl Default for PluginsHostSection {
+    fn default() -> Self {
+        Self {
+            pending_plugin_renders: std::collections::HashMap::new(),
+            plugin_captures_text: std::collections::HashMap::new(),
+            plugin_render_errors: std::collections::HashMap::new(),
+            plugin_runtime: None,
+        }
+    }
+}

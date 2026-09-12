@@ -40,7 +40,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 /// Plugin-owned screen wrapper. Reads the WireBuffer that
 /// `App::tick_plugin_renders` drained into
-/// `state.pending_plugin_renders[screen_id]` and paints it cell-by-cell
+/// `state.plugins_host.pending_plugin_renders[screen_id]` and paints it cell-by-cell
 /// onto the host's ratatui Frame.
 ///
 /// Falls back to a single-line "loading" message if the plugin hasn't
@@ -146,7 +146,12 @@ pub fn crossterm_to_protocol_key(
 #[must_use]
 pub fn focused_plugin_captures_text(state: &AppState) -> bool {
     plugin_id_for_screen(&state.current_screen).is_some()
-        && state.plugin_captures_text.get(&state.current_screen).copied().unwrap_or(false)
+        && state
+            .plugins_host
+            .plugin_captures_text
+            .get(&state.current_screen)
+            .copied()
+            .unwrap_or(false)
 }
 
 /// `true` if the host reserves this key — it MUST NOT be forwarded to
@@ -227,7 +232,7 @@ pub fn forward_key_to_focused_plugin(
         // `events.rs` resolve it to Quit / ToggleHelp / etc.
         return EventOutcome::NotHandled;
     }
-    let Some(runtime) = state.plugin_runtime.as_ref() else {
+    let Some(runtime) = state.plugins_host.plugin_runtime.as_ref() else {
         return EventOutcome::NotHandled;
     };
     let Some(protocol_key) = crossterm_to_protocol_key(key) else {
@@ -340,7 +345,7 @@ pub fn forward_mouse_to_focused_plugin(
     let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
         return EventOutcome::NotHandled;
     };
-    let Some(runtime) = state.plugin_runtime.as_ref() else {
+    let Some(runtime) = state.plugins_host.plugin_runtime.as_ref() else {
         return EventOutcome::NotHandled;
     };
 
@@ -430,7 +435,7 @@ fn build_placeholder_for_unloaded_plugin(
     };
 
     let plugin_name = plugin_id_for_screen(screen_id);
-    let plugin_registered = match (plugin_name, state.plugin_runtime.as_ref()) {
+    let plugin_registered = match (plugin_name, state.plugins_host.plugin_runtime.as_ref()) {
         (Some(name), Some(rt)) => {
             let pid = ainb_plugin_runtime::PluginId::from(name);
             rt.lifecycle_state(&pid).is_some()
@@ -441,7 +446,7 @@ fn build_placeholder_for_unloaded_plugin(
     // A recorded render failure outranks the loading beat: the plugin is
     // registered, so case 3 would otherwise paint "connecting…" forever.
     let render_error = if plugin_registered {
-        state.plugin_render_errors.get(screen_id)
+        state.plugins_host.plugin_render_errors.get(screen_id)
     } else {
         None
     };
@@ -641,7 +646,7 @@ impl Screen for PluginScreen {
         // absolute terminal click into this plugin's viewport space.
         ui.plugin_render_origins.insert(self.screen_id.to_string(), (area.x, area.y));
 
-        let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
+        let Some(wire) = state.plugins_host.pending_plugin_renders.get(self.screen_id) else {
             let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state, area);
             frame.render_widget(placeholder, area);
             return;
@@ -1299,7 +1304,7 @@ mod tests {
         let (runtime, handle) =
             ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
         let mut state = crate::app::state::AppState::default();
-        state.plugin_runtime = Some(handle);
+        state.plugins_host.plugin_runtime = Some(handle);
         state.current_screen = ids::ANALYTICS.to_string();
 
         let mk = |code| CtEvent {
@@ -1352,7 +1357,7 @@ mod tests {
         let (runtime, handle) =
             ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
         let mut state = crate::app::state::AppState::default();
-        state.plugin_runtime = Some(handle);
+        state.plugins_host.plugin_runtime = Some(handle);
         state.current_screen = ids::HANGAR.to_string();
 
         let mk = |code, mods| CtEvent {
@@ -1384,7 +1389,7 @@ mod tests {
 
         // Declare text-capture (as the plugin's `captures_text` frame would):
         // unchanged, still forwarded.
-        state.plugin_captures_text.insert(ids::HANGAR.to_string(), true);
+        state.plugins_host.plugin_captures_text.insert(ids::HANGAR.to_string(), true);
         assert!(
             focused_plugin_captures_text(&state),
             "the stash drives focused_plugin_captures_text"

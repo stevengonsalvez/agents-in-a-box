@@ -3140,6 +3140,8 @@ type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
+    pub plugins_host: Versioned<PluginsHostSection>,
+
     pub hangar: Versioned<HangarSection>,
 
     pub claude_chat: Versioned<ClaudeChatSection>,
@@ -3296,53 +3298,12 @@ pub struct AppState {
     // Changelog viewer state
     pub changelog_state: crate::components::ChangelogState,
 
-    /// WireBuffers freshly drained from plugins, keyed by screen id.
-    /// `App::tick_plugin_renders` populates this before each frame so
-    /// `PluginScreen::render` can paint without needing access to the
-    /// plugin runtime (which lives on `App`, not `AppState`).
-    pub pending_plugin_renders:
-        std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
-
     /// Cache of workspace paths that are currently favorited (starred).
     /// Computed by `recompute_favorite_workspaces()` whenever the workspace
     /// list or the favorites store changes — NOT in the render path. The
     /// session-list render reads this set with an O(1) lookup, so it never
     /// re-parses `favorites.yaml` or opens a git repo per frame.
     pub favorite_workspace_paths: HashSet<PathBuf>,
-
-    /// Whether each plugin-owned screen's focused surface is currently capturing
-    /// free text (a title/filter/compose/search/API-key input), as reported by
-    /// its last frame's `RenderResult.captures_text`. Refreshed every tick by
-    /// `tick_plugin_renders` from `RuntimeHandle::captures_text`.
-    ///
-    /// While the entry for `current_screen` is `true`, the host key dispatch
-    /// (`is_text_input_context` + the plugin key-forwarder) suppresses its own
-    /// global single-character shortcuts (`H`/`?`/`W`) and forwards `?`/`H` to
-    /// the plugin so keystrokes land in the input verbatim instead of toggling
-    /// help / wiring the statusline (8hx). Absent entry (never painted, or not a
-    /// plugin screen) reads as `false`.
-    pub plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
-
-    /// Last `plugin/render` failure per plugin-owned screen id, as reported by
-    /// the render oneshot that `tick_plugin_renders` now keeps instead of
-    /// dropping. Set on `RenderOutcome::RuntimeError` / `PluginError`, cleared
-    /// the moment a frame renders successfully.
-    ///
-    /// `PluginScreen::render` paints this instead of the "connecting…"
-    /// placeholder, which is the difference between a screen that explains it
-    /// cannot start the plugin and one that claims to be loading forever.
-    pub plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
-
-    /// Cheap Send + Clone façade onto the plugin runtime, populated by
-    /// `App::init`. `None` when running plugin-free (e.g. tests, or
-    /// installs that haven't completed bundled-plugin discovery yet).
-    ///
-    /// Lives on `AppState` rather than `App` so the key-dispatch path
-    /// in `app::events::handle_key_event` can forward keystrokes to
-    /// the focused plugin without needing access to `App`. `App` still
-    /// owns the underlying `Runtime` via `plugin_runtime_owner` so the
-    /// tokio executor is torn down when `App` drops.
-    pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
 
     /// Background poller for the live OAuth-window snapshot. The render
     /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
@@ -3840,6 +3801,7 @@ impl Default for AppState {
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
         Self {
+            plugins_host: Versioned::default(),
             hangar: Versioned::default(),
             claude_chat: Versioned::default(),
             git_view: Versioned::default(),
@@ -3936,11 +3898,7 @@ impl Default for AppState {
             // Daemons observability (collects health on first/periodic render)
 
             // Fleet control panel (reads current_state on entry/tick)
-            pending_plugin_renders: std::collections::HashMap::new(),
             favorite_workspace_paths: HashSet::new(),
-            plugin_captures_text: std::collections::HashMap::new(),
-            plugin_render_errors: std::collections::HashMap::new(),
-            plugin_runtime: None,
 
             live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
@@ -13597,7 +13555,7 @@ pub struct App {
     /// Owning handle to the plugin runtime's tokio executor. Held by `App`
     /// so dropping `App` joins every plugin task and tears down the runtime.
     /// `None` until [`App::init`] runs. The cheap Send + Clone façade lives
-    /// on `state.plugin_runtime` so dispatchers reach it without needing
+    /// on `state.plugins_host.plugin_runtime` so dispatchers reach it without needing
     /// access to `App`.
     plugin_runtime_owner: Option<ainb_plugin_runtime::Runtime>,
     /// Filesystem watcher that keeps the burndown usage snapshot live by
@@ -13617,7 +13575,7 @@ pub struct App {
     /// key and mouse events were silently dropped (`child.is_none()`).
     /// Holding the receiver for one tick and polling it with `try_recv`
     /// keeps `tick_plugin_renders` synchronous while letting the failure
-    /// reach `state.plugin_render_errors` and the user.
+    /// reach `state.plugins_host.plugin_render_errors` and the user.
     plugin_render_outcomes: std::collections::HashMap<
         crate::app::screens::ScreenId,
         tokio::sync::oneshot::Receiver<ainb_plugin_runtime::RenderOutcome>,
@@ -13645,7 +13603,7 @@ impl App {
     }
 
     /// Drain any freshly-painted plugin frames into
-    /// `state.pending_plugin_renders` so the next `terminal.draw` paints
+    /// `state.plugins_host.pending_plugin_renders` so the next `terminal.draw` paints
     /// the latest buffer per plugin-owned screen.
     ///
     /// Architectural contract (enforced by `build.rs` lint): this method
@@ -13665,7 +13623,7 @@ impl App {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
-        let Some(handle) = self.state.plugin_runtime.clone() else {
+        let Some(handle) = self.state.plugins_host.plugin_runtime.clone() else {
             return false;
         };
         let mut drained = false;
@@ -13695,6 +13653,7 @@ impl App {
             // (8hx). Done before the lifecycle skip so an unregistered plugin's
             // stale flag is cleared to false rather than lingering true.
             self.state
+                .plugins_host
                 .plugin_captures_text
                 .insert((*screen_id).to_string(), handle.captures_text(&pid));
 
@@ -13720,7 +13679,10 @@ impl App {
             // user navigated away must still land in the cache so the
             // screen repaints instantly on return.
             if let Some(buf) = handle.try_recv_render(&pid) {
-                self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
+                self.state
+                    .plugins_host
+                    .pending_plugin_renders
+                    .insert((*screen_id).to_string(), buf);
                 drained = true;
             }
 
@@ -13809,7 +13771,7 @@ impl App {
     }
 
     /// Poll the parked `plugin/render` oneshot for `screen_id`, recording any
-    /// failure in `state.plugin_render_errors` (and clearing it on success).
+    /// failure in `state.plugins_host.plugin_render_errors` (and clearing it on success).
     ///
     /// Non-blocking by construction — `try_recv` never awaits, so
     /// `tick_plugin_renders` stays synchronous per its `build.rs`-enforced
@@ -13829,7 +13791,7 @@ impl App {
         };
         let message = match rx.try_recv() {
             Ok(RenderOutcome::Ok(_)) => {
-                self.state.plugin_render_errors.remove(screen_id);
+                self.state.plugins_host.plugin_render_errors.remove(screen_id);
                 return;
             }
             Ok(RenderOutcome::RuntimeError(e)) => e,
@@ -13848,11 +13810,14 @@ impl App {
 
         // Log once per distinct message so a failing screen doesn't spam the
         // log at tick cadence while the user sits on it.
-        let is_new = self.state.plugin_render_errors.get(screen_id) != Some(&message);
+        let is_new = self.state.plugins_host.plugin_render_errors.get(screen_id) != Some(&message);
         if is_new {
             warn!(screen = %screen_id, error = %message, "plugin render failed");
         }
-        self.state.plugin_render_errors.insert(screen_id.to_string(), message);
+        self.state
+            .plugins_host
+            .plugin_render_errors
+            .insert(screen_id.to_string(), message);
     }
 
     pub async fn init(&mut self) {
@@ -13868,7 +13833,7 @@ impl App {
                     warn!(plugin = %name, error = %err, "plugin failed to load");
                 }
                 self.plugin_runtime_owner = Some(runtime);
-                self.state.plugin_runtime = Some(handle.clone());
+                self.state.plugins_host.plugin_runtime = Some(handle.clone());
 
                 // Surface each loaded plugin's `[[config]]` schema in the
                 // Settings ▸ Plugins category. `from_app_config` built the
@@ -14354,7 +14319,7 @@ mod plugin_render_gate_tests {
             ));
         }
         let mut app = App::new();
-        app.state.plugin_runtime = Some(handle);
+        app.state.plugins_host.plugin_runtime = Some(handle);
         (runtime, app)
     }
 
@@ -14362,7 +14327,7 @@ mod plugin_render_gate_tests {
     fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut ui = crate::app::ui_state::UiState::default();
-        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         app.state.current_screen = ids::SESSION_LIST.to_string();
@@ -14389,7 +14354,7 @@ mod plugin_render_gate_tests {
     fn dirty_plugin_kick_deferred_until_viewport_known() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut ui = crate::app::ui_state::UiState::default();
-        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         // Ticks while hidden: gated, dirty preserved (proved above).
@@ -14428,7 +14393,7 @@ mod plugin_render_gate_tests {
     fn only_the_focused_plugin_screen_is_kicked() {
         let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
         let mut ui = crate::app::ui_state::UiState::default();
-        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
 
         app.state.current_screen = ids::LEARNINGS.to_string();
         // Focused screen has painted once (area known); the hidden one hasn't.
@@ -14474,7 +14439,7 @@ mod plugin_render_gate_tests {
         let mut recorded = None;
         for _ in 0..200 {
             app.tick_plugin_renders(&mut ui);
-            if let Some(err) = app.state.plugin_render_errors.get(ids::LEARNINGS) {
+            if let Some(err) = app.state.plugins_host.plugin_render_errors.get(ids::LEARNINGS) {
                 recorded = Some(err.clone());
                 break;
             }
