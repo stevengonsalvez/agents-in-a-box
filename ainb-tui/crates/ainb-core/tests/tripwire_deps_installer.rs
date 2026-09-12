@@ -118,10 +118,16 @@ fn deps_installer_cursor_docs_and_install_affordance() {
 
     // Now wait for the check WITHOUT pressing anything: from here every Enter
     // would leave the screen under test.
-    let loaded = poll_capture(&session, deadline, |screen| {
+    let Some(loaded) = poll_capture(&session, deadline, |screen| {
         screen.contains("Plugin binaries") && !screen.contains("Checking dependencies")
-    })
-    .unwrap_or_else(|| capture(&session));
+    }) else {
+        // Falling back to a plain capture here would hand the footer
+        // assertions a mid-check screen and report the timeout as a missing
+        // chord, which is a different bug from the one that happened.
+        let last = capture(&session);
+        Command::new("tmux").args(["kill-session", "-t", &session]).status().ok();
+        panic!("dependency check never finished within the deadline:\n{last}");
+    };
 
     // The new keymap footer must advertise the install + cursor affordances.
     assert!(
