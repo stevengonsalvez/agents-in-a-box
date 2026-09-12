@@ -252,7 +252,7 @@ impl LogFormatter {
         // Check if this log belongs to current group
         if let Some(ref mut group) = self.current_group {
             if self.belongs_to_group(log, group) {
-                group.log_streams.logs.push(log.clone());
+                group.logs.push(log.clone());
                 return None;
             }
         }
@@ -274,7 +274,7 @@ impl LogFormatter {
     /// Check if a log belongs to the current group
     fn belongs_to_group(&self, log: &ParsedLog, group: &LogGroup) -> bool {
         // Same category and within 5 seconds
-        if let Some(last) = group.log_streams.logs.last() {
+        if let Some(last) = group.logs.last() {
             if last.category == log.category {
                 if let (Some(last_ts), Some(log_ts)) = (&last.timestamp, &log.timestamp) {
                     let diff = *log_ts - *last_ts;
@@ -311,7 +311,7 @@ impl LogFormatter {
     /// Finish the current group and add it to recent groups
     fn finish_current_group(&mut self) {
         if let Some(group) = self.current_group.take() {
-            if !group.log_streams.logs.is_empty() {
+            if !group.logs.is_empty() {
                 self.recent_groups.push_back(group);
                 if self.recent_groups.len() > 100 {
                     self.recent_groups.pop_front();
@@ -326,7 +326,7 @@ impl LogFormatter {
         
         // Group header
         let header = if group.collapsed {
-            format!("▶ {} {} ({} logs)", group.icon, group.title, group.log_streams.logs.len())
+            format!("▶ {} {} ({} logs)", group.icon, group.title, group.logs.len())
         } else {
             format!("▼ {} {}", group.icon, group.title)
         };
@@ -344,8 +344,8 @@ impl LogFormatter {
         
         // Show logs if not collapsed
         if !group.collapsed {
-            for (i, log) in group.log_streams.logs.iter().enumerate() {
-                let prefix = if i == group.log_streams.logs.len() - 1 {
+            for (i, log) in group.logs.iter().enumerate() {
+                let prefix = if i == group.logs.len() - 1 {
                     "└─"
                 } else {
                     "├─"

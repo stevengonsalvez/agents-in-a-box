@@ -645,7 +645,7 @@ mod tests {
         push.upsert(sub("https://b", Some(true))).await.unwrap(); // focused → skip
         push.upsert(sub("https://c", None)).await.unwrap(); // unknown → deliver
 
-        let delivered = push.fleet.broadcast(&json!({ "title": "x" })).await;
+        let delivered = push.broadcast(&json!({ "title": "x" })).await;
         assert_eq!(delivered, 2, "focused subscriber must be suppressed");
         assert_eq!(sender.sent.load(Ordering::SeqCst), 2);
     }
@@ -658,7 +658,7 @@ mod tests {
         push.upsert(sub("https://dead", Some(false))).await.unwrap();
         assert_eq!(push.count().await, 2);
 
-        let delivered = push.fleet.broadcast(&json!({ "title": "x" })).await;
+        let delivered = push.broadcast(&json!({ "title": "x" })).await;
         assert_eq!(delivered, 1, "only the live endpoint delivers");
         assert_eq!(push.count().await, 1, "the 410-gone endpoint is pruned");
     }
@@ -669,16 +669,16 @@ mod tests {
         let (push, _dir) = push_state(sender.clone());
         push.upsert(sub("https://a", Some(false))).await.unwrap();
 
-        assert_eq!(push.fleet.broadcast(&json!({})).await, 1);
+        assert_eq!(push.broadcast(&json!({})).await, 1);
         push.set_focus("https://a", true).await.unwrap();
         assert_eq!(
-            push.fleet.broadcast(&json!({})).await,
+            push.broadcast(&json!({})).await,
             0,
             "focused now suppressed"
         );
         push.set_focus("https://a", false).await.unwrap();
         assert_eq!(
-            push.fleet.broadcast(&json!({})).await,
+            push.broadcast(&json!({})).await,
             1,
             "unfocused again delivers"
         );

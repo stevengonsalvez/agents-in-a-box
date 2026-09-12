@@ -830,7 +830,7 @@ mod tests {
         }
 
         fn notify(&mut self, method: &str, params: Value) -> Result<(), ProviderError> {
-            self.shell.notifications.push((method.to_owned(), params));
+            self.notifications.push((method.to_owned(), params));
             Ok(())
         }
 
@@ -936,7 +936,7 @@ mod tests {
             true
         );
         assert_eq!(
-            transport.shell.notifications,
+            transport.notifications,
             vec![("initialized".into(), json!({}))]
         );
     }

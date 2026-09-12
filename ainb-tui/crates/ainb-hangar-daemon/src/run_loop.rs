@@ -4078,7 +4078,7 @@ mod tests {
             path: dir.path().join("scratch"),
         };
         // A throwaway execenv rooted in the tempdir; `finalize_failure` only
-        // reads `env.log_streams.logs` for the `HANGAR_KEEP_FAILED_RUNS` diagnostic log line
+        // reads `env.logs` for the `HANGAR_KEEP_FAILED_RUNS` diagnostic log line
         // (unset here), so the paths need not exist.
         let root = dir.path().join("task-root");
         let env = crate::execenv::ExecEnv {

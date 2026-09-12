@@ -993,7 +993,7 @@ impl Runner {
     }
 
     /// Spawn `claude` in `env.workdir`, stream its JSONL stdout to
-    /// `{env.log_streams.logs}/claude.jsonl`, pin the first `session_id`, and enforce the
+    /// `{env.logs}/claude.jsonl`, pin the first `session_id`, and enforce the
     /// configured deadline.
     ///
     /// `source_env` supplies the candidate environment; only the keys in
@@ -1088,7 +1088,7 @@ impl Runner {
     }
 
     /// Spawn `codex` in `env.workdir` via its non-interactive `exec` subcommand
-    /// (e38.16), stream its JSONL stdout to `{env.log_streams.logs}/codex.jsonl`, pin the
+    /// (e38.16), stream its JSONL stdout to `{env.logs}/codex.jsonl`, pin the
     /// first `session_id`, and enforce the configured deadline.
     ///
     /// `invocation` threads the agent's migration-0015 config onto the codex
@@ -1665,7 +1665,7 @@ impl Runner {
     /// Spawns `program` (through the OS sandbox) with `spec.argv` in
     /// `env.workdir`, builds the child env from the allowlist-filtered
     /// `source_env` plus the verbatim `extra_env` overrides, tees stdout to
-    /// `{env.log_streams.logs}/{spec.log_file}` while pinning the first `session_id`, and
+    /// `{env.logs}/{spec.log_file}` while pinning the first `session_id`, and
     /// enforces the deadline — returning the same [`RunOutcome`] shape for any
     /// provider. Only the program, argv, log file, and the env composition differ
     /// per provider; the orchestration is identical.

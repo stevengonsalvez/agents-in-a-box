@@ -83,12 +83,12 @@ fn prepare_creates_full_env_layout() {
     let root = expected_root(home.path(), WS_SLUG, &task.id);
     assert_eq!(env.workdir, root.join("workdir"));
     assert_eq!(env.output, root.join("output"));
-    assert_eq!(env.log_streams.logs, root.join("logs"));
+    assert_eq!(env.logs, root.join("logs"));
     assert_eq!(env.gc_meta, root.join(".gc_meta.json"));
 
     assert!(env.workdir.is_dir(), "workdir must exist");
     assert!(env.output.is_dir(), "output must exist");
-    assert!(env.log_streams.logs.is_dir(), "logs must exist");
+    assert!(env.logs.is_dir(), "logs must exist");
     assert!(env.gc_meta.is_file(), ".gc_meta.json must exist");
 }
 
@@ -230,7 +230,7 @@ fn cleanup_artifact_only_keeps_workdir() {
     // Simulate a git checkout + an emitted artifact + a log line.
     std::fs::create_dir_all(env.workdir.join(".git")).expect("fake .git");
     std::fs::write(env.output.join("patch.diff"), b"diff").expect("artifact");
-    std::fs::write(env.log_streams.logs.join("claude.jsonl"), b"{}").expect("log");
+    std::fs::write(env.logs.join("claude.jsonl"), b"{}").expect("log");
 
     cleanup(&env, CleanupKind::ArtifactOnly).expect("cleanup artifact-only");
 
@@ -240,7 +240,7 @@ fn cleanup_artifact_only_keeps_workdir() {
         "artifact-only keeps workdir/.git/"
     );
     assert!(
-        env.log_streams.logs.join("claude.jsonl").is_file(),
+        env.logs.join("claude.jsonl").is_file(),
         "artifact-only keeps logs"
     );
 }

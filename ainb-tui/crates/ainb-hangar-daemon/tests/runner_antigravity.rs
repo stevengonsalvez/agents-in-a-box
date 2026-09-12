@@ -19,7 +19,7 @@ fn exec_env_in(root: &Path) -> ExecEnv {
     };
     fs::create_dir_all(&env.workdir).expect("create workdir");
     fs::create_dir_all(&env.output).expect("create output");
-    fs::create_dir_all(&env.log_streams.logs).expect("create logs");
+    fs::create_dir_all(&env.logs).expect("create logs");
     env
 }
 
@@ -80,7 +80,7 @@ exit 0"#,
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.session_id.as_deref(), Some("agy-session-1"));
 
-    let log_file = env.log_streams.logs.join("antigravity.jsonl");
+    let log_file = env.logs.join("antigravity.jsonl");
     assert!(log_file.exists(), "antigravity.jsonl must be created");
     let content = fs::read_to_string(&log_file).expect("read log");
     assert!(content.contains("agy-session-1"));
