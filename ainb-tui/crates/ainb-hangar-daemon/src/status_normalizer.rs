@@ -185,9 +185,7 @@ fn record_unknown(provider: &str, name: &str) {
         // of this module is that an unknown name is survivable.
         return;
     };
-    *counters
-        .entry((provider.to_ascii_lowercase(), name.to_string()))
-        .or_insert(0) += 1;
+    *counters.entry((provider.to_ascii_lowercase(), name.to_string())).or_insert(0) += 1;
 }
 
 /// Every `status_unknown_event{provider,name}` seen since this daemon started,
@@ -264,7 +262,9 @@ mod tests {
     /// tiers 0 and 1 may assert that, and a coarse state word is neither.
     #[test]
     fn the_generic_state_family_never_asserts_needs_input() {
-        for name in ["running", "busy", "idle", "done", "complete", "error", "failed"] {
+        for name in [
+            "running", "busy", "idle", "done", "complete", "error", "failed",
+        ] {
             let mapped = normalize("some-new-agent", name);
             assert!(
                 !matches!(mapped, Some("AskUserQuestion") | Some("PermissionRequest")),

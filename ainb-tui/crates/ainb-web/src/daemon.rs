@@ -458,15 +458,17 @@ pub fn attention_to_needs_with_status(
 ) -> Value {
     use ainb_hangar_proto::agent_status::AgentState;
 
-    let by_session: std::collections::HashMap<&str, &ainb_hangar_proto::agent_status::AgentStatusRow> =
-        status
-            .iter()
-            .filter_map(|row| {
-                // The status row is keyed by Fleet identity; the inbox is keyed
-                // by the provider's own session id, which is the key's tail.
-                row.session_key.split_once(':').map(|(_, id)| (id, row))
-            })
-            .collect();
+    let by_session: std::collections::HashMap<
+        &str,
+        &ainb_hangar_proto::agent_status::AgentStatusRow,
+    > = status
+        .iter()
+        .filter_map(|row| {
+            // The status row is keyed by Fleet identity; the inbox is keyed
+            // by the provider's own session id, which is the key's tail.
+            row.session_key.split_once(':').map(|(_, id)| (id, row))
+        })
+        .collect();
     let mut cards: Vec<Value> = rows
         .iter()
         .map(|row| {

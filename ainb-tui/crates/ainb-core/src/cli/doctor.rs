@@ -235,7 +235,10 @@ fn print_pane_unbound_text(rows: &[PaneUnboundRow], error: Option<&str>) {
     );
     println!("and they cannot be attached to until a later event binds them.");
     for row in rows {
-        println!("  pane_unbound  {}  {}  {}", row.session_key, row.provider, row.cwd);
+        println!(
+            "  pane_unbound  {}  {}  {}",
+            row.session_key, row.provider, row.cwd
+        );
     }
 }
 

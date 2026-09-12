@@ -251,32 +251,26 @@ pub async fn run_retention_pass_bounded(
     //
     // Bounded by the same delete budget as stage B, because they contend for
     // the same single `SQLite` writer.
-    let (receipts, capped) = delete_batched(
-        &mut delete_left,
-        |limit| async move {
-            FleetRetentionRepo::delete_receipts_before(
-                pool,
-                now_ms.saturating_sub(RECEIPT_TTL_MS),
-                limit,
-            )
-            .await
-        },
-    )
+    let (receipts, capped) = delete_batched(&mut delete_left, |limit| async move {
+        FleetRetentionRepo::delete_receipts_before(
+            pool,
+            now_ms.saturating_sub(RECEIPT_TTL_MS),
+            limit,
+        )
+        .await
+    })
     .await?;
     outcome.receipts_deleted = receipts;
     outcome.backlog_remaining |= capped;
 
-    let (closed, capped) = delete_batched(
-        &mut delete_left,
-        |limit| async move {
-            FleetRetentionRepo::delete_closed_attention_before(
-                pool,
-                now_ms.saturating_sub(ATTENTION_CLOSED_TTL_MS),
-                limit,
-            )
-            .await
-        },
-    )
+    let (closed, capped) = delete_batched(&mut delete_left, |limit| async move {
+        FleetRetentionRepo::delete_closed_attention_before(
+            pool,
+            now_ms.saturating_sub(ATTENTION_CLOSED_TTL_MS),
+            limit,
+        )
+        .await
+    })
     .await?;
     outcome.attention_deleted = closed;
     outcome.backlog_remaining |= capped;
@@ -611,7 +605,10 @@ mod tests {
 
         let outcome = run_retention_pass(pool, now).await.unwrap();
         assert_eq!(outcome.receipts_deleted, 2, "both settled aged receipts go");
-        assert_eq!(outcome.attention_deleted, 1, "only the aged closed row goes");
+        assert_eq!(
+            outcome.attention_deleted, 1,
+            "only the aged closed row goes"
+        );
 
         let receipts: Vec<String> =
             sqlx::query_scalar("SELECT request_id FROM fleet_action_receipt ORDER BY request_id")
@@ -624,11 +621,10 @@ mod tests {
             "an unsettled receipt is exempt at any age: it may mean a write died mid-flight"
         );
 
-        let attention: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM attention ORDER BY id")
-                .fetch_all(pool)
-                .await
-                .unwrap();
+        let attention: Vec<String> = sqlx::query_scalar("SELECT id FROM attention ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
         assert_eq!(
             attention,
             ["a-ancient-open", "a-fresh-closed"],

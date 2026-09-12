@@ -18,12 +18,12 @@ use ainb_fleet_core::types::{
     AttentionState, Capabilities, Confidence, FleetSession, LifecycleState, ManagementState,
     Provider, SessionKey, TransportHealth,
 };
-use std::collections::BTreeSet;
 use ainb_hangar_daemon::attention_ingest::AttentionIngest;
 use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_proto::fleet::PaneBinding;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::fleet::FleetRepo;
+use std::collections::BTreeSet;
 
 const PROVIDER: &str = "codex";
 const SESSION_ID: &str = "cx-916";
@@ -156,14 +156,9 @@ async fn ingest(store: &Store, home: &std::path::Path) {
 
 /// Every visible row the store holds, as `(session_key, pane_binding)`.
 async fn visible_rows(store: &Store) -> Vec<(String, PaneBinding)> {
-    let snapshot = ainb_hangar_daemon::fleet::snapshot_wire(store.pool())
-        .await
-        .expect("snapshot");
-    let mut rows: Vec<_> = snapshot
-        .sessions
-        .into_iter()
-        .map(|s| (s.session_key, s.pane_binding))
-        .collect();
+    let snapshot = ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot");
+    let mut rows: Vec<_> =
+        snapshot.sessions.into_iter().map(|s| (s.session_key, s.pane_binding)).collect();
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     rows
 }

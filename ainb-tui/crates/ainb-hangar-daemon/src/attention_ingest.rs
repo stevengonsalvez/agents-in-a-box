@@ -73,9 +73,9 @@ use ainb_fleet_core::read::jsonl_tail::ask_data_from_tool_input;
 use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, WaitContext, classify};
 use ainb_fleet_core::read::{ModelInfo, TranscriptDialect, last_model_info};
 use ainb_fleet_core::types::{Session, SessionSource};
+use ainb_hangar_core::channel::ChannelSet;
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
-use ainb_hangar_core::channel::ChannelSet;
 use ainb_hangar_store::repo::fleet::AttentionProjection;
 use ainb_hangar_store::repo::fleet_provider_event::{
     FleetProviderEventRepo, NewFleetProviderEvent,
@@ -516,9 +516,12 @@ impl AttentionIngest {
                     return LineOutcome::Retry;
                 }
             };
-            if let Err(error) =
-                FleetProviderEventRepo::mark_projected(&self.pool, &event_id, applied.fleet.revision)
-                    .await
+            if let Err(error) = FleetProviderEventRepo::mark_projected(
+                &self.pool,
+                &event_id,
+                applied.fleet.revision,
+            )
+            .await
             {
                 tracing::warn!(error = %error, "fleet provider event projection link failed");
                 return LineOutcome::Retry;
@@ -607,7 +610,11 @@ impl AttentionIngest {
     /// `events.jsonl`, which is why the cursor is a byte offset and not a line
     /// count. Kept as one function so the ingest and the decision agree.
     fn legacy_event_id(&self, line: &HookEventLine) -> String {
-        format!("legacy-hook:{}:{}", line.session_id, read_cursor(&self.cursor_path))
+        format!(
+            "legacy-hook:{}:{}",
+            line.session_id,
+            read_cursor(&self.cursor_path)
+        )
     }
 
     /// Decide what this hook line does to the attention inbox, without writing.
@@ -795,11 +802,7 @@ impl AttentionIngest {
                 raise: Some(row),
                 request_key,
             }),
-            raised_row: Some(RaisedRow {
-                id,
-                kind,
-                channels,
-            }),
+            raised_row: Some(RaisedRow { id, kind, channels }),
         }
     }
 
@@ -1089,8 +1092,8 @@ fn write_cursor(path: &Path, offset: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ainb_hangar_store::repo::fleet::FleetRepo;
     use ainb_hangar_store::Store;
+    use ainb_hangar_store::repo::fleet::FleetRepo;
     use std::io::Write;
 
     /// Plant a transcript under `~/.claude/projects/<slug>` for a UNIQUE cwd so
@@ -2021,9 +2024,7 @@ mod tests {
             .unwrap();
         }
 
-        let drift = AttentionRepo::drift_against_fleet_session(store.pool())
-            .await
-            .unwrap();
+        let drift = AttentionRepo::drift_against_fleet_session(store.pool()).await.unwrap();
         assert_eq!(
             drift.open_without_asking_session, 1,
             "the row whose session is not asking IS drift and must be counted"
@@ -2088,9 +2089,7 @@ mod tests {
         std::fs::remove_file(&cursor).ok();
         ingest.ingest_once(1_700_000_600_000).await;
 
-        let drift = AttentionRepo::drift_against_fleet_session(store.pool())
-            .await
-            .unwrap();
+        let drift = AttentionRepo::drift_against_fleet_session(store.pool()).await.unwrap();
         assert_eq!(
             drift,
             ainb_hangar_store::repo::attention::AttentionDrift::default(),

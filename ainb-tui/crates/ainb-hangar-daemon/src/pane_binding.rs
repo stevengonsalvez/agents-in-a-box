@@ -237,9 +237,7 @@ pub async fn unbound_answer_reason(pool: &SqlitePool, provider_session_id: &str)
     if tmux_target.is_some_and(|target| !target.is_empty()) {
         return None;
     }
-    let candidates = discovered_candidates(pool, &session_key, &provider, &cwd)
-        .await
-        .ok()?;
+    let candidates = discovered_candidates(pool, &session_key, &provider, &cwd).await.ok()?;
     let reason = match bind(candidates) {
         PaneBinding::Unbound(reason) => reason,
         // The binding resolves NOW even though the row is still null: a later
@@ -314,9 +312,7 @@ mod tests {
     #[tokio::test]
     async fn a_hook_provided_target_wins_without_consulting_the_scan() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = ainb_hangar_store::Store::open_in(dir.path())
-            .await
-            .expect("open store");
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.expect("open store");
         let binding = resolve(
             store.pool(),
             "claude:sid-1",
@@ -328,7 +324,10 @@ mod tests {
         .await
         .expect("resolve");
         assert_eq!(binding.target(), Some("dev:1.0"));
-        assert_eq!(binding.fingerprint(), Some("pane=%7;pid=9;session_started=1"));
+        assert_eq!(
+            binding.fingerprint(),
+            Some("pane=%7;pid=9;session_started=1")
+        );
         assert!(matches!(binding, PaneBinding::FromHook { .. }));
     }
 
@@ -337,9 +336,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_cwd_never_correlates() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let store = ainb_hangar_store::Store::open_in(dir.path())
-            .await
-            .expect("open store");
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.expect("open store");
         let candidates = discovered_candidates(store.pool(), "claude:sid-1", "claude", "")
             .await
             .expect("query");

@@ -57,9 +57,7 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
 
     // Surface 0: what the daemon serves on `fleet/status`. Every other surface
     // is measured against this, because it is the one derivation.
-    let status = ainb_hangar_daemon::fleet::status_rows(store.pool())
-        .await
-        .expect("status rows");
+    let status = ainb_hangar_daemon::fleet::status_rows(store.pool()).await.expect("status rows");
     let daemon_row = status
         .rows
         .iter()
@@ -67,24 +65,24 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         .expect("the fixture session reached the store");
     let expected = daemon_row.identity_tuple();
     assert_eq!(expected.1, "waiting", "the hook announced a live question");
-    assert_eq!(expected.2, "hook", "a hook wrote it, so the provenance is hook");
+    assert_eq!(
+        expected.2, "hook",
+        "a hook wrote it, so the provenance is hook"
+    );
     assert_eq!(expected.3, 0, "tier 0 is the hook push");
     assert!(expected.4 > 0, "the evidence clock must be stamped");
 
     // Surface 1: the TUI fleet panel. It keeps its own flattened row because it
     // renders strings, so this proves the flattening round-trips through the
     // shared derivation rather than becoming a second fold.
-    let snapshot = ainb_hangar_daemon::fleet::snapshot_wire(store.pool())
-        .await
-        .expect("snapshot");
+    let snapshot = ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot");
     let wire_session = snapshot
         .sessions
         .iter()
         .find(|session| session.session_key == SESSION_KEY)
         .expect("the panel sees the session")
         .clone();
-    let panel_row =
-        ainb_plugin_hangar::screen::fleet::FleetSessionRow::from(wire_session.clone());
+    let panel_row = ainb_plugin_hangar::screen::fleet::FleetSessionRow::from(wire_session.clone());
     let panel = panel_row.status_identity();
     assert_eq!(
         (panel.0.as_str(), panel.1, panel.2, panel.3, panel.4),
@@ -227,9 +225,7 @@ async fn a_tier_five_idle_never_overwrites_a_tier_zero_waiting() {
     .await
     .expect("fold the scan");
 
-    let status = ainb_hangar_daemon::fleet::status_rows(store.pool())
-        .await
-        .expect("status rows");
+    let status = ainb_hangar_daemon::fleet::status_rows(store.pool()).await.expect("status rows");
     let row = status
         .rows
         .iter()
@@ -293,9 +289,8 @@ async fn no_event_sequence_ending_in_silence_reports_completion() {
         .await;
 
         // Then silence: nothing else is fed, and the read happens much later.
-        let status = ainb_hangar_daemon::fleet::status_rows(store.pool())
-            .await
-            .expect("status rows");
+        let status =
+            ainb_hangar_daemon::fleet::status_rows(store.pool()).await.expect("status rows");
         for row in &status.rows {
             assert_ne!(
                 row.state.as_str(),

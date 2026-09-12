@@ -258,10 +258,7 @@ pub fn tier_of(session: &FleetSession) -> Tier {
     // A managed row, or one with a provider session id, was keyed by a hook:
     // the tmux scan cannot learn a provider's own session id.
     if session.management == ManagementState::Managed
-        || session
-            .provider_session_id
-            .as_deref()
-            .is_some_and(|id| !id.is_empty())
+        || session.provider_session_id.as_deref().is_some_and(|id| !id.is_empty())
     {
         Tier::Hook
     } else {
@@ -312,12 +309,14 @@ fn state_of(session: &FleetSession, tier: Tier) -> AgentState {
 fn evidence_observed_at(session: &FleetSession, state: AgentState) -> i64 {
     let group = match state {
         AgentState::Waiting => session.attention_updated_at,
-        AgentState::Working | AgentState::Idle | AgentState::Exited => {
-            session.lifecycle_updated_at
-        }
+        AgentState::Working | AgentState::Idle | AgentState::Exited => session.lifecycle_updated_at,
         AgentState::Unverifiable => 0,
     };
-    if group > 0 { group } else { session.last_observed_at }
+    if group > 0 {
+        group
+    } else {
+        session.last_observed_at
+    }
 }
 
 #[cfg(test)]
@@ -367,7 +366,10 @@ mod tests {
         assert_eq!(row.state, AgentState::Waiting);
         assert_eq!(row.provenance, Provenance::Hook);
         assert_eq!(row.tier, Tier::Hook);
-        assert_eq!(row.evidence_observed_at, 7, "the attention clock, not metadata");
+        assert_eq!(
+            row.evidence_observed_at, 7,
+            "the attention clock, not metadata"
+        );
     }
 
     /// A tier-5 row may describe a pane, but it may not claim a human is

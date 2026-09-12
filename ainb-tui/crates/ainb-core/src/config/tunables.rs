@@ -1168,7 +1168,10 @@ mod tests {
             "`[fleet.status] legacy_classify_primary` must parse"
         );
         with_rollback(None, config, || {
-            assert!(legacy_classify_primary(), "the config value must be in force");
+            assert!(
+                legacy_classify_primary(),
+                "the config value must be in force"
+            );
         });
     }
 

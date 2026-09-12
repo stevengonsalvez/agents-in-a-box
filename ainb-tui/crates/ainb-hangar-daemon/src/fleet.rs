@@ -726,10 +726,8 @@ pub async fn status_rows(
         .sessions
         .iter()
         .map(|session| {
-            let has_open_request = session
-                .provider_session_id
-                .as_deref()
-                .is_some_and(|id| open.contains(id));
+            let has_open_request =
+                session.provider_session_id.as_deref().is_some_and(|id| open.contains(id));
             ainb_hangar_proto::agent_status::status_row(session, has_open_request)
         })
         .collect();
@@ -1480,10 +1478,7 @@ pub async fn events_after_wire(
 /// having no pane question to answer.
 fn pane_binding_of(row: &FleetSessionRow) -> ainb_hangar_proto::fleet::PaneBinding {
     use ainb_hangar_proto::fleet::PaneBinding;
-    let hook_sourced = row
-        .provider_session_id
-        .as_deref()
-        .is_some_and(|id| !id.is_empty());
+    let hook_sourced = row.provider_session_id.as_deref().is_some_and(|id| !id.is_empty());
     if !hook_sourced || row.provider == "acp" {
         return PaneBinding::NotApplicable;
     }
@@ -5041,9 +5036,7 @@ mod tests {
                 last_seen_ms: None,
                 version: 0,
             };
-            FleetRepo::apply_event(store.pool(), &tmux_event(&session, 100))
-                .await
-                .unwrap();
+            FleetRepo::apply_event(store.pool(), &tmux_event(&session, 100)).await.unwrap();
         }
 
         let payload = serde_json::json!({

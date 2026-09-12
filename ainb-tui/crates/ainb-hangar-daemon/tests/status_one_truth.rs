@@ -20,17 +20,19 @@
 //!    only way they diverge is a lost write — which is exactly what
 //!    `sweep_once` stopped papering over when it became an assertion.
 
+use ainb_fleet_core::types::{
+    AttentionState, Capabilities, Confidence, FleetSession, LifecycleState, ManagementState,
+    Provider, SessionKey, TransportHealth,
+};
 use ainb_hangar_daemon::events::EventBroker;
-use ainb_hangar_daemon::fleet::{ReconcilePass, apply_hook_with_attention, reconcile_discovered_panes, status_rows};
+use ainb_hangar_daemon::fleet::{
+    ReconcilePass, apply_hook_with_attention, reconcile_discovered_panes, status_rows,
+};
 use ainb_hangar_proto::agent_status::{AgentState, Provenance};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
 use ainb_hangar_store::repo::fleet::{
     AttentionProjection, FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
-};
-use ainb_fleet_core::types::{
-    AttentionState, Capabilities, Confidence, FleetSession, LifecycleState, ManagementState,
-    Provider, SessionKey, TransportHealth,
 };
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -352,7 +354,15 @@ async fn an_event_nobody_can_map_leaves_the_state_unverifiable_not_idle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("store");
 
-    hook(&store, "e-unmapped", "agent-turn-aborted", None, BASE_MS, None).await;
+    hook(
+        &store,
+        "e-unmapped",
+        "agent-turn-aborted",
+        None,
+        BASE_MS,
+        None,
+    )
+    .await;
 
     let (state, _) = read_state(&store).await;
     assert_eq!(
@@ -389,7 +399,11 @@ async fn a_thousand_event_replay_leaves_no_projection_drift() {
             event,
             tool,
             now,
-            Some(if asking { raise(sequence, now) } else { release(now) }),
+            Some(if asking {
+                raise(sequence, now)
+            } else {
+                release(now)
+            }),
         )
         .await;
     }
