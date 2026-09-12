@@ -139,6 +139,30 @@ pub struct AgentStatusResult {
     pub rows: Vec<AgentStatusRow>,
     /// The Fleet revision these rows were derived from.
     pub head_revision: i64,
+    /// `status_unknown_event{provider,name}` — provider event names this daemon
+    /// incarnation could not map, most frequent first.
+    ///
+    /// Carried here rather than behind its own method because the one operator
+    /// question it answers ("is my status truth complete?") is asked at the
+    /// same moment as the rows themselves. Empty is the healthy answer.
+    #[serde(default)]
+    pub unknown_events: Vec<UnknownEventCount>,
+}
+
+/// One provider event name a daemon could not map to its status vocabulary.
+///
+/// An unmapped name is survivable — the event still lands with its clocks and
+/// its identity, it just asserts no transition — but it is how a provider's new
+/// event silently stops advancing a session's state. Counting it makes that a
+/// number an operator can see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownEventCount {
+    /// The provider that emitted it.
+    pub provider: String,
+    /// The raw event name, verbatim.
+    pub name: String,
+    /// Sightings since this daemon started.
+    pub count: u64,
 }
 
 /// One agent, as every surface shows it.

@@ -277,6 +277,7 @@ async fn daemon_needs() -> Value {
                     ainb_hangar_proto::agent_status::AgentStatusResult {
                         rows: Vec::new(),
                         head_revision: 0,
+                        unknown_events: Vec::new(),
                     }
                 });
                 crate::daemon::attention_to_needs_with_status(&rows, &status.rows)

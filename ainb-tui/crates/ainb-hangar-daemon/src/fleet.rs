@@ -737,6 +737,17 @@ pub async fn status_rows(
     Ok(ainb_hangar_proto::agent_status::AgentStatusResult {
         rows,
         head_revision: snapshot.head_revision,
+        // `status_unknown_event{provider,name}` travels with the status read so
+        // `ainb doctor` needs one call, not two, to answer "is this daemon
+        // seeing provider events it cannot map".
+        unknown_events: crate::status_normalizer::unknown_events()
+            .into_iter()
+            .map(|row| ainb_hangar_proto::agent_status::UnknownEventCount {
+                provider: row.provider,
+                name: row.name,
+                count: row.count,
+            })
+            .collect(),
     })
 }
 
@@ -2787,26 +2798,20 @@ pub(crate) fn canonical_hook_event_type<'a>(
     event_type: &'a str,
     payload: &Value,
 ) -> &'a str {
-    let event_type = event_type.split(':').next().unwrap_or(event_type);
-    if provider.eq_ignore_ascii_case("codex") {
-        return match event_type {
-            "request_user_input" => "AskUserQuestion",
-            "wait_for_user" => "Notification",
-            "agent-turn-complete" | "agentStop" | "task_complete" => "Stop",
-            "PermissionRequest"
-            | "permission_request"
-            | "exec_approval_request"
-            | "apply_patch_approval_request" => "PermissionRequest",
-            _ => event_type,
-        };
-    }
-    if event_type == "PermissionRequest"
-        && claude_hook_tool_name(payload) == Some("AskUserQuestion")
+    let stripped = event_type.split(':').next().unwrap_or(event_type);
+    // One payload-shaped special case, before the name-only table: Claude wraps
+    // a structured picker in a `PermissionRequest`, and only the tool name
+    // inside the payload tells that apart from a real approval. A normalizer
+    // that sees names alone cannot know it.
+    if stripped == "PermissionRequest" && claude_hook_tool_name(payload) == Some("AskUserQuestion")
     {
-        "AskUserQuestion"
-    } else {
-        event_type
+        return "AskUserQuestion";
     }
+    // Everything else goes through the one normalizer, which also counts the
+    // names it cannot map. An unknown name keeps its raw spelling: the reducer
+    // answers `(None, None)` for it, so the event still lands with its clocks,
+    // its identity and its pane binding, and simply asserts no transition.
+    crate::status_normalizer::normalize(provider, stripped).unwrap_or(stripped)
 }
 
 fn claude_hook_tool_name(payload: &Value) -> Option<&str> {

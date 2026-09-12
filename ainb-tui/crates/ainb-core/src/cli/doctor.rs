@@ -22,6 +22,10 @@ struct DoctorReport<'a> {
     /// cannot be attached to, so it is a health fact, not a cosmetic one.
     pane_unbound: Vec<PaneUnboundRow>,
     pane_unbound_error: Option<String>,
+    /// `status_unknown_event{provider,name}` — provider event names the daemon
+    /// could not map (D14). Non-empty means a provider shipped a name this
+    /// build does not know, and sessions using it stop advancing silently.
+    status_unknown_event: Vec<ainb_hangar_proto::agent_status::UnknownEventCount>,
 }
 
 /// One session with no pane bound.
@@ -91,7 +95,7 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
     } else {
         Vec::new()
     };
-    let (pane_unbound, pane_unbound_error) = collect_pane_unbound().await;
+    let (pane_unbound, status_unknown_event, pane_unbound_error) = collect_fleet_status().await;
     match format {
         OutputFormat::Json => {
             let (skill_doctor, skill_doctor_error) = run_skill_doctor(args.offline);
@@ -108,6 +112,7 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
                     daemon_repairs,
                     pane_unbound,
                     pane_unbound_error,
+                    status_unknown_event,
                 })?
             );
             if let Some(error) = skill_doctor_error {
@@ -126,6 +131,7 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
                 println!("daemon repair: {repair}");
             }
             print_pane_unbound_text(&pane_unbound, pane_unbound_error.as_deref());
+            print_unknown_event_text(&status_unknown_event);
             // The skill check can traverse several tool homes. Render the
             // runtime result first so a slow skill scan never hides a dead
             // hook or daemon from the user.
@@ -141,27 +147,36 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
     Ok(())
 }
 
-/// Read the Fleet snapshot and list every hook-sourced session with no pane
-/// bound (D14, issue #916).
+/// Read the daemon's one status read and pull out the two health facts it
+/// carries: sessions with no pane bound (#916) and provider event names the
+/// daemon could not map (D14).
+///
+/// One call for both, because they answer the same operator question — "is the
+/// status truth complete?" — and asking twice would let the two answers come
+/// from different instants.
 ///
 /// A daemon that is not running is not an error here: `ainb doctor` runs on a
 /// cold machine too, and reporting "cannot reach the daemon" once, in the
-/// daemon section, is enough. This returns an empty list and the reason.
-async fn collect_pane_unbound() -> (Vec<PaneUnboundRow>, Option<String>) {
-    use ainb_hangar_proto::fleet::{FleetProvider, PaneBinding};
+/// daemon section, is enough.
+async fn collect_fleet_status() -> (
+    Vec<PaneUnboundRow>,
+    Vec<ainb_hangar_proto::agent_status::UnknownEventCount>,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::FleetProvider;
     let client = match crate::fleet::bridge::daemon::DaemonClient::from_env() {
         Ok(client) => client,
-        Err(error) => return (Vec::new(), Some(error.to_string())),
+        Err(error) => return (Vec::new(), Vec::new(), Some(error.to_string())),
     };
-    match client.fleet_snapshot().await {
-        Ok(snapshot) => (
-            snapshot
-                .sessions
-                .into_iter()
-                .filter(|session| session.pane_binding == PaneBinding::PaneUnbound)
-                .map(|session| PaneUnboundRow {
-                    session_key: session.session_key,
-                    provider: match session.provider {
+    match client.fleet_status().await {
+        Ok(status) => (
+            status
+                .rows
+                .iter()
+                .filter(|row| row.pane_unbound)
+                .map(|row| PaneUnboundRow {
+                    session_key: row.session_key.clone(),
+                    provider: match row.provider {
                         FleetProvider::Claude => "claude",
                         FleetProvider::Codex => "codex",
                         FleetProvider::Antigravity => "antigravity",
@@ -170,12 +185,35 @@ async fn collect_pane_unbound() -> (Vec<PaneUnboundRow>, Option<String>) {
                         FleetProvider::Unknown => "unknown",
                     }
                     .to_string(),
-                    cwd: session.cwd,
+                    cwd: row.cwd.clone(),
                 })
                 .collect(),
+            status.unknown_events,
             None,
         ),
-        Err(error) => (Vec::new(), Some(error.to_string())),
+        Err(error) => (Vec::new(), Vec::new(), Some(error.to_string())),
+    }
+}
+
+/// Render the unknown-event counters. Silent when there are none, because an
+/// empty list IS the healthy state and printing "0 unknown events" on every
+/// run trains an operator to skip the section.
+fn print_unknown_event_text(rows: &[ainb_hangar_proto::agent_status::UnknownEventCount]) {
+    if rows.is_empty() {
+        return;
+    }
+    println!("\nPROVIDER EVENTS NOT UNDERSTOOD");
+    println!("------------------------------");
+    println!(
+        "{} provider event name(s) this build cannot map. Sessions emitting them",
+        rows.len()
+    );
+    println!("still record, but their state stops advancing on that event.");
+    for row in rows {
+        println!(
+            "  status_unknown_event  {}  {}  x{}",
+            row.provider, row.name, row.count
+        );
     }
 }
 

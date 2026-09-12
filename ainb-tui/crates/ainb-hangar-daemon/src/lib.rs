@@ -192,6 +192,15 @@ pub mod observability;
 /// tier-5 discovery scan, binds when exactly one pane matches, and leaves the
 /// row `pane_unbound` when zero or two do rather than guessing.
 pub mod pane_binding;
+/// Per-provider status event normalizers and the `status_unknown_event`
+/// counters (D14).
+///
+/// Every provider spells the same facts differently; the reducer speaks one
+/// vocabulary. This translates, in the order the spec fixes (Claude-compatible
+/// family, then the OSC frame schema, then the generic session-state family),
+/// and counts every name it cannot map so an unmapped event is visible rather
+/// than silent.
+pub mod status_normalizer;
 /// Pal's guardrail gate and its confirm cards (buzz-port part 2).
 ///
 /// The classifier and the argument projection are `ainb-fleet-tools`'; the
