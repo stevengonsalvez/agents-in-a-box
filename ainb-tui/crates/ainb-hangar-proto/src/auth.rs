@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{RpcId, RpcRequest, jsonrpc_version, methods};
+use crate::{RpcId, RpcRequest, connections::SurfaceInfo, jsonrpc_version, methods};
 
 /// JSON-RPC error code the daemon answers when a connection's first frame is
 /// not a valid `auth/hello`, or the presented token does not verify.
@@ -44,6 +44,13 @@ pub const UNAUTHORIZED: i32 = -32000;
 pub struct HelloParams {
     /// The plaintext daemon token (`mdt_…`).
     pub token: String,
+    /// Optional identity of the connected surface.
+    ///
+    /// Omitted by pre-registry clients. The daemon records those connections as
+    /// [`crate::connections::SurfaceKind::Unknown`], preserving the original
+    /// `{ token }` handshake shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SurfaceInfo>,
 }
 
 /// Build the `auth/hello` request envelope a client sends as its first frame.
@@ -55,6 +62,7 @@ pub fn hello_request(id: i64, token: &str) -> RpcRequest {
         method: methods::AUTH_HELLO.to_string(),
         params: serde_json::json!(HelloParams {
             token: token.to_string(),
+            surface: None,
         }),
     }
 }
@@ -96,6 +104,7 @@ mod tests {
         assert_eq!(req.id, RpcId::Number(7));
         let params: HelloParams = serde_json::from_value(req.params).unwrap();
         assert_eq!(params.token, "mdt_SECRET");
+        assert_eq!(params.surface, None);
     }
 
     /// The token file lives at `{home}/hangar/daemon.token`.

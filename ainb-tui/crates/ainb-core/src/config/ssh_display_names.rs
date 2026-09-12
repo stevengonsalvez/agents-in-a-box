@@ -63,7 +63,8 @@ impl SessionLabelStore {
                 fs::create_dir_all(parent)?;
             }
             let content = serde_json::to_string_pretty(self)?;
-            fs::write(path, content)?;
+            let _lock = crate::config::lock::lock_for(&path)?;
+            crate::config::write_atomic(&path, &content)?;
         }
         Ok(())
     }

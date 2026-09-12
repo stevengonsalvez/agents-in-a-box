@@ -101,6 +101,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 directories = "5.0"
 dirs = "5.0"
+gethostname = "0.4"
 uuid = { version = "1.5", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"

@@ -1019,7 +1019,10 @@ impl HangarPlugin {
         let auth_body = match encode_request(
             AUTH_REQ_ID,
             daemon_methods::AUTH_HELLO,
-            serde_json::json!({ "token": token }),
+            serde_json::json!({
+                "token": token,
+                "surface": { "kind": "tui", "pid": std::process::id() },
+            }),
         ) {
             Ok(b) => b,
             Err(e) => {

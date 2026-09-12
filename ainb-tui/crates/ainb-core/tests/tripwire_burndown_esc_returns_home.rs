@@ -27,6 +27,8 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde_json::json;
+
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
@@ -119,6 +121,83 @@ git_directories = []
         let dst = home.join(".codex").join("sessions");
         copy_dir_all(&codex_src, &dst);
     }
+}
+
+struct TmuxFixture {
+    name: String,
+}
+
+impl Drop for TmuxFixture {
+    fn drop(&mut self) {
+        kill_session(&self.name);
+    }
+}
+
+fn init_git_repo(dir: &Path) {
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "tripwire")
+            .env("GIT_AUTHOR_EMAIL", "tripwire@example.invalid")
+            .env("GIT_COMMITTER_NAME", "tripwire")
+            .env("GIT_COMMITTER_EMAIL", "tripwire@example.invalid")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+
+    git(&["init", "--initial-branch=main"]);
+    fs::write(dir.join("README.md"), "burndown origin fixture\n").expect("seed fixture repo");
+    git(&["add", "README.md"]);
+    git(&["-c", "commit.gpgsign=false", "commit", "-m", "seed"]);
+}
+
+fn seed_session_list_origin(home: &Path) -> TmuxFixture {
+    let worktree = home.join("burndown-origin");
+    fs::create_dir_all(&worktree).expect("create origin worktree");
+    init_git_repo(&worktree);
+
+    let origin = TmuxFixture {
+        name: format!("tripwire-burndown-origin-{}", std::process::id()),
+    };
+    let status = Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            &origin.name,
+            "sh",
+            "-c",
+            "sleep 900",
+        ])
+        .status()
+        .expect("start origin tmux session");
+    assert!(status.success(), "origin tmux session failed");
+
+    let entry = json!({
+        "sessions": {
+            &origin.name: {
+                "session_id": "6f1f5f7e-0000-4000-8000-0000000000e1",
+                "tmux_session_name": &origin.name,
+                "worktree_path": worktree,
+                "workspace_name": "burndown-origin",
+                "created_at": "2026-05-11T00:00:00Z",
+                "agent_type": "Codex",
+                "codex_thread_id": "burndown-origin-1",
+                "skip_permissions": true,
+            }
+        }
+    });
+    fs::write(
+        home.join(".agents-in-a-box").join("sessions.json"),
+        serde_json::to_vec_pretty(&entry).expect("encode sessions.json"),
+    )
+    .expect("seed sessions.json");
+
+    origin
 }
 
 fn capture_pane(session: &str) -> String {
@@ -277,6 +356,7 @@ fn esc_on_burndown_returns_to_session_list_when_opened_there() {
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_fixture_home(home_tmp.path());
+    let _origin = seed_session_list_origin(home_tmp.path());
 
     let session = format!("tripwire-esc-sessions-{}", std::process::id());
     let ainb = ainb_bin();

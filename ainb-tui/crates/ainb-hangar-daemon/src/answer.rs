@@ -38,6 +38,7 @@ use ainb_fleet_core::discover::{discover_from_ainb, discover_from_peers, merge_s
 use ainb_fleet_core::read::jsonl_tail::latest_transcript_for_cwd;
 use ainb_fleet_core::send::send;
 use ainb_fleet_core::types::{SendOutcome, Session};
+use ainb_hangar_proto::connections::ConnectionRow;
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
 use ainb_hangar_store::repo::attention::{AttentionRepo, AttentionRow};
@@ -46,6 +47,16 @@ use std::time::{Duration, Instant};
 
 use crate::acp_pool::{PermissionAnswer, PermissionDecision};
 use crate::events::EventSink;
+
+/// Daemon-owned provenance for an answer made through a live RPC connection.
+///
+/// The wire request's `answered_by` remains required for backwards-compatible
+/// decoding, but the socket handler replaces it with this value before any
+/// database write. Client input can therefore never forge another surface.
+#[must_use]
+pub fn answered_by(connection: &ConnectionRow) -> String {
+    format!("{}@{}", connection.surface.kind, connection.host)
+}
 
 /// The resolved delivery target for an answer, or a refusal.
 enum Target {
@@ -981,6 +992,9 @@ mod tests {
     use ainb_fleet_core::types::SessionSource;
     use ainb_hangar_store::Store;
     use ainb_hangar_store::repo::attention::{AttentionKind, NewAttention};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TRANSCRIPT_FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
 
     /// The payload shape the hook ingest stores for a real `AskUserQuestion`
     /// (captured live from Claude Code 2.1.257).
@@ -1606,10 +1620,12 @@ mod tests {
     }
     fn plant_transcript(name: &str) -> (TxFixture, std::path::PathBuf) {
         use std::io::Write;
+        let fixture_id = NEXT_TRANSCRIPT_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
         let cwd = format!(
-            "/ainb-test-answer-c1/{}/{}",
+            "/ainb-test-answer-c1/{}/{}/{}",
             std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            fixture_id,
         );
         let mut dir = dirs::home_dir().expect("home dir");
         dir.push(".claude");

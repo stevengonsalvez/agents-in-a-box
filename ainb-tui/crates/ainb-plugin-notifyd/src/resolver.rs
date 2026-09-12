@@ -138,7 +138,10 @@ async fn list_global_rules(socket: &Path, token: &str) -> Option<NotifyRulesList
     write_frame(
         &mut writer,
         methods::AUTH_HELLO,
-        serde_json::json!({ "token": token }),
+        serde_json::json!({
+            "token": token,
+            "surface": { "kind": "cli", "pid": std::process::id() },
+        }),
         1,
     )
     .await?;

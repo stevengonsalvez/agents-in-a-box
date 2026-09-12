@@ -120,7 +120,9 @@ impl OnboardingConfig {
         let content =
             toml::to_string_pretty(self).context("Failed to serialize onboarding config")?;
 
-        fs::write(path, content)
+        let _lock = crate::config::lock::lock_for(path)
+            .with_context(|| format!("Failed to lock onboarding config at {}", path.display()))?;
+        crate::config::write_atomic(path, &content)
             .with_context(|| format!("Failed to write onboarding config to {}", path.display()))?;
 
         Ok(())

@@ -20,6 +20,7 @@ pub mod git_cmd;
 pub mod hangar;
 pub mod headroom;
 pub mod init;
+pub mod keymap;
 pub mod label;
 pub mod list;
 pub mod logs;
@@ -121,6 +122,7 @@ pub enum OutputFormat {
     Text,
     Json,
     Csv,
+    #[value(alias = "md")]
     Markdown,
 }
 

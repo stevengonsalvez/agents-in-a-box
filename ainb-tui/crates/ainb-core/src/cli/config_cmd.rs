@@ -188,6 +188,17 @@ async fn cmd_set(key: &str, value: &str) -> Result<()> {
         return set_hangar_daemon(key, daemon_key, value).await;
     }
 
+    // Validation reads the current document and the final write edits that
+    // same document. Hold the shared lock across both so a concurrent settings
+    // save cannot land between them.
+    let lock = match crate::config::lock::lock_for(&config_path) {
+        Ok(lock) => Some(lock),
+        Err(err) => {
+            tracing::warn!(path = %config_path.display(), error = %err, "config lock unavailable; saving without it");
+            None
+        }
+    };
+
     // Validate against CONFIG_REGISTRY first: a mistyped key or an out-of-range
     // value fails here rather than landing in the file and being dropped by the
     // next load, which is how a `set` could look like it worked and do nothing.
@@ -229,12 +240,19 @@ async fn cmd_set(key: &str, value: &str) -> Result<()> {
     let cleared = validated.is_none();
     match validated {
         Some(value) => {
-            crate::config::write_keys_into(&config_path, &[(key.to_string(), value)])
-                .context("Failed to write user config")?;
+            let edits = [(key.to_string(), value)];
+            match lock.as_ref() {
+                Some(lock) => crate::config::write_keys_into_with_lock(&config_path, &edits, lock),
+                None => crate::config::write_keys_into(&config_path, &edits),
+            }
+            .context("Failed to write user config")?;
         }
         None => {
-            crate::config::remove_key_from(&config_path, key)
-                .context("Failed to write user config")?;
+            match lock.as_ref() {
+                Some(lock) => crate::config::remove_key_from_with_lock(&config_path, key, lock),
+                None => crate::config::remove_key_from(&config_path, key),
+            }
+            .context("Failed to write user config")?;
         }
     }
 

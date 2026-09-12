@@ -22,6 +22,8 @@ use ainb_hangar_core::ids::{AgentId, CommentId, IssueId, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::connections::ConnectionRow;
+
 /// The JSON-RPC notification method carrying every [`HangarEvent`].
 ///
 /// The event discriminant lives in the payload's `event` tag, not the method
@@ -190,6 +192,15 @@ pub enum HangarEvent {
         attention_id: String,
         /// The surface/actor that won the answer race (`tui` / `web` / `atc` / …).
         by: String,
+    },
+    /// The daemon's authenticated surface registry changed.
+    ///
+    /// Live connections receive this on the fleet-wide attention stream. The
+    /// registry is in memory, so reconnecting clients re-read it through
+    /// `hangar/connections_list`.
+    ConnectionsChanged {
+        /// Current complete live connection snapshot.
+        connections: Vec<ConnectionRow>,
     },
 }
 

@@ -129,6 +129,9 @@ serde_yaml = { workspace = true }
 # Home-directory resolution for the per-task env tree root (mirrors the store's
 # `$AINB_HANGAR_HOME`-else-`~` resolution so env dirs and the db share a root).
 dirs = { workspace = true }
+# Daemon-side host stamp for live surface registry rows. Clients never send a
+# hostname, so a forwarded socket stays attributed to the daemon's machine.
+gethostname = { workspace = true }
 # y0f: the advisory file lock (`FileExt::lock_exclusive`) the inbox cap takes on
 # `inbox/hangar-daemon.lock` — the SAME lock the hook's inbox writer holds — so a
 # periodic cap of the daemon's own exhaust inbox never races a concurrent commit.
@@ -185,6 +188,10 @@ opentelemetry-otlp = { version = "0.30", optional = true, default-features = fal
 tracing-opentelemetry = { version = "0.31", optional = true }
 
 [dev-dependencies]
+# Real web-owned presence coverage drives the production web connection loop
+# against this test's daemon socket. The web crate depends on wire/core only,
+# so this remains an acyclic, test-only dependency.
+ainb-web = { path = "../ainb-web" }
 # multica-gap #10 acceptance (`rpc_issue_facets_sqlite`): the facet reducer is
 # run over the rows the REAL daemon put on the wire, so the screen-side numbers
 # are anchored in SQLite instead of in a mock. Acyclic — the plugin depends only

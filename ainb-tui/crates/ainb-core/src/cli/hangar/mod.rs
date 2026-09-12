@@ -89,6 +89,9 @@ pub enum HangarCommand {
     /// Inspect the Hangar control-plane daemon.
     #[command(subcommand)]
     Daemon(DaemonCommand),
+    /// Inspect live authenticated Hangar client connections.
+    #[command(subcommand)]
+    Connections(ConnectionsCommand),
     /// Manage Hangar auth tokens (PATs + daemon tokens).
     #[command(subcommand)]
     Auth(AuthCommand),
@@ -132,6 +135,13 @@ pub enum HangarCommand {
     /// Provision and inspect the role-gated pull pipeline.
     #[command(subcommand)]
     Pipeline(PipelineCommand),
+}
+
+/// `hangar connections <verb>` — inspect daemon-local authenticated clients.
+#[derive(Subcommand, Debug)]
+pub enum ConnectionsCommand {
+    /// List connection id, surface kind, process id, and daemon host.
+    List,
 }
 
 /// `hangar pipeline <verb>` - provision the role-gated board pipeline that
@@ -2566,6 +2576,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Task(c) => dispatch_task(c, format).await,
         HangarCommand::Beads(BeadsCommand::Reconcile(args)) => run_beads_reconcile(args).await,
         HangarCommand::Daemon(c) => dispatch_daemon(c, format).await,
+        HangarCommand::Connections(ConnectionsCommand::List) => run_connections_list(format).await,
         HangarCommand::Auth(c) => dispatch_auth(c, format).await,
         HangarCommand::Config(c) => dispatch_config(c, format),
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
@@ -2581,6 +2592,46 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Inbox(InboxCommand::List(args)) => run_inbox_list(args, format).await,
         HangarCommand::Pipeline(c) => dispatch_pipeline(c).await,
     }
+}
+
+/// List the daemon's live authenticated connections through its local socket.
+async fn run_connections_list(format: OutputFormat) -> Result<()> {
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .context("connect to local authenticated hangar daemon")?;
+    print!(
+        "{}",
+        run_connections_list_with_client(&client, format).await?
+    );
+    Ok(())
+}
+
+/// Fetch and render connection rows, keeping the command's test seam local.
+async fn run_connections_list_with_client(
+    client: &crate::fleet::bridge::daemon::DaemonClient,
+    format: OutputFormat,
+) -> Result<String> {
+    let mut connections = client
+        .connections_list()
+        .await
+        .context("list local authenticated hangar connections")?
+        .connections;
+    connections.sort_unstable_by_key(|connection| connection.conn_id);
+
+    if format == OutputFormat::Json {
+        return Ok(format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({ "connections": connections }))?
+        ));
+    }
+
+    let mut output = String::from("CONNECTION ID\tKIND\tPID\tHOST\n");
+    for connection in connections {
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            connection.conn_id, connection.surface.kind, connection.surface.pid, connection.host
+        ));
+    }
+    Ok(output)
 }
 
 /// `hangar pipeline init|show`: provision (or describe) the role-gated board
@@ -15018,6 +15069,118 @@ mod tests {
     fn parses_daemon_status() {
         let cmd = parse_hangar(&["ainb", "hangar", "daemon", "status"]);
         assert!(matches!(cmd, HangarCommand::Daemon(DaemonCommand::Status)));
+    }
+
+    #[test]
+    fn parses_connections_list() {
+        let cmd = parse_hangar(&["ainb", "hangar", "connections", "list"]);
+        assert!(matches!(
+            cmd,
+            HangarCommand::Connections(ConnectionsCommand::List)
+        ));
+    }
+
+    #[tokio::test]
+    async fn connections_list_json_uses_authenticated_local_client() {
+        use ainb_hangar_proto::methods;
+        use serde_json::{Value, json};
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        async fn read_frame(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Value {
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                let read = reader.read_line(&mut line).await.expect("read frame header");
+                assert_ne!(read, 0, "socket closed before frame header");
+                let line = line.trim_end_matches("\r\n");
+                if line.is_empty() {
+                    let length = length.expect("content length header");
+                    let mut body = vec![0; length];
+                    reader.read_exact(&mut body).await.expect("read frame body");
+                    return serde_json::from_slice(&body).expect("decode frame body");
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = Some(value.trim().parse().expect("numeric content length"));
+                    }
+                }
+            }
+        }
+
+        async fn write_frame(writer: &mut tokio::net::unix::OwnedWriteHalf, value: &Value) {
+            let body = serde_json::to_vec(value).expect("encode frame body");
+            writer
+                .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+                .await
+                .expect("write frame header");
+            writer.write_all(&body).await.expect("write frame body");
+            writer.flush().await.expect("flush frame");
+        }
+
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
+            let hello = read_frame(&mut reader).await;
+            assert_eq!(hello["method"], methods::AUTH_HELLO);
+            assert_eq!(hello["params"]["token"], "test-token");
+            write_frame(
+                &mut write_half,
+                &json!({"jsonrpc": "2.0", "id": 1, "result": {}}),
+            )
+            .await;
+
+            let request = read_frame(&mut reader).await;
+            assert_eq!(request["method"], methods::HANGAR_CONNECTIONS_LIST);
+            assert_eq!(request["params"], json!({}));
+            write_frame(
+                &mut write_half,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "result": {
+                        "connections": [
+                            {
+                                "conn_id": 9,
+                                "surface": {"kind": "web", "pid": 200},
+                                "host": "beta.test",
+                                "connected_at": "2026-09-11T10:00:00Z",
+                                "tmux_clients": []
+                            },
+                            {
+                                "conn_id": 2,
+                                "surface": {"kind": "cli", "pid": 100},
+                                "host": "alpha.test",
+                                "connected_at": "2026-09-11T09:00:00Z",
+                                "tmux_clients": []
+                            }
+                        ]
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let client = crate::fleet::bridge::daemon::DaemonClient::with_parts(
+            socket,
+            "test-token".to_string(),
+        );
+        let output = run_connections_list_with_client(&client, OutputFormat::Json)
+            .await
+            .expect("connections list succeeds");
+        server.await.expect("fake daemon exits");
+
+        let rendered: Value = serde_json::from_str(&output).expect("valid JSON output");
+        let first = &rendered["connections"][0];
+        assert_eq!(first["conn_id"], 2, "connection rows sort by id");
+        assert_eq!(first["surface"]["kind"], "cli");
+        assert_eq!(first["surface"]["pid"], 100);
+        assert_eq!(first["host"], "alpha.test");
     }
 
     #[test]

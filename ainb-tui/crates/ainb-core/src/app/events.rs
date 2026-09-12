@@ -2,15 +2,22 @@
 
 #![allow(dead_code)]
 
+#[cfg(test)]
+use super::keymap::test_key_codes::*;
+use crate::app::keymap::{
+    Chord, HostFlags, KeyAction, KeyContext, Keymap, UiAction, active_contexts,
+};
 use crate::app::{
     AppState,
     screens::ids as screen_ids,
-    state::{AsyncAction, AuthMethod, ConfigPane, ConfigScreenState},
+    state::{AsyncAction, AuthMethod, ConfigPane},
 };
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::KeyEvent;
+#[cfg(test)]
+use crossterm::event::{KeyCode, KeyModifiers};
 use std::time::Instant;
 use tracing::info;
 
@@ -1254,8 +1261,7 @@ impl EventHandler {
             return false;
         }
         for c in text.chars().filter(|c| !c.is_control()) {
-            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
-            if let Some(ev) = Self::handle_key_event(key, state) {
+            if let Some(ev) = Self::keymap_text_event(c, state) {
                 Self::process_event(ev, state);
             }
         }
@@ -1291,248 +1297,6 @@ impl EventHandler {
     /// slash-palette while the user is typing into a free-form input.
     pub fn is_in_text_input_context(state: &AppState) -> bool {
         Self::is_text_input_context(state)
-    }
-
-    /// Fold one key into the `ask` pane.
-    ///
-    /// Returns `None` for keys the pane does not claim, so `Tab` still walks
-    /// the strip and `q`/`Esc` still leave — an answer pane the operator cannot
-    /// escape is worse than one they cannot type into.
-    fn route_session_ask_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
-        state.ask_state.retarget(&chip);
-        match key_event.code {
-            KeyCode::Up => state.ask_state.move_cursor(&chip, -1),
-            KeyCode::Down => state.ask_state.move_cursor(&chip, 1),
-            KeyCode::Enter => return Some(AppEvent::SessionAskSend),
-            KeyCode::Backspace => state.ask_state.backspace(),
-            // Left to the strip and the screen: an answer pane the operator
-            // cannot leave is a trap.
-            KeyCode::Tab | KeyCode::BackTab | KeyCode::Esc => return None,
-            // Printable keys type into the free-text answer. `j`/`k` are NOT
-            // stolen for navigation here: they are letters, and an answer that
-            // cannot contain the word "just" is not an answer field.
-            KeyCode::Char(c) => {
-                // Only once the composer row is selected, so the option list
-                // still answers plain typing with nothing rather than silently
-                // filling a buffer the operator cannot see.
-                if state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText {
-                    state.ask_state.push_char(c);
-                } else {
-                    return None;
-                }
-            }
-            _ => return None,
-        }
-        state.ui_needs_refresh = true;
-        Some(AppEvent::Consumed)
-    }
-
-    /// Fold one key into the active composer tab's chat surface.
-    ///
-    /// Returns `None` for a key the chat does not claim, so it falls through to
-    /// the sessions screen — `Tab` still moves the strip and the attach digits
-    /// still attach, which is the contract the footer advertises on every tab.
-    fn route_session_composer_key(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        /// Which Pal header dial a key turned.
-        enum PalDialTurn {
-            Engine,
-            Model,
-            Mode,
-            Retry,
-        }
-
-        use crate::components::session_tabs::SessionTab;
-        use ainb_plugin_hangar::screen::fleet_chat::ChatKey;
-
-        // `Tab` belongs to the STRIP, `Shift+Tab` to the conversation's own
-        // focus toggle. They collided: the chat uses Tab to move between its
-        // composer and its card list, so leaving Tab to the chat made the strip
-        // unreachable from a conversation, and taking it for the strip made the
-        // card list unreachable — which is where a guardrail card is answered.
-        //
-        // The strip wins Tab because it is the surface-wide navigator and it
-        // WRAPS, so nothing is lost by giving up the reverse direction here.
-        // Answered before the reducer rather than by falling through: the
-        // `in_text_input` short-circuit downstream swallows everything, so a
-        // bare `None` would trap the operator on a pane they could only leave
-        // with Esc.
-        if key_event.code == KeyCode::Tab {
-            return Some(AppEvent::SessionTabNext);
-        }
-        // The Pal header's dials, on ALT. Bare letters were the first shape
-        // and the tripwire killed it: the Pal composer holds focus as soon
-        // as the conversation opens, so `e` is an `e` in a half-typed message
-        // and the dials were unreachable in the steady state. Alt never types,
-        // so one binding works in both halves of the pane rather than a bare
-        // key that silently does nothing most of the time.
-        if state.session_tab == SessionTab::Pal
-            && key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT)
-        {
-            let turned = match key_event.code {
-                KeyCode::Char('e') => Some(PalDialTurn::Engine),
-                KeyCode::Char('o') => Some(PalDialTurn::Model),
-                KeyCode::Char('g') => Some(PalDialTurn::Mode),
-                // Retry is offered only where something failed, so it does not
-                // shadow anything while the header is healthy.
-                KeyCode::Char('r')
-                    if matches!(
-                        state.pal_dial.status(),
-                        crate::fleet::pal_dial::DialStatus::Failed { .. }
-                    ) =>
-                {
-                    Some(PalDialTurn::Retry)
-                }
-                _ => None,
-            };
-            if let Some(turn) = turned {
-                match turn {
-                    PalDialTurn::Engine => state.pal_dial.cycle_engine(),
-                    PalDialTurn::Model => state.pal_dial.cycle_model(),
-                    PalDialTurn::Mode => state.pal_dial.cycle_mode(),
-                    PalDialTurn::Retry => state.pal_dial.retry(),
-                }
-                state.ui_needs_refresh = true;
-                return Some(AppEvent::Consumed);
-            }
-        }
-        // The Pal pane's offer to start the daemon owns Enter while it is
-        // up, and takes it BEFORE the chat reducer. The composer under it has
-        // nothing to send to — that is precisely the condition the offer
-        // appears in — so Enter reaching the reducer there is a key the footer
-        // advertised and nothing performed.
-        //
-        // Gated on ARMED, not merely shown: with focus on the session list,
-        // `Enter` is that list's, and starting a daemon on a keystroke the
-        // operator aimed somewhere else is not a thing to do quietly. The
-        // footer reads the same predicate, so it promises this only when it
-        // will happen.
-        if key_event.code == KeyCode::Enter && state.pal_daemon_cta_armed() {
-            return Some(AppEvent::SessionStartHangarDaemon);
-        }
-        // The broadcast composer, which replaces the thread's while rows are
-        // checked. Handled BEFORE the chat reducer because there is no chat
-        // host behind it — the pane is a composer and a receipt list, not a
-        // conversation, so there is nothing for `reduce_chat_key` to reduce.
-        if state.session_tab == SessionTab::Thread {
-            let targets = state.broadcast_targets();
-            if !targets.is_empty() {
-                let handled = match key_event.code {
-                    KeyCode::Enter => {
-                        // `send` refuses an empty message and an empty target
-                        // list, and says so by returning false, so a blank
-                        // Enter is a no-op rather than a receipt for nothing.
-                        state.broadcast.send(targets);
-                        true
-                    }
-                    KeyCode::Backspace => {
-                        state.broadcast.backspace();
-                        true
-                    }
-                    KeyCode::Esc => {
-                        // Out of the pane, not out of the multi-select: the
-                        // checkboxes are the left pane's and clearing them here
-                        // would undo work the operator did with Space.
-                        state.session_tab = SessionTab::Preview;
-                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
-                        true
-                    }
-                    KeyCode::Char(ch) => {
-                        state.broadcast.push(ch);
-                        true
-                    }
-                    _ => false,
-                };
-                if handled {
-                    state.ui_needs_refresh = true;
-                    return Some(AppEvent::Consumed);
-                }
-                return None;
-            }
-        }
-        // The conversation's OWN pane keys, on ALT for the same reason the
-        // header's dials are: the composer holds focus as soon as a
-        // conversation opens, so a bare `p` is a `p` in a half-typed message
-        // and the binding would be advertised on the pane and do nothing in the
-        // state an operator is usually in.
-        //
-        // Bound HERE rather than in the Pal-only block above so they work
-        // on the `thread` tab too: the chat surface is one state machine over
-        // two tabs, and a retry that only existed on one of them would be the
-        // drift `fleet_chat`'s header warns about. `p` and `c`, because the
-        // Pal header already owns Alt-r for the engine dial's own retry
-        // (`pal_dial::DialStatus::Failed`) and the two mean different
-        // things three rows apart. The LABELS live beside the reducer
-        // (`CHAT_RETRY_HINT`, `CHAT_CANCEL_HINT`), so the key a pane advertises
-        // and the key bound here cannot drift.
-        if key_event.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
-            let pane_key = match key_event.code {
-                KeyCode::Char('p') => Some(ChatKey::Retry),
-                KeyCode::Char('c') => Some(ChatKey::Cancel),
-                _ => None,
-            };
-            if let Some(pane_key) = pane_key {
-                return Self::apply_chat_key(pane_key, state);
-            }
-            // Every other Alt-modified key falls through to the sessions
-            // screen rather than into the composer: an Alt-modified letter is a
-            // binding an operator meant for a pane, never a character they
-            // meant to type.
-            return None;
-        }
-        // Attach digits ARE passed through to the composer — a digit typed into
-        // a message is a digit, and stealing it would make the composer unable
-        // to type "3". The footer stops advertising them here for that reason.
-        let chat_key = match key_event.code {
-            // The conversation's own focus toggle, moved off `Tab`.
-            KeyCode::BackTab => ChatKey::Tab,
-            KeyCode::Char(c) if c != ' ' => ChatKey::Char(c),
-            KeyCode::Char(' ') => ChatKey::Space,
-            KeyCode::Enter => ChatKey::Enter,
-            KeyCode::Esc => ChatKey::Esc,
-            KeyCode::Backspace => ChatKey::Backspace,
-            KeyCode::Up => ChatKey::Up,
-            KeyCode::Down => ChatKey::Down,
-            _ => return None,
-        };
-        Self::apply_chat_key(chat_key, state)
-    }
-
-    /// Fold one already-translated key into whichever conversation is open.
-    ///
-    /// Split out so the pane-level Alt bindings and the composer's own keys
-    /// reach the reducer through ONE path: two copies of "find the host,
-    /// reduce, dispatch the intent" is how a key ends up handled on one tab and
-    /// silently dropped on the other.
-    fn apply_chat_key(
-        chat_key: ainb_plugin_hangar::screen::fleet_chat::ChatKey,
-        state: &mut AppState,
-    ) -> Option<AppEvent> {
-        use crate::components::session_tabs::SessionTab;
-        use ainb_plugin_hangar::screen::fleet_chat::{ChatKeyOutcome, reduce_chat_key};
-
-        let host = match state.session_tab {
-            SessionTab::Pal => state.pal_chat.as_mut(),
-            SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
-            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
-        }?;
-        let outcome = reduce_chat_key(host.state_mut(), chat_key);
-        state.ui_needs_refresh = true;
-        match outcome {
-            ChatKeyOutcome::Handled => Some(AppEvent::Consumed),
-            // Esc out of the conversation returns to the pane that is never
-            // disabled, rather than leaving the operator on a composer they
-            // have just closed.
-            ChatKeyOutcome::Close => {
-                state.session_tab = SessionTab::Preview;
-                state.focused_pane = crate::app::state::FocusedPane::Sessions;
-                Some(AppEvent::Consumed)
-            }
-            ChatKeyOutcome::Intent(intent) => {
-                host.dispatch(intent);
-                Some(AppEvent::Consumed)
-            }
-        }
     }
 
     fn is_text_input_context(state: &AppState) -> bool {
@@ -1688,935 +1452,479 @@ impl EventHandler {
     }
 
     pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        use crate::app::screens::ids as screen_ids;
+        let keymap = Keymap::defaults();
+        return Self::handle_key_event_with_keymap(key_event, state, &keymap);
+    }
 
-        // Handle confirmation dialog first (highest priority)
-        if let Some(ref dialog) = state.confirmation_dialog {
-            // Tri-option dialogs cycle backwards on Left so users can navigate
-            // both directions; binary dialogs keep the simple Toggle behaviour.
-            let is_tri = dialog.options.is_some();
-            match key_event.code {
-                KeyCode::Left if is_tri => return Some(AppEvent::ConfirmationPrev),
-                KeyCode::Right | KeyCode::Tab => {
-                    return Some(AppEvent::ConfirmationToggle);
-                }
-                KeyCode::Left => {
-                    return Some(AppEvent::ConfirmationToggle);
-                }
-                KeyCode::Enter => {
-                    return Some(AppEvent::ConfirmationConfirm);
-                }
-                KeyCode::Esc => {
-                    return Some(AppEvent::ConfirmationCancel);
-                }
-                _ => return None,
-            }
-        }
-
-        // MCP pool overlay captures all keys while open (after the
-        // confirmation dialog, so a stop-confirmation sits on top of it).
-        if state.mcp_overlay.is_some() {
-            return match key_event.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('p') => {
-                    Some(AppEvent::McpOverlayClose)
-                }
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::McpOverlayPrev),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::McpOverlayNext),
-                KeyCode::Char('r') => Some(AppEvent::McpOverlayRefresh),
-                KeyCode::Char('s') => Some(AppEvent::McpOverlayStopServer),
-                KeyCode::Char('X') => Some(AppEvent::McpOverlayStopDaemon),
-                KeyCode::Char('i') => Some(AppEvent::McpOverlayImport),
-                _ => None,
-            };
-        }
-
-        // Handle "Other tmux" rename mode (high priority)
-        if state.other_tmux_rename_mode {
-            match key_event.code {
-                KeyCode::Enter => return Some(AppEvent::OtherTmuxConfirmRename),
-                KeyCode::Esc => return Some(AppEvent::OtherTmuxCancelRename),
-                KeyCode::Backspace => return Some(AppEvent::OtherTmuxRenameBackspace),
-                KeyCode::Char(c) => return Some(AppEvent::OtherTmuxRenameChar(c)),
-                _ => return None,
-            }
-        }
-
-        // Handle SSH session rename mode (high priority)
-        if state.ssh_session_rename_mode {
-            match key_event.code {
-                KeyCode::Enter => return Some(AppEvent::SshSessionConfirmRename),
-                KeyCode::Esc => return Some(AppEvent::SshSessionCancelRename),
-                KeyCode::Backspace => return Some(AppEvent::SshSessionRenameBackspace),
-                KeyCode::Char(c) => return Some(AppEvent::SshSessionRenameChar(c)),
-                _ => return None,
-            }
-        }
-
-        // Durable session-label popup captures input everywhere it is opened.
-        if state.session_label_rename_mode {
-            match key_event.code {
-                KeyCode::Enter => return Some(AppEvent::SessionLabelConfirmRename),
-                KeyCode::Esc => return Some(AppEvent::SessionLabelCancelRename),
-                KeyCode::Backspace => return Some(AppEvent::SessionLabelRenameBackspace),
-                KeyCode::Char(c) => return Some(AppEvent::SessionLabelRenameChar(c)),
-                _ => return None,
-            }
-        }
-
-        if state.session_context_menu.is_some() {
-            return match key_event.code {
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SessionContextPrev),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SessionContextNext),
-                KeyCode::Enter => Some(AppEvent::SessionContextActivate),
-                KeyCode::Esc => Some(AppEvent::SessionContextCancel),
-                _ => None,
-            };
-        }
-
-        // Handle onboarding wizard view FIRST (before any other handlers)
-        // Onboarding is a modal experience that should not be interrupted by global keybinds
-        if state.current_screen == screen_ids::ONBOARDING {
-            return Self::handle_onboarding_keys(key_event, state);
-        }
-
-        // Handle setup menu view (same priority as onboarding)
-        if state.current_screen == screen_ids::SETUP_MENU {
-            return Self::handle_setup_menu_keys(key_event, state);
-        }
-
-        // ------------------------------------------------------------
-        // Single-character global shortcuts.
-        //
-        // Contract: a single `KeyCode::Char(_)` with no modifier MUST
-        // NOT trigger any app-level action while the user is in a
-        // text-input context. If you need a binding that fires inside
-        // text inputs, use an explicit modifier (`Ctrl+`, `Alt+`,
-        // function keys) — never a bare `KeyCode::Char`.
-        //
-        // Previously each global shortcut maintained its own suppress
-        // list of text-input views (the `W` shortcut had one; the
-        // `H`/`?` shortcut did not). That was easy to forget and caused
-        // pasted text containing `H` to be partially swallowed because
-        // `H` toggled the help overlay mid-paste (e.g. `SHOTClubhouse/SHOTid`
-        // → `SOTid`). The single `in_text_input` predicate replaces all
-        // those lists. It gates the SessionList fallthrough match later in
-        // this function (defense-in-depth for future text-input views that
-        // forget an early-return handler); `host_globals_suppressed` below
-        // extends it for (a) the explicit `?`/`H` and `W` globals and (b) the
-        // help-visible swallow guard (so the field still consumes keys if
-        // help is somehow open inside a text input).
-        let in_text_input = Self::is_text_input_context(state);
-        // The printable host globals (`?`/`H` help, `W` statusline) are also
-        // off on a plugin screen whose plugin renders its OWN help, whatever the
-        // per-frame `captures_text` flag says: that flag is refreshed from the
-        // previous render, so the first ~70ms after such a plugin opens a text
-        // field report `false`, and a typed `H`/`?`/`W` was hijacked by the
-        // host. Worse, once `H` opened help the swallow branch below dropped
-        // every later key until Esc, which read as "the wizard lost my input".
-        // This is deliberately NOT folded into `in_text_input`: that predicate
-        // also short-circuits the fallthrough at the end of this function,
-        // and folding it in turned an unavailable plugin's placeholder into a
-        // screen where Ctrl+C, Esc and q all died (the PR #249 trap).
-        let host_globals_suppressed =
-            in_text_input || crate::app::screens::builtin::plugin_owns_help_keys(state);
-
+    /// Resolve host-owned rows through the data keymap.
+    ///
+    /// Component-owned New Session and PickRepo input remains behind its local
+    /// handlers; every host-owned routing decision is resolved from the table.
+    pub fn handle_key_event_with_keymap(
+        key_event: KeyEvent,
+        state: &mut AppState,
+        keymap: &Keymap,
+    ) -> Option<AppEvent> {
+        let chord = Chord::from_key_event(&key_event);
+        // New Session delegates to component-owned handlers in this phase, but
+        // Help remains a host modal and therefore wins before that delegation.
         if state.help_visible {
-            tracing::debug!("Help is visible, handling key: {:?}", key_event.code);
-            if !host_globals_suppressed {
-                match key_event.code {
-                    KeyCode::Char('?' | 'H') | KeyCode::Esc => {
-                        tracing::info!("Toggling help off via {:?}", key_event.code);
-                        return Some(AppEvent::ToggleHelp);
-                    }
-                    _ => {
-                        tracing::debug!("Ignoring key {:?} while help visible", key_event.code);
-                        return None;
-                    }
-                }
-            } else if matches!(key_event.code, KeyCode::Esc) {
-                // Help is visible while the user is in a text input.
-                // (Reachable via `HomeTile::Help` / `SidebarItem::Help`
-                // followed by view navigation — `H`/`?` itself can no
-                // longer toggle help inside a text input.) Treat Esc as
-                // "close help" rather than letting it fall through to
-                // the view's cancel handler, which would otherwise
-                // close the form. Any printable key falls through so
-                // the field still consumes it.
-                tracing::info!("Closing help via Esc from text-input context");
-                return Some(AppEvent::ToggleHelp);
+            let context = if Self::is_text_input_context(state) {
+                KeyContext::Screen("help", crate::app::keymap::SubContext::Named("text"))
+            } else {
+                KeyContext::HelpVisible
+            };
+            if let Some(KeyAction::App(event)) = keymap.resolve(&[context], &chord) {
+                return Some(event);
+            }
+            if !Self::is_text_input_context(state) {
+                return None;
             }
         }
-
-        if !host_globals_suppressed {
-            // Session-list-specific intercept for `H`: downgrade Headroom
-            // routing on the selected running session. Must be checked before
-            // the global `H` → ToggleHelp handler below because the global
-            // handler fires first and the session-list has no early-return
-            // path of its own. Only intercepts on the SESSION_LIST screen when
-            // the selected session is a Headroom-capable agent (Claude/Codex).
-            if matches!(key_event.code, KeyCode::Char('H'))
-                && state.current_screen == screen_ids::SESSION_LIST
-            {
-                use crate::models::session::SessionAgentType;
-                let is_headroom_capable = state
-                    .selected_session()
-                    .map(|s| {
-                        matches!(
-                            s.agent_type,
-                            SessionAgentType::Claude | SessionAgentType::Codex
-                        )
-                    })
-                    .unwrap_or(false);
-                if is_headroom_capable {
-                    return Some(AppEvent::DowngradeHeadroom);
-                }
-            }
-
-            // Global help toggle: `?` or `Shift+H` from any non-text view.
-            if matches!(key_event.code, KeyCode::Char('?' | 'H')) {
-                return Some(AppEvent::ToggleHelp);
-            }
-
-            // Global notice dismiss: `Ctrl+X` from any non-text view.
-            //
-            // A Ctrl-chord rather than a bare letter, and not by preference: a
-            // notice can be up on ANY screen, so the dismiss key has to be
-            // global, and every printable letter is already claimed by some
-            // screen's own handler further down. A chord is the mechanism this
-            // block's own contract points at for exactly that reason.
-            //
-            // Claimed ONLY while a notice is actually showing, so an empty
-            // corner leaves the chord exactly where it was. The one behaviour
-            // it does take, and only for as long as a notice is up: the
-            // session list matches a bare `KeyCode::Char('x')` without looking
-            // at modifiers, so `Ctrl+X` there used to fall into Cleanup
-            // Orphaned. Plain `x` is that action's documented key and is
-            // untouched.
-            //
-            // Sits inside the `!host_globals_suppressed` guard so an attached
-            // terminal or any text field still receives its own `Ctrl+X` —
-            // that chord means something in nano and emacs.
-            if matches!(key_event.code, KeyCode::Char('x' | 'X'))
-                && key_event.modifiers.contains(KeyModifiers::CONTROL)
-                && state.has_visible_notifications()
-            {
-                return Some(AppEvent::DismissNotifications);
-            }
-
-            // Global `W`: wire Claude Code statusline. Active from any
-            // non-text-input context when the statusline is unwired or
-            // stale (live data isn't coming from the Tier1 cache). The CTA
-            // in the top status bar points users here, so the shortcut
-            // must work everywhere — not just from the Burndown panel
-            // where it originally lived.
-            //
-            // The suppress list below covers two kinds of context:
-            //   (a) views that fundamentally accept free-form character
-            //       input (NewSession's prompt/branch/repo entry,
-            //       SearchWorkspace, ClaudeChat, AuthSetup, the Config
-            //       editor, the AttachedTerminal pass-through, the auth
-            //       provider popup),
-            //   (b) per-view text-entry overlays toggled inside otherwise
-            //       navigable screens (GitView's commit message, the
-            //       Skills search overlay).
-            //
-            // Modal text inputs that already early-return at the top of
-            // `handle_key_event` (confirmation dialog, OtherTmux/SshSession
-            // rename, onboarding/setup menus, quick-commit) don't reach
-            // this block, so they don't need entries here.
-            // Plugin text-entry modes (burndown zoom search / custom period,
-            // Hangar's card-title / compose / API-key inputs, …) are now covered
-            // generically: the plugin reports `captures_text` on every frame and
-            // `is_text_input_context` folds it into `in_text_input` via
-            // `plugin_capturing_text`. That gates this ENTIRE `!in_text_input`
-            // block — including the `W` handler below — so a `W` typed into a
-            // plugin input is suppressed here and forwarded to the plugin
-            // instead. No per-plugin W-suppression list is needed (8hx). This
-            // local stays `false` because the generic gate already handles it.
-            let analytics_text_active = false;
-            let skills_text_active =
-                state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
-            let recovery_text_active = state.current_screen == screen_ids::SESSION_RECOVERY
-                && state.session_recovery_state.search_active;
-            let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
-                && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
-            let suppress_global_w = matches!(
-                state.current_screen.as_str(),
-                screen_ids::NEW_SESSION
-                    | screen_ids::SEARCH_WORKSPACE
-                    | screen_ids::CLAUDE_CHAT
-                    | screen_ids::AUTH_SETUP
-                    | screen_ids::CONFIG
-                    | screen_ids::ATTACHED_TERMINAL
-            ) || state.auth_provider_popup_state.show_popup
-                || analytics_text_active
-                || skills_text_active
-                || recovery_text_active
-                || git_view_text_active;
-            if !suppress_global_w
-                && matches!(key_event.code, KeyCode::Char('W'))
-                && Self::should_wire_statusline(state)
-            {
-                return Some(AppEvent::UsageWireStatusline);
-            }
-        }
-
-        // AINB 2.0: Handle home screen view
-        if state.current_screen == screen_ids::HOME {
-            return Self::handle_home_screen_keys(key_event, state);
-        }
-
-        // Daemons runtime-health screen. Esc/q must pop back to the
-        // origin `GoToDaemons` saved in `previous_screen`, NOT hardcode home —
-        // the generic fallthrough below treats this non-plugin screen as
-        // GoToHomeScreen, which ignored the saved origin (L2).
-        if state.current_screen == screen_ids::DAEMONS {
-            return Self::handle_daemons_keys(key_event, state);
-        }
-
-        // AINB 2.0: Handle agent selection view
-
-        // AINB 2.0: Handle auth provider popup (overlays config screen)
-        if state.auth_provider_popup_state.show_popup {
-            return Self::handle_auth_provider_popup_keys(key_event, state);
-        }
-
-        // AINB 2.0: Handle config screen view
-        if state.current_screen == screen_ids::CONFIG {
-            return Self::handle_config_screen_keys(key_event, state);
-        }
-
-        // Handle new session creation view
         if state.current_screen == screen_ids::NEW_SESSION {
             return Self::handle_new_session_keys(key_event, state);
         }
 
-        // Handle search workspace view
-        if state.current_screen == screen_ids::SEARCH_WORKSPACE {
-            return Self::handle_search_workspace_keys(key_event, state);
-        }
-
-        // Handle non-git notification view
-        if state.current_screen == screen_ids::NON_GIT_NOTIFICATION {
-            return Self::handle_non_git_notification_keys(key_event, state);
-        }
-
-        // Handle Claude chat popup view
-        if state.current_screen == screen_ids::CLAUDE_CHAT {
-            return Self::handle_claude_chat_keys(key_event, state);
-        }
-
-        // Handle attached terminal view
-        if state.current_screen == screen_ids::ATTACHED_TERMINAL {
-            return Self::handle_attached_terminal_keys(key_event, state);
-        }
-
-        // Handle auth setup view
-        if state.current_screen == screen_ids::AUTH_SETUP {
-            return Self::handle_auth_setup_keys(key_event, state);
-        }
-
-        // Handle quick commit dialog input
-        if state.is_in_quick_commit_mode() {
-            return match key_event.code {
-                KeyCode::Enter => Some(AppEvent::QuickCommitConfirm),
-                KeyCode::Esc => Some(AppEvent::QuickCommitCancel),
-                KeyCode::Backspace => Some(AppEvent::QuickCommitBackspace),
-                KeyCode::Left => Some(AppEvent::QuickCommitCursorLeft),
-                KeyCode::Right => Some(AppEvent::QuickCommitCursorRight),
-                KeyCode::Char(ch) => Some(AppEvent::QuickCommitInputChar(ch)),
-                _ => None,
-            };
-        }
-
-        // Handle git view
-        if state.current_screen == screen_ids::GIT_VIEW {
-            tracing::debug!("In git view, handling git view keys");
-            return Self::handle_git_view_keys(key_event, state);
-        }
-
-        // Handle log history view
-        if state.current_screen == screen_ids::LOG_HISTORY {
-            tracing::debug!("In log history view, handling log history keys");
-            return Self::handle_log_history_keys(key_event, state);
-        }
-
-        // Handle changelog view
-        if state.current_screen == screen_ids::CHANGELOG {
-            tracing::debug!("In changelog view, handling changelog keys");
-            return Self::handle_changelog_keys(key_event, state);
-        }
-
-        // Plugin-owned screens (Analytics → burndown today) forward
-        // keystrokes down `plugin/handle_key` so the plugin's own UI
-        // state (period chip, focused panel, zoom, filter stack) can
-        // react. The forwarder returns `Handled` for non-reserved
-        // keys; reserved keys (`Ctrl+C`, `?`, `H`) and screens with
-        // no associated plugin fall through to the global handler
-        // below. See `screens::builtin::forward_key_to_focused_plugin`
-        // for the reservation list and the crossterm → wire
-        // translation.
-        if let crate::app::screens::EventOutcome::Handled =
-            crate::app::screens::builtin::forward_key_to_focused_plugin(state, &key_event)
-        {
-            return None;
-        }
-
-        // Handle skills browser view
-        if state.current_screen == screen_ids::SKILLS {
-            tracing::debug!("In skills view, handling skills keys");
-            return Self::handle_skills_keys(key_event, state);
-        }
-
-        // Handle skill-manager view (spec §10.1)
-        if state.current_screen == screen_ids::SKILL_MANAGER {
-            // Text-input prompt (add-source URI or search) takes
-            // priority over every other key — while it's open the
-            // user is typing, so chars must reach the buffer rather
-            // than trigger shortcuts.
-            if state.skill_manager_state.input.is_some() {
-                return match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::SkillManagerInputSubmit),
-                    KeyCode::Esc => Some(AppEvent::SkillManagerInputCancel),
-                    KeyCode::Backspace => Some(AppEvent::SkillManagerInputBackspace),
-                    KeyCode::Char(c) => Some(AppEvent::SkillManagerInputChar(c)),
-                    _ => None,
-                };
+        let contexts = active_contexts(state, &HostFlags::default());
+        match keymap.resolve_with_context(&contexts, &chord) {
+            Some((context, _))
+                if state.help_visible
+                    && context != KeyContext::HelpVisible
+                    && !Self::is_text_input_context(state) =>
+            {
+                None
             }
-
-            // Sync assess-then-apply dialog: shows the dry-run plan as a
-            // git-style diff. Enter applies, Esc cancels, arrows scroll.
-            // Intercepts before every other key while open.
-            if state.skill_manager_state.sync_confirm.is_some() {
-                return match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerSyncScroll(-1)),
-                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerSyncScroll(1)),
-                    KeyCode::Enter => Some(AppEvent::SkillManagerSyncConfirm),
-                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerSyncCancel),
-                    _ => None,
-                };
+            Some((context, KeyAction::App(event)))
+                if context == KeyContext::Global
+                    && matches!(event, AppEvent::ToggleHelp)
+                    && crate::app::screens::builtin::plugin_owns_help_keys(state) =>
+            {
+                None
             }
-
-            // Source-removal confirm dialog: arrows pick an option, Enter
-            // confirms, Esc cancels. Intercepts before every other key.
-            if state.skill_manager_state.source_remove_confirm.is_some() {
-                return match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        Some(AppEvent::SkillManagerSourceRemoveMove(-1))
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        Some(AppEvent::SkillManagerSourceRemoveMove(1))
-                    }
-                    KeyCode::Enter => Some(AppEvent::SkillManagerSourceRemoveConfirm),
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        Some(AppEvent::SkillManagerSourceRemoveCancel)
-                    }
-                    _ => None,
-                };
-            }
-
-            // Source-preview picker: multi-select units + target tools.
-            // Intercepts before browse/library/banner — it's the active
-            // modal whenever open.
-            if state.skill_manager_state.preview.is_some() {
-                return match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerPreviewUp),
-                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerPreviewDown),
-                    KeyCode::Char(' ') => Some(AppEvent::SkillManagerPreviewToggle),
-                    KeyCode::Char('a') => Some(AppEvent::SkillManagerPreviewAll),
-                    KeyCode::Char('n') => Some(AppEvent::SkillManagerPreviewNone),
-                    KeyCode::Char('1') => Some(AppEvent::SkillManagerPreviewTool(0)),
-                    KeyCode::Char('2') => Some(AppEvent::SkillManagerPreviewTool(1)),
-                    KeyCode::Char('3') => Some(AppEvent::SkillManagerPreviewTool(2)),
-                    KeyCode::Char('4') => Some(AppEvent::SkillManagerPreviewTool(3)),
-                    KeyCode::Enter => Some(AppEvent::SkillManagerPreviewConfirm),
-                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerPreviewClose),
-                    _ => None,
-                };
-            }
-
-            // Catalog browse overlay (`[b]`, bead ai-a20): two phases.
-            //   * Query mode — every char goes into the query buffer
-            //     (so `/`, `:`, spaces all reach it); Enter searches.
-            //   * Results mode — arrows select; Enter installs the
-            //     selected hit; `/` returns to Query mode to refine.
-            // Esc closes from either mode. Intercepts before the banner
-            // + normal keymap, just like the Library overlay.
-            if let Some(browse) = &state.skill_manager_state.browse {
-                use crate::components::skill_manager_screen::BrowseMode;
-                return match browse.mode {
-                    BrowseMode::Query => match key_event.code {
-                        // Tab switches catalog (before Char so it doesn't
-                        // land in the query buffer).
-                        KeyCode::Tab | KeyCode::BackTab => {
-                            Some(AppEvent::SkillManagerBrowseToggleCatalog)
-                        }
-                        KeyCode::Enter => Some(AppEvent::SkillManagerBrowseSearch),
-                        KeyCode::Esc => Some(AppEvent::SkillManagerBrowseClose),
-                        KeyCode::Backspace => Some(AppEvent::SkillManagerBrowseInputBackspace),
-                        KeyCode::Char(c) => Some(AppEvent::SkillManagerBrowseInputChar(c)),
-                        _ => None,
-                    },
-                    BrowseMode::Results => match key_event.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            Some(AppEvent::SkillManagerBrowseSelectPrev)
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            Some(AppEvent::SkillManagerBrowseSelectNext)
-                        }
-                        KeyCode::Tab | KeyCode::BackTab => {
-                            Some(AppEvent::SkillManagerBrowseToggleCatalog)
-                        }
-                        KeyCode::Enter => Some(AppEvent::SkillManagerBrowseInstall),
-                        KeyCode::Char('/') => Some(AppEvent::SkillManagerBrowseEditQuery),
-                        KeyCode::Esc | KeyCode::Char('q') => {
-                            Some(AppEvent::SkillManagerBrowseClose)
-                        }
-                        _ => None,
-                    },
-                };
-            }
-
-            // Own-skill Library overlay (`[l]`, bead ai-lgk): when
-            // open, arrows / j-k move the selection, Enter expands the
-            // selected row's Detail band, and Esc/q closes the overlay
-            // (back to the Units screen — NOT home, so the user doesn't
-            // lose the SkillManager context). Intercepts before the
-            // banner + normal keymap.
-            if state.skill_manager_state.library.is_some() {
-                return match key_event.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        Some(AppEvent::SkillManagerLibrarySelectPrev)
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        Some(AppEvent::SkillManagerLibrarySelectNext)
-                    }
-                    KeyCode::Enter => Some(AppEvent::SkillManagerLibraryEnter),
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => {
-                        Some(AppEvent::SkillManagerLibraryClose)
-                    }
-                    _ => None,
-                };
-            }
-
-            // Discovery banner (spec §User Flow 1 / P5): when the
-            // overlay is visible, Enter/d/s drive its state machine
-            // instead of the normal Skills shortcuts. Esc/q still
-            // returns to Home so the user can always escape.
-            if state.skill_manager_state.banner.is_active() {
-                return match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::SkillManagerDiscoveryImport),
-                    KeyCode::Char('d') => Some(AppEvent::SkillManagerDiscoveryToggleDetails),
-                    KeyCode::Char('s') => Some(AppEvent::SkillManagerDiscoverySkip),
-                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
-                    _ => None,
-                };
-            }
-            tracing::debug!("In skill-manager view, handling full keymap");
-            use crate::components::skill_manager_screen::FocusedSkillPane;
-            let sources_focused =
-                state.skill_manager_state.focused_pane == FocusedSkillPane::Sources;
-            return match key_event.code {
-                // `q` always returns home. `Esc` first clears an active
-                // source filter (if any) before returning home, so it
-                // doubles as the "back to All sources" affordance.
-                KeyCode::Char('q') => Some(AppEvent::SkillManagerBack),
-                KeyCode::Esc => {
-                    if state.skill_manager_state.source_filter.is_some() {
-                        Some(AppEvent::SkillManagerClearSourceFilter)
-                    } else {
-                        Some(AppEvent::SkillManagerBack)
-                    }
-                }
-                // Tab / Shift-Tab toggle focus between Sources and Units.
-                KeyCode::Tab | KeyCode::BackTab => Some(AppEvent::SkillManagerToggleFocus),
-                // `[` / `]` resize the Sources panel regardless of focus.
-                KeyCode::Char('[') => Some(AppEvent::SkillManagerShrinkSources),
-                KeyCode::Char(']') => Some(AppEvent::SkillManagerGrowSources),
-                // Navigation + Enter are focus-aware. When the Sources
-                // panel is focused, arrows/jk step the source cursor and
-                // Enter applies the filter; otherwise they drive the
-                // Units table as before.
-                KeyCode::Up | KeyCode::Char('k') if sources_focused => {
-                    Some(AppEvent::SkillManagerSourceSelectPrev)
-                }
-                KeyCode::Down | KeyCode::Char('j') if sources_focused => {
-                    Some(AppEvent::SkillManagerSourceSelectNext)
-                }
-                // `Enter` on a source row opens the installed-aware import
-                // picker (its skills, pre-checked if already installed) —
-                // the primary action. `[f]` keeps the older filter-to-source
-                // behaviour for when you just want to scope the Units table.
-                KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
-                KeyCode::Char('f') if sources_focused => {
-                    Some(AppEvent::SkillManagerApplySourceFilterKey)
-                }
-                // `[p]` still opens the picker too (muscle-memory alias).
-                KeyCode::Char('p') if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
-                // `[o]` on a unit — open its deployed skill dir in $EDITOR.
-                KeyCode::Char('o') if !sources_focused => {
-                    Some(AppEvent::SkillManagerOpenUnitInEditor)
-                }
-                // `[r]` on a source row — remove dialog (skills+source, or
-                // skills-only / keep source). Distinct from unit `[r]`.
-                KeyCode::Char('r') if sources_focused => {
-                    Some(AppEvent::SkillManagerSourceRemoveOpen)
-                }
-                // `[s]` on a source row — sync the whole source (all its
-                // units, both directions). Same assess popup as unit sync.
-                KeyCode::Char('s') if sources_focused => Some(AppEvent::SkillManagerSync),
-                // `[L]` on a source row — toggle "my library" mark. Capital
-                // L so lowercase `l` stays the Library overlay.
-                KeyCode::Char('L') if sources_focused => {
-                    Some(AppEvent::SkillManagerToggleLibrarySource)
-                }
-                // `[y]` on a unit — copy it into my library (yank).
-                KeyCode::Char('y') if !sources_focused => Some(AppEvent::SkillManagerCopyToLibrary),
-                // Units panel `[s]` — dual-purpose:
-                //   * if the selected unit is part of a conflict pair,
-                //     flip the shadowed_by edge (legacy behaviour);
-                //   * otherwise, fire `SkillManagerSync` to run the
-                //     Phase D bidirectional content sync on the
-                //     selected unit (bead v12.D.5).
-                // The banner branch above intercepts `s` first when
-                // the discovery overlay is visible (skip-banner).
-                KeyCode::Char('s') => {
-                    let ainb_home = ainb_skill_core::default_ainb_home();
-                    if selected_unit_has_conflict_peer(state, &ainb_home) {
-                        Some(AppEvent::SkillManagerConflictFlip)
-                    } else {
-                        Some(AppEvent::SkillManagerSync)
-                    }
-                }
-                // Help-bar shortcuts — now wired (were advertised but
-                // dropped before this change):
-                KeyCode::Char('i') => Some(AppEvent::SkillManagerOpenAddSource),
-                KeyCode::Char('u') => Some(AppEvent::SkillManagerUpdate),
-                KeyCode::Char('c') => Some(AppEvent::SkillManagerCheck),
-                KeyCode::Char('r') => Some(AppEvent::SkillManagerRemove),
-                KeyCode::Char('b') => Some(AppEvent::SkillManagerOpenBrowse),
-                KeyCode::Char('l') => Some(AppEvent::SkillManagerOpenLibrary),
-                KeyCode::Char('/') => Some(AppEvent::SkillManagerOpenSearch),
-                // `[m]` re-runs discovery (the empty-state hint
-                // finally tells the truth).
-                KeyCode::Char('m') => Some(AppEvent::SkillManagerRefreshDiscovery),
-                // Selection navigation — arrows + vim-style j/k +
-                // Home/End/g/G. Wraps at list ends. Detail pane
-                // recomputed on every move so the right-hand pane
-                // mirrors the cursor without an extra keystroke.
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerSelectPrev),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerSelectNext),
-                KeyCode::Home | KeyCode::Char('g') => Some(AppEvent::SkillManagerSelectFirst),
-                KeyCode::End | KeyCode::Char('G') => Some(AppEvent::SkillManagerSelectLast),
-                _ => None,
-            };
+            Some((_, KeyAction::App(event))) => Some(event),
+            Some((_, KeyAction::Text(character))) => Self::keymap_text_event(character, state),
+            Some((_, KeyAction::Ui(action))) => Self::keymap_ui_event(action, state),
+            Some((_, KeyAction::Passthrough | KeyAction::OpenSlashPalette)) | None => None,
         }
+    }
 
-        // A conversation pane owns the keyboard — BOTH its halves. Gating this
-        // on text capture alone let `y` fall through to the session screen
-        // while a guardrail confirm card was waiting for it.
-        //
-        // Routed BEFORE the `in_text_input` short-circuit below, which only
-        // suppresses the bare-char shortcuts — suppression alone would leave
-        // the operator typing into a pane that drops every character.
-        if state.session_tab_owns_keys() {
-            if let Some(event) = Self::route_session_composer_key(key_event, state) {
-                return Some(event);
-            }
+    /// Map a table-owned printable glyph onto the reducer's input intent.
+    fn keymap_text_event(character: char, state: &mut AppState) -> Option<AppEvent> {
+        if state.current_screen == screen_ids::SESSION_LIST && state.session_tab_owns_keys() {
+            return Self::route_session_composer_char(character, state);
         }
-
-        // The `ask` pane owns the arrows, the printable keys and Enter while it
-        // is open, for the same reason: an answer typed into it must not fire
-        // session shortcuts a character at a time.
         if state.current_screen == screen_ids::SESSION_LIST
             && crate::components::session_tabs::resolve(state, state.session_tab)
                 == crate::components::session_tabs::SessionTab::Ask
+            && state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
         {
-            if let Some(event) = Self::route_session_ask_key(key_event, state) {
-                return Some(event);
-            }
+            return Self::route_session_ask_text(character, state);
+        }
+        if state.other_tmux_rename_mode {
+            return Some(AppEvent::OtherTmuxRenameChar(character));
+        }
+        if state.ssh_session_rename_mode {
+            return Some(AppEvent::SshSessionRenameChar(character));
+        }
+        if state.session_label_rename_mode {
+            return Some(AppEvent::SessionLabelRenameChar(character));
+        }
+        if state.is_in_quick_commit_mode() {
+            return Some(AppEvent::QuickCommitInputChar(character));
+        }
+        if state.config_popup_state.show_popup {
+            return Some(AppEvent::ConfigPopupInputChar(character));
+        }
+        if state.auth_provider_popup_state.show_popup
+            && state.auth_provider_popup_state.is_entering_key
+        {
+            return Some(AppEvent::AuthProviderPopupInputChar(character));
         }
 
-        // Handle session recovery view
-        if state.current_screen == screen_ids::SESSION_RECOVERY {
-            tracing::debug!("In session recovery view, handling session recovery keys");
-            return Self::handle_session_recovery_keys(key_event, state);
-        }
-
-        // Handle key events based on focused pane (the SessionList view
-        // reaches this block via fallthrough — it has no explicit early
-        // return above). Defense-in-depth guard: every text-input view
-        // listed in `is_text_input_context` already has its own
-        // early-return handler higher up, so reaching here while
-        // `in_text_input` is true would only happen if someone adds a
-        // new text-input view to the predicate but forgets to wire a
-        // handler. Short-circuit so the bare-char shortcuts below
-        // (`c`, `n`, `a`, `q`, …) can't steal a keystroke from the field.
-        if in_text_input {
-            return None;
-        }
-
-        use crate::app::state::FocusedPane;
-
-        match key_event.code {
-            // Return to home screen (quit only available from HomeScreen).
-            // Plugin screens normally consume Esc via the forwarder above,
-            // but when the plugin is unavailable (runtime down, plugin
-            // disabled — the placeholder is showing) the key falls through
-            // to here: pop back to wherever the panel was opened from
-            // instead of hardcoding home.
-            KeyCode::Char('q') | KeyCode::Esc => {
-                if crate::app::screens::builtin::plugin_id_for_screen(&state.current_screen)
-                    .is_some()
-                {
-                    Some(AppEvent::PanelBack)
-                } else {
-                    Some(AppEvent::GoToHomeScreen)
-                }
-            }
-            // Tab cycles the right pane's tab strip; Shift+Tab walks it back.
-            //
-            // This REPLACES `SwitchPaneFocus`, which toggled Sessions <-> right
-            // pane. Nothing is lost: focus is now implied by which tab is open
-            // (the composer tabs take input, `preview` and `log` do not), so the
-            // one thing Tab used to buy is now a consequence of the same key.
-            // Two keys for one concept is the ambiguity the strip removes.
-            KeyCode::Tab => Some(AppEvent::SessionTabNext),
-            KeyCode::BackTab => Some(AppEvent::SessionTabPrev),
-            KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(AppEvent::Quit)
-            }
-            KeyCode::Char('c') => Some(AppEvent::ToggleClaudeChat),
-            KeyCode::Char('f') => Some(AppEvent::RefreshWorkspaces), // Manual refresh
-            KeyCode::Char('F') => Some(AppEvent::CycleSessionFilter), // Cycle session filter (active/stopped/all)
-            KeyCode::Char('n') => Some(AppEvent::NewSession),
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                // Star/unstar the selected workspace (only if a workspace is selected)
-                if state.selected_workspace_index.is_some() {
-                    Some(AppEvent::StarSelectedWorkspace)
-                } else {
-                    Some(AppEvent::ShowNotification(
-                        "Select a workspace first to star it".to_string(),
-                    ))
-                }
-            }
-            KeyCode::Char('a') => {
-                tracing::info!("[ACTION] 'a' key pressed - AttachTmuxSession requested");
-                Some(AppEvent::AttachTmuxSession)
-            }
-            KeyCode::Char('A') => {
-                // In-place interactive embed: Shift+A is the in-pane sibling of
-                // 'a' (full-screen attach) — same verb, different surface. Only
-                // meaningful if the selection has a tmux session; the handler in
-                // the loop no-ops otherwise. (Re-auth, which used to live on
-                // 'A', moved to 'u'.)
-                tracing::info!("[ACTION] 'A' key pressed - EnterInteractivePane requested");
-                Some(AppEvent::EnterInteractivePane)
-            }
-            // The badge-to-position mapping is recomputed on every render —
-            // digit N attaches to whatever is at that position *now*, not a
-            // fixed session ID.
-            KeyCode::Char(d)
-                if matches!(d, '1'..='9')
-                    && !key_event.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key_event.modifiers.contains(KeyModifiers::ALT) =>
+        match state.current_screen.as_str() {
+            screen_ids::CONFIG
+                if state.config_screen_state.editing
+                    || state.config_screen_state.api_key_input_mode =>
             {
-                let n = (d as u8 - b'0') as usize;
-                let items = state.attachable_items_in_order();
-                if let Some(target) = items.get(n - 1).copied() {
-                    tracing::info!(
-                        "[ACTION] digit '{}' pressed - attach to position {} ({:?})",
-                        d,
-                        n,
-                        target
-                    );
-                    state.select_attachable(target);
-                    Some(AppEvent::AttachTmuxSession)
-                } else {
-                    Some(AppEvent::ShowNotification(format!(
-                        "No session at position {}",
-                        n
-                    )))
-                }
+                Some(AppEvent::ConfigEditChar(character))
             }
-            KeyCode::Enter => {
-                // Enter is SCOPED TO THE ACTIVE TAB. It meant "attach"
-                // everywhere, which is the wrong verb on four of the five panes
-                // the strip now offers — on `ask` it has to send the answer.
-                // Each tab declares its own verb in `session_tabs`, and the
-                // footer prints it, so the operator never has to guess which
-                // one is about to fire.
-                use crate::components::session_tabs::SessionTab;
-                match crate::components::session_tabs::resolve(state, state.session_tab) {
-                    SessionTab::Preview => {}
-                    SessionTab::Ask => return Some(AppEvent::SessionAskSend),
-                    SessionTab::Thread | SessionTab::Pal => {
-                        return Some(AppEvent::SessionTabComposerSend);
-                    }
-                    // Deliberately nothing: a history pane has no verb, and
-                    // silently attaching from it is the surprise this scoping
-                    // exists to stop.
-                    SessionTab::Err | SessionTab::Log => return None,
-                }
-                // Enter on a Stopped interactive session = resume it.
-                // Enter on a Running session = attach (mirrors 'a').
-                // Other selection types fall through to None to preserve prior behaviour.
-                use crate::models::SessionStatus;
-                // Checked rows win over cursor: with a multi-select active,
-                // Enter starts every selected resumable session, not just the
-                // highlighted one.
-                if !state.selected_sessions.is_empty() {
-                    Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
-                } else if let Some(session) = state.selected_session() {
-                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
-                    if is_interactive && matches!(session.status, SessionStatus::Stopped) {
-                        Some(AppEvent::ResumeSession("Enter".to_string()))
-                    } else {
-                        Some(AppEvent::AttachTmuxSession)
-                    }
-                } else {
-                    None
-                }
+            screen_ids::CONFIG if state.config_screen_state.is_searching() => {
+                Some(AppEvent::ConfigSearchChar(character))
             }
-            KeyCode::Char('r') => {
-                // 'r' resumes a Stopped interactive session only. It no longer
-                // doubles as the reauthenticate-credentials shortcut — that
-                // moved to 'A' so the menu bar's `r resume` hint matches what
-                // the key actually does (one key, one meaning). Pressing 'r'
-                // on a non-resumable selection is a no-op.
-                use crate::models::SessionStatus;
-                // Checked rows win over cursor: with a multi-select active,
-                // 'r' resumes every selected resumable session.
-                if !state.selected_sessions.is_empty() {
-                    Some(AppEvent::ResumeSelectedSessions("r".to_string()))
-                } else if let Some(session) = state.selected_session() {
-                    let is_interactive = crate::app::state::is_stoppable_interactive(session);
-                    if is_interactive && matches!(session.status, SessionStatus::Stopped) {
-                        Some(AppEvent::ResumeSession("r".to_string()))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+            screen_ids::GIT_VIEW
+                if state.git_view_state.as_ref().is_some_and(|git| git.is_in_commit_mode()) =>
+            {
+                Some(AppEvent::GitViewCommitInputChar(character))
             }
-            // Re-authenticate agent credentials. Lives on 'u' ("re-aUth"; was
-            // 'A' until Shift+A became the in-pane attach, and 'r' before that
-            // so the resume affordance could own 'r'). See restart_affordance.
-            KeyCode::Char('u') => Some(AppEvent::ReauthenticateCredentials),
-            KeyCode::F(2) => {
-                // Durable labels never rename Git branches or tmux sessions.
-                if state.selected_session().is_some() || state.is_ssh_session_selected() {
-                    Some(AppEvent::SessionLabelStartRename)
-                } else if state.is_other_tmux_selected() {
-                    Some(AppEvent::OtherTmuxStartRename)
-                } else {
-                    Some(AppEvent::ShowNotification(
-                        "F2 labels managed or SSH sessions; Other tmux keeps rename".to_string(),
-                    ))
-                }
+            screen_ids::SKILLS if state.skills_state.search_active => {
+                Some(AppEvent::SkillsSearchChar(character))
             }
-            KeyCode::Char('e') => Some(AppEvent::RestartSession),
-            KeyCode::Char(' ') => Some(AppEvent::ToggleSelectSession),
-            KeyCode::Char('D') => Some(AppEvent::DeleteSelectedSessions),
-            KeyCode::Char('d') => Some(AppEvent::DeleteSession),
-            KeyCode::Char('x') => Some(AppEvent::CleanupOrphaned),
-            KeyCode::Char('g') => Some(AppEvent::ShowGitView), // Show git view
-            KeyCode::Char('p') => Some(AppEvent::QuickCommitStart), // Start quick commit dialog
-            KeyCode::Char('o') => Some(AppEvent::OpenInEditor), // Open in editor
-            KeyCode::Char('E') => Some(AppEvent::ToggleExpandAll), // Toggle expand/collapse all workspaces
-            KeyCode::Char('$') => Some(AppEvent::OpenQuickShell), // Quick shell in current workspace/session
-            // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
-            // 'B' is its keyboard twin. Hinted next to the glyph itself.
-            KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
-            // Hide/show the bottom keymap legend to reclaim vertical space.
-            KeyCode::Char('M') => Some(AppEvent::ToggleSessionMenuBar),
-            // Panel screens mirror their home-menu letters here so every
-            // panel opens from the session list too (i stats, w witr,
-            // k skills, m memory, t abtop — same set
-            // `handle_home_screen_keys` binds). GoToStats/GoToSkills/
-            // GoToLearnings save `previous_screen`, so closing the panel
-            // lands back on the session list, not home. GoToWitr /
-            // GoToAbtop are tmux suspend/attach that never change
-            // `current_screen`, so quitting them resumes here automatically.
-            KeyCode::Char('i') => Some(AppEvent::GoToStats),
-            KeyCode::Char('w') => Some(AppEvent::GoToWitr),
-            KeyCode::Char('k') => Some(AppEvent::GoToSkills),
-            KeyCode::Char('m') => Some(AppEvent::GoToLearnings),
-            KeyCode::Char('t') => Some(AppEvent::GoToAbtop),
+            screen_ids::SESSION_RECOVERY if state.session_recovery_state.search_active => {
+                Some(AppEvent::SessionRecoverySearchChar(character))
+            }
+            screen_ids::SKILL_MANAGER if state.skill_manager_state.input.is_some() => {
+                Some(AppEvent::SkillManagerInputChar(character))
+            }
+            screen_ids::AUTH_SETUP
+                if state
+                    .auth_setup_state
+                    .as_ref()
+                    .is_some_and(|auth| auth.selected_method == AuthMethod::ApiKey) =>
+            {
+                Some(AppEvent::AuthSetupInputChar(character))
+            }
+            screen_ids::ONBOARDING => state.onboarding_state.as_ref().map(|onboarding| {
+                use crate::components::onboarding::{AuthPane, OnboardingStep};
 
-            // Tmux preview scroll mode (Shift + Up/Down)
-            KeyCode::Up if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                Some(AppEvent::ScrollPreviewUp)
-            }
-            KeyCode::Down if key_event.modifiers.contains(KeyModifiers::SHIFT) => {
-                Some(AppEvent::ScrollPreviewDown)
-            }
-
-            // Navigation keys depend on focused pane (arrow keys only)
-            KeyCode::Down => {
-                tracing::debug!("Down key pressed, focused_pane: {:?}", state.focused_pane);
-                match state.focused_pane {
-                    FocusedPane::Sessions => {
-                        tracing::debug!("Sessions pane focused, triggering NextSession");
-                        Some(AppEvent::NextSession)
+                match onboarding.current_step {
+                    OnboardingStep::OtelSetup => AppEvent::OnboardingOtelChar(character),
+                    OnboardingStep::Authentication
+                        if matches!(onboarding.auth_pane, AuthPane::KeyEntry { .. }) =>
+                    {
+                        AppEvent::OnboardingAuthKeyChar(character)
                     }
-                    FocusedPane::LiveLogs | FocusedPane::Preview => {
-                        tracing::debug!("LiveLogs pane focused, triggering ScrollLogsDown");
-                        Some(AppEvent::ScrollLogsDown)
-                    }
+                    _ => AppEvent::OnboardingInputChar(character),
                 }
-            }
-            KeyCode::Up => {
-                tracing::debug!("Up key pressed, focused_pane: {:?}", state.focused_pane);
-                match state.focused_pane {
-                    FocusedPane::Sessions => {
-                        tracing::debug!("Sessions pane focused, triggering PreviousSession");
-                        Some(AppEvent::PreviousSession)
-                    }
-                    FocusedPane::LiveLogs | FocusedPane::Preview => {
-                        tracing::debug!("LiveLogs pane focused, triggering ScrollLogsUp");
-                        Some(AppEvent::ScrollLogsUp)
-                    }
-                }
-            }
-            // ← no longer switches workspace (use the mouse / sidebar for that);
-            // it's a no-op so it can't be mistaken for navigation.
-            KeyCode::Left => None,
-            // → attaches the selected session in a split pane (the in-place
-            // sibling of `a`/full-screen) — same verb as Shift+A. Workspace
-            // switching moved to the mouse.
-            KeyCode::Right => match state.focused_pane {
-                FocusedPane::Sessions => Some(AppEvent::EnterInteractivePane),
-                FocusedPane::LiveLogs | FocusedPane::Preview => None,
-            },
-            KeyCode::Home => match state.focused_pane {
-                FocusedPane::Sessions => Some(AppEvent::GoToTop),
-                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToTop),
-            },
-            KeyCode::End => match state.focused_pane {
-                FocusedPane::Sessions => Some(AppEvent::GoToBottom),
-                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ScrollLogsToBottom),
-            },
-            KeyCode::Char(' ') => match state.focused_pane {
-                FocusedPane::Sessions => None, // Space does nothing in sessions pane
-                FocusedPane::LiveLogs | FocusedPane::Preview => Some(AppEvent::ToggleAutoScroll),
-            },
+            }),
             _ => None,
         }
     }
 
-    fn handle_search_workspace_keys(
-        key_event: KeyEvent,
-        _state: &mut AppState,
+    /// Apply stateful host commands selected by the key table. None of these
+    /// branches inspect terminal key codes: their only input is a typed action.
+    fn keymap_ui_event(action: UiAction, state: &mut AppState) -> Option<AppEvent> {
+        use UiAction::{
+            PalCycleEngine, PalCycleMode, PalCycleModel, PalRetry, SessionAskBackspace,
+            SessionAskNext, SessionAskPrevious, SessionComposerBackspace, SessionComposerCancel,
+            SessionComposerDown, SessionComposerEnter, SessionComposerEscape,
+            SessionComposerFocusToggle, SessionComposerRetry, SessionComposerUp,
+        };
+
+        match action {
+            SessionAskPrevious => Self::route_session_ask_move(-1, state),
+            SessionAskNext => Self::route_session_ask_move(1, state),
+            SessionAskBackspace => Self::route_session_ask_backspace(state),
+            SessionComposerEnter => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Enter,
+                state,
+            ),
+            SessionComposerBackspace => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Backspace,
+                state,
+            ),
+            SessionComposerEscape => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Esc,
+                state,
+            ),
+            SessionComposerUp => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Up,
+                state,
+            ),
+            SessionComposerDown => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Down,
+                state,
+            ),
+            SessionComposerFocusToggle => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Tab,
+                state,
+            ),
+            SessionComposerRetry => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Retry,
+                state,
+            ),
+            SessionComposerCancel => Self::route_session_composer_action(
+                ainb_plugin_hangar::screen::fleet_chat::ChatKey::Cancel,
+                state,
+            ),
+            PalCycleEngine => Self::route_pal_dial(|dial| dial.cycle_engine(), state),
+            PalCycleModel => Self::route_pal_dial(|dial| dial.cycle_model(), state),
+            PalCycleMode => Self::route_pal_dial(|dial| dial.cycle_mode(), state),
+            PalRetry
+                if matches!(
+                    state.pal_dial.status(),
+                    crate::fleet::pal_dial::DialStatus::Failed { .. }
+                ) =>
+            {
+                Self::route_pal_dial(|dial| dial.retry(), state)
+            }
+            PalRetry => None,
+            UiAction::DaemonsCloseOverlay => {
+                state.daemons_state.close_overlay();
+                None
+            }
+            UiAction::DaemonsCloseAndBack => {
+                state.daemons_state.close_all_overlays();
+                Some(AppEvent::PanelBack)
+            }
+            UiAction::DaemonsConfirmMenu => {
+                state.daemons_state.confirm_menu();
+                if let Some(session) = state.daemons_state.take_attach_request() {
+                    state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session));
+                }
+                None
+            }
+            UiAction::DaemonsOpenMenu => {
+                state.daemons_state.open_menu();
+                None
+            }
+            UiAction::DaemonsMoveOverlay(delta) => {
+                state.daemons_state.move_menu(delta);
+                None
+            }
+            UiAction::DaemonsMoveSelection(delta) => {
+                state.daemons_state.move_selection(delta);
+                None
+            }
+            UiAction::SkillManagerSyncOrConflict => {
+                if state.skill_manager_state.focused_pane
+                    == crate::components::skill_manager_screen::FocusedSkillPane::Sources
+                {
+                    return Some(AppEvent::SkillManagerSync);
+                }
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                Some(if selected_unit_has_conflict_peer(state, &ainb_home) {
+                    AppEvent::SkillManagerConflictFlip
+                } else {
+                    AppEvent::SkillManagerSync
+                })
+            }
+            UiAction::SkillManagerRemoveOrSource => Some(
+                if state.skill_manager_state.focused_pane
+                    == crate::components::skill_manager_screen::FocusedSkillPane::Sources
+                {
+                    AppEvent::SkillManagerSourceRemoveOpen
+                } else {
+                    AppEvent::SkillManagerRemove
+                },
+            ),
+            UiAction::SkillManagerOpenUnitIfFocused => (state.skill_manager_state.focused_pane
+                != crate::components::skill_manager_screen::FocusedSkillPane::Sources)
+                .then_some(AppEvent::SkillManagerOpenUnitInEditor),
+            UiAction::SkillManagerCopyToLibraryIfFocused => {
+                (state.skill_manager_state.focused_pane
+                    != crate::components::skill_manager_screen::FocusedSkillPane::Sources)
+                    .then_some(AppEvent::SkillManagerCopyToLibrary)
+            }
+            UiAction::SkillManagerBackOrClearFilter => {
+                if state.skill_manager_state.source_filter.is_some() {
+                    Some(AppEvent::SkillManagerClearSourceFilter)
+                } else {
+                    Some(AppEvent::SkillManagerBack)
+                }
+            }
+            UiAction::SessionActivateSelected => Self::activate_selected_session(state),
+            UiAction::SessionResumeSelected => Self::resume_selected_session(state),
+            UiAction::SessionStartRename => Self::start_selected_session_rename(state),
+            UiAction::SessionHeadroomOrHelp => Self::session_headroom_or_help(state),
+            UiAction::AttachSessionByPosition(position) => {
+                let items = state.attachable_items_in_order();
+                if let Some(target) = items.get(position - 1).copied() {
+                    state.select_attachable(target);
+                    Some(AppEvent::AttachTmuxSession)
+                } else {
+                    Some(AppEvent::ShowNotification(format!(
+                        "No session at position {position}"
+                    )))
+                }
+            }
+            UiAction::UsageWireStatusline => {
+                Self::should_wire_statusline(state).then_some(AppEvent::UsageWireStatusline)
+            }
+            UiAction::PreviewScrollUp
+            | UiAction::PreviewScrollDown
+            | UiAction::PreviewPageUp
+            | UiAction::PreviewPageDown
+            | UiAction::PreviewExitScroll => None,
+        }
+    }
+
+    fn activate_selected_session(state: &AppState) -> Option<AppEvent> {
+        use crate::components::session_tabs::SessionTab;
+        use crate::models::SessionStatus;
+
+        match crate::components::session_tabs::resolve(state, state.session_tab) {
+            SessionTab::Preview => {}
+            SessionTab::Ask => return Some(AppEvent::SessionAskSend),
+            SessionTab::Thread | SessionTab::Pal => return Some(AppEvent::SessionTabComposerSend),
+            SessionTab::Err | SessionTab::Log => return None,
+        }
+        // Checked managed rows remain the action target even after the cursor
+        // moves to a terminal, SSH, shell, or Other tmux row.
+        if !state.selected_sessions.is_empty() {
+            Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
+        } else if state.is_ssh_session_selected()
+            || state.is_other_tmux_selected()
+            || state.shell_selected
+        {
+            Some(AppEvent::AttachTmuxSession)
+        } else if let Some(session) = state.selected_session() {
+            let interactive = crate::app::state::is_stoppable_interactive(session);
+            if interactive && matches!(session.status, SessionStatus::Stopped) {
+                Some(AppEvent::ResumeSession("Enter".to_string()))
+            } else {
+                Some(AppEvent::AttachTmuxSession)
+            }
+        } else {
+            None
+        }
+    }
+
+    fn resume_selected_session(state: &AppState) -> Option<AppEvent> {
+        use crate::models::SessionStatus;
+
+        if !state.selected_sessions.is_empty() {
+            Some(AppEvent::ResumeSelectedSessions("r".to_string()))
+        } else if let Some(session) = state.selected_session() {
+            let interactive = crate::app::state::is_stoppable_interactive(session);
+            (interactive && matches!(session.status, SessionStatus::Stopped))
+                .then(|| AppEvent::ResumeSession("r".to_string()))
+        } else {
+            None
+        }
+    }
+
+    fn start_selected_session_rename(state: &AppState) -> Option<AppEvent> {
+        if state.selected_session().is_some() || state.is_ssh_session_selected() {
+            Some(AppEvent::SessionLabelStartRename)
+        } else if state.is_other_tmux_selected() {
+            Some(AppEvent::OtherTmuxStartRename)
+        } else {
+            Some(AppEvent::ShowNotification(
+                "F2 labels managed or SSH sessions; Other tmux keeps rename".to_string(),
+            ))
+        }
+    }
+
+    fn session_headroom_or_help(state: &AppState) -> Option<AppEvent> {
+        use crate::models::session::SessionAgentType;
+
+        state
+            .selected_session()
+            .is_some_and(|session| {
+                matches!(
+                    session.agent_type,
+                    SessionAgentType::Claude | SessionAgentType::Codex
+                )
+            })
+            .then_some(AppEvent::DowngradeHeadroom)
+            .or(Some(AppEvent::ToggleHelp))
+    }
+
+    fn route_session_ask_move(delta: isize, state: &mut AppState) -> Option<AppEvent> {
+        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
+        state.ask_state.retarget(&chip);
+        state.ask_state.move_cursor(&chip, delta);
+        state.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
+    fn route_session_ask_backspace(state: &mut AppState) -> Option<AppEvent> {
+        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
+        state.ask_state.retarget(&chip);
+        state.ask_state.backspace();
+        state.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
+    fn route_session_ask_text(character: char, state: &mut AppState) -> Option<AppEvent> {
+        let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
+        state.ask_state.retarget(&chip);
+        if state.ask_state.focus() != crate::fleet::answer::AskFocus::FreeText {
+            return None;
+        }
+        state.ask_state.push_char(character);
+        state.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
+    fn route_pal_dial<F>(turn: F, state: &mut AppState) -> Option<AppEvent>
+    where
+        F: FnOnce(&mut crate::fleet::pal_dial::PalDial),
+    {
+        if state.session_tab != crate::components::session_tabs::SessionTab::Pal {
+            return None;
+        }
+        turn(&mut state.pal_dial);
+        state.ui_needs_refresh = true;
+        Some(AppEvent::Consumed)
+    }
+
+    fn route_session_composer_char(character: char, state: &mut AppState) -> Option<AppEvent> {
+        use ainb_plugin_hangar::screen::fleet_chat::ChatKey;
+
+        Self::route_session_composer_action(
+            if character == ' ' {
+                ChatKey::Space
+            } else {
+                ChatKey::Char(character)
+            },
+            state,
+        )
+    }
+
+    fn route_session_composer_action(
+        action: ainb_plugin_hangar::screen::fleet_chat::ChatKey,
+        state: &mut AppState,
     ) -> Option<AppEvent> {
-        // Phase 6 (new-session redesign): the search-workspace screen used to
-        // host the legacy `SelectRepo` repo picker. The redesigned flow
-        // routes that responsibility into PickRepo, so this handler now only
-        // honors Esc to back out.
-        match key_event.code {
-            KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-            _ => None,
+        use crate::components::session_tabs::SessionTab;
+        use ainb_plugin_hangar::screen::fleet_chat::{ChatKey, ChatKeyOutcome, reduce_chat_key};
+
+        if matches!(action, ChatKey::Enter) && state.pal_daemon_cta_armed() {
+            return Some(AppEvent::SessionStartHangarDaemon);
+        }
+        if state.session_tab == SessionTab::Thread {
+            let targets = state.broadcast_targets();
+            if !targets.is_empty() {
+                let handled = match action {
+                    ChatKey::Enter => {
+                        state.broadcast.send(targets);
+                        true
+                    }
+                    ChatKey::Backspace => {
+                        state.broadcast.backspace();
+                        true
+                    }
+                    ChatKey::Esc => {
+                        state.session_tab = SessionTab::Preview;
+                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        true
+                    }
+                    ChatKey::Char(character) => {
+                        state.broadcast.push(character);
+                        true
+                    }
+                    ChatKey::Space => {
+                        state.broadcast.push(' ');
+                        true
+                    }
+                    _ => false,
+                };
+                if handled {
+                    state.ui_needs_refresh = true;
+                    return Some(AppEvent::Consumed);
+                }
+                return None;
+            }
+        }
+
+        let host = match state.session_tab {
+            SessionTab::Pal => state.pal_chat.as_mut(),
+            SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
+            SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
+        }?;
+        let outcome = reduce_chat_key(host.state_mut(), action);
+        state.ui_needs_refresh = true;
+        match outcome {
+            ChatKeyOutcome::Handled => Some(AppEvent::Consumed),
+            ChatKeyOutcome::Close => {
+                state.session_tab = SessionTab::Preview;
+                state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                Some(AppEvent::Consumed)
+            }
+            ChatKeyOutcome::Intent(intent) => {
+                host.dispatch(intent);
+                Some(AppEvent::Consumed)
+            }
         }
     }
 
@@ -2653,7 +1961,7 @@ impl EventHandler {
         // Phase 4 (new-session redesign): screen-1 has its own self-contained
         // key handler. Process it BEFORE the match below so we can take a
         // `&mut` borrow on `pick_repo_state` without fighting the immutable
-        // borrow used by the legacy match arms.
+        // borrow used by the following component state handling.
         let on_pick_repo = state
             .new_session_state
             .as_ref()
@@ -2785,862 +2093,13 @@ impl EventHandler {
             match session_state.step {
                 NewSessionStep::Configure => None, // handled above
                 NewSessionStep::PickRepo => None,  // handled above
-                NewSessionStep::Creating => match key_event.code {
-                    KeyCode::Esc => Some(AppEvent::NewSessionCancel),
-                    _ => None,
-                },
+                NewSessionStep::Creating if Chord::from_key_event(&key_event).as_str() == "esc" => {
+                    Some(AppEvent::NewSessionCancel)
+                }
+                NewSessionStep::Creating => None,
             }
         } else {
             None
-        }
-    }
-
-    fn handle_non_git_notification_keys(
-        key_event: KeyEvent,
-        _state: &mut AppState,
-    ) -> Option<AppEvent> {
-        match key_event.code {
-            KeyCode::Char('q') | KeyCode::Esc => Some(AppEvent::GoToHomeScreen),
-            // 's' key removed - use 'n' to access local repo search via source selection
-            _ => None,
-        }
-    }
-
-    fn handle_attached_terminal_keys(
-        key_event: KeyEvent,
-        _state: &mut AppState,
-    ) -> Option<AppEvent> {
-        match key_event.code {
-            KeyCode::Char('d') => Some(AppEvent::DetachSession),
-            KeyCode::Char('q') | KeyCode::Esc => Some(AppEvent::DetachSession),
-            KeyCode::Char('k') => Some(AppEvent::KillContainer),
-            _ => None, // All other keys are passed through to the terminal
-        }
-    }
-
-    fn handle_claude_chat_keys(key_event: KeyEvent, _state: &mut AppState) -> Option<AppEvent> {
-        match key_event.code {
-            // Escape closes the Claude chat popup
-            KeyCode::Esc => Some(AppEvent::ToggleClaudeChat),
-            // Enter sends the message
-            KeyCode::Enter => {
-                // TODO: Add send message event
-                None
-            }
-            // Backspace for editing input
-            KeyCode::Backspace => {
-                // TODO: Add backspace handling
-                None
-            }
-            // All other characters are input to the chat
-            KeyCode::Char(_ch) => {
-                // TODO: Add character input handling
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn handle_auth_setup_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        if let Some(ref auth_state) = state.auth_setup_state {
-            // If we're inputting API key, handle text input
-            if auth_state.selected_method == AuthMethod::ApiKey
-                && !auth_state.api_key_input.is_empty()
-            {
-                match key_event.code {
-                    KeyCode::Enter => Some(AppEvent::AuthSetupSelect),
-                    KeyCode::Backspace => Some(AppEvent::AuthSetupBackspace),
-                    KeyCode::Esc => Some(AppEvent::AuthSetupBackspace), // Clear input
-                    KeyCode::Char(ch) => Some(AppEvent::AuthSetupInputChar(ch)),
-                    _ => None,
-                }
-            } else {
-                // Method selection mode or waiting for auth completion
-                match key_event.code {
-                    KeyCode::Esc => Some(AppEvent::AuthSetupCancel),
-                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::AuthSetupPrevious),
-                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::AuthSetupNext),
-                    KeyCode::Enter => Some(AppEvent::AuthSetupSelect),
-                    KeyCode::Char('r') => Some(AppEvent::AuthSetupRefresh), // Manual refresh
-                    KeyCode::Char('c') => Some(AppEvent::AuthSetupShowCommand), // Show CLI command
-                    _ => None,
-                }
-            }
-        } else {
-            None
-        }
-    }
-
-    fn handle_onboarding_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        use crate::components::onboarding::OnboardingStep;
-
-        if let Some(ref onboarding_state) = state.onboarding_state {
-            // Different handling based on current step
-            match onboarding_state.current_step {
-                OnboardingStep::GitDirectories => {
-                    // Text input mode for git directories
-                    // Note: Left/Backspace used for text editing, use Up arrow to go back
-                    match key_event.code {
-                        KeyCode::Enter => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                        KeyCode::Up => Some(AppEvent::OnboardingBack), // Go back (since Left is cursor)
-                        KeyCode::Backspace => Some(AppEvent::OnboardingBackspace),
-                        KeyCode::Delete => Some(AppEvent::OnboardingDelete),
-                        KeyCode::Left => Some(AppEvent::OnboardingCursorLeft),
-                        KeyCode::Right => Some(AppEvent::OnboardingCursorRight),
-                        KeyCode::Home => Some(AppEvent::OnboardingCursorHome),
-                        KeyCode::End => Some(AppEvent::OnboardingCursorEnd),
-                        KeyCode::Char(ch) => Some(AppEvent::OnboardingInputChar(ch)),
-                        _ => None,
-                    }
-                }
-                OnboardingStep::Source | OnboardingStep::Role | OnboardingStep::UseCase => {
-                    match key_event.code {
-                        KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                        KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
-                        KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::OnboardingQuestionUp),
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            Some(AppEvent::OnboardingQuestionDown)
-                        }
-                        _ => None,
-                    }
-                }
-                OnboardingStep::DependencyCheck => {
-                    if onboarding_state.agent_pick_open {
-                        // Agent picker (after G): choose which agent's installer to write.
-                        match key_event.code {
-                            KeyCode::Char('c') | KeyCode::Char('C') => Some(
-                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Claude),
-                            ),
-                            KeyCode::Char('x') | KeyCode::Char('X') => Some(
-                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Codex),
-                            ),
-                            KeyCode::Char('a') | KeyCode::Char('A') => {
-                                Some(AppEvent::OnboardingGenerateScript(
-                                    crate::setup::Agent::Antigravity,
-                                ))
-                            }
-                            KeyCode::Char('p') | KeyCode::Char('P') => Some(
-                                AppEvent::OnboardingGenerateScript(crate::setup::Agent::Copilot),
-                            ),
-                            KeyCode::Esc => Some(AppEvent::OnboardingCancelScriptPrompt),
-                            _ => None,
-                        }
-                    } else {
-                        match key_event.code {
-                            // All four arrows are navigation (move the focused-dep
-                            // cursor) — never a screen change, so they don't fight
-                            // each other. Enter advances, Esc goes back one screen.
-                            KeyCode::Enter => {
-                                // If deps not checked yet, check them; otherwise advance.
-                                if onboarding_state.dependency_status.is_none() {
-                                    Some(AppEvent::OnboardingCheckDeps)
-                                } else {
-                                    Some(AppEvent::OnboardingNext)
-                                }
-                            }
-                            KeyCode::Esc => Some(AppEvent::OnboardingBack),
-                            KeyCode::Up | KeyCode::Left => Some(AppEvent::OnboardingDepCursorUp),
-                            KeyCode::Down | KeyCode::Right => {
-                                Some(AppEvent::OnboardingDepCursorDown)
-                            }
-                            KeyCode::Char('r') => Some(AppEvent::OnboardingCheckDeps), // Re-check
-                            // `i` installs the focused dep; tmux config moved to `t`.
-                            KeyCode::Char('i') | KeyCode::Char('I') => {
-                                Some(AppEvent::OnboardingInstallFocusedDep)
-                            }
-                            KeyCode::Char('t') | KeyCode::Char('T') => {
-                                Some(AppEvent::OnboardingInstallConfig)
-                            } // Install tmux config
-                            KeyCode::Char('g') | KeyCode::Char('G') => {
-                                Some(AppEvent::OnboardingScriptPrompt)
-                            } // Generate install script
-                            _ => None,
-                        }
-                    }
-                }
-                OnboardingStep::Authentication => {
-                    use crate::components::onboarding::AuthPane;
-                    let pane = state.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
-                    match pane {
-                        // Typing an API key.
-                        Some(AuthPane::KeyEntry { .. }) => match key_event.code {
-                            KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
-                            KeyCode::Esc => Some(AppEvent::OnboardingAuthCancel),
-                            KeyCode::Backspace => Some(AppEvent::OnboardingAuthKeyBackspace),
-                            KeyCode::Char(c) => Some(AppEvent::OnboardingAuthKeyChar(c)),
-                            _ => None,
-                        },
-                        // Choosing a method for one agent.
-                        Some(AuthPane::MethodPicker { .. }) => match key_event.code {
-                            KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
-                            KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
-                            KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingAuthSelect),
-                            KeyCode::Esc | KeyCode::Left => Some(AppEvent::OnboardingAuthCancel),
-                            _ => None,
-                        },
-                        // Per-agent list (default). Enter drills in; Right/n advance.
-                        _ => match key_event.code {
-                            KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
-                            KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
-                            KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
-                            KeyCode::Right | KeyCode::Char('n') | KeyCode::Char('N') => {
-                                Some(AppEvent::OnboardingNext)
-                            }
-                            KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                            KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
-                            KeyCode::Char('s') | KeyCode::Char('S') => {
-                                Some(AppEvent::OnboardingSkipAuth)
-                            }
-                            _ => None,
-                        },
-                    }
-                }
-                OnboardingStep::OtelSetup => match key_event.code {
-                    // Enter advances; if all 3 creds are filled, finish-time
-                    // setup runs, otherwise the step is effectively skipped.
-                    KeyCode::Enter => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                    KeyCode::Left => Some(AppEvent::OnboardingBack),
-                    KeyCode::Tab | KeyCode::Down => Some(AppEvent::OnboardingOtelNextField),
-                    KeyCode::BackTab | KeyCode::Up => Some(AppEvent::OnboardingOtelPrevField),
-                    KeyCode::Backspace => Some(AppEvent::OnboardingOtelBackspace),
-                    KeyCode::Char(ch) => Some(AppEvent::OnboardingOtelChar(ch)),
-                    _ => None,
-                },
-                OnboardingStep::EditorSelection => match key_event.code {
-                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                    KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
-                    KeyCode::Up => Some(AppEvent::OnboardingEditorUp),
-                    KeyCode::Down => Some(AppEvent::OnboardingEditorDown),
-                    KeyCode::Char('k') => Some(AppEvent::OnboardingEditorUp),
-                    KeyCode::Char('j') => Some(AppEvent::OnboardingEditorDown),
-                    _ => None,
-                },
-                OnboardingStep::Summary => match key_event.code {
-                    KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingFinish),
-                    KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                    KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                        Some(AppEvent::OnboardingBack)
-                    }
-                    _ => None,
-                },
-                _ => {
-                    // Welcome and other steps - basic navigation
-                    match key_event.code {
-                        KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
-                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
-                        KeyCode::Left | KeyCode::Backspace | KeyCode::Up => {
-                            Some(AppEvent::OnboardingBack)
-                        }
-                        _ => None,
-                    }
-                }
-            }
-        } else {
-            None
-        }
-    }
-
-    fn handle_setup_menu_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        // Handle confirmation dialog keys
-        if state.setup_menu_state.showing_confirmation {
-            match key_event.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                    Some(AppEvent::SetupMenuSelect) // Confirm
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    Some(AppEvent::SetupMenuBack) // Cancel
-                }
-                _ => None,
-            }
-        } else {
-            // Normal menu navigation
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::SetupMenuBack),
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SetupMenuUp),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SetupMenuDown),
-                KeyCode::Enter => Some(AppEvent::SetupMenuSelect),
-                _ => None,
-            }
-        }
-    }
-
-    fn handle_git_view_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        tracing::debug!("Git view key pressed: {:?}", key_event);
-
-        // Check if we're in commit message input mode
-        let in_commit_mode = if let Some(ref git_state) = state.git_view_state {
-            git_state.is_in_commit_mode()
-        } else {
-            tracing::warn!("No git state available in handle_git_view_keys");
-            false
-        };
-
-        if in_commit_mode {
-            // Handle commit message input
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::GitViewCommitCancel),
-                KeyCode::Enter => Some(AppEvent::GitViewCommitConfirm),
-                KeyCode::Backspace => Some(AppEvent::GitViewCommitBackspace),
-                KeyCode::Left => Some(AppEvent::GitViewCommitCursorLeft),
-                KeyCode::Right => Some(AppEvent::GitViewCommitCursorRight),
-                KeyCode::Char(ch) => Some(AppEvent::GitViewCommitInputChar(ch)),
-                _ => None,
-            }
-        } else {
-            // Normal git view navigation
-            let on_review = state
-                .git_view_state
-                .as_ref()
-                .is_some_and(|g| g.active_tab == crate::components::git_view::GitTab::Review);
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::GitViewBack),
-                KeyCode::Tab => Some(AppEvent::GitViewSwitchTab),
-                KeyCode::Up if on_review => Some(AppEvent::GitReviewSidebarUp),
-                KeyCode::Down if on_review => Some(AppEvent::GitReviewSidebarDown),
-                KeyCode::Char('n') if on_review => Some(AppEvent::GitReviewNextHunk),
-                KeyCode::Char('N') if on_review => Some(AppEvent::GitReviewPrevHunk),
-                KeyCode::Char(']') if on_review => Some(AppEvent::GitReviewNextReviewFile),
-                KeyCode::Char('[') if on_review => Some(AppEvent::GitReviewPrevReviewFile),
-                KeyCode::Char(' ') if on_review => Some(AppEvent::GitReviewToggleCollapse),
-                KeyCode::Char('z') if on_review => Some(AppEvent::GitReviewExpandContext),
-                KeyCode::Char('e') if on_review => Some(AppEvent::GitReviewExpandAllFolders),
-                KeyCode::Char('E') if on_review => Some(AppEvent::GitReviewCollapseAllFolders),
-                KeyCode::Enter if on_review => Some(AppEvent::GitReviewToggleCollapse),
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if let Some(ref git_state) = state.git_view_state {
-                        match git_state.active_tab {
-                            crate::components::git_view::GitTab::Files => {
-                                Some(AppEvent::GitViewNextFile)
-                            }
-                            crate::components::git_view::GitTab::Commits => {
-                                Some(AppEvent::GitViewNextCommit)
-                            }
-                            crate::components::git_view::GitTab::Review
-                            | crate::components::git_view::GitTab::Diff
-                            | crate::components::git_view::GitTab::Markdown => {
-                                Some(AppEvent::GitViewScrollDown)
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if let Some(ref git_state) = state.git_view_state {
-                        match git_state.active_tab {
-                            crate::components::git_view::GitTab::Files => {
-                                Some(AppEvent::GitViewPrevFile)
-                            }
-                            crate::components::git_view::GitTab::Commits => {
-                                Some(AppEvent::GitViewPrevCommit)
-                            }
-                            crate::components::git_view::GitTab::Review
-                            | crate::components::git_view::GitTab::Diff
-                            | crate::components::git_view::GitTab::Markdown => {
-                                Some(AppEvent::GitViewScrollUp)
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                }
-                KeyCode::Enter => {
-                    // Toggle folder on Enter key in Files tab, show commit diff in Commits tab
-                    if let Some(ref git_state) = state.git_view_state {
-                        match git_state.active_tab {
-                            crate::components::git_view::GitTab::Files => {
-                                Some(AppEvent::GitViewToggleFolder)
-                            }
-                            crate::components::git_view::GitTab::Commits => {
-                                Some(AppEvent::GitViewShowCommitDiff)
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                }
-                KeyCode::Char('e') => {
-                    // Expand all folders
-                    if let Some(ref git_state) = state.git_view_state {
-                        if git_state.active_tab == crate::components::git_view::GitTab::Files {
-                            Some(AppEvent::GitViewExpandAll)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                KeyCode::Char('E') => {
-                    // Collapse all folders
-                    if let Some(ref git_state) = state.git_view_state {
-                        if git_state.active_tab == crate::components::git_view::GitTab::Files {
-                            Some(AppEvent::GitViewCollapseAll)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                }
-                KeyCode::Char('p') => {
-                    tracing::info!("Git view 'p' key pressed - starting commit");
-                    Some(AppEvent::GitViewStartCommit)
-                }
-                _ => None,
-            }
-        }
-    }
-
-    /// Handle key events for the log history viewer
-    fn handle_log_history_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        use crate::components::log_history_viewer::LogViewerFocus;
-
-        tracing::debug!("Log history key handler: {:?}", key_event.code);
-
-        // Global shortcuts
-        match key_event.code {
-            KeyCode::Esc => return Some(AppEvent::LogHistoryBack),
-            KeyCode::Char('f') => return Some(AppEvent::LogHistoryCycleFilter),
-            KeyCode::Char('r') => return Some(AppEvent::LogHistoryRefresh),
-            KeyCode::Char('y') => return Some(AppEvent::LogHistoryCopySelection),
-            KeyCode::Char('c')
-                if key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
-                return Some(AppEvent::LogHistoryCopySelection);
-            }
-            KeyCode::Char('c') | KeyCode::Char('C') => return Some(AppEvent::LogHistoryCleanup),
-            KeyCode::Tab => return Some(AppEvent::LogHistoryToggleFocus),
-            KeyCode::Home => return Some(AppEvent::LogHistoryScrollHome),
-            _ => {}
-        }
-
-        // Focus-specific navigation
-        match state.log_history_state.focus {
-            LogViewerFocus::SessionList => match key_event.code {
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::LogHistoryPrevSession),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::LogHistoryNextSession),
-                KeyCode::Enter => Some(AppEvent::LogHistorySelectSession),
-                _ => None,
-            },
-            LogViewerFocus::LogEntries => match key_event.code {
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::LogHistoryScrollUp),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::LogHistoryScrollDown),
-                KeyCode::PageUp => Some(AppEvent::LogHistoryPageUp),
-                KeyCode::PageDown => Some(AppEvent::LogHistoryPageDown),
-                KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::LogHistoryScrollLeft),
-                KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::LogHistoryScrollRight),
-                _ => None,
-            },
-        }
-    }
-
-    // Skills browser key handling
-    fn handle_skills_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        tracing::debug!("Skills key handler: {:?}", key_event.code);
-
-        // Search mode eats most keys: typing feeds the query, Esc exits.
-        if state.skills_state.search_active {
-            return match key_event.code {
-                KeyCode::Esc => Some(AppEvent::SkillsSearchClose),
-                KeyCode::Enter => Some(AppEvent::SkillsSearchClose),
-                KeyCode::Backspace => Some(AppEvent::SkillsSearchBackspace),
-                KeyCode::Char(c) => Some(AppEvent::SkillsSearchChar(c)),
-                _ => None,
-            };
-        }
-
-        match key_event.code {
-            KeyCode::Esc => Some(AppEvent::SkillsBack),
-            KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::SkillsNextProvider),
-            KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::SkillsPrevProvider),
-            KeyCode::Tab => Some(AppEvent::SkillsNextTab),
-            KeyCode::BackTab => Some(AppEvent::SkillsPrevTab),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillsScrollUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillsScrollDown),
-            KeyCode::PageUp => Some(AppEvent::SkillsPageUp),
-            KeyCode::PageDown => Some(AppEvent::SkillsPageDown),
-            KeyCode::Char('g') => Some(AppEvent::SkillsToTop),
-            KeyCode::Char('G') => Some(AppEvent::SkillsToBottom),
-            KeyCode::Char('r') => Some(AppEvent::SkillsRefresh),
-            KeyCode::Char('/') => Some(AppEvent::SkillsSearchStart),
-            _ => None,
-        }
-    }
-
-    // Changelog viewer key handling
-    fn handle_changelog_keys(key_event: KeyEvent, _state: &AppState) -> Option<AppEvent> {
-        tracing::debug!("Changelog key handler: {:?}", key_event.code);
-
-        match key_event.code {
-            KeyCode::Esc => Some(AppEvent::ChangelogBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::ChangelogScrollUp),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::ChangelogScrollDown),
-            KeyCode::PageUp => Some(AppEvent::ChangelogPageUp),
-            KeyCode::PageDown => Some(AppEvent::ChangelogPageDown),
-            KeyCode::Char('g') => Some(AppEvent::ChangelogToTop),
-            KeyCode::Char('G') => Some(AppEvent::ChangelogToBottom),
-            _ => None,
-        }
-    }
-
-    // Session recovery key handling
-    fn handle_session_recovery_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        tracing::debug!("Session recovery key handler: {:?}", key_event.code);
-
-        // If overlay is showing, Esc dismisses it; all other keys ignored
-        if state.session_recovery_state.recovery_overlay.is_some() {
-            return match key_event.code {
-                KeyCode::Esc | KeyCode::Enter => Some(AppEvent::SessionRecoveryBack), // reused to dismiss
-                _ => None,
-            };
-        }
-
-        // Filter mode eats every printable key: without this, typing "d" into
-        // the query would archive a session instead of narrowing the list.
-        if state.session_recovery_state.search_active {
-            return match key_event.code {
-                KeyCode::Esc => Some(AppEvent::SessionRecoverySearchCancel),
-                KeyCode::Enter => Some(AppEvent::SessionRecoverySearchClose),
-                KeyCode::Backspace => Some(AppEvent::SessionRecoverySearchBackspace),
-                // Arrows still navigate while typing; j/k cannot, they are query text.
-                KeyCode::Up => Some(AppEvent::SessionRecoveryPrev),
-                KeyCode::Down => Some(AppEvent::SessionRecoveryNext),
-                KeyCode::Char(c) => Some(AppEvent::SessionRecoverySearchChar(c)),
-                _ => None,
-            };
-        }
-
-        match key_event.code {
-            // Enter closes the bar but keeps the filter applied, and the empty
-            // state then tells the operator "Esc clears the filter". Esc has to
-            // actually do that before it leaves the screen, or the filter
-            // survives into the next visit with no way to drop it.
-            KeyCode::Esc if !state.session_recovery_state.search_query.is_empty() => {
-                Some(AppEvent::SessionRecoverySearchCancel)
-            }
-            KeyCode::Esc => Some(AppEvent::SessionRecoveryBack),
-            KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SessionRecoveryPrev),
-            KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SessionRecoveryNext),
-            KeyCode::Char('r') => Some(AppEvent::SessionRecoveryResume),
-            KeyCode::Char('d') => Some(AppEvent::SessionRecoveryArchive),
-            KeyCode::Char('R') => Some(AppEvent::SessionRecoveryRefresh),
-            KeyCode::Tab => Some(AppEvent::SessionRecoveryToggleView),
-            KeyCode::Char('A') => Some(AppEvent::SessionRecoveryRecoverAll),
-            KeyCode::Char(' ') => Some(AppEvent::SessionRecoveryToggleSelect),
-            KeyCode::Char('D') => Some(AppEvent::SessionRecoveryDeleteSelected),
-            KeyCode::Char('/') => Some(AppEvent::SessionRecoverySearchStart),
-            _ => None,
-        }
-    }
-
-    fn handle_daemons_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
-        let daemons = &mut state.daemons_state;
-        // Selection and the action menu are pure in-memory state, so they are
-        // applied here rather than routed through an AppEvent each. Nothing on
-        // this path touches disk, a socket, or a process — `Enter` only ARMS an
-        // action; the action itself runs on its own thread.
-        match key_event.code {
-            // Esc unwinds the innermost thing first: the error view, then the
-            // menu, and only then the screen. Popping straight out from under
-            // an open overlay is how a user loses the error they just opened.
-            KeyCode::Esc if daemons.has_overlay() => {
-                daemons.close_overlay();
-                return None;
-            }
-            // `q` leaves the screen outright, so it must not leave an overlay
-            // armed behind it: the state is app-level, and re-entering would
-            // paint a stale menu bound to a row the selection no longer sits on.
-            KeyCode::Char('q') if daemons.has_overlay() => daemons.close_all_overlays(),
-            KeyCode::Enter if daemons.has_overlay() => {
-                daemons.confirm_menu();
-                // The component cannot reach into AppState, so an entry that
-                // needs to leave the TUI (attaching to the ATC session) parks
-                // the request and the handler, which owns the slot, drains it.
-                if let Some(session) = daemons.take_attach_request() {
-                    state.pending_async_action =
-                        Some(crate::app::state::AsyncAction::AttachToOtherTmux(session));
-                }
-                return None;
-            }
-            KeyCode::Enter => {
-                daemons.open_menu();
-                return None;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if daemons.has_overlay() {
-                    daemons.move_menu(-1);
-                } else {
-                    daemons.move_selection(-1);
-                }
-                return None;
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if daemons.has_overlay() {
-                    daemons.move_menu(1);
-                } else {
-                    daemons.move_selection(1);
-                }
-                return None;
-            }
-            _ => {}
-        }
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
-            KeyCode::Char('r') => Some(AppEvent::DaemonsRefresh),
-            // Routed as events rather than applied inline: this dispatcher is
-            // pure by contract (its tests call it just to read the routing) and
-            // both of these really do write into the user's home.
-            KeyCode::Char('I') => Some(AppEvent::DaemonsRepairHooks),
-            KeyCode::Char('B') => Some(AppEvent::DaemonsPinHookBinary),
-            // The old one-key-per-daemon actions are gone. `M` (mcp), `P`
-            // (headroom) and `S` (hangar) wrote status fields whose only
-            // renderer was the System services panel, so after that panel was
-            // deleted they fired real lifecycle actions with no visible result
-            // at all, bypassing the row's own working/failed state. Every daemon
-            // is reachable through Enter now, which does show what happened.
-            _ => None,
-        }
-    }
-
-    fn handle_home_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        use crate::components::home_screen_v2::HomeScreenFocus;
-
-        tracing::debug!("HomeScreen V2 key handler: {:?}", key_event.code);
-
-        // Global shortcuts that work regardless of focus (matches HomeTile shortcuts)
-        // Inbox is bound to plain 'b' ("in-Box") to avoid the
-        // i/I case-pair confusion with Stats ('i'). 'b' is otherwise
-        // unused across every screen handler.
-        match key_event.code {
-            // One daemon surface: health, hook status, and repair controls.
-            KeyCode::Char('d') => return Some(AppEvent::GoToDaemons),
-            KeyCode::Char('o') => return Some(AppEvent::GoToConfig),
-            KeyCode::Char('s') => return Some(AppEvent::GoToSessionList),
-            KeyCode::Char('i') => return Some(AppEvent::GoToStats),
-            KeyCode::Char('w') => return Some(AppEvent::GoToWitr),
-            // `m` for "memory" — opens the learnings KB browser. The
-            // plugin also advertises `/recall` + `/memory` slash commands
-            // (wired in P9); this global shortcut is the host's sidebar/
-            // keybinding open path the P3 tripwire drives.
-            KeyCode::Char('m') => return Some(AppEvent::GoToLearnings),
-            KeyCode::Char('t') => return Some(AppEvent::GoToAbtop),
-            KeyCode::Char('c') => return Some(AppEvent::GoToSkills),
-            KeyCode::Char('u') => return Some(AppEvent::GoToSetupMenu),
-            KeyCode::Char('l') => return Some(AppEvent::GoToLogHistory),
-            // `m` is the Memory/Learnings browser (main); SkillManager moved
-            // to `z` to avoid the collision when the two features merged.
-            KeyCode::Char('z') => return Some(AppEvent::GoToSkillManager),
-            KeyCode::Char('g') => return Some(AppEvent::GoToHangar),
-            KeyCode::Char('r') => return Some(AppEvent::GoToRecovery),
-            // `p` for "pool" — opens the shared MCP pool observability
-            // overlay. `m` is taken by the learnings/Memory browser, so the
-            // pool tile + global keybind use `p` instead.
-            KeyCode::Char('p') => return Some(AppEvent::McpOverlayOpen),
-            KeyCode::Char('v') => return Some(AppEvent::ShowChangelog),
-            KeyCode::Char('?') => return Some(AppEvent::ToggleHelp),
-            KeyCode::Char('q') => return Some(AppEvent::Quit),
-            // Phase 4 (new-session redesign): `n` opens the unified picker
-            // directly from home. The spec's 90% flow is `n -> Enter` (2
-            // keystrokes) — previously users had to land on session-list
-            // first. See plans/new-session-redesign-spec.md flow 1.
-            KeyCode::Char('n') => return Some(AppEvent::NewSession),
-            _ => {}
-        }
-
-        // Tab to toggle focus between sidebar and content panel
-        if key_event.code == KeyCode::Tab {
-            return Some(AppEvent::HomeScreenToggleFocus);
-        }
-
-        // Focus-specific navigation
-        let focus = &state.home_screen_v2_state.focus;
-        let event = match focus {
-            HomeScreenFocus::Sidebar => match key_event.code {
-                KeyCode::Up => Some(AppEvent::HomeScreenSidebarUp),
-                KeyCode::Down => Some(AppEvent::HomeScreenSidebarDown),
-                KeyCode::Enter => Some(AppEvent::HomeScreenSidebarSelect),
-                _ => None,
-            },
-            HomeScreenFocus::ContentPanel => match key_event.code {
-                KeyCode::Up => Some(AppEvent::WelcomePanelScrollUp),
-                KeyCode::Down => Some(AppEvent::WelcomePanelScrollDown),
-                KeyCode::PageUp => Some(AppEvent::WelcomePanelPageUp),
-                KeyCode::PageDown => Some(AppEvent::WelcomePanelPageDown),
-                KeyCode::Char('y') => Some(AppEvent::WelcomePanelCopyContent),
-                _ => None,
-            },
-        };
-
-        tracing::debug!("HomeScreen V2 key handler returning: {:?}", event);
-        event
-    }
-
-    fn handle_config_screen_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        // Check if config popup is showing first
-        if state.config_popup_state.show_popup {
-            return Self::handle_config_popup_keys(key_event, state);
-        }
-
-        let config_state = &state.config_screen_state;
-        tracing::debug!(
-            "Config screen key handler: {:?}, editing: {}, api_key_mode: {}",
-            key_event.code,
-            config_state.editing,
-            config_state.api_key_input_mode
-        );
-
-        // API key input mode - special handling (saves to keychain)
-        if config_state.api_key_input_mode {
-            match key_event.code {
-                KeyCode::Enter => Some(AppEvent::ConfigApiKeySave),
-                KeyCode::Esc => Some(AppEvent::ConfigCancelEdit),
-                KeyCode::Backspace => Some(AppEvent::ConfigEditBackspace),
-                KeyCode::Char(c) => Some(AppEvent::ConfigEditChar(c)),
-                _ => None,
-            }
-        } else if config_state.editing {
-            // Normal editing mode - handle text input
-            match key_event.code {
-                KeyCode::Enter => Some(AppEvent::ConfigSaveEdit),
-                KeyCode::Esc => Some(AppEvent::ConfigCancelEdit),
-                KeyCode::Backspace => Some(AppEvent::ConfigEditBackspace),
-                KeyCode::Char(c) => Some(AppEvent::ConfigEditChar(c)),
-                _ => None,
-            }
-        } else if config_state.is_searching() {
-            // `/` filter box: every printable key narrows the match list, so
-            // the vim nav letters have to come from the arrow keys here.
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::ConfigSearchCancel),
-                KeyCode::Up => Some(AppEvent::ConfigPrevSetting),
-                KeyCode::Down => Some(AppEvent::ConfigNextSetting),
-                KeyCode::Enter => Some(AppEvent::ConfigEditSetting),
-                KeyCode::Backspace => Some(AppEvent::ConfigSearchBackspace),
-                KeyCode::Char('k') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(AppEvent::ConfigSecretToKeychain)
-                }
-                KeyCode::Char(c) => Some(AppEvent::ConfigSearchChar(c)),
-                _ => None,
-            }
-        } else {
-            // Navigation mode. The Claude-auth row opens its own popup rather
-            // than the generic choice widget, because picking "API key" there
-            // also prompts for the key and stores it in the OS keychain.
-            // Matched by KEY: the old `selected_category == 0 &&
-            // selected_setting == 0` index match pointed at whatever row
-            // happened to sort first.
-            let on_claude_auth = config_state
-                .current_setting()
-                .is_some_and(|row| row.key == ConfigScreenState::CLAUDE_PROVIDER_KEY);
-            let on_categories = config_state.focused_pane == ConfigPane::Categories;
-
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::ConfigBack),
-                KeyCode::Tab => Some(AppEvent::ConfigSwitchPane),
-                KeyCode::Char('/') => Some(AppEvent::ConfigSearchStart),
-                // Ctrl+K before the bare `k` nav arm, which would otherwise
-                // swallow it.
-                KeyCode::Char('k') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    Some(AppEvent::ConfigSecretToKeychain)
-                }
-                // Up/Down navigate within the current focused pane
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::ConfigNavigateUp),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::ConfigNavigateDown),
-                // Left/Right switch focus between panes
-                KeyCode::Left | KeyCode::Char('h') => Some(AppEvent::ConfigFocusCategories),
-                KeyCode::Right | KeyCode::Char('l') => Some(AppEvent::ConfigFocusSettings),
-                // Space opens/closes a section from either pane, so the tree is
-                // reachable without giving up Enter-to-edit.
-                KeyCode::Char(' ') => Some(AppEvent::ConfigToggleExpand),
-                KeyCode::Enter if on_categories => Some(AppEvent::ConfigToggleExpand),
-                KeyCode::Enter if on_claude_auth => Some(AppEvent::AuthProviderPopupOpen),
-                KeyCode::Enter => Some(AppEvent::ConfigEditSetting),
-                KeyCode::Char('s' | 'S') => Some(AppEvent::ConfigSaveAll),
-                _ => None,
-            }
-        }
-    }
-
-    // AINB 2.0: Auth provider popup key handling
-    fn handle_auth_provider_popup_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        let popup_state = &state.auth_provider_popup_state;
-
-        if popup_state.is_entering_key {
-            // API key input mode
-            match key_event.code {
-                KeyCode::Enter => Some(AppEvent::AuthProviderPopupSelect),
-                KeyCode::Esc => Some(AppEvent::AuthProviderPopupClose),
-                KeyCode::Backspace => Some(AppEvent::AuthProviderPopupBackspace),
-                KeyCode::Char(c) => Some(AppEvent::AuthProviderPopupInputChar(c)),
-                _ => None,
-            }
-        } else {
-            // Navigation mode
-            match key_event.code {
-                KeyCode::Esc => Some(AppEvent::AuthProviderPopupClose),
-                KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::AuthProviderPopupPrev),
-                KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::AuthProviderPopupNext),
-                KeyCode::Enter => Some(AppEvent::AuthProviderPopupSelect),
-                KeyCode::Char('d' | 'D') => Some(AppEvent::AuthProviderPopupDeleteKey),
-                _ => None,
-            }
-        }
-    }
-
-    // AINB 2.0: Config popup key handling (for choice/text input popups)
-    fn handle_config_popup_keys(key_event: KeyEvent, state: &AppState) -> Option<AppEvent> {
-        use crate::components::config_popup::ConfigPopupType;
-
-        let popup_state = &state.config_popup_state;
-
-        match &popup_state.popup_type {
-            ConfigPopupType::Choice { .. } | ConfigPopupType::Boolean { .. } => {
-                // Choice/Boolean navigation mode
-                match key_event.code {
-                    KeyCode::Esc => Some(AppEvent::ConfigPopupCancel),
-                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::ConfigPopupNavigateUp),
-                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::ConfigPopupNavigateDown),
-                    KeyCode::Enter => Some(AppEvent::ConfigPopupConfirm),
-                    _ => None,
-                }
-            }
-            ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. } => {
-                // Text/Number input mode. Cursor-movement keys are no-ops on
-                // NumberInput (handled at the state layer) but let the text
-                // field behave like a normal editable line: arrows to move,
-                // Delete to forward-delete.
-                //
-                // Two paste routes: Cmd+V arrives as a bracketed-paste
-                // `Event::Paste` (handled in the main loop) when the terminal
-                // delivers it; Ctrl+V is a real keystroke we always receive, so
-                // it reads the OS clipboard directly via arboard. The second
-                // route works even when bracketed paste isn't passed through
-                // (e.g. some tmux / mouse-capture setups), which is why the
-                // Cmd+V-only path appeared to "do nothing".
-                match key_event.code {
-                    KeyCode::Char('v' | 'V')
-                        if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
-                        Some(AppEvent::ConfigPopupPasteClipboard)
-                    }
-                    KeyCode::Esc => Some(AppEvent::ConfigPopupCancel),
-                    KeyCode::Enter => Some(AppEvent::ConfigPopupConfirm),
-                    KeyCode::Backspace => Some(AppEvent::ConfigPopupBackspace),
-                    KeyCode::Delete => Some(AppEvent::ConfigPopupDelete),
-                    KeyCode::Left => Some(AppEvent::ConfigPopupCursorLeft),
-                    KeyCode::Right => Some(AppEvent::ConfigPopupCursorRight),
-                    KeyCode::Home => Some(AppEvent::ConfigPopupCursorHome),
-                    KeyCode::End => Some(AppEvent::ConfigPopupCursorEnd),
-                    KeyCode::Char(c) => Some(AppEvent::ConfigPopupInputChar(c)),
-                    _ => None,
-                }
-            }
         }
     }
 
@@ -8535,7 +6994,7 @@ mod session_recovery_key_tests {
     }
 
     fn key(state: &mut AppState, c: char) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), state)
+        EventHandler::handle_key_event(KeyEvent::new(Char(c), KeyModifiers::NONE), state)
     }
 
     #[test]
@@ -8570,7 +7029,7 @@ mod session_recovery_key_tests {
         state.session_recovery_state.search_query = "zzzz".to_string();
         state.session_recovery_state.search_active = false;
 
-        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        let esc = KeyEvent::new(Esc, KeyModifiers::NONE);
         assert!(matches!(
             EventHandler::handle_key_event(esc, &mut state),
             Some(AppEvent::SessionRecoverySearchCancel)
@@ -8591,17 +7050,11 @@ mod session_recovery_key_tests {
         let mut state = recovery_state();
         state.session_recovery_state.search_active = true;
         assert!(matches!(
-            EventHandler::handle_key_event(
-                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                &mut state
-            ),
+            EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state),
             Some(AppEvent::SessionRecoverySearchCancel)
         ));
         assert!(matches!(
-            EventHandler::handle_key_event(
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                &mut state
-            ),
+            EventHandler::handle_key_event(KeyEvent::new(Enter, KeyModifiers::NONE), &mut state),
             Some(AppEvent::SessionRecoverySearchClose)
         ));
     }
@@ -8614,7 +7067,7 @@ mod session_list_key_tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn key(state: &mut AppState, c: char) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE), state)
+        EventHandler::handle_key_event(KeyEvent::new(Char(c), KeyModifiers::NONE), state)
     }
 
     fn session_list_state() -> AppState {
@@ -8624,10 +7077,7 @@ mod session_list_key_tests {
     }
 
     fn ctrl_x(state: &mut AppState) -> Option<AppEvent> {
-        EventHandler::handle_key_event(
-            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
-            state,
-        )
+        EventHandler::handle_key_event(KeyEvent::new(Char('x'), KeyModifiers::CONTROL), state)
     }
 
     /// The chord is claimed only while a notice is showing; an empty corner
@@ -8937,7 +7387,7 @@ mod panel_back_tests {
         );
     }
 
-    /// Hangar is a plugin screen, so Esc on it resolves to `PanelBack` —
+    /// Hangar is a plugin screen, so Esc on it resolves to `PanelBack`.
     /// it must therefore save its origin on entry like every other panel,
     /// or it would pop a stale `previous_screen` left by an earlier panel.
     #[test]
@@ -8977,12 +7427,12 @@ mod panel_back_tests {
 
     /// L2 regression: the Daemons screen is not a plugin screen,
     /// so before the fix its Esc fell through the generic handler to
-    /// `GoToHomeScreen` — discarding the `previous_screen` that `GoToDaemons`
+    /// `GoToHomeScreen`, discarding the `previous_screen` that `GoToDaemons`
     /// saved. Drive the real Esc key through the dispatcher and assert it routes
     /// to `PanelBack` and returns to the origin, not home.
     #[test]
     fn daemons_esc_routes_through_panel_back_to_origin() {
-        use crossterm::event::{KeyCode, KeyEvent};
+        use crossterm::event::KeyEvent;
 
         let mut state = AppState::default();
         state.current_screen = ids::SESSION_LIST.to_string();
@@ -8993,7 +7443,7 @@ mod panel_back_tests {
 
         // The key dispatcher must turn Esc on the Daemons screen into PanelBack
         // (the pre-fix bug produced GoToHomeScreen, ignoring the saved origin).
-        let event = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Esc), &mut state);
+        let event = EventHandler::handle_key_event(KeyEvent::from(Esc), &mut state);
         assert!(
             matches!(event, Some(AppEvent::PanelBack)),
             "Daemons Esc must resolve to PanelBack, not GoToHomeScreen; got {event:?}"
@@ -9010,13 +7460,13 @@ mod panel_back_tests {
     /// `q` on the Daemons screen behaves identically to Esc.
     #[test]
     fn daemons_q_routes_through_panel_back() {
-        use crossterm::event::{KeyCode, KeyEvent};
+        use crossterm::event::KeyEvent;
 
         let mut state = AppState::default();
         state.current_screen = ids::HOME.to_string();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
 
-        let event = EventHandler::handle_key_event(KeyEvent::from(KeyCode::Char('q')), &mut state);
+        let event = EventHandler::handle_key_event(KeyEvent::from(Char('q')), &mut state);
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
@@ -9029,7 +7479,7 @@ mod panel_back_tests {
     /// looking at.
     #[test]
     fn daemons_screen_keys_drive_the_screen_cursor_not_the_overlay() {
-        use crossterm::event::{KeyCode, KeyEvent};
+        use crossterm::event::KeyEvent;
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
@@ -9044,24 +7494,24 @@ mod panel_back_tests {
         // through an event was how the cursor ended up wired to the overlay —
         // a different component the operator was not looking at.
         assert!(
-            route(&mut state, KeyCode::Down).is_none(),
+            route(&mut state, Down).is_none(),
             "Down moves the screen cursor inline, not via an event"
         );
-        assert!(route(&mut state, KeyCode::Char('k')).is_none());
+        assert!(route(&mut state, Char('k')).is_none());
         assert!(
-            route(&mut state, KeyCode::Enter).is_none(),
+            route(&mut state, Enter).is_none(),
             "Enter opens the screen's own action menu"
         );
         // `R` restarted ONLY notifyd and refused every other daemon, ATC
         // included — the row this work exists to make restartable. It is gone;
         // Enter offers start/restart/stop on whichever row is highlighted.
-        assert!(route(&mut state, KeyCode::Char('R')).is_none());
+        assert!(route(&mut state, Char('R')).is_none());
     }
 
     /// Daemons repair keys stay next to the table that reports their state.
     #[test]
     fn daemons_repair_key_routing() {
-        use crossterm::event::{KeyCode, KeyEvent};
+        use crossterm::event::KeyEvent;
 
         let mut state = AppState::default();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
@@ -9069,15 +7519,15 @@ mod panel_back_tests {
         let route =
             |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
         assert!(matches!(
-            route(&mut state, KeyCode::Char('I')),
+            route(&mut state, Char('I')),
             Some(AppEvent::DaemonsRepairHooks)
         ));
         assert!(matches!(
-            route(&mut state, KeyCode::Char('B')),
+            route(&mut state, Char('B')),
             Some(AppEvent::DaemonsPinHookBinary)
         ));
         assert!(matches!(
-            route(&mut state, KeyCode::Char('r')),
+            route(&mut state, Char('r')),
             Some(AppEvent::DaemonsRefresh)
         ));
         // The one-key-per-daemon actions are gone. `M` (mcp), `P` (headroom)
@@ -9088,7 +7538,7 @@ mod panel_back_tests {
         // Enter now, which does show what happened.
         for orphaned in ['M', 'P', 'S', 'R'] {
             assert!(
-                route(&mut state, KeyCode::Char(orphaned)).is_none(),
+                route(&mut state, Char(orphaned)).is_none(),
                 "`{orphaned}` must not fire a blind lifecycle action"
             );
         }
@@ -9104,7 +7554,7 @@ mod panel_back_tests {
         assert_eq!(state.current_screen, ids::HOME);
     }
 
-    /// Learnings (memory) is a plugin screen — Esc on it resolves to
+    /// Learnings (memory) is a plugin screen. Esc on it resolves to
     /// `PanelBack` (and to the plugin's `ui.close_request` at its root
     /// view), so it must save its origin on entry like stats/skills/
     /// hangar, or closing it would fall back to home instead of the
@@ -9142,7 +7592,7 @@ mod panel_back_tests {
         let mut state = AppState::default();
         state.current_screen = ids::SESSION_LIST.to_string();
 
-        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let key = KeyEvent::new(Char('m'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(key, &mut state)
             .expect("`m` on the session list must dispatch an event");
         assert!(
@@ -9153,7 +7603,7 @@ mod panel_back_tests {
 
     /// Activating the Memory tile on the home sidebar (Enter) must open the
     /// learnings panel, saving home as the origin so the panel's Esc-close
-    /// returns there. The tile was missing entirely before — every other
+    /// returns there. The tile was missing entirely before, every other
     /// overlay panel had one.
     #[test]
     fn home_sidebar_memory_tile_opens_learnings() {
@@ -9177,7 +7627,7 @@ mod panel_back_tests {
         let mut state = AppState::default();
         state.current_screen = ids::HOME.to_string();
 
-        let p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE);
+        let p = KeyEvent::new(Char('p'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(p, &mut state)
             .expect("`p` on home must dispatch an event");
         assert!(
@@ -9185,7 +7635,7 @@ mod panel_back_tests {
             "`p` must open the MCP pool overlay, got {evt:?}"
         );
 
-        let m = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        let m = KeyEvent::new(Char('m'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(m, &mut state)
             .expect("`m` on home must dispatch an event");
         assert!(
@@ -9212,7 +7662,7 @@ mod panel_back_tests {
             last_action: None,
         });
 
-        let i = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
+        let i = KeyEvent::new(Char('i'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(i, &mut state)
             .expect("`i` in the overlay must dispatch an event");
         assert!(
@@ -9339,7 +7789,7 @@ mod text_input_guard_tests {
     // char" invariant is still covered by `is_text_input_context_covers_*`
     // tests below.
     fn char_key(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+        KeyEvent::new(Char(c), KeyModifiers::NONE)
     }
 
     /// Outside any text input, `Shift+H` must still toggle the global
@@ -9386,7 +7836,7 @@ mod text_input_guard_tests {
             "/Users/me/git",
         );
 
-        let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
+        let ctrl_v = KeyEvent::new(Char('v'), KeyModifiers::CONTROL);
         let evt = EventHandler::handle_key_event(ctrl_v, &mut state)
             .expect("Ctrl+V in a text popup must dispatch a paste event");
         assert!(matches!(evt, AppEvent::ConfigPopupPasteClipboard));
@@ -9473,11 +7923,9 @@ mod text_input_guard_tests {
         });
         state.help_visible = true;
 
-        let evt = EventHandler::handle_key_event(
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-            &mut state,
-        )
-        .expect("Esc in help-visible text-input must dispatch ToggleHelp");
+        let evt =
+            EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state)
+                .expect("Esc in help-visible text-input must dispatch ToggleHelp");
         assert!(
             matches!(evt, AppEvent::ToggleHelp),
             "expected ToggleHelp, got {:?}",
@@ -9702,17 +8150,14 @@ mod text_input_guard_tests {
         // (the plugin runtime is absent in this test, exactly the unavailable-
         // plugin placeholder case).
         assert!(
-            EventHandler::handle_key_event(
-                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
-                &mut state
-            )
-            .is_some(),
+            EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state)
+                .is_some(),
             "Esc must not be swallowed on a plugin screen"
         );
         assert!(
             matches!(
                 EventHandler::handle_key_event(
-                    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                    KeyEvent::new(Char('c'), KeyModifiers::CONTROL),
                     &mut state
                 ),
                 Some(AppEvent::Quit)
@@ -9802,7 +8247,7 @@ mod skill_manager_sync_keybind_tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn press_s(state: &mut AppState) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE), state)
+        EventHandler::handle_key_event(KeyEvent::new(Char('s'), KeyModifiers::NONE), state)
     }
 
     fn switch_to_skill_manager(state: &mut AppState) {
@@ -10146,13 +8591,13 @@ mod session_composer_key_tests {
     #[test]
     fn typing_into_a_composer_never_fires_a_session_shortcut() {
         for code in [
-            KeyCode::Char('d'),
-            KeyCode::Char('D'),
-            KeyCode::Char('x'),
-            KeyCode::Char('e'),
-            KeyCode::Char('n'),
-            KeyCode::Char('q'),
-            KeyCode::Char(' '),
+            Char('d'),
+            Char('D'),
+            Char('x'),
+            Char('e'),
+            Char('n'),
+            Char('q'),
+            Char(' '),
         ] {
             let mut state = composing();
             let event = press(&mut state, code);
@@ -10171,18 +8616,18 @@ mod session_composer_key_tests {
         let mut state = AppState::default();
         state.current_screen = ids::SESSION_LIST.to_string();
         assert!(matches!(
-            press(&mut state, KeyCode::Char('d')),
+            press(&mut state, Char('d')),
             Some(AppEvent::DeleteSession)
         ));
     }
 
-    /// `Tab` belongs to the strip even while composing, or the operator is
+    /// Tab belongs to the strip even while composing, or the operator is
     /// trapped on a pane they cannot leave except by Esc.
     #[test]
     fn tab_still_moves_the_strip_from_inside_a_composer() {
         let mut state = composing();
         assert!(matches!(
-            press(&mut state, KeyCode::Tab),
+            press(&mut state, Tab),
             Some(AppEvent::SessionTabNext)
         ));
     }
@@ -10192,7 +8637,7 @@ mod session_composer_key_tests {
     #[test]
     fn a_digit_types_rather_than_attaching_while_composing() {
         let mut state = composing();
-        let event = press(&mut state, KeyCode::Char('3'));
+        let event = press(&mut state, Char('3'));
         assert!(
             matches!(event, Some(AppEvent::Consumed)),
             "a digit must reach the composer, not attach: {event:?}"
@@ -10203,7 +8648,7 @@ mod session_composer_key_tests {
     #[test]
     fn esc_leaves_the_composer_for_a_pane_that_is_always_live() {
         let mut state = composing();
-        press(&mut state, KeyCode::Esc);
+        press(&mut state, Esc);
         assert_eq!(state.session_tab, SessionTab::Preview);
     }
 }
@@ -10264,11 +8709,11 @@ mod session_ask_key_tests {
     fn typing_an_answer_never_fires_a_session_shortcut() {
         let mut state = asking();
         // Reach the composer row.
-        press(&mut state, KeyCode::Down);
-        press(&mut state, KeyCode::Down);
+        press(&mut state, Down);
+        press(&mut state, Down);
         assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
         for c in ['d', 'D', 'x', 'e', 'n', 'q'] {
-            let event = press(&mut state, KeyCode::Char(c));
+            let event = press(&mut state, Char(c));
             assert!(
                 matches!(event, Some(AppEvent::Consumed)),
                 "`{c}` in the answer composer produced {event:?}"
@@ -10285,7 +8730,7 @@ mod session_ask_key_tests {
         let mut state = asking();
         assert_eq!(state.ask_state.focus(), AskFocus::Options);
         assert!(matches!(
-            press(&mut state, KeyCode::Char('d')),
+            press(&mut state, Char('d')),
             Some(AppEvent::DeleteSession)
         ));
     }
@@ -10293,9 +8738,9 @@ mod session_ask_key_tests {
     #[test]
     fn the_arrows_walk_the_options_and_reach_the_composer() {
         let mut state = asking();
-        press(&mut state, KeyCode::Down);
+        press(&mut state, Down);
         assert_eq!(state.ask_state.cursor(), 1);
-        press(&mut state, KeyCode::Down);
+        press(&mut state, Down);
         assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
     }
 
@@ -10303,7 +8748,7 @@ mod session_ask_key_tests {
     fn enter_sends_rather_than_attaching() {
         let mut state = asking();
         assert!(matches!(
-            press(&mut state, KeyCode::Enter),
+            press(&mut state, Enter),
             Some(AppEvent::SessionAskSend)
         ));
     }
@@ -10314,12 +8759,12 @@ mod session_ask_key_tests {
     fn the_ask_pane_can_always_be_left() {
         let mut state = asking();
         assert!(matches!(
-            press(&mut state, KeyCode::Tab),
+            press(&mut state, Tab),
             Some(AppEvent::SessionTabNext)
         ));
         let mut state = asking();
         assert!(
-            press(&mut state, KeyCode::Esc).is_some(),
+            press(&mut state, Esc).is_some(),
             "Esc must still do something"
         );
     }

@@ -126,6 +126,17 @@ pub fn ensure_daemon() -> Result<()> {
         );
     }
 
+    // Guard probe + detached spawn with the control-socket lock. Holding it
+    // through the readiness poll makes a second host wait for the first daemon
+    // to bind rather than launching an identical second daemon in that gap.
+    paths::ensure_sockets_dir()?;
+    let control_path = paths::control_socket()?;
+    let _startup_lock = crate::config::lock::lock_for(&control_path)
+        .with_context(|| format!("lock MCP control socket {}", control_path.display()))?;
+    if daemon_alive() {
+        return Ok(());
+    }
+
     let exe = std::env::current_exe().context("current_exe")?;
     let log_path = paths::daemon_log()?;
     if let Some(dir) = log_path.parent() {

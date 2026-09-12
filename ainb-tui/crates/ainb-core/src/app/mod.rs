@@ -3,6 +3,9 @@
 pub mod attach_handler;
 pub mod event_bus;
 pub mod events;
+pub mod keymap;
+pub mod keymap_defaults;
+pub mod keymap_toml;
 pub mod registry;
 pub mod screens;
 pub mod session_loader;

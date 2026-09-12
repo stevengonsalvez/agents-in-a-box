@@ -95,8 +95,8 @@ pub fn outbox_fields(event: &HangarEvent) -> (&'static str, Option<String>) {
             ("autopilot_run_changed", Some(autopilot_id.clone()))
         }
         HangarEvent::WorkspaceChanged { to, .. } => ("workspace_changed", Some(to.clone())),
-        // Attention events (spec P2) ride the daemon's dedicated FLEET-WIDE
-        // attention stream, not this workspace-scoped outbox — their durable
+        // Attention and connection events ride the daemon's dedicated FLEET-WIDE
+        // stream, not this workspace-scoped outbox. Their durable
         // source is the `attention` table, and a fleet row has no workspace to
         // FK-scope the log by. These arms keep the match total (a new variant is
         // still a compile error to ignore); at runtime an attention event never
@@ -107,6 +107,7 @@ pub fn outbox_fields(event: &HangarEvent) -> (&'static str, Option<String>) {
         HangarEvent::AttentionAnswered { attention_id, .. } => {
             ("attention_answered", Some(attention_id.clone()))
         }
+        HangarEvent::ConnectionsChanged { .. } => ("connections_changed", None),
     }
 }
 

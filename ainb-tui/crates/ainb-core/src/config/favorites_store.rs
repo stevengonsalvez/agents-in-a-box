@@ -181,7 +181,8 @@ impl FavoritesStore {
             }
             let content = serde_yaml::to_string(self)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            fs::write(path, content)?;
+            let _lock = crate::config::lock::lock_for(&path)?;
+            crate::config::write_atomic(&path, &content)?;
         }
         Ok(())
     }

@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub mod container;
 pub mod favorites_store;
+pub mod lock;
 pub mod mcp;
 pub mod mcp_init;
 pub mod onboarding;
@@ -1304,7 +1305,7 @@ pub(crate) fn read_existing(path: &Path) -> Result<String> {
     }
 }
 
-pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     // Follow a symlink to its target before writing. `rename` REPLACES a
     // symlink with a regular file, so a config.toml symlinked into a dotfiles
     // repo would silently stop being the tracked file after the first save,
@@ -1360,6 +1361,26 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// to nothing" where an absent one means "autodetect", so clearing has to
 /// delete the key rather than blank it.
 pub(crate) fn remove_key_from(path: &Path, key: &str) -> Result<()> {
+    match lock::lock_for(path) {
+        Ok(lock) => remove_key_from_with_lock(path, key, &lock),
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "config lock unavailable; saving without it");
+            remove_key_from_unlocked(path, key)
+        }
+    }
+}
+
+/// Remove one key while a caller already holds `path`'s config lock.
+pub(crate) fn remove_key_from_with_lock(
+    path: &Path,
+    key: &str,
+    lock: &lock::ConfigLock,
+) -> Result<()> {
+    debug_assert!(lock.guards(path), "config lock must guard the edited file");
+    remove_key_from_unlocked(path, key)
+}
+
+fn remove_key_from_unlocked(path: &Path, key: &str) -> Result<()> {
     let existing = read_existing(path)?;
     if existing.trim().is_empty() {
         return Ok(());
@@ -1398,6 +1419,30 @@ pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> R
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+
+    match lock::lock_for(path) {
+        Ok(lock) => write_keys_into_with_lock(path, edits, &lock),
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "config lock unavailable; saving without it");
+            write_keys_into_unlocked(path, edits)
+        }
+    }
+}
+
+/// Write keys while a caller already holds `path`'s config lock.
+pub(crate) fn write_keys_into_with_lock(
+    path: &Path,
+    edits: &[(String, toml::Value)],
+    lock: &lock::ConfigLock,
+) -> Result<()> {
+    debug_assert!(lock.guards(path), "config lock must guard the edited file");
+    write_keys_into_unlocked(path, edits)
+}
+
+fn write_keys_into_unlocked(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
+    if edits.is_empty() {
+        return Ok(());
     }
 
     let existing = read_existing(path)?;
@@ -2031,10 +2076,30 @@ impl AppConfig {
         fs::create_dir_all(&config_dir)?;
 
         let config_path = config_dir.join("config.toml");
-        let existing = read_existing(&config_path)?;
+        match lock::lock_for(&config_path) {
+            Ok(lock) => self.save_with_lock(&lock),
+            Err(err) => {
+                tracing::warn!(path = %config_path.display(), error = %err, "config lock unavailable; saving without it");
+                self.save_at_path(&config_path)
+            }
+        }
+    }
+
+    /// Save while a caller already holds the user config file lock.
+    pub(crate) fn save_with_lock(&self, lock: &lock::ConfigLock) -> Result<()> {
+        let config_path = Self::get_user_config_dir()?.join("config.toml");
+        debug_assert!(
+            lock.guards(&config_path),
+            "config lock must guard config.toml"
+        );
+        self.save_at_path(&config_path)
+    }
+
+    fn save_at_path(&self, config_path: &Path) -> Result<()> {
+        let existing = read_existing(config_path)?;
         let content = self.overlay_onto_existing(&existing)?;
 
-        match write_atomic(&config_path, &content) {
+        match write_atomic(config_path, &content) {
             Ok(()) => {
                 // The promoted tunables read from a process-wide snapshot, so
                 // without this a save reports success and changes nothing until
@@ -2090,6 +2155,24 @@ impl AppConfig {
         }
         let config_path = Self::get_user_config_dir()?.join("config.toml");
         write_keys_into(&config_path, &prepared)
+    }
+
+    /// Save externally-owned keys while a caller already holds `config.toml`'s
+    /// shared lock. Paired settings updates can use this with
+    /// [`Self::save_with_lock`] as one critical section.
+    pub(crate) fn save_external_keys_with_lock(
+        edits: &[(String, String)],
+        lock: &lock::ConfigLock,
+    ) -> Result<()> {
+        if edits.is_empty() {
+            return Ok(());
+        }
+        let mut prepared = Vec::with_capacity(edits.len());
+        for (key, raw) in edits {
+            prepared.push((key.clone(), external_edit_value(key, raw)?));
+        }
+        let config_path = Self::get_user_config_dir()?.join("config.toml");
+        write_keys_into_with_lock(&config_path, &prepared, lock)
     }
 
     /// Persist the settings screen's tree expansion, and nothing else.

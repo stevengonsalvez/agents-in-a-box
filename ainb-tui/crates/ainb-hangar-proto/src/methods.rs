@@ -1663,6 +1663,10 @@ pub const HANGAR_DAEMON_CONFIG_SET: &str = "hangar/daemon_config_set";
 /// key, so a new registry knob surfaces without new wiring.
 pub const HANGAR_DAEMON_CONFIG_LIST: &str = "hangar/daemon_config_list";
 
+/// `hangar/connections_list` — all currently authenticated daemon surfaces.
+/// Params: `{}`. Result: [`crate::connections::ConnectionsListResult`].
+pub const HANGAR_CONNECTIONS_LIST: &str = "hangar/connections_list";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -1809,6 +1813,9 @@ pub const ALL_METHODS: &[&str] = &[
     // Agent create-from-scratch (fresh-home bootstrap), likewise appended.
     HANGAR_AGENT_CREATE,
     HANGAR_DAEMON_CONFIG_LIST,
+    // In-memory live surface registry, appended to keep the wire catalogue
+    // stable for older clients.
+    HANGAR_CONNECTIONS_LIST,
     // Issue delete (63d) is APPENDED at the catalogue tail — append-only wire.
     HANGAR_ISSUE_DELETE,
     // Issue-scoped cancel-active (board-less cancel-and-delete), likewise appended.
@@ -2148,6 +2155,7 @@ mod tests {
             HANGAR_AGENT_CREATE,
             HANGAR_AGENT_DELETE,
             HANGAR_DAEMON_CONFIG_LIST,
+            HANGAR_CONNECTIONS_LIST,
             HANGAR_ISSUE_DELETE,
             HANGAR_ISSUE_CANCEL_ACTIVE,
             HANGAR_ISSUE_LINK_ADD,

@@ -15,6 +15,7 @@
 //! the test SKIPs rather than fails — the weak macOS CI runner must never be
 //! blocked on a binary it did not build.
 
+use std::cell::Cell;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -133,6 +134,223 @@ fn kill_and_wait(child: &mut Child) {
 }
 
 #[test]
+fn shell_quote_path_preserves_apostrophes() {
+    assert_eq!(
+        shell_quote_path(Path::new("/tmp/ainb's tui")),
+        "'/tmp/ainb'\"'\"'s tui'"
+    );
+}
+
+/// Quote a UTF-8 path as one POSIX shell word for tmux's shell pane.
+fn shell_quote_path(path: &Path) -> String {
+    let path = path.to_str().expect("test launch path must be valid UTF-8");
+    format!("'{}'", path.replace('\'', r#"'"'"'"#))
+}
+
+/// Return the staged plugin root only when the real Hangar subprocess exists.
+/// The acceptance test requires this artifact instead of exercising a mock.
+fn hangar_plugin_root() -> Option<PathBuf> {
+    let bin = ainb_bin();
+    let mut dir = bin.parent()?;
+    for _ in 0..6 {
+        let candidate = dir.join("dist").join("plugins");
+        let hangar = candidate.join("hangar-tui");
+        if hangar.join("hangar-tui").is_file() && hangar.join("manifest.toml").is_file() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
+    None
+}
+
+fn tmux_available() -> bool {
+    Command::new("tmux")
+        .arg("-V")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// Skip TUI onboarding and modal prompts, then pre-ack Hangar's first-run
+/// warning. The daemon binds its authenticated Unix endpoint inside this same
+/// isolated home, so every process in the acceptance run is test-owned.
+fn seed_tui_home(home: &Path) {
+    let base = home.join(".agents-in-a-box");
+    let config = base.join("config");
+    std::fs::create_dir_all(&config).expect("create isolated TUI config");
+    let onboarding = format!(
+        r#"completed = true
+completed_at = "2026-09-11T00:00:00+00:00"
+version = "{version}"
+skipped_dependencies = []
+git_directories = []
+"#,
+        version = env!("CARGO_PKG_VERSION"),
+    );
+    std::fs::write(config.join("onboarding.toml"), onboarding).expect("seed onboarding");
+    std::fs::write(
+        base.join("install.json"),
+        r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#,
+    )
+    .expect("dismiss hooks prompt");
+
+    let hangar_state = home.join("hangar").join("state.toml");
+    std::fs::create_dir_all(hangar_state.parent().expect("hangar state parent"))
+        .expect("create isolated Hangar state dir");
+    std::fs::write(hangar_state, "warnings_ack = [\"first_run\"]\n")
+        .expect("ack Hangar first-run warning");
+}
+
+fn capture_pane(session: &str) -> String {
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-t", session, "-p"])
+        .output()
+        .expect("capture owned tmux pane");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn poll_capture<F>(session: &str, timeout: Duration, mut ready: F) -> Option<String>
+where
+    F: FnMut(&str) -> bool,
+{
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let capture = capture_pane(session);
+        if ready(&capture) {
+            return Some(capture);
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    None
+}
+
+fn send_key(session: &str, key: &str) {
+    let status = Command::new("tmux")
+        .args(["send-keys", "-t", session, key])
+        .status()
+        .expect("send key to owned tmux session");
+    assert!(status.success(), "tmux send-keys {key:?} failed");
+}
+
+/// Exact-name tmux cleanup remains armed through assertion panics. This test
+/// never touches the tmux server or any session it did not create.
+struct OwnedTmuxSession {
+    name: String,
+    shut_down: Cell<bool>,
+}
+
+impl OwnedTmuxSession {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn shutdown(&self) {
+        if self.shut_down.replace(true) {
+            return;
+        }
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &self.name])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
+impl Drop for OwnedTmuxSession {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn launch_tui(home: &Path, plugin_root: &Path, daemon: &Path) -> OwnedTmuxSession {
+    let session = format!("tripwire-hangar-tui-presence-{}", std::process::id());
+    let ainb_home = home.join(".agents-in-a-box");
+    let mut new_session = Command::new("tmux");
+    new_session.args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"]);
+    for (key, value) in [
+        ("HOME", home),
+        ("AINB_HOME", ainb_home.as_path()),
+        ("AINB_HANGAR_HOME", home),
+        ("AINB_PLUGIN_ROOT", plugin_root),
+        ("AINB_HANGAR_DAEMON_BIN", daemon),
+    ] {
+        new_session.arg("-e").arg(format!("{key}={}", value.display()));
+    }
+    for (key, value) in [
+        // Tmux windows inherit their server environment. Empty values prevent
+        // a server-owned kill or deny filter from changing this acceptance run.
+        ("AINB_DISABLE_PLUGINS", ""),
+        ("AINB_DISABLE_PLUGIN", ""),
+        ("AINB_ONLY_PLUGINS", "hangar-tui"),
+    ] {
+        new_session.arg("-e").arg(format!("{key}={value}"));
+    }
+    // The environment reaches tmux directly. Its noninteractive shell receives
+    // one quoted executable path, avoiding user shell startup prompts.
+    let command = format!("exec {} tui", shell_quote_path(&ainb_bin()));
+    let status = new_session.arg(&command).status().expect("launch TUI in owned tmux session");
+    assert!(status.success(), "tmux new-session failed");
+
+    OwnedTmuxSession {
+        name: session,
+        shut_down: Cell::new(false),
+    }
+}
+
+fn connections_json(home: &Path, daemon: &Path) -> serde_json::Value {
+    let (ok, output) = run(
+        home,
+        daemon,
+        &["--format", "json", "hangar", "connections", "list"],
+    );
+    assert!(ok, "connections list should succeed: {output}");
+    serde_json::from_str(&output)
+        .unwrap_or_else(|error| panic!("connections list must be JSON: {error}; output:\n{output}"))
+}
+
+fn tui_pid(connections: &serde_json::Value) -> Option<u32> {
+    connections["connections"]
+        .as_array()?
+        .iter()
+        .find(|row| row["surface"]["kind"].as_str() == Some("tui"))?["surface"]["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0)
+}
+
+fn wait_for_tui_pid(home: &Path, daemon: &Path, timeout: Duration) -> (u32, serde_json::Value) {
+    let deadline = Instant::now() + timeout;
+    let mut last = None;
+    while Instant::now() < deadline {
+        let connections = connections_json(home, daemon);
+        if let Some(pid) = tui_pid(&connections).filter(|pid| pid_alive(*pid)) {
+            return (pid, connections);
+        }
+        last = Some(connections);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "real TUI plugin never stayed in connections list; last listing: {}",
+        last.unwrap_or(serde_json::Value::Null)
+    );
+}
+
+fn tui_stays_listed(home: &Path, daemon: &Path, pid: u32, duration: Duration) -> bool {
+    let deadline = Instant::now() + duration;
+    let mut observed = false;
+    while Instant::now() < deadline {
+        let listing = connections_json(home, daemon);
+        if tui_pid(&listing) != Some(pid) || !pid_alive(pid) {
+            return false;
+        }
+        observed = true;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    observed
+}
+
+#[test]
 fn daemon_start_status_stop_round_trip() {
     reap_orphaned_test_daemons();
     let Some(daemon) = daemon_bin() else {
@@ -206,6 +424,128 @@ fn daemon_start_status_stop_round_trip() {
         use nix::unistd::Pid;
         let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
     }
+}
+
+/// S-B acceptance: a real Hangar plugin inside the real TUI registers its
+/// authenticated TUI presence with the daemon, keeps that row live, then drops
+/// it when this test shuts down its exact tmux session. Raw daemon-row tests
+/// and in-process plugin mocks cannot prove this host, subprocess, socket, and
+/// CLI-list path together.
+#[test]
+fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
+    assert!(
+        tmux_available(),
+        "tmux is required for this real TUI acceptance test"
+    );
+    let plugin_root = hangar_plugin_root()
+        .expect("staged dist/plugins/hangar-tui is required for this acceptance test");
+    let daemon = daemon_bin()
+        .expect("sibling ainb-hangar-daemon binary is required for this acceptance test");
+
+    let home = tempfile::tempdir().expect("isolated Hangar home");
+    seed_tui_home(home.path());
+
+    // Start the production daemon through the production CLI. Its endpoint is
+    // the test-owned Unix socket at `<home>/hangar.sock`; explicit HOME values
+    // ensure no real user daemon, token, or socket can join this assertion.
+    let (ok, output) = run(home.path(), &daemon, &["hangar", "daemon", "start"]);
+    assert!(ok, "start real daemon should succeed: {output}");
+    let daemon_pid = read_pid(home.path()).expect("daemon start wrote owned pid");
+    let _daemon_cleanup = ExactPidCleanup(daemon_pid);
+    assert!(
+        wait_until(Duration::from_secs(10), || home
+            .path()
+            .join("hangar.sock")
+            .exists()),
+        "real daemon never bound the test-owned socket"
+    );
+
+    let tui = launch_tui(home.path(), &plugin_root, &daemon);
+    let home_capture = poll_capture(tui.name(), Duration::from_secs(45), |capture| {
+        capture.contains("Stats") && capture.contains("[i]")
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "TUI HomeScreen never rendered in owned session; last capture:\n{}",
+            capture_pane(tui.name())
+        )
+    });
+    assert!(
+        !home_capture.contains("Control Center"),
+        "Hangar content appeared before its launch key:\n{home_capture}"
+    );
+    let empty_listing = connections_json(home.path(), &daemon);
+    let empty_connections = empty_listing["connections"]
+        .as_array()
+        .expect("connections list must contain an array");
+    let non_observer_connections: Vec<_> = empty_connections
+        .iter()
+        .filter(|connection| connection["surface"]["kind"].as_str() != Some("cli"))
+        .collect();
+    assert!(
+        non_observer_connections.is_empty(),
+        "registry must have zero connections before the Hangar launch key, apart from its CLI observer: {empty_listing}"
+    );
+    assert_eq!(
+        empty_connections.len(),
+        1,
+        "only the connections-list CLI observer may be registered before the Hangar launch key: {empty_listing}"
+    );
+
+    // `g` is a single-shot navigation key. It lazy-spawns the staged real
+    // hangar-tui subprocess, which authenticates as `surface.kind=tui` over the
+    // production daemon socket. Do not re-send it: plugin screens may own `g`.
+    send_key(tui.name(), "g");
+    let hangar_capture = poll_capture(tui.name(), Duration::from_secs(30), |capture| {
+        capture.contains("[1]Issues") && capture.contains("[B]Boards")
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "Hangar screen chrome never rendered after its launch key; last capture:\n{}",
+            capture_pane(tui.name())
+        )
+    });
+    assert!(
+        !hangar_capture.contains("Stats"),
+        "HomeScreen remained visible after Hangar launch key:\n{hangar_capture}"
+    );
+    let (plugin_pid, first_listing) =
+        wait_for_tui_pid(home.path(), &daemon, Duration::from_secs(30));
+    assert!(
+        tui_pid(&first_listing) == Some(plugin_pid),
+        "connections list must expose the live TUI row with its process pid: {first_listing}"
+    );
+
+    // Poll through a real hold period so this cannot pass on a transient
+    // registration event. The plugin PID remains alive while its parent TUI
+    // session remains connected.
+    let stable = tui_stays_listed(home.path(), &daemon, plugin_pid, Duration::from_millis(750));
+    assert!(
+        stable,
+        "TUI pid {plugin_pid} did not remain listed while its tmux session lived"
+    );
+
+    // Exact session only. Drop keeps this same cleanup armed if a later
+    // assertion changes, and no broad tmux/process kill is ever used.
+    tui.shutdown();
+    assert!(
+        wait_until(Duration::from_secs(15), || {
+            let listing = connections_json(home.path(), &daemon);
+            tui_pid(&listing).is_none()
+        }),
+        "TUI row for pid {plugin_pid} remained after exact tmux shutdown"
+    );
+    assert!(
+        wait_until(Duration::from_secs(5), || !pid_alive(plugin_pid)),
+        "TUI plugin pid {plugin_pid} survived its owned tmux shutdown"
+    );
+
+    let (ok, output) = run(home.path(), &daemon, &["hangar", "daemon", "stop"]);
+    assert!(ok, "stop real daemon should succeed: {output}");
+    assert!(
+        wait_until(Duration::from_secs(10), || !pid_alive(daemon_pid)),
+        "owned daemon pid {daemon_pid} survived test cleanup"
+    );
 }
 
 /// Issue #784's guard binds a daemon to the process that launched it when the
