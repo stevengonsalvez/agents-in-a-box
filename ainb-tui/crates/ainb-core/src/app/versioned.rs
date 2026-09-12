@@ -41,6 +41,44 @@ impl<T> Versioned<T> {
         self.version += 1;
         &mut self.data
     }
+
+    /// Run `f` against the section and bump only if it reports a change.
+    ///
+    /// For the draw path, which runs every frame whether or not anything
+    /// moved. A tick that needs `&mut` to run at all would otherwise bump on
+    /// every frame through `DerefMut`, and a section that changes every frame
+    /// tells a subscriber nothing.
+    ///
+    /// This is the ONE place the coarse-bump rule is relaxed, so the contract
+    /// is narrow: `f` must return true whenever it wrote anything an observer
+    /// could see. Use it for calls that already answer that question, the
+    /// `tick()` family whose bool means exactly "I changed something", and
+    /// nothing else. Everywhere else `DerefMut` is the right tool precisely
+    /// because it cannot be forgotten.
+    pub fn update(&mut self, f: impl FnOnce(&mut T) -> bool) -> bool {
+        let changed = f(&mut self.data);
+        if changed {
+            self.version += 1;
+        }
+        changed
+    }
+
+    /// Assign only when the value differs, bumping only when it does.
+    ///
+    /// The read goes through the section without bumping; the write happens
+    /// only on a real change. For the rects and cursors the renderer
+    /// recomputes every frame and usually recomputes identically.
+    pub fn set_if_changed<U: PartialEq>(
+        &mut self,
+        field: impl Fn(&mut T) -> &mut U,
+        value: U,
+    ) -> bool {
+        if *field(&mut self.data) == value {
+            return false;
+        }
+        *field(self.get_mut()) = value;
+        true
+    }
 }
 
 impl<T> Deref for Versioned<T> {
@@ -142,6 +180,30 @@ mod tests {
             1,
             "the split borrow is one bump, not two"
         );
+    }
+
+    #[test]
+    fn update_bumps_only_when_the_closure_reports_a_change() {
+        let mut section = Versioned::new(0_u8);
+        assert!(!section.update(|_| false), "a no-op tick reported a change");
+        assert_eq!(section.version(), 0, "a no-op tick bumped");
+
+        assert!(section.update(|n| {
+            *n += 1;
+            true
+        }));
+        assert_eq!(section.version(), 1);
+    }
+
+    #[test]
+    fn set_if_changed_is_silent_on_an_identical_write() {
+        let mut section = Versioned::new((1_u8, 2_u8));
+        assert!(!section.set_if_changed(|s| &mut s.0, 1));
+        assert_eq!(section.version(), 0, "writing the same value bumped");
+
+        assert!(section.set_if_changed(|s| &mut s.0, 9));
+        assert_eq!(section.version(), 1);
+        assert_eq!(section.0, 9);
     }
 
     #[test]
