@@ -138,6 +138,20 @@ impl DaemonClient {
         Ok(parsed.attention)
     }
 
+    /// Read one status row per agent (`fleet/status`) — the D14 "one truth"
+    /// read.
+    ///
+    /// The dashboard stamps every card with this rather than deriving state
+    /// from the inbox alone, so `/api/needs`, `ainb fleet needs` and the TUI
+    /// fleet panel print the same `(session_key, state, provenance, tier,
+    /// evidence_observed_at)` for the same agent.
+    pub async fn fleet_status(
+        &self,
+    ) -> Result<ainb_hangar_proto::agent_status::AgentStatusResult, DaemonError> {
+        let result = self.call(methods::FLEET_STATUS, Value::Object(Default::default())).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
     /// Answer one open attention row (`attention/answer`). The daemon runs the
     /// first-answer-wins + C1 ambiguity guards and performs the verified
     /// last-mile send; the tagged [`AnswerResult`] says what happened.
@@ -424,11 +438,40 @@ pub fn display_kind(wire_kind: &str) -> &'static str {
 /// raw string — the card always has something to show.
 #[must_use]
 pub fn attention_to_needs(rows: &[AttentionRow]) -> Value {
-    let cards: Vec<Value> = rows
+    attention_to_needs_with_status(rows, &[])
+}
+
+/// [`attention_to_needs`], with every card stamped from the daemon's one status
+/// read (D14), and a card added for any agent the status read says is blocked
+/// that the inbox has no row for.
+///
+/// The stamp is what makes the dashboard's answer to "what state is this agent
+/// in" the SAME answer the CLI and the TUI panel give: all three take it from
+/// `ainb_hangar_proto::agent_status`, none of them re-derives it.
+///
+/// The added card matters for issue #916: an agent whose pane could not be
+/// bound may be blocked with nothing able to type into it, and a dashboard that
+/// only lists inbox rows would show one agent fewer than the panel does.
+pub fn attention_to_needs_with_status(
+    rows: &[AttentionRow],
+    status: &[ainb_hangar_proto::agent_status::AgentStatusRow],
+) -> Value {
+    use ainb_hangar_proto::agent_status::AgentState;
+
+    let by_session: std::collections::HashMap<&str, &ainb_hangar_proto::agent_status::AgentStatusRow> =
+        status
+            .iter()
+            .filter_map(|row| {
+                // The status row is keyed by Fleet identity; the inbox is keyed
+                // by the provider's own session id, which is the key's tail.
+                row.session_key.split_once(':').map(|(_, id)| (id, row))
+            })
+            .collect();
+    let mut cards: Vec<Value> = rows
         .iter()
         .map(|row| {
             let payload = normalize_payload(&row.payload);
-            json!({
+            let mut card = json!({
                 "attentionId": row.id,
                 "kind": display_kind(&row.kind),
                 "wireKind": row.kind,
@@ -442,10 +485,57 @@ pub fn attention_to_needs(rows: &[AttentionRow]) -> Value {
                 // delivery loop filters on this: it buzzes a device only when the
                 // rules routed this attention to the `web` channel.
                 "channels": row.channels,
-            })
+            });
+            if let Some(status) = by_session.get(row.session_id.as_str()) {
+                stamp_status(&mut card, status);
+            }
+            card
         })
         .collect();
+    let carried: std::collections::HashSet<&str> =
+        rows.iter().map(|row| row.session_id.as_str()).collect();
+    for row in status.iter().filter(|row| row.state == AgentState::Waiting) {
+        let provider_session_id = row.session_key.split_once(':').map_or("", |(_, id)| id);
+        if carried.contains(provider_session_id) {
+            continue;
+        }
+        let mut card = json!({
+            "attentionId": Value::Null,
+            "kind": "Waiting",
+            "wireKind": "waiting",
+            "sessionId": provider_session_id,
+            "cwd": row.cwd,
+            "workspaceId": Value::Null,
+            "degraded": false,
+            "createdAt": row.evidence_observed_at,
+            "payload": json!({
+                "marker": "needs input:",
+                "text": if row.pane_unbound {
+                    "blocked, and no tmux pane is bound to this session (see `ainb doctor`)"
+                } else {
+                    "blocked on a human; the question is in the attention inbox"
+                },
+            }),
+            "channels": 0,
+        });
+        stamp_status(&mut card, row);
+        cards.push(card);
+    }
     Value::Array(cards)
+}
+
+/// Stamp one card with the D14 identity tuple.
+fn stamp_status(card: &mut Value, status: &ainb_hangar_proto::agent_status::AgentStatusRow) {
+    let (session_key, state, provenance, tier, evidence_observed_at) = status.identity_tuple();
+    let Some(object) = card.as_object_mut() else {
+        return;
+    };
+    object.insert("sessionKey".into(), json!(session_key));
+    object.insert("state".into(), json!(state));
+    object.insert("provenance".into(), json!(provenance));
+    object.insert("tier".into(), json!(tier));
+    object.insert("evidenceObservedAt".into(), json!(evidence_observed_at));
+    object.insert("paneUnbound".into(), json!(status.pane_unbound));
 }
 
 /// Normalise one stored attention payload into the flat card shape the dashboard

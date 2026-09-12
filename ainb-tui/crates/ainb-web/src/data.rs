@@ -266,7 +266,21 @@ impl AinbCliSource {
 async fn daemon_needs() -> Value {
     match crate::daemon::DaemonClient::from_env() {
         Ok(client) => match client.attention_list_fleet().await {
-            Ok(rows) => crate::daemon::attention_to_needs(&rows),
+            Ok(rows) => {
+                // D14: stamp every card from the daemon's one status read, so
+                // the dashboard, `ainb fleet needs` and the TUI fleet panel
+                // print the same state for the same agent. A status read that
+                // fails leaves the cards unstamped rather than dropping them:
+                // an inbox row with no tier is still a question worth showing.
+                let status = client.fleet_status().await.unwrap_or_else(|e| {
+                    tracing::debug!(error = %e, "fleet/status unavailable; needs render unstamped");
+                    ainb_hangar_proto::agent_status::AgentStatusResult {
+                        rows: Vec::new(),
+                        head_revision: 0,
+                    }
+                });
+                crate::daemon::attention_to_needs_with_status(&rows, &status.rows)
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "attention/list unavailable; needs degrades to empty");
                 Value::Array(Vec::new())

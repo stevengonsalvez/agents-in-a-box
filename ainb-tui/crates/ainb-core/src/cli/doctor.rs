@@ -17,6 +17,19 @@ struct DoctorReport<'a> {
     daemons: Vec<crate::fleet::daemons::DaemonStatus>,
     daemons_error: Option<String>,
     daemon_repairs: Vec<String>,
+    /// Hook-sourced sessions the daemon could not bind to a tmux pane (D14,
+    /// issue #916). An unbound session cannot receive a send-keys answer and
+    /// cannot be attached to, so it is a health fact, not a cosmetic one.
+    pane_unbound: Vec<PaneUnboundRow>,
+    pane_unbound_error: Option<String>,
+}
+
+/// One session with no pane bound.
+#[derive(Serialize)]
+struct PaneUnboundRow {
+    session_key: String,
+    provider: String,
+    cwd: String,
 }
 
 /// Full machine health check. `--offline` skips skill-source network probes.
@@ -37,7 +50,6 @@ pub struct DoctorArgs {
 }
 
 /// Entry point for `ainb doctor`.
-#[allow(clippy::unused_async)]
 pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
     let dependencies = deps::detect(&RealEnv);
     let (hooks, hooks_error) = match ainb_plugin_notifyd::Paths::from_home() {
@@ -79,6 +91,7 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
     } else {
         Vec::new()
     };
+    let (pane_unbound, pane_unbound_error) = collect_pane_unbound().await;
     match format {
         OutputFormat::Json => {
             let (skill_doctor, skill_doctor_error) = run_skill_doctor(args.offline);
@@ -93,6 +106,8 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
                     daemons,
                     daemons_error,
                     daemon_repairs,
+                    pane_unbound,
+                    pane_unbound_error,
                 })?
             );
             if let Some(error) = skill_doctor_error {
@@ -110,6 +125,7 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
             for repair in &daemon_repairs {
                 println!("daemon repair: {repair}");
             }
+            print_pane_unbound_text(&pane_unbound, pane_unbound_error.as_deref());
             // The skill check can traverse several tool homes. Render the
             // runtime result first so a slow skill scan never hides a dead
             // hook or daemon from the user.
@@ -123,6 +139,66 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read the Fleet snapshot and list every hook-sourced session with no pane
+/// bound (D14, issue #916).
+///
+/// A daemon that is not running is not an error here: `ainb doctor` runs on a
+/// cold machine too, and reporting "cannot reach the daemon" once, in the
+/// daemon section, is enough. This returns an empty list and the reason.
+async fn collect_pane_unbound() -> (Vec<PaneUnboundRow>, Option<String>) {
+    use ainb_hangar_proto::fleet::{FleetProvider, PaneBinding};
+    let client = match crate::fleet::bridge::daemon::DaemonClient::from_env() {
+        Ok(client) => client,
+        Err(error) => return (Vec::new(), Some(error.to_string())),
+    };
+    match client.fleet_snapshot().await {
+        Ok(snapshot) => (
+            snapshot
+                .sessions
+                .into_iter()
+                .filter(|session| session.pane_binding == PaneBinding::PaneUnbound)
+                .map(|session| PaneUnboundRow {
+                    session_key: session.session_key,
+                    provider: match session.provider {
+                        FleetProvider::Claude => "claude",
+                        FleetProvider::Codex => "codex",
+                        FleetProvider::Antigravity => "antigravity",
+                        FleetProvider::Copilot => "copilot",
+                        FleetProvider::Acp => "acp",
+                        FleetProvider::Unknown => "unknown",
+                    }
+                    .to_string(),
+                    cwd: session.cwd,
+                })
+                .collect(),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    }
+}
+
+/// Render the pane-binding section. Silent when every session is bound and the
+/// daemon answered: a clean check that prints nothing keeps the report short.
+fn print_pane_unbound_text(rows: &[PaneUnboundRow], error: Option<&str>) {
+    if rows.is_empty() && error.is_none() {
+        return;
+    }
+    println!("\nPANE BINDING");
+    println!("------------");
+    if let Some(error) = error {
+        println!("unavailable: {error}");
+        return;
+    }
+    println!(
+        "{} session(s) have no tmux pane bound. Answers cannot be typed into them",
+        rows.len()
+    );
+    println!("and they cannot be attached to until a later event binds them.");
+    for row in rows {
+        println!("  pane_unbound  {}  {}  {}", row.session_key, row.provider, row.cwd);
+    }
 }
 
 /// Restart only owner processes with positive old-version evidence. Bridge,

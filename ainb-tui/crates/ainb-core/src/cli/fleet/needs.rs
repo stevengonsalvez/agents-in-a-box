@@ -66,7 +66,15 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         })
         .collect();
     let merged = merge_sessions(vec![known, discovered]);
-    let (rows, census) = classify_all(merged, &probes, idle_override, enrich).await;
+    let (mut rows, census) = classify_all(merged, &probes, idle_override, enrich).await;
+    // D14 one-truth stamp. The daemon derives every agent's state, tier,
+    // provenance and evidence clock ONCE (`fleet/status`); this command, the
+    // TUI fleet panel and `GET /api/needs` all print that derivation rather
+    // than folding their own, so the same agent reads the same way on every
+    // surface. A daemon that is not running leaves the rows unstamped and the
+    // local tiering above is still the answer — degraded, and visibly so,
+    // rather than silently different.
+    stamp_from_daemon(&mut rows).await;
 
     if matches!(format, OutputFormat::Text) {
         print_text(&rows);
@@ -188,6 +196,101 @@ impl TierCensus {
             self.probe, self.hook, self.scan, self.running, self.probes_seen
         )
     }
+}
+
+/// Stamp every row with the daemon's own status derivation, and add a row for
+/// any agent the daemon says is waiting that the local tiers did not see.
+///
+/// Best-effort by design: `ainb fleet needs` must keep working on a box where
+/// the daemon is not installed or not running, which is exactly when the local
+/// tiering earns its keep. An unreachable daemon is therefore silent here.
+async fn stamp_from_daemon(rows: &mut Vec<NeedsRow>) {
+    use ainb_hangar_proto::agent_status::AgentState;
+
+    let Ok(client) = crate::fleet::bridge::daemon::DaemonClient::from_env() else {
+        return;
+    };
+    let Ok(status) = client.fleet_status().await else {
+        return;
+    };
+    for status_row in &status.rows {
+        // Correlate on cwd: the local tiers key sessions by working directory
+        // (the fleet's cross-source dedupe key), and the daemon row carries the
+        // same cwd the hook reported.
+        let tuple = status_row.identity_tuple();
+        let mut matched = false;
+        for row in rows.iter_mut() {
+            if row.session.cwd != status_row.cwd {
+                continue;
+            }
+            matched = true;
+            row.stamp_status(
+                tuple.0.to_string(),
+                tuple.1,
+                tuple.2,
+                tuple.3,
+                tuple.4,
+                status_row.pane_unbound,
+            );
+        }
+        // An agent the daemon says is blocked but the local scan never found
+        // (its pane is gone, or it never had one — see issue #916) is still
+        // blocked. Dropping it is how a surface ends up showing fewer agents
+        // than another, which is the drift this whole phase removes.
+        if !matched && status_row.state == AgentState::Waiting {
+            rows.push(needs_row_from_status(status_row));
+        }
+    }
+}
+
+/// Build a `NeedsRow` for an agent only the daemon can see.
+///
+/// The context is deliberately a `Wait` marker rather than a fabricated
+/// question: the daemon's status read says THAT the agent is blocked, and the
+/// card that says WHAT it asked is the inbox's, not this command's. Inventing a
+/// question here would put words in the agent's mouth.
+fn needs_row_from_status(status: &ainb_hangar_proto::agent_status::AgentStatusRow) -> NeedsRow {
+    use ainb_fleet_core::fleet::read::needs::{NeedsContext, WaitContext};
+
+    let session = Session {
+        id: status.session_key.clone(),
+        cwd: status.cwd.clone(),
+        pid: None,
+        git_root: None,
+        tmux_session: None,
+        workspace_name: status.display_name.clone(),
+        worktree_path: None,
+        peer_id: None,
+        bg_job_id: None,
+        transcript_path: None,
+        sources: vec![SessionSource::Ainb],
+        summary: None,
+        // The daemon's own evidence clock, so a row only it can see ages by
+        // the same number every other surface shows for that agent.
+        last_seen_ms: Some(status.evidence_observed_at),
+    };
+    let mut row = ainb_fleet_core::fleet::read::needs::make_row(
+        session,
+        NeedsContext::Wait(WaitContext {
+            marker: "needs input:".to_string(),
+            text: if status.pane_unbound {
+                "blocked, and no tmux pane is bound to this session (see `ainb doctor`)".to_string()
+            } else {
+                "blocked on a human; the question is in the attention inbox".to_string()
+            },
+        }),
+        ainb_fleet_core::fleet::read::needs::RouteHint::None,
+    );
+    let tuple = status.identity_tuple();
+    row.stamp_status(
+        tuple.0.to_string(),
+        tuple.1,
+        tuple.2,
+        tuple.3,
+        tuple.4,
+        status.pane_unbound,
+    );
+    row
 }
 
 async fn classify_all(
