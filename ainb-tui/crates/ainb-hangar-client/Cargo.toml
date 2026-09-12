@@ -18,10 +18,6 @@ path = "src/lib.rs"
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 # Hangar home resolution (`hangar_home`) for the socket + token file paths.
 ainb-hangar-core = { path = "../ainb-hangar-core" }
-# Op-id minting (D18). 128 bits of OS CSPRNG per mutation: the id is what makes
-# a lost reply replayable instead of a second execution, and it has to come from
-# the CLIENT because the client is the only party still holding it at retry time.
-rand = "0.8"
 tokio = { workspace = true }
 # `Serialize`/`DeserializeOwned` bound `call_typed`, so a caller has to name the
 # proto types rather than hand-build JSON for an arbitrary method.

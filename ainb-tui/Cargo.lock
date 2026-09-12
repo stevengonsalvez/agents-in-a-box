@@ -336,7 +336,6 @@ version = "0.1.0"
 dependencies = [
  "ainb-hangar-core",
  "ainb-hangar-proto",
- "rand 0.8.7",
  "serde",
  "serde_json",
  "tempfile",
