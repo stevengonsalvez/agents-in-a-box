@@ -374,29 +374,55 @@ fn connections_json(home: &Path, daemon: &Path) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("connections list must be JSON: {error}; output:\n{output}"))
 }
 
-fn tui_pid(connections: &serde_json::Value) -> Option<u32> {
+/// Every `tui`-kind connection's pid.
+///
+/// There is more than one. The `ainb tui` process registers its own `tui`
+/// surface when it connects to the daemon, and the Hangar plugin registers a
+/// second when the launch key spawns it, so "the tui row" is not a thing
+/// (#953). Which of them a single-row lookup returned came down to connection
+/// order, and on macOS the main TUI's registration landed first.
+fn tui_pids(connections: &serde_json::Value) -> std::collections::BTreeSet<u32> {
     connections["connections"]
-        .as_array()?
-        .iter()
-        .find(|row| row["surface"]["kind"].as_str() == Some("tui"))?["surface"]["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .filter(|pid| *pid > 0)
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row["surface"]["kind"].as_str() == Some("tui"))
+                .filter_map(|row| row["surface"]["pid"].as_u64())
+                .filter_map(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 0)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-fn wait_for_tui_pid(home: &Path, daemon: &Path, timeout: Duration) -> (u32, serde_json::Value) {
+/// Wait for a `tui` connection that was NOT there before the launch key.
+///
+/// The plugin is identified by being new, which is the only thing that
+/// distinguishes it from the `ainb tui` process's own `tui` registration
+/// without reaching into either process. Strictly stronger than the old
+/// "first tui row" lookup: it asserts the launch key CAUSED a connection
+/// rather than that one happens to exist.
+fn wait_for_new_tui_pid(
+    home: &Path,
+    daemon: &Path,
+    before: &std::collections::BTreeSet<u32>,
+    timeout: Duration,
+) -> (u32, serde_json::Value) {
     let deadline = Instant::now() + timeout;
     let mut last = None;
     while Instant::now() < deadline {
         let connections = connections_json(home, daemon);
-        if let Some(pid) = tui_pid(&connections).filter(|pid| pid_alive(*pid)) {
+        if let Some(pid) =
+            tui_pids(&connections).difference(before).copied().find(|pid| pid_alive(*pid))
+        {
             return (pid, connections);
         }
         last = Some(connections);
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!(
-        "real TUI plugin never stayed in connections list; last listing: {}",
+        "the Hangar launch key never produced a new TUI connection; pids before: \
+         {before:?}; last listing: {}",
         last.unwrap_or(serde_json::Value::Null)
     );
 }
@@ -406,7 +432,7 @@ fn tui_stays_listed(home: &Path, daemon: &Path, pid: u32, duration: Duration) ->
     let mut observed = false;
     while Instant::now() < deadline {
         let listing = connections_json(home, daemon);
-        if tui_pid(&listing) != Some(pid) || !pid_alive(pid) {
+        if !tui_pids(&listing).contains(&pid) || !pid_alive(pid) {
             return false;
         }
         observed = true;
@@ -578,13 +604,19 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         .filter(|connection| connection["surface"]["kind"].as_str() != Some("cli"))
         .collect();
     assert!(
-        non_observer_connections.is_empty(),
-        "registry must have zero non-CLI connections before the Hangar launch key: {empty_listing}"
+        non_observer_connections
+            .iter()
+            .all(|connection| connection["surface"]["kind"].as_str() == Some("tui")),
+        "only CLI observers and the TUI itself may be connected before the Hangar launch key: {empty_listing}"
     );
-    assert!(
-        tui_pid(&empty_listing).is_none(),
-        "no TUI may be registered before the Hangar launch key: {empty_listing}"
-    );
+    // Recorded, not forbidden. The `ainb tui` process registers its OWN `tui`
+    // surface when it connects to the daemon, before and independently of the
+    // Hangar plugin, so requiring zero `tui` rows here asserted a race: on
+    // macOS that registration landed before this probe and the test failed
+    // with a listing that was entirely correct (#953). What the launch key
+    // must do is produce a NEW one, which is what this baseline makes
+    // checkable.
+    let tui_before = tui_pids(&empty_listing);
 
     press_hangar_launch_key(tui.name());
     let hangar_capture = poll_capture(tui.name(), Duration::from_secs(30), |capture| {
@@ -601,10 +633,14 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         "HomeScreen remained visible after Hangar launch key:\n{hangar_capture}"
     );
     let (plugin_pid, first_listing) =
-        wait_for_tui_pid(home.path(), &daemon, Duration::from_secs(30));
+        wait_for_new_tui_pid(home.path(), &daemon, &tui_before, Duration::from_secs(30));
     assert!(
-        tui_pid(&first_listing) == Some(plugin_pid),
+        tui_pids(&first_listing).contains(&plugin_pid),
         "connections list must expose the live TUI row with its process pid: {first_listing}"
+    );
+    assert!(
+        !tui_before.contains(&plugin_pid),
+        "the plugin's connection must be the one the launch key created: {first_listing}"
     );
 
     // Poll through a real hold period so this cannot pass on a transient
@@ -622,7 +658,7 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
     assert!(
         wait_until(Duration::from_secs(15), || {
             let listing = connections_json(home.path(), &daemon);
-            tui_pid(&listing).is_none()
+            !tui_pids(&listing).contains(&plugin_pid)
         }),
         "TUI row for pid {plugin_pid} remained after exact tmux shutdown"
     );
