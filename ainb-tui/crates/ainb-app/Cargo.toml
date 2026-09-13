@@ -84,6 +84,11 @@ ainb-plugin-hangar = { path = "../ainb-plugin-hangar" }
 ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
 rand = "0.8"
 
+# Skill manager: manifest, lockfile and drift types, and the CLI verbs the
+# screen runs in-process.
+ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0" }
+ainb-cli = { path = "../ainb-cli", version = "0.1.0" }
+
 # Fleet core and the Hangar control plane
 ainb-fleet-core = { path = "../ainb-fleet-core", version = "0.1.0" }
 ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }

@@ -236,6 +236,7 @@ dependencies = [
 name = "ainb-app"
 version = "1.28.2"
 dependencies = [
+ "ainb-cli",
  "ainb-fleet-core",
  "ainb-hangar-client",
  "ainb-hangar-core",
