@@ -107,7 +107,10 @@ impl UITestFramework {
     pub fn press_key(&mut self, key_code: KeyCode) -> Result<(), Box<dyn std::error::Error>> {
         let key_event = KeyEvent::new(key_code, KeyModifiers::NONE);
 
-        if let Some(event) = EventHandler::handle_key_event(key_event, &mut self.app.state) {
+        if let Some(event) = EventHandler::handle_key_event(
+            ainb::app::terminal_keys::chord_from_key_event(&key_event).expect("mapped key"),
+            &mut self.app.state,
+        ) {
             EventHandler::process_event(event, &mut self.app.state);
         }
 

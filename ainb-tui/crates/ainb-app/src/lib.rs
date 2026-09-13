@@ -6,6 +6,7 @@
 
 pub mod agent_parsers;
 pub mod agents;
+pub mod app;
 pub mod audit;
 pub mod claude;
 pub mod cli;
@@ -20,6 +21,7 @@ pub mod fleet;
 pub mod geometry;
 pub mod git;
 pub mod headroom;
+pub mod host;
 pub mod interactive;
 pub mod mcp_pool;
 pub mod models;
@@ -33,8 +35,11 @@ pub mod setup;
 pub mod text_editor;
 pub mod tmux;
 pub mod usage_cache;
-pub mod viewport;
 pub mod widgets;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+
+pub use app::{
+    AppState, Btn, Chord, CommandId, Intent, Key, Keymap, Mods, Pos, SectionId, Versioned, dispatch,
+};

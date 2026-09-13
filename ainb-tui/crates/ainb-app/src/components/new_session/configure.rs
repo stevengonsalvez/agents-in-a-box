@@ -2,6 +2,7 @@
 // state types and the logic that does not draw. The renderer lives in
 // `ainb-core::components::new_session::configure`, which re-exports this module.
 
+use crate::app::keymap::{Chord, Key, Mods};
 use crate::config::presets::{PresetManager, RepositoryPreset, SessionMode};
 use crate::config::session_defaults::SessionDefaults;
 use crate::git::branch_list::BranchEntry;
@@ -762,5 +763,666 @@ impl LaunchSpec {
     #[must_use]
     pub fn branch_override(&self) -> Option<String> {
         self.branch_override.clone()
+    }
+}
+/// Handle a single key event for the Configure screen.
+///
+/// Returns the outcome the dispatcher should act on. Mutates `state` in place
+/// for the common "type a char" path.
+///
+/// Key model (2026-05 split — ↑/↓ are row-nav, NOT value cycling):
+///   * Tab / Shift+Tab — cycle focus through visible rows (canonical).
+///   * ↑ / ↓ — alias for Shift+Tab / Tab respectively. The earlier prototype
+///     had these double as value cycling; Stevie flagged that as a UX bug.
+///     Now strictly row-nav, EXCEPT when the focused row is `Prompt` — there
+///     the arrow keys are absorbed by the textarea for cursor movement.
+///   * ← / → — cycle the VALUE in the focused row. No effect on Prompt row.
+///   * Enter — Launch from any non-Prompt row. On the Branch row Enter opens
+///     inline edit. On the Prompt row Enter inserts a newline; Ctrl+Enter
+///     launches.
+///   * Esc — back to PickRepo (or cancel the active branch edit / save-preset
+///     modal).
+///   * Ctrl+S / Ctrl+P — save preset / open preset manager.
+pub fn handle_key(state: &mut ConfigureState, key: &Chord) -> ConfigureOutcome {
+    // Modal interception — every key goes to the modal until it closes.
+    if state.save_preset_modal.is_some() {
+        return handle_modal_key(state, key);
+    }
+
+    // Base-branch popup interception — mirrors the save-preset modal.
+    // INVARIANT: the two modals are mutually exclusive (the picker handler
+    // exposes no ^S path and vice versa). If that ever changes, align this
+    // precedence with the render order in `render()` — the picker draws on
+    // top, so it must also win the key race.
+    if state.branch_picker.is_some() {
+        return handle_branch_picker_key(state, key);
+    }
+
+    // Inline branch edit takes priority over the row machinery — every key
+    // either commits / cancels the edit or extends the buffer.
+    if state.branch_edit.is_some() {
+        return handle_branch_edit_key(state, key);
+    }
+
+    // Prefix editing has the same priority. Keeping this separate from the
+    // branch editor makes the Prefix row a true per-session control instead
+    // of overloading the branch-name textarea.
+    if state.branch_prefix_edit.is_some() {
+        return handle_branch_prefix_edit_key(state, key);
+    }
+    if state.session_prefix_edit.is_some() {
+        return handle_session_prefix_edit_key(state, key);
+    }
+
+    // Ctrl shortcuts.
+    if key.modifiers().contains(Mods::CTRL) {
+        match key.code() {
+            Key::Char('s' | 'S') => {
+                state.save_preset_modal = Some(String::new());
+                return ConfigureOutcome::Stay;
+            }
+            Key::Char('p' | 'P') => {
+                tracing::warn!("configure: ^P preset manager — stub until Phase 7 polish");
+                return ConfigureOutcome::OpenPresetManager;
+            }
+            // Ctrl+Enter from anywhere = Launch. Many terminals don't deliver
+            // Ctrl+Enter distinctly (they collapse to Enter), but where they
+            // do we honour it as the prompt-textarea escape hatch.
+            Key::Enter => return launch_outcome(state),
+            _ => {}
+        }
+    }
+
+    match key.code() {
+        Key::Esc => ConfigureOutcome::BackToPickRepo,
+        // Shift+Tab: a terminal's BackTab arrives as Tab with Shift held.
+        Key::Tab if key.modifiers().contains(Mods::SHIFT) => {
+            state.cycle_focus(-1);
+            ConfigureOutcome::Stay
+        }
+        Key::Tab => {
+            state.cycle_focus(1);
+            ConfigureOutcome::Stay
+        }
+        Key::Enter => match state.focused_row {
+            ConfigureRow::Prefix => {
+                state.branch_prefix_edit = Some(state.branch_prefix.clone());
+                ConfigureOutcome::Stay
+            }
+            ConfigureRow::SessionPrefix => {
+                state.session_prefix_edit = Some(state.session_prefix.clone());
+                ConfigureOutcome::Stay
+            }
+            ConfigureRow::Branch => match state.branch_segment {
+                // Source segment: open the base-branch picker popup. The
+                // dispatcher lists branches (git stays out of components/).
+                BranchSegment::Source => ConfigureOutcome::OpenBranchPicker,
+                BranchSegment::Worktree => {
+                    // Checkout-direct pick: no generated name to edit — route
+                    // to the picker instead so Enter never dead-ends.
+                    if state.is_checkout() {
+                        return ConfigureOutcome::OpenBranchPicker;
+                    }
+                    // Open inline branch edit. Seed buffer from override or auto.
+                    let buf = state
+                        .branch_override
+                        .clone()
+                        .unwrap_or_else(|| state.branch_worktree.clone());
+                    state.branch_edit = Some(buf);
+                    ConfigureOutcome::Stay
+                }
+            },
+            ConfigureRow::Prompt => {
+                // Inside Prompt textarea — Enter = newline. Ctrl+Enter is
+                // the launch shortcut from anywhere.
+                state.prompt.insert_newline();
+                ConfigureOutcome::Stay
+            }
+            ConfigureRow::Launch => launch_outcome(state),
+            // Enter on a non-Launch row no longer fires the launch — Stevie
+            // 2026-05-27 wants the explicit Launch row to be the only canonical
+            // way to commit the form. Ctrl+Enter still works as the quick-
+            // launch shortcut from any row (handled higher in this match).
+            _ => ConfigureOutcome::Stay,
+        },
+        Key::Left => {
+            cycle_value_in_focused_row(state, -1);
+            ConfigureOutcome::Stay
+        }
+        Key::Right => {
+            cycle_value_in_focused_row(state, 1);
+            ConfigureOutcome::Stay
+        }
+        // ↑/↓ are row navigation (alias for Shift+Tab / Tab respectively).
+        // EXCEPT inside the Prompt textarea — there they're absorbed by the
+        // textarea so vertical cursor movement still works. The textarea
+        // doesn't itself implement arrow-key cursor moves today, but
+        // forwarding the keystroke leaves room for that without retraining
+        // muscle memory later.
+        Key::Up => {
+            if state.focused_row == ConfigureRow::Prompt {
+                // No-op for now (TextEditor has no vertical move API yet);
+                // intentionally NOT row-nav so Stevie's "↑/↓ behave normally
+                // inside the textarea" rule holds.
+                return ConfigureOutcome::Stay;
+            }
+            state.cycle_focus(-1);
+            ConfigureOutcome::Stay
+        }
+        Key::Down => {
+            if state.focused_row == ConfigureRow::Prompt {
+                return ConfigureOutcome::Stay;
+            }
+            state.cycle_focus(1);
+            ConfigureOutcome::Stay
+        }
+        Key::Backspace => {
+            if state.focused_row == ConfigureRow::Prompt {
+                state.prompt.backspace();
+            }
+            ConfigureOutcome::Stay
+        }
+        Key::Char(c) if !key.modifiers().contains(Mods::CTRL) => {
+            if state.focused_row == ConfigureRow::Prompt {
+                state.prompt.insert_char(c);
+                return ConfigureOutcome::Stay;
+            }
+            // `[i]` initializes an empty remote (README + commit + push) so
+            // the user never leaves ainb. Only offered while the pre-flight
+            // verdict is EmptyRemote; the Prompt row keeps plain chars.
+            if matches!(c, 'i' | 'I') && state.repo_check == RepoCheck::EmptyRemote {
+                state.repo_check = RepoCheck::Initializing;
+                return ConfigureOutcome::InitializeRemote;
+            }
+            // No other bare-char shortcuts — Tab + arrows is the entire
+            // navigation surface for non-Prompt rows.
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
+/// Build a `Launch` outcome from the current state.
+pub fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
+    // Pre-flight: refuse to launch onto a branch already checked out in a
+    // live worktree (git would reject `worktree add` anyway). Move focus to
+    // the Branch row so the inline "⚠ in use" guidance is unmissable, and
+    // stay on Configure. Single chokepoint — covers both the [Launch] row
+    // and the Ctrl+Enter quick-launch (Stevie 2026-05-27).
+    if state.branch_collision() {
+        state.focused_row = ConfigureRow::Branch;
+        return ConfigureOutcome::Stay;
+    }
+    // Remote pre-flight gate: a missing / empty / unreachable remote can never
+    // launch — the clone or worktree step is guaranteed to fail. Refuse here
+    // and let the inline message (rendered in the filler space) explain.
+    // `Checking` also blocks: ls-remote lands sub-second, and launching before
+    // the verdict would just re-open the old fail-after-Launch hole.
+    if state.repo_check.blocks_launch() {
+        return ConfigureOutcome::Stay;
+    }
+    // Defense-in-depth: a greyed-out agent (e.g. Gemini) is never selectable in
+    // the UI, but a hand-authored preset could still carry one. Refuse to launch
+    // a disabled provider and refocus the Agent row, mirroring the collision
+    // guard above. `DISABLED_AGENTS` is the shared source of truth with the
+    // Agent-row greying, so the two never disagree.
+    if DISABLED_AGENTS.contains(&state.effective_preset().agent_provider.as_str()) {
+        state.focused_row = ConfigureRow::Agent;
+        return ConfigureOutcome::Stay;
+    }
+    let preset = state.effective_preset();
+    let prompt = state.prompt.to_non_empty_string();
+    // Checkout-direct pick: the session branch IS the picked branch — the
+    // generated `agents/xxx` name (and any manual override) doesn't apply.
+    let branch_worktree = if state.is_checkout() {
+        state.effective_branch()
+    } else {
+        state.branch_override.clone().unwrap_or_else(|| state.branch_worktree.clone())
+    };
+    ConfigureOutcome::Launch(LaunchSpec {
+        repo_label: state.repo_label.clone(),
+        repo_source: state.repo_source.clone(),
+        preset_name: preset.name.clone(),
+        preset,
+        branch_worktree,
+        branch_source: state.branch_source.clone(),
+        branch_override: state.branch_override.clone(),
+        session_prefix: state.session_prefix.trim().to_string(),
+        base: state.base_selection.clone(),
+        prompt,
+        // Defensive: never launch with Headroom on if the binary isn't there,
+        // even if some stale state slipped through.
+        headroom_enabled: state.headroom_enabled && state.headroom_available,
+        // Same guard for RTK.
+        rtk_enabled: state.rtk_enabled && state.rtk_available,
+    })
+}
+
+/// Cycle the value in the focused row by `delta` (+1 / -1). For locked rows
+/// (Mode / Yolo when a real preset is active), no-op.
+pub fn cycle_value_in_focused_row(state: &mut ConfigureState, delta: i32) {
+    match state.focused_row {
+        ConfigureRow::Preset => cycle_preset_ring(state, delta),
+        ConfigureRow::Agent => {
+            if state.preset_selection == PresetSelection::Custom {
+                cycle_agent(state, delta);
+            }
+        }
+        ConfigureRow::Model => {
+            if state.preset_selection == PresetSelection::Custom {
+                cycle_model(state, delta);
+            }
+        }
+        ConfigureRow::Mode => {
+            if state.preset_selection == PresetSelection::Custom {
+                cycle_mode(state);
+            }
+        }
+        ConfigureRow::Yolo => {
+            if state.preset_selection == PresetSelection::Custom {
+                cycle_yolo(state);
+            }
+        }
+        ConfigureRow::HeadroomProxy => {
+            // No-op when headroom isn't installed — the row is informational only.
+            if state.headroom_available {
+                state.headroom_enabled = !state.headroom_enabled;
+            }
+        }
+        ConfigureRow::Rtk => {
+            // No-op when rtk isn't installed — the row is informational only.
+            if state.rtk_available {
+                state.rtk_enabled = !state.rtk_enabled;
+            }
+        }
+        ConfigureRow::Prefix => {
+            // Prefix is an editable text row, not a value ring.
+        }
+        ConfigureRow::SessionPrefix => {
+            // Session prefix is an editable text row, not a value ring.
+        }
+        ConfigureRow::Branch => {
+            // ←/→ on the Branch row toggles the targeted segment
+            // (source ⇄ worktree). Checkout mode pins Source — there's no
+            // editable worktree name to target.
+            if !state.is_checkout() {
+                state.branch_segment = match state.branch_segment {
+                    BranchSegment::Source => BranchSegment::Worktree,
+                    BranchSegment::Worktree => BranchSegment::Source,
+                };
+            }
+        }
+        ConfigureRow::Prompt
+        | ConfigureRow::Host
+        | ConfigureRow::User
+        | ConfigureRow::Port
+        | ConfigureRow::Key
+        | ConfigureRow::Launch => {
+            // No cyclable value — silently ignore.
+        }
+    }
+}
+
+/// Cycle the preset selection ring: Named(0)..Named(n-1) → Custom → Named(0).
+pub fn cycle_preset_ring(state: &mut ConfigureState, delta: i32) {
+    if state.available_presets.is_empty() {
+        return;
+    }
+    let n = state.available_presets.len() as i32;
+    // Ring length = named count + 1 (the Custom slot).
+    let ring_len = n + 1;
+    let cur = match state.preset_selection {
+        PresetSelection::Named(idx) => idx as i32,
+        PresetSelection::Custom => n,
+    };
+    let next = (cur + delta).rem_euclid(ring_len);
+    if next == n {
+        // Stepping into Custom — seed overrides from the previously-selected
+        // named preset so the editor starts at a known baseline.
+        let seed = match state.preset_selection {
+            PresetSelection::Named(idx) => state
+                .available_presets
+                .get(idx)
+                .and_then(|n| state.presets_cache.get(n).cloned())
+                .unwrap_or_else(|| state.current_preset.clone()),
+            PresetSelection::Custom => state.current_preset.clone(),
+        };
+        if state.custom_overrides.is_none() {
+            state.custom_overrides = Some(CustomOverrides::seed_from(&seed));
+        }
+        state.preset_selection = PresetSelection::Custom;
+    } else {
+        state.preset_selection = PresetSelection::Named(next as usize);
+        // Leaving Custom → clear the override layer so the named preset
+        // displays exactly as it lives on disk.
+        state.custom_overrides = None;
+    }
+    // Focus stays on the Preset row; row visibility may have changed
+    // (e.g. Boss preset reveals Prompt row).
+    // Re-anchor if the previously focused row vanished.
+    let rows = state.visible_rows();
+    if !rows.contains(&state.focused_row) {
+        state.focused_row = ConfigureRow::Preset;
+    }
+}
+
+fn ensure_overrides_seed(state: &mut ConfigureState) -> &mut CustomOverrides {
+    if state.custom_overrides.is_none() {
+        let seed = state.current_preset.clone();
+        state.custom_overrides = Some(CustomOverrides::seed_from(&seed));
+    }
+    state.custom_overrides.as_mut().expect("just seeded")
+}
+
+pub const AGENTS: &[&str] = &["claude", "codex", "antigravity", "copilot", "shell", "ssh"];
+
+/// Agent providers shown in the Agent row but greyed-out / non-selectable:
+/// kept OUT of the `AGENTS` cycle ring AND refused at launch. Single source of
+/// truth so the greyed pill and the launch guard never disagree.
+pub const DISABLED_AGENTS: &[&str] = &["gemini"];
+
+/// Cycle agent for Custom selection: rotates through claude -> codex -> antigravity -> copilot -> shell -> ssh.
+/// Gemini is intentionally excluded: it renders greyed-out (non-selectable) in the Agent row.
+pub fn cycle_agent(state: &mut ConfigureState, delta: i32) {
+    let prev_provider = {
+        let overrides = ensure_overrides_seed(state);
+        let cur = AGENTS.iter().position(|a| *a == overrides.agent_provider).unwrap_or(0);
+        let len = AGENTS.len() as i32;
+        let next = ((cur as i32) + delta).rem_euclid(len) as usize;
+        let prev = overrides.agent_provider.clone();
+        overrides.agent_provider = AGENTS[next].to_string();
+        prev
+    };
+    // Crossing the model-supporting provider boundary directly: reset the model field to
+    // `"default"` so a Claude/Codex/Antigravity-flavoured id doesn't linger on another agent.
+    // Non-adjacent paths skip this, but model parsers map any stale/unknown id to SystemDefault
+    // and omit `--model`, so it stays safe either way.
+    {
+        let overrides = state.custom_overrides.as_mut().expect("just seeded");
+        let crossed = matches!(
+            (prev_provider.as_str(), overrides.agent_provider.as_str()),
+            ("claude", "codex")
+                | ("codex", "claude")
+                | ("claude", "antigravity")
+                | ("antigravity", "claude")
+                | ("codex", "antigravity")
+                | ("antigravity", "codex")
+        );
+        if crossed {
+            overrides.agent_model = "default".to_string();
+        }
+    }
+    // Swapping agents may strand focus on a Model row that's no longer visible
+    // (Model exists only for Claude / Codex / Antigravity). Re-anchor.
+    let rows = state.visible_rows();
+    if !rows.contains(&state.focused_row) {
+        state.focused_row = ConfigureRow::Agent;
+    }
+}
+
+/// Cycle the Model row's value. Provider-aware: walks the `ClaudeModel::all()`
+/// ring for Claude, `CodexModel::all()` for Codex, `AntigravityModel::all()` for Antigravity.
+/// The cycled-to variant's full canonical id (or `"default"` for `SystemDefault`) is written
+/// back into `overrides.agent_model` so TOML serialization stays the same
+/// String shape it always was.
+pub fn cycle_model(state: &mut ConfigureState, delta: i32) {
+    use crate::models::{AntigravityModel, ClaudeModel, CodexModel};
+    let provider = state.effective_preset().agent_provider.clone();
+    let overrides = ensure_overrides_seed(state);
+    overrides.agent_model = match provider.as_str() {
+        "claude" => {
+            let ring = ClaudeModel::all();
+            let current = ClaudeModel::parse(&overrides.agent_model);
+            let cur_idx = ring.iter().position(|m| *m == current).unwrap_or(0);
+            let len = ring.len() as i32;
+            let next = ((cur_idx as i32) + delta).rem_euclid(len) as usize;
+            // SystemDefault -> "default"; real variants -> canonical CLI id.
+            ring[next].cli_value().unwrap_or("default").to_string()
+        }
+        "codex" => {
+            let ring = CodexModel::all();
+            let current = CodexModel::parse(&overrides.agent_model);
+            let cur_idx = ring.iter().position(|m| *m == current).unwrap_or(0);
+            let len = ring.len() as i32;
+            let next = ((cur_idx as i32) + delta).rem_euclid(len) as usize;
+            ring[next].cli_value().unwrap_or("default").to_string()
+        }
+        "antigravity" => {
+            let ring = AntigravityModel::all();
+            let current = AntigravityModel::parse(&overrides.agent_model);
+            let cur_idx = ring.iter().position(|m| *m == current).unwrap_or(0);
+            let len = ring.len() as i32;
+            let next = ((cur_idx as i32) + delta).rem_euclid(len) as usize;
+            ring[next].cli_value().unwrap_or("default").to_string()
+        }
+        // Shell / SSH never reach this code path (Model row hidden), but
+        // belt-and-braces: leave the field unchanged.
+        _ => overrides.agent_model.clone(),
+    };
+}
+
+pub fn cycle_mode(state: &mut ConfigureState) {
+    // ponytail: Boss/container mode is hidden for now, so cycling pins the
+    // mode to Interactive. Restore the Boss<->Interactive toggle (and the
+    // Prompt-row reveal it drove) when the container path is wired up again.
+    let overrides = ensure_overrides_seed(state);
+    overrides.mode = SessionMode::Interactive;
+}
+
+fn cycle_yolo(state: &mut ConfigureState) {
+    let overrides = ensure_overrides_seed(state);
+    overrides.skip_all = !overrides.skip_all;
+}
+
+/// Inline branch-edit key handler.
+fn handle_branch_edit_key(state: &mut ConfigureState, key: &Chord) -> ConfigureOutcome {
+    let buf = state.branch_edit.as_mut().expect("guard checked");
+    match key.code() {
+        Key::Esc => {
+            state.branch_edit = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Enter => {
+            let new_branch = buf.trim().to_string();
+            state.branch_edit = None;
+            if !new_branch.is_empty() && new_branch != state.branch_worktree {
+                state.branch_override = Some(new_branch);
+            } else if new_branch.is_empty() {
+                state.branch_override = None;
+            }
+            ConfigureOutcome::Stay
+        }
+        Key::Backspace => {
+            buf.pop();
+            ConfigureOutcome::Stay
+        }
+        Key::Char(c) if !key.modifiers().contains(Mods::CTRL) => {
+            buf.push(c);
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
+/// Inline prefix-edit key handler. An empty prefix is valid and creates a
+/// generated branch with no leading namespace.
+fn handle_branch_prefix_edit_key(state: &mut ConfigureState, key: &Chord) -> ConfigureOutcome {
+    let buffer = state.branch_prefix_edit.as_mut().expect("guard checked");
+    match key.code() {
+        Key::Esc => {
+            state.branch_prefix_edit = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Enter => {
+            let prefix = buffer.trim().to_string();
+            state.branch_prefix_edit = None;
+            state.set_branch_prefix(prefix);
+            ConfigureOutcome::Stay
+        }
+        Key::Backspace => {
+            buffer.pop();
+            ConfigureOutcome::Stay
+        }
+        Key::Char(c) if !key.modifiers().contains(Mods::CTRL) => {
+            buffer.push(c);
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
+/// Inline edit for the durable session prefix. Empty deliberately clears it.
+fn handle_session_prefix_edit_key(state: &mut ConfigureState, key: &Chord) -> ConfigureOutcome {
+    let buffer = state.session_prefix_edit.as_mut().expect("guard checked");
+    match key.code() {
+        Key::Esc => {
+            state.session_prefix_edit = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Enter => {
+            state.session_prefix = buffer.trim().to_string();
+            state.session_prefix_edit = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Backspace => {
+            buffer.pop();
+            ConfigureOutcome::Stay
+        }
+        Key::Char(c) if !key.modifiers().contains(Mods::CTRL) => {
+            buffer.push(c);
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
+/// Base-branch popup key handler. Chars/Backspace edit the fuzzy filter,
+/// ↑/↓ move the selection, Tab toggles the action mode (base-off ⇄ checkout),
+/// Enter commits the pick, Esc closes without changes.
+///
+/// `c` from the interview mock was dropped as the checkout shortcut — plain
+/// chars feed the filter, so a bare-letter action key would corrupt typing.
+/// Tab-toggle + Enter keeps per-branch action choice without the conflict.
+fn handle_branch_picker_key(state: &mut ConfigureState, key: &Chord) -> ConfigureOutcome {
+    let picker = state.branch_picker.as_mut().expect("guard checked");
+    match key.code() {
+        Key::Esc => {
+            state.branch_picker = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Tab => {
+            picker.mode = match picker.mode {
+                BaseMode::BaseOff => BaseMode::Checkout,
+                BaseMode::Checkout => BaseMode::BaseOff,
+            };
+            picker.error = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Up => {
+            picker.selected = picker.selected.saturating_sub(1);
+            ConfigureOutcome::Stay
+        }
+        Key::Down => {
+            let len = picker.filtered_indices().len();
+            if len > 0 && picker.selected + 1 < len {
+                picker.selected += 1;
+            }
+            ConfigureOutcome::Stay
+        }
+        Key::Backspace => {
+            picker.filter.pop();
+            picker.clamp_selection();
+            picker.error = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Enter => {
+            let Some(picked) = picker.selected_entry().cloned() else {
+                return ConfigureOutcome::Stay;
+            };
+            let mode = picker.mode;
+            // Checkout of an in-use branch is a hard `git worktree add`
+            // failure — block here with the inline error (interview pick:
+            // mark + block, never silently degrade to base-off).
+            if mode == BaseMode::Checkout && picked.in_use {
+                picker.error = Some(
+                    "checked out by a live session — base a new branch off it instead".to_string(),
+                );
+                return ConfigureOutcome::Stay;
+            }
+            state.base_selection = Some(BaseSelection {
+                display: picked.entry.display.clone(),
+                short_name: picked.entry.short_name.clone(),
+                is_remote: picked.entry.is_remote,
+                mode,
+            });
+            state.branch_source = picked.entry.display;
+            if state.is_checkout() {
+                // No generated name in checkout mode — drop the stale edit
+                // buffer and pin the segment back on Source.
+                state.branch_edit = None;
+                state.branch_segment = BranchSegment::Source;
+            }
+            state.branch_picker = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Char(c) if !key.modifiers().contains(Mods::CTRL) => {
+            picker.filter.push(c);
+            picker.clamp_selection();
+            picker.error = None;
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
+    }
+}
+
+/// Save-preset modal key handler. Backspace removes from the name buffer;
+/// Enter calls `PresetManager::save_preset` and closes the modal; Esc cancels.
+fn handle_modal_key(state: &mut ConfigureState, key: &Chord) -> ConfigureOutcome {
+    let buf = state.save_preset_modal.as_mut().expect("modal guard checked");
+    match key.code() {
+        Key::Esc => {
+            state.save_preset_modal = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Enter => {
+            let new_name = buf.trim().to_string();
+            if new_name.is_empty() {
+                state.save_preset_modal = None;
+                return ConfigureOutcome::Stay;
+            }
+            let mut to_save = state.effective_preset();
+            to_save.name = new_name.clone();
+            if let Ok(mut manager) = PresetManager::new() {
+                if let Err(err) = manager.save_preset(&to_save) {
+                    tracing::warn!(error = %err, "save_preset failed");
+                }
+            }
+            state.save_preset_modal = None;
+            // Refresh the preset list and select the new entry.
+            if !state.available_presets.iter().any(|n| n == &new_name) {
+                state.available_presets.push(new_name.clone());
+                state.available_presets.sort();
+            }
+            if let Some(idx) = state.available_presets.iter().position(|n| n == &new_name) {
+                state.preset_selection = PresetSelection::Named(idx);
+            }
+            // Invalidate and reload the in-memory cache so subsequent Tab
+            // cycles see the newly saved preset.
+            state.presets_cache.insert(new_name.clone(), to_save.clone());
+            // New preset becomes the baseline — clear overrides so the
+            // `• modified` badge disappears.
+            state.current_preset = to_save;
+            state.custom_overrides = None;
+            ConfigureOutcome::Stay
+        }
+        Key::Backspace => {
+            buf.pop();
+            ConfigureOutcome::Stay
+        }
+        Key::Char(c) if !key.modifiers().contains(Mods::CTRL) => {
+            buf.push(c);
+            ConfigureOutcome::Stay
+        }
+        _ => ConfigureOutcome::Stay,
     }
 }

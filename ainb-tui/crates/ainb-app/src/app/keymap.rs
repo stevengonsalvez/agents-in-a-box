@@ -3,23 +3,103 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use super::events::AppEvent;
 use super::screens::ids as screen_ids;
 use super::state::{AppState, FocusedPane};
 
-/// Key-code variants used by legacy event tests.
-///
-/// Kept test-only so production host dispatch remains entirely chord based.
+/// Key variants used by the event tests, so a test names `Char('q')` or `Esc`
+/// the way a renderer would hand it over.
 #[cfg(test)]
 pub(crate) mod test_key_codes {
-    pub(crate) use crossterm::event::KeyCode::*;
+    pub(crate) use super::Key::*;
 }
 
-/// A terminal-normalised key chord.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// A key on its own, before modifiers.
+///
+/// Renderers convert their native key events into this at their input edge;
+/// nothing past that edge sees a renderer's key type. Shift+Tab is `Tab` with
+/// [`Mods::SHIFT`], not a key of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Key {
+    Char(char),
+    Enter,
+    Esc,
+    Tab,
+    Backspace,
+    Delete,
+    Insert,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    F(u8),
+}
+
+/// The modifier keys held with a [`Key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Mods {
+    bits: u8,
+}
+
+impl Mods {
+    pub const NONE: Self = Self { bits: 0 };
+    pub const CTRL: Self = Self { bits: 1 };
+    pub const ALT: Self = Self { bits: 1 << 1 };
+    pub const SHIFT: Self = Self { bits: 1 << 2 };
+
+    /// Whether every modifier in `other` is held.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.bits & other.bits == other.bits
+    }
+
+    /// Whether no modifier is held.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.bits == 0
+    }
+}
+
+impl std::ops::BitOr for Mods {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self {
+            bits: self.bits | rhs.bits,
+        }
+    }
+}
+
+/// A key plus its modifiers, in one canonical form.
+///
+/// Stored as its wire spelling (`"ctrl+k"`, `"G"`, `"shift+tab"`), which is
+/// what the keymap table, `keymap.toml`, the docs and the palette all use, so
+/// two chords are equal exactly when they would resolve to the same binding.
+/// [`Chord::code`] and [`Chord::modifiers`] give the structured view a reducer
+/// matches on.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(into = "String", try_from = "String")]
 pub struct Chord(String);
+
+impl From<Chord> for String {
+    fn from(chord: Chord) -> Self {
+        chord.0
+    }
+}
+
+impl TryFrom<String> for Chord {
+    type Error = ChordParseError;
+
+    fn try_from(spelling: String) -> Result<Self, Self::Error> {
+        Self::parse(&spelling)
+    }
+}
 
 /// Invalid user supplied chord.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +112,12 @@ impl fmt::Display for ChordParseError {
 }
 
 impl std::error::Error for ChordParseError {}
+
+impl From<Key> for Chord {
+    fn from(key: Key) -> Self {
+        Self::new(key, Mods::NONE)
+    }
+}
 
 impl Chord {
     /// Parse the wire spelling used by `keymap.toml`.
@@ -128,54 +214,95 @@ impl Chord {
         Ok(char_key.to_string())
     }
 
-    /// Convert the only terminal event type at the input boundary.
+    /// Build the chord a renderer reports for `key` held with `mods`.
+    ///
+    /// Shift on a printable glyph is dropped: the glyph (`:`, `G`) already
+    /// carries it, and keeping `shift+:` would leak a terminal's layout
+    /// details into the user-facing table.
     #[must_use]
-    pub fn from_key_event(event: &KeyEvent) -> Self {
+    pub fn new(key: Key, mods: Mods) -> Self {
         let mut modifiers = Vec::new();
-        if event.modifiers.contains(KeyModifiers::CONTROL) {
+        if mods.contains(Mods::CTRL) {
             modifiers.push("ctrl");
         }
-        if event.modifiers.contains(KeyModifiers::ALT) {
+        if mods.contains(Mods::ALT) {
             modifiers.push("alt");
         }
-        if event.modifiers.contains(KeyModifiers::SHIFT) {
+        if mods.contains(Mods::SHIFT) && !matches!(key, Key::Char(_)) {
             modifiers.push("shift");
         }
-        let key = match event.code {
-            KeyCode::Backspace => "backspace".to_string(),
-            KeyCode::Enter => "enter".to_string(),
-            KeyCode::Left => "left".to_string(),
-            KeyCode::Right => "right".to_string(),
-            KeyCode::Up => "up".to_string(),
-            KeyCode::Down => "down".to_string(),
-            KeyCode::Home => "home".to_string(),
-            KeyCode::End => "end".to_string(),
-            KeyCode::PageUp => "pageup".to_string(),
-            KeyCode::PageDown => "pagedown".to_string(),
-            KeyCode::Tab => "tab".to_string(),
-            KeyCode::BackTab => "tab".to_string(),
-            KeyCode::Delete => "delete".to_string(),
-            KeyCode::Insert => "insert".to_string(),
-            KeyCode::F(number) => format!("f{number}"),
-            KeyCode::Esc => "esc".to_string(),
-            KeyCode::Char(' ') => "space".to_string(),
-            KeyCode::Char('+') => "plus".to_string(),
-            KeyCode::Char(character) => character.to_string(),
-            other => format!("{other:?}").to_ascii_lowercase(),
+        let name = match key {
+            Key::Backspace => "backspace".to_string(),
+            Key::Enter => "enter".to_string(),
+            Key::Left => "left".to_string(),
+            Key::Right => "right".to_string(),
+            Key::Up => "up".to_string(),
+            Key::Down => "down".to_string(),
+            Key::Home => "home".to_string(),
+            Key::End => "end".to_string(),
+            Key::PageUp => "pageup".to_string(),
+            Key::PageDown => "pagedown".to_string(),
+            Key::Tab => "tab".to_string(),
+            Key::Delete => "delete".to_string(),
+            Key::Insert => "insert".to_string(),
+            Key::F(number) => format!("f{number}"),
+            Key::Esc => "esc".to_string(),
+            Key::Char(' ') => "space".to_string(),
+            Key::Char('+') => "plus".to_string(),
+            Key::Char(character) => character.to_string(),
         };
-        // Crossterm may report SHIFT for a printable glyph (for example `:`).
-        // The glyph already carries that intent, so storing `shift+:` would
-        // make terminal layout details leak into the user-facing table.
-        if matches!(&event.code, KeyCode::Char(_)) {
-            modifiers.retain(|modifier| *modifier != "shift");
-        }
         let source = modifiers
             .into_iter()
-            .chain(std::iter::once(key.as_str()))
+            .chain(std::iter::once(name.as_str()))
             .collect::<Vec<_>>()
             .join("+");
-        // Every crossterm spelling above is a supported wire key.
-        Self::parse(&source).expect("crossterm key normalisation is valid")
+        // Every `Key` spells a supported wire key.
+        Self::parse(&source).expect("every Key has a wire spelling")
+    }
+
+    /// The key, without its modifiers.
+    #[must_use]
+    pub fn code(&self) -> Key {
+        let name = self.0.rsplit('+').next().unwrap_or_default();
+        // A lone `+` never survives parsing (it is spelled `plus`), so the last
+        // `+`-separated part is always the key name.
+        match name {
+            "backspace" => Key::Backspace,
+            "delete" => Key::Delete,
+            "down" => Key::Down,
+            "end" => Key::End,
+            "enter" => Key::Enter,
+            "esc" => Key::Esc,
+            "home" => Key::Home,
+            "insert" => Key::Insert,
+            "left" => Key::Left,
+            "pagedown" => Key::PageDown,
+            "pageup" => Key::PageUp,
+            "plus" => Key::Char('+'),
+            "right" => Key::Right,
+            "space" => Key::Char(' '),
+            "tab" => Key::Tab,
+            "up" => Key::Up,
+            function if function.len() > 1 && function.starts_with('f') => {
+                Key::F(function[1..].parse().expect("parsed chords only carry f<number>"))
+            }
+            glyph => Key::Char(glyph.chars().next().expect("parsed chords carry a key")),
+        }
+    }
+
+    /// The modifiers held with [`Chord::code`].
+    #[must_use]
+    pub fn modifiers(&self) -> Mods {
+        let mut parts = self.0.split('+').collect::<Vec<_>>();
+        parts.pop();
+        parts.into_iter().fold(Mods::NONE, |mods, part| {
+            mods | match part {
+                "ctrl" => Mods::CTRL,
+                "alt" => Mods::ALT,
+                "shift" => Mods::SHIFT,
+                _ => Mods::NONE,
+            }
+        })
     }
 
     /// Wire spelling used in TOML, docs, and palette labels.
@@ -737,6 +864,8 @@ pub enum UiAction {
     SessionAskPrevious,
     SessionAskNext,
     SessionAskBackspace,
+    SkillManagerShrinkSources,
+    SkillManagerGrowSources,
     DaemonsCloseOverlay,
     DaemonsCloseAndBack,
     DaemonsConfirmMenu,
@@ -789,7 +918,9 @@ impl KeyAction {
 pub struct Binding {
     pub id: &'static str,
     pub ctx: KeyContext,
-    pub chord: Chord,
+    /// The key that runs this row, or `None` for a command reachable only by
+    /// name (from a palette or a click). Unbound rows never match a key press.
+    pub chord: Option<Chord>,
     pub action: KeyAction,
     pub doc: &'static str,
 }
@@ -830,11 +961,13 @@ impl Keymap {
                     binding.id
                 )));
             }
-            let key = (binding.ctx.clone(), binding.chord.clone());
-            if by_chord.insert(key, index).is_some() {
+            let Some(chord) = &binding.chord else {
+                continue;
+            };
+            if by_chord.insert((binding.ctx.clone(), chord.clone()), index).is_some() {
                 return Err(OverrideError(format!(
                     "duplicate key `{}` in [{}]",
-                    binding.chord.as_str(),
+                    chord.as_str(),
                     binding.ctx.name()
                 )));
             }
@@ -885,6 +1018,22 @@ impl Keymap {
         self.bindings.iter().find(|binding| binding.ctx == *ctx && binding.id == id)
     }
 
+    /// The command registry: every row, addressable by its [`CommandId`].
+    ///
+    /// Palettes list it and clicks invoke from it, so it is the same table key
+    /// presses resolve through, overrides included.
+    pub fn commands(&self) -> impl Iterator<Item = (CommandId, &Binding)> {
+        self.bindings.iter().map(|binding| (CommandId::of(binding), binding))
+    }
+
+    /// Look a command up by id. `None` for ids no row carries.
+    #[must_use]
+    pub fn command(&self, id: &CommandId) -> Option<&Binding> {
+        // ponytail: linear scan of a few hundred rows per palette or click
+        // invocation; index by id if commands ever run per frame.
+        self.commands()
+            .find_map(|(candidate, binding)| (candidate == *id).then_some(binding))
+    }
     /// Load the conventional override file, preserving defaults on every error.
     #[must_use]
     pub fn load_user() -> (Self, Option<String>) {
@@ -953,7 +1102,7 @@ impl Keymap {
             is_override_target
                 || !replacements.iter().any(|(_, context, event, chord)| {
                     binding.ctx == *context
-                        && binding.chord == *chord
+                        && binding.chord.as_ref() == Some(chord)
                         && binding.id != event.as_str()
                 })
         });
@@ -962,11 +1111,45 @@ impl Keymap {
                 .iter_mut()
                 .find(|(binding_index, _)| *binding_index == index)
                 .expect("validated override target remains in keymap");
-            binding.1.chord = chord;
+            binding.1.chord = Some(chord);
         }
         self.bindings = bindings.into_iter().map(|(_, binding)| binding).collect();
 
         Self::new(self.bindings)
+    }
+}
+
+/// Stable name of a keymap row: `<context>.<row id>`.
+///
+/// For example `session_list.attach_session` or `global.toggle_help`. The
+/// context half is the `[section]` a `keymap.toml` override names, so a
+/// command id and an override address the same row.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct CommandId(String);
+
+impl CommandId {
+    /// Wrap a command name. Unknown names are allowed and resolve to nothing.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    fn of(binding: &Binding) -> Self {
+        Self(format!("{}.{}", binding.ctx.name(), binding.id))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CommandId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

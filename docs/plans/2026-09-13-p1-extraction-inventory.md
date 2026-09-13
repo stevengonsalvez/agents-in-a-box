@@ -1,6 +1,6 @@
 # P1 extraction inventory: `ainb-app`
 
-Status: P1a implemented, P1b and P1c planned. Base spec: `2026-09-04-desktop-shared-core-spec.md`, rows P1 to P5 of "Extraction plan". Goal: `goals/2026-09-13-p1-ainb-app.md`.
+Status: P1a and P1b merged, P1c implemented. Base spec: `2026-09-04-desktop-shared-core-spec.md`, rows P1 to P5 of "Extraction plan". Goal: `goals/2026-09-13-p1-ainb-app.md`.
 
 This is the checklist reviewers hold each P1 PR against. Every row names a module, its size, what in it touches ratatui or crossterm, where it ends up, and the shim that keeps `ainb::<path>` and `crate::<path>` resolving in `ainb-core`.
 
@@ -29,9 +29,9 @@ The spec's P1 row and "Hard knots" line were written before a module graph exist
 | crossterm in ~130 handler signatures | 3 in `events.rs` (`handle_key_event`, `handle_key_event_with_keymap`, `handle_new_session_keys`) plus 2 component reducers (`configure::handle_key`, `pick_repo::handle_key`) | Dispatch already resolves through `Chord` since Phase 1 keymap. The other `KeyEvent` uses are test constructors (36 in `events.rs`). |
 | 17 component fields on `AppState` can wait for P2 to P5 | They cannot | A type in `ainb-app` cannot name a type in `ainb-core`, which depends on it. A generic seam (`AppState<X>`) would need about 560 trait touchpoints in `events.rs`, and the moved tests could not build without core types. P1b moves the pure half of each component file (types, impls, reducers) and leaves render fns in core, which is the P2 to P5 "cut at the first render fn", done earlier and without moving any render code. |
 
-"297 tests under `app/`" counts every test in the directory. 13 of them are in files that stay in the renderer: `ui_state.rs` (1), `attach_handler.rs` (1) and `screens/builtin.rs` (11).
+"297 tests under `app/`" counts every test in the directory. 16 of them stay with the renderer because they build a ratatui `Frame`, a crossterm event or `UiState`; the P1c section lists them.
 
-## P1a: service layer (this PR)
+## P1a: service layer (#973)
 
 Zero logic change. Files moved with `git mv`; the only text edits are import paths, `pub(crate)` widened to `pub` where `ainb-core` reaches in, and `#[cfg(test)]` helpers that core tests use widened to `#[cfg(any(test, feature = "test-support"))]`.
 
@@ -88,7 +88,7 @@ Zero logic change. Files moved with `git mv`; the only text edits are import pat
 | `docs/assets/diagrams/generate-diagrams.py` | Reads `fleet/daemons/probe.rs` from the new path. |
 | `plugins/README.md`, `ainb-tui/scripts/chat-bus-smoke.sh` | Path references updated. Historical research and plan docs keep the paths they were written against. |
 
-## P1b: component pure halves (this PR)
+## P1b: component pure halves (#975)
 
 Each screen gets one commit. In each component file, the types and the logic that does not draw move to `ainb-app/src/components/<same path>`. The draw functions stay at the old path, and the core file starts with `pub use ainb_app::components::<path>::*;`.
 
@@ -124,21 +124,92 @@ Deferred to P1c, because these reach `AppState`, which does not move until then:
 - `session_tabs`: `SessionTab`, `cycle`, `resolve` and `selected_blocking` take `&AppState`. `SessionTab` has inherent methods that do so, and an inherent impl must live in its type's crate.
 - `configure::handle_key` and `pick_repo::handle_key`: they move once they take `Chord`.
 
-## P1c: state machine (planned)
+## P1c: state machine (this PR)
 
-| Moves to `ainb-app/src/app/` | Stays in `ainb-core/src/app/` |
-|------------------------------|-------------------------------|
-| `state.rs`, `sections.rs`, `versioned.rs`, `events.rs`, `keymap.rs`, `keymap_defaults.rs`, `keymap_toml.rs`, `session_loader.rs`, `snapshot.rs`, `event_bus.rs`, `state_tests.rs`, `screens::ids`, `EventOutcome` | `ui_state.rs`, `attach_handler.rs`, `screens/builtin.rs` (minus `plugin_id_for_screen`, `focused_plugin_captures_text`, `plugin_owns_help_keys`, which are state reads and move), the `Screen` trait and `registry.rs` (they hold `Frame` and `Rect`) |
+The commits, in order:
 
-P1c also covers:
+| Commit | What it does |
+|--------|--------------|
+| terminal handoff | `ainb_app::host::TerminalHandoff` with `release_terminal` and `reclaim_terminal`; the TUI installs `CrosstermHandoff` at startup. `run_oauth_setup` and `docker::exec_interactive_blocking` (now in `ainb-app`) hand the terminal over through it instead of calling crossterm. The core `docker` shim is gone. One behaviour change: the docker path used to leave only raw mode and the alternate screen. It now also releases mouse capture and bracketed paste, as OAuth setup always did, so a `docker exec -it` child no longer receives the TUI's mouse and paste escape sequences. |
+| state machine move | The files in the table below, plus the seams the move forces (next table). |
+| pure tests follow their code | `screen_ids_are_unique` and `plugin_id_for_screen_resolves_analytics` move beside the ids and routing fns they test. |
+| width from the host | `RendererHost::columns()` replaces the process-global `viewport` from P1b. |
+| Intent | `Intent`, `CommandId`, `Pos`, `Btn`, `dispatch`, `EventHandler::resolve_intent`, the command registry, and the root re-exports. |
+| unbound commands | `Binding.chord` becomes `Option<Chord>`. An unbound row is a command that a palette or click runs by name, and no key reaches it until a `keymap.toml` override binds one. |
 
-- **Keys.** `Chord::from_key_event` becomes a free fn in core, at the host edge. Handlers take `Chord`.
-- **Terminal size.** The eight `crossterm::terminal::size` reads in `events.rs` become a viewport the host passes in.
-- **Mouse and terminal suspend.** Mouse fns (`events.rs` 805 to 1210) become a core extension trait. `run_oauth_setup` suspends the terminal through a host hook.
-- **Serde.** `AppState` and all 19 sections get `Serialize`, with `#[serde(skip)]` on receivers, handles and join handles. specta sits behind `typescript-bindings`, off by default.
-- **Intent.** `Intent` (`Key(Chord) | Command(CommandId, Args) | Mouse(Pos, Btn) | Text(String)`), `CommandId`, `dispatch`, and the command registry derived from the keymap table.
-- **Guard tests.** A manifest test fails if ratatui or crossterm is ever added to `ainb-app`.
-- **Keymap parity test.** Every row in `keymap_defaults.rs` resolves from `Intent::Key` to the same `AppEvent` the old `KeyEvent` path produced.
-- **Section-version tests.** A `Text` intent and a `Command` intent each bump exactly one section version.
-- **Programme doc.** The P1 row flips in `2026-09-12-desktop-programme.md`.
-- **Build lint.** `build.rs` scans `src/app/state.rs` for `.await` in render-path fns. That scan follows the file or is dropped with a stated reason.
+| Moved to `ainb-app/src/app/` (LOC now) | Stays in `ainb-core/src/app/` |
+|----------------------------------------|-------------------------------|
+| `state.rs` (14,691), `events.rs` (8,622), `state_tests.rs` (4,492), `keymap.rs` (1,236), `keymap_defaults.rs` (1,221), `sections.rs` (784), `session_loader.rs` (276), `versioned.rs` (219), `snapshot.rs` (193), `event_bus.rs` (130), `keymap_toml.rs` (75); `screens::{ids, ScreenId, EventOutcome}` and the plugin routing reads from `screens/builtin.rs` | `ui_state.rs`, `attach_handler.rs`, the `Screen` trait, `registry.rs`, the plugin screen renderer and key/mouse forwarders in `screens/builtin.rs`; new: `mouse.rs` (359), `terminal_keys.rs` (85) |
+| Component halves deferred from P1b: `session_recovery` state (1,411), `session_tabs` (305), `configure::handle_key` and helpers (672), `pick_repo::handle_key` and helpers (294) | their renderers |
+
+Seams the move forces (a type in `ainb-app` cannot name one in `ainb-core`, and an inherent impl must live in its type's crate):
+
+| Seam | Where | Replaces |
+|------|-------|----------|
+| `Chord` as a structured key: `Key`, `Mods`, `Chord::new`, `code()`, `modifiers()` | `ainb_app::app::keymap` | `Chord::from_key_event(&KeyEvent)`. Handlers take `Chord`: `handle_key_event`, `handle_key_event_with_keymap`, `handle_new_session_keys`, `configure::handle_key`, `pick_repo::handle_key`. |
+| `terminal_keys::chord_from_key_event` | `ainb-core/src/app/terminal_keys.rs` | The only crossterm key conversion left. It returns `None` for keys the keymap cannot spell (`Null`, media keys, lone modifiers). The old converter panicked on those, for example Ctrl+Space, which crossterm reports as `KeyCode::Null`. |
+| `RendererHost` (`queue_scroll`, `statusline_status`, `columns`, `pointer`), `NoRenderer` | `ainb_app::app::events` | `&mut UiState` in key dispatch. `UiState` implements it. |
+| `SessionsPaneHitTest` | `ainb_app::app::state` | `&SessionsPaneState` in the session-list mouse reads |
+| `PluginViewports` | `ainb_app::app::screens` | the two plugin geometry maps `tick_plugin_renders` read from `UiState` |
+| Mouse reducers | `ainb-core/src/app/mouse.rs` | `EventHandler::handle_mouse_event` and its hit-test helpers, which read the rects `UiState` records |
+
+`crates/ainb-core/build.rs` scans `tick_plugin_renders` for `.await` at the file's new path. A missing scan file now fails the build; before, it passed without checking anything.
+
+Tests from the 297:
+
+| Where | Count | Which |
+|-------|------:|-------|
+| `ainb-app` | 281 | `state_tests.rs` 148, `events.rs` 77, `state.rs` 42, `versioned.rs` 5, `event_bus.rs` 4, `keymap.rs` 2, `session_loader.rs` 1, `screens/mod.rs` 1, `screens/builtin.rs` 1 |
+| `ainb-core` | 16 | `screens/builtin.rs` 10 (the plugin screen renderer, crossterm key translation, `register_builtins`), `registry.rs` 3 (they implement `Screen` with a ratatui `Frame`), `ui_state.rs` 1, `attach_handler.rs` 1, `mouse.rs` 1 (the menu-bar click reads `UiState`, moved out of `events.rs`) |
+
+New tests:
+
+| Test | Proves |
+|------|--------|
+| `ainb-core/tests/intent_key_parity.rs` | For all 525 default rows, the crossterm key a terminal sends converts to the row's chord, matching the pre-split converter (kept in the test as the oracle). `Intent::Key` resolves to the same event and leaves the same section versions as that key path. 155 rows reach their own event from a fresh state; the rest need an overlay open and match on both paths. |
+| `ainb-app/tests/intent_dispatch.rs` | A `Command` intent (`global.help`) bumps only `Shell`. A `Text` intent into the config popup bumps only `Config`. A pointer with no renderer and an unknown command bump nothing. Every row is a registered command. Intents round-trip through JSON. |
+| `ainb-app/tests/host_width.rs` | Two hosts at 80 and 200 columns clamp the same resize command to their own widths. |
+| `intent_dispatch.rs` `an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it` | An unbound row is listed by `commands()`, runs through `Intent::Command` and bumps only its section. No key resolves to it until an override binds it. |
+
+Decisions:
+
+- **`dispatch` and `resolve_intent`.** `dispatch(state, keymap, host, intent)` applies an intent. The TUI calls `resolve_intent` instead, because it handles a few resolved events against its own layout first (embed sizing, sidebar collapse, the immediate tick after `NewSession`). `AppEvent` stays public so that host can match on it. Renderers that have nothing of their own go through `dispatch`.
+- **`CommandId`.** Spelled `<context>.<row id>`, the same pair a `keymap.toml` override names. One pre-existing clash, `session_list.restart` (`r` resume and `e` restart), resolves to the first row, as an override does. Renaming it would change `docs/tui/keyboard-shortcuts.md`, so it is tracked in #976 and pinned by the registry test.
+- **Pointer intents.** `Mouse(Pos, Btn)` goes to `RendererHost::pointer`, because only the renderer knows what it drew where. The wheel is not an intent: scroll position belongs to the renderer. Drags, hovers and the log-history and code-review click paths stay in the TUI's mouse loop.
+- **Surface width.** The only width reads left in `ainb-app` were the Skill Manager `[`/`]` clamps. They are now `UiAction` rows resolved on the host path, and the generated shortcut docs are unchanged. On screen open, only the minimum width is applied; the renderer already clamps the maximum at draw, and a step clamps the current width before moving. The log separator is baked into log entries that every attached surface shares, so it is laid out to a fixed 80 columns, the fallback it used before a host published a width.
+- **No `Serialize` on state in P1c.** A first cut derived `Serialize` on `AppState` and its sections, with `typescript-bindings` on the contract types. A security review found 47 credential-bearing or private fields reachable from that derive. Examples: bot tokens in `FleetConfig.bridge`, `env` maps, tmux scrollback in `Session.preview_content`, and typed key buffers. Both commits were dropped. The mirror phase adds serialisation behind a redaction layer, tracked in #983. Only the intent wire types (`Intent`, `Chord`, `CommandId`, `Pos`, `Btn`) derive serde.
+- **Unbound commands.** A palette must list commands that have no key. `Binding.chord` is `Option<Chord>`, and `Keymap::new` indexes only bound rows. Every built-in row stays bound, so `keyboard-shortcuts.md` does not change. `ainb keymap list` prints `unbound` in Markdown and `null` in JSON.
+
+### Left for P2 to P5
+
+The reducer in `ainb-app` still performs these side effects directly. P2 to P5 turn each one into an `Effect` the host executes:
+
+| Side effect | Where | Count |
+|-------------|-------|------:|
+| `std::process::Command` spawns: `tmux` 14, `docker` 8, `git`, `gh`, `sh` 1 each (a `ps` in a test module is not counted) | `app/state.rs` 23, `app/events.rs` 2 | 25 |
+| Terminal handoff for OAuth setup and `docker exec -it` | `run_oauth_setup`, `attach_to_container` (through `host::release_terminal`) | 3 |
+| OSC 52 clipboard write (copy a run command) | `app/events.rs` | 1 |
+| Live embed attach and detach (tmux client) | `enter_interactive_pane`, `release_interactive_pane`, `poll_embed_exit` | 3 fns |
+
+Seams P1c added that P2 reshapes (from the #982 design review):
+
+| Seam | Gap | P2 direction |
+|------|-----|--------------|
+| `RendererHost::pointer` | Returns `Option<AppEvent>` and takes `&mut AppState`, so a host has to name the internal event enum and mutates state outside the reducer. `Pos` is a terminal cell. | Return `Option<Intent>`, or a `CommandId` from the hit-test. `AppEvent` then stops being public. |
+| `Intent::Command(_, Args)` | `resolve_intent` drops `Args`. Payload rows bake the payload into the row, so `AttachSessionByPosition(3)` is one command per index. | Honour `Args` for payload actions, or reject anything but `Null`. |
+| `host::TERMINAL` | A process-global `OnceLock` where the first writer wins. A desktop-triggered OAuth setup would release the terminal host's modes. | Move the handoff onto `RendererHost`, or key it per host. |
+| `RendererHost::statusline_status` | A cached filesystem probe sitting in a renderer trait. | Split it into a host service beside `TerminalHandoff`. |
+| `RendererHost::columns` | The one consumer clamps a width stored in shared `AppState` and persisted to `ui_preferences`. `host_width.rs` uses two separate states, so it does not cover two hosts sharing one. | Keep per-host width host-side, and test one state with two hosts. |
+
+These state types still live in `ainb-core`, because only the terminal renderer uses them:
+
+| File | Types |
+|------|-------|
+| `tmux_preview.rs` | `TmuxPreviewPane`, `PreviewMode` |
+| `slash.rs` | `SlashPalette`, `SlashCommandRegistry`, `SlashAction` and the built-in commands |
+| `fuzzy_file_finder.rs` | `FuzzyFileFinderState`, `FileMatch` |
+| `action_card.rs` | `ActionCardGridState`, `ActionCard`, `ActionCardId` |
+| `claude_chat.rs` | `ConnectionStatus`, `ClaudeConnectionStatus` |
+| `app/ui_state.rs` | `UiState`: scroll, hover, pane rects, plugin geometry |
+
+The session list, fleet panel, new-session, daemons, git view, code review, recovery, Skill Manager, log history and config states already live in `ainb-app`, from P1b and P1c. Their renderers and the renderer-local fields in `UiState` stay in core.

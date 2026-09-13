@@ -16,9 +16,15 @@ pub mod log_writer;
 pub mod mascot;
 pub mod new_session;
 pub mod onboarding;
+pub mod session_recovery;
 pub mod session_tabs;
 pub mod setup_menu;
 pub mod sidebar;
 pub mod skill_manager_screen;
 pub mod skills;
 pub mod welcome_panel;
+
+pub use changelog::ChangelogState;
+pub use git_view::GitViewState;
+pub use log_history_viewer::LogHistoryViewerState;
+pub use session_recovery::SessionRecoveryState;

@@ -2,6 +2,7 @@
 // state types and the logic that does not draw. The renderer lives in
 // `ainb-core::components::new_session::pick_repo`, which re-exports this module.
 
+use crate::app::keymap::{Chord, Key, Mods};
 use crate::config::favorites_store::{Favorite, FavoritesStore, SourceType};
 use crate::config::session_defaults::SessionDefaults;
 use crate::git::repo_source::{RealFs, RepoSource, parse_with};
@@ -344,4 +345,292 @@ pub fn pick_default_selection(
         }
     }
     0
+}
+/// Result of toggling a favorite — drives the `^F` notification.
+enum FavoriteToggle {
+    /// Newly favorited; carries the stored remote source for display.
+    Added(String),
+    /// Un-favorited; carries the row label for display.
+    Removed(String),
+    /// Refused because the row has no remote repository indicator.
+    Refused(String),
+}
+
+/// Handle a single key event. Mutates state in place; returns the outcome
+/// the caller should act on (advance, return home, start clone, or stay).
+///
+/// Persistence is the dispatcher's job for navigation keys (finding #3 +
+/// #11) — arrow/Esc/Enter only mutate the in-memory `state.defaults`
+/// snapshot, and the dispatcher writes to
+/// `~/.agents-in-a-box/session-defaults.yaml` when the screen exits
+/// (AdvanceTo / StartClone / BackToHome). Two exceptions:
+///   1. `^R` (reset) — a deliberate user-issued clear; we persist
+///      synchronously here so the next Esc doesn't immediately re-record
+///      a sticky-cursor highlight that the user just told us to wipe.
+///   2. `^F` (favorite toggle) — already writes `favorites.yaml`
+///      synchronously inside `toggle_favorite`.
+pub fn handle_key(state: &mut PickRepoState, key: &Chord) -> PickRepoOutcome {
+    // When an auth check is in flight or failed, intercept keys before
+    // normal picker handling. Checking → only Esc; NotAuthenticated →
+    // Enter retries, s skips, Esc clears.
+    if let Some(ref auth) = state.git_auth_status {
+        match auth {
+            GitAuthStatus::Checking => {
+                if matches!(key.code(), Key::Esc) {
+                    state.git_auth_status = None;
+                    state.pending_clone_source = None;
+                    state.git_auth_error = None;
+                }
+                return PickRepoOutcome::Stay;
+            }
+            GitAuthStatus::NotAuthenticated => {
+                match key.code() {
+                    Key::Enter => {
+                        // Re-probe: drop the stale error so the modal shows the
+                        // spinner, not last attempt's failure, while it re-runs.
+                        state.git_auth_error = None;
+                        state.git_auth_status = Some(GitAuthStatus::Checking);
+                        return PickRepoOutcome::Stay; // dispatcher sees Checking → re-runs check
+                    }
+                    Key::Char('s' | 'S') => {
+                        let source = state.pending_clone_source.take();
+                        state.git_auth_status = None;
+                        state.git_auth_error = None;
+                        if let Some(src) = source {
+                            return PickRepoOutcome::StartClone(src);
+                        }
+                        return PickRepoOutcome::Stay;
+                    }
+                    Key::Esc => {
+                        state.git_auth_status = None;
+                        state.pending_clone_source = None;
+                        state.git_auth_error = None;
+                        return PickRepoOutcome::Stay;
+                    }
+                    _ => return PickRepoOutcome::Stay,
+                }
+            }
+            GitAuthStatus::Authenticated => {
+                // Auto-advance handled by dispatcher; shouldn't linger here
+                state.git_auth_status = None;
+            }
+        }
+    }
+
+    let defaults_path = SessionDefaults::default_path();
+    // Ctrl-modified keys take precedence over plain chars so `^R` / `^F`
+    // never get swallowed by the filter-input branch below.
+    if key.modifiers().contains(Mods::CTRL) {
+        match key.code() {
+            Key::Char('r' | 'R') => {
+                tracing::debug!("pick_repo: ^R reset");
+                state.filter.clear();
+                state.defaults.reset_last_repo();
+                state.refilter();
+                state.selected = 0;
+                // Persist the cleared state immediately — the next Esc
+                // would otherwise re-stamp `last_repo` with the row 0 id
+                // (sticky-cursor UX) and silently undo the ^R.
+                if let Err(err) = state.defaults.save_to(&defaults_path) {
+                    tracing::warn!(error = %err, "pick_repo: ^R persist failed");
+                }
+                return PickRepoOutcome::Stay;
+            }
+            Key::Char('f' | 'F') => {
+                tracing::debug!("pick_repo: ^F toggle favorite on highlighted row");
+                if let Some(row) = state.highlighted().cloned() {
+                    return match toggle_favorite(state, &row) {
+                        FavoriteToggle::Refused(reason) => PickRepoOutcome::Notice {
+                            message: format!("★ Can't favorite: {reason}"),
+                            is_error: true,
+                        },
+                        FavoriteToggle::Added(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("⭐ Added '{display}' to favorites"),
+                                is_error: false,
+                            }
+                        }
+                        FavoriteToggle::Removed(display) => {
+                            let local_repos = collect_local_repo_paths(state);
+                            state.rebuild_rows(&local_repos);
+                            PickRepoOutcome::Notice {
+                                message: format!("★ Removed '{display}' from favorites"),
+                                is_error: false,
+                            }
+                        }
+                    };
+                }
+                return PickRepoOutcome::Stay;
+            }
+            Key::Char('v' | 'V') => {
+                // Ctrl+V: ask the caller to read the OS clipboard and append
+                // it (Cmd+V / bracketed paste isn't delivered to this field
+                // in some terminals — tmux, mouse-capture).
+                tracing::debug!("pick_repo: ^V clipboard paste");
+                return PickRepoOutcome::PasteFromClipboard;
+            }
+            _ => {}
+        }
+    }
+
+    match key.code() {
+        Key::Esc => {
+            // Esc with text typed → clear filter first; on second press
+            // (empty filter) → return to home. Sticky-cursor highlight is
+            // stored in-memory only; dispatcher persists on exit.
+            if !state.filter.is_empty() {
+                if let Some(row) = state.highlighted() {
+                    state.defaults.last_repo = Some(row.id.clone());
+                }
+                state.filter.clear();
+                state.refilter();
+                return PickRepoOutcome::Stay;
+            }
+            if let Some(row) = state.highlighted() {
+                state.defaults.last_repo = Some(row.id.clone());
+            }
+            PickRepoOutcome::BackToHome
+        }
+        Key::Up => {
+            if !state.filtered_indices.is_empty() {
+                state.selected = if state.selected == 0 {
+                    state.filtered_indices.len() - 1
+                } else {
+                    state.selected - 1
+                };
+                if let Some(row) = state.highlighted() {
+                    state.defaults.last_repo = Some(row.id.clone());
+                }
+            }
+            PickRepoOutcome::Stay
+        }
+        Key::Down => {
+            if !state.filtered_indices.is_empty() {
+                state.selected = (state.selected + 1) % state.filtered_indices.len();
+                if let Some(row) = state.highlighted() {
+                    state.defaults.last_repo = Some(row.id.clone());
+                }
+            }
+            PickRepoOutcome::Stay
+        }
+        Key::Enter => {
+            // Prefer a row hit; fall back to smart-parse on the filter text.
+            if let Some(row) = state.highlighted().cloned() {
+                tracing::debug!("pick_repo: Enter on row {}", row.id);
+                state.defaults.last_repo = Some(row.id.clone());
+                return resolve_outcome(row.source);
+            }
+            // No matches — smart-parse the filter as raw input.
+            if state.filter.is_empty() {
+                return PickRepoOutcome::Stay;
+            }
+            let parsed = parse_with(&state.filter, &RealFs);
+            tracing::debug!("pick_repo: smart-parse {:?} -> {parsed:?}", state.filter);
+            state.defaults.last_repo = Some(state.filter.clone());
+            resolve_outcome(parsed)
+        }
+        Key::Backspace => {
+            state.filter.pop();
+            state.refilter();
+            PickRepoOutcome::Stay
+        }
+        Key::Char(c) if !key.modifiers().contains(Mods::CTRL) => {
+            state.filter.push(c);
+            state.refilter();
+            PickRepoOutcome::Stay
+        }
+        _ => PickRepoOutcome::Stay,
+    }
+}
+
+/// Dispatch a resolved `RepoSource` into a `PickRepoOutcome` per spec table:
+/// - `LocalPath` / pre-cloned `GithubShorthand` (local hit) → `AdvanceTo`
+/// - `HttpsUrl` / `SshUrl` / `GithubShorthand` (remote) → `StartClone`
+/// - `SshSession` → `AdvanceTo` (no clone needed)
+/// - `Filter` → `Stay` (just an unparseable string)
+pub fn resolve_outcome(source: RepoSource) -> PickRepoOutcome {
+    match source {
+        RepoSource::LocalPath(_) | RepoSource::SshSession(_) => PickRepoOutcome::AdvanceTo(source),
+        RepoSource::HttpsUrl(_) | RepoSource::SshUrl(_) | RepoSource::GithubShorthand { .. } => {
+            PickRepoOutcome::StartClone(source)
+        }
+        RepoSource::Filter(_) => PickRepoOutcome::Stay,
+    }
+}
+
+/// Toggle the favorite status of a row. Updates both the in-memory store
+/// (mutating `state.favorites`) AND the on-disk YAML so the change survives
+/// across TUI restarts.
+///
+/// A favorite ALWAYS records a remote indicator. Remote rows store directly;
+/// a `LocalPath` row is resolved to its `origin` remote via
+/// [`favorite_from_local_repo`] (refused if it has none). `SshSession`
+/// (interactive, not a repo) and `Filter` (unparseable text) rows are refused
+/// outright — never persisted.
+fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) -> FavoriteToggle {
+    if state.favorites.has_alias(&row.id) {
+        state.favorites.remove(&row.id);
+        persist_favorites(state);
+        return FavoriteToggle::Removed(row.label.clone());
+    }
+
+    let fav = match &row.source {
+        RepoSource::HttpsUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::HttpsUrl),
+        RepoSource::SshUrl(u) => Favorite::new(row.id.clone(), u.clone(), SourceType::SshUrl),
+        RepoSource::GithubShorthand { owner, repo } => Favorite::new(
+            row.id.clone(),
+            format!("{owner}/{repo}"),
+            SourceType::GithubShorthand,
+        ),
+        RepoSource::LocalPath(p) => {
+            match crate::config::favorite_from_local_repo(row.id.clone(), p) {
+                Ok(fav) => fav,
+                Err(e) => {
+                    tracing::warn!(
+                        alias = %row.id,
+                        path = %p.display(),
+                        error = %e,
+                        "pick_repo: refusing to favorite local row — no remote indicator",
+                    );
+                    return FavoriteToggle::Refused(e.to_string());
+                }
+            }
+        }
+        RepoSource::SshSession(s) | RepoSource::Filter(s) => {
+            tracing::warn!(
+                alias = %row.id,
+                text = %s,
+                "pick_repo: refusing to favorite — not a remote repository indicator",
+            );
+            return FavoriteToggle::Refused("not a remote repository".to_string());
+        }
+    };
+
+    let display = fav.source.clone();
+    state.favorites.set(fav);
+    persist_favorites(state);
+    FavoriteToggle::Added(display)
+}
+
+/// Persist the favorites store to disk, logging (but not failing) on error.
+fn persist_favorites(state: &PickRepoState) {
+    if let Err(err) = state.favorites.save() {
+        tracing::warn!(error = %err, "pick_repo: failed to persist favorites");
+    }
+}
+
+/// Pull current local-only paths out of state so the row list can be
+/// rebuilt without losing the local-scan input.
+fn collect_local_repo_paths(state: &PickRepoState) -> Vec<PathBuf> {
+    state
+        .rows
+        .iter()
+        .filter(|r| r.kind == RowKind::Local)
+        .filter_map(|r| match &r.source {
+            RepoSource::LocalPath(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect()
 }

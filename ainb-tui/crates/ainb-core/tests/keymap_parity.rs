@@ -58,7 +58,7 @@ fn update_golden_when_asked() {
         .map(|binding| {
             serde_json::json!({
                 "context": binding.ctx.name(),
-                "chord": binding.chord.as_str(),
+                "chord": binding.chord.as_ref().expect("built-in rows are bound").as_str(),
                 "action": format!("{:?}", binding.action),
             })
         })
@@ -90,9 +90,11 @@ fn defaults_are_unique_documented_and_parseable() {
     let mut keys = std::collections::HashSet::new();
 
     for binding in keymap.bindings() {
-        assert!(keys.insert((binding.ctx.clone(), binding.chord.clone())));
+        // Unbound rows are for commands a palette adds; every built-in has a key.
+        let chord = binding.chord.as_ref().expect("built-in rows are bound");
+        assert!(keys.insert((binding.ctx.clone(), chord.clone())));
         assert!(!binding.doc.trim().is_empty());
-        assert_eq!(Chord::parse(binding.chord.as_str()).unwrap(), binding.chord);
+        assert_eq!(&Chord::parse(chord.as_str()).unwrap(), chord);
     }
 
     assert_eq!(
@@ -173,7 +175,11 @@ fn shifted_letter_rows_resolve_with_or_without_shift_modifier_bit() {
         });
         let character = binding.chord.chars().next().unwrap();
         for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
-            let chord = Chord::from_key_event(&KeyEvent::new(KeyCode::Char(character), modifiers));
+            let chord = ainb::app::terminal_keys::chord_from_key_event(&KeyEvent::new(
+                KeyCode::Char(character),
+                modifiers,
+            ))
+            .expect("mapped key");
             assert_eq!(chord.as_str(), binding.chord);
 
             let resolved =
