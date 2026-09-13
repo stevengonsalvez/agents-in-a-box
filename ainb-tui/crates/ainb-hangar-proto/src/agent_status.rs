@@ -280,16 +280,6 @@ pub fn status_row_with_tier(
     }
 }
 
-/// Which tier's evidence this row's state rests on, DERIVED.
-///
-/// The fallback for a row written before migration 0099, and for a caller that
-/// holds only the wire session. It reaches three of the six values: an ACP
-/// session is tier 1 by construction, a row carrying a provider session id was
-/// keyed by a hook, and everything else reads as the tmux scan. A row actually
-/// written by an OSC frame, the process table or the transcript is
-/// indistinguishable here from a pane scrape, which is why 0099 stores it and
-/// [`status_row_with_tier`] prefers the column.
-
 /// Parse a stored tier token, or `None` for `unknown` and for anything this
 /// build does not recognise.
 ///
@@ -323,6 +313,15 @@ pub fn tier_token(tier: Tier) -> &'static str {
     }
 }
 
+/// Which tier's evidence this row's state rests on, DERIVED.
+///
+/// The fallback for a row written before migration 0099, and for a caller that
+/// holds only the wire session. It reaches three of the six values: an ACP
+/// session is tier 1 by construction, a row carrying a provider session id was
+/// keyed by a hook, and everything else reads as the tmux scan. A row actually
+/// written by an OSC frame, the process table or the transcript is
+/// indistinguishable here from a pane scrape, which is why 0099 stores it and
+/// [`status_row_with_tier`] prefers the column.
 #[must_use]
 pub fn tier_of(session: &FleetSession) -> Tier {
     if session.provider == FleetProvider::Acp {
