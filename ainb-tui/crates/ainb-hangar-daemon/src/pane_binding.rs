@@ -99,7 +99,7 @@ pub enum PaneBinding {
         /// The discovered row's fingerprint, when it had one.
         fingerprint: Option<String>,
         /// The discovered row's key, retired onto the managed key by the caller.
-        legacy_key: String,
+        legacy_key: Option<String>,
     },
     /// Nothing could be attributed. The row renders `pane_unbound`.
     Unbound(UnboundReason),
@@ -183,7 +183,7 @@ pub async fn resolve(
                     fingerprint: decision.fingerprint,
                     // Nothing to retire: the legacy row was retired when this
                     // binding was first made.
-                    legacy_key: String::new(),
+                    legacy_key: None,
                 });
             }
             Confirmation::Broken(candidates) => {
@@ -200,7 +200,7 @@ pub async fn resolve(
                 return Ok(PaneBinding::Correlated {
                     target: decision.target,
                     fingerprint: decision.fingerprint,
-                    legacy_key: String::new(),
+                    legacy_key: None,
                 });
             }
         }
@@ -324,7 +324,7 @@ pub fn bind(mut candidates: Vec<PaneCandidate>) -> PaneBinding {
             PaneBinding::Correlated {
                 target: only.tmux_target,
                 fingerprint: only.process_start_fingerprint,
-                legacy_key: only.session_key,
+                legacy_key: Some(only.session_key),
             }
         }
         0 => PaneBinding::Unbound(UnboundReason::NoCandidate),
@@ -473,7 +473,8 @@ mod tests {
         assert_eq!(binding.target(), Some("dev:1.0"));
         assert!(matches!(
             binding,
-            PaneBinding::Correlated { ref legacy_key, .. } if legacy_key == "tmux:dev:1.0"
+            PaneBinding::Correlated { ref legacy_key, .. }
+                if legacy_key.as_deref() == Some("tmux:dev:1.0")
         ));
     }
 

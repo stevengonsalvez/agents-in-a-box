@@ -522,7 +522,14 @@ pub async fn apply_hook_with_attention(
     // discovered row it came from, so it retires that key directly instead of
     // re-deriving it from a fingerprint the scan may never have recorded.
     match &binding {
-        crate::pane_binding::PaneBinding::Correlated { legacy_key, .. } => {
+        // `None` is a RE-confirmed binding: the discovered row it came from was
+        // retired when the decision was first made, so there is nothing left to
+        // supersede and the query would match nothing every time the bound
+        // session emits a hook line.
+        crate::pane_binding::PaneBinding::Correlated {
+            legacy_key: Some(legacy_key),
+            ..
+        } => {
             if let Some(revision) = FleetRepo::supersede_session(
                 pool,
                 legacy_key,
@@ -534,6 +541,11 @@ pub async fn apply_hook_with_attention(
                 events.emit_fleet_revision(revision);
             }
         }
+        // A re-confirmed binding: the discovered row was retired when the
+        // decision was first made, so there is nothing left to supersede.
+        crate::pane_binding::PaneBinding::Correlated {
+            legacy_key: None, ..
+        } => {}
         crate::pane_binding::PaneBinding::FromHook { .. } => {
             if let (Some(target), Some(fingerprint)) =
                 (tmux_target.as_deref(), process_start_fingerprint.as_deref())
