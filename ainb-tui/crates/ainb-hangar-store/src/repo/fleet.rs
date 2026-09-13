@@ -339,6 +339,46 @@ pub struct ApplyFleetEventResult {
     pub session: FleetSessionRow,
 }
 
+/// What one event's attention projection should write (D14).
+///
+/// Built by the caller BEFORE the transaction opens, from the hook payload and
+/// the classifier, so the transaction itself does no I/O beyond the store and
+/// stays short enough to hold the write lock without starving the reconciler.
+#[derive(Debug, Clone)]
+pub struct AttentionProjection {
+    /// The provider session this projection is about.
+    pub session_id: String,
+    /// Retire every still-open `ask_user_question` row for the session first.
+    ///
+    /// A question answered, interrupted or timed out IN the live session never
+    /// routes through the answer router, so nothing else closes its row. The
+    /// close and the replacement raise share this transaction, so no reader
+    /// sees both cards at once.
+    pub close_open_asks: bool,
+    /// `answered_by` stamped on the rows this event retires.
+    pub closed_by: String,
+    /// `answer` text stamped on the rows this event retires.
+    pub closed_answer: String,
+    /// `answered_at` stamped on the rows this event retires.
+    pub closed_at: i64,
+    /// The row this event raises, when it raises one.
+    pub raise: Option<crate::repo::attention::NewAttention>,
+    /// Stable identity of the request `raise` is about, for 0084 idempotency.
+    pub request_key: Option<String>,
+}
+
+/// Outcome of [`FleetRepo::apply_event_with_attention`].
+#[derive(Debug, Clone)]
+pub struct ApplyFleetEventWithAttention {
+    /// The Fleet event's own outcome.
+    pub fleet: ApplyFleetEventResult,
+    /// True when THIS call raised the attention row (never on a replay), so
+    /// exactly one caller emits the `AttentionRaised` nudge.
+    pub raised: bool,
+    /// The ids this call retired, for the `AttentionAnswered` nudges.
+    pub closed: Vec<String>,
+}
+
 /// Consistent Fleet snapshot and its global revision head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetSnapshot {
@@ -457,6 +497,103 @@ impl FleetRepo {
         event: &NewFleetEvent,
     ) -> Result<ApplyFleetEventResult, FleetRepoError> {
         Self::apply_event_at_version(pool, event, None).await
+    }
+
+    /// Apply one normalized event AND its attention projection in ONE
+    /// transaction (D14 status store).
+    ///
+    /// `fleet_session.attention_state` and the `attention` inbox are two views
+    /// of one fact: whether this session is blocked on a human. They were
+    /// written by two independent transactions with no ordering between them,
+    /// so they drifted, measured live at 732 open rows against 7 sessions the
+    /// Fleet model believed were waiting, the oldest 25 days stale. Writing the
+    /// projection here, against the same write lock and the same commit, is
+    /// what removes the second writer rather than adding a third reconciler.
+    ///
+    /// `projection` describes what the inbox should look like AFTER this event:
+    /// which still-open ASK rows this event retires, and which row (if any) it
+    /// raises. Both are optional; an event that changes no attention (most of
+    /// them) passes `None` and pays one transaction, exactly as before.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FleetRepoError`] on an event-id collision across sessions, a
+    /// stale version, or any store fault. Nothing is committed on an error, so
+    /// the caller replays the whole event rather than reconciling a half-write.
+    pub async fn apply_event_with_attention(
+        pool: &SqlitePool,
+        event: &NewFleetEvent,
+        projection: Option<&AttentionProjection>,
+    ) -> Result<ApplyFleetEventWithAttention, FleetRepoError> {
+        with_write_lock_retry(move || async move {
+            let mut tx = pool.begin_with(IMMEDIATE_TRANSACTION).await?;
+            let fleet = Self::apply_event_in_tx(&mut tx, event, None).await?;
+            let mut closed = Vec::new();
+            let mut raised = false;
+            // A replayed event is a no-op, projection included. The event id is
+            // the idempotency key for the WHOLE step, not just for the
+            // `fleet_event` insert, and the inbox half is not idempotent on its
+            // own: the raise dedups on its request key, but the close does not.
+            //
+            // Replaying a `Stop` therefore closed the very card the first pass
+            // raised from it. A `Stop` both raises an idle card and returns the
+            // session to `NONE`, so on the second pass the raise was suppressed
+            // as a duplicate while the close ran again and took the card with
+            // it. A lost cursor, which re-reads `events.jsonl` from zero, is
+            // enough to hit it.
+            if fleet.duplicate {
+                tx.commit().await?;
+                return Ok(ApplyFleetEventWithAttention {
+                    fleet,
+                    raised,
+                    closed,
+                });
+            }
+            if let Some(projection) = projection {
+                if projection.close_open_asks {
+                    let stale =
+                        crate::repo::attention::AttentionRepo::open_ask_ids_for_session_in_tx(
+                            &mut tx,
+                            &projection.session_id,
+                        )
+                        .await?;
+                    for id in stale {
+                        if crate::repo::attention::AttentionRepo::mark_answered_if_open_in_tx(
+                            &mut tx,
+                            &id,
+                            &projection.closed_by,
+                            &projection.closed_answer,
+                            projection.closed_at,
+                            // No client version to fence on: this close is the
+                            // projection's own, driven by the session state in
+                            // this same transaction, so `state = 'open'` is the
+                            // whole fence exactly as it was before D18.
+                            None,
+                        )
+                        .await?
+                            == 1
+                        {
+                            closed.push(id);
+                        }
+                    }
+                }
+                if let Some(row) = &projection.raise {
+                    raised = crate::repo::attention::AttentionRepo::insert_if_absent_in_tx(
+                        &mut tx,
+                        row,
+                        projection.request_key.as_deref(),
+                    )
+                    .await?;
+                }
+            }
+            tx.commit().await?;
+            Ok(ApplyFleetEventWithAttention {
+                fleet,
+                raised,
+                closed,
+            })
+        })
+        .await
     }
 
     /// Apply one normalized event only if the existing session has `expected_version`.

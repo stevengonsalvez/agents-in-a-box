@@ -149,6 +149,91 @@ impl FleetRetentionRepo {
     ///
     /// # Errors
     /// Propagates the `SQLite` failure.
+    /// Delete action receipts that settled before `before_ms` (D14).
+    ///
+    /// `fleet_action_receipt` had NO retention: every answer, cancel and kill
+    /// the daemon has ever attempted is still on disk. A receipt is a delivery
+    /// outcome, not history an operator reads back weeks later, so it lives for
+    /// seven days after it SETTLED.
+    ///
+    /// Unsettled receipts are never deleted, at any age. `PENDING` on a
+    /// week-old row means the daemon died mid-write, and that is precisely the
+    /// row an operator has to see (D18 turns it into a
+    /// `delivery_unconfirmed` card). Deleting it would erase the only record
+    /// that something may have been typed into a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the delete fails.
+    pub async fn delete_receipts_before(
+        pool: &SqlitePool,
+        before_ms: i64,
+        limit: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "DELETE FROM fleet_action_receipt WHERE request_id IN ( \
+                 SELECT request_id FROM fleet_action_receipt \
+                 WHERE updated_at < ? AND status IN ('DELIVERED', 'FAILED', 'REJECTED') \
+                 ORDER BY updated_at ASC LIMIT ? \
+             )",
+        )
+        .bind(before_ms)
+        .bind(limit)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Delete attention rows closed more than `before_ms` ago (D14).
+    ///
+    /// The inbox had NO retention either, so every question ever answered is
+    /// still a row. Answered rows are audit history and age out at 30 days.
+    ///
+    /// OPEN rows are never deleted, at any age. An open row is a session still
+    /// blocked on a human, and the age of the oldest one is the single most
+    /// useful number the inbox produces, the measured drift was 25 days on the
+    /// oldest row, which an age-based delete would have quietly hidden instead
+    /// of surfacing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the delete fails.
+    pub async fn delete_closed_attention_before(
+        pool: &SqlitePool,
+        before_ms: i64,
+        limit: i64,
+    ) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "DELETE FROM attention WHERE id IN ( \
+                 SELECT id FROM attention \
+                 WHERE state = 'answered' AND answered_at IS NOT NULL AND answered_at < ? \
+                 ORDER BY answered_at ASC LIMIT ? \
+             )",
+        )
+        .bind(before_ms)
+        .bind(limit)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Fold the write-ahead log back into the database file.
+    ///
+    /// Required between retention batches, not hygiene. Blanking ~700 MB of
+    /// payload writes ~700 MB of WAL frames, and a WAL only shrinks at a
+    /// checkpoint. A continuous backlog sweep starves the automatic checkpointer
+    /// (it runs on a committing writer, and this writer never pauses long
+    /// enough), so the WAL and the pages pinned behind it grow for the whole
+    /// sweep, measured at 2,599 MB RSS against a 204 MB steady state on the
+    /// first production backlog run.
+    ///
+    /// `PASSIVE` on purpose: it checkpoints as much as it can and returns
+    /// immediately if a reader is mid-snapshot. `TRUNCATE`/`RESTART` would BLOCK
+    /// on that reader, which is the one thing a background janitor must never do
+    /// to the Fleet read path.
+    ///
+    /// # Errors
+    /// Propagates the `SQLite` failure.
     pub async fn checkpoint_wal(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)").execute(pool).await?;
         Ok(())

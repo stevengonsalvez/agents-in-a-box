@@ -256,17 +256,63 @@ impl AinbCliSource {
     }
 }
 
+/// Whether the pre-T0 read ordering is in force, read from the environment.
+///
+/// `ainb` owns `[fleet.status] legacy_classify_primary` and bridges it into
+/// this variable at startup (`config::tunables::export_env_bridge`), because
+/// this crate deliberately does not depend on `ainb-core`. Unset means the T0
+/// ordering, which is the shipped default.
+///
+/// Accepts only the affirmative tokens: anything else, including a typo, leaves
+/// the shipped behaviour in place rather than silently rolling a host back.
+fn legacy_classify_primary() -> bool {
+    matches!(
+        std::env::var("AINB_FLEET_LEGACY_CLASSIFY_PRIMARY")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// Fetch the open attention inbox from the daemon (`attention/list`, fleet-wide)
 /// and map it to the dashboard's `needs` cards (D18). Best-effort: a
 /// down / unreachable daemon (or a token that hasn't been minted yet) degrades
 /// to an empty list so the dashboard still renders sessions instead of failing
-/// the whole poll. This is the read half of the web-on-the-bus retarget — the
+/// the whole poll. This is the read half of the web-on-the-bus retarget: the
 /// old `ainb fleet needs` subprocess (which cold-booted a plugin runtime and
 /// capture-paned every session) is gone.
 async fn daemon_needs() -> Value {
     match crate::daemon::DaemonClient::from_env() {
         Ok(client) => match client.attention_list_fleet().await {
-            Ok(rows) => crate::daemon::attention_to_needs(&rows),
+            Ok(rows) => {
+                // D14: stamp every card from the daemon's one status read, so
+                // the dashboard, `ainb fleet needs` and the TUI fleet panel
+                // print the same state for the same agent. A status read that
+                // fails leaves the cards unstamped rather than dropping them:
+                // an inbox row with no tier is still a question worth showing.
+                let empty = || ainb_hangar_proto::agent_status::AgentStatusResult {
+                    rows: Vec::new(),
+                    head_revision: 0,
+                    unknown_events: Vec::new(),
+                };
+                // The T0 rollback, read from the env because this crate has no
+                // config loader: `ainb` bridges
+                // `[fleet.status] legacy_classify_primary` into
+                // `AINB_FLEET_LEGACY_CLASSIFY_PRIMARY` at startup. Rolled back,
+                // the dashboard renders the inbox cards unstamped, exactly as it
+                // did before T0.
+                let status = if legacy_classify_primary() {
+                    empty()
+                } else {
+                    client.fleet_status().await.unwrap_or_else(|e| {
+                        tracing::debug!(error = %e, "fleet/status unavailable; needs render unstamped");
+                        empty()
+                    })
+                };
+                crate::daemon::attention_to_needs_with_status(&rows, &status.rows)
+            }
             Err(e) => {
                 tracing::debug!(error = %e, "attention/list unavailable; needs degrades to empty");
                 Value::Array(Vec::new())

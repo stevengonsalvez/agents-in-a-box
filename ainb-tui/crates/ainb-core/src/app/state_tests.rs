@@ -2623,6 +2623,7 @@ mod tests {
             transport_health: TransportHealth::Healthy,
             capabilities: FleetCapabilities::default(),
             provenance: FleetProvenance::Authoritative,
+            pane_binding: ainb_hangar_proto::fleet::PaneBinding::Bound,
             confidence: FleetConfidence::High,
             discovered_at: NOW - 2_000,
             last_observed_at: NOW - 1_000,

@@ -61,6 +61,22 @@ const PAYLOAD_TTL_MS: i64 = 48 * 60 * 60 * 1000;
 /// How long a `fleet_event` row survives at all.
 const ROW_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
+/// How long a SETTLED action receipt is kept (D14).
+///
+/// A receipt is a delivery outcome, not history read back weeks later. Seven
+/// days covers "did yesterday's answer land", which is the only question it is
+/// ever asked. An UNSETTLED receipt is exempt at any age: `PENDING` on a
+/// week-old row means the daemon died mid-write, and that is the one row an
+/// operator must see.
+const RECEIPT_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// How long a CLOSED attention row is kept after it was answered (D14).
+///
+/// Answered rows are audit history. Open rows are exempt at any age: an open
+/// row is a session still blocked on a human, and the age of the oldest one is
+/// the number that exposed the 25-day drift in the first place.
+const ATTENTION_CLOSED_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 /// Payload budget before stage C tightens the eviction cutoff.
 const PAYLOAD_CEILING_BYTES: i64 = 1024 * 1024 * 1024;
 
@@ -115,6 +131,10 @@ pub struct RetentionOutcome {
     pub deleted: u64,
     /// Extra rows blanked by stage C's tightened cutoffs.
     pub ceiling_evicted: u64,
+    /// Settled action receipts deleted by stage D.
+    pub receipts_deleted: u64,
+    /// Closed attention rows deleted by stage D.
+    pub attention_deleted: u64,
     /// Live payload bytes after the pass.
     pub live_bytes: i64,
     /// A stage stopped on its per-pass budget rather than on running out of
@@ -133,7 +153,11 @@ impl RetentionOutcome {
     }
 
     const fn touched_anything(self) -> bool {
-        self.evicted > 0 || self.deleted > 0 || self.ceiling_evicted > 0
+        self.receipts_deleted > 0
+            || self.attention_deleted > 0
+            || self.evicted > 0
+            || self.deleted > 0
+            || self.ceiling_evicted > 0
     }
 }
 
@@ -220,6 +244,37 @@ pub async fn run_retention_pass_bounded(
     outcome.deleted = deleted;
     outcome.backlog_remaining |= capped;
 
+    // Stage D: the two tables that had no retention at all (D14). Both are
+    // age-after-SETTLEMENT, never age-after-creation: an unsettled receipt and
+    // an open question are the rows an operator most needs, and deleting them
+    // by age would erase exactly the evidence of a fault.
+    //
+    // Bounded by the same delete budget as stage B, because they contend for
+    // the same single `SQLite` writer.
+    let (receipts, capped) = delete_batched(&mut delete_left, |limit| async move {
+        FleetRetentionRepo::delete_receipts_before(
+            pool,
+            now_ms.saturating_sub(RECEIPT_TTL_MS),
+            limit,
+        )
+        .await
+    })
+    .await?;
+    outcome.receipts_deleted = receipts;
+    outcome.backlog_remaining |= capped;
+
+    let (closed, capped) = delete_batched(&mut delete_left, |limit| async move {
+        FleetRetentionRepo::delete_closed_attention_before(
+            pool,
+            now_ms.saturating_sub(ATTENTION_CLOSED_TTL_MS),
+            limit,
+        )
+        .await
+    })
+    .await?;
+    outcome.attention_deleted = closed;
+    outcome.backlog_remaining |= capped;
+
     outcome.live_bytes = FleetRetentionRepo::live_payload_bytes(pool).await?;
     for ttl_ms in CEILING_TTL_LADDER_MS {
         if outcome.live_bytes <= PAYLOAD_CEILING_BYTES || evict_left == 0 {
@@ -242,6 +297,34 @@ pub async fn run_retention_pass_bounded(
     }
 
     Ok(outcome)
+}
+
+/// Run one batched delete to exhaustion or to the budget.
+///
+/// Shared by stage D's two tables: the loop, the batch size, the yield between
+/// batches and the "stopped on budget" signal are identical for both, and only
+/// the statement differs. Returns the rows deleted and whether it stopped on
+/// the BUDGET, which is what tells the caller to come back sooner.
+async fn delete_batched<F, Fut>(
+    budget_left: &mut u64,
+    mut delete: F,
+) -> Result<(u64, bool), sqlx::Error>
+where
+    F: FnMut(i64) -> Fut,
+    Fut: std::future::Future<Output = Result<u64, sqlx::Error>>,
+{
+    let mut total = 0;
+    while *budget_left > 0 {
+        let limit = BATCH.min(i64::try_from(*budget_left).unwrap_or(BATCH));
+        let deleted = delete(limit).await?;
+        if deleted == 0 {
+            return Ok((total, false));
+        }
+        total += deleted;
+        *budget_left = budget_left.saturating_sub(deleted);
+        tokio::time::sleep(BATCH_PAUSE).await;
+    }
+    Ok((total, true))
 }
 
 /// Evict until the cutoff is exhausted or `budget_left` runs out.
@@ -453,6 +536,106 @@ mod tests {
         assert!(
             !second.backlog_remaining,
             "a converged sweep must not ask to be re-run in a minute"
+        );
+    }
+
+    /// Stage D, both tables at once, and both exemptions.
+    ///
+    /// The exemptions are the point. An unsettled receipt and an open question
+    /// are the rows an operator most needs to see, and an age-only delete would
+    /// erase exactly the evidence of a fault, which is how the 25-day drift
+    /// stayed invisible for 25 days.
+    #[tokio::test]
+    async fn stage_d_ages_out_settled_work_and_spares_what_is_still_live() {
+        use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let now = 90 * DAY_MS;
+
+        for (request_id, status, updated_at) in [
+            ("r-old-delivered", "DELIVERED", now - 8 * DAY_MS),
+            ("r-old-failed", "FAILED", now - 8 * DAY_MS),
+            ("r-old-pending", "PENDING", now - 8 * DAY_MS),
+            ("r-fresh-delivered", "DELIVERED", now - 1 * DAY_MS),
+        ] {
+            sqlx::query(
+                "INSERT INTO fleet_action_receipt \
+                 (request_id, session_key, action_kind, action_fingerprint, expected_version, \
+                  status, created_at, updated_at) \
+                 VALUES (?, 'claude:s', 'answer', 'fp', 1, ?, 0, ?)",
+            )
+            .bind(request_id)
+            .bind(status)
+            .bind(updated_at)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+
+        for (id, answered_at) in [
+            ("a-old-closed", Some(now - 31 * DAY_MS)),
+            ("a-fresh-closed", Some(now - 1 * DAY_MS)),
+            ("a-ancient-open", None),
+        ] {
+            AttentionRepo::insert(
+                pool,
+                &NewAttention {
+                    id: id.to_string(),
+                    session_id: "s".to_string(),
+                    cwd: "/w".to_string(),
+                    workspace_id: None,
+                    kind: AttentionKind::Waiting,
+                    payload: "{}".to_string(),
+                    degraded: false,
+                    created_at: now - 60 * DAY_MS,
+                    raise_transcript: None,
+                    channels: ainb_hangar_core::channel::ChannelSet::NONE,
+                },
+            )
+            .await
+            .unwrap();
+            if let Some(answered_at) = answered_at {
+                AttentionRepo::mark_answered_if_open(pool, id, "op", "done", answered_at)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let outcome = run_retention_pass(pool, now).await.unwrap();
+        assert_eq!(outcome.receipts_deleted, 2, "both settled aged receipts go");
+        assert_eq!(
+            outcome.attention_deleted, 1,
+            "only the aged closed row goes"
+        );
+
+        let receipts: Vec<String> =
+            sqlx::query_scalar("SELECT request_id FROM fleet_action_receipt ORDER BY request_id")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            receipts,
+            ["r-fresh-delivered", "r-old-pending"],
+            "an unsettled receipt is exempt at any age: it may mean a write died mid-flight"
+        );
+
+        let attention: Vec<String> = sqlx::query_scalar("SELECT id FROM attention ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            attention,
+            ["a-ancient-open", "a-fresh-closed"],
+            "an open question is exempt at any age: it is a session still blocked"
+        );
+
+        let second = run_retention_pass(pool, now).await.unwrap();
+        assert_eq!(
+            (second.receipts_deleted, second.attention_deleted),
+            (0, 0),
+            "a converged stage D must not touch a row"
         );
     }
 

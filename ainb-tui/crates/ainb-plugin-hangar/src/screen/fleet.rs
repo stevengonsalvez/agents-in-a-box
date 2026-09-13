@@ -130,6 +130,11 @@ pub struct FleetSessionRow {
     pub cwd: String,
     #[serde(default)]
     pub tmux_target: Option<String>,
+    /// Whether the daemon could bind this session to a tmux pane (D14, issue
+    /// #916). `pane_unbound` is the case an operator can act on: the agent is
+    /// alive and asking, but nothing can type an answer into it.
+    #[serde(default)]
+    pub pane_binding: String,
     #[serde(default)]
     pub display_name: Option<String>,
     /// Best-effort repository label enriched by the host from `cwd`.
@@ -210,10 +215,104 @@ impl FleetSessionRow {
             .unwrap_or_else(|| "branch unknown".into())
     }
 
+    /// This row's D14 status identity: the tuple every surface must agree on.
+    ///
+    /// Derived by `ainb_hangar_proto::agent_status`, the SAME function
+    /// `ainb fleet needs` and `GET /api/needs` derive theirs from, so the panel
+    /// cannot drift from them by rendering its own reading of the same session.
+    #[must_use]
+    pub fn status_identity(&self) -> (String, &'static str, &'static str, u8, i64) {
+        let session = self.to_wire_session();
+        let row = ainb_hangar_proto::agent_status::status_row(&session, self.is_actionable());
+        let (key, state, provenance, tier, observed) = row.identity_tuple();
+        (key.to_string(), state, provenance, tier, observed)
+    }
+
+    /// Rebuild the wire session this row was rendered from.
+    ///
+    /// The panel keeps its own flattened row (it renders strings, not enums),
+    /// so the shared derivation is fed a reconstruction rather than a second
+    /// implementation of the fold. Only the fields the derivation reads are
+    /// recovered; everything else takes its default.
+    fn to_wire_session(&self) -> ainb_hangar_proto::fleet::FleetSession {
+        use ainb_hangar_proto::fleet as wire;
+        wire::FleetSession {
+            session_key: self.session_key.clone(),
+            provider: match self.provider.as_str() {
+                "claude" => wire::FleetProvider::Claude,
+                "codex" => wire::FleetProvider::Codex,
+                "copilot" => wire::FleetProvider::Copilot,
+                "antigravity" | "agy" => wire::FleetProvider::Antigravity,
+                "acp" => wire::FleetProvider::Acp,
+                _ => wire::FleetProvider::Unknown,
+            },
+            provider_session_id: self.provider_session_id.clone(),
+            tmux_target: self.tmux_target.clone(),
+            pane_binding: match self.pane_binding.as_str() {
+                "bound" => wire::PaneBinding::Bound,
+                "pane_unbound" => wire::PaneBinding::PaneUnbound,
+                _ => wire::PaneBinding::NotApplicable,
+            },
+            process_start_fingerprint: None,
+            cwd: self.cwd.clone(),
+            display_name: self.display_name.clone(),
+            lifecycle: match self.lifecycle_state.to_ascii_uppercase().as_str() {
+                "STARTING" => wire::LifecycleState::Starting,
+                "RUNNING" => wire::LifecycleState::Running,
+                "TURN_COMPLETE" => wire::LifecycleState::TurnComplete,
+                "IDLE" => wire::LifecycleState::Idle,
+                "EXITED" => wire::LifecycleState::Exited,
+                _ => wire::LifecycleState::Unknown,
+            },
+            active_work_count: self.active_work_count,
+            attention: match self.attention_state.to_ascii_uppercase().as_str() {
+                "ASK" => wire::AttentionState::Ask,
+                "APPROVAL" => wire::AttentionState::Approval,
+                "WAITING" => wire::AttentionState::Waiting,
+                "ERROR" => wire::AttentionState::Error,
+                _ => wire::AttentionState::None,
+            },
+            current_request_fingerprint: self.current_request_fingerprint.clone(),
+            current_request: self.current_request.clone(),
+            management: if self.is_managed() {
+                wire::ManagementState::Managed
+            } else {
+                wire::ManagementState::Degraded
+            },
+            transport_health: wire::TransportHealth::default(),
+            capabilities: wire::FleetCapabilities::default(),
+            provenance: wire::FleetProvenance::default(),
+            confidence: wire::FleetConfidence::default(),
+            discovered_at: self.discovered_at,
+            last_observed_at: self.last_observed_at,
+            lifecycle_updated_at: self.lifecycle_updated_at,
+            attention_updated_at: self.attention_updated_at,
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            version: self.version,
+            updated_revision: 0,
+        }
+    }
+
+    /// True when the daemon could not bind this session to a tmux pane.
+    ///
+    /// Distinct from "no transport": the session IS reachable as a row and may
+    /// be actively asking, it simply has no pane, so send-keys delivery and
+    /// attach are both unavailable until a later event binds one.
+    pub fn is_pane_unbound(&self) -> bool {
+        self.pane_binding == "pane_unbound"
+    }
+
     /// Operator-facing attachment transport.
     pub fn attachment_label(&self) -> &'static str {
         if self.capabilities.contains("tmux_attach") && self.tmux_target.is_some() {
             "TMUX"
+        } else if self.is_pane_unbound() {
+            // Never collapse this into NONE. NONE reads as "this session was
+            // never attachable"; UNBOUND says the pane is missing and names a
+            // defect the operator can chase in `ainb doctor`.
+            "UNBOUND"
         } else if self.is_managed()
             && self
                 .capabilities
@@ -248,7 +347,7 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
     fn from(session: ainb_hangar_proto::fleet::FleetSession) -> Self {
         use ainb_hangar_proto::fleet::{
             AttentionState, FleetConfidence, FleetProvenance, FleetProvider, LifecycleState,
-            ManagementState, TransportHealth,
+            ManagementState, PaneBinding, TransportHealth,
         };
 
         let capabilities = session.capabilities;
@@ -327,6 +426,12 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
             version: session.version,
             cwd: session.cwd,
             tmux_target: session.tmux_target,
+            pane_binding: match session.pane_binding {
+                PaneBinding::Bound => "bound",
+                PaneBinding::PaneUnbound => "pane_unbound",
+                PaneBinding::NotApplicable => "",
+            }
+            .into(),
             display_name: session.display_name,
             repository_name: None,
             branch_name: None,
@@ -4047,6 +4152,9 @@ mod tests {
             session_key: key.into(),
             provider: provider.into(),
             provider_session_id: Some(format!("provider-{key}")),
+            // A fixture pane is bound; `pane_unbound` is the case these
+            // screens render differently, so it is named where it is meant.
+            pane_binding: "bound".into(),
             current_request_fingerprint: None,
             current_request: None,
             lifecycle_state: lifecycle.into(),
@@ -5980,6 +6088,7 @@ mod tests {
                 provider,
                 provider_session_id: None,
                 tmux_target: None,
+                pane_binding: ainb_hangar_proto::fleet::PaneBinding::NotApplicable,
                 process_start_fingerprint: None,
                 cwd: "/work".into(),
                 display_name: None,
@@ -6025,6 +6134,7 @@ mod tests {
             provider: FleetProvider::Codex,
             provider_session_id: Some("thread-1".into()),
             tmux_target: Some("codex-1:0.0".into()),
+            pane_binding: ainb_hangar_proto::fleet::PaneBinding::Bound,
             process_start_fingerprint: None,
             cwd: "/work/shared".into(),
             display_name: Some("codex-1".into()),

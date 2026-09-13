@@ -85,6 +85,36 @@ pub struct NeedsRow {
     /// simply see one new optional field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// The D14 status identity, stamped from the daemon's one status read
+    /// (`fleet/status`) when the daemon is reachable.
+    ///
+    /// `(session_key, state, source, tier, evidence_observed_at)` is the tuple
+    /// the TUI fleet panel, `GET /api/needs` and this command must agree on
+    /// exactly. All three take it from one derivation in the daemon rather than
+    /// folding their own, which is what makes "one row per agent, same state
+    /// everywhere" a property of one function instead of an agreement between
+    /// three codebases.
+    ///
+    /// Every field is additive and omitted when absent, so a consumer that
+    /// predates D14 (the ATC heartbeat parses this as a bare `Vec<NeedsRow>`)
+    /// sees an unchanged shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    /// The operator-facing state token: `working`, `waiting`, `idle`,
+    /// `exited`, `unverifiable`. Never `done`: silence is not completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// The evidence tier `state` rests on, 0 (hook push) to 5 (pane text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<u8>,
+    /// When the SOURCE observed the evidence, epoch milliseconds. Never moved
+    /// by a replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_observed_at: Option<i64>,
+    /// True when no tmux pane is bound (issue #916): the agent may be asking
+    /// and nothing can type an answer into it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pane_unbound: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -286,6 +316,38 @@ pub fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) 
         enriched: None,
         need_enrich: false,
         source: None,
+        // Stamped by the reader that holds the daemon's status read; a row
+        // built with no daemon carries none rather than a guessed tier.
+        session_key: None,
+        state: None,
+        tier: None,
+        evidence_observed_at: None,
+        pane_unbound: false,
+    }
+}
+
+impl NeedsRow {
+    /// Stamp this row's D14 status identity from the daemon's one status read.
+    ///
+    /// The tuple the cross-surface gate compares comes from here, so the CLI
+    /// prints the same `(session_key, state, provenance, tier,
+    /// evidence_observed_at)` the panel renders and `/api/needs` returns,
+    /// derived once in `ainb_hangar_proto::agent_status`, never re-derived.
+    pub fn stamp_status(
+        &mut self,
+        session_key: String,
+        state: &'static str,
+        provenance: &'static str,
+        tier: u8,
+        evidence_observed_at: i64,
+        pane_unbound: bool,
+    ) {
+        self.session_key = Some(session_key);
+        self.state = Some(state.to_string());
+        self.source = Some(provenance.to_string());
+        self.tier = Some(tier);
+        self.evidence_observed_at = Some(evidence_observed_at);
+        self.pane_unbound = pane_unbound;
     }
 }
 

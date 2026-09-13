@@ -73,9 +73,10 @@ use ainb_fleet_core::read::jsonl_tail::ask_data_from_tool_input;
 use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, WaitContext, classify};
 use ainb_fleet_core::read::{ModelInfo, TranscriptDialect, last_model_info};
 use ainb_fleet_core::types::{Session, SessionSource};
+use ainb_hangar_core::channel::ChannelSet;
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
-use ainb_hangar_store::repo::fleet::FleetRepo;
+use ainb_hangar_store::repo::fleet::AttentionProjection;
 use ainb_hangar_store::repo::fleet_provider_event::{
     FleetProviderEventRepo, NewFleetProviderEvent,
 };
@@ -92,18 +93,10 @@ const MAX_INGEST_BYTES: u64 = 4 * 1024 * 1024;
 /// How often the producer tails the event log.
 const TICK: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// How often the producer reconciles the open set against Fleet's own view.
-/// Slow on purpose: the sweep is a convergence backstop, not a hot path.
+/// How often the producer asserts that the inbox and `fleet_session` still
+/// agree. Slow on purpose: it is an alarm, not a hot path, and it no longer
+/// has a backlog to work through because it no longer writes.
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// How long a row is protected from the sweep. A card raised seconds ago may
-/// legitimately lead its `fleet_session` projection, and closing it would delete
-/// a live question.
-const SWEEP_GRACE_MS: i64 = 15 * 60 * 1000;
-
-/// Rows one sweep pass may close. Bounds the pass so a pathological backlog
-/// cannot stall the tail loop; the remainder goes in the next pass.
-const SWEEP_LIMIT: i64 = 2000;
 
 /// The hook events worth classifying for attention. `Notification` is Claude
 /// asking for input / permission (the ASK path); `Stop` / `SubagentStop` mark a
@@ -209,6 +202,37 @@ pub struct AttentionIngest {
     /// session the daemon has ever seen (a few thousand on a busy host), and a
     /// restart costs one extra bounded read per live session.
     model_seeded: tokio::sync::Mutex<HashSet<String>>,
+}
+
+/// `answered_by` stamped on a row this ingest retires because the session
+/// itself resolved the question. One constant so the ingest, the drift
+/// assertion and every surface agree on the token they filter by.
+const RESOLVED_IN_SESSION: &str = "resolved:session";
+
+/// What one hook line does to the attention inbox, decided before the write.
+#[derive(Debug, Clone, Default)]
+struct AttentionDecision {
+    /// The projection to apply in the same transaction as the Fleet event.
+    projection: Option<AttentionProjection>,
+    /// The row the projection raises, kept alongside so the post-commit nudge
+    /// can be built without re-reading what was just written.
+    raised_row: Option<RaisedRow>,
+    /// The outcome the line takes once the Fleet event has been applied.
+    ///
+    /// `Some` means the line yields no attention decision: it did not qualify,
+    /// the classifier read nothing, a live request already covers it, or the
+    /// live-request check itself faulted and the line must be replayed. It is
+    /// deliberately NOT a short-circuit before the apply: every hook line
+    /// reduces into the Fleet model whether or not it raises a card.
+    terminal: Option<LineOutcome>,
+}
+
+/// The fields of a raised row the `AttentionRaised` nudge needs.
+#[derive(Debug, Clone)]
+struct RaisedRow {
+    id: String,
+    kind: AttentionKind,
+    channels: ChannelSet,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -452,11 +476,21 @@ impl AttentionIngest {
         } else {
             crate::fleet::canonical_hook_event_type(provider, &line.event_type, &payload)
         };
+
+        // D14: the attention decision is made BEFORE the write, so the Fleet
+        // event, the session state it reduces to, and the inbox row that state
+        // implies all commit together. It has to be decided out here rather
+        // than inside the transaction because the fallback classifier reads the
+        // JSONL transcript from disk, and blocking I/O under the write lock
+        // would starve the reconciler.
+        let decision = self
+            .attention_decision(&line, raw_event, semantic_event, &payload, now_ms)
+            .await;
+
         if !line.session_id.is_empty() {
-            // Taken HERE, before the observation is built, and so before the
-            // `is_qualifying` early-return below: a read placed after that gate
-            // would miss the patch it needs to ride on for every non-qualifying
-            // event, which is most of them.
+            // Taken HERE, before the observation is built: a read placed after
+            // the qualifying gate would miss the patch it needs to ride on for
+            // every non-qualifying event, which is most of them.
             let transcript_model = self.transcript_model(&line, &payload).await;
             let observation = crate::fleet::HookObservation {
                 event_id: event_id.clone(),
@@ -468,17 +502,26 @@ impl AttentionIngest {
                 observed_at: if line.ts > 0 { line.ts } else { now_ms },
                 transcript_model,
             };
-            let reduced =
-                match crate::fleet::apply_hook(&self.pool, &self.events, observation).await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        tracing::warn!(error = %error, "fleet hook reduce failed");
-                        return LineOutcome::Retry;
-                    }
-                };
-            if let Err(error) =
-                FleetProviderEventRepo::mark_projected(&self.pool, &event_id, reduced.revision)
-                    .await
+            let applied = match crate::fleet::apply_hook_with_attention(
+                &self.pool,
+                &self.events,
+                observation,
+                decision.projection.clone(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(error = %error, "fleet hook reduce failed");
+                    return LineOutcome::Retry;
+                }
+            };
+            if let Err(error) = FleetProviderEventRepo::mark_projected(
+                &self.pool,
+                &event_id,
+                applied.fleet.revision,
+            )
+            .await
             {
                 tracing::warn!(error = %error, "fleet provider event projection link failed");
                 return LineOutcome::Retry;
@@ -488,11 +531,125 @@ impl AttentionIngest {
             // needing the TUI or a client-side filesystem read.
             crate::fleet_usage::request_refresh().await;
             crate::fleet_quota::request_refresh().await;
+
+            // A line that yields no attention decision still reduces into the
+            // Fleet model: it carries lifecycle, model, pane binding and
+            // workload, and most lines are exactly that. The decision's own
+            // outcome is therefore honoured only AFTER the apply, never
+            // instead of it.
+            if let Some(outcome) = decision.terminal {
+                return outcome;
+            }
+            // Nudges are emitted AFTER the commit, from what the transaction
+            // actually did. A replay writes nothing and therefore announces
+            // nothing, which is what keeps a dismissed card from resurrecting.
+            for closed in applied.closed {
+                self.events.emit_attention(HangarEvent::AttentionAnswered {
+                    attention_id: closed,
+                    by: RESOLVED_IN_SESSION.to_string(),
+                });
+            }
+            let Some(raised) = decision.raised_row else {
+                return LineOutcome::Processed;
+            };
+            if !applied.raised {
+                return LineOutcome::Processed;
+            }
+            self.events.emit_attention(HangarEvent::AttentionRaised {
+                attention_id: raised.id,
+                session_id: line.session_id,
+                workspace_id: None,
+                kind: raised.kind.as_str().to_string(),
+                degraded: false,
+                created_at: now_ms,
+                channels: raised.channels,
+            });
+            return LineOutcome::Raised;
         }
 
-        if !is_qualifying(semantic_event) {
-            return LineOutcome::Processed;
+        // No provider session id: there is no Fleet row to project onto, so the
+        // card (if any) is written on its own. This is the pre-Fleet legacy
+        // shape and stays exactly as it was.
+        if let Some(outcome) = decision.terminal {
+            return outcome;
         }
+        let Some(projection) = decision.projection else {
+            return LineOutcome::Processed;
+        };
+        let Some(row) = projection.raise else {
+            return LineOutcome::Processed;
+        };
+        let Some(raised) = decision.raised_row else {
+            return LineOutcome::Processed;
+        };
+        match AttentionRepo::insert_if_absent(&self.pool, &row, projection.request_key.as_deref())
+            .await
+        {
+            Ok(false) => return LineOutcome::Processed,
+            Ok(true) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "attention ingest: insert failed");
+                return LineOutcome::Retry;
+            }
+        }
+        self.events.emit_attention(HangarEvent::AttentionRaised {
+            attention_id: raised.id,
+            session_id: line.session_id,
+            workspace_id: None,
+            kind: raised.kind.as_str().to_string(),
+            degraded: false,
+            created_at: now_ms,
+            channels: raised.channels,
+        });
+        LineOutcome::Raised
+    }
+
+    /// The replay-safe id a line with no `event_id` of its own gets.
+    ///
+    /// Pre-`event_id` lines are identified by their durable byte offset in
+    /// `events.jsonl`, which is why the cursor is a byte offset and not a line
+    /// count. Kept as one function so the ingest and the decision agree.
+    fn legacy_event_id(&self, line: &HookEventLine) -> String {
+        format!(
+            "legacy-hook:{}:{}",
+            line.session_id,
+            read_cursor(&self.cursor_path)
+        )
+    }
+
+    /// Decide what this hook line does to the attention inbox, without writing.
+    ///
+    /// Split out so the decision (which reads the transcript from disk on the
+    /// fallback path) happens outside the write transaction that applies it.
+    /// `Err(outcome)` is a short-circuit: the line yields no attention decision
+    /// and the caller returns that outcome for the whole line.
+    /// `raw_event` is the provider's own event name, BEFORE
+    /// [`crate::fleet::canonical_hook_event_type`] folds it into the reducer's
+    /// vocabulary. Both are needed and they are not interchangeable: the
+    /// reducer wants to know a picker is open, so it maps
+    /// `PermissionRequest(AskUserQuestion)` onto `AskUserQuestion` and the two
+    /// become one token. The inbox has to tell them apart (one OPENS a
+    /// question, the other re-announces one already open), so it reads
+    /// the unfolded name.
+    async fn attention_decision(
+        &self,
+        line: &HookEventLine,
+        raw_event: &str,
+        semantic_event: &str,
+        payload: &serde_json::Value,
+        now_ms: i64,
+    ) -> AttentionDecision {
+        if !is_qualifying(semantic_event) {
+            return AttentionDecision {
+                terminal: Some(LineOutcome::Processed),
+                ..AttentionDecision::default()
+            };
+        }
+        let provider = if line.agent.is_empty() {
+            "unknown"
+        } else {
+            line.agent.as_str()
+        };
 
         // An AskUserQuestion is classified from the hook line that ANNOUNCED it,
         // not from the transcript. Claude does not append the `tool_use` row for
@@ -507,13 +664,13 @@ impl AttentionIngest {
         // re-derived from the transcript. The distinction is load-bearing at the
         // stale-ASK gate below, so it travels with the context.
         let (context, from_hook_payload) =
-            match ask_context_from_hook_payload(provider, semantic_event, &payload) {
+            match ask_context_from_hook_payload(provider, raw_event, semantic_event, payload) {
                 Some(ask) => (ask, true),
                 None => match permission_context_from_hook_payload(
                     provider,
                     semantic_event,
                     &line.matcher,
-                    &payload,
+                    payload,
                 ) {
                     Some(wait) => (wait, true),
                     // Every other signal (Stop/Notification/an ask observed
@@ -523,14 +680,17 @@ impl AttentionIngest {
                         // Classify off the async runtime: `classify` reads the JSONL
                         // transcript + does blocking fs I/O, so it must not run inline on
                         // a tokio worker.
-                        let session = session_from(&line);
+                        let session = session_from(line);
                         let Some(row) = tokio::task::spawn_blocking(move || {
                             classify(ClassifyInput::from_env(session, None, now_ms))
                         })
                         .await
                         .ok()
                         .flatten() else {
-                            return LineOutcome::Processed;
+                            return AttentionDecision {
+                                terminal: Some(LineOutcome::Processed),
+                                ..AttentionDecision::default()
+                            };
                         };
                         (row.context, false)
                     }
@@ -554,34 +714,53 @@ impl AttentionIngest {
         // a live question reads IDLE off its last FINISHED turn as soon as that
         // turn is 5 minutes old. Acting on that reading would close the card the
         // payload producer raised seconds earlier AND stand a Waiting card up in
-        // its place, while the hook is still blocked waiting for the answer. Fleet's
-        // own projection (written from this same hook line a few lines above)
-        // is the authority on whether the request is still live, so while it says
-        // one is, this line yields no attention decision at all.
+        // its place, while the hook is still blocked waiting for the answer.
+        // Fleet's own projection is the authority on whether the request is
+        // still live, and the authority now includes what THIS event is about
+        // to write: the gate used to read the row after the apply, which is the
+        // same answer one statement later.
         //
         // A context built from the hook payload is exempt. The reasoning above
         // is entirely about a TRANSCRIPT reading being untrustworthy while a
         // request is live; a payload-derived context IS the announcement of
-        // that live request, and it arrives on the same line that just wrote
-        // the projection this gate consults. Without the exemption the gate
-        // reads the state the caller itself produced and discards it — which is
-        // precisely how a Codex approval reached the roster but never the notch.
+        // that live request. Without the exemption the gate reads the state the
+        // caller itself produced and discards it, which is precisely how a
+        // Codex approval reached the roster but never the notch.
+        let mut close_open_asks = false;
         if !from_hook_payload && kind != AttentionKind::AskUserQuestion {
-            match FleetRepo::provider_session_holds_open_request(&self.pool, &line.session_id).await
+            match crate::fleet::holds_open_request_after(
+                &self.pool,
+                provider,
+                &line.session_id,
+                semantic_event,
+                payload,
+            )
+            .await
             {
-                Ok(true) => return LineOutcome::Processed,
+                Ok(true) => {
+                    return AttentionDecision {
+                        terminal: Some(LineOutcome::Processed),
+                        ..AttentionDecision::default()
+                    };
+                }
                 Ok(false) => {}
                 Err(e) => {
                     tracing::warn!(error = %e, "attention ingest: live-request check failed");
-                    return LineOutcome::Retry;
+                    return AttentionDecision {
+                        terminal: Some(LineOutcome::Retry),
+                        ..AttentionDecision::default()
+                    };
                 }
             }
-            self.reconcile_stale_asks(&line.session_id, now_ms).await;
+            close_open_asks = !line.session_id.is_empty();
         }
 
         // Event-keyed id: a replay keeps the same id and is skipped. New source
         // events receive a new id even when request context is identical. Legacy
         // records retain offset identity rather than a time-derived context hash.
+        let event_id = (!line.event_id.is_empty())
+            .then(|| line.event_id.clone())
+            .unwrap_or_else(|| self.legacy_event_id(line));
         let id = format!("att:{}:{event_id}", line.session_id);
 
         // Resolve the routing channels ONCE, here at raise time (tcp T5). Hook
@@ -593,8 +772,7 @@ impl AttentionIngest {
         let context = serde_json::to_value(&context)
             .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
         let request_key = request_key_of(kind, &context);
-        let payload = context.to_string();
-        let new = NewAttention {
+        let row = NewAttention {
             id: id.clone(),
             session_id: line.session_id.clone(),
             cwd: line.cwd.clone(),
@@ -602,7 +780,7 @@ impl AttentionIngest {
             // (Resolving cwd→ainb workspace is a later enrichment.)
             workspace_id: None,
             kind,
-            payload,
+            payload: context.to_string(),
             // Hook-sourced = full fidelity (the degraded flag is for the
             // unhooked pane-classifier fallback, a separate producer).
             degraded: false,
@@ -613,27 +791,19 @@ impl AttentionIngest {
                 .then(|| line.transcript_path.clone()),
             channels,
         };
-        match AttentionRepo::insert_if_absent(&self.pool, &new, request_key.as_deref()).await {
-            // Already raised: a replay of this durable line, or an earlier firing
-            // of the SAME still-open question. Either way there is nothing new to
-            // announce, and re-emitting would resurrect a dismissed card.
-            Ok(false) => return LineOutcome::Processed,
-            Ok(true) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "attention ingest: insert failed");
-                return LineOutcome::Retry;
-            }
+        AttentionDecision {
+            terminal: None,
+            projection: Some(AttentionProjection {
+                session_id: line.session_id.clone(),
+                close_open_asks,
+                closed_by: RESOLVED_IN_SESSION.to_string(),
+                closed_answer: "answered in session".to_string(),
+                closed_at: now_ms,
+                raise: Some(row),
+                request_key,
+            }),
+            raised_row: Some(RaisedRow { id, kind, channels }),
         }
-        self.events.emit_attention(HangarEvent::AttentionRaised {
-            attention_id: id,
-            session_id: line.session_id,
-            workspace_id: None,
-            kind: kind.as_str().to_string(),
-            degraded: false,
-            created_at: now_ms,
-            channels,
-        });
-        LineOutcome::Raised
     }
 
     /// Return the exact payload sidecar when the hook stored one. Legacy lines
@@ -685,75 +855,28 @@ impl AttentionIngest {
         Ok(sidecar)
     }
 
-    /// Close any OPEN ASK rows a session still carries once a later hook shows it
-    /// is no longer asking. The live AskUserQuestion was answered / timed out /
-    /// interrupted in the session (never through the hangar answer router), so no
-    /// [`AttentionRepo::mark_answered_if_open`] ever fired for it. Each close goes
-    /// through that SAME first-answer-wins flip — so a concurrent human answer
-    /// racing on the row is never clobbered — and emits an `AttentionAnswered`
-    /// nudge so live surfaces drop the stale card without waiting for a re-pull.
-    /// Best-effort: a lookup / close fault is logged and skipped, never fatal.
-    async fn reconcile_stale_asks(&self, session_id: &str, now_ms: i64) {
-        if session_id.is_empty() {
-            return;
-        }
-        let ids = match AttentionRepo::open_ask_ids_for_session(&self.pool, session_id).await {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::warn!(error = %e, "attention ingest: stale-ASK lookup failed");
-                return;
-            }
-        };
-        for id in ids {
-            match AttentionRepo::mark_answered_if_open(
-                &self.pool,
-                &id,
-                "resolved:session",
-                "answered in session",
-                now_ms,
-            )
-            .await
-            {
-                // We flipped it: the ASK was still open and is now closed.
-                Ok(1) => {
-                    self.events.emit_attention(HangarEvent::AttentionAnswered {
-                        attention_id: id,
-                        by: "resolved:session".to_string(),
-                    });
-                }
-                // A surface won the answer race first — already closed, nothing to do.
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "attention ingest: stale-ASK close failed");
-                }
-            }
-        }
-    }
-
-    /// Close open rows that no live Fleet session still claims.
+    /// Assert that the inbox and `fleet_session.attention_state` still agree.
+    /// Logs, never mutates (D14).
     ///
-    /// The `attention` table and `fleet_session.attention_state` are two
-    /// independent records of "needs input" that never cross-write, so they
-    /// drift: measured live at 732 open rows against 7 sessions Fleet believed
-    /// were waiting, the oldest 25 days stale. Nothing else closes a `waiting`
-    /// row at all, so this runs on a slow tick rather than once at boot: a
-    /// one-shot pass would clear today's backlog and let it re-accumulate.
+    /// This used to close rows: `attention` and `fleet_session.attention_state`
+    /// were two independent records of "needs input" that never cross-wrote, so
+    /// they drifted, 732 open rows against 7 sessions Fleet believed were
+    /// waiting, the oldest 25 days stale, and a periodic sweep papered over it
+    /// by answering the losers. Both records now come from one apply path in
+    /// one transaction, so a non-zero count is a defect in that path, and
+    /// closing rows would hide exactly the signal that says so.
     ///
     /// Best-effort: a store fault is logged and retried next interval.
-    async fn sweep_once(&self, now_ms: i64) {
-        match AttentionRepo::close_unclaimed_open(
-            &self.pool,
-            now_ms - SWEEP_GRACE_MS,
-            now_ms,
-            SWEEP_LIMIT,
-        )
-        .await
-        {
-            Ok(0) => {}
-            Ok(closed) => {
-                tracing::info!(closed, "attention sweep: closed rows no session claims");
-            }
-            Err(e) => tracing::warn!(error = %e, "attention sweep failed"),
+    async fn sweep_once(&self, _now_ms: i64) {
+        match AttentionRepo::drift_against_fleet_session(&self.pool).await {
+            Ok(drift) if drift.is_clean() => {}
+            Ok(drift) => tracing::warn!(
+                open_without_asking_session = drift.open_without_asking_session,
+                asking_session_without_open = drift.asking_session_without_open,
+                "attention drift: the inbox and fleet_session.attention_state disagree; \
+                 the single apply path lost a write"
+            ),
+            Err(e) => tracing::warn!(error = %e, "attention drift assertion failed"),
         }
     }
 
@@ -831,12 +954,20 @@ fn session_from(line: &HookEventLine) -> Session {
 /// Claude-only, matching the producing hook and the reducer: the answer route a
 /// card advertises is the Claude structured broker, so another provider that
 /// happened to name a tool `AskUserQuestion` must not mint one.
+///
+/// `raw_event` is what makes "only the picker-OPEN event" enforceable.
+/// `semantic_event` cannot: the reducer deliberately folds
+/// `PermissionRequest(AskUserQuestion)` onto `AskUserQuestion` so a session's
+/// projection knows a picker is open, and that fold makes the re-announcement
+/// indistinguishable from the open. Gating on the raw `PreToolUse` keeps both
+/// consumers correct without either having to weaken its own contract.
 fn ask_context_from_hook_payload(
     agent: &str,
+    raw_event: &str,
     semantic_event: &str,
     envelope: &serde_json::Value,
 ) -> Option<NeedsContext> {
-    if agent != "claude" || semantic_event != "AskUserQuestion" {
+    if agent != "claude" || semantic_event != "AskUserQuestion" || raw_event != "PreToolUse" {
         return None;
     }
     let payload = envelope.get("payload")?;
@@ -863,12 +994,12 @@ fn ask_context_from_hook_payload(
 ///   answer"). A hook-route Codex session is `DEGRADED` (see #653) — Hangar can
 ///   observe it but cannot act on it — so those keys would advertise a delivery
 ///   route that does not exist.
-/// - Only `ask_user_question` / `waiting` / `error` are swept by
-///   [`AttentionRepo::close_unclaimed_open`]; `approval` is excluded because its
-///   producers own their lifecycles. A hook-raised `approval` would therefore
-///   never close. As `waiting` the card follows the projection this same line
-///   writes: open while `attention_state` is `APPROVAL`, swept once the next
-///   hook returns it to `NONE`.
+/// - `approval` is owned by its producer's own lifecycle (the ACP pool parks a
+///   responder for it), so a hook-raised `approval` has nobody to retire it and
+///   is excluded from the drift assertion for that reason. As `waiting` the
+///   card follows the projection this same line writes: raised while
+///   `attention_state` is `APPROVAL`, retired by the single apply path on the
+///   next hook that returns the session to `NONE`.
 ///
 /// Claude is excluded because its permission lines are already accounted for:
 /// they either re-announce a live picker (handled by the Ask path and by
@@ -962,6 +1093,7 @@ fn write_cursor(path: &Path, offset: u64) {
 mod tests {
     use super::*;
     use ainb_hangar_store::Store;
+    use ainb_hangar_store::repo::fleet::FleetRepo;
     use std::io::Write;
 
     /// Plant a transcript under `~/.claude/projects/<slug>` for a UNIQUE cwd so
@@ -1854,9 +1986,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_closes_open_rows_no_fleet_session_claims() {
+    async fn the_sweep_reports_drift_and_never_closes_a_row() {
         // The drift the two representations never reconciled: 732 open rows
-        // against 7 sessions Fleet believed were waiting.
+        // against 7 sessions Fleet believed were waiting. The sweep used to
+        // answer the losers, which made the number go down without fixing the
+        // cause. It now only measures, so a defect in the single apply path
+        // stays visible instead of being tidied away every 5 minutes.
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
         let base_ms = 1_700_000_000_000_i64;
@@ -1869,11 +2004,7 @@ mod tests {
         .execute(store.pool())
         .await
         .unwrap();
-        for (id, session, created) in [
-            ("keep-live", "live", base_ms - SWEEP_GRACE_MS - 1),
-            ("close-gone", "gone", base_ms - SWEEP_GRACE_MS - 1),
-            ("keep-fresh", "gone", base_ms - 1000),
-        ] {
+        for (id, session) in [("keep-live", "live"), ("keep-gone", "gone")] {
             AttentionRepo::insert(
                 store.pool(),
                 &NewAttention {
@@ -1884,7 +2015,7 @@ mod tests {
                     kind: AttentionKind::Waiting,
                     payload: "{}".to_string(),
                     degraded: false,
-                    created_at: created,
+                    created_at: base_ms - 1000,
                     raise_transcript: None,
                     channels: ainb_hangar_core::channel::ChannelSet::NONE,
                 },
@@ -1892,6 +2023,13 @@ mod tests {
             .await
             .unwrap();
         }
+
+        let drift = AttentionRepo::drift_against_fleet_session(store.pool()).await.unwrap();
+        assert_eq!(
+            drift.open_without_asking_session, 1,
+            "the row whose session is not asking IS drift and must be counted"
+        );
+        assert!(!drift.is_clean());
 
         let events_jsonl = dir.path().join("events.jsonl");
         let cursor = dir.path().join("attention_ingest.offset");
@@ -1905,8 +2043,57 @@ mod tests {
             .collect();
         assert_eq!(
             open,
-            ["keep-live", "keep-fresh"],
-            "only the stale row whose session is gone is closed"
+            ["keep-gone", "keep-live"],
+            "the assertion reports drift; it never closes a row"
+        );
+    }
+
+    /// The gate the whole restructure exists to hold: one apply path writes the
+    /// session state and its card together, so no replay can separate them.
+    #[tokio::test]
+    async fn a_thousand_event_replay_leaves_no_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let fx = plant_ask_transcript("drift");
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+
+        // 1,000 events over 50 sessions: an ask, then the stop that retires it,
+        // repeated, which is the exact open/close interleaving that drifted.
+        let mut lines = String::new();
+        for n in 0..500 {
+            let session = format!("sid-{}", n % 50);
+            lines.push_str(&live_ask_hook_line_in(
+                &session,
+                &fx.cwd,
+                &format!("e-ask-{n}"),
+                "PreToolUse",
+                &format!("question {n}"),
+                None,
+            ));
+            lines.push('\n');
+            lines.push_str(&hook_line_with_event_id(
+                &session,
+                &fx.cwd,
+                "Stop",
+                &format!("e-stop-{n}"),
+            ));
+            lines.push('\n');
+        }
+        std::fs::write(&events_jsonl, lines).unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        ingest.ingest_once(1_700_000_000_000).await;
+        // Replay the whole log from zero: a restart re-reads every line, and a
+        // second pass must converge on the same rows rather than fork them.
+        std::fs::remove_file(&cursor).ok();
+        ingest.ingest_once(1_700_000_600_000).await;
+
+        let drift = AttentionRepo::drift_against_fleet_session(store.pool()).await.unwrap();
+        assert_eq!(
+            drift,
+            ainb_hangar_store::repo::attention::AttentionDrift::default(),
+            "the inbox and fleet_session.attention_state must agree exactly"
         );
     }
 
