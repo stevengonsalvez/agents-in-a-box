@@ -234,7 +234,12 @@ pub struct NewFleetEvent {
 }
 
 /// Canonical Fleet session row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` is derived so a test fixture can name the columns it cares about
+/// and inherit the rest. Every D14 column added in 0099 broke a handful of
+/// literals across the workspace before this existed, which is churn that says
+/// nothing about the change causing it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FleetSessionRow {
     /// Stable Fleet identity.
     pub session_key: String,

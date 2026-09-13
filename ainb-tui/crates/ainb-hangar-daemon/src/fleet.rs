@@ -423,6 +423,19 @@ pub async fn apply_hook_with_attention(
     }
     let tmux_target = binding.target().map(str::to_string);
     let process_start_fingerprint = binding.fingerprint().map(str::to_string);
+    // The decision itself, so a later pass has something to re-confirm against
+    // (#961). `bound` records what was chosen; `invalidate_binding` clears both
+    // the decision and the live route when the pane it chose has been taken
+    // over, which is what stops send-keys typing into the new occupant.
+    let bound = tmux_target
+        .clone()
+        .map(|target| (target, process_start_fingerprint.clone()));
+    let invalidate_binding = matches!(
+        &binding,
+        crate::pane_binding::PaneBinding::Unbound(
+            crate::pane_binding::UnboundReason::Invalidated { .. }
+        )
+    );
     let exact_tmux_identity = tmux_target.is_some() && process_start_fingerprint.is_some();
     let (model, reasoning_effort) = observed_model_pair(&observation);
     let (lifecycle_state, attention_state) = if preserve_active_request {
@@ -466,6 +479,8 @@ pub async fn apply_hook_with_attention(
             provider_session_id: Some(observation.provider_session_id.to_string()),
             tmux_target: tmux_target.clone(),
             process_start_fingerprint: process_start_fingerprint.clone(),
+            bound: bound.clone(),
+            invalidate_binding,
             // Tier 0, recorded rather than left to be reverse-engineered. This
             // is the one producer that may assert a human is needed, so it is
             // the one whose tier the read path must not have to guess.
@@ -6279,43 +6294,12 @@ mod tests {
         );
     }
 
+    /// A row with nothing set, for a test that cares about one column.
+    ///
+    /// `Default` rather than a literal: every column added to the row broke
+    /// this fixture, and the churn said nothing about the change causing it.
     fn blank_row() -> FleetSessionRow {
-        FleetSessionRow {
-            session_key: String::new(),
-            provider: String::new(),
-            provider_session_id: None,
-            tmux_target: None,
-            process_start_fingerprint: None,
-            cwd: String::new(),
-            display_name: None,
-            lifecycle_state: "UNKNOWN".to_string(),
-            active_work_count: 0,
-            workload_updated_at: 0,
-            workload_authority: "inferred".to_string(),
-            attention_state: "NONE".to_string(),
-            current_request_fingerprint: None,
-            management_state: "DEGRADED".to_string(),
-            transport_health: "HEALTHY".to_string(),
-            capabilities: "{}".to_string(),
-            provenance: "tmux".to_string(),
-            confidence: "INFERRED".to_string(),
-            discovered_at: 0,
-            last_observed_at: 0,
-            metadata_updated_at: 0,
-            metadata_authority: "inferred".to_string(),
-            lifecycle_updated_at: 0,
-            lifecycle_authority: "inferred".to_string(),
-            attention_updated_at: 0,
-            attention_authority: "inferred".to_string(),
-            transport_updated_at: 0,
-            transport_authority: "inferred".to_string(),
-            model: None,
-            reasoning_effort: None,
-            model_updated_at: 0,
-            model_authority: "inferred".to_string(),
-            version: 1,
-            updated_revision: 1,
-        }
+        FleetSessionRow::default()
     }
 
     /// The reap-then-archive pipeline, end to end on its two real clocks: a
