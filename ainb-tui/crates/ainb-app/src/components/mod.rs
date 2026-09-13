@@ -4,6 +4,10 @@
 
 pub mod config_popup;
 pub mod daemons;
+pub mod live_logs_stream;
+pub mod log_parser;
+pub mod log_reader;
+pub mod log_writer;
 pub mod onboarding;
 pub mod setup_menu;
 pub mod skill_manager_screen;

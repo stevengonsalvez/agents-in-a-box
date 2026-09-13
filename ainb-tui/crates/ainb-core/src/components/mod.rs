@@ -26,8 +26,6 @@ pub mod live_logs_stream;
 pub mod log_formatter_simple;
 pub mod log_history_viewer;
 pub mod log_parser;
-pub mod log_reader;
-pub mod log_writer;
 pub mod logs_viewer;
 pub mod mascot;
 pub mod mcp_overlay;

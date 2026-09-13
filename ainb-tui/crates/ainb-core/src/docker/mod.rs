@@ -1,12 +1,8 @@
 // ABOUTME: Terminal-side Docker helpers. The Docker service layer lives in
-// `ainb-app`; this module re-exports it and adds the pieces that still touch
-// the terminal or the log widgets.
+// `ainb-app`; this module re-exports it and adds the interactive exec, which
+// has to suspend the terminal.
 
 pub use ainb_app::docker::*;
-
-pub mod log_streaming;
-
-pub use log_streaming::LogStreamingCoordinator;
 
 use tracing::info;
 

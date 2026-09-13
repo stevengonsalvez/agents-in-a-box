@@ -72,6 +72,10 @@ url = { workspace = true }
 # release. See the workspace manifest comment.
 time = { workspace = true }
 
+# Markdown and syntax highlighting for the agent-event widgets
+pulldown-cmark = { workspace = true }
+syntect = { workspace = true }
+
 # Usage analytics cache
 rusqlite = { workspace = true }
 blake3 = { workspace = true }
