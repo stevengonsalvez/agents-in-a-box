@@ -281,14 +281,13 @@ pub struct UiState {
     pub embed_pane_area: Option<Rect>,
     /// The menu bar's row, as last painted, for click routing.
     pub menu_bar_area: Option<Rect>,
-    /// Per-plugin-screen viewport size `(width, height)` from the last render.
-    pub plugin_render_areas: HashMap<ScreenId, (u16, u16)>,
+    /// Per-plugin-screen allocated size from the last render, and the viewport
+    /// each plugin was last asked to render at. The plugin render tick reads
+    /// and updates both.
+    pub plugin_viewports: crate::app::screens::PluginViewports,
     /// Per-plugin-screen origin `(x, y)`, so absolute mouse coordinates can be
     /// translated into the plugin's own space.
     pub plugin_render_origins: HashMap<ScreenId, (u16, u16)>,
-    /// The viewport each plugin screen was last rendered AT, so a resize can be
-    /// detected and a re-render kicked.
-    pub plugin_last_render_viewport: HashMap<ScreenId, (u16, u16)>,
     /// TTL cache behind the status bar's statusline probe: `(value, read_at)`.
     /// Holding `W`, or any rapid keystroke, would otherwise hit the filesystem
     /// once per frame.
@@ -421,6 +420,37 @@ impl UiState {
             ScrollAction::PreviewExitScroll => layout.tmux_preview_mut().exit_scroll_mode(),
         }
         self.needs_redraw = true;
+    }
+}
+
+impl crate::app::state::SessionsPaneHitTest for SessionsPaneState {
+    fn row_index_at(&self, x: u16, y: u16) -> Option<usize> {
+        Self::row_index_at(self, x, y)
+    }
+
+    fn contains_preview_point(&self, x: u16, y: u16) -> bool {
+        Self::contains_preview_point(self, x, y)
+    }
+
+    fn contains_sessions_point(&self, x: u16, y: u16) -> bool {
+        Self::contains_sessions_point(self, x, y)
+    }
+
+    fn is_collapsed(&self) -> bool {
+        self.collapsed
+    }
+}
+
+/// The terminal host's side of key dispatch: scrolls are queued for the run
+/// loop to apply against the layout, and the statusline status comes from the
+/// TTL cache.
+impl crate::app::events::KeyHost for UiState {
+    fn queue_scroll(&mut self, action: ScrollAction) {
+        self.queue(action);
+    }
+
+    fn statusline_status(&mut self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
+        Self::statusline_status(self)
     }
 }
 

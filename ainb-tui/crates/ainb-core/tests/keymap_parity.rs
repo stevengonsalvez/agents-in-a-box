@@ -173,7 +173,11 @@ fn shifted_letter_rows_resolve_with_or_without_shift_modifier_bit() {
         });
         let character = binding.chord.chars().next().unwrap();
         for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
-            let chord = Chord::from_key_event(&KeyEvent::new(KeyCode::Char(character), modifiers));
+            let chord = ainb::app::terminal_keys::chord_from_key_event(&KeyEvent::new(
+                KeyCode::Char(character),
+                modifiers,
+            ))
+            .expect("mapped key");
             assert_eq!(chord.as_str(), binding.chord);
 
             let resolved =

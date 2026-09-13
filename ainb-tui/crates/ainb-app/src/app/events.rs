@@ -7,23 +7,43 @@ use super::keymap::test_key_codes::*;
 use crate::app::keymap::{
     Chord, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
 };
+#[cfg(test)]
+use crate::app::keymap::{Key, Mods};
 use crate::app::{
     AppState,
     screens::ids as screen_ids,
     state::{AsyncAction, AuthMethod, ConfigPane},
-    ui_state::UiState,
 };
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
-use crossterm::event::KeyEvent;
-#[cfg(test)]
-use crossterm::event::{KeyCode, KeyModifiers};
-use std::time::Instant;
 use tracing::info;
 
-// Layout configuration - sessions pane width as percentage of terminal width
-const SESSIONS_PANE_WIDTH_PERCENTAGE: f32 = 0.4;
+/// What key dispatch needs from the renderer it runs under.
+///
+/// Key handling resolves some bindings to renderer-local work: scrolling a
+/// pane, or asking whether wiring the Claude statusline would be productive,
+/// which a terminal host answers from a short-lived cache. The TUI's `UiState`
+/// implements this; [`NoRenderer`] serves tests and hosts with neither.
+pub trait KeyHost {
+    /// Queue a renderer-local scroll the keymap resolved.
+    fn queue_scroll(&mut self, action: ScrollAction);
+    /// The Claude statusline wiring status, possibly from the host's cache.
+    fn statusline_status(&mut self) -> Option<StatuslineStatus>;
+}
+
+/// A [`KeyHost`] with no renderer: scrolls are dropped and the statusline
+/// status is detected fresh on every ask.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoRenderer;
+
+impl KeyHost for NoRenderer {
+    fn queue_scroll(&mut self, _action: ScrollAction) {}
+
+    fn statusline_status(&mut self) -> Option<StatuslineStatus> {
+        crate::cli::statusline_install::detect_statusline_status().ok()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum AppEvent {
@@ -802,23 +822,13 @@ impl PersistOutcome {
 }
 
 impl EventHandler {
-    pub fn persist_sessions_pane_preferences(state: &mut AppState, ui: &UiState) {
-        state.config.app_config.ui_preferences.sessions_sidebar_width =
-            Some(ui.sessions_pane.preferred_width);
-        state.config.app_config.ui_preferences.sessions_sidebar_collapsed =
-            Some(ui.sessions_pane.collapsed);
-        if let Err(e) = state.config.app_config.save() {
-            tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
-        }
-    }
-
     /// Apply the persisted SkillManager Sources-panel width to the live
     /// screen state on screen-open. `None` keeps the in-memory default
     /// (32). The width is clamped against the current terminal so a
     /// stale oversized value can never starve the Units table.
     fn apply_skill_manager_sources_width(state: &mut AppState) {
         if let Some(width) = state.config.app_config.ui_preferences.skill_manager_sources_width {
-            let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+            let term_w = crate::viewport::columns().unwrap_or(80);
             state.skills.skill_manager_state.sources_width =
                 crate::components::skill_manager_screen::clamp_sources_width(width, term_w);
         }
@@ -839,7 +849,7 @@ impl EventHandler {
     /// visible — i.e. the underlying Sources/Units panels are NOT the
     /// active surface. Mouse hit-testing on the panels is suppressed in
     /// that case so a click meant for the modal doesn't leak through.
-    fn skill_manager_overlay_open(state: &AppState) -> bool {
+    pub fn skill_manager_overlay_open(state: &AppState) -> bool {
         let s = &state.skills.skill_manager_state;
         state.shell.help_visible
             || s.banner.is_active()
@@ -848,51 +858,6 @@ impl EventHandler {
             || s.browse.is_some()
             || s.preview.is_some()
             || s.source_remove_confirm.is_some()
-    }
-
-    /// Recompute the SkillManager top-row rects (Sources panel + Units
-    /// table) from the current terminal size + persisted `sources_width`,
-    /// mirroring the deterministic layout in `skill_manager_screen::render`:
-    ///
-    /// ```text
-    /// outer (vertical):  [ Min(8) top ][ Length(8) detail ][ Length(1) help ]
-    /// top   (horizontal):[ Length(sources_w) ][ Min(40) units ]
-    /// ```
-    ///
-    /// The render path always draws into the full terminal Rect
-    /// `(0,0,w,h)`, so we reconstruct that here rather than threading a
-    /// Rect through the immutable render. Returns `(sources_rect,
-    /// units_rect, sources_w)` or `None` when the terminal is too small
-    /// to host the top row.
-    fn skill_manager_top_rects(
-        state: &AppState,
-    ) -> Option<(ratatui::layout::Rect, ratatui::layout::Rect, u16)> {
-        use ratatui::layout::Rect;
-        let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
-        // Vertical layout: the top row is everything above the 8-row
-        // detail pane + 1-row help bar. Mirror `Constraint::Min(8)`.
-        let top_h = term_h.saturating_sub(9);
-        if term_w == 0 || top_h == 0 {
-            return None;
-        }
-        let sources_w = crate::components::skill_manager_screen::clamp_sources_width(
-            state.skills.skill_manager_state.sources_width,
-            term_w,
-        );
-        let sources_rect = Rect::new(0, 0, sources_w, top_h);
-        let units_x = sources_w;
-        let units_w = term_w.saturating_sub(sources_w);
-        let units_rect = Rect::new(units_x, 0, units_w, top_h);
-        Some((sources_rect, units_rect, sources_w))
-    }
-
-    /// True when `(x, y)` falls inside `rect` (half-open on the far
-    /// edges, matching ratatui's Rect convention).
-    fn point_in_rect(x: u16, y: u16, rect: ratatui::layout::Rect) -> bool {
-        x >= rect.x
-            && x < rect.x.saturating_add(rect.width)
-            && y >= rect.y
-            && y < rect.y.saturating_add(rect.height)
     }
 
     /// Queue a background fetch of `uri` (git clone off the event loop) that
@@ -927,286 +892,6 @@ impl EventHandler {
         }
     }
 
-    /// Handle mouse events and convert to appropriate app events
-    pub fn handle_mouse_event(
-        event: AppEvent,
-        state: &mut AppState,
-        ui: &mut UiState,
-    ) -> Option<AppEvent> {
-        // Mode boundary (defense in depth): while the interactive embed owns
-        // input, host mouse handling must never mutate focus/selection under
-        // the live pane. main.rs already swallows/forwards mouse events before
-        // calling this, but the boundary must hold even if a future call site
-        // forgets the gate. Pinned by the mode-boundary tripwire.
-        if state.is_interactive_pane() {
-            return None;
-        }
-        match event {
-            AppEvent::MouseRightClick { x, y } => {
-                if state.shell.current_screen == screen_ids::SESSION_LIST
-                    && !state.shell.help_visible
-                {
-                    if let Some(crate::app::state::SessionListRowTarget::Attachable(target)) =
-                        state.session_list_row_at_mouse(&ui.sessions_pane, x, y)
-                    {
-                        if matches!(
-                            target,
-                            crate::app::state::AttachableRef::WorkspaceSession { .. }
-                                | crate::app::state::AttachableRef::SshSession { .. }
-                        ) {
-                            state.open_session_context_menu(target);
-                        }
-                    }
-                }
-                None
-            }
-            AppEvent::MouseClick { x, y } => {
-                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
-                    if state.shell.home_screen_v2_state.begin_sidebar_resize(x, y) {
-                        return None;
-                    }
-
-                    if let Some(outcome) =
-                        state.shell.home_screen_v2_state.click_sidebar_item_at(x, y, Instant::now())
-                    {
-                        if outcome.double_click {
-                            return Some(AppEvent::HomeScreenSidebarSelect);
-                        }
-                    }
-
-                    return None;
-                }
-
-                // SkillManager: divider-drag-resize + click-to-select on
-                // Sources / Units. Guarded so clicks meant for an open
-                // overlay (banner / input / library / browse / help)
-                // don't leak through to the panels.
-                if state.shell.current_screen == screen_ids::SKILL_MANAGER
-                    && !Self::skill_manager_overlay_open(state)
-                {
-                    if let Some((sources_rect, units_rect, sources_w)) =
-                        Self::skill_manager_top_rects(state)
-                    {
-                        // Resize edge = the Sources panel's right border
-                        // column. Begin a drag (consumed on subsequent
-                        // MouseDragging events).
-                        let edge_x = sources_w.saturating_sub(1);
-                        let on_edge = x == edge_x
-                            && y >= sources_rect.y
-                            && y < sources_rect.y.saturating_add(sources_rect.height);
-                        if on_edge {
-                            state.skills.skill_manager_state.resize_active = true;
-                            return None;
-                        }
-
-                        // Click inside the Sources panel body → focus +
-                        // select that source (applies the filter). Source
-                        // rows start at `rect.y + 1` (after the top
-                        // border); row 0 is the "All sources" affordance,
-                        // rows 1.. map onto `sources[index]`.
-                        if Self::point_in_rect(x, y, sources_rect) {
-                            let row = y.saturating_sub(sources_rect.y).saturating_sub(1);
-                            if row == 0 {
-                                // "All sources" → clear the filter.
-                                return Some(AppEvent::SkillManagerClearSourceFilter);
-                            }
-                            let index = usize::from(row.saturating_sub(1));
-                            if index < state.skills.skill_manager_state.sources.len() {
-                                return Some(AppEvent::SkillManagerSourceClick { index });
-                            }
-                            // Empty area inside the panel → just focus it.
-                            state.skills.skill_manager_state.focused_pane =
-                                crate::components::skill_manager_screen::FocusedSkillPane::Sources;
-                            return None;
-                        }
-
-                        // Click inside the Units table → focus + select
-                        // the clicked unit. Unit data rows start at
-                        // `rect.y + 2` (top border + header row); map y
-                        // onto a position within `visible_indices()`.
-                        if Self::point_in_rect(x, y, units_rect) {
-                            let data_y = sources_rect.y.saturating_add(2);
-                            if y >= data_y {
-                                let position = usize::from(y - data_y);
-                                let visible_len =
-                                    state.skills.skill_manager_state.visible_indices().len();
-                                if position < visible_len {
-                                    return Some(AppEvent::SkillManagerUnitClick { position });
-                                }
-                            }
-                            state.skills.skill_manager_state.focused_pane =
-                                crate::components::skill_manager_screen::FocusedSkillPane::Units;
-                            return None;
-                        }
-                    }
-                    return None;
-                }
-
-                // Determine which pane was clicked based on terminal dimensions
-                // The layout splits at 40% for sessions, 60% for logs
-                let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                let split_point = (term_width as f32 * SESSIONS_PANE_WIDTH_PERCENTAGE) as u16;
-
-                // Check if we're in the main view (not in overlays)
-                if state.shell.current_screen == screen_ids::SESSION_LIST
-                    && !state.shell.help_visible
-                {
-                    // Click on the bottom keymap legend (or its collapsed hint
-                    // row) toggles it — the mouse twin of ⇧M.
-                    if let Some(area) = ui.menu_bar_area {
-                        if Self::point_in_rect(x, y, area) {
-                            return Some(AppEvent::ToggleSessionMenuBar);
-                        }
-                    }
-
-                    if ui.sessions_pane.is_on_filter_toggle(x, y) {
-                        return Some(AppEvent::CycleSessionFilter);
-                    }
-
-                    if ui.sessions_pane.is_on_toggle(x, y) {
-                        ui.sessions_pane.toggle_collapsed();
-                        Self::persist_sessions_pane_preferences(state, ui);
-                        return None;
-                    }
-
-                    if ui.sessions_pane.begin_resize(x, y) {
-                        return None;
-                    }
-
-                    if let Some(target) = state.session_list_row_at_mouse(&ui.sessions_pane, x, y) {
-                        let double_click =
-                            ui.sessions_pane.record_row_click(target, Instant::now());
-                        state.select_session_list_row(target);
-                        if double_click {
-                            return Some(AppEvent::AttachTmuxSession);
-                        }
-                        return None;
-                    }
-
-                    if ui.sessions_pane.contains_sessions_point(x, y) {
-                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
-                        return None;
-                    }
-
-                    if ui.sessions_pane.contains_preview_point(x, y) {
-                        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
-                        return None;
-                    }
-
-                    if x < split_point {
-                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
-                    } else {
-                        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
-                    }
-                    None
-                } else {
-                    None
-                }
-            }
-            AppEvent::MouseDragStart { x: _, y: _ } => {
-                // Start text selection in logs pane
-                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
-                    // This will be handled in Phase 2
-                    None
-                } else {
-                    None
-                }
-            }
-            AppEvent::MouseDragging { x, y: _ } => {
-                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
-                    let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                    state.shell.home_screen_v2_state.drag_sidebar_resize(x, term_width);
-                    return None;
-                }
-
-                if state.shell.current_screen == screen_ids::SESSION_LIST
-                    && !state.shell.help_visible
-                {
-                    let width = ui
-                        .sessions_pane
-                        .last_content_width()
-                        .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)).0);
-                    ui.sessions_pane.drag_resize(x, width);
-                    return None;
-                }
-
-                // SkillManager divider drag: the new Sources width is the
-                // pointer's x + 1 (the panel spans columns 0..=x). Clamped
-                // by `grow`/`shrink`'s shared clamp via the setter below.
-                if state.shell.current_screen == screen_ids::SKILL_MANAGER
-                    && state.skills.skill_manager_state.resize_active
-                {
-                    let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                    let requested = x.saturating_add(1);
-                    state.skills.skill_manager_state.sources_width =
-                        crate::components::skill_manager_screen::clamp_sources_width(
-                            requested, term_w,
-                        );
-                    return None;
-                }
-
-                // Update selection during drag
-                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
-                    // This will be handled in Phase 2
-                    None
-                } else {
-                    None
-                }
-            }
-            AppEvent::MouseDragEnd { x, y } => {
-                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
-                    state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
-                    if state.shell.home_screen_v2_state.finish_sidebar_resize() {
-                        let width = state.shell.home_screen_v2_state.sidebar.preferred_width;
-                        state.config.app_config.ui_preferences.home_sidebar_width = Some(width);
-                        if let Err(e) = state.config.app_config.save() {
-                            tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
-                        }
-                    }
-                    return None;
-                }
-
-                if state.shell.current_screen == screen_ids::SESSION_LIST
-                    && !state.shell.help_visible
-                {
-                    ui.sessions_pane.update_hover(x, y);
-                    if ui.sessions_pane.finish_resize() {
-                        Self::persist_sessions_pane_preferences(state, ui);
-                    }
-                    return None;
-                }
-
-                if state.shell.current_screen == screen_ids::SKILL_MANAGER {
-                    let _ = (x, y);
-                    if state.skills.skill_manager_state.resize_active {
-                        state.skills.skill_manager_state.resize_active = false;
-                        return Some(AppEvent::SkillManagerPersistSourcesWidth);
-                    }
-                    return None;
-                }
-
-                // Finalize text selection
-                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
-                    // This will be handled in Phase 2
-                    None
-                } else {
-                    None
-                }
-            }
-            AppEvent::MouseMove { x, y } => {
-                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
-                    state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
-                }
-                if state.shell.current_screen == screen_ids::SESSION_LIST
-                    && !state.shell.help_visible
-                {
-                    ui.sessions_pane.update_hover(x, y);
-                }
-                None
-            }
-            _ => None,
-        }
-    }
     /// Get text from system clipboard
     fn get_clipboard_text() -> Result<String, Box<dyn std::error::Error>> {
         use arboard::Clipboard;
@@ -1452,24 +1137,23 @@ impl EventHandler {
     /// is ignored at the global layer and falls through to the active
     /// view's normal handling.
     ///
-    /// The settings.json read goes through [`UiState::statusline_status`]
+    /// The settings.json read goes through [`KeyHost::statusline_status`]
     /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
     /// the filesystem.
-    fn should_wire_statusline(state: &AppState, ui: &mut UiState) -> bool {
+    fn should_wire_statusline(state: &AppState, host: &mut dyn KeyHost) -> bool {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
         let live_source = state.fleet.live_window_watcher.snapshot().source;
-        let status = ui.statusline_status();
+        let status = host.statusline_status();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
 
     /// Convenience wrapper for callers with no renderer of their own (tests,
     /// and the tripwire harnesses that drive key handling headlessly).
-    pub fn handle_key_event(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+    pub fn handle_key_event(chord: Chord, state: &mut AppState) -> Option<AppEvent> {
         let keymap = Keymap::defaults();
-        let mut ui = UiState::default();
-        Self::handle_key_event_with_keymap(key_event, state, &keymap, &mut ui)
+        Self::handle_key_event_with_keymap(chord, state, &keymap, &mut NoRenderer)
     }
 
     /// Resolve host-owned rows through the data keymap.
@@ -1477,12 +1161,11 @@ impl EventHandler {
     /// Component-owned New Session and PickRepo input remains behind its local
     /// handlers; every host-owned routing decision is resolved from the table.
     pub fn handle_key_event_with_keymap(
-        key_event: KeyEvent,
+        chord: Chord,
         state: &mut AppState,
         keymap: &Keymap,
-        ui: &mut UiState,
+        host: &mut dyn KeyHost,
     ) -> Option<AppEvent> {
-        let chord = Chord::from_key_event(&key_event);
         // New Session delegates to component-owned handlers in this phase, but
         // Help remains a host modal and therefore wins before that delegation.
         if state.shell.help_visible {
@@ -1499,7 +1182,7 @@ impl EventHandler {
             }
         }
         if state.shell.current_screen == screen_ids::NEW_SESSION {
-            return Self::handle_new_session_keys(key_event, state);
+            return Self::handle_new_session_keys(chord, state);
         }
 
         let contexts = active_contexts(state, &HostFlags::default());
@@ -1520,7 +1203,7 @@ impl EventHandler {
             }
             Some((_, KeyAction::App(event))) => Some(event),
             Some((_, KeyAction::Text(character))) => Self::keymap_text_event(character, state),
-            Some((_, KeyAction::Ui(action))) => Self::keymap_ui_event(action, state, ui),
+            Some((_, KeyAction::Ui(action))) => Self::keymap_ui_event(action, state, host),
             Some((_, KeyAction::Passthrough | KeyAction::OpenSlashPalette)) | None => None,
         }
     }
@@ -1632,7 +1315,7 @@ impl EventHandler {
     fn keymap_ui_event(
         action: UiAction,
         state: &mut AppState,
-        ui: &mut UiState,
+        host: &mut dyn KeyHost,
     ) -> Option<AppEvent> {
         use UiAction::{
             PalCycleEngine, PalCycleMode, PalCycleModel, PalRetry, SessionAskBackspace,
@@ -1772,7 +1455,7 @@ impl EventHandler {
                 }
             }
             UiAction::UsageWireStatusline => {
-                Self::should_wire_statusline(state, ui).then_some(AppEvent::UsageWireStatusline)
+                Self::should_wire_statusline(state, host).then_some(AppEvent::UsageWireStatusline)
             }
             // A read-only mirror uses tmux's own scrollback, so entering the
             // host's scroll mode over it would swallow navigation invisibly.
@@ -1786,7 +1469,7 @@ impl EventHandler {
             // its `LayoutComponent`, never handed to the reducer. One arm, so a
             // new `ScrollAction` cannot be left out of it.
             UiAction::Scroll(scroll) => {
-                ui.queue(scroll);
+                host.queue_scroll(scroll);
                 None
             }
         }
@@ -1982,7 +1665,7 @@ impl EventHandler {
         }
     }
 
-    fn handle_new_session_keys(key_event: KeyEvent, state: &mut AppState) -> Option<AppEvent> {
+    fn handle_new_session_keys(chord: Chord, state: &mut AppState) -> Option<AppEvent> {
         use crate::app::state::NewSessionStep;
         use crate::components::new_session::configure::{self, ConfigureOutcome};
         use crate::components::new_session::pick_repo::{self, PickRepoOutcome};
@@ -2001,7 +1684,7 @@ impl EventHandler {
                 .new_session_state
                 .as_mut()
                 .and_then(|s| s.configure_state.as_mut())
-                .map(|cfg| configure::handle_key(cfg, key_event))
+                .map(|cfg| configure::handle_key(cfg, &chord))
                 .unwrap_or(ConfigureOutcome::Stay);
 
             return match outcome {
@@ -2030,7 +1713,7 @@ impl EventHandler {
                 .new_session_state
                 .as_mut()
                 .and_then(|s| s.pick_repo_state.as_mut())
-                .map(|pick| pick_repo::handle_key(pick, key_event))
+                .map(|pick| pick_repo::handle_key(pick, &chord))
                 .unwrap_or(PickRepoOutcome::Stay);
 
             return match outcome {
@@ -2158,7 +1841,7 @@ impl EventHandler {
             match session_state.step {
                 NewSessionStep::Configure => None, // handled above
                 NewSessionStep::PickRepo => None,  // handled above
-                NewSessionStep::Creating if Chord::from_key_event(&key_event).as_str() == "esc" => {
+                NewSessionStep::Creating if chord.as_str() == "esc" => {
                     Some(AppEvent::NewSessionCancel)
                 }
                 NewSessionStep::Creating => None,
@@ -4662,12 +4345,12 @@ impl EventHandler {
                 );
             }
             AppEvent::SkillManagerShrinkSources => {
-                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                let term_w = crate::viewport::columns().unwrap_or(80);
                 state.skills.skill_manager_state.shrink_sources(2, term_w);
                 Self::persist_skill_manager_sources_width(state);
             }
             AppEvent::SkillManagerGrowSources => {
-                let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                let term_w = crate::viewport::columns().unwrap_or(80);
                 state.skills.skill_manager_state.grow_sources(2, term_w);
                 Self::persist_skill_manager_sources_width(state);
             }
@@ -7097,7 +6780,6 @@ fn is_known_screen_id(id: &str) -> bool {
 mod session_recovery_key_tests {
     use super::*;
     use crate::app::screens::ids;
-    use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn recovery_state() -> AppState {
         let mut state = AppState::default();
@@ -7107,7 +6789,7 @@ mod session_recovery_key_tests {
     }
 
     fn key(state: &mut AppState, c: char) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(Char(c), KeyModifiers::NONE), state)
+        EventHandler::handle_key_event(Chord::new(Char(c), Mods::NONE), state)
     }
 
     #[test]
@@ -7142,9 +6824,9 @@ mod session_recovery_key_tests {
         state.recovery.session_recovery_state.search_query = "zzzz".to_string();
         state.recovery.session_recovery_state.search_active = false;
 
-        let esc = KeyEvent::new(Esc, KeyModifiers::NONE);
+        let esc = Chord::new(Esc, Mods::NONE);
         assert!(matches!(
-            EventHandler::handle_key_event(esc, &mut state),
+            EventHandler::handle_key_event(esc.clone(), &mut state),
             Some(AppEvent::SessionRecoverySearchCancel)
         ));
 
@@ -7163,11 +6845,11 @@ mod session_recovery_key_tests {
         let mut state = recovery_state();
         state.recovery.session_recovery_state.search_active = true;
         assert!(matches!(
-            EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state),
+            EventHandler::handle_key_event(Chord::new(Esc, Mods::NONE), &mut state),
             Some(AppEvent::SessionRecoverySearchCancel)
         ));
         assert!(matches!(
-            EventHandler::handle_key_event(KeyEvent::new(Enter, KeyModifiers::NONE), &mut state),
+            EventHandler::handle_key_event(Chord::new(Enter, Mods::NONE), &mut state),
             Some(AppEvent::SessionRecoverySearchClose)
         ));
     }
@@ -7177,10 +6859,9 @@ mod session_recovery_key_tests {
 mod session_list_key_tests {
     use super::*;
     use crate::app::screens::ids;
-    use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn key(state: &mut AppState, c: char) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(Char(c), KeyModifiers::NONE), state)
+        EventHandler::handle_key_event(Chord::new(Char(c), Mods::NONE), state)
     }
 
     fn session_list_state() -> AppState {
@@ -7190,7 +6871,7 @@ mod session_list_key_tests {
     }
 
     fn ctrl_x(state: &mut AppState) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(Char('x'), KeyModifiers::CONTROL), state)
+        EventHandler::handle_key_event(Chord::new(Char('x'), Mods::CTRL), state)
     }
 
     /// The chord is claimed only while a notice is showing; an empty corner
@@ -7363,31 +7044,6 @@ mod panel_back_tests {
             state.shell.previous_screen.is_none(),
             "pop must consume the origin"
         );
-    }
-
-    /// A click anywhere on the published menu-bar rect toggles the legend
-    /// (the mouse twin of ⇧M); a click above it does not.
-    #[test]
-    fn click_on_menu_bar_toggles_the_legend() {
-        use ratatui::layout::Rect;
-        let mut state = AppState::default();
-        state.shell.current_screen = ids::SESSION_LIST.to_string();
-        let mut ui = UiState::default();
-        ui.menu_bar_area = Some(Rect::new(0, 20, 100, 6));
-
-        let inside = EventHandler::handle_mouse_event(
-            AppEvent::MouseClick { x: 10, y: 22 },
-            &mut state,
-            &mut ui,
-        );
-        assert!(matches!(inside, Some(AppEvent::ToggleSessionMenuBar)));
-
-        let outside = EventHandler::handle_mouse_event(
-            AppEvent::MouseClick { x: 10, y: 5 },
-            &mut state,
-            &mut ui,
-        );
-        assert!(!matches!(outside, Some(AppEvent::ToggleSessionMenuBar)));
     }
 
     /// `[r]` in the Skill Manager must arm a confirm on the first press
@@ -7563,8 +7219,6 @@ mod panel_back_tests {
     /// to `PanelBack` and returns to the origin, not home.
     #[test]
     fn daemons_esc_routes_through_panel_back_to_origin() {
-        use crossterm::event::KeyEvent;
-
         let mut state = AppState::default();
         state.shell.current_screen = ids::SESSION_LIST.to_string();
 
@@ -7577,7 +7231,7 @@ mod panel_back_tests {
 
         // The key dispatcher must turn Esc on the Daemons screen into PanelBack
         // (the pre-fix bug produced GoToHomeScreen, ignoring the saved origin).
-        let event = EventHandler::handle_key_event(KeyEvent::from(Esc), &mut state);
+        let event = EventHandler::handle_key_event(Chord::from(Esc), &mut state);
         assert!(
             matches!(event, Some(AppEvent::PanelBack)),
             "Daemons Esc must resolve to PanelBack, not GoToHomeScreen; got {event:?}"
@@ -7594,13 +7248,11 @@ mod panel_back_tests {
     /// `q` on the Daemons screen behaves identically to Esc.
     #[test]
     fn daemons_q_routes_through_panel_back() {
-        use crossterm::event::KeyEvent;
-
         let mut state = AppState::default();
         state.shell.current_screen = ids::HOME.to_string();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
 
-        let event = EventHandler::handle_key_event(KeyEvent::from(Char('q')), &mut state);
+        let event = EventHandler::handle_key_event(Chord::from(Char('q')), &mut state);
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
@@ -7613,16 +7265,13 @@ mod panel_back_tests {
     /// looking at.
     #[test]
     fn daemons_screen_keys_drive_the_screen_cursor_not_the_overlay() {
-        use crossterm::event::KeyEvent;
-
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
 
         let mut state = AppState::default();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
 
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        let route = |s: &mut AppState, code| EventHandler::handle_key_event(Chord::from(code), s);
         // Selection and the action menu are applied inline against the SCREEN's
         // own state, so they resolve to no AppEvent at all. Routing them
         // through an event was how the cursor ended up wired to the overlay —
@@ -7645,13 +7294,10 @@ mod panel_back_tests {
     /// Daemons repair keys stay next to the table that reports their state.
     #[test]
     fn daemons_repair_key_routing() {
-        use crossterm::event::KeyEvent;
-
         let mut state = AppState::default();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
 
-        let route =
-            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        let route = |s: &mut AppState, code| EventHandler::handle_key_event(Chord::from(code), s);
         assert!(matches!(
             route(&mut state, Char('I')),
             Some(AppEvent::DaemonsRepairHooks)
@@ -7732,7 +7378,7 @@ mod panel_back_tests {
         let mut state = AppState::default();
         state.shell.current_screen = ids::SESSION_LIST.to_string();
 
-        let key = KeyEvent::new(Char('m'), KeyModifiers::NONE);
+        let key = Chord::new(Char('m'), Mods::NONE);
         let evt = EventHandler::handle_key_event(key, &mut state)
             .expect("`m` on the session list must dispatch an event");
         assert!(
@@ -7767,7 +7413,7 @@ mod panel_back_tests {
         let mut state = AppState::default();
         state.shell.current_screen = ids::HOME.to_string();
 
-        let p = KeyEvent::new(Char('p'), KeyModifiers::NONE);
+        let p = Chord::new(Char('p'), Mods::NONE);
         let evt = EventHandler::handle_key_event(p, &mut state)
             .expect("`p` on home must dispatch an event");
         assert!(
@@ -7775,7 +7421,7 @@ mod panel_back_tests {
             "`p` must open the MCP pool overlay, got {evt:?}"
         );
 
-        let m = KeyEvent::new(Char('m'), KeyModifiers::NONE);
+        let m = Chord::new(Char('m'), Mods::NONE);
         let evt = EventHandler::handle_key_event(m, &mut state)
             .expect("`m` on home must dispatch an event");
         assert!(
@@ -7802,7 +7448,7 @@ mod panel_back_tests {
             last_action: None,
         });
 
-        let i = KeyEvent::new(Char('i'), KeyModifiers::NONE);
+        let i = Chord::new(Char('i'), Mods::NONE);
         let evt = EventHandler::handle_key_event(i, &mut state)
             .expect("`i` in the overlay must dispatch an event");
         assert!(
@@ -7934,8 +7580,8 @@ mod text_input_guard_tests {
     // component-locally; the cross-component "no global shortcut steals a
     // char" invariant is still covered by `is_text_input_context_covers_*`
     // tests below.
-    fn char_key(c: char) -> KeyEvent {
-        KeyEvent::new(Char(c), KeyModifiers::NONE)
+    fn char_key(c: char) -> Chord {
+        Chord::new(Char(c), Mods::NONE)
     }
 
     /// Outside any text input, `Shift+H` must still toggle the global
@@ -7982,7 +7628,7 @@ mod text_input_guard_tests {
             "/Users/me/git",
         );
 
-        let ctrl_v = KeyEvent::new(Char('v'), KeyModifiers::CONTROL);
+        let ctrl_v = Chord::new(Char('v'), Mods::CTRL);
         let evt = EventHandler::handle_key_event(ctrl_v, &mut state)
             .expect("Ctrl+V in a text popup must dispatch a paste event");
         assert!(matches!(evt, AppEvent::ConfigPopupPasteClipboard));
@@ -8069,9 +7715,8 @@ mod text_input_guard_tests {
         });
         state.shell.help_visible = true;
 
-        let evt =
-            EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state)
-                .expect("Esc in help-visible text-input must dispatch ToggleHelp");
+        let evt = EventHandler::handle_key_event(Chord::new(Esc, Mods::NONE), &mut state)
+            .expect("Esc in help-visible text-input must dispatch ToggleHelp");
         assert!(
             matches!(evt, AppEvent::ToggleHelp),
             "expected ToggleHelp, got {:?}",
@@ -8296,16 +7941,12 @@ mod text_input_guard_tests {
         // (the plugin runtime is absent in this test, exactly the unavailable-
         // plugin placeholder case).
         assert!(
-            EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state)
-                .is_some(),
+            EventHandler::handle_key_event(Chord::new(Esc, Mods::NONE), &mut state).is_some(),
             "Esc must not be swallowed on a plugin screen"
         );
         assert!(
             matches!(
-                EventHandler::handle_key_event(
-                    KeyEvent::new(Char('c'), KeyModifiers::CONTROL),
-                    &mut state
-                ),
+                EventHandler::handle_key_event(Chord::new(Char('c'), Mods::CTRL), &mut state),
                 Some(AppEvent::Quit)
             ),
             "Ctrl+C must still quit from a plugin screen"
@@ -8396,10 +8037,9 @@ mod skill_manager_sync_keybind_tests {
     use crate::app::screens::ids as screen_ids;
     use ainb_skill_core::Uri;
     use ainb_skill_core::manifest::{Manifest, UnitEntry};
-    use crossterm::event::{KeyEvent, KeyModifiers};
 
     fn press_s(state: &mut AppState) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(Char('s'), KeyModifiers::NONE), state)
+        EventHandler::handle_key_event(Chord::new(Char('s'), Mods::NONE), state)
     }
 
     fn switch_to_skill_manager(state: &mut AppState) {
@@ -8724,10 +8364,9 @@ mod session_composer_key_tests {
     use crate::app::screens::ids;
     use crate::components::session_tabs::SessionTab;
     use crate::fleet::chat_host::ChatHost;
-    use crossterm::event::{KeyEvent, KeyModifiers};
 
-    fn press(state: &mut AppState, code: KeyCode) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), state)
+    fn press(state: &mut AppState, code: Key) -> Option<AppEvent> {
+        EventHandler::handle_key_event(Chord::new(code, Mods::NONE), state)
     }
 
     /// The sessions screen with a LIVE Pal composer.
@@ -8819,10 +8458,9 @@ mod session_ask_key_tests {
     use crate::fleet::answer::AskFocus;
     use crate::fleet::attention::{AttentionKind, AttentionOption, SessionAttention};
     use crate::models::{Session, SessionStatus, Workspace};
-    use crossterm::event::{KeyEvent, KeyModifiers};
 
-    fn press(state: &mut AppState, code: KeyCode) -> Option<AppEvent> {
-        EventHandler::handle_key_event(KeyEvent::new(code, KeyModifiers::NONE), state)
+    fn press(state: &mut AppState, code: Key) -> Option<AppEvent> {
+        EventHandler::handle_key_event(Chord::new(code, Mods::NONE), state)
     }
 
     /// The sessions screen on the `ask` tab, with a structured ASK selected.

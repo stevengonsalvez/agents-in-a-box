@@ -17,10 +17,20 @@ fn chord_normalises_terminal_spellings() {
 #[test]
 fn shifted_printable_terminal_keys_use_the_printed_character() {
     let event = KeyEvent::new(KeyCode::Char(':'), KeyModifiers::SHIFT);
-    assert_eq!(Chord::from_key_event(&event).as_str(), ":");
+    assert_eq!(
+        ainb::app::terminal_keys::chord_from_key_event(&event)
+            .expect("mapped key")
+            .as_str(),
+        ":"
+    );
 
     let event = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
-    assert_eq!(Chord::from_key_event(&event).as_str(), "G");
+    assert_eq!(
+        ainb::app::terminal_keys::chord_from_key_event(&event)
+            .expect("mapped key")
+            .as_str(),
+        "G"
+    );
 }
 
 #[test]

@@ -559,11 +559,20 @@ impl AppState {
     }
 }
 
-// The sessions pane's geometry, hover and drag state is renderer-local and
-// lives in `app::ui_state` after the Phase 3 seal. Re-exported here because
-// `SessionListRowTarget` below and the mouse reducer are its callers.
-pub use crate::app::ui_state::SessionsPaneState;
-pub use crate::app::ui_state::UiState;
+/// Where the renderer last drew the sessions pane, as mouse hit-tests.
+///
+/// The pane's geometry, hover and drag state is renderer-local (the TUI keeps
+/// it in `UiState`); the session-list reducers only need these answers.
+pub trait SessionsPaneHitTest {
+    /// The session-list row index under (`x`, `y`), if any.
+    fn row_index_at(&self, x: u16, y: u16) -> Option<usize>;
+    /// Whether (`x`, `y`) falls in the preview pane.
+    fn contains_preview_point(&self, x: u16, y: u16) -> bool;
+    /// Whether (`x`, `y`) falls in the sessions pane.
+    fn contains_sessions_point(&self, x: u16, y: u16) -> bool;
+    /// Whether the sessions pane is collapsed.
+    fn is_collapsed(&self) -> bool;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionListRowTarget {
@@ -576,7 +585,7 @@ pub enum SessionListRowTarget {
 // View enum was replaced in Phase 2a by ScreenId (String) + the screens::ids
 // constants module. Layout dispatch now goes through app::ScreenRegistry; see
 // `crate::app::screens` for the trait + identifier constants.
-pub use crate::app::screens::{Screen, ScreenId, ids as screen_ids};
+pub use crate::app::screens::{ScreenId, ids as screen_ids};
 
 #[derive(Debug, Clone)]
 pub struct ConfirmationDialog {
@@ -3101,7 +3110,7 @@ fn merge_oldest_call_day(
 /// read. 15s is short enough that a manual edit of `~/.claude/settings.json`
 /// is reflected almost immediately, long enough to coalesce normal
 /// scrolling activity.
-pub(crate) const STATUSLINE_STATUS_CACHE_TTL_SECS: u64 = 15;
+pub const STATUSLINE_STATUS_CACHE_TTL_SECS: u64 = 15;
 
 impl AppState {
     pub fn new() -> Self {
@@ -3112,7 +3121,7 @@ impl AppState {
     /// owns the cache itself. Lets unit tests inject
     /// a clock and a fake detector to verify TTL coalescing without
     /// touching the filesystem.
-    pub(crate) fn statusline_status_cached_inner<F>(
+    pub fn statusline_status_cached_inner<F>(
         cache: &mut Option<(
             Option<crate::cli::statusline_install::StatuslineStatus>,
             Instant,
@@ -4836,7 +4845,7 @@ impl AppState {
     /// `labels` is threaded in rather than loaded here because this runs once
     /// per stopped session inside a refresh loop, and a per-row file read is a
     /// syscall per session for a store that only changes on rename.
-    pub(crate) fn stopped_session_from_metadata(
+    pub fn stopped_session_from_metadata(
         metadata: &crate::interactive::SessionMetadata,
         labels: &crate::config::SessionLabelStore,
     ) -> crate::models::Session {
@@ -5418,7 +5427,7 @@ impl AppState {
 
     pub fn session_list_row_at_mouse(
         &self,
-        pane: &SessionsPaneState,
+        pane: &dyn SessionsPaneHitTest,
         x: u16,
         y: u16,
     ) -> Option<SessionListRowTarget> {
@@ -5469,7 +5478,7 @@ impl AppState {
     /// scroll behavior.
     pub fn scroll_session_list_by_mouse(
         &mut self,
-        pane: &SessionsPaneState,
+        pane: &dyn SessionsPaneHitTest,
         x: u16,
         y: u16,
         is_down: bool,
@@ -5484,7 +5493,7 @@ impl AppState {
             return false;
         }
 
-        let over_sessions = pane.contains_sessions_point(x, y) && !pane.collapsed;
+        let over_sessions = pane.contains_sessions_point(x, y) && !pane.is_collapsed();
         let should_scroll_sessions =
             over_sessions || matches!(self.shell.focused_pane, FocusedPane::Sessions);
 
@@ -12859,7 +12868,10 @@ impl App {
     /// Drive plugin-owned screens. Returns `true` if a fresh plugin frame was
     /// drained into `pending_plugin_renders` this tick, so the render loop can
     /// treat that as a reason to repaint (perf: bead `wai` dirty-gate).
-    pub fn tick_plugin_renders(&mut self, ui: &mut UiState) -> bool {
+    pub fn tick_plugin_renders(
+        &mut self,
+        viewports: &mut crate::app::screens::PluginViewports,
+    ) -> bool {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
@@ -12953,7 +12965,7 @@ impl App {
             // Viewport comes from the previous frame's allocated area
             // (stashed by `PluginScreen::render`); (0, 0) means that render
             // hasn't happened yet.
-            let (width, height) = ui.plugin_render_areas.get(*screen_id).copied().unwrap_or((0, 0));
+            let (width, height) = viewports.render_areas.get(*screen_id).copied().unwrap_or((0, 0));
 
             // No allocated area stashed yet — the very first entry to this
             // screen, before `PluginScreen::render` has run once. Kicking now
@@ -12976,7 +12988,7 @@ impl App {
             // re-marked dirty by that publish, but a screen with no such
             // feed (e.g. `witr` before a scan) would otherwise stay blank
             // forever after its dirty flag was consumed at `(0, 0)`.
-            let last_viewport = ui.plugin_last_render_viewport.get(*screen_id).copied();
+            let last_viewport = viewports.last_render_viewport.get(*screen_id).copied();
             let viewport_changed = last_viewport != Some((width, height));
 
             // Kick the next render when something has actually changed
@@ -12997,7 +13009,7 @@ impl App {
                 continue;
             }
 
-            ui.plugin_last_render_viewport.insert((*screen_id).to_string(), (width, height));
+            viewports.last_render_viewport.insert((*screen_id).to_string(), (width, height));
 
             let viewport = ainb_plugin_runtime::Viewport { width, height };
             // The frame lands in the cache for `try_recv_render`; the
@@ -13577,18 +13589,18 @@ mod plugin_render_gate_tests {
     #[test]
     fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
-        let mut ui = crate::app::ui_state::UiState::default();
+        let mut viewports = crate::app::screens::PluginViewports::default();
         let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         app.state.shell.current_screen = ids::SESSION_LIST.to_string();
-        app.tick_plugin_renders(&mut ui);
-        app.tick_plugin_renders(&mut ui);
+        app.tick_plugin_renders(&mut viewports);
+        app.tick_plugin_renders(&mut viewports);
 
         // No kick: `plugin_last_render_viewport` is only written when a
         // render is dispatched.
         assert!(
-            !ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            !viewports.last_render_viewport.contains_key(ids::LEARNINGS),
             "hidden screen must not receive a render kick"
         );
         // The registration-seeded dirty flag survived both ticks, so the
@@ -13604,31 +13616,31 @@ mod plugin_render_gate_tests {
     #[test]
     fn dirty_plugin_kick_deferred_until_viewport_known() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
-        let mut ui = crate::app::ui_state::UiState::default();
+        let mut viewports = crate::app::screens::PluginViewports::default();
         let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         // Ticks while hidden: gated, dirty preserved (proved above).
         app.state.shell.current_screen = ids::SESSION_LIST.to_string();
-        app.tick_plugin_renders(&mut ui);
+        app.tick_plugin_renders(&mut viewports);
 
         // User opens the learnings screen. No allocated area is stashed yet,
         // so the tick must NOT kick: a (0, 0) seed kick made the plugin paint
         // its 80×24 fallback across the real (larger) area — the blank-flash
         // bug on first entry.
         app.state.shell.current_screen = ids::LEARNINGS.to_string();
-        app.tick_plugin_renders(&mut ui);
+        app.tick_plugin_renders(&mut viewports);
         assert!(
-            !ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            !viewports.last_render_viewport.contains_key(ids::LEARNINGS),
             "no render kick before the real viewport is known"
         );
 
         // The draw pass stashes the allocated area (what `PluginScreen::render`
         // does) → the next tick kicks at full size and consumes the flag.
-        ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
-        app.tick_plugin_renders(&mut ui);
+        viewports.render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
+        app.tick_plugin_renders(&mut viewports);
         assert_eq!(
-            ui.plugin_last_render_viewport.get(ids::LEARNINGS),
+            viewports.last_render_viewport.get(ids::LEARNINGS),
             Some(&(120, 40)),
             "first tick with a known viewport must kick at the real size"
         );
@@ -13643,20 +13655,20 @@ mod plugin_render_gate_tests {
     #[test]
     fn only_the_focused_plugin_screen_is_kicked() {
         let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
-        let mut ui = crate::app::ui_state::UiState::default();
+        let mut viewports = crate::app::screens::PluginViewports::default();
         let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
 
         app.state.shell.current_screen = ids::LEARNINGS.to_string();
         // Focused screen has painted once (area known); the hidden one hasn't.
-        ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (100, 30));
-        app.tick_plugin_renders(&mut ui);
+        viewports.render_areas.insert(ids::LEARNINGS.to_string(), (100, 30));
+        app.tick_plugin_renders(&mut viewports);
 
         assert!(
-            ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            viewports.last_render_viewport.contains_key(ids::LEARNINGS),
             "focused plugin screen must be kicked"
         );
         assert!(
-            !ui.plugin_last_render_viewport.contains_key(ids::ANALYTICS),
+            !viewports.last_render_viewport.contains_key(ids::ANALYTICS),
             "unfocused plugin screen must not be kicked"
         );
         assert!(
@@ -13679,17 +13691,17 @@ mod plugin_render_gate_tests {
         // `app_with_plugins` registers against /nonexistent/plugin-binary,
         // which is exactly the post-upgrade state.
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
-        let mut ui = crate::app::ui_state::UiState::default();
+        let mut viewports = crate::app::screens::PluginViewports::default();
 
         app.state.shell.current_screen = ids::LEARNINGS.to_string();
-        ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
+        viewports.render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
 
         // First tick kicks the render; the spawn attempt and its failure
         // happen on the runtime's executor, so poll a bounded number of
         // ticks for the outcome rather than assuming one is enough.
         let mut recorded = None;
         for _ in 0..200 {
-            app.tick_plugin_renders(&mut ui);
+            app.tick_plugin_renders(&mut viewports);
             if let Some(err) = app.state.plugins_host.plugin_render_errors.get(ids::LEARNINGS) {
                 recorded = Some(err.clone());
                 break;

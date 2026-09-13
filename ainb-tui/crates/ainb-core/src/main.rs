@@ -33,7 +33,7 @@ use std::{
 // second time, so every module has one home and one set of visibility rules.
 use ainb::{app, cli, components, config, fleet, headroom, models, perf, plugins, tmux};
 
-use app::keymap::{Chord, KeyAction, KeyContext, Keymap, ScrollAction, UiAction};
+use app::keymap::{KeyAction, KeyContext, Keymap, ScrollAction, UiAction};
 use app::{App, EventHandler};
 use components::LayoutComponent;
 use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
@@ -483,7 +483,7 @@ async fn run_tui_loop(
         // directly.
         // A fresh plugin frame is a reason to repaint even if nothing else
         // changed (e.g. a self-animating plugin screen).
-        if app.tick_plugin_renders(&mut ui) {
+        if app.tick_plugin_renders(&mut ui.plugin_viewports) {
             needs_redraw = true;
         }
 
@@ -615,11 +615,16 @@ async fn run_tui_loop(
                     // Ctrl+Q belongs to the terminal screen. Interactive mode
                     // releases; every other session-list state consumes it so
                     // the host's plain `q` shortcut is never timing-dependent.
-                    let chord = Chord::from_key_event(&key_event);
-                    let interactive_detach = matches!(
-                        keymap.resolve(&[KeyContext::EmbedInteractive], &chord),
-                        Some(KeyAction::App(crate::app::events::AppEvent::DetachSession))
-                    );
+                    // `None` for keys the keymap has no spelling for; those still
+                    // reach the embed, the palette and plugins below, but never
+                    // the host keymap.
+                    let chord = crate::app::terminal_keys::chord_from_key_event(&key_event);
+                    let interactive_detach = chord.as_ref().is_some_and(|chord| {
+                        matches!(
+                            keymap.resolve(&[KeyContext::EmbedInteractive], chord),
+                            Some(KeyAction::App(crate::app::events::AppEvent::DetachSession))
+                        )
+                    });
                     if interactive_detach {
                         if app.state.is_interactive_pane() {
                             app.state.release_interactive_pane();
@@ -676,10 +681,12 @@ async fn run_tui_loop(
                     //    typing an `ssh://...` URL.
                     // An already-open palette still consumes keys, so it can
                     // always be closed.
-                    let colon = matches!(
-                        keymap.resolve(&[KeyContext::Global], &chord),
-                        Some(KeyAction::OpenSlashPalette)
-                    );
+                    let colon = chord.as_ref().is_some_and(|chord| {
+                        matches!(
+                            keymap.resolve(&[KeyContext::Global], chord),
+                            Some(KeyAction::OpenSlashPalette)
+                        )
+                    });
                     let palette_open_suppressed = colon
                         && !slash_palette.is_open()
                         && (crate::app::screens::builtin::plugin_id_for_screen(
@@ -724,7 +731,9 @@ async fn run_tui_loop(
                             ui.apply(ScrollAction::PreviewExitScroll, layout, &app.state);
                         }
                         PreviewScrollRoute::Handle => {
-                            match keymap.resolve(&[KeyContext::PreviewScroll], &chord) {
+                            match chord.as_ref().and_then(|chord| {
+                                keymap.resolve(&[KeyContext::PreviewScroll], chord)
+                            }) {
                                 // Don't let ESC fall through as Quit, or the
                                 // arrows navigate sessions behind the pane.
                                 Some(KeyAction::Ui(UiAction::Scroll(
@@ -756,8 +765,11 @@ async fn run_tui_loop(
                         continue;
                     }
 
+                    let Some(chord) = chord else {
+                        continue;
+                    };
                     let resolved = EventHandler::handle_key_event_with_keymap(
-                        key_event,
+                        chord,
                         &mut app.state,
                         &keymap,
                         &mut ui,
@@ -775,7 +787,7 @@ async fn run_tui_loop(
                             // same reason the [-]/[+] mouse glyph persists it.
                             AppEvent::ToggleSessionsSidebar => {
                                 ui.sessions_pane.toggle_collapsed();
-                                EventHandler::persist_sessions_pane_preferences(
+                                crate::app::mouse::persist_sessions_pane_preferences(
                                     &mut app.state,
                                     &ui,
                                 );
@@ -930,7 +942,7 @@ async fn run_tui_loop(
                                 if let Some(ref mut git_state) = app.state.git_view.git_view_state {
                                     git_state.review_sidebar_click(col, row);
                                 }
-                            } else if let Some(app_event) = EventHandler::handle_mouse_event(
+                            } else if let Some(app_event) = crate::app::mouse::handle_mouse_event(
                                 AppEvent::MouseClick { x: col, y: row },
                                 &mut app.state,
                                 &mut ui,
@@ -939,7 +951,7 @@ async fn run_tui_loop(
                             }
                         }
                         MouseEventKind::Down(MouseButton::Right) => {
-                            if let Some(app_event) = EventHandler::handle_mouse_event(
+                            if let Some(app_event) = crate::app::mouse::handle_mouse_event(
                                 AppEvent::MouseRightClick {
                                     x: mouse_event.column,
                                     y: mouse_event.row,
@@ -1078,7 +1090,7 @@ async fn run_tui_loop(
                                 == crate::app::screens::ids::LOG_HISTORY
                             {
                                 app.state.log_streams.log_history_state.update_selection(col, row);
-                            } else if let Some(app_event) = EventHandler::handle_mouse_event(
+                            } else if let Some(app_event) = crate::app::mouse::handle_mouse_event(
                                 AppEvent::MouseDragging { x: col, y: row },
                                 &mut app.state,
                                 &mut ui,
@@ -1094,7 +1106,7 @@ async fn run_tui_loop(
                                 == crate::app::screens::ids::LOG_HISTORY
                             {
                                 app.state.log_streams.log_history_state.end_selection();
-                            } else if let Some(app_event) = EventHandler::handle_mouse_event(
+                            } else if let Some(app_event) = crate::app::mouse::handle_mouse_event(
                                 AppEvent::MouseDragEnd { x: col, y: row },
                                 &mut app.state,
                                 &mut ui,
@@ -1104,7 +1116,7 @@ async fn run_tui_loop(
                         }
                         MouseEventKind::Moved => {
                             let (col, row) = (mouse_event.column, mouse_event.row);
-                            if let Some(app_event) = EventHandler::handle_mouse_event(
+                            if let Some(app_event) = crate::app::mouse::handle_mouse_event(
                                 AppEvent::MouseMove { x: col, y: row },
                                 &mut app.state,
                                 &mut ui,

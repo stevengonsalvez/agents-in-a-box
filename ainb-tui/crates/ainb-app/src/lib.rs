@@ -6,6 +6,7 @@
 
 pub mod agent_parsers;
 pub mod agents;
+pub mod app;
 pub mod audit;
 pub mod claude;
 pub mod cli;
