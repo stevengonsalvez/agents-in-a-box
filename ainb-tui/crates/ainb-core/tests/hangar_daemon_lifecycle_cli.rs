@@ -224,6 +224,38 @@ where
     None
 }
 
+/// Press the Hangar launch key and confirm the TUI acted on it.
+///
+/// `g` lazy-spawns the staged hangar-tui subprocess, which authenticates as
+/// `surface.kind=tui` over the production daemon socket. It used to be sent
+/// once and hoped for, with a comment warning not to re-send because a plugin
+/// screen may own `g` itself.
+///
+/// That warning is real but narrower than it looks: the hazard needs a plugin
+/// screen to be UP, and while the HomeScreen chrome is still on the pane no
+/// plugin screen is. So this re-sends only while the app is demonstrably still
+/// on the HomeScreen, which is precisely the state in which the previous key
+/// cannot have been consumed by anything that would mind a second one.
+///
+/// This is delivery-until-observed, not a retry loop over a flaky assertion.
+/// A `send-keys` that tmux accepted can still be dropped by an application that
+/// has not finished taking over the terminal, and the symptom is exactly what
+/// #953 reports: the HomeScreen renders, the key reports success, and the
+/// Hangar screen never appears, with the captured frame showing an ordinary
+/// HomeScreen and the `[g]` item sitting unactivated in the sidebar.
+fn press_hangar_launch_key(session: &str) {
+    // `Stats` plus `[i]` is the HomeScreen chrome the caller just waited for,
+    // and the same pair the post-launch assertion requires to be GONE.
+    let on_home = |capture: &str| capture.contains("Stats") && capture.contains("[i]");
+    for _ in 0..3 {
+        send_key(session, "g");
+        if poll_capture(session, Duration::from_secs(5), |capture| !on_home(capture)).is_some() {
+            return;
+        }
+    }
+    // Out of attempts. The caller's own poll produces the diagnostic frame.
+}
+
 fn send_key(session: &str, key: &str) {
     let status = Command::new("tmux")
         .args(["send-keys", "-t", session, key])
@@ -554,10 +586,7 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         "no TUI may be registered before the Hangar launch key: {empty_listing}"
     );
 
-    // `g` is a single-shot navigation key. It lazy-spawns the staged real
-    // hangar-tui subprocess, which authenticates as `surface.kind=tui` over the
-    // production daemon socket. Do not re-send it: plugin screens may own `g`.
-    send_key(tui.name(), "g");
+    press_hangar_launch_key(tui.name());
     let hangar_capture = poll_capture(tui.name(), Duration::from_secs(30), |capture| {
         capture.contains("[1]Issues") && capture.contains("[B]Boards")
     })
