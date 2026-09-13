@@ -386,6 +386,9 @@ async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    if let Ok(size) = terminal.size() {
+        ainb::viewport::set_columns(size.width);
+    }
 
     // Ensure terminal cleanup happens even if there's an error
     let result = run_tui_loop(app, layout, &mut terminal).await;
@@ -1111,7 +1114,8 @@ async fn run_tui_loop(
                         _ => {}
                     }
                 }
-                Event::Resize(_, _) => {
+                Event::Resize(columns, _) => {
+                    ainb::viewport::set_columns(columns);
                     // Clear terminal buffer on resize to prevent ghost/duplicate UI elements
                     // The old frame buffer contains data for the previous terminal size,
                     // which can cause stale content to appear without this clear
