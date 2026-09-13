@@ -1,0 +1,47 @@
+[package]
+name = "ainb-wire-mobile"
+version = "0.1.0"
+edition = "2021"
+description = "Spike 5/6 scratch: Noise IK over WebSocket carrying the hangar JSON-RPC envelope, compiled for phones through uniffi."
+publish = false
+
+[workspace]
+
+[lib]
+name = "ainb_wire_mobile"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "peerd"
+path = "src/bin/peerd.rs"
+required-features = ["peer"]
+
+[[bin]]
+name = "wirectl"
+path = "src/bin/wirectl.rs"
+required-features = ["peer"]
+
+[features]
+peer = ["dep:clap"]
+
+[dependencies]
+# The real wire types: the crate stops compiling the moment the envelope changes.
+ainb-hangar-proto = { path = "../../../../../ainb-tui/crates/ainb-hangar-proto" }
+snow = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+rand = "0.8"
+base64 = "0.22"
+uniffi = "=0.31"
+clap = { version = "4", features = ["derive"], optional = true }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = false
+panic = "unwind"
