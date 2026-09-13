@@ -102,8 +102,8 @@ pub fn refresh_snapshot() {
 /// guarding nothing — two different locks around the same `setenv` is still a
 /// `setenv`/`getenv` data race, and a snapshot installed by one test is read by
 /// every other test in the binary. There is exactly one of these on purpose.
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(test, feature = "test-support"))]
+pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Install `config` as the snapshot.
 ///

@@ -136,7 +136,7 @@ impl RepoSource {
     ///
     /// `None` for anything carrying a scheme, host, path, or leading `-`;
     /// those are left to `from_input` to classify.
-    pub(crate) fn github_shorthand(input: &str) -> Option<Self> {
+    pub fn github_shorthand(input: &str) -> Option<Self> {
         let (owner, repo) = input.trim().split_once('/')?;
         let repo = repo.strip_suffix(".git").unwrap_or(repo);
         let bare = |segment: &str| {

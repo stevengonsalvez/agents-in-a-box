@@ -17,7 +17,7 @@ thread_local! {
 /// Cross-process lock for read-modify-write of a file.
 ///
 /// Holds a blocking exclusive flock on `<file>.lock`, released on drop.
-pub(crate) struct ConfigLock {
+pub struct ConfigLock {
     _file: File,
     path: PathBuf,
 }
@@ -43,7 +43,7 @@ impl Drop for ConfigLock {
 /// Callers create `path`'s parent directory first. The lock filename appends
 /// `.lock` rather than replacing the extension, so every writer of
 /// `config.toml` uses the byte-identical `config.toml.lock` path.
-pub(crate) fn lock_for(path: &Path) -> io::Result<ConfigLock> {
+pub fn lock_for(path: &Path) -> io::Result<ConfigLock> {
     let path = path.to_path_buf();
     HELD_PATHS.with(|held| {
         debug_assert!(

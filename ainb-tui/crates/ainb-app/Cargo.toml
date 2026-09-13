@@ -1,0 +1,123 @@
+[package]
+name = "ainb-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Renderer-agnostic state and services for Agents-in-a-Box"
+
+# `time` is intentionally unused in code: it exists only to cap the transitive
+# version below the broken 0.3.48 release (see the workspace manifest comment).
+[package.metadata.cargo-machete]
+ignored = ["time"]
+
+[lib]
+name = "ainb_app"
+path = "src/lib.rs"
+
+[dependencies]
+ainb-model-rates = { path = "../ainb-model-rates" }
+tokio = { workspace = true }
+
+# Docker
+bollard = { workspace = true }
+futures-util = { workspace = true }
+tar = { workspace = true }
+
+# Tmux and PTY
+portable-pty = { workspace = true }
+vt100 = { workspace = true }
+
+# Git
+git2 = { workspace = true }
+
+# Persistence
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+
+# Claude API client and the Slack socket-mode bridge transport
+reqwest = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-tungstenite = { workspace = true }
+
+# Utils
+shell-escape = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true }
+tempfile = { workspace = true }
+# Advisory file locks for the durable fleet inbox.
+fs2 = { workspace = true }
+nix = { workspace = true }
+# Process-identity cross-check in the daemons liveness probe.
+sysinfo = { workspace = true }
+keyring = { workspace = true }
+regex = { workspace = true }
+semver = "1.0"
+base64 = "0.22"
+ed25519-dalek = "2.1"
+sha2 = "0.10"
+lazy_static = { workspace = true }
+which = { workspace = true }
+url = { workspace = true }
+# Version cap only: pins the transitive `time` crate below the broken 0.3.48
+# release. See the workspace manifest comment.
+time = { workspace = true }
+
+# Usage analytics cache
+rusqlite = { workspace = true }
+blake3 = { workspace = true }
+bincode = { workspace = true }
+
+# Plugin runtime and in-tree plugins the service layer talks to
+ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
+ainb-plugin-protocol = { path = "../ainb-plugin-protocol", version = "0.1.0" }
+ainb-plugin-hangar = { path = "../ainb-plugin-hangar" }
+ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd", version = "1.1.0" }
+rand = "0.8"
+
+# Fleet core and the Hangar control plane
+ainb-fleet-core = { path = "../ainb-fleet-core", version = "0.1.0" }
+ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
+ainb-hangar-proto = { path = "../ainb-hangar-proto", version = "0.1.0" }
+ainb-hangar-client = { path = "../ainb-hangar-client", version = "0.1.0" }
+ainb-hangar-store = { path = "../ainb-hangar-store", version = "0.1.0" }
+ainb-hangar-daemon = { path = "../ainb-hangar-daemon" }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "macros",
+] }
+bytes = "1.6"
+
+# Filesystem watch for the JSONL transcript tail.
+notify = { workspace = true }
+
+[features]
+default = []
+# Exposes shared test fixtures to dependents' integration tests. `ainb`
+# forwards its own `test-support` feature here.
+test-support = []
+
+[dev-dependencies]
+mockall = { workspace = true }
+pretty_assertions = { workspace = true }
+rexpect = { workspace = true }
+proptest = { workspace = true }
+insta = { version = "1.40", features = ["json"] }
+bytes = "1.6"
+# Fixtures for the skill-core and hangar-daemon backed tests that moved here.
+ainb-skill-core = { path = "../ainb-skill-core", version = "0.1.0", features = ["test-fixtures"] }
+ainb-hangar-daemon = { path = "../ainb-hangar-daemon", features = ["test-support"] }
+tempfile = "3"
+
+[lints]
+workspace = true

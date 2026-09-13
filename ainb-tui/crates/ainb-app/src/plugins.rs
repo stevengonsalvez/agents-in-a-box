@@ -479,7 +479,7 @@ pub fn plugins_disabled() -> bool {
 /// To force an EMPTY runtime, set `AINB_DISABLE_PLUGINS=1` or point
 /// `AINB_PLUGIN_ROOT` at an existing empty directory. A non-existent path is no
 /// longer a way to ask for that — it is treated as the mistake it usually is.
-pub(crate) fn discover_plugin_root() -> Option<PathBuf> {
+pub fn discover_plugin_root() -> Option<PathBuf> {
     discover_plugin_root_from(std::env::var("AINB_PLUGIN_ROOT").ok().as_deref())
 }
 

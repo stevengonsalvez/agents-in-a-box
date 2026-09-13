@@ -3,8 +3,8 @@
 
 #![allow(dead_code)]
 
-use crate::app::state::SessionFilter;
 use crate::audit::{self, AuditResult, AuditTrigger};
+use crate::config::settings_model::SessionFilter;
 use anyhow::{Context, Result};
 use dirs;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ pub mod presets;
 pub mod registry;
 pub mod screen_model;
 pub mod session_defaults;
+pub mod settings_model;
 pub mod ssh_display_names;
 pub mod tunables;
 
@@ -468,7 +469,7 @@ fn lexically_normalise(p: &Path) -> PathBuf {
 /// Either list is empty by default — meaning "no filter from config".
 /// Env vars (`AINB_DISABLE_PLUGINS`, `AINB_DISABLE_PLUGIN`,
 /// `AINB_ONLY_PLUGINS`) override these at runtime; see
-/// `crates/ainb-core/src/plugins.rs::resolve_plugin_filter` for the
+/// `crates/ainb-app/src/plugins.rs::resolve_plugin_filter` for the
 /// precedence ladder.
 ///
 /// Example `config.toml`:
@@ -1318,7 +1319,7 @@ fn temp_path(path: &Path) -> PathBuf {
 /// then overwrites it, because `rename` needs permission on the DIRECTORY, not
 /// the file. `[skills]`, `[session_reader]` and `[fleet.bridge]` all live in
 /// that file and would go with it.
-pub(crate) fn read_existing(path: &Path) -> Result<String> {
+pub fn read_existing(path: &Path) -> Result<String> {
     match fs::read_to_string(path) {
         Ok(text) => Ok(text),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -1384,7 +1385,7 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// Storing `""` is not the same as unset: an empty `docker.host` means "connect
 /// to nothing" where an absent one means "autodetect", so clearing has to
 /// delete the key rather than blank it.
-pub(crate) fn remove_key_from(path: &Path, key: &str) -> Result<()> {
+pub fn remove_key_from(path: &Path, key: &str) -> Result<()> {
     match lock::lock_for(path) {
         Ok(lock) => remove_key_from_with_lock(path, key, &lock),
         Err(err) => {
@@ -1395,11 +1396,7 @@ pub(crate) fn remove_key_from(path: &Path, key: &str) -> Result<()> {
 }
 
 /// Remove one key while a caller already holds `path`'s config lock.
-pub(crate) fn remove_key_from_with_lock(
-    path: &Path,
-    key: &str,
-    lock: &lock::ConfigLock,
-) -> Result<()> {
+pub fn remove_key_from_with_lock(path: &Path, key: &str, lock: &lock::ConfigLock) -> Result<()> {
     debug_assert!(lock.guards(path), "config lock must guard the edited file");
     remove_key_from_unlocked(path, key)
 }
@@ -1430,14 +1427,14 @@ fn remove_key_from_unlocked(path: &Path, key: &str) -> Result<()> {
 /// load-modify-save against the same file, so a write from here would revert a
 /// plan set from another shell.
 #[must_use]
-pub(crate) fn is_burndown_owned(key: &str) -> bool {
+pub fn is_burndown_owned(key: &str) -> bool {
     let section = key.split('.').next().unwrap_or_default();
     NEVER_WRITE_PATHS
         .iter()
         .any(|p| *p == section || key.starts_with(&format!("{p}.")))
 }
 
-pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
+pub fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> Result<()> {
     if edits.is_empty() {
         return Ok(());
     }
@@ -1455,7 +1452,7 @@ pub(crate) fn write_keys_into(path: &Path, edits: &[(String, toml::Value)]) -> R
 }
 
 /// Write keys while a caller already holds `path`'s config lock.
-pub(crate) fn write_keys_into_with_lock(
+pub fn write_keys_into_with_lock(
     path: &Path,
     edits: &[(String, toml::Value)],
     lock: &lock::ConfigLock,

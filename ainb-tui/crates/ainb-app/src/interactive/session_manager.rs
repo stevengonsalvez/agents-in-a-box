@@ -322,7 +322,7 @@ impl SharedThreadDegrade {
 /// not WHY, so every caller that wanted to tell the user had to go and ask the
 /// log. The degrade reason rides back with the outcome instead.
 #[derive(Debug)]
-pub(crate) enum CodexRemote {
+pub enum CodexRemote {
     /// The daemon owns a shared thread for this session.
     Shared(ainb_hangar_proto::fleet::CodexSessionEnsureResult),
     /// The session runs without one, for this reason.
@@ -331,7 +331,7 @@ pub(crate) enum CodexRemote {
 
 impl CodexRemote {
     /// The reason this launch has no shared thread, if it has none.
-    pub(crate) const fn degrade(&self) -> Option<SharedThreadDegrade> {
+    pub const fn degrade(&self) -> Option<SharedThreadDegrade> {
         match self {
             Self::Shared(_) => None,
             Self::Degraded(reason) => Some(*reason),
@@ -339,7 +339,7 @@ impl CodexRemote {
     }
 
     /// The shared thread, if there is one.
-    pub(crate) fn thread(self) -> Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
+    pub fn thread(self) -> Option<ainb_hangar_proto::fleet::CodexSessionEnsureResult> {
         match self {
             Self::Shared(remote) => Some(remote),
             Self::Degraded(_) => None,
@@ -355,7 +355,7 @@ impl CodexRemote {
 /// provider CLI directly, which is the same path a non-Codex session and a
 /// Codex session with the feature disabled take. Callers must not treat it as
 /// a failure, and in particular must not roll back a worktree over it.
-pub(crate) async fn ensure_codex_remote_thread(
+pub async fn ensure_codex_remote_thread(
     session_id: Uuid,
     cwd: &std::path::Path,
     model: Option<&str>,
@@ -511,7 +511,7 @@ fn cause_excerpt(cause: &str) -> Option<String> {
 /// [`CodexRemote::Degraded`] carries the same meaning as in
 /// [`ensure_codex_remote_thread`]: shared remote control is unavailable and the
 /// session runs without it.
-pub(crate) async fn claim_codex_remote_thread(
+pub async fn claim_codex_remote_thread(
     session_id: Uuid,
     cwd: &std::path::Path,
     model: Option<&str>,
@@ -630,7 +630,7 @@ where
 }
 
 /// Archive and forget a remote thread created by a failed fresh launch.
-pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Result<()> {
+pub async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Result<()> {
     let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
         .map_err(|error| anyhow::anyhow!("connect to Ainb Codex runtime: {error}"))?;
     client
@@ -658,7 +658,7 @@ pub(crate) async fn discard_codex_remote_thread(session_id: Uuid) -> anyhow::Res
 ///   and any other client on that app-server (the phone) share ONE
 ///   conversation. Without it each client starts its own thread on the same
 ///   cwd and neither sees the other's turns.
-pub(crate) fn codex_remote_command(
+pub fn codex_remote_command(
     provider: &crate::config::CliProvider,
     remote: &ainb_hangar_proto::fleet::CodexSessionEnsureResult,
     working_dir: &std::path::Path,
@@ -823,7 +823,7 @@ async fn codex_launch_exit(exact_target: &str) -> Option<String> {
 ///
 /// Best-effort: a failure here only means the user answers one prompt, so it
 /// must never fail a launch.
-pub(crate) fn trust_codex_project_dir(worktree: &std::path::Path) {
+pub fn trust_codex_project_dir(worktree: &std::path::Path) {
     let Some(config) = codex_config_path() else {
         return;
     };
@@ -894,7 +894,7 @@ fn write_atomic_config(path: &std::path::Path, contents: &str) -> std::io::Resul
 /// [`ainb_model_rates::retired_codex_replacement`], the small dated table of ids
 /// known to be dead. Returns the input unchanged only when neither source has
 /// anything to say. Never fails a launch on its own.
-pub(crate) fn migrated_codex_model(model: &str) -> String {
+pub fn migrated_codex_model(model: &str) -> String {
     if let Some((replacement, source)) = codex_cache_upgrade(model) {
         warn!(
             "Codex is retiring '{model}'; launching '{replacement}' instead \
@@ -978,7 +978,7 @@ pub enum WorktreeOwner {
 /// because "remove the tree" and "remove the link to the tree" differ by
 /// exactly one unrecoverable directory.
 #[derive(Clone, Copy)]
-pub(crate) enum WorktreeRollback<'a> {
+pub enum WorktreeRollback<'a> {
     /// Neither a tree nor an index entry was created for this session.
     Nothing,
     /// This launch created the tree: remove it, which also drops its link.
@@ -989,7 +989,7 @@ pub(crate) enum WorktreeRollback<'a> {
 }
 
 /// Roll back resources created before a fresh Interactive session is registered.
-pub(crate) async fn rollback_failed_interactive_launch(
+pub async fn rollback_failed_interactive_launch(
     session_id: Uuid,
     exact_tmux_name: Option<&str>,
     worktree: WorktreeRollback<'_>,
@@ -1042,7 +1042,7 @@ pub(crate) async fn rollback_failed_interactive_launch(
     }
 }
 
-pub(crate) fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
+pub fn persist_codex_thread_id(session_id: Uuid, thread_id: String) -> anyhow::Result<()> {
     SessionStore::mutate(|store| {
         if let Some(metadata) =
             store.sessions.values_mut().find(|metadata| metadata.session_id == session_id)
@@ -2742,7 +2742,7 @@ impl InteractiveSessionManager {
     /// `has_history` is `true` when the caller found a prior conversation for
     /// this cwd (gates Claude's `--continue`). See `start_cli_in_tmux` for the
     /// full resume semantics.
-    pub(crate) fn build_cli_cmd_parts(
+    pub fn build_cli_cmd_parts(
         provider: &crate::config::CliProvider,
         agent_type: SessionAgentType,
         skip_permissions: bool,

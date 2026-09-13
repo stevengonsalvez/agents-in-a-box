@@ -211,8 +211,8 @@ impl PalDial {
     /// other route to one is a live `fleet/adapter_list`. `asked` is latched
     /// here so the fold cannot also spawn a worker against a daemon the test
     /// does not have.
-    #[cfg(test)]
-    pub(crate) fn seed_for_test(&mut self, outcomes: Vec<DialOutcome>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_for_test(&mut self, outcomes: Vec<DialOutcome>) {
         self.asked = true;
         if let Ok(mut inbox) = self.inbox.lock() {
             inbox.extend(outcomes);

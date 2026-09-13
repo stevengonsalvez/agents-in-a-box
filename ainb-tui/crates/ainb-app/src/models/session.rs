@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Whether a model value requests the provider's configured default.
-pub(crate) fn is_default_model(value: &str) -> bool {
+pub fn is_default_model(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default")
 }

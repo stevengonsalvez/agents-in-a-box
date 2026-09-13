@@ -35,7 +35,7 @@
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::app::state::{ConfigCategory, ConfigSetting, ConfigValue};
+use crate::config::settings_model::{ConfigCategory, ConfigSetting, ConfigValue};
 
 /// The value type of a configuration leaf: selects the widget the settings
 /// screen renders, and the validator `ainb config set` applies.
@@ -1795,7 +1795,7 @@ impl ConfigRow {
                 } else {
                     !crate::fleet::bridge::secrets::resolve_secret(&reference).trim().is_empty()
                 };
-                ConfigValue::Secret(crate::app::state::SecretValue {
+                ConfigValue::Secret(crate::config::settings_model::SecretValue {
                     reference,
                     resolved,
                 })
@@ -1843,8 +1843,8 @@ pub fn scalar_text(value: &toml::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::state::SessionFilter;
     use crate::config::container::{ImageSource, VolumeMount};
+    use crate::config::settings_model::SessionFilter;
     use crate::config::{
         AcpAdapterConfig, AcpConfig, AppConfig, AuthenticationConfig, ClaudeAuthProvider,
         CliProvider, ContainerTemplate, ContainerTemplateConfig, CostBudgetConfig, CurrencyConfig,
@@ -2214,7 +2214,7 @@ mod tests {
             "config schema leaves with no CONFIG_REGISTRY entry:\n  {}\n\n\
              Add an Entry::Row for each (it is a user preference) or an \
              Entry::Hidden with a written `why` (it is internal state) in \
-             crates/ainb-core/src/config/registry.rs.",
+             crates/ainb-app/src/config/registry.rs.",
             missing.join("\n  ")
         );
     }

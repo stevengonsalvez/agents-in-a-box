@@ -19,7 +19,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::app::state::{ConfigCategory, ConfigSetting, ConfigValue};
+use crate::config::settings_model::{ConfigCategory, ConfigSetting, ConfigValue};
 
 use super::registry::{self, parse_dot_key};
 
