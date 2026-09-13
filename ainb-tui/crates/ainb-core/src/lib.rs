@@ -10,7 +10,6 @@ pub mod app;
 pub mod cli;
 pub mod components;
 pub mod docker;
-pub mod fleet;
 pub mod tmux;
 
 #[cfg(any(test, feature = "test-support"))]
