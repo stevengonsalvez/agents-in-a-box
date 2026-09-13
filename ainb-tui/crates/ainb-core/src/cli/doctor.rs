@@ -36,15 +36,19 @@ struct PaneUnboundRow {
     cwd: String,
 }
 
-/// Full machine health check.
-///
-/// `--offline` skips skill-source NETWORK probes. It does not skip the local
-/// daemon read: `fleet/status` is a unix socket on this machine, and the two
-/// facts it carries (panes nothing can be attributed to, and provider event
-/// names this build cannot map) are exactly what an operator runs `ainb doctor`
-/// to find out. Skipping them would make the offline run quieter without making
-/// it more honest. A daemon that is not running is reported once, in the daemon
-/// section, and costs nothing here.
+// `--offline` skips skill-source NETWORK probes. It deliberately does NOT skip
+// the local daemon read: `fleet/status` is a unix socket on this machine, and
+// the two facts it carries (panes nothing can be attributed to, and provider
+// event names this build cannot map) are exactly what an operator runs
+// `ainb doctor` to find out. Skipping them would make the offline run quieter
+// without making it more honest. A daemon that is not running is reported once,
+// in the daemon section, and costs nothing here.
+//
+// Deliberately a `//` comment, not a doc comment: clap renders a struct's doc
+// as the subcommand's `about`, so a paragraph here lands in
+// `ainb doctor --help` and flips every flag from short to long help. The
+// reasoning is for whoever edits this file, not for the operator running it.
+/// Health-check skills, dependencies, hooks, and daemons
 #[derive(clap::Args)]
 pub struct DoctorArgs {
     /// Skip skill-source reachability checks. Runtime checks stay local.
