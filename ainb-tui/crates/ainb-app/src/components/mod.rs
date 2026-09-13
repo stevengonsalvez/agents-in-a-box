@@ -4,12 +4,16 @@
 
 pub mod config_popup;
 pub mod daemons;
+pub mod home_screen_v2;
 pub mod live_logs_stream;
 pub mod log_parser;
 pub mod log_reader;
 pub mod log_writer;
+pub mod mascot;
 pub mod onboarding;
 pub mod session_tabs;
 pub mod setup_menu;
+pub mod sidebar;
 pub mod skill_manager_screen;
 pub mod skills;
+pub mod welcome_panel;

@@ -271,7 +271,7 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
     if ui.home_sidebar_rect.is_some() {
         state.shell.set_if_changed(
             |shell| &mut shell.home_screen_v2_state.last_sidebar_rect,
-            ui.home_sidebar_rect,
+            ui.home_sidebar_rect.map(area_of),
         );
     }
     state.shell.set_if_changed(
@@ -287,6 +287,12 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
         |logs| &mut logs.log_history_state.log_entries_area,
         ui.log_entries_area,
     );
+}
+
+/// The renderer-agnostic copy of a rectangle this frame drew, for state that
+/// hit-tests clicks against it.
+const fn area_of(rect: Rect) -> crate::geometry::Area {
+    crate::geometry::Area::new(rect.x, rect.y, rect.width, rect.height)
 }
 
 pub struct LayoutComponent {

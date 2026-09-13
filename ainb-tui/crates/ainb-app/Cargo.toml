@@ -67,6 +67,7 @@ ed25519-dalek = "2.1"
 sha2 = "0.10"
 lazy_static = { workspace = true }
 which = { workspace = true }
+arboard = { workspace = true }
 url = { workspace = true }
 # Version cap only: pins the transitive `time` crate below the broken 0.3.48
 # release. See the workspace manifest comment.

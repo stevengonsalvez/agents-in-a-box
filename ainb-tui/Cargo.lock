@@ -250,6 +250,7 @@ dependencies = [
  "ainb-plugin-runtime",
  "ainb-skill-core",
  "anyhow",
+ "arboard",
  "base64 0.22.1",
  "bincode",
  "blake3",
