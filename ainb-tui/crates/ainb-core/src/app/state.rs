@@ -9969,15 +9969,6 @@ impl AppState {
 
     /// Run OAuth authentication setup
     async fn run_oauth_setup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        use crossterm::{
-            event::{
-                DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-                EnableMouseCapture,
-            },
-            execute,
-            terminal::{LeaveAlternateScreen, disable_raw_mode},
-        };
-
         // Create auth directory
         let home_dir = dirs::home_dir().ok_or("Could not determine home directory")?;
         let auth_dir = home_dir.join(".agents-in-a-box/auth");
@@ -10033,15 +10024,9 @@ impl AppState {
         // Temporarily exit TUI to run interactive container
         info!("Exiting TUI to run interactive authentication");
 
-        // Disable raw mode and tear down input modes that match TUI startup
-        // (see main.rs: EnterAlternateScreen + EnableMouseCapture + EnableBracketedPaste).
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-        );
+        // Hand the terminal over: the host leaves raw mode, the alternate
+        // screen, mouse capture and bracketed paste (the modes it set up).
+        let _ = crate::host::release_terminal();
 
         println!("\n🔐 Claude Authentication Setup\n");
         println!("This will guide you through the OAuth authentication process.");
@@ -10110,14 +10095,7 @@ impl AppState {
         // Re-enable raw mode and the full input mode set established at startup —
         // without re-enabling mouse capture + bracketed paste, mouse events stop
         // arriving after the auth flow returns to the TUI.
-        use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
-        let _ = enable_raw_mode();
-        let _ = execute!(
-            std::io::stdout(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste,
-        );
+        let _ = crate::host::reclaim_terminal();
 
         // Force UI refresh
         self.shell.ui_needs_refresh = true;

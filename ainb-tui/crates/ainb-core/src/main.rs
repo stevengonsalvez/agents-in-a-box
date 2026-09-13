@@ -386,6 +386,7 @@ async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
     )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    ainb::host::set_terminal_handoff(Box::new(ainb::terminal_handoff::CrosstermHandoff));
     if let Ok(size) = terminal.size() {
         ainb::viewport::set_columns(size.width);
     }

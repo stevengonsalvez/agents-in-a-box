@@ -20,6 +20,7 @@ pub mod fleet;
 pub mod geometry;
 pub mod git;
 pub mod headroom;
+pub mod host;
 pub mod interactive;
 pub mod mcp_pool;
 pub mod models;
