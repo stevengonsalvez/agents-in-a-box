@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.28.5] - 2026-09-13
+### Fixed
+- expire stale sidebar run state
+
+
 ## [1.28.4] - 2026-09-12
 ### Fixed
 - make sidebar status authoritative
