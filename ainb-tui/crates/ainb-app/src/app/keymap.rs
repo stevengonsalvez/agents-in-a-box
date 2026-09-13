@@ -81,8 +81,25 @@ impl std::ops::BitOr for Mods {
 /// two chords are equal exactly when they would resolve to the same binding.
 /// [`Chord::code`] and [`Chord::modifiers`] give the structured view a reducer
 /// matches on.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(into = "String", try_from = "String")]
 pub struct Chord(String);
+
+impl From<Chord> for String {
+    fn from(chord: Chord) -> Self {
+        chord.0
+    }
+}
+
+impl TryFrom<String> for Chord {
+    type Error = ChordParseError;
+
+    fn try_from(spelling: String) -> Result<Self, Self::Error> {
+        Self::parse(&spelling)
+    }
+}
 
 /// Invalid user supplied chord.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -997,6 +1014,22 @@ impl Keymap {
         self.bindings.iter().find(|binding| binding.ctx == *ctx && binding.id == id)
     }
 
+    /// The command registry: every row, addressable by its [`CommandId`].
+    ///
+    /// Palettes list it and clicks invoke from it, so it is the same table key
+    /// presses resolve through, overrides included.
+    pub fn commands(&self) -> impl Iterator<Item = (CommandId, &Binding)> {
+        self.bindings.iter().map(|binding| (CommandId::of(binding), binding))
+    }
+
+    /// Look a command up by id. `None` for ids no row carries.
+    #[must_use]
+    pub fn command(&self, id: &CommandId) -> Option<&Binding> {
+        // ponytail: linear scan of a few hundred rows per palette or click
+        // invocation; index by id if commands ever run per frame.
+        self.commands()
+            .find_map(|(candidate, binding)| (candidate == *id).then_some(binding))
+    }
     /// Load the conventional override file, preserving defaults on every error.
     #[must_use]
     pub fn load_user() -> (Self, Option<String>) {
@@ -1079,6 +1112,40 @@ impl Keymap {
         self.bindings = bindings.into_iter().map(|(_, binding)| binding).collect();
 
         Self::new(self.bindings)
+    }
+}
+
+/// Stable name of a keymap row: `<context>.<row id>`.
+///
+/// For example `session_list.attach_session` or `global.toggle_help`. The
+/// context half is the `[section]` a `keymap.toml` override names, so a
+/// command id and an override address the same row.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct CommandId(String);
+
+impl CommandId {
+    /// Wrap a command name. Unknown names are allowed and resolve to nothing.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    fn of(binding: &Binding) -> Self {
+        Self(format!("{}.{}", binding.ctx.name(), binding.id))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CommandId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 

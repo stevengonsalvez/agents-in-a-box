@@ -765,8 +765,8 @@ async fn run_tui_loop(
                     let Some(chord) = chord else {
                         continue;
                     };
-                    let resolved = EventHandler::handle_key_event_with_keymap(
-                        chord,
+                    let resolved = EventHandler::resolve_intent(
+                        ainb::Intent::Key(chord),
                         &mut app.state,
                         &keymap,
                         &mut ui,
@@ -939,21 +939,24 @@ async fn run_tui_loop(
                                 if let Some(ref mut git_state) = app.state.git_view.git_view_state {
                                     git_state.review_sidebar_click(col, row);
                                 }
-                            } else if let Some(app_event) = crate::app::mouse::handle_mouse_event(
-                                AppEvent::MouseClick { x: col, y: row },
+                            } else if let Some(app_event) = EventHandler::resolve_intent(
+                                ainb::Intent::Mouse(ainb::Pos { x: col, y: row }, ainb::Btn::Left),
                                 &mut app.state,
+                                &keymap,
                                 &mut ui,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
                             }
                         }
                         MouseEventKind::Down(MouseButton::Right) => {
-                            if let Some(app_event) = crate::app::mouse::handle_mouse_event(
-                                AppEvent::MouseRightClick {
-                                    x: mouse_event.column,
-                                    y: mouse_event.row,
-                                },
+                            let pos = ainb::Pos {
+                                x: mouse_event.column,
+                                y: mouse_event.row,
+                            };
+                            if let Some(app_event) = EventHandler::resolve_intent(
+                                ainb::Intent::Mouse(pos, ainb::Btn::Right),
                                 &mut app.state,
+                                &keymap,
                                 &mut ui,
                             ) {
                                 EventHandler::process_event(app_event, &mut app.state);
@@ -1149,16 +1152,13 @@ async fn run_tui_loop(
                                 "Live session input channel closed — released".to_string(),
                             );
                         }
-                    } else if let Some(app_event) =
-                        EventHandler::handle_paste_event(text.clone(), &app.state)
-                    {
+                    } else if let Some(app_event) = EventHandler::resolve_intent(
+                        ainb::Intent::Text(text),
+                        &mut app.state,
+                        &keymap,
+                        &mut ui,
+                    ) {
                         EventHandler::process_event(app_event, &mut app.state);
-                    } else {
-                        // Any other focused text input (onboarding fields,
-                        // skill-manager prompts, renames, searches, …):
-                        // feed the paste through the normal key path so
-                        // every field accepts it without a dedicated route.
-                        EventHandler::paste_into_text_input(&text, &mut app.state);
                     }
                 }
             }

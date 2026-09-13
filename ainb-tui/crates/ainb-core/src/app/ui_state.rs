@@ -441,10 +441,11 @@ impl crate::app::state::SessionsPaneHitTest for SessionsPaneState {
     }
 }
 
-/// The terminal host's side of key dispatch: scrolls are queued for the run
-/// loop to apply against the layout, and the statusline status comes from the
-/// TTL cache.
-impl crate::app::events::KeyHost for UiState {
+/// The terminal host's side of intent dispatch: scrolls are queued for the
+/// run loop to apply against the layout, the statusline status comes from the
+/// TTL cache, and pointer presses are hit-tested against the panes this
+/// renderer last drew.
+impl crate::app::events::RendererHost for UiState {
     fn queue_scroll(&mut self, action: ScrollAction) {
         self.queue(action);
     }
@@ -455,6 +456,22 @@ impl crate::app::events::KeyHost for UiState {
 
     fn columns(&self) -> Option<u16> {
         crossterm::terminal::size().ok().map(|(columns, _)| columns)
+    }
+
+    fn pointer(
+        &mut self,
+        state: &mut crate::app::AppState,
+        pos: crate::app::Pos,
+        btn: crate::app::Btn,
+    ) -> Option<crate::app::events::AppEvent> {
+        use crate::app::events::AppEvent;
+        let (x, y) = (pos.x, pos.y);
+        let event = match btn {
+            crate::app::Btn::Left => AppEvent::MouseClick { x, y },
+            crate::app::Btn::Right => AppEvent::MouseRightClick { x, y },
+            crate::app::Btn::Middle => return None,
+        };
+        crate::app::mouse::handle_mouse_event(event, state, self)
     }
 }
 

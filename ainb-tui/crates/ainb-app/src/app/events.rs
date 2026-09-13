@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 use super::keymap::test_key_codes::*;
+use crate::app::intent::{Btn, Intent, Pos};
 use crate::app::keymap::{
     Chord, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
 };
@@ -19,13 +20,14 @@ use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
 use tracing::info;
 
-/// What key dispatch needs from the renderer it runs under.
+/// What intent dispatch needs from the renderer it runs under.
 ///
-/// Key handling resolves some bindings to renderer-local work: scrolling a
-/// pane, or asking whether wiring the Claude statusline would be productive,
-/// which a terminal host answers from a short-lived cache. The TUI's `UiState`
-/// implements this; [`NoRenderer`] serves tests and hosts with neither.
-pub trait KeyHost {
+/// Some intents resolve to renderer-local work: scrolling a pane, asking
+/// whether wiring the Claude statusline would be productive (a terminal host
+/// answers from a short-lived cache), or finding what sits under the pointer,
+/// which only the renderer that drew the frame knows. The TUI's `UiState`
+/// implements this; [`NoRenderer`] serves tests and hosts with none of it.
+pub trait RendererHost {
     /// Queue a renderer-local scroll the keymap resolved.
     fn queue_scroll(&mut self, action: ScrollAction);
     /// The Claude statusline wiring status, possibly from the host's cache.
@@ -34,17 +36,24 @@ pub trait KeyHost {
     /// when it has none. Layout clamps read it per host, so two surfaces at
     /// different widths never share one value.
     fn columns(&self) -> Option<u16>;
+    /// Hit-test a press at `pos` against the last drawn frame and apply it.
+    /// Returns the event for the reducer, if the press produced one.
+    fn pointer(&mut self, state: &mut AppState, pos: Pos, btn: Btn) -> Option<AppEvent>;
 }
 
-/// A [`KeyHost`] with no renderer: scrolls are dropped and the statusline
-/// status is detected fresh on every ask.
+/// A [`RendererHost`] with no renderer: scrolls are dropped, nothing is under
+/// the pointer, and the statusline status is detected fresh on every ask.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoRenderer;
 
-impl KeyHost for NoRenderer {
+impl RendererHost for NoRenderer {
     fn queue_scroll(&mut self, _action: ScrollAction) {}
 
     fn columns(&self) -> Option<u16> {
+        None
+    }
+
+    fn pointer(&mut self, _state: &mut AppState, _pos: Pos, _btn: Btn) -> Option<AppEvent> {
         None
     }
 
@@ -1140,10 +1149,10 @@ impl EventHandler {
     /// is ignored at the global layer and falls through to the active
     /// view's normal handling.
     ///
-    /// The settings.json read goes through [`KeyHost::statusline_status`]
+    /// The settings.json read goes through [`RendererHost::statusline_status`]
     /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
     /// the filesystem.
-    fn should_wire_statusline(state: &AppState, host: &mut dyn KeyHost) -> bool {
+    fn should_wire_statusline(state: &AppState, host: &mut dyn RendererHost) -> bool {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
@@ -1167,7 +1176,7 @@ impl EventHandler {
         chord: Chord,
         state: &mut AppState,
         keymap: &Keymap,
-        host: &mut dyn KeyHost,
+        host: &mut dyn RendererHost,
     ) -> Option<AppEvent> {
         // New Session delegates to component-owned handlers in this phase, but
         // Help remains a host modal and therefore wins before that delegation.
@@ -1208,6 +1217,47 @@ impl EventHandler {
             Some((_, KeyAction::Text(character))) => Self::keymap_text_event(character, state),
             Some((_, KeyAction::Ui(action))) => Self::keymap_ui_event(action, state, host),
             Some((_, KeyAction::Passthrough | KeyAction::OpenSlashPalette)) | None => None,
+        }
+    }
+
+    /// Resolve a renderer's intent to the event the reducer applies.
+    ///
+    /// Hosts that act on some events themselves (the TUI resizes its embed
+    /// on `EnterInteractivePane`) call this and apply the rest with
+    /// [`Self::process_event`]; hosts with nothing of their own call
+    /// [`crate::app::dispatch`]. A `Text` intent that lands in a free-form
+    /// field is applied character by character here and yields `None`.
+    pub fn resolve_intent(
+        intent: Intent,
+        state: &mut AppState,
+        keymap: &Keymap,
+        host: &mut dyn RendererHost,
+    ) -> Option<AppEvent> {
+        match intent {
+            Intent::Key(chord) => Self::handle_key_event_with_keymap(chord, state, keymap, host),
+            Intent::Command(id, _args) => {
+                let action = keymap.command(&id)?.action.clone();
+                Self::apply_key_action(action, state, host)
+            }
+            Intent::Mouse(pos, btn) => host.pointer(state, pos, btn),
+            Intent::Text(text) => Self::handle_paste_event(text.clone(), state).or_else(|| {
+                Self::paste_into_text_input(&text, state);
+                None
+            }),
+        }
+    }
+
+    /// Run a keymap row's action directly, as a palette or click invokes it.
+    fn apply_key_action(
+        action: KeyAction,
+        state: &mut AppState,
+        host: &mut dyn RendererHost,
+    ) -> Option<AppEvent> {
+        match action {
+            KeyAction::App(event) => Some(event),
+            KeyAction::Text(character) => Self::keymap_text_event(character, state),
+            KeyAction::Ui(action) => Self::keymap_ui_event(action, state, host),
+            KeyAction::Passthrough | KeyAction::OpenSlashPalette => None,
         }
     }
 
@@ -1318,7 +1368,7 @@ impl EventHandler {
     fn keymap_ui_event(
         action: UiAction,
         state: &mut AppState,
-        host: &mut dyn KeyHost,
+        host: &mut dyn RendererHost,
     ) -> Option<AppEvent> {
         use UiAction::{
             PalCycleEngine, PalCycleMode, PalCycleModel, PalRetry, SessionAskBackspace,
