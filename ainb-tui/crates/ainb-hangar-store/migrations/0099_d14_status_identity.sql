@@ -108,9 +108,12 @@ ALTER TABLE fleet_event ADD COLUMN tier TEXT NOT NULL DEFAULT 'unknown'
         'unknown'
     ));
 
--- The spec's idempotency key, recorded and enforced. `event_id` keeps its own
--- narrower UNIQUE for the reason in the header.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_fleet_event_identity
+-- The spec's idempotency key, recorded and indexed. Deliberately NOT UNIQUE:
+-- `UNIQUE(event_id)` already implies uniqueness of any tuple containing it, so
+-- a unique index here would enforce nothing and still cost a second b-tree
+-- write per insert on the highest-volume table in the schema. It exists so a
+-- reader can key on the tuple, which is what the spec asks for.
+CREATE INDEX IF NOT EXISTS idx_fleet_event_identity
     ON fleet_event (host_id, session_key, tier, event_id);
 
 -- The binding invalidation sweep and `ainb doctor` both ask "which rows claim a
