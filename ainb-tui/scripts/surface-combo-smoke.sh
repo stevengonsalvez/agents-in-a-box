@@ -167,7 +167,9 @@ run_combo() {
           || fail "$label: the TUI never reached the session list"
         ;;
       web)
-        port=$(shuf -i 30000-45000 -n 1)
+        # Not `shuf`: it is GNU coreutils and macOS does not ship it, so the
+        # {web} combination exited 127 there while the job stayed green.
+        port=$((30000 + RANDOM % 15000))
         start_web "$home" "$hangar_home" "combo-$$-$i" "$port"
         ;;
     esac
