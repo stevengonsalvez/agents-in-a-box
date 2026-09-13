@@ -29,38 +29,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod agent_parsers;
-mod agents;
-mod app;
-mod audit;
-mod claude;
-mod cli;
-mod clipboard;
-mod components;
-mod config;
-mod credentials;
-mod docker;
-mod docs;
-mod editors;
-mod fleet;
-mod git;
-mod headroom;
-mod interactive;
-mod mcp_pool;
-mod models;
-mod otel;
-mod perf;
-mod plugins;
-mod providers;
-mod rtk;
-mod self_exec_guard;
-mod setup;
-mod tmux;
-mod usage_cache;
-mod widgets;
-
-#[cfg(any(test, feature = "test-support"))]
-mod test_support;
+// The binary links the `ainb` library instead of compiling the module tree a
+// second time, so every module has one home and one set of visibility rules.
+use ainb::*;
 
 use app::keymap::{Chord, KeyAction, KeyContext, Keymap, ScrollAction, UiAction};
 use app::{App, EventHandler};

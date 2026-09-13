@@ -9678,7 +9678,7 @@ impl AppState {
     ///
     /// Keeping the persisted metadata intact makes the row immediately
     /// resumable and makes the next reload retain it under the Stopped filter.
-    pub(crate) fn mark_session_stopped_for_missing_tmux(
+    pub fn mark_session_stopped_for_missing_tmux(
         &mut self,
         session_id: Uuid,
         tmux_session_name: &str,

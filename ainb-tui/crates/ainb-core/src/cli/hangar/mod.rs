@@ -8978,7 +8978,7 @@ fn canonical_or_self(path: &std::path::Path) -> std::path::PathBuf {
 /// a second after the spawn: binding a daemon to one of those would stand it
 /// down immediately and report success for a process that is already dying.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LauncherLifetime {
+pub enum LauncherLifetime {
     /// The TUI: it lives for as long as the daemon is wanted.
     Persistent,
     /// A one-shot CLI verb, which is expected to leave the daemon behind.
