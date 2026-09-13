@@ -285,7 +285,7 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
 
     state.log_streams.set_if_changed(
         |logs| &mut logs.log_history_state.log_entries_area,
-        ui.log_entries_area,
+        ui.log_entries_area.map(area_of),
     );
 }
 
