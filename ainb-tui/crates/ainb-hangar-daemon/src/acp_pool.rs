@@ -2132,7 +2132,7 @@ impl SessionActor {
                 false
             }
             Control::Evict => {
-                self.close_adapter_session().await;
+                self.release_for_eviction().await;
                 // The DB row is set EVICTED by `evict_if_at_cap`; without this
                 // the health pane keeps rendering the victim as IDLE and the
                 // two disagree about the same session.
@@ -2966,6 +2966,32 @@ impl SessionActor {
         self.pending_prelude = None;
     }
 
+    /// Give up this session's slot, then tell the adapter.
+    ///
+    /// The ORDER is the point, and it is the opposite of
+    /// [`Self::close_adapter_session`]. The route table is the daemon's own
+    /// accounting: `make_room` counts tenants from it, and `hangar/health`
+    /// reports it as the process's session count. A slot is conceptually free
+    /// the moment this actor accepts the eviction, and holding the route until
+    /// a remote `session/close` returns makes the pool's capacity depend on
+    /// adapter latency.
+    ///
+    /// That coupling is visible as a process sitting at cap+1 for as long as
+    /// the adapter takes to answer, which on a loaded host is unbounded. The
+    /// adapter still gets its close; it simply no longer gates the slot.
+    ///
+    /// Eviction only. Every other teardown path keeps
+    /// [`Self::close_adapter_session`]'s order, where draining updates before
+    /// dropping the route matters because the session may continue.
+    async fn release_for_eviction(&mut self) {
+        let closing = self.process.clone().zip(self.acp_session_id.clone());
+        // Route first: the slot is free now.
+        self.detach();
+        if let Some((process, id)) = closing {
+            let _ = process.process.close_session(&id).await;
+        }
+    }
+
     async fn close_adapter_session(&mut self) {
         if let (Some(process), Some(id)) = (self.process.clone(), self.acp_session_id.clone()) {
             let _ = process.process.close_session(&id).await;
@@ -3375,27 +3401,78 @@ impl AcpPool {
             return false;
         }
         candidates.sort_by_key(|row| row.last_active_at);
+        // Count what was actually freed, not what was attempted.
+        //
+        // An eviction is only real once the victim's actor has been TOLD, and
+        // the two maps this reads are not updated together: `hosted` comes from
+        // `process.routes`, which the actor registers in `attach_channels`,
+        // while the control handle lives in `self.sessions`, which
+        // `retire_if_current` drops when the actor retires. A retiring actor
+        // therefore leaves a window where a session is still routed and its
+        // handle is already gone, and teardown-then-respawn makes that window a
+        // normal occurrence rather than a rare one.
+        //
+        // Marking such a victim `EVICTED` anyway was the defect: the row is
+        // then skipped by the tenant count above, so the accounting believes
+        // the slot is free while the route still holds it, and the process
+        // hosts cap+1 permanently. That is the overshoot this function exists
+        // to prevent, produced by the function itself.
+        let mut freed = 0_usize;
         for victim in candidates.into_iter().take(over) {
-            tracing::info!(
-                provider = %process.provider,
-                session_key = %victim.session_key,
-                "evicting the least recently used idle acp session; the process stays warm"
-            );
             let control = {
                 let sessions = self.sessions.lock().await;
                 sessions.get(&victim.session_key).map(|handle| handle.control.clone())
             };
-            if let Some(control) = control {
-                let _ = control.send(Control::Evict);
+            if !signal_evict(control.as_ref()) {
+                tracing::warn!(
+                    provider = %process.provider,
+                    session_key = %victim.session_key,
+                    "acp eviction could not reach the session actor; leaving it counted \
+                     rather than freeing a slot its route still holds"
+                );
+                continue;
             }
-            let _ = FleetAcpSessionRepo::set_state(
+            // Only now is the row's state a true statement. A store fault here
+            // leaves the session counted, which costs one refused arrival and
+            // never an overshoot.
+            if let Err(error) = FleetAcpSessionRepo::set_state(
                 self.store.pool(),
                 &victim.session_key,
                 "EVICTED",
                 SystemClock.now_ms(),
             )
-            .await;
+            .await
+            {
+                tracing::warn!(
+                    provider = %process.provider,
+                    session_key = %victim.session_key,
+                    error = %error,
+                    "acp eviction could not record the state; leaving it counted"
+                );
+                continue;
+            }
+            tracing::info!(
+                provider = %process.provider,
+                session_key = %victim.session_key,
+                "evicted the least recently used idle acp session; the process stays warm"
+            );
             self.evicted_total.fetch_add(1, Ordering::Relaxed);
+            freed += 1;
+        }
+        if freed < over {
+            // Refusing is the honest answer and the same one this function
+            // already gives when nothing is idle: the arrival fails with
+            // `provider_at_capacity` instead of silently pushing the process
+            // over the maximum an operator configured.
+            tracing::warn!(
+                provider = %process.provider,
+                %incoming,
+                cap,
+                over,
+                freed,
+                "acp provider could not free enough slots; refusing the arrival"
+            );
+            return false;
         }
         true
     }
@@ -3693,6 +3770,24 @@ fn holds_process<T>(dead: &Weak<T>, current: Option<&Arc<T>>) -> bool {
     }
 }
 
+/// Tell one victim's actor to evict, and report whether it was actually told.
+///
+/// The return value is the whole point. An eviction is only real once the actor
+/// has the message, and there are two ways to miss: no handle in
+/// `AcpPool::sessions`, or a handle whose receiver has already gone. Both are
+/// reachable in normal operation, because `hosted` is derived from
+/// `ProviderProcess::routes` (written by the actor in `attach_channels`) while
+/// the handle lives in `AcpPool::sessions` (dropped by `retire_if_current` when
+/// the actor retires), so a retiring actor leaves a window where a session is
+/// routed and its handle is already gone.
+///
+/// Treating either miss as success is what let the cap be overshot: the row was
+/// marked `EVICTED`, the tenant count then skipped it, and the process kept
+/// serving a route the accounting believed was free.
+fn signal_evict(control: Option<&mpsc::UnboundedSender<Control>>) -> bool {
+    control.is_some_and(|control| control.send(Control::Evict).is_ok())
+}
+
 /// Drop a session's map entry ONLY while the retiring actor still owns it.
 ///
 /// Teardown then respawn is the normal path through convergence and resume, so
@@ -3787,8 +3882,8 @@ mod tests {
         );
     }
     use super::{
-        Arc, DEFAULT_SWEEP_INTERVAL, Duration, HashMap, MIN_SWEEP_INTERVAL, PoolConfig,
-        holds_process, retire_if_current,
+        Arc, Control, DEFAULT_SWEEP_INTERVAL, Duration, HashMap, MIN_SWEEP_INTERVAL, PoolConfig,
+        holds_process, mpsc, retire_if_current, signal_evict,
     };
 
     /// The exit event is PROCESS-SCOPED. The interleaving it defends against
@@ -3819,6 +3914,46 @@ mod tests {
         assert!(
             !holds_process(&dead, Some(&mine)),
             "a process nobody holds cannot be the one this actor holds"
+        );
+    }
+
+    /// An eviction counts only when the actor was actually told.
+    ///
+    /// THE cap overshoot (#958). `hosted` comes from `ProviderProcess::routes`,
+    /// which the actor writes in `attach_channels`, while the control handle
+    /// lives in `AcpPool::sessions`, which `retire_if_current` drops when the
+    /// actor retires. A retiring actor therefore leaves a window where a
+    /// session is still routed and its handle is already gone, and
+    /// teardown-then-respawn makes that a normal occurrence.
+    ///
+    /// Marking such a victim `EVICTED` anyway freed a slot whose route was
+    /// still live: the tenant count skipped the row, the next arrival attached,
+    /// and the process hosted cap+1 until something else removed one. That is
+    /// the permanent overshoot the cap exists to prevent, produced by the
+    /// eviction itself.
+    #[test]
+    fn an_eviction_counts_only_when_the_actor_was_told() {
+        // No handle at all: the retirement window.
+        assert!(
+            !signal_evict(None),
+            "a session with no live actor was not evicted, whatever its row says"
+        );
+
+        // A handle whose receiver has gone: the actor stopped between the
+        // lookup and the send.
+        let (dead, rx) = mpsc::unbounded_channel::<Control>();
+        drop(rx);
+        assert!(
+            !signal_evict(Some(&dead)),
+            "a send that nobody will receive did not evict anything"
+        );
+
+        // A live actor: told, and the message is the one it acts on.
+        let (live, mut rx) = mpsc::unbounded_channel::<Control>();
+        assert!(signal_evict(Some(&live)), "a live actor is reachable");
+        assert!(
+            matches!(rx.try_recv(), Ok(Control::Evict)),
+            "and receives the eviction rather than something else"
         );
     }
 

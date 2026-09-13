@@ -3139,6 +3139,58 @@ async fn a_provider_at_its_cap_with_every_tenant_busy_refuses_the_arrival() {
     );
 }
 
+/// A `session/close` that never answers must not hold a pool slot (#958).
+///
+/// `make_room` counts tenants from `ProviderProcess::routes`, and
+/// `hangar/health` reports the same map as the process's session count, so the
+/// route table IS the pool's capacity accounting. Evicting used to await the
+/// adapter's `session/close` before dropping the route, which made that
+/// accounting depend on adapter latency: while the adapter was slow, the
+/// process sat at cap+1 and a status read said so.
+///
+/// Deterministic, not timing-based: the fixture adapter is told never to answer
+/// `session/close` at all, so pre-fix the slot is held forever rather than
+/// merely for a while.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hung_adapter_close_does_not_hold_the_evicted_slot() {
+    let (_dir, store, pool, _broker) = harness_with_broker(
+        &[("FAKE_ACP_CHUNKS", "1"), ("FAKE_ACP_HANG_CLOSE", "*")],
+        |config| {
+            config.max_sessions_per_provider = 1;
+        },
+    )
+    .await;
+
+    // One hosted, idle session: the cap is full and it is evictable.
+    let first = seed_session(&store, "acp:hang-a").await;
+    let warm = seed_message(&store, &first.session_key, "warm").await;
+    pool.submit_prompt(&first.session_key, &warm, "warm").await;
+    await_terminal(&store, &warm, &first.session_key).await;
+
+    // A second arrival evicts it. The adapter will never acknowledge the close.
+    let second = seed_session(&store, "acp:hang-b").await;
+    let arrive = seed_message(&store, &second.session_key, "arrive").await;
+    pool.submit_prompt(&second.session_key, &arrive, "arrive").await;
+    let (state, detail) = await_terminal(&store, &arrive, &second.session_key).await;
+    assert_eq!(state, "DELIVERED", "{detail:?}");
+
+    // The evicted session's slot is the daemon's to free, so it is free now
+    // even though the adapter has said nothing.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let hosted: u32 = pool.health().await.processes.iter().map(|row| row.sessions).sum();
+        if hosted <= 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the process settled at {hosted} sessions with a cap of 1: a hung \
+             adapter close is holding a slot the daemon already gave up"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Two arrivals racing for one free slot do not BOTH take it.
 ///
 /// Eviction only frees a slot once the victim's own actor closes its adapter
