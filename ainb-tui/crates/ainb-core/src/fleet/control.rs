@@ -75,7 +75,7 @@ pub fn chat_thread_page_blocking(
         .build()
         .map_err(|error| ChatPageFailure::new(ChatOpenStep::Connecting, error))?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        let client = crate::fleet::bridge::daemon::tui_client()
             .map_err(|error| ChatPageFailure::new(ChatOpenStep::Connecting, error))?;
         let messages = client
             .message_list(FleetMessageListParams {
@@ -158,7 +158,7 @@ pub fn chat_page_blocking(
         .build()
         .map_err(|error| ChatPageFailure::new(ChatOpenStep::Connecting, error))?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        let client = crate::fleet::bridge::daemon::tui_client()
             .map_err(|error| ChatPageFailure::new(ChatOpenStep::Connecting, error))?;
 
         // Resolve the Pal channel. NEWEST wins, matching the daemon's own
@@ -354,8 +354,8 @@ pub fn chat_cancel_turns_blocking(session_keys: Vec<String>) -> Result<String, S
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-            .map_err(|error| error.to_string())?;
+        let client =
+            crate::fleet::bridge::daemon::tui_client().map_err(|error| error.to_string())?;
         let snapshot = client.fleet_snapshot().await.map_err(|error| error.to_string())?;
         let mut cancelled = 0usize;
         let mut refusals: Vec<String> = Vec::new();
@@ -414,8 +414,8 @@ pub fn chat_send_blocking(
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-            .map_err(|error| error.to_string())?;
+        let client =
+            crate::fleet::bridge::daemon::tui_client().map_err(|error| error.to_string())?;
         client.message_send(params).await.map_err(|error| error.to_string())
     })
 }
@@ -429,8 +429,8 @@ pub fn chat_confirm_answer_blocking(
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-            .map_err(|error| error.to_string())?;
+        let client =
+            crate::fleet::bridge::daemon::tui_client().map_err(|error| error.to_string())?;
         client.confirm_answer(params).await.map_err(|error| error.to_string())
     })
 }
@@ -615,7 +615,7 @@ pub fn answer_via_daemon_blocking(attention_id: String, answer: String) -> Resul
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        let client = crate::fleet::bridge::daemon::tui_client()
             .map_err(|error| format!("attention/answer unavailable: {error}"))?;
         let socket = client.socket().display().to_string();
         let result = client
@@ -666,8 +666,8 @@ pub fn broadcast_channels_blocking() -> Result<Vec<String>, String> {
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-            .map_err(|error| error.to_string())?;
+        let client =
+            crate::fleet::bridge::daemon::tui_client().map_err(|error| error.to_string())?;
         client
             .channel_list()
             .await
@@ -700,8 +700,8 @@ pub fn broadcast_blocking(
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-            .map_err(|error| error.to_string())?;
+        let client =
+            crate::fleet::bridge::daemon::tui_client().map_err(|error| error.to_string())?;
         client
             .fleet_broadcast(FleetBroadcastParams {
                 target_keys,
@@ -725,8 +725,8 @@ pub fn adapter_list_blocking() -> Result<Vec<ainb_hangar_proto::fleet::FleetAdap
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-            .map_err(|error| error.to_string())?;
+        let client =
+            crate::fleet::bridge::daemon::tui_client().map_err(|error| error.to_string())?;
         client
             .adapter_list()
             .await
@@ -748,8 +748,8 @@ pub fn pal_configure_blocking(
         .build()
         .map_err(|error| error.to_string())?;
     runtime.block_on(async {
-        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
-            .map_err(|error| error.to_string())?;
+        let client =
+            crate::fleet::bridge::daemon::tui_client().map_err(|error| error.to_string())?;
         client.pal_configure(params).await.map_err(|error| error.to_string())
     })
 }
