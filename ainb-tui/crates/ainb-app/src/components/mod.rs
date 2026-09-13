@@ -3,4 +3,5 @@
 // `ainb-core::components`, which re-exports this module.
 
 pub mod onboarding;
+pub mod setup_menu;
 pub mod skills;
