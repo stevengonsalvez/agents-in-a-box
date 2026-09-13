@@ -1,0 +1,36 @@
+    ╭──────────╮
+   ╱│          │╲     A I N B  -  Agents in a Box
+  ╱ │  ◉    ◉  │ ╲
+ ╱  │    ──    │  ╲   Your AI-Powered Development Hub                    v<version>
+│   │          │   │
+│   ╰──────────╯   │
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆ AINB                 │╭ 📖  Getting Started ────────────────────────────────────────────────────────────────────────╮
+                         ││  Agents in a Box                                                                           │
+                         ││        ╭ 🛠️  Setup ──────────────────────────────────────╮                                  │
+█ 🚀   Sessions      [s]  ││  You're│                                                │n, or open Setup.                 │
+█     Manage Active      ││        │▶ 🔄  Re-run Setup Wizard                        │                                  │
+  🛠️   Setup         [u]  ││  ──────│     Start the full setup wizard from scratch   │                                  │
+  ⚙️   Config        [o]  ││        │  🔍  Check Dependencies                         │                                  │
+  🧠   Skills Catalogue[c]││  Start │     Verify all required tools are installed    │                                  │
+  🧰   Skills (manager)[z]││        │  📁  Configure Git Paths                        │                                  │
+  📚   Memory        [m]  ││  • `n` │     Update your project directories            │n agent                           │
+  📊   Stats         [i]  ││  • `s` │  🔐  Authentication Settings                    │                                  │
+  ⚙  Daemons        [d]  ││  • `Ent│     Configure auth for Claude, Codex, Antigravi│                                  │
+  🌳   Witr          [w]  ││  • `1`–│  📝  Editor Preference                          │                                  │
+  📡   abtop         [t]  ││  • `?` │     Choose your preferred code editor          │                                  │
+  🧬   MCP           [p]  ││  • `q` │ ────────────────────────────────────────────── │                                  │
+  📋   Logs          [l]  ││        │  ⚠️  Factory Reset AINB                         │                                  │
+  🔄   Recovery      [r]  ││  To att│     Remove all configuration and start fresh   │er`.                              │
+  🛩️   Hangar        [g]  ││        │       ↑↓ Navigate  Enter Select  Esc Back      │                                  │
+  📝   Changelog     [v]  ││  Each s│                                                │, fully isolated.                 │
+  ❓   Help          [?]  ││        ╰────────────────────────────────────────────────╯                                  │
+                         ││  ─────────────────────────────────────────                                                 │
+                         ││                                                                                            │
+                         ││  💡  `Esc` in the setup wizard returns here. Press `?` for the full keymap.                 │
+                         │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   No workspaces configured - press s to go to Sessions
+
+  Enter select | Tab content | ↑↓ navigate | ? help | q quit
+

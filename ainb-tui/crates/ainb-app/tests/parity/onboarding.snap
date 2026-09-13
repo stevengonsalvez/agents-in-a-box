@@ -1,0 +1,36 @@
+
+                                                  🛠️  AINB Setup Wizard
+   ◉ Welcome → ○ Source → ○ Role → ○ Use Case → ○ Dependencies → ○ Git Directories → ○ Authentication → ○ Telemetry → ○
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ 💡  First-time setup — dependencies, project folders, agent auth, telemetry, and editor. Change any of it later from the
+                                                       Setup menu.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+╭ Welcome ─────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                       ╭───────╮                                                      │
+│                                                       │ ◉   ◉ │                                                      │
+│                                                       │   ▽   │                                                      │
+│                                                       │  ───  │                                                      │
+│                                                       ╰───────╯                                                      │
+│                                                                                                                      │
+│                                              Welcome to Agents in a Box!                                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                    Let's get you set up — just a few quick steps:                                    │
+│                                                                                                                      │
+│                                             • Check required dependencies                                            │
+│                                           • Point AINB at your git projects                                          │
+│                                           • Configure agent authentication                                           │
+│                                             • Pick your preferred editor                                             │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                              Enter   or  →    Get started                                            │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                [Enter] Next  |  [Esc] Menu
+

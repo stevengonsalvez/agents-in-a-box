@@ -1,0 +1,36 @@
+╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  Configuration  (184 settings)   press / to search every setting                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭ Categories ──────────────────────╮╭ Authentication ──────────────────────────────────────────────────────────────────╮
+│▶  🔐  Authentication              ││▶ Claude Authentication      : system_auth                                        │
+│   📁  Workspace                   ││    └─ How Claude authenticates: subscription, API key, or a cloud gateway        │
+│   🐳  Docker                      ││  GitHub Auth Method         :                                                    │
+│   🤖  Agent Defaults              ││                                                                                  │
+│   📝  Editor                      ││                                                                                  │
+│   🔌  Plugins                     ││                                                                                  │
+│   🧬  MCP Pool                    ││                                                                                  │
+│ ▸ 🎨  Appearance                  ││                                                                                  │
+│ ▸ ⚙️  General                     ││                                                                                  │
+│ ▸ 📦  Container Templates         ││                                                                                  │
+│ ▸ 🚁  Fleet                       ││                                                                                  │
+│ ▸ 💰  Usage                       ││                                                                                  │
+│   🎓  Skills                      ││                                                                                  │
+│   📖  Session Reader              ││                                                                                  │
+│   🗂️  Presets                     ││                                                                                  │
+│ ▸ 🛎️  Daemons                     ││                                                                                  │
+│   🌐  Web Dashboard               ││                                                                                  │
+│ ▸ 🔗  ACP Adapters                ││                                                                                  │
+│ ▸ 🏗️  Hangar Daemon               ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+│                                  ││                                                                                  │
+╰──────────────────────────────────╯╰ 1/2 ─────────────────────────────────────────────────────────────────────────────╯
+  / search │ ↑↓ navigate │ ←→/Tab switch pane │ Space expand │ Enter edit │ S save all │ Esc back
+
