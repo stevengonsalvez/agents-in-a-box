@@ -555,6 +555,16 @@ fn with_no_daemon_the_pal_header_names_the_failed_call() {
         return;
     }
 
+    // Gated to Linux: see #966.
+    //
+    // Same reason as the first case in this file: unmasked by installing tmux
+    // on the macOS leg, where the TUI renders and then dies partway through
+    // the key sequence.
+    if !cfg!(target_os = "linux") {
+        eprintln!("SKIP: gated to Linux, see #966");
+        return;
+    }
+
     let home_tmp = tempfile::Builder::new()
         .prefix("ainb-nodaemon-")
         .tempdir_in("/tmp")
