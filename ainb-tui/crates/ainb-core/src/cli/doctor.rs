@@ -17,9 +17,38 @@ struct DoctorReport<'a> {
     daemons: Vec<crate::fleet::daemons::DaemonStatus>,
     daemons_error: Option<String>,
     daemon_repairs: Vec<String>,
+    /// Hook-sourced sessions the daemon could not bind to a tmux pane (D14,
+    /// issue #916). An unbound session cannot receive a send-keys answer and
+    /// cannot be attached to, so it is a health fact, not a cosmetic one.
+    pane_unbound: Vec<PaneUnboundRow>,
+    pane_unbound_error: Option<String>,
+    /// `status_unknown_event{provider,name}`: provider event names the daemon
+    /// could not map (D14). Non-empty means a provider shipped a name this
+    /// build does not know, and sessions using it stop advancing silently.
+    status_unknown_event: Vec<ainb_hangar_proto::agent_status::UnknownEventCount>,
 }
 
-/// Full machine health check. `--offline` skips skill-source network probes.
+/// One session with no pane bound.
+#[derive(Serialize)]
+struct PaneUnboundRow {
+    session_key: String,
+    provider: String,
+    cwd: String,
+}
+
+// `--offline` skips skill-source NETWORK probes. It deliberately does NOT skip
+// the local daemon read: `fleet/status` is a unix socket on this machine, and
+// the two facts it carries (panes nothing can be attributed to, and provider
+// event names this build cannot map) are exactly what an operator runs
+// `ainb doctor` to find out. Skipping them would make the offline run quieter
+// without making it more honest. A daemon that is not running is reported once,
+// in the daemon section, and costs nothing here.
+//
+// Deliberately a `//` comment, not a doc comment: clap renders a struct's doc
+// as the subcommand's `about`, so a paragraph here lands in
+// `ainb doctor --help` and flips every flag from short to long help. The
+// reasoning is for whoever edits this file, not for the operator running it.
+/// Health-check skills, dependencies, hooks, and daemons
 #[derive(clap::Args)]
 pub struct DoctorArgs {
     /// Skip skill-source reachability checks. Runtime checks stay local.
@@ -37,7 +66,6 @@ pub struct DoctorArgs {
 }
 
 /// Entry point for `ainb doctor`.
-#[allow(clippy::unused_async)]
 pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
     let dependencies = deps::detect(&RealEnv);
     let (hooks, hooks_error) = match ainb_plugin_notifyd::Paths::from_home() {
@@ -79,6 +107,7 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
     } else {
         Vec::new()
     };
+    let (pane_unbound, status_unknown_event, pane_unbound_error) = collect_fleet_status().await;
     match format {
         OutputFormat::Json => {
             let (skill_doctor, skill_doctor_error) = run_skill_doctor(args.offline);
@@ -93,6 +122,9 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
                     daemons,
                     daemons_error,
                     daemon_repairs,
+                    pane_unbound,
+                    pane_unbound_error,
+                    status_unknown_event,
                 })?
             );
             if let Some(error) = skill_doctor_error {
@@ -110,6 +142,8 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
             for repair in &daemon_repairs {
                 println!("daemon repair: {repair}");
             }
+            print_pane_unbound_text(&pane_unbound, pane_unbound_error.as_deref());
+            print_unknown_event_text(&status_unknown_event);
             // The skill check can traverse several tool homes. Render the
             // runtime result first so a slow skill scan never hides a dead
             // hook or daemon from the user.
@@ -123,6 +157,101 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Read the daemon's one status read and pull out the two health facts it
+/// carries: sessions with no pane bound (#916) and provider event names the
+/// daemon could not map (D14).
+///
+/// One call for both, because they answer the same operator question, "is the
+/// status truth complete?", and asking twice would let the two answers come
+/// from different instants.
+///
+/// A daemon that is not running is not an error here: `ainb doctor` runs on a
+/// cold machine too, and reporting "cannot reach the daemon" once, in the
+/// daemon section, is enough.
+async fn collect_fleet_status() -> (
+    Vec<PaneUnboundRow>,
+    Vec<ainb_hangar_proto::agent_status::UnknownEventCount>,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::FleetProvider;
+    let client = match crate::fleet::bridge::daemon::DaemonClient::from_env() {
+        Ok(client) => client,
+        Err(error) => return (Vec::new(), Vec::new(), Some(error.to_string())),
+    };
+    match client.fleet_status().await {
+        Ok(status) => (
+            status
+                .rows
+                .iter()
+                .filter(|row| row.pane_unbound)
+                .map(|row| PaneUnboundRow {
+                    session_key: row.session_key.clone(),
+                    provider: match row.provider {
+                        FleetProvider::Claude => "claude",
+                        FleetProvider::Codex => "codex",
+                        FleetProvider::Antigravity => "antigravity",
+                        FleetProvider::Copilot => "copilot",
+                        FleetProvider::Acp => "acp",
+                        FleetProvider::Unknown => "unknown",
+                    }
+                    .to_string(),
+                    cwd: row.cwd.clone(),
+                })
+                .collect(),
+            status.unknown_events,
+            None,
+        ),
+        Err(error) => (Vec::new(), Vec::new(), Some(error.to_string())),
+    }
+}
+
+/// Render the unknown-event counters. Silent when there are none, because an
+/// empty list IS the healthy state and printing "0 unknown events" on every
+/// run trains an operator to skip the section.
+fn print_unknown_event_text(rows: &[ainb_hangar_proto::agent_status::UnknownEventCount]) {
+    if rows.is_empty() {
+        return;
+    }
+    println!("\nPROVIDER EVENTS NOT UNDERSTOOD");
+    println!("------------------------------");
+    println!(
+        "{} provider event name(s) this build cannot map. Sessions emitting them",
+        rows.len()
+    );
+    println!("still record, but their state stops advancing on that event.");
+    for row in rows {
+        println!(
+            "  status_unknown_event  {}  {}  x{}",
+            row.provider, row.name, row.count
+        );
+    }
+}
+
+/// Render the pane-binding section. Silent when every session is bound and the
+/// daemon answered: a clean check that prints nothing keeps the report short.
+fn print_pane_unbound_text(rows: &[PaneUnboundRow], error: Option<&str>) {
+    if rows.is_empty() && error.is_none() {
+        return;
+    }
+    println!("\nPANE BINDING");
+    println!("------------");
+    if let Some(error) = error {
+        println!("unavailable: {error}");
+        return;
+    }
+    println!(
+        "{} session(s) have no tmux pane bound. Answers cannot be typed into them",
+        rows.len()
+    );
+    println!("and they cannot be attached to until a later event binds them.");
+    for row in rows {
+        println!(
+            "  pane_unbound  {}  {}  {}",
+            row.session_key, row.provider, row.cwd
+        );
+    }
 }
 
 /// Restart only owner processes with positive old-version evidence. Bridge,

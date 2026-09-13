@@ -33,6 +33,13 @@ pub const FLEET_CAPABILITY_QUOTA_READ: &str = "fleet.quota.read";
 pub const FLEET_CAPABILITY_DASHBOARD_READ: &str = "fleet.dashboard.read";
 /// Negotiated capability for runtime and provider-hook health.
 pub const FLEET_CAPABILITY_RUNTIME_READ: &str = "fleet.runtime.read";
+/// Negotiated capability for the one D14 status derivation every surface reads.
+///
+/// A capability rather than a protocol bump, which is what D17 makes a new
+/// method for: the desktop and the phone are the clients this exists to serve
+/// and they must be able to ASK whether a daemon serves it, instead of
+/// discovering the answer from a method-not-found.
+pub const FLEET_CAPABILITY_STATUS_READ: &str = "fleet.status.read";
 /// Negotiated capability required for chat-bus message sends.
 pub const FLEET_CAPABILITY_MESSAGE_SEND: &str = "fleet.message.send";
 /// Negotiated capability required for chat-bus message list and subscribe.
@@ -137,6 +144,10 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_RUNTIME_READ,
     FLEET_CAPABILITY_USAGE_READ,
     FLEET_CAPABILITY_DASHBOARD_READ,
+    // Advertised in the SAME change that lands the `fleet/status` dispatch
+    // arm, per the rule above: a capability that names a method answering
+    // -32601 is worse than no capability at all.
+    FLEET_CAPABILITY_STATUS_READ,
 ];
 
 /// Inclusive supported protocol version range.
@@ -283,6 +294,27 @@ pub enum FleetProvenance {
     Inferred,
 }
 
+/// Whether this session is bound to a tmux pane (D14, issue #916).
+///
+/// Derived, never stored: a managed row whose `tmux_target` is null is by
+/// definition unbound. Kept as a named state rather than left implicit in a
+/// null so every surface renders the same word for it, and so an operator sees
+/// "this agent has no pane" instead of an empty attach column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneBinding {
+    /// A tmux target is resolved: the hook named it, or the daemon correlated
+    /// exactly one discovered pane onto it.
+    Bound,
+    /// No pane could be attributed. Send-keys delivery and pane attach are
+    /// both unavailable until a later observation binds the row.
+    PaneUnbound,
+    /// The session has no pane by construction (an ACP child, a discovered row
+    /// still being scanned). Absence here is expected and is not a defect.
+    #[default]
+    NotApplicable,
+}
+
 /// Confidence assigned to session identity and state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -345,6 +377,10 @@ pub struct FleetSession {
     pub provider_session_id: Option<String>,
     /// Exact tmux target for attach or fallback.
     pub tmux_target: Option<String>,
+    /// Whether a pane is bound to this session (D14, issue #916). Defaulted so
+    /// an older client that never learned the field still deserializes.
+    #[serde(default)]
+    pub pane_binding: PaneBinding,
     /// Process-start fingerprint for legacy identity.
     pub process_start_fingerprint: Option<String>,
     /// Working directory metadata.
@@ -2432,6 +2468,7 @@ mod tests {
             provider: FleetProvider::Claude,
             provider_session_id: Some("s-1".to_string()),
             tmux_target: None,
+            pane_binding: PaneBinding::PaneUnbound,
             process_start_fingerprint: None,
             cwd: "/repo".to_string(),
             display_name: None,

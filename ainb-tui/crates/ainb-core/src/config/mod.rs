@@ -504,16 +504,39 @@ pub struct PluginsConfig {
     pub values: BTreeMap<String, toml::Value>,
 }
 
+/// `[fleet.status]`: knobs for the D14 status store.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetStatusConfig {
+    /// Restore the pre-T0 ordering: the live `classify()` pane and transcript
+    /// scan answers first, and the daemon's status read is consulted only where
+    /// it has nothing.
+    ///
+    /// This is the ONE-RELEASE rollback for T0, and it exists because the
+    /// change it reverses moves every surface onto a new primary source at
+    /// once. If a real fleet reads worse after T0 ships, an operator needs a
+    /// line in a config file, not a downgrade.
+    ///
+    /// It is deliberately not a general "which source do you prefer" setting:
+    /// it is removed in T0+2, and leaving it in place past that would be a
+    /// second status truth, which is the whole thing D14 removes.
+    ///
+    /// Env: `AINB_FLEET_LEGACY_CLASSIFY_PRIMARY`.
+    #[serde(default)]
+    pub legacy_classify_primary: bool,
+}
+
 /// Fleet orchestration configuration.
 ///
-/// Currently only carries cost budget caps; reserved as the home for
-/// future fleet-wide knobs so they share one `[fleet]` table in
+/// The home for fleet-wide knobs so they share one `[fleet]` table in
 /// `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FleetConfig {
     /// Budget caps for `ainb fleet cost`. See [`CostBudgetConfig`].
     #[serde(default)]
     pub cost: CostBudgetConfig,
+    /// Status-store knobs. See [`FleetStatusConfig`].
+    #[serde(default)]
+    pub status: FleetStatusConfig,
     /// Which surface answers Claude interviews. See [`InterviewConfig`].
     #[serde(default)]
     pub interview: InterviewConfig,
@@ -611,6 +634,7 @@ impl Default for FleetConfig {
     fn default() -> Self {
         Self {
             cost: CostBudgetConfig::default(),
+            status: FleetStatusConfig::default(),
             interview: InterviewConfig::default(),
             terminal: None,
             idle_min: default_fleet_idle_min(),

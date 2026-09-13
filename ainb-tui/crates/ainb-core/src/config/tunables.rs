@@ -169,6 +169,25 @@ pub fn resolved<T: FromStr>(env_var: &str, from_config: T) -> T {
     }
 }
 
+/// The `[fleet.status] legacy_classify_primary` env spelling.
+///
+/// Named once because three crates read it and a typo in any of them would
+/// leave that surface on the new ordering with nothing going red.
+pub const LEGACY_CLASSIFY_PRIMARY_ENV: &str = "AINB_FLEET_LEGACY_CLASSIFY_PRIMARY";
+
+/// Whether the pre-T0 read ordering is in force: the live `classify()` pane and
+/// transcript scan is the answer, and `fleet/status` is not called at all.
+///
+/// The ONE-RELEASE rollback for T0. It is removed in T0+2; leaving it past that
+/// would be a second status truth, which is the thing D14 removes.
+#[must_use]
+pub fn legacy_classify_primary() -> bool {
+    resolved_bool(
+        LEGACY_CLASSIFY_PRIMARY_ENV,
+        snapshot().fleet.status.legacy_classify_primary,
+    )
+}
+
 /// [`resolved`] for booleans, which have no useful `FromStr`.
 ///
 /// Accepts the tolerant token family the rest of ainb uses
@@ -270,6 +289,14 @@ pub fn export_env_bridge(config: &AppConfig) {
     publish(
         "AINB_FLEET_HEALTHY_STATE_STALE_MS",
         config.fleet.healthy_state_stale_ms.to_string(),
+    );
+    // Bridged because `ainb-web` renders `/api/needs` and does not depend on
+    // this crate, so the env is the only channel a config file has to it. An
+    // operator setting one line in `config.toml` must roll back every surface
+    // or it is not a rollback.
+    publish(
+        LEGACY_CLASSIFY_PRIMARY_ENV,
+        config.fleet.status.legacy_classify_primary.to_string(),
     );
     publish(
         "AINB_HEADROOM_PORT",
@@ -1109,6 +1136,90 @@ mod tests {
         with_env("AINB_HOME", None, || {
             export_env_bridge(&AppConfig::default());
             assert!(std::env::var_os("AINB_HOME").is_none());
+        });
+    }
+
+    /// Run `body` with `LEGACY_CLASSIFY_PRIMARY_ENV` set to `env` and the
+    /// snapshot holding `config`, restoring BOTH afterwards.
+    ///
+    /// The snapshot restore is the part that is easy to miss and the part that
+    /// breaks other tests: it is process-global, so a config installed here is
+    /// read by every later test in the binary.
+    fn with_rollback<T>(env: Option<&str>, config: AppConfig, body: impl FnOnce() -> T) -> T {
+        let prior = snapshot();
+        let out = with_env(LEGACY_CLASSIFY_PRIMARY_ENV, env, || {
+            install_snapshot(config);
+            body()
+        });
+        install_snapshot((*prior).clone());
+        out
+    }
+
+    /// The T0 rollback must be reachable from `config.toml`, not only from the
+    /// environment. It is the switch an operator reaches for when a real fleet
+    /// reads worse after T0, and a flag that only answers to an exported
+    /// variable is not a rollback for a daemon someone else started.
+    #[test]
+    fn the_t0_rollback_reads_from_config() {
+        let config = from_toml("[fleet.status]\nlegacy_classify_primary = true\n");
+        assert!(
+            config.fleet.status.legacy_classify_primary,
+            "`[fleet.status] legacy_classify_primary` must parse"
+        );
+        with_rollback(None, config, || {
+            assert!(
+                legacy_classify_primary(),
+                "the config value must be in force"
+            );
+        });
+    }
+
+    /// And the shipped default is the T0 ordering, so an untouched host gets
+    /// the new behaviour rather than the rollback.
+    #[test]
+    fn the_shipped_default_is_the_new_ordering() {
+        with_rollback(None, AppConfig::default(), || {
+            assert!(
+                !legacy_classify_primary(),
+                "T0 must be the default; the rollback is opt-in"
+            );
+        });
+    }
+
+    /// The environment still beats the file, the same way every other knob in
+    /// this module works: an operator debugging one shell must not have to edit
+    /// a file the whole host reads. Both directions, because a rollback you
+    /// cannot turn back off is a one-way door.
+    #[test]
+    fn an_exported_rollback_beats_the_config_value() {
+        with_rollback(Some("1"), AppConfig::default(), || {
+            assert!(
+                legacy_classify_primary(),
+                "the export must win over the shipped default"
+            );
+        });
+        let rolled_back = from_toml("[fleet.status]\nlegacy_classify_primary = true\n");
+        with_rollback(Some("off"), rolled_back, || {
+            assert!(
+                !legacy_classify_primary(),
+                "and it must be able to turn the rollback back OFF"
+            );
+        });
+    }
+
+    /// `ainb-web` has no config loader, so the bridge is the only channel
+    /// `config.toml` has to `/api/needs`. An unbridged flag rolls back two
+    /// surfaces of three and calls it done.
+    #[test]
+    fn the_rollback_is_bridged_for_the_crates_that_cannot_read_config() {
+        let config = from_toml("[fleet.status]\nlegacy_classify_primary = true\n");
+        with_env(LEGACY_CLASSIFY_PRIMARY_ENV, None, || {
+            export_env_bridge(&config);
+            assert_eq!(
+                std::env::var(LEGACY_CLASSIFY_PRIMARY_ENV).ok().as_deref(),
+                Some("true"),
+                "the bridge must publish the rollback for out-of-crate readers"
+            );
         });
     }
 }

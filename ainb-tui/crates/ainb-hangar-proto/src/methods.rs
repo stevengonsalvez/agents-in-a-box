@@ -394,6 +394,14 @@ pub const HANGAR_ISSUE_DELETE: &str = "hangar/issue_delete";
 pub const HANGAR_ISSUE_CANCEL_ACTIVE: &str = "hangar/issue_cancel_active";
 /// Fetch canonical Fleet snapshot and revision head.
 pub const FLEET_SNAPSHOT: &str = "fleet/snapshot";
+/// Read one status row per agent, in the vocabulary every surface renders.
+///
+/// Result: `{ rows: [`[`crate::agent_status::AgentStatusRow`]`], head_revision }`.
+/// This is the D14 "one truth" read: the TUI fleet panel, `ainb fleet needs`,
+/// `ainb-web` and the desktop all derive their row from
+/// [`crate::agent_status::status_row`], so a state is one function's answer
+/// rather than three surfaces' independent guesses.
+pub const FLEET_STATUS: &str = "fleet/status";
 /// Negotiate Fleet protocol version and capability catalogue.
 pub const FLEET_NEGOTIATE: &str = "fleet/negotiate";
 /// Subscribe after a global Fleet revision.
@@ -1835,6 +1843,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_REACTION_REMOVE,
     // Fleet control-plane methods are appended at the wire catalogue tail.
     FLEET_SNAPSHOT,
+    FLEET_STATUS,
     FLEET_SUBSCRIBE,
     FLEET_ACTION,
     FLEET_BROADCAST,
@@ -2167,6 +2176,7 @@ mod tests {
             HANGAR_ISSUE_REACTION_ADD,
             HANGAR_ISSUE_REACTION_REMOVE,
             FLEET_SNAPSHOT,
+            FLEET_STATUS,
             FLEET_SUBSCRIBE,
             FLEET_ACTION,
             FLEET_BROADCAST,

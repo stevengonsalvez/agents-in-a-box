@@ -4008,6 +4008,9 @@ mod fleet_routing_tests {
             session_key: "claude:one".into(),
             provider: "claude".into(),
             provider_session_id: Some("one".into()),
+            // A fixture pane is bound; `pane_unbound` is the case these
+            // screens render differently, so it is named where it is meant.
+            pane_binding: "bound".into(),
             current_request_fingerprint: Some("fingerprint".into()),
             current_request: Some(serde_json::json!({
                 "tool_use_id": "request-1",

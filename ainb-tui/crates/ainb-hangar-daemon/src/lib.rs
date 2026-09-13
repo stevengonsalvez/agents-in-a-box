@@ -196,6 +196,14 @@ pub mod observability;
 /// parking, the expiry, the activity feed and Pal's authorship live
 /// here, because only the daemon owns the store and the event broker.
 pub mod pal;
+/// Daemon-side pane binding for hook-sourced Fleet rows (D14, issue #916).
+///
+/// A provider whose hooks run from a long-lived shared daemon (Codex 0.154)
+/// cannot see `$TMUX_PANE`, so its hook lines carry a null `tmux_target`. The
+/// daemon recovers the pane by correlating `(provider, cwd)` against the
+/// tier-5 discovery scan, binds when exactly one pane matches, and leaves the
+/// row `pane_unbound` when zero or two do rather than guessing.
+pub mod pane_binding;
 /// `gh`-backed PR status fetch behind an injectable seam (e38.34).
 ///
 /// Fetches a captured PR's CI rollup + mergeability + merge state by shelling out
@@ -322,6 +330,15 @@ pub mod squad_briefing;
 /// pure [`standup::decide_standup`] gate is the exhaustively-tested heart; a busy
 /// / mid-turn session is NEVER written to (hook status, never a pane heuristic).
 pub mod standup;
+/// Per-provider status event normalizers and the `status_unknown_event`
+/// counters (D14).
+///
+/// Every provider spells the same facts differently; the reducer speaks one
+/// vocabulary. This translates, in the order the spec fixes (Claude-compatible
+/// family, then the OSC frame schema, then the generic session-state family),
+/// and counts every name it cannot map so an unmapped event is visible rather
+/// than silent.
+pub mod status_normalizer;
 /// TTL sweepers + stale-dispatch reclaim (P1.4).
 ///
 /// The daemon's tokio runtime registers these as periodic tasks; they are also
