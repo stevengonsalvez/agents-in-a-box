@@ -17,6 +17,7 @@ pub mod docker;
 pub mod docs;
 pub mod editors;
 pub mod fleet;
+pub mod geometry;
 pub mod git;
 pub mod headroom;
 pub mod interactive;
