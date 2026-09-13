@@ -5,7 +5,6 @@
 
 use crate::agent_parsers::AgentEvent;
 use crate::components::live_logs_stream::{LogEntry, LogEntryLevel};
-use crossterm::terminal;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -246,8 +245,8 @@ pub mod helpers {
 
     /// Generate a dynamic separator line based on terminal width
     pub fn create_dynamic_separator(label: &str, min_width: usize) -> String {
-        // Try to get terminal width, fallback to 80 if unable
-        let terminal_width = terminal::size().map(|(width, _)| width as usize).unwrap_or(80);
+        // The width the host last rendered at, or 80 before it has published one.
+        let terminal_width = crate::viewport::columns().map_or(80, usize::from);
 
         // Ensure we have a minimum width to work with
         let effective_width = terminal_width.max(min_width);

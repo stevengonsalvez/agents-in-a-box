@@ -17,7 +17,6 @@
 //!
 //! ## Watched paths
 //! - `src/components/**/*.rs` — every screen/component renderer
-//! - `src/widgets/**/*.rs`    — reusable render widgets
 //! - `src/app/state.rs`       — `App::tick_plugin_renders`, the
 //!                              top-of-frame plugin drain
 //!
@@ -41,7 +40,7 @@ const ALLOW_LIST: &[&str] = &[];
 /// Directories to scan recursively from the crate root (the dir that
 /// contains this `build.rs`). Every `.rs` file under these is render
 /// path by convention.
-const SCAN_DIRS: &[&str] = &["src/components", "src/widgets"];
+const SCAN_DIRS: &[&str] = &["src/components"];
 
 /// Files where the lint runs **only inside the named functions**.
 /// `state.rs` is a 10k-line god-object that mixes render-path code

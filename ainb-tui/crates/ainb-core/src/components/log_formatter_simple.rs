@@ -58,7 +58,7 @@ impl SimpleLogFormatter {
         if !matches!(log.level, LogLevel::Info | LogLevel::Debug) {
             spans.push(Span::styled(
                 log.level.icon(),
-                Style::default().fg(log.level.color()),
+                Style::default().fg(super::log_parser::level_color(log.level)),
             ));
             spans.push(Span::raw(" "));
         }

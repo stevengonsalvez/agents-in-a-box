@@ -88,26 +88,41 @@ Zero logic change. Files moved with `git mv`; the only text edits are import pat
 | `docs/assets/diagrams/generate-diagrams.py` | Reads `fleet/daemons/probe.rs` from the new path. |
 | `plugins/README.md`, `ainb-tui/scripts/chat-bus-smoke.sh` | Path references updated. Historical research and plan docs keep the paths they were written against. |
 
-## P1b: component pure halves (planned)
+## P1b: component pure halves (this PR)
 
-One commit per screen. In each file, the types, their impls and the reducers move to `ainb-app/src/components/<same path>`. The render fns stay at the old path and start with `pub use ainb_app::components::<path>::*;`. Where a pure half leaks a ratatui type, it is replaced as follows: `Rect` becomes a crate-owned `Area { x, y, width, height }`, `ListState` becomes `Option<usize>`, and fns that return a `Color` stay in core as free fns.
+Each screen gets one commit. In each component file, the types and the logic that does not draw move to `ainb-app/src/components/<same path>`. The draw functions stay at the old path, and the core file starts with `pub use ainb_app::components::<path>::*;`.
 
-| File | Leak in the pure half | First render fn (line) | Pure LOC (approx) |
-|------|-----------------------|------------------------|------------------:|
-| `session_recovery` | none | 1438 | 1,420 |
-| `git_view` + `code_review::{model, parse}` | `GitFileStatus::color`, `Cell<Rect>` sidebar rect | 1300 | 2,180 |
-| `daemons` | none (14 private fields read by render and tests) | 892 | 880 |
-| `skills` | none | 283 | 270 |
-| `skill_manager_screen` | none | 787 | 1,500 |
-| `onboarding/state` | none, already a separate file | n/a | 1,261 |
-| `setup_menu`, `config_popup`, `changelog` | none | 170, 359, 281 | 765 |
-| `log_history_viewer` + `log_reader`, `log_writer` | `ListState`, `Rect` | 690 | 1,240 |
-| `home_screen_v2` + `sidebar`, `welcome_panel`, `mascot` state | `Rect` in `last_sidebar_rect` | 256 | 775 |
-| `session_tabs` | none (`strip`, `footer` stay) | 354 | 410 |
-| `live_logs_stream`, `log_parser` | `LogLevel::color` | 78, none | 565 |
-| `new_session::{pick_repo, configure}` | `handle_key(KeyEvent)` becomes `handle_key(&Chord)` | 423, 821 | 2,185 |
-| `widgets` (`MessageRouter`) | `crossterm::terminal::size` at `widgets/mod.rs:250` becomes a width argument | n/a | 8,273 |
-| core-held `docker::log_streaming`, `fleet::{daemon_cta, session_log}` | none once the halves above land | n/a | 1,786 |
+The leak replacements are the only logic changes, and each one is listed below. Everything else is text moved as-is, plus two kinds of edit: `pub(crate)` and private items widened to `pub` where the core renderer reads them, and test-only imports placed inside test modules. `crates/ainb-app/tests/renderer_free.rs` (from P1a) enforces the boundary on every commit.
+
+| Screen or module | Moved to `ainb-app` (LOC now there) | Leak replaced | Stays in `ainb-core` |
+|------------------|-------------------------------------|---------------|----------------------|
+| `onboarding` | `state.rs` whole (1,261) | none | wizard renderer |
+| `skills` | `SkillsViewState`, provider/tab enums, query filters (260) | none | renderer |
+| `setup_menu` | `SetupMenuItem`, `SetupMenuState` (142) | none | renderer |
+| `config_popup` | `ConfigPopupState`, value/type enums, editing logic (333) | none | renderer |
+| `skill_manager_screen` | `SkillsScreenData`, browse/library/preview/input states, discovery banner, selection reducers (1,460) | none | renderer and its tests |
+| `daemons` | `DaemonsState`, collector, action runner (851); `cli::daemon` (834); `cli::fleet::daemons` (296); `fleet::daemon_cta` (277) | none | renderer; the daemon argv test, which needs the clap tree |
+| live log pipeline | `log_parser` (393), `LogEntry` half of `live_logs_stream` (240), `log_reader` (739), `log_writer` (314), `widgets` whole (8,272), `docker::log_streaming` (934) | `LogLevel::color` becomes `log_parser::level_color` in core. The widgets' `crossterm::terminal::size` read becomes `ainb_app::viewport::columns()`, which the TUI publishes at startup and on resize. | `LiveLogsStreamComponent`, formatters |
+| `session_tabs` (log rows) | `LogRow`, `log_rows`, `log_detail` (57); `fleet::session_log` (575) | none | tab renderers |
+| `home_screen_v2` | `HomeScreenV2State`, focus, click outcome (189); `sidebar` state and `item_index_at` (256); `welcome_panel` state (101); `mascot` animation (157) | `last_sidebar_rect: Option<Rect>` becomes `Option<Area>`, converted in `publish_after_draw`. `item_index_at` takes `Area` and moves from `SidebarComponent` to a free fn beside `SidebarState`. | renderers |
+| `log_history_viewer` | `LogHistoryViewerState`, focus/filter/selection types, session summaries (650) | `session_list_state: ListState` becomes `selected_session: Option<usize>`; the renderer already kept its own `ListState` in `UiState` and synced only the index. `log_entries_area: Option<Rect>` becomes `Option<Area>`. | renderer |
+| `git_view` + `code_review` | `GitViewState` and its file tree/markdown/commit types (1,257); `code_review::model` (97) and `parse` (318) whole; `CodeReviewUi` and its keyboard/mouse helpers (478) | `GitFileStatus::color` becomes `git_view::status_color` in core. `CodeReviewUi.sidebar_rect: Cell<Rect>` becomes `Cell<Area>`. | draw fns, `code_review::highlight` |
+| `changelog` | `ChangelogState`, markdown line types, embedded `CHANGELOG.md` (259) | none | renderer |
+| `new_session` | `ConfigureState`, branch picker, preset and base selections, `LaunchSpec` (766); `PickRepoState` and rows (347); `TextEditor` out of `app::state` into `ainb_app::text_editor` (315) | none | renderers, dispatcher, key handlers (these take `KeyEvent` until P1c) |
+| `cli::statusline_install` | whole (614) | none | nothing |
+
+New renderer-agnostic seams introduced by P1b:
+
+| Seam | Where | Why |
+|------|-------|-----|
+| `viewport::{set_columns, columns}` | `ainb-app/src/viewport.rs` | Width-dependent text layout without asking a terminal library |
+| `geometry::Area` | `ainb-app/src/geometry.rs` | State that hit-tests clicks against where the renderer last drew |
+
+Deferred to P1c, because these reach `AppState`, which does not move until then:
+
+- `session_recovery`: `SessionRecoveryState`'s impl calls `AppState::find_latest_transcript`.
+- `session_tabs`: `SessionTab`, `cycle`, `resolve` and `selected_blocking` take `&AppState`. `SessionTab` has inherent methods that do so, and an inherent impl must live in its type's crate.
+- `configure::handle_key` and `pick_repo::handle_key`: they move once they take `Chord`.
 
 ## P1c: state machine (planned)
 

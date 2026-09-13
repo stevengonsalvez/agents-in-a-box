@@ -32,7 +32,6 @@ pub mod registry;
 pub mod rtk;
 pub mod run;
 pub mod status;
-pub mod statusline_install;
 pub mod tmux_install;
 pub mod usage;
 

@@ -32,7 +32,6 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 
 # Docker
-bollard = { workspace = true }
 futures-util = { workspace = true }
 
 # Tmux/PTY support
@@ -63,15 +62,12 @@ arboard = { workspace = true }
 regex = { workspace = true }
 base64 = "0.22"
 ed25519-dalek = "2.1"
-lazy_static = { workspace = true }
 which = { workspace = true }
 
 # Markdown and syntax highlighting
-pulldown-cmark = { workspace = true }
 syntect = { workspace = true }
 ansi-to-tui = { workspace = true }
 # Code Review diff surface
-similar = { workspace = true }
 two-face = { workspace = true }
 unicode-width = { workspace = true }
 # Version cap only (no code uses it directly) — pins the TRANSITIVE time

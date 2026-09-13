@@ -5,7 +5,6 @@ use ainb::app::screens::ids as screen_ids;
 use ainb::app::state::AppState;
 use ainb::components::sidebar::SidebarItem;
 use ainb::config::AppConfig;
-use ratatui::layout::Rect;
 use std::sync::Mutex;
 use tempfile::TempDir;
 
@@ -22,7 +21,8 @@ fn home_sidebar_mouse_click_selects_and_double_click_navigates() {
     let mut state = AppState::default();
     let mut ui = ainb::app::ui_state::UiState::default();
     state.shell.current_screen = screen_ids::HOME.to_string();
-    state.shell.home_screen_v2_state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
+    state.shell.home_screen_v2_state.last_sidebar_rect =
+        Some(ainb::geometry::Area::new(0, 4, 26, 30));
 
     // Sidebar rect starts at y=4, so first item row is y=7. With Sessions
     // (index 0) selected and thus 2 rows tall, y=10 lands on index 2 =
@@ -51,7 +51,8 @@ fn home_sidebar_resize_release_persists_width_to_isolated_home() {
     let mut state = AppState::default();
     let mut ui = ainb::app::ui_state::UiState::default();
     state.shell.current_screen = screen_ids::HOME.to_string();
-    state.shell.home_screen_v2_state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
+    state.shell.home_screen_v2_state.last_sidebar_rect =
+        Some(ainb::geometry::Area::new(0, 4, 26, 30));
 
     let down = EventHandler::handle_mouse_event(
         AppEvent::MouseClick { x: 25, y: 10 },
