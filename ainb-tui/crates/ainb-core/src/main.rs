@@ -31,7 +31,7 @@ use std::{
 
 // The binary links the `ainb` library instead of compiling the module tree a
 // second time, so every module has one home and one set of visibility rules.
-use ainb::*;
+use ainb::{app, cli, components, config, fleet, headroom, models, perf, plugins, tmux};
 
 use app::keymap::{Chord, KeyAction, KeyContext, Keymap, ScrollAction, UiAction};
 use app::{App, EventHandler};
