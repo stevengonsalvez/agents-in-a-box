@@ -1,5 +1,9 @@
 // ABOUTME: UI components for the TUI interface including session list, logs viewer, and help
 
+// Component state that does not draw lives in `ainb-app`; the local modules
+// below add the renderers and shadow the re-exported module of the same name.
+pub use ainb_app::components::*;
+
 pub mod action_card;
 pub mod attached_terminal;
 pub mod auth_provider_popup;
