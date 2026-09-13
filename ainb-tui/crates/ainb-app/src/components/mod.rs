@@ -14,6 +14,7 @@ pub mod log_parser;
 pub mod log_reader;
 pub mod log_writer;
 pub mod mascot;
+pub mod new_session;
 pub mod onboarding;
 pub mod session_tabs;
 pub mod setup_menu;
