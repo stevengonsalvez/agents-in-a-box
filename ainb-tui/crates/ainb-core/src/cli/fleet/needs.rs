@@ -72,7 +72,7 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
     // TUI fleet panel and `GET /api/needs` all print that derivation rather
     // than folding their own, so the same agent reads the same way on every
     // surface. A daemon that is not running leaves the rows unstamped and the
-    // local tiering above is still the answer — degraded, and visibly so,
+    // local tiering above is still the answer, degraded, and visibly so,
     // rather than silently different.
     stamp_from_daemon(&mut rows).await;
 

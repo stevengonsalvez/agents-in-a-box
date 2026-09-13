@@ -22,7 +22,7 @@ struct DoctorReport<'a> {
     /// cannot be attached to, so it is a health fact, not a cosmetic one.
     pane_unbound: Vec<PaneUnboundRow>,
     pane_unbound_error: Option<String>,
-    /// `status_unknown_event{provider,name}` — provider event names the daemon
+    /// `status_unknown_event{provider,name}`: provider event names the daemon
     /// could not map (D14). Non-empty means a provider shipped a name this
     /// build does not know, and sessions using it stop advancing silently.
     status_unknown_event: Vec<ainb_hangar_proto::agent_status::UnknownEventCount>,
@@ -163,8 +163,8 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
 /// carries: sessions with no pane bound (#916) and provider event names the
 /// daemon could not map (D14).
 ///
-/// One call for both, because they answer the same operator question — "is the
-/// status truth complete?" — and asking twice would let the two answers come
+/// One call for both, because they answer the same operator question, "is the
+/// status truth complete?", and asking twice would let the two answers come
 /// from different instants.
 ///
 /// A daemon that is not running is not an error here: `ainb doctor` runs on a

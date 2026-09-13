@@ -147,7 +147,7 @@ impl DaemonClient {
         Ok(parsed.attention)
     }
 
-    /// Read one status row per agent (`fleet/status`) — the D14 "one truth"
+    /// Read one status row per agent (`fleet/status`): the D14 "one truth"
     /// read.
     ///
     /// The dashboard stamps every card with this rather than deriving state

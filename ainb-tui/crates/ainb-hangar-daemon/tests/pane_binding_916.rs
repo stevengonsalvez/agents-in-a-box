@@ -1,4 +1,4 @@
-//! Issue #916 — a hook that cannot see `$TMUX_PANE` still lands one attributed
+//! Issue #916: a hook that cannot see `$TMUX_PANE` still lands one attributed
 //! row, or says `pane_unbound`, and never leaves a duplicate legacy row.
 //!
 //! Codex 0.154 attaches its interactive TUI to a shared app-server and runs
@@ -7,9 +7,9 @@
 //! `tmux_target: null` (`atc.rs::current_tmux_identity` returns `None` without
 //! the variable). Measured live: 1,215 of 1,215 sampled lines carried a null.
 //!
-//! The env loss is reproduced exactly as the spec's gate names it — the real
+//! The env loss is reproduced exactly as the spec's gate names it, the real
 //! `plugins/ainb-hooks/hooks/notify.sh` is executed under `env -i HOME=<fixture>`
-//! with a Codex payload — and the managed branch's `ainb` is a fixture binary
+//! with a Codex payload, and the managed branch's `ainb` is a fixture binary
 //! that appends the canonical line `build_event_line_for_agent` produces in
 //! that environment. The daemon-side binding is then exercised through the real
 //! ingest path, `AttentionIngest::ingest_once`, not a hand-built observation.
@@ -41,7 +41,7 @@ fn notify_sh() -> std::path::PathBuf {
 /// the canonical `events.jsonl` line for the hook it was handed.
 ///
 /// The line's `tmux_target` and `process_start_fingerprint` are null, which is
-/// what the real command emits with no `$TMUX_PANE` in its environment — that
+/// what the real command emits with no `$TMUX_PANE` in its environment, that
 /// null IS issue #916, so the fixture must not paper over it.
 fn plant_fixture_home(home: &std::path::Path) {
     let hooks = home.join(".agents-in-a-box/hooks");
@@ -102,11 +102,11 @@ fn fire_hook_under_env_i(home: &std::path::Path) {
         .expect("read events.jsonl");
     assert!(
         line.contains(r#""tmux_target":null"#),
-        "the premise of #916: no $TMUX_PANE means no target — {line}"
+        "the premise of #916, no $TMUX_PANE means no target: {line}"
     );
     assert!(
         line.contains(SESSION_ID) && line.contains(CWD),
-        "identity survives env loss even though the pane does not — {line}"
+        "identity survives env loss even though the pane does not: {line}"
     );
 }
 
@@ -232,7 +232,7 @@ async fn two_matching_panes_produce_one_pane_unbound_row_and_retire_nothing() {
     assert_eq!(
         rows.len(),
         3,
-        "an ambiguous binding retires nothing — {rows:?}"
+        "an ambiguous binding retires nothing: {rows:?}"
     );
 }
 
@@ -251,5 +251,5 @@ async fn replaying_the_same_hook_line_leaves_one_row() {
     ingest(&store, home.path()).await;
 
     let rows = visible_rows(&store).await;
-    assert_eq!(rows.len(), 1, "a replay must not fork the row — {rows:?}");
+    assert_eq!(rows.len(), 1, "a replay must not fork the row: {rows:?}");
 }

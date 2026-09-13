@@ -504,7 +504,7 @@ pub struct PluginsConfig {
     pub values: BTreeMap<String, toml::Value>,
 }
 
-/// `[fleet.status]` — knobs for the D14 status store.
+/// `[fleet.status]`: knobs for the D14 status store.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetStatusConfig {
     /// Restore the pre-T0 ordering: the live `classify()` pane and transcript

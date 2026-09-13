@@ -191,7 +191,7 @@ impl FleetRetentionRepo {
     ///
     /// OPEN rows are never deleted, at any age. An open row is a session still
     /// blocked on a human, and the age of the oldest one is the single most
-    /// useful number the inbox produces — the measured drift was 25 days on the
+    /// useful number the inbox produces, the measured drift was 25 days on the
     /// oldest row, which an age-based delete would have quietly hidden instead
     /// of surfacing.
     ///

@@ -47,7 +47,7 @@ const P99_CEILING_MS: f64 = 15.0;
 /// Sessions in flight, per the spec's "100 sessions".
 const SESSIONS: usize = 100;
 
-/// Events in the run. 900 at 10/s is 90 seconds and 9 samples above p99 —
+/// Events in the run. 900 at 10/s is 90 seconds and 9 samples above p99,
 /// enough for the percentile to mean something without a 20-minute test.
 const EVENTS: usize = 900;
 
@@ -162,7 +162,7 @@ async fn one_transaction_per_event_holds_the_p99_ceiling_with_the_projection_ins
     let p99 = percentile(&mut latencies_ms.clone(), 99.0);
     let max = latencies_ms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     println!(
-        "status write path: {events} events over {SESSIONS} sessions at {rate_per_sec}/s — \
+        "status write path: {events} events over {SESSIONS} sessions at {rate_per_sec}/s, \
          p50 {p50:.2} ms, p99 {p99:.2} ms, max {max:.2} ms (ceiling {P99_CEILING_MS:.0} ms)"
     );
     assert!(

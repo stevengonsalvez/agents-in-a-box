@@ -3,8 +3,8 @@
 //
 // Every provider spells the same five or six facts differently. Codex says
 // `agent-turn-complete`, Claude says `Stop`, an OSC frame says `turn_complete`.
-// The reducer speaks ONE vocabulary — Claude's, because it was first and the
-// tables already hold its tokens — so every other spelling is translated here,
+// The reducer speaks ONE vocabulary (Claude's, because it was first and the
+// tables already hold its tokens), so every other spelling is translated here,
 // in one place, rather than in a match arm inside whatever consumer noticed the
 // difference first.
 //
@@ -29,7 +29,7 @@
 // the caller never drops the event: the row still gets its clocks, its pane
 // binding and its provenance, it simply gains no lifecycle transition. That is
 // the correct behaviour for a provider that ships a new event name in a point
-// release — the alternative is a daemon that refuses lines it could have stored.
+// release: the alternative is a daemon that refuses lines it could have stored.
 //
 // Silence, though, is how an unmapped name stays unmapped for a year. Every
 // `None` increments `status_unknown_event{provider,name}`, which `fleet/status`
@@ -119,7 +119,7 @@ pub struct UnknownEventCount {
 /// Process-wide `status_unknown_event{provider,name}` counters.
 ///
 /// In memory and per-incarnation on purpose. The number an operator needs is
-/// "is this daemon, now, seeing names it cannot map" — a persisted total would
+/// "is this daemon, now, seeing names it cannot map"; a persisted total would
 /// keep reporting a name that a provider upgrade already fixed.
 fn counters() -> &'static Mutex<BTreeMap<(String, String), u64>> {
     static COUNTERS: OnceLock<Mutex<BTreeMap<(String, String), u64>>> = OnceLock::new();
@@ -153,7 +153,7 @@ pub fn normalize(provider: &str, raw_event: &str) -> Option<&'static str> {
         })
 }
 
-/// Step 1 — the Claude-compatible family.
+/// Step 1: the Claude-compatible family.
 ///
 /// Claude's own names pass through unchanged. Every other member maps its
 /// aliases onto them; a member whose name is already canonical needs no arm.
@@ -185,7 +185,7 @@ fn claude_family(provider: &str, name: &str) -> Option<&'static str> {
     })
 }
 
-/// Step 2 — the published OSC in-band frame schema.
+/// Step 2: the published OSC in-band frame schema.
 ///
 /// A frame carries an explicit event name from a fixed set, so this is a
 /// closed mapping and a name outside it is a protocol error on the emitter's
@@ -202,7 +202,7 @@ fn osc_frame(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Step 3 — the generic session-state family.
+/// Step 3: the generic session-state family.
 ///
 /// The last resort, for a provider with no lifecycle hooks that publishes only
 /// a coarse state word. Deliberately does NOT map anything to a needs-input

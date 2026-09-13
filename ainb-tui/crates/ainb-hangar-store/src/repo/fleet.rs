@@ -505,7 +505,7 @@ impl FleetRepo {
     /// `fleet_session.attention_state` and the `attention` inbox are two views
     /// of one fact: whether this session is blocked on a human. They were
     /// written by two independent transactions with no ordering between them,
-    /// so they drifted — measured live at 732 open rows against 7 sessions the
+    /// so they drifted, measured live at 732 open rows against 7 sessions the
     /// Fleet model believed were waiting, the oldest 25 days stale. Writing the
     /// projection here, against the same write lock and the same commit, is
     /// what removes the second writer rather than adding a third reconciler.

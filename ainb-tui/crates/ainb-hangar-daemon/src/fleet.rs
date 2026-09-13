@@ -698,7 +698,7 @@ async fn retire_correlated_legacy(
     Ok(())
 }
 
-/// Read one status row per agent — the D14 "one truth" read.
+/// Read one status row per agent: the D14 "one truth" read.
 ///
 /// Every surface calls this (the TUI fleet panel through `fleet/status`, `ainb
 /// fleet needs` and `ainb-web` through the same method) rather than folding its
@@ -1474,7 +1474,7 @@ pub async fn events_after_wire(
 /// means "not scanned yet" rather than "an agent lost its pane", and an ACP
 /// child has no pane by construction. `management_state` does not separate
 /// those cases: only Claude hook rows are marked MANAGED, so keying on it
-/// would report every Codex session — the exact provider #916 is about — as
+/// would report every Codex session (the exact provider #916 is about) as
 /// having no pane question to answer.
 fn pane_binding_of(row: &FleetSessionRow) -> ainb_hangar_proto::fleet::PaneBinding {
     use ainb_hangar_proto::fleet::PaneBinding;
@@ -2713,7 +2713,7 @@ fn tmux_model_is_complete(row: &FleetSessionRow) -> bool {
 ///
 /// Authoritative so it can land on the model group a hook already wrote.
 /// Codex's hooks carry effort without a model, so a hook-written pair is
-/// routinely half-empty, and an inferred event can never complete it —
+/// routinely half-empty, and an inferred event can never complete it:
 /// `should_replace` refuses a lower rank outright. Equal rank falls through to
 /// `observed_at`, so the newer reading wins and a live `/model` change reaches
 /// the roster instead of being pinned by the first hook that guessed.

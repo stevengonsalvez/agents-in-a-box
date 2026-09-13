@@ -219,7 +219,7 @@ struct AttentionDecision {
     raised_row: Option<RaisedRow>,
     /// The outcome the line takes once the Fleet event has been applied.
     ///
-    /// `Some` means the line yields no attention decision — it did not qualify,
+    /// `Some` means the line yields no attention decision: it did not qualify,
     /// the classifier read nothing, a live request already covers it, or the
     /// live-request check itself faulted and the line must be replayed. It is
     /// deliberately NOT a short-circuit before the apply: every hook line
@@ -628,8 +628,8 @@ impl AttentionIngest {
     /// vocabulary. Both are needed and they are not interchangeable: the
     /// reducer wants to know a picker is open, so it maps
     /// `PermissionRequest(AskUserQuestion)` onto `AskUserQuestion` and the two
-    /// become one token. The inbox has to tell them apart — one OPENS a
-    /// question, the other re-announces one that is already open — so it reads
+    /// become one token. The inbox has to tell them apart (one OPENS a
+    /// question, the other re-announces one already open), so it reads
     /// the unfolded name.
     async fn attention_decision(
         &self,
@@ -724,7 +724,7 @@ impl AttentionIngest {
         // is entirely about a TRANSCRIPT reading being untrustworthy while a
         // request is live; a payload-derived context IS the announcement of
         // that live request. Without the exemption the gate reads the state the
-        // caller itself produced and discards it — which is precisely how a
+        // caller itself produced and discards it, which is precisely how a
         // Codex approval reached the roster but never the notch.
         let mut close_open_asks = false;
         if !from_hook_payload && kind != AttentionKind::AskUserQuestion {
@@ -860,8 +860,8 @@ impl AttentionIngest {
     ///
     /// This used to close rows: `attention` and `fleet_session.attention_state`
     /// were two independent records of "needs input" that never cross-wrote, so
-    /// they drifted — 732 open rows against 7 sessions Fleet believed were
-    /// waiting, the oldest 25 days stale — and a periodic sweep papered over it
+    /// they drifted, 732 open rows against 7 sessions Fleet believed were
+    /// waiting, the oldest 25 days stale, and a periodic sweep papered over it
     /// by answering the losers. Both records now come from one apply path in
     /// one transaction, so a non-zero count is a defect in that path, and
     /// closing rows would hide exactly the signal that says so.

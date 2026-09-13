@@ -7,9 +7,9 @@
 //! renders `fleet/snapshot`. Three readers, three vocabularies, three answers
 //! for one agent.
 //!
-//! This module is the single derivation. It is deliberately PURE — it takes a
+//! This module is the single derivation. It is deliberately PURE: it takes a
 //! [`FleetSession`] and whether the inbox holds an open card for it, and returns
-//! the row every surface renders — so "same state everywhere" is a property of
+//! the row every surface renders, so "same state everywhere" is a property of
 //! one function rather than an agreement between three codebases that drift.
 //!
 //! # Why tier and provenance travel with the state
@@ -42,17 +42,17 @@ use crate::fleet::{AttentionState, FleetProvider, FleetSession, LifecycleState, 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
-    /// 0 — a provider lifecycle hook pushed this.
+    /// 0: a provider lifecycle hook pushed this.
     Hook,
-    /// 1 — an ACP session feed reported it.
+    /// 1: an ACP session feed reported it.
     AcpFeed,
-    /// 2 — an in-band OSC frame carried it.
+    /// 2: an in-band OSC frame carried it.
     OscFrame,
-    /// 3 — the process table implied it.
+    /// 3: the process table implied it.
     Process,
-    /// 4 — the session transcript implied it.
+    /// 4: the session transcript implied it.
     Transcript,
-    /// 5 — a tmux pane scrape implied it.
+    /// 5: a tmux pane scrape implied it.
     #[default]
     PaneText,
 }
@@ -139,7 +139,7 @@ pub struct AgentStatusResult {
     pub rows: Vec<AgentStatusRow>,
     /// The Fleet revision these rows were derived from.
     pub head_revision: i64,
-    /// `status_unknown_event{provider,name}` — provider event names this daemon
+    /// `status_unknown_event{provider,name}`: provider event names this daemon
     /// incarnation could not map, most frequent first.
     ///
     /// Carried here rather than behind its own method because the one operator
@@ -151,8 +151,8 @@ pub struct AgentStatusResult {
 
 /// One provider event name a daemon could not map to its status vocabulary.
 ///
-/// An unmapped name is survivable — the event still lands with its clocks and
-/// its identity, it just asserts no transition — but it is how a provider's new
+/// An unmapped name is survivable, the event still lands with its clocks and
+/// its identity, it just asserts no transition, but it is how a provider's new
 /// event silently stops advancing a session's state. Counting it makes that a
 /// number an operator can see.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

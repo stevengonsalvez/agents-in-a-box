@@ -1,4 +1,4 @@
-//! D14 — one status truth on the `fleet_session` family.
+//! D14: one status truth on the `fleet_session` family.
 //!
 //! Three properties that a second status source silently breaks, each written
 //! against the shipped write and read paths rather than a hand-built row:
@@ -17,7 +17,7 @@
 //! 3. **The projection cannot drift.** After a 1,000-event replay, zero rows
 //!    where `attention.open` disagrees with `fleet_session.attention_state`.
 //!    Both are written by the single apply path in one transaction, so the
-//!    only way they diverge is a lost write — which is exactly what
+//!    only way they diverge is a lost write, which is exactly what
 //!    `sweep_once` stopped papering over when it became an assertion.
 
 use ainb_fleet_core::types::{
@@ -256,7 +256,7 @@ async fn an_inferred_observation_cannot_retract_an_authoritative_attention_state
 /// because the constructor is private and the columns are what `should_replace`
 /// reads. A discovered row claiming `authoritative` lifecycle is a row no
 /// later hook can correct when the hook's own clock lags the scan's, which
-/// provider hooks routinely do — they carry the provider's timestamp, not the
+/// provider hooks routinely do: they carry the provider's timestamp, not the
 /// daemon's.
 #[tokio::test]
 async fn a_discovered_pane_row_claims_only_inferred_authority() {
@@ -382,8 +382,8 @@ async fn a_row_stamped_by_the_old_authoritative_scan_can_still_be_advanced() {
 ///
 /// The sequences below are pseudo-random ORDERS of non-terminal events, with
 /// gaps that cross every idle threshold the reducer knows about. Order is the
-/// variable because the failure mode is not "a Stop was mishandled" — there is
-/// no Stop here — it is a reducer that concludes completion from the shape of
+/// variable because the failure mode is not "a Stop was mishandled": there is
+/// no Stop here, it is a reducer that concludes completion from the shape of
 /// what it saw, which only shows up in some orders.
 ///
 /// `Idle` and `Exited` are both barred: `idle` is this vocabulary's "finished
@@ -443,7 +443,7 @@ async fn no_sequence_without_a_terminal_event_ever_claims_completion() {
 /// state for reads `unverifiable`, never `idle`.
 ///
 /// Driven with an event name no normalizer maps, which is the shape this
-/// actually takes in production — a provider ships `agent-turn-aborted` in a
+/// actually takes in production, a provider ships `agent-turn-aborted` in a
 /// point release and the daemon has no arm for it. The row must still land with
 /// its identity and its clocks and assert no transition, so the session reads
 /// "nothing has told us", not "finished and free".
@@ -474,8 +474,8 @@ async fn an_event_nobody_can_map_leaves_the_state_unverifiable_not_idle() {
 /// The inbox is a projection of the session state, written in the same
 /// transaction, so it cannot fall behind it.
 ///
-/// Replays the open/close interleaving a real fleet produces — an ask raised,
-/// then released, a thousand times — and then asks the drift assertion the
+/// Replays the open/close interleaving a real fleet produces, an ask raised,
+/// then released, a thousand times, and then asks the drift assertion the
 /// question `sweep_once` asks in production. `sweep_once` only logs, so if this
 /// ever diverges nothing goes red except this test.
 #[tokio::test]

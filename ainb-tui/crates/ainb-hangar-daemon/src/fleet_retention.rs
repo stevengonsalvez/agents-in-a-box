@@ -244,7 +244,7 @@ pub async fn run_retention_pass_bounded(
     outcome.deleted = deleted;
     outcome.backlog_remaining |= capped;
 
-    // Stage D — the two tables that had no retention at all (D14). Both are
+    // Stage D: the two tables that had no retention at all (D14). Both are
     // age-after-SETTLEMENT, never age-after-creation: an unsettled receipt and
     // an open question are the rows an operator most needs, and deleting them
     // by age would erase exactly the evidence of a fault.
@@ -543,7 +543,7 @@ mod tests {
     ///
     /// The exemptions are the point. An unsettled receipt and an open question
     /// are the rows an operator most needs to see, and an age-only delete would
-    /// erase exactly the evidence of a fault — which is how the 25-day drift
+    /// erase exactly the evidence of a fault, which is how the 25-day drift
     /// stayed invisible for 25 days.
     #[tokio::test]
     async fn stage_d_ages_out_settled_work_and_spares_what_is_still_live() {

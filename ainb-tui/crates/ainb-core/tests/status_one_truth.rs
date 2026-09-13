@@ -4,7 +4,7 @@
 //! The drift this phase removes is not subtle. `ainb fleet needs` folds a
 //! materialized `current_state` table with a live tmux `classify()` fallback,
 //! `GET /api/needs` maps the attention inbox, and the TUI fleet panel renders a
-//! Fleet snapshot. Three readers, three sources, three vocabularies — so one
+//! Fleet snapshot. Three readers, three sources, three vocabularies, so one
 //! agent could be `waiting` on the phone, absent from the dashboard and `idle`
 //! in the panel, with nothing in the tree saying which was right.
 //!
@@ -346,8 +346,8 @@ async fn a_tier_five_idle_never_overwrites_a_tier_zero_waiting() {
 ///
 /// Property-style over the real reducer rather than over a mock: every
 /// permutation of the lifecycle events a provider actually emits is replayed,
-/// and then the session goes quiet. `done` must not be reachable — there is no
-/// such state — and a silent session must never be reported as `idle` unless
+/// and then the session goes quiet. `done` must not be reachable (there is no
+/// such state), and a silent session must never be reported as `idle` unless
 /// something actually observed it become free.
 #[tokio::test]
 async fn no_event_sequence_ending_in_silence_reports_completion() {

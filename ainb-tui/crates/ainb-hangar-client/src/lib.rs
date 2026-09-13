@@ -375,7 +375,7 @@ impl DaemonClient {
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
     }
 
-    /// Read one status row per agent — the D14 "one truth" read.
+    /// Read one status row per agent: the D14 "one truth" read.
     ///
     /// Every surface calls this rather than folding its own view from a
     /// snapshot, so the state the phone shows is the state the panel shows.

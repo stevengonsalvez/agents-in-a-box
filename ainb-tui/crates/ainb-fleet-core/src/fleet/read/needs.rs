@@ -101,7 +101,7 @@ pub struct NeedsRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_key: Option<String>,
     /// The operator-facing state token: `working`, `waiting`, `idle`,
-    /// `exited`, `unverifiable`. Never `done` — silence is not completion.
+    /// `exited`, `unverifiable`. Never `done`: silence is not completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
     /// The evidence tier `state` rests on, 0 (hook push) to 5 (pane text).
@@ -331,7 +331,7 @@ impl NeedsRow {
     ///
     /// The tuple the cross-surface gate compares comes from here, so the CLI
     /// prints the same `(session_key, state, provenance, tier,
-    /// evidence_observed_at)` the panel renders and `/api/needs` returns —
+    /// evidence_observed_at)` the panel renders and `/api/needs` returns,
     /// derived once in `ainb_hangar_proto::agent_status`, never re-derived.
     pub fn stamp_status(
         &mut self,
