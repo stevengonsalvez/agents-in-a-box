@@ -81,6 +81,8 @@ Terminal B:
 
 In A, open Config (`o`) and change one setting. In B, change a DIFFERENT setting. Quit both, start either one again.
 
+How to change a setting on `v2` at `026f40828`: press `/`, move to the row with `up` / `down`, press `enter`, edit, `enter` to save. Plain `enter` on the settings list does not open the editor any more (the `config` keymap context has no `enter` row; only `config.search` does), even though the footer still says `Enter edit`. Quit with `ctrl+c`: on the home screen `q` is bound to `go_home`, not quit.
+
 - **Pass:** both settings survive. Before S-A the second writer's read-modify-write dropped the first.
 
 ## 5. One headroom proxy (S-A)
@@ -92,6 +94,8 @@ cat ~/.agents-in-a-box/headroom/proxy.pid
 ./target/debug/ainb
 cat ~/.agents-in-a-box/headroom/proxy.pid
 ```
+
+There is only a pid to read if A has a live session with Headroom enabled and `headroom` is on `PATH`; nothing starts the proxy at TUI launch. The second `cat` above runs after B exits, so also run it from a third shell while B is still open, and check B's log (`~/.agents-in-a-box/logs/`, newest file) for `spawned headroom proxy`.
 
 - **Pass:** the pid is unchanged, and B's log records no second spawn attempt.
 
@@ -105,7 +109,9 @@ Terminal B (a third shell, or after backgrounding web):
 ./target/debug/ainb hangar connections list
 ```
 
-- **Pass:** a `web` row with a pid and the daemon host.
+Terminal A must be on the session list (`s`): a TUI parked on the home screen never dials the daemon.
+
+- **Pass:** a `web` row with a pid and the daemon host. A `cli` row is the `connections list` command itself.
 - **Known broken, do not fail the checkpoint on it:** there will be NO `tui` row. This is issue #963, found by S-D's surface-combination smoke and not by this
   page: `DaemonClient::from_env` labels every client `cli`, and separately the TUI holds no connection for the registry to list at all. S-D fixed the first
   half (the TUI now says `tui` when it dials); the connection lifecycle is S-B's and is still open.
@@ -115,7 +121,9 @@ Terminal B (a third shell, or after backgrounding web):
 
 ## 7. An answered card retires everywhere (S-C, PR #936)
 
-This one needs a live ASK. With the TUI open on the control center (`g`, then `C`) and `ainb web` open in a browser, raise an ASK in any session, then answer it FROM THE WEB.
+This one needs a live ASK. With the TUI open on the control center and `ainb web` open in a browser, raise an ASK in any session, then answer it FROM THE WEB.
+
+Getting to the control center on `v2` at `026f40828`: from home press `g`, then `ctrl+p`, type `control`, press `enter`. The hangar no longer binds `C`. If the hangar shows the `danger-full-access` notice first, press `y`.
 
 - **Pass:** the TUI card disappears at once, and the title row reads `answered by web@<your host>` for about three seconds.
 - **Pass:** answering from the TUI instead closes the web card's options and reply box as soon as the request returns, with `answered by tui@<your host>` under the card.
