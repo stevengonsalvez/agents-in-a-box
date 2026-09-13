@@ -548,6 +548,26 @@ jobs:
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test sandbox_script_safety_guards --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
+      # ──────────────────────────────────────────────────────────────────────
+      # Surface combinations (S-D)
+      #
+      # Runs AFTER the tripwires in this job, and deliberately in it rather
+      # than in one of its own: it needs the same tmux and the same built
+      # `ainb`, and a separate job would pay for both again to assert something
+      # no single surface's test can reach.
+      #
+      # What no unit test covers: two surfaces sharing one $HOME, where the
+      # locks, the connection registry and the config read-modify-write
+      # actually meet. {tui} {web} {tui,web} {tui,tui}, each from a clean home.
+      # ──────────────────────────────────────────────────────────────────────
+      - name: Surface combinations start clean and leave nothing behind
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          cargo build -p ainb
+          scripts/surface-combo-smoke.sh
+        working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
   # Fleet send-path integrity against a REAL tmux pane
