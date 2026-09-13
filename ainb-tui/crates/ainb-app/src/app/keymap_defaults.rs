@@ -668,8 +668,14 @@ pub fn defaults() -> Vec<Binding> {
         back: "q" => AppEvent::SkillManagerBack,
         tab: "tab" => AppEvent::SkillManagerToggleFocus,
         backtab: "shift+tab" => AppEvent::SkillManagerToggleFocus,
-        shrink_sources: "[" => AppEvent::SkillManagerShrinkSources,
-        grow_sources: "]" => AppEvent::SkillManagerGrowSources,
+    );
+    // The panel width clamps against the host's surface, so these resolve on
+    // the host-aware path rather than in the reducer.
+    append_action_rows!(rows, Context::screen("skill_manager"),
+        shrink_sources: "[" => KeyAction::Ui(UiAction::SkillManagerShrinkSources),
+        grow_sources: "]" => KeyAction::Ui(UiAction::SkillManagerGrowSources),
+    );
+    append_app_rows!(rows, Context::screen("skill_manager"),
         add_source: "i" => AppEvent::SkillManagerOpenAddSource,
         update: "u" => AppEvent::SkillManagerUpdate,
         check: "c" => AppEvent::SkillManagerCheck,

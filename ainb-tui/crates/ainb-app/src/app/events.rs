@@ -30,6 +30,10 @@ pub trait KeyHost {
     fn queue_scroll(&mut self, action: ScrollAction);
     /// The Claude statusline wiring status, possibly from the host's cache.
     fn statusline_status(&mut self) -> Option<StatuslineStatus>;
+    /// Width, in columns, of the surface this host renders into, or `None`
+    /// when it has none. Layout clamps read it per host, so two surfaces at
+    /// different widths never share one value.
+    fn columns(&self) -> Option<u16>;
 }
 
 /// A [`KeyHost`] with no renderer: scrolls are dropped and the statusline
@@ -39,6 +43,10 @@ pub struct NoRenderer;
 
 impl KeyHost for NoRenderer {
     fn queue_scroll(&mut self, _action: ScrollAction) {}
+
+    fn columns(&self) -> Option<u16> {
+        None
+    }
 
     fn statusline_status(&mut self) -> Option<StatuslineStatus> {
         crate::cli::statusline_install::detect_statusline_status().ok()
@@ -338,12 +346,6 @@ pub enum AppEvent {
     /// `Esc` — clear the active source filter (if any). Falls through to
     /// [`Self::SkillManagerBack`] when no filter is set.
     SkillManagerClearSourceFilter,
-    /// `[` — shrink the Sources panel by one column (clamped). Persists
-    /// the new width.
-    SkillManagerShrinkSources,
-    /// `]` — grow the Sources panel by one column (clamped). Persists
-    /// the new width.
-    SkillManagerGrowSources,
     /// A Source row was clicked: focus the Sources panel, move its
     /// cursor to row `index`, and apply that source as the filter.
     SkillManagerSourceClick {
@@ -824,13 +826,14 @@ impl PersistOutcome {
 impl EventHandler {
     /// Apply the persisted SkillManager Sources-panel width to the live
     /// screen state on screen-open. `None` keeps the in-memory default
-    /// (32). The width is clamped against the current terminal so a
-    /// stale oversized value can never starve the Units table.
+    /// (32). Only the minimum is enforced here: the renderer clamps the width
+    /// against its own surface at draw, and the resize keys clamp against the
+    /// host's width before stepping, so a stale oversized value can never
+    /// starve the Units table.
     fn apply_skill_manager_sources_width(state: &mut AppState) {
         if let Some(width) = state.config.app_config.ui_preferences.skill_manager_sources_width {
-            let term_w = crate::viewport::columns().unwrap_or(80);
             state.skills.skill_manager_state.sources_width =
-                crate::components::skill_manager_screen::clamp_sources_width(width, term_w);
+                crate::components::skill_manager_screen::clamp_sources_width(width, u16::MAX);
         }
     }
 
@@ -1372,6 +1375,18 @@ impl EventHandler {
                 Self::route_pal_dial(|dial| dial.retry(), state)
             }
             PalRetry => None,
+            UiAction::SkillManagerShrinkSources => {
+                let term_w = host.columns().unwrap_or(80);
+                state.skills.skill_manager_state.shrink_sources(2, term_w);
+                Self::persist_skill_manager_sources_width(state);
+                None
+            }
+            UiAction::SkillManagerGrowSources => {
+                let term_w = host.columns().unwrap_or(80);
+                state.skills.skill_manager_state.grow_sources(2, term_w);
+                Self::persist_skill_manager_sources_width(state);
+                None
+            }
             UiAction::DaemonsCloseOverlay => {
                 state.hangar.daemons_state.close_overlay();
                 None
@@ -4343,16 +4358,6 @@ impl EventHandler {
                     &mut state.skills.skill_manager_state,
                     &ainb_home,
                 );
-            }
-            AppEvent::SkillManagerShrinkSources => {
-                let term_w = crate::viewport::columns().unwrap_or(80);
-                state.skills.skill_manager_state.shrink_sources(2, term_w);
-                Self::persist_skill_manager_sources_width(state);
-            }
-            AppEvent::SkillManagerGrowSources => {
-                let term_w = crate::viewport::columns().unwrap_or(80);
-                state.skills.skill_manager_state.grow_sources(2, term_w);
-                Self::persist_skill_manager_sources_width(state);
             }
             AppEvent::SkillManagerSourceClick { index } => {
                 state.skills.skill_manager_state.source_selected = index;

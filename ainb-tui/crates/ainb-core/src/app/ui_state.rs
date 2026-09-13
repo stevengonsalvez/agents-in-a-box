@@ -452,6 +452,10 @@ impl crate::app::events::KeyHost for UiState {
     fn statusline_status(&mut self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
         Self::statusline_status(self)
     }
+
+    fn columns(&self) -> Option<u16> {
+        crossterm::terminal::size().ok().map(|(columns, _)| columns)
+    }
 }
 
 #[cfg(test)]

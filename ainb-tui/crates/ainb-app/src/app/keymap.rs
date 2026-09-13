@@ -847,6 +847,8 @@ pub enum UiAction {
     SessionAskPrevious,
     SessionAskNext,
     SessionAskBackspace,
+    SkillManagerShrinkSources,
+    SkillManagerGrowSources,
     DaemonsCloseOverlay,
     DaemonsCloseAndBack,
     DaemonsConfirmMenu,
