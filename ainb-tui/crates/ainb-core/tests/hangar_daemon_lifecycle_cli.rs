@@ -266,6 +266,7 @@ impl Drop for OwnedTmuxSession {
 fn launch_tui(home: &Path, plugin_root: &Path, daemon: &Path) -> OwnedTmuxSession {
     let session = format!("tripwire-hangar-tui-presence-{}", std::process::id());
     let ainb_home = home.join(".agents-in-a-box");
+    dismiss_notify_install_prompt(home);
     let mut new_session = Command::new("tmux");
     new_session.args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"]);
     for (key, value) in [
@@ -296,6 +297,38 @@ fn launch_tui(home: &Path, plugin_root: &Path, daemon: &Path) -> OwnedTmuxSessio
         name: session,
         shut_down: Cell::new(false),
     }
+}
+
+/// Record the ainb-hooks prompt as already dismissed, before the TUI starts.
+///
+/// `maybe_prompt_notify_install` fires on startup whenever `install.json`
+/// records no agents and no dismissal, which is exactly what a fresh fixture
+/// `HOME` looks like. The modal then owns the keyboard, so the `g` that should
+/// open the Hangar screen is swallowed and the test fails with "Hangar screen
+/// chrome never rendered after its launch key" while the captured frame shows
+/// the install prompt (#953).
+///
+/// Whether the modal wins that race depends on how fast the runner reaches the
+/// first render, which is why it failed intermittently and only on CI. Seeding
+/// the dismissal removes the race rather than out-waiting it: this test is
+/// about daemon connection presence and has no opinion about hook installation.
+///
+/// `Paths::from_home` reads `AINB_HANGAR_HOME` first, which `launch_tui` points
+/// at `home`, so the record belongs at `home/install.json`.
+fn dismiss_notify_install_prompt(home: &Path) {
+    std::fs::create_dir_all(home).expect("fixture home exists");
+    std::fs::write(
+        home.join("install.json"),
+        serde_json::json!({
+            "agents": [],
+            "hook_script": "",
+            "claude_plugin_dir": null,
+            "codex_hooks_json": null,
+            "prompt_dismissed": true,
+        })
+        .to_string(),
+    )
+    .expect("seed the dismissed notify-install prompt");
 }
 
 fn connections_json(home: &Path, daemon: &Path) -> serde_json::Value {
@@ -486,22 +519,39 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         !home_capture.contains("Control Center"),
         "Hangar content appeared before its launch key:\n{home_capture}"
     );
+    // If the install prompt is up, it owns the keyboard and the `g` below is
+    // swallowed. `dismiss_notify_install_prompt` is what keeps it down, and
+    // failing HERE names the cause instead of surfacing 30 s later as "Hangar
+    // screen chrome never rendered" with no hint why (#953).
+    assert!(
+        !home_capture.contains("Get notified when a session needs you?")
+            && !home_capture.contains("Update notification hooks?"),
+        "the ainb-hooks install prompt is holding focus and will swallow the \
+         launch key; the seeded dismissal did not take:\n{home_capture}"
+    );
+    // Keyed on the TUI surface, never on a count of CLI rows (#953).
+    //
+    // Every `connections_json` call is itself a CLI connection, and the daemon
+    // deregisters one when its socket closes, which it does asynchronously. So
+    // the number of `cli` rows visible at any instant is a property of this
+    // harness racing its own previous probe, not of the daemon: two were seen
+    // 0.3 ms apart on CI. The invariant the test is actually about is that the
+    // Hangar TUI has not connected before its launch key, which is the same
+    // thing `tui_pid` keys on everywhere below.
     let empty_listing = connections_json(home.path(), &daemon);
-    let empty_connections = empty_listing["connections"]
+    let non_observer_connections: Vec<_> = empty_listing["connections"]
         .as_array()
-        .expect("connections list must contain an array");
-    let non_observer_connections: Vec<_> = empty_connections
+        .expect("connections list must contain an array")
         .iter()
         .filter(|connection| connection["surface"]["kind"].as_str() != Some("cli"))
         .collect();
     assert!(
         non_observer_connections.is_empty(),
-        "registry must have zero connections before the Hangar launch key, apart from its CLI observer: {empty_listing}"
+        "registry must have zero non-CLI connections before the Hangar launch key: {empty_listing}"
     );
-    assert_eq!(
-        empty_connections.len(),
-        1,
-        "only the connections-list CLI observer may be registered before the Hangar launch key: {empty_listing}"
+    assert!(
+        tui_pid(&empty_listing).is_none(),
+        "no TUI may be registered before the Hangar launch key: {empty_listing}"
     );
 
     // `g` is a single-shot navigation key. It lazy-spawns the staged real
