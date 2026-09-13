@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use serde::Serialize;
 
-use crate::app::keymap::{KeyAction, Keymap};
+use crate::app::keymap::{Chord, KeyAction, Keymap};
 use crate::app::keymap_toml::KeymapOverrides;
 use crate::cli::OutputFormat;
 
@@ -25,7 +25,7 @@ pub enum KeymapFormat {
 #[derive(Serialize)]
 struct JsonRow<'a> {
     context: String,
-    chord: &'a str,
+    chord: Option<&'a str>,
     event: &'a str,
     action: &'static str,
     description: &'a str,
@@ -95,7 +95,7 @@ fn print_markdown(keymap: &Keymap) -> Result<()> {
         }
         println!(
             "| `{}` | `{}` | {} |",
-            binding.chord.as_str(),
+            binding.chord.as_ref().map_or("unbound", Chord::as_str),
             binding.id,
             binding.doc
         );
@@ -108,7 +108,7 @@ fn print_json(keymap: &Keymap) -> Result<()> {
         .bindings()
         .map(|binding| JsonRow {
             context: binding.ctx.name(),
-            chord: binding.chord.as_str(),
+            chord: binding.chord.as_ref().map(Chord::as_str),
             event: binding.id,
             action: action_name(&binding.action),
             description: binding.doc,

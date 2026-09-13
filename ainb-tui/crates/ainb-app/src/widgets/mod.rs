@@ -194,6 +194,10 @@ impl WidgetRegistry {
     }
 }
 
+/// Width separators in shared log entries are laid out to, the classic
+/// terminal width they fell back to before a host published its own.
+pub const SEPARATOR_COLUMNS: usize = 80;
+
 /// Helper functions for widgets
 pub mod helpers {
     use super::*;
@@ -243,13 +247,12 @@ pub mod helpers {
         .with_metadata("event_type", "separator")
     }
 
-    /// Generate a dynamic separator line based on terminal width
+    /// Generate a separator line at least `min_width` columns wide.
+    ///
+    /// The line is baked into log entries every attached surface shows, so it
+    /// is laid out to [`SEPARATOR_COLUMNS`] rather than any one host's width.
     pub fn create_dynamic_separator(label: &str, min_width: usize) -> String {
-        // The width the host last rendered at, or 80 before it has published one.
-        let terminal_width = crate::viewport::columns().map_or(80, usize::from);
-
-        // Ensure we have a minimum width to work with
-        let effective_width = terminal_width.max(min_width);
+        let effective_width = SEPARATOR_COLUMNS.max(min_width);
 
         // Calculate available space for dashes
         // "╰─ " (3 chars) + label + " " (1 char) + remaining dashes

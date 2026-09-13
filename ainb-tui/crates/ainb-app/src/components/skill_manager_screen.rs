@@ -1271,12 +1271,14 @@ impl SkillsScreenData {
     /// Grow the Sources panel by `delta` columns, clamped to the legal
     /// range for `term_w`. Used by the `]` keybind.
     pub fn grow_sources(&mut self, delta: u16, term_w: u16) {
-        self.sources_width = clamp_sources_width(self.sources_width.saturating_add(delta), term_w);
+        let current = clamp_sources_width(self.sources_width, term_w);
+        self.sources_width = clamp_sources_width(current.saturating_add(delta), term_w);
     }
 
     /// Shrink the Sources panel by `delta` columns, clamped. Used by `[`.
     pub fn shrink_sources(&mut self, delta: u16, term_w: u16) {
-        self.sources_width = clamp_sources_width(self.sources_width.saturating_sub(delta), term_w);
+        let current = clamp_sources_width(self.sources_width, term_w);
+        self.sources_width = clamp_sources_width(current.saturating_sub(delta), term_w);
     }
 }
 

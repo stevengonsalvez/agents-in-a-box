@@ -274,7 +274,14 @@ fn state_with_selected_stopped_managed_session() -> AppState {
 }
 
 fn enter_event(state: &mut AppState) -> Option<AppEvent> {
-    EventHandler::handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), state)
+    EventHandler::handle_key_event(
+        ainb::app::terminal_keys::chord_from_key_event(&KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))
+        .expect("mapped key"),
+        state,
+    )
 }
 
 fn is_bulk_resume_on_enter(event: Option<AppEvent>) -> bool {

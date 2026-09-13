@@ -335,7 +335,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     );
 
     // ── (a) mouse click through the real state-level handler: swallowed ──
-    let click = EventHandler::handle_mouse_event(
+    let click = ainb::app::mouse::handle_mouse_event(
         AppEvent::MouseClick { x: px, y: py },
         &mut state,
         &mut ui,
@@ -408,7 +408,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     // Next frame re-lays-out the normal split; (80,10) sits in the preview
     // pane, so a click there must move focus to LiveLogs.
     draw_frame(&mut term, &mut layout, &mut state, &mut ui);
-    let _ = EventHandler::handle_mouse_event(
+    let _ = ainb::app::mouse::handle_mouse_event(
         AppEvent::MouseClick { x: px, y: py },
         &mut state,
         &mut ui,

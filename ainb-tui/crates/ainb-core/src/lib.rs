@@ -9,7 +9,7 @@ pub use ainb_app::*;
 pub mod app;
 pub mod cli;
 pub mod components;
-pub mod docker;
+pub mod terminal_handoff;
 pub mod tmux;
 
 #[cfg(any(test, feature = "test-support"))]

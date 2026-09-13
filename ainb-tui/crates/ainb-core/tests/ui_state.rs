@@ -204,7 +204,7 @@ fn mouse_hit_test_resolves_a_click_through_the_painted_row_map() {
 /// a renderer's measurement leaking into state every other surface shares.
 #[test]
 fn app_state_carries_no_terminal_geometry() {
-    const STATE_SOURCE: &str = include_str!("../src/app/state.rs");
+    const STATE_SOURCE: &str = include_str!("../../ainb-app/src/app/state.rs");
 
     let offenders: Vec<&str> = STATE_SOURCE
         .lines()

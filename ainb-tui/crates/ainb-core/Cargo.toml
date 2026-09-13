@@ -58,7 +58,6 @@ clap = { workspace = true }
 clap_complete = { workspace = true }
 tempfile = { workspace = true }
 nix = { workspace = true }
-arboard = { workspace = true }
 regex = { workspace = true }
 base64 = "0.22"
 ed25519-dalek = "2.1"

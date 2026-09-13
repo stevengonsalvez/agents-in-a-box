@@ -17,8 +17,9 @@
 //!
 //! ## Watched paths
 //! - `src/components/**/*.rs` — every screen/component renderer
-//! - `src/app/state.rs`       — `App::tick_plugin_renders`, the
-//!                              top-of-frame plugin drain
+//! - `../ainb-app/src/app/state.rs`: `App::tick_plugin_renders`, the
+//!   top-of-frame plugin drain. The state machine lives in `ainb-app`; the
+//!   TUI still runs it on its render thread.
 //!
 //! ## Allow-list
 //! Currently empty. If you genuinely need to await something in the
@@ -53,7 +54,7 @@ const SCAN_DIRS: &[&str] = &["src/components"];
 // and is render-path code, but the scan is function-scoped — an `.await` added
 // there would otherwise slip past the lint.
 const SCAN_FN_SCOPED: &[(&str, &[&str])] = &[(
-    "src/app/state.rs",
+    "../ainb-app/src/app/state.rs",
     &["tick_plugin_renders", "collect_plugin_render_outcome"],
 )];
 
@@ -146,9 +147,11 @@ fn scan_file_fn_scoped(
     offenders: &mut Vec<(PathBuf, usize, String)>,
 ) {
     let rel = path.strip_prefix(crate_root).unwrap_or(path).to_path_buf();
-    let Ok(text) = fs::read_to_string(path) else {
-        return;
-    };
+    // A missing file means it moved and the lint stopped watching it; fail
+    // rather than pass vacuously.
+    let text = fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!("render-thread lint cannot read {}: {error}", path.display())
+    });
     let lines: Vec<&str> = text.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         let trimmed = line.trim_start();

@@ -28,8 +28,9 @@ use ainb::git::repo_source::RepoSource;
 use ainb::models::session::{AntigravityModel, SessionAgentType};
 use ainb::providers::{AntigravityProvider, ProviderRegistry};
 
-fn make_dummy_key(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::empty())
+fn make_dummy_key(code: KeyCode) -> ainb::app::keymap::Chord {
+    ainb::app::terminal_keys::chord_from_key_event(&KeyEvent::new(code, KeyModifiers::empty()))
+        .expect("mapped key")
 }
 
 fn create_test_configure_state() -> ConfigureState {
@@ -57,7 +58,7 @@ fn test_configure_wizard_custom_cycle_to_antigravity() {
 
     // Cycle presets until reaching Custom slot
     while state.preset_selection != PresetSelection::Custom {
-        handle_key(&mut state, make_dummy_key(KeyCode::Right));
+        handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     }
     assert_eq!(state.preset_selection, PresetSelection::Custom);
 
@@ -66,7 +67,7 @@ fn test_configure_wizard_custom_cycle_to_antigravity() {
         if state.focused_row == ConfigureRow::Agent {
             break;
         }
-        handle_key(&mut state, make_dummy_key(KeyCode::Tab));
+        handle_key(&mut state, &make_dummy_key(KeyCode::Tab));
     }
     assert_eq!(state.focused_row, ConfigureRow::Agent);
 
@@ -75,41 +76,41 @@ fn test_configure_wizard_custom_cycle_to_antigravity() {
         if state.effective_preset().agent_provider == "antigravity" {
             break;
         }
-        handle_key(&mut state, make_dummy_key(KeyCode::Right));
+        handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     }
     assert_eq!(state.effective_preset().agent_provider, "antigravity");
 
     // Move to Model row
-    handle_key(&mut state, make_dummy_key(KeyCode::Tab));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Tab));
     assert_eq!(state.focused_row, ConfigureRow::Model);
 
     // Initial model should be default
     assert_eq!(state.effective_preset().agent_model, "default");
 
     // Cycle Model forward: default -> gemini-3.7-flash -> gemini-2.5-pro -> gemini-2.5-flash -> default
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(state.effective_preset().agent_model, "gemini-3.7-flash");
 
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(state.effective_preset().agent_model, "gemini-2.5-pro");
 
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(state.effective_preset().agent_model, "gemini-2.5-flash");
 
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(state.effective_preset().agent_model, "default");
 
     // Cycle Model backward: default -> gemini-2.5-flash -> gemini-2.5-pro -> gemini-3.7-flash -> default
-    handle_key(&mut state, make_dummy_key(KeyCode::Left));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Left));
     assert_eq!(state.effective_preset().agent_model, "gemini-2.5-flash");
 
-    handle_key(&mut state, make_dummy_key(KeyCode::Left));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Left));
     assert_eq!(state.effective_preset().agent_model, "gemini-2.5-pro");
 
-    handle_key(&mut state, make_dummy_key(KeyCode::Left));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Left));
     assert_eq!(state.effective_preset().agent_model, "gemini-3.7-flash");
 
-    handle_key(&mut state, make_dummy_key(KeyCode::Left));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Left));
     assert_eq!(state.effective_preset().agent_model, "default");
 }
 
@@ -127,7 +128,7 @@ fn test_configure_wizard_boundary_crossing_model_reset() {
     state.focused_row = ConfigureRow::Agent;
 
     // Claude -> Codex
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(
         state.custom_overrides.as_ref().unwrap().agent_provider,
         "codex"
@@ -141,7 +142,7 @@ fn test_configure_wizard_boundary_crossing_model_reset() {
     state.custom_overrides.as_mut().unwrap().agent_model = "gpt-5.5".to_string();
 
     // Codex -> Antigravity
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(
         state.custom_overrides.as_ref().unwrap().agent_provider,
         "antigravity"
@@ -155,7 +156,7 @@ fn test_configure_wizard_boundary_crossing_model_reset() {
     state.custom_overrides.as_mut().unwrap().agent_model = "gemini-3.7-flash".to_string();
 
     // Antigravity -> Codex (backward)
-    handle_key(&mut state, make_dummy_key(KeyCode::Left));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Left));
     assert_eq!(
         state.custom_overrides.as_ref().unwrap().agent_provider,
         "codex"
@@ -166,7 +167,7 @@ fn test_configure_wizard_boundary_crossing_model_reset() {
     );
 
     // Back to Antigravity
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(
         state.custom_overrides.as_ref().unwrap().agent_provider,
         "antigravity"
@@ -174,7 +175,7 @@ fn test_configure_wizard_boundary_crossing_model_reset() {
     state.custom_overrides.as_mut().unwrap().agent_model = "gemini-2.5-pro".to_string();
 
     // Antigravity -> Copilot (forward)
-    handle_key(&mut state, make_dummy_key(KeyCode::Right));
+    handle_key(&mut state, &make_dummy_key(KeyCode::Right));
     assert_eq!(
         state.custom_overrides.as_ref().unwrap().agent_provider,
         "copilot"

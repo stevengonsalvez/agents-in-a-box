@@ -90,7 +90,7 @@ fn sessions_mouse_click_selects_session_row_without_async_work() {
     let (_home, mut state, mut ui) = state_with_two_sessions();
 
     let second = session_row_y(&ui, 1);
-    let outcome = EventHandler::handle_mouse_event(
+    let outcome = ainb::app::mouse::handle_mouse_event(
         AppEvent::MouseClick { x: 8, y: second },
         &mut state,
         &mut ui,
@@ -108,12 +108,12 @@ fn sessions_mouse_double_click_attaches_selected_session_row() {
     let (_home, mut state, mut ui) = state_with_two_sessions();
 
     let row = session_row_y(&ui, 1);
-    let first = EventHandler::handle_mouse_event(
+    let first = ainb::app::mouse::handle_mouse_event(
         AppEvent::MouseClick { x: 8, y: row },
         &mut state,
         &mut ui,
     );
-    let second = EventHandler::handle_mouse_event(
+    let second = ainb::app::mouse::handle_mouse_event(
         AppEvent::MouseClick { x: 8, y: row },
         &mut state,
         &mut ui,
@@ -132,12 +132,12 @@ fn sessions_mouse_double_click_requires_same_attachable_row() {
 
     let first_row = session_row_y(&ui, 0);
     let second_row = session_row_y(&ui, 1);
-    let first = EventHandler::handle_mouse_event(
+    let first = ainb::app::mouse::handle_mouse_event(
         AppEvent::MouseClick { x: 8, y: first_row },
         &mut state,
         &mut ui,
     );
-    let second = EventHandler::handle_mouse_event(
+    let second = ainb::app::mouse::handle_mouse_event(
         AppEvent::MouseClick {
             x: 8,
             y: second_row,
@@ -157,8 +157,12 @@ fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (home, mut state, mut ui) = state_with_two_sessions();
 
-    EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 39, y: 8 }, &mut state, &mut ui);
-    EventHandler::handle_mouse_event(AppEvent::MouseDragging { x: 55, y: 8 }, &mut state, &mut ui);
+    ainb::app::mouse::handle_mouse_event(AppEvent::MouseClick { x: 39, y: 8 }, &mut state, &mut ui);
+    ainb::app::mouse::handle_mouse_event(
+        AppEvent::MouseDragging { x: 55, y: 8 },
+        &mut state,
+        &mut ui,
+    );
 
     assert_eq!(ui.sessions_pane.preferred_width, 56);
     let config_path = home.path().join(".agents-in-a-box/config/config.toml");
@@ -167,7 +171,11 @@ fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
         "drag hot path should not persist config before mouse release"
     );
 
-    EventHandler::handle_mouse_event(AppEvent::MouseDragEnd { x: 55, y: 8 }, &mut state, &mut ui);
+    ainb::app::mouse::handle_mouse_event(
+        AppEvent::MouseDragEnd { x: 55, y: 8 },
+        &mut state,
+        &mut ui,
+    );
 
     let config = std::fs::read_to_string(config_path).expect("persisted config");
     assert!(config.contains("sessions_sidebar_width = 56"));
@@ -178,12 +186,12 @@ fn sessions_mouse_toggle_collapses_and_expands_sidebar() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (home, mut state, mut ui) = state_with_two_sessions();
 
-    EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 3 }, &mut state, &mut ui);
+    ainb::app::mouse::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 3 }, &mut state, &mut ui);
     assert!(ui.sessions_pane.collapsed);
     assert_eq!(ui.sessions_pane.effective_width(120), 5);
 
     ui.sessions_pane.set_layout(Rect::new(0, 3, 5, 20), Rect::new(5, 3, 115, 20));
-    EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 4 }, &mut state, &mut ui);
+    ainb::app::mouse::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 4 }, &mut state, &mut ui);
 
     assert!(!ui.sessions_pane.collapsed);
     assert_eq!(ui.sessions_pane.effective_width(120), 40);
