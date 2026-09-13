@@ -27,19 +27,29 @@
 
 set -euo pipefail
 
+# A missing tool is a SKIP for a developer and a FAILURE in CI.
+#
+# Every guard below used to exit 0, so that someone without tmux was not
+# blocked. In CI that is exactly backwards, and it is how this script ran as a
+# silent no-op on the macOS leg while the job reported green. `REQUIRE=1` (set
+# by the workflow) turns each of them into exit 1.
+REQUIRE="${REQUIRE:-0}"
+
+missing() {
+  if [[ "$REQUIRE" == "1" ]]; then
+    echo "FAIL: $1 (REQUIRE=1)" >&2
+    exit 1
+  fi
+  echo "SKIP: $1" >&2
+  exit 0
+}
+
 AINB_BIN="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/debug/ainb}"
 if [[ ! -x "$AINB_BIN" ]]; then
-  echo "SKIP: no ainb binary at $AINB_BIN (build with: cargo build -p ainb)" >&2
-  exit 0
+  missing "no ainb binary at $AINB_BIN (build with: cargo build -p ainb)"
 fi
-if ! command -v tmux >/dev/null 2>&1; then
-  echo "SKIP: tmux is not on PATH" >&2
-  exit 0
-fi
-if ! command -v jq >/dev/null 2>&1; then
-  echo "SKIP: jq is not on PATH" >&2
-  exit 0
-fi
+command -v tmux >/dev/null 2>&1 || missing "tmux is not on PATH"
+command -v jq   >/dev/null 2>&1 || missing "jq is not on PATH"
 
 # A private tmux server. The shared one sizes new windows to whatever its
 # existing client has, commonly 63x36, which truncates the screens a TUI
@@ -52,8 +62,7 @@ export TMUX_TMPDIR
 # version is the second field; $NF is the channel.
 AINB_VERSION=$("$AINB_BIN" --version 2>/dev/null | awk '{print $2}')
 if [[ -z "$AINB_VERSION" ]]; then
-  echo "SKIP: $AINB_BIN would not report its version" >&2
-  exit 0
+  missing "$AINB_BIN would not report its version"
 fi
 
 FAILURES=0
