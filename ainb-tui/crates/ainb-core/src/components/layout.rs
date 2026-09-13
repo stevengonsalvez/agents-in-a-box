@@ -799,6 +799,8 @@ impl LayoutComponent {
             desc(" refresh "),
             key("⇧F", WARNING_ORANGE),
             desc(" filter "),
+            key("v", CORNFLOWER_BLUE),
+            desc(" model "),
             sep(),
             key("u", MUTED_GRAY),
             desc(" re-auth "),
@@ -903,6 +905,8 @@ impl LayoutComponent {
                 desc(" filter  "),
                 key("u", MUTED_GRAY),
                 desc(" re-auth  "),
+                key("v", CORNFLOWER_BLUE),
+                desc(" model "),
             ]),
         ];
 

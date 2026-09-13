@@ -66,7 +66,8 @@ pub enum SessionContextAction {
 /// Fleet-only metadata for one local session row.
 ///
 /// Absent fields mean Hangar has never observed them. The UI must omit those
-/// fields, never replace them with a guessed provider default.
+/// fields, never replace them with a guessed provider default. The Session
+/// List can temporarily use model/effort as its one-line title.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFleetMetadata {
     pub model: Option<String>,
@@ -3385,6 +3386,8 @@ pub struct AppState {
     pub selected_sessions: HashSet<Uuid>, // Multi-selected session IDs for bulk operations
     pub expand_all_workspaces: bool, // When true, show all sessions across all workspaces
     pub session_filter: SessionFilter, // View filter for Interactive sessions (Shift+F to cycle)
+    /// Session List alternate title mode; never persisted across TUI launches.
+    pub show_session_metadata: bool,
     pub current_screen: ScreenId,
     pub should_quit: bool,
     pub logs: HashMap<Uuid, Vec<String>>,
@@ -4177,6 +4180,7 @@ impl Default for AppState {
             selected_sessions: HashSet::new(),
             expand_all_workspaces: true, // Default to expanded view
             session_filter: app_config.ui_preferences.session_filter,
+            show_session_metadata: false,
             current_screen: screen_ids::HOME.to_string(),
             should_quit: false,
             logs: HashMap::new(),
@@ -7166,6 +7170,11 @@ impl AppState {
 
     pub fn toggle_expand_all_workspaces(&mut self) {
         self.expand_all_workspaces = !self.expand_all_workspaces;
+    }
+
+    /// Toggle compact model/effort titles for this TUI process only.
+    pub fn toggle_session_metadata(&mut self) {
+        self.show_session_metadata = !self.show_session_metadata;
     }
 
     /// Hide/show the Sessions bottom keymap legend (⇧M) and persist the choice.
@@ -12682,6 +12691,19 @@ impl AppState {
         }
     }
 
+    /// A daemon heartbeat proves transport only. Lifecycle remains authoritative
+    /// only while its own transition evidence is fresh. `0` is an explicit
+    /// no-expiry override for operators who require it.
+    pub(crate) fn fleet_lifecycle_is_fresh_at(
+        lifecycle_updated_at: i64,
+        now_ms: i64,
+        stale_after_ms: i64,
+    ) -> bool {
+        stale_after_ms == 0
+            || (lifecycle_updated_at > 0
+                && now_ms.saturating_sub(lifecycle_updated_at) <= stale_after_ms)
+    }
+
     /// A local stopped observation means its tmux session is gone. A retained
     /// Fleet `IDLE` row only means its last observed pane was quiet, so it must
     /// not resurrect a stopped session into the Active filter. Fleet may still
@@ -12827,10 +12849,18 @@ impl AppState {
                     .reachable
                     .then(|| {
                         fleet_metadata.get(&s.id).and_then(|metadata| {
-                            metadata
-                                .lifecycle
-                                .and_then(Self::session_status_for_fleet_lifecycle)
-                                .map(|status| (status, metadata.lifecycle_updated_at))
+                            Self::fleet_lifecycle_is_fresh_at(
+                                metadata.lifecycle_updated_at,
+                                now_ms,
+                                self.app_config.fleet.healthy_state_stale_ms,
+                            )
+                            .then(|| {
+                                metadata
+                                    .lifecycle
+                                    .and_then(Self::session_status_for_fleet_lifecycle)
+                                    .map(|status| (status, metadata.lifecycle_updated_at))
+                            })
+                            .flatten()
                         })
                     })
                     .flatten();

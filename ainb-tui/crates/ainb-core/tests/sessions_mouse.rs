@@ -31,6 +31,11 @@ fn state_with_sessions(count: usize) -> (tempfile::TempDir, AppState) {
     state
         .sessions_pane_state
         .set_layout(Rect::new(0, 3, 40, 20), Rect::new(40, 3, 80, 20));
+    // One workspace header plus one physical terminal line per session.
+    // This is normally supplied by the renderer before mouse events arrive.
+    state
+        .sessions_pane_state
+        .set_list_item_heights(vec![1; count + 1]);
     state.sessions_pane_state.set_list_scroll_offset(0);
 
     (temp_home, state)
@@ -45,7 +50,7 @@ fn sessions_mouse_click_selects_session_row_without_async_work() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state) = state_with_two_sessions();
 
-    // y=3 is the top border, y=4 workspace header, y=5 first session, y=6 second session.
+    // Header is y=4; single-line sessions are y=5 and y=6.
     let outcome = EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 8, y: 6 }, &mut state);
 
     assert!(outcome.is_none());

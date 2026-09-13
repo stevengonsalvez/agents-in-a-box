@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthChar;
 const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
 const GOLD: Color = Color::Rgb(255, 215, 0);
 const SELECTION_GREEN: Color = Color::Rgb(100, 200, 100);
+const PROGRESS_CYAN: Color = Color::Rgb(100, 200, 230);
 const WARNING_ORANGE: Color = Color::Rgb(255, 165, 0);
 const DARK_BG: Color = Color::Rgb(25, 25, 35);
 const LIST_HIGHLIGHT_BG: Color = Color::Rgb(40, 40, 60);
@@ -29,7 +30,7 @@ const ALERT_WAITING_AMBER: Color = Color::Rgb(230, 180, 80);
 const ALERT_PERMISSION_RED: Color = Color::Rgb(220, 90, 90);
 const ALERT_ERROR_RED: Color = Color::Rgb(230, 100, 100);
 
-// Per-agent brand colours for the compact provider icon on the metadata line.
+// Per-agent brand colours for session metadata elsewhere in this component.
 const BRAND_CLAUDE: Color = Color::Rgb(217, 119, 87); // Anthropic clay-orange
 const BRAND_CODEX: Color = Color::Rgb(236, 236, 241); // OpenAI near-white
 const BRAND_COPILOT: Color = Color::Rgb(46, 160, 67); // GitHub green
@@ -670,7 +671,7 @@ impl SessionListComponent {
                     // Tree line characters with subdued color
                     let tree_prefix = if is_last_session { "└─" } else { "├─" };
 
-                    let lifecycle_label = session_lifecycle_label(state, session);
+                    let lifecycle_label = session_lifecycle_label(state, session, now_ms);
                     let status_indicator = session_lifecycle_indicator(lifecycle_label);
 
                     // Git changes (controlled by show_git_status config)
@@ -690,13 +691,17 @@ impl SessionListComponent {
                         session_lifecycle_color(lifecycle_label)
                     };
                     let branch_color = state_color;
-                    let agent_icon = session.agent_type.icon();
-                    let agent_color = agent_brand_color(&session.agent_type);
                     let is_multi_selected = state.selected_sessions.contains(&session.id);
-                    let title = session_list_name(session);
+                    let normal_title = session_list_name(session);
+                    let title = if state.show_session_metadata {
+                        session_model_effort_label(state, session)
+                            .unwrap_or_else(|| normal_title.clone())
+                    } else {
+                        normal_title.clone()
+                    };
                     let collision_id = session_collision_id(
                         session,
-                        title_counts.get(&title).copied().unwrap_or_default() > 1,
+                        title_counts.get(&normal_title).copied().unwrap_or_default() > 1,
                     );
 
                     let checkbox = ballot_checkbox(is_multi_selected);
@@ -748,20 +753,33 @@ impl SessionListComponent {
                     // than searched, so future reordering cannot silently
                     // truncate a tree or status decoration instead.
                     let name_span_index = title_spans.len();
+                    let title_with_collision = collision_id
+                        .as_ref()
+                        // Identity precedes the lossy title budget so two
+                        // same-branch rows remain distinguishable even when a
+                        // narrow sidebar must protect an attention/status gutter.
+                        .map(|identity| format!("{identity} · {title}"))
+                        .unwrap_or_else(|| title.clone());
                     title_spans.push(Span::styled(
-                        title.clone(),
-                        Style::default().fg(branch_color).add_modifier(if is_selected_session {
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        }),
+                        title_with_collision.clone(),
+                        Style::default()
+                            .fg(if state.show_session_metadata {
+                                METADATA_GRAY
+                            } else {
+                                branch_color
+                            })
+                            .add_modifier(if is_selected_session {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
                     ));
                     title_spans.push(Span::styled(
                         changes_text,
                         Style::default().fg(WARNING_ORANGE),
                     ));
                     debug_assert_eq!(
-                        title_spans[name_span_index].content, title,
+                        title_spans[name_span_index].content, title_with_collision,
                         "name_span_index must track the session-name span"
                     );
                     // The chip whose answer is still in flight, if it is on
@@ -790,33 +808,7 @@ impl SessionListComponent {
                     );
                     let title_line = Line::from(title_spans);
 
-                    // Keep model/effort visible for every row without making
-                    // identity compete with provider metadata. It is a separate
-                    // line, aligned underneath the title rather than a pill.
-                    let mut metadata_spans = vec![
-                        empty_badge(),
-                        Span::raw("     "),
-                        Span::styled(agent_icon.to_string(), Style::default().fg(agent_color)),
-                    ];
-                    if let Some(identity) = collision_id {
-                        // Metadata has an independent second-line budget. Put
-                        // collision identity first there so a narrow title can
-                        // still yield to the fixed right status/ASK gutter.
-                        metadata_spans.push(Span::raw(" "));
-                        metadata_spans
-                            .push(Span::styled(identity, Style::default().fg(METADATA_GRAY)));
-                    }
-                    if let Some(metadata) = session_model_effort_label(state, session) {
-                        let prefix_width: usize = metadata_spans.iter().map(Span::width).sum();
-                        metadata_spans.push(Span::raw(" · "));
-                        metadata_spans.push(Span::styled(
-                            truncate_text(&metadata, row_width.saturating_sub(prefix_width + 3)),
-                            Style::default().fg(METADATA_GRAY),
-                        ));
-                    }
-                    let metadata_line = Line::from(metadata_spans);
-
-                    items.push(ListItem::new(vec![title_line, metadata_line]));
+                    items.push(ListItem::new(title_line));
                 }
 
                 // Render workspace shell (single shell per workspace)
@@ -1243,7 +1235,7 @@ fn session_collision_id(session: &Session, has_collision: bool) -> Option<String
 /// that a pane was found. Never paint that as `RUN`: an attachable shell may be
 /// quiet, waiting, or already complete. Explicit hook attention wins, then an
 /// authoritative Fleet lifecycle; a live pane with neither is honestly `LIVE`.
-fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str {
+fn session_lifecycle_label(state: &AppState, session: &Session, now_ms: i64) -> &'static str {
     // A stopped session has no attachable pane. It must never retain an old
     // chip in its right gutter while refresh is catching up.
     if matches!(session.status, SessionStatus::Stopped) {
@@ -1253,12 +1245,21 @@ fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str 
         return chip.kind.label();
     }
 
+    let fleet_lifecycle_is_fresh = state.fleet_metadata.get(&session.id).is_some_and(|metadata| {
+        AppState::fleet_lifecycle_is_fresh_at(
+            metadata.lifecycle_updated_at,
+            now_ms,
+            state.app_config.fleet.healthy_state_stale_ms,
+        )
+    });
+
     if matches!(session.status, SessionStatus::Idle)
         && matches!(
             state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
             Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete)
         )
         && state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false)
+        && fleet_lifecycle_is_fresh
         && session.live_attention.is_empty()
     {
         return "DONE";
@@ -1268,7 +1269,7 @@ fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str 
         SessionStatus::Running => {
             let fleet_is_live =
                 state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false);
-            match fleet_is_live
+            match (fleet_is_live && fleet_lifecycle_is_fresh)
                 .then(|| {
                     state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle)
                 })
@@ -1302,7 +1303,8 @@ fn session_lifecycle_indicator(label: &str) -> &'static str {
 /// Agent-state colour shared by the title and right-hand status word.
 fn session_lifecycle_color(label: &str) -> Color {
     match label {
-        "RUN" | "DONE" => SELECTION_GREEN,
+        "RUN" => SELECTION_GREEN,
+        "DONE" => PROGRESS_CYAN,
         "ASK" | "APPROVE" | "ERR" => ALERT_PERMISSION_RED,
         "WAIT" => ALERT_WAITING_AMBER,
         "LIVE" | "STOP" => MUTED_GRAY,
@@ -1526,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_shows_observed_model_and_effort_on_each_session_row() {
+    fn sidebar_toggles_observed_model_and_effort_into_one_line_titles() {
         let mut state = chip_state();
         let first = state.workspaces[0].sessions[0].id;
         let second = state.workspaces[0].sessions[1].id;
@@ -1562,17 +1564,23 @@ mod tests {
             "{second_row}"
         );
         assert!(
-            rendered.contains("gpt-5.6-terra / high"),
-            "first row gets a second-line model/effort label: {rendered}"
+            !rendered.contains("gpt-5.6-terra / high"),
+            "normal mode retains session names: {rendered}"
         );
         assert!(
-            rendered.contains("claude-opus-5 / medium"),
-            "second row gets a second-line model/effort label: {rendered}"
+            !rendered.contains("claude-opus-5 / medium"),
+            "normal mode retains session names: {rendered}"
         );
+
+        state.show_session_metadata = true;
+        let metadata = render_panel(&mut state, 120, 14);
+        assert!(metadata.contains("gpt-5.6-terra / high"), "{metadata}");
+        assert!(metadata.contains("claude-opus-5 / medium"), "{metadata}");
+        assert!(!metadata.contains("ainb/acp-chat"), "{metadata}");
     }
 
     #[test]
-    fn sidebar_keeps_model_effort_on_its_own_line_at_narrow_width() {
+    fn sidebar_metadata_mode_keeps_attention_in_the_fixed_gutter_at_narrow_width() {
         let mut state = chip_state();
         let first = state.workspaces[0].sessions[0].id;
         state.fleet_metadata.insert(
@@ -1584,6 +1592,7 @@ mod tests {
             },
         );
 
+        state.show_session_metadata = true;
         let rendered = render_panel(&mut state, 42, 14);
         assert!(rendered.contains("gpt-5.6-terra / high"), "{rendered}");
         assert!(
@@ -1616,6 +1625,18 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_gutter_uses_distinct_run_and_done_colours() {
+        assert_eq!(session_lifecycle_color("RUN"), SELECTION_GREEN);
+        assert_eq!(session_lifecycle_color("DONE"), PROGRESS_CYAN);
+        assert_ne!(
+            session_lifecycle_color("RUN"),
+            session_lifecycle_color("DONE")
+        );
+        assert_eq!(session_lifecycle_color("WAIT"), ALERT_WAITING_AMBER);
+        assert_eq!(session_lifecycle_color("ASK"), ALERT_PERMISSION_RED);
+    }
+
+    #[test]
     fn sidebar_shows_lifecycle_words_separate_from_attention() {
         let mut state = chip_state();
         state.workspaces[0].sessions[0].status = SessionStatus::Running;
@@ -1626,7 +1647,7 @@ mod tests {
             session.live_attention.clear();
         }
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[2]),
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[2], CHIP_NOW),
             "STOP"
         );
 
@@ -1653,7 +1674,7 @@ mod tests {
         state.workspaces[0].sessions[0].status = SessionStatus::Running;
 
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0], CHIP_NOW),
             "LIVE",
             "tmux discovery alone is only attachability"
         );
@@ -1662,12 +1683,13 @@ mod tests {
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::Running),
+                lifecycle_updated_at: CHIP_NOW,
                 ..Default::default()
             },
         );
         state.daemon_attention.lock().unwrap().reachable = true;
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0], CHIP_NOW),
             "RUN",
             "authoritative Fleet active-work lifecycle permits RUN"
         );
@@ -1683,6 +1705,7 @@ mod tests {
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
+                lifecycle_updated_at: CHIP_NOW,
                 ..Default::default()
             },
         );
@@ -1739,6 +1762,35 @@ mod tests {
     }
 
     #[test]
+    fn stale_fleet_running_is_live_not_run_and_stale_completion_is_not_done() {
+        let mut state = chip_state();
+        let session = state.workspaces[0].sessions[0].id;
+        state.workspaces[0].sessions[0].live_attention.clear();
+        state.workspaces[0].sessions[0].status = SessionStatus::Running;
+        state.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet_metadata.insert(
+            session,
+            crate::app::state::SessionFleetMetadata {
+                lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::Running),
+                lifecycle_updated_at: CHIP_NOW - 5 * 60_000 - 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0], CHIP_NOW),
+            "LIVE"
+        );
+
+        state.workspaces[0].sessions[0].status = SessionStatus::Idle;
+        state.fleet_metadata.get_mut(&session).unwrap().lifecycle =
+            Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete);
+        assert_eq!(
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0], CHIP_NOW),
+            "IDLE"
+        );
+    }
+
+    #[test]
     fn retained_fleet_done_never_relabels_a_stopped_session() {
         let mut state = chip_state();
         let session = state.workspaces[0].sessions[0].id;
@@ -1754,13 +1806,13 @@ mod tests {
         );
 
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            session_lifecycle_label(&state, &state.workspaces[0].sessions[0], CHIP_NOW),
             "STOP"
         );
     }
 
     #[test]
-    fn metadata_line_click_targets_its_own_session() {
+    fn single_line_session_click_targets_its_own_session() {
         use ratatui::{Terminal, backend::TestBackend};
 
         let mut state = chip_state();
@@ -1778,15 +1830,22 @@ mod tests {
             session_idx: 0,
         });
         assert_eq!(state.session_list_row_at_mouse(8, 2), Some(first));
-        assert_eq!(state.session_list_row_at_mouse(8, 3), Some(first));
+        assert_eq!(
+            state.session_list_row_at_mouse(8, 3),
+            Some(SessionListRowTarget::Attachable(
+                AttachableRef::WorkspaceSession {
+                    workspace_idx: 0,
+                    session_idx: 1,
+                }
+            ))
+        );
 
-        // When List has scrolled past the one-line workspace header, the two
-        // physical rows of the first session still resolve to the same logical
-        // item before the next session starts.
+        // List row mapping remains one physical row per logical session after
+        // scrolling past the workspace header.
         state.sessions_pane_state.set_list_scroll_offset(1);
         assert_eq!(state.sessions_pane_state.row_index_at(8, 1), Some(1));
-        assert_eq!(state.sessions_pane_state.row_index_at(8, 2), Some(1));
-        assert_eq!(state.sessions_pane_state.row_index_at(8, 3), Some(2));
+        assert_eq!(state.sessions_pane_state.row_index_at(8, 2), Some(2));
+        assert_eq!(state.sessions_pane_state.row_index_at(8, 3), Some(3));
     }
 
     #[test]
@@ -2104,7 +2163,7 @@ mod tests {
         workspace.add_session(second);
         state.workspaces.push(workspace);
 
-        let painted = render_panel(&mut state, 24, 8);
+        let painted = render_panel(&mut state, 42, 8);
         assert!(
             painted.contains(&format!("#{first_id}")),
             "painted: {painted}"
