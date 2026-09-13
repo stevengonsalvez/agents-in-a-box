@@ -47,7 +47,7 @@ attach = "o"
     assert!(
         keymap
             .binding_for(&KeyContext::screen("session_list"), "attach")
-            .is_some_and(|binding| binding.chord.as_str() == "o")
+            .is_some_and(|binding| binding.chord.as_ref().map(Chord::as_str) == Some("o"))
     );
     assert!(matches!(
         keymap.resolve(
@@ -80,12 +80,22 @@ cleanup = "enter"
     let keymap = Keymap::defaults().with_overrides(&overrides).unwrap();
 
     assert_eq!(
-        keymap.binding_for(&context, "attach").unwrap().chord.as_str(),
-        "x"
+        keymap
+            .binding_for(&context, "attach")
+            .unwrap()
+            .chord
+            .as_ref()
+            .map(Chord::as_str),
+        Some("x")
     );
     assert_eq!(
-        keymap.binding_for(&context, "cleanup").unwrap().chord.as_str(),
-        "enter"
+        keymap
+            .binding_for(&context, "cleanup")
+            .unwrap()
+            .chord
+            .as_ref()
+            .map(Chord::as_str),
+        Some("enter")
     );
 }
 
@@ -102,8 +112,8 @@ enter = "f12"
     let keymap = Keymap::defaults().with_overrides(&overrides).unwrap();
 
     assert_eq!(
-        keymap.binding_for(&context, "enter").unwrap().chord.as_str(),
-        "f12"
+        keymap.binding_for(&context, "enter").unwrap().chord.as_ref().map(Chord::as_str),
+        Some("f12")
     );
 }
 
@@ -189,8 +199,9 @@ attach = "a"
             .binding_for(&KeyContext::screen("session_list"), "attach")
             .unwrap()
             .chord
-            .as_str(),
-        "a"
+            .as_ref()
+            .map(Chord::as_str),
+        Some("a")
     );
 }
 

@@ -113,7 +113,8 @@ fn state_for(context: &KeyContext) -> AppState {
 #[test]
 fn every_default_row_converts_to_the_chord_the_legacy_path_produced() {
     for binding in Keymap::defaults().bindings() {
-        let event = terminal_event_for(&binding.chord);
+        let bound = binding.chord.as_ref().expect("built-in rows are bound");
+        let event = terminal_event_for(bound);
         let converted = chord_from_key_event(&event)
             .unwrap_or_else(|| panic!("{} [{}] has no chord", binding.id, binding.ctx.name()));
         assert_eq!(
@@ -123,13 +124,7 @@ fn every_default_row_converts_to_the_chord_the_legacy_path_produced() {
             binding.id,
             binding.ctx.name()
         );
-        assert_eq!(
-            converted,
-            binding.chord,
-            "{} [{}]",
-            binding.id,
-            binding.ctx.name()
-        );
+        assert_eq!(&converted, bound, "{} [{}]", binding.id, binding.ctx.name());
     }
 }
 
@@ -141,12 +136,13 @@ fn key_intent_resolves_to_the_event_the_key_event_path_produced_for_every_row() 
     let keymap = Keymap::defaults();
     let mut reached = 0;
     for binding in keymap.bindings() {
-        let event = terminal_event_for(&binding.chord);
+        let bound = binding.chord.as_ref().expect("built-in rows are bound");
+        let event = terminal_event_for(bound);
         let label = format!(
             "{} [{}] `{}`",
             binding.id,
             binding.ctx.name(),
-            binding.chord.as_str()
+            bound.as_str()
         );
 
         let mut legacy_state = state_for(&binding.ctx);
@@ -166,7 +162,7 @@ fn key_intent_resolves_to_the_event_the_key_event_path_produced_for_every_row() 
         assert_eq!(state.versions(), legacy_state.versions(), "{label}");
 
         // The row itself, looked up in its own context, yields its action.
-        let action = keymap.resolve(std::slice::from_ref(&binding.ctx), &binding.chord);
+        let action = keymap.resolve(std::slice::from_ref(&binding.ctx), bound);
         assert_eq!(
             format!("{action:?}"),
             format!("{:?}", Some(&binding.action)),

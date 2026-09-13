@@ -918,7 +918,9 @@ impl KeyAction {
 pub struct Binding {
     pub id: &'static str,
     pub ctx: KeyContext,
-    pub chord: Chord,
+    /// The key that runs this row, or `None` for a command reachable only by
+    /// name (from a palette or a click). Unbound rows never match a key press.
+    pub chord: Option<Chord>,
     pub action: KeyAction,
     pub doc: &'static str,
 }
@@ -959,11 +961,13 @@ impl Keymap {
                     binding.id
                 )));
             }
-            let key = (binding.ctx.clone(), binding.chord.clone());
-            if by_chord.insert(key, index).is_some() {
+            let Some(chord) = &binding.chord else {
+                continue;
+            };
+            if by_chord.insert((binding.ctx.clone(), chord.clone()), index).is_some() {
                 return Err(OverrideError(format!(
                     "duplicate key `{}` in [{}]",
-                    binding.chord.as_str(),
+                    chord.as_str(),
                     binding.ctx.name()
                 )));
             }
@@ -1098,7 +1102,7 @@ impl Keymap {
             is_override_target
                 || !replacements.iter().any(|(_, context, event, chord)| {
                     binding.ctx == *context
-                        && binding.chord == *chord
+                        && binding.chord.as_ref() == Some(chord)
                         && binding.id != event.as_str()
                 })
         });
@@ -1107,7 +1111,7 @@ impl Keymap {
                 .iter_mut()
                 .find(|(binding_index, _)| *binding_index == index)
                 .expect("validated override target remains in keymap");
-            binding.1.chord = chord;
+            binding.1.chord = Some(chord);
         }
         self.bindings = bindings.into_iter().map(|(_, binding)| binding).collect();
 

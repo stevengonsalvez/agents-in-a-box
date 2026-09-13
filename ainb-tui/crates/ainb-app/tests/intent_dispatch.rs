@@ -149,3 +149,49 @@ fn intents_round_trip_through_json() {
     );
     assert!(serde_json::from_str::<Intent>(r#"{"Key":"cmd+k"}"#).is_err());
 }
+
+#[test]
+fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
+    use ainb_app::app::events::AppEvent;
+    use ainb_app::app::keymap::{Binding, KeyAction, KeyContext};
+    use ainb_app::app::keymap_toml::KeymapOverrides;
+
+    let mut rows = Keymap::defaults().bindings().cloned().collect::<Vec<_>>();
+    rows.push(Binding {
+        id: "help_from_palette",
+        ctx: KeyContext::Global,
+        chord: None,
+        action: KeyAction::App(AppEvent::ToggleHelp),
+        doc: "Toggle keyboard help from the palette",
+    });
+    let keymap = Keymap::new(rows).expect("an unbound row is valid");
+    let id = CommandId::new("global.help_from_palette");
+    assert!(
+        keymap.commands().any(|(command, _)| command == id),
+        "listed for a palette"
+    );
+
+    let mut state = AppState::new();
+    let before = state.versions();
+    dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Command(id, serde_json::Value::Null),
+    );
+    assert!(state.shell.help_visible, "runs by name");
+    assert_eq!(bumped(&before, &state.versions()), vec![SectionId::Shell]);
+
+    let chord = Chord::parse("ctrl+g").expect("valid chord");
+    assert!(
+        keymap.resolve(&[KeyContext::Global], &chord).is_none(),
+        "no key reaches it"
+    );
+    let overrides = KeymapOverrides::parse("[global]\nhelp_from_palette = \"ctrl+g\"\n")
+        .expect("valid override");
+    let bound = keymap.with_overrides(&overrides).expect("an override can bind it");
+    assert!(matches!(
+        bound.resolve(&[KeyContext::Global], &chord),
+        Some(KeyAction::App(AppEvent::ToggleHelp))
+    ));
+}

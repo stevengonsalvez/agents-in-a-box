@@ -13,7 +13,7 @@ fn app(
     Binding {
         id,
         ctx,
-        chord: Chord::parse(chord).expect("built-in chord is valid"),
+        chord: Some(Chord::parse(chord).expect("built-in chord is valid")),
         action: KeyAction::App(event),
         doc,
     }
@@ -29,7 +29,7 @@ fn action(
     Binding {
         id,
         ctx,
-        chord: Chord::parse(chord).expect("built-in chord is valid"),
+        chord: Some(Chord::parse(chord).expect("built-in chord is valid")),
         action,
         doc,
     }
