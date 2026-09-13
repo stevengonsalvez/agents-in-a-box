@@ -58,3 +58,20 @@ pub fn plugin_owns_help_keys(state: &AppState) -> bool {
     plugin_id_for_screen(&state.shell.current_screen)
         .is_some_and(|id| PLUGINS_WITH_OWN_HELP.contains(&id))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_id_for_screen_resolves_analytics() {
+        assert_eq!(plugin_id_for_screen(ids::ANALYTICS), Some("burndown"));
+        assert_eq!(plugin_id_for_screen(ids::WITR), Some("witr"));
+        assert_eq!(plugin_id_for_screen(ids::LEARNINGS), Some("learnings"));
+        assert_eq!(plugin_id_for_screen(ids::ABTOP), Some("abtop"));
+        assert_eq!(plugin_id_for_screen(ids::HANGAR), Some("hangar-tui"));
+        // Non-plugin screens return None so the forwarder bails early.
+        assert_eq!(plugin_id_for_screen(ids::HOME), None);
+        assert_eq!(plugin_id_for_screen("nonsense"), None);
+    }
+}

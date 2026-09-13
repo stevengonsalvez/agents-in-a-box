@@ -1237,18 +1237,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn plugin_id_for_screen_resolves_analytics() {
-        assert_eq!(plugin_id_for_screen(ids::ANALYTICS), Some("burndown"));
-        assert_eq!(plugin_id_for_screen(ids::WITR), Some("witr"));
-        assert_eq!(plugin_id_for_screen(ids::LEARNINGS), Some("learnings"));
-        assert_eq!(plugin_id_for_screen(ids::ABTOP), Some("abtop"));
-        assert_eq!(plugin_id_for_screen(ids::HANGAR), Some("hangar-tui"));
-        // Non-plugin screens return None so the forwarder bails early.
-        assert_eq!(plugin_id_for_screen(ids::HOME), None);
-        assert_eq!(plugin_id_for_screen("nonsense"), None);
-    }
-
     /// Regression (PR #249 review HIGH-1): with the runtime up but the
     /// plugin NOT registered — exactly the "[plugin unavailable]"
     /// placeholder state — `send_key` drops the keystroke. Esc/q must

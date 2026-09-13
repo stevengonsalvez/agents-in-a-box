@@ -76,3 +76,39 @@ pub struct PluginViewports {
     /// changed area forces a fresh render.
     pub last_render_viewport: std::collections::HashMap<ScreenId, (u16, u16)>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn screen_ids_are_unique() {
+        let all = [
+            ids::HOME,
+            ids::CONFIG,
+            ids::ANALYTICS,
+            ids::SESSION_LIST,
+            ids::LOGS,
+            ids::LOG_HISTORY,
+            ids::TERMINAL,
+            ids::HELP,
+            ids::NEW_SESSION,
+            ids::SEARCH_WORKSPACE,
+            ids::NON_GIT_NOTIFICATION,
+            ids::ATTACHED_TERMINAL,
+            ids::AUTH_SETUP,
+            ids::CLAUDE_CHAT,
+            ids::GIT_VIEW,
+            ids::ONBOARDING,
+            ids::SETUP_MENU,
+            ids::CHANGELOG,
+            ids::SESSION_RECOVERY,
+            ids::SKILLS,
+            ids::SKILL_MANAGER,
+        ];
+        let mut sorted = all.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), all.len(), "screen ids must be unique");
+    }
+}
