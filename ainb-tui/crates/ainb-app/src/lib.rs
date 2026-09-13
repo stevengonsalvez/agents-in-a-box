@@ -31,6 +31,7 @@ pub mod self_exec_guard;
 pub mod setup;
 pub mod tmux;
 pub mod usage_cache;
+pub mod viewport;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
