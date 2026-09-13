@@ -3,6 +3,7 @@
 // `ainb-core::components`, which re-exports this module.
 
 pub mod config_popup;
+pub mod daemons;
 pub mod onboarding;
 pub mod setup_menu;
 pub mod skill_manager_screen;

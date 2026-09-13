@@ -26,6 +26,7 @@ pub mod bridge;
 pub mod broadcast;
 pub mod chat_host;
 pub mod control;
+pub mod daemon_cta;
 pub mod daemons;
 pub mod pal_dial;
 pub mod plumbing;

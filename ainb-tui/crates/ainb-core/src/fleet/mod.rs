@@ -1,8 +1,7 @@
 // ABOUTME: Terminal-side fleet pieces. The fleet service layer lives in
-// `ainb-app`; this module re-exports it and adds the two modules that still
-// depend on screen components (the daemon start offer and the session log tab).
+// `ainb-app`; this module re-exports it and adds the session log tab worker, which still
+// depends on a screen component.
 
 pub use ainb_app::fleet::*;
 
-pub mod daemon_cta;
 pub mod session_log;

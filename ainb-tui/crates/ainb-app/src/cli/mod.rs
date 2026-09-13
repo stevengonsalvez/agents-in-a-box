@@ -4,7 +4,9 @@
 // re-exports this module from its own `cli`.
 
 pub mod codex_statusline;
+pub mod daemon;
 pub mod deps;
+pub mod fleet;
 pub mod hangar;
 pub mod statusline;
 pub mod update;
