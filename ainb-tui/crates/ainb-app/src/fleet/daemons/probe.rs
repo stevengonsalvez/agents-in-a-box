@@ -305,7 +305,7 @@ fn heartbeat_version(hb: &DaemonHeartbeat) -> (Option<String>, Option<bool>) {
 /// binary. Unknown, prerelease, equal, and newer versions return false: repair
 /// paths are upgrade-only and must never downgrade a live daemon.
 #[must_use]
-pub(crate) fn release_version_is_older(running: &str, current: &str) -> bool {
+pub fn release_version_is_older(running: &str, current: &str) -> bool {
     fn parts(version: &str) -> Option<[u64; 3]> {
         let mut parts = version.split('.').map(str::parse::<u64>);
         let parsed = [

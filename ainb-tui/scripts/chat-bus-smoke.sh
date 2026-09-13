@@ -503,7 +503,7 @@ seed_first_run_records() {
   # verb (same trap the tmux tripwires document).
   #
   # The version is READ FROM THE BINARY, never a literal: `needs_onboarding`
-  # (ainb-core/src/config/onboarding.rs) re-runs the wizard when the record's
+  # (ainb-app/src/config/onboarding.rs) re-runs the wizard when the record's
   # MAJOR version differs from the binary's, so a placeholder like `smoke` is
   # indistinguishable from major 0 and the wizard fires anyway — invisible to
   # every CLI journey, and fatal to J6, whose `f` the wizard swallows.

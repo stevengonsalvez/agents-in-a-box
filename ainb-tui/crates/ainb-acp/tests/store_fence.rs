@@ -12,14 +12,22 @@ use std::process::Command;
 
 /// The crates allowed to depend on `sqlx`.
 ///
-/// The plan's rule is "`ainb-hangar-store` ONLY". The TREE already has two more
-/// (DRIFT, recorded here rather than papered over): `ainb-hangar-daemon` and
+/// The plan's rule is "`ainb-hangar-store` ONLY". The TREE already has more
+/// (DRIFT, recorded here rather than papered over): `ainb-hangar-daemon`,
 /// `ainb` (the package name of `crates/ainb-core`, whose hangar workspace
-/// bootstrap issues raw SQL, see its Cargo.toml comment). They are
-/// grandfathered by NAME so each is reviewable, and the fence still does its
-/// real job: it stops the set growing. NOTHING may be added here without
-/// deleting the raw SQL that made it necessary.
-const ALLOWED: &[&str] = &["ainb-hangar-store", "ainb-hangar-daemon", "ainb"];
+/// bootstrap issues raw SQL, see its Cargo.toml comment) and `ainb-app`, which
+/// is not a new site: `plugins::load_workspace_catalogue` held one of `ainb`'s
+/// grandfathered queries and moved with `plugins.rs` when the service layer
+/// split out of `ainb-core`. They are grandfathered by NAME so each is
+/// reviewable, and the fence still does its real job: it stops the set of
+/// queries growing. NOTHING may be added here without deleting the raw SQL
+/// that made it necessary.
+const ALLOWED: &[&str] = &[
+    "ainb-hangar-store",
+    "ainb-hangar-daemon",
+    "ainb",
+    "ainb-app",
+];
 
 #[test]
 fn sqlx_appears_only_in_the_crates_that_own_raw_sql() {

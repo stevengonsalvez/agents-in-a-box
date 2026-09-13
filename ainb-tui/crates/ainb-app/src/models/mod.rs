@@ -11,7 +11,7 @@ pub mod usage_dir_watcher;
 pub mod workspace;
 
 pub use other_tmux::OtherTmuxSession;
-pub(crate) use session::is_default_model;
+pub use session::is_default_model;
 pub use session::{
     AntigravityModel, ClaudeModel, CodexModel, GitChanges, Session, SessionAgentType, SessionMode,
     SessionStatus, ShellSession, ShellSessionStatus, SshTarget,

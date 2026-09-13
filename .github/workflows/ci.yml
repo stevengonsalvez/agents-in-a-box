@@ -759,7 +759,7 @@ jobs:
           cargo test -p ainb --test behavioral keeping_dead_pane \
             --no-fail-fast -- --nocapture \
             2>&1 | tee "$RUNNER_TEMP/codex-launch-tmux.log"
-          cargo test -p ainb --lib capture_failed_launch_pane_reads_a_dead_pane \
+          cargo test -p ainb-app --lib capture_failed_launch_pane_reads_a_dead_pane \
             --no-fail-fast -- --nocapture \
             2>&1 | tee -a "$RUNNER_TEMP/codex-launch-tmux.log"
           if grep -q '^SKIP:' "$RUNNER_TEMP/codex-launch-tmux.log"; then

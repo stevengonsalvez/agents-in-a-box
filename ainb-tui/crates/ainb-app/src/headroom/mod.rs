@@ -348,8 +348,8 @@ fn try_kill(pid: u32) -> bool {
 /// another (e.g. `headroom_base_url()` in the session_manager tests). All such
 /// tests — in this module AND others — must hold this lock. See
 /// [reference: ENV_LOCK for parallel tests].
-#[cfg(test)]
-pub(crate) static HEADROOM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(any(test, feature = "test-support"))]
+pub static HEADROOM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {

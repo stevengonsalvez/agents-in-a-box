@@ -8,10 +8,8 @@
 
 pub mod attach;
 pub mod auth;
-pub mod codex_statusline;
 pub mod config_cmd;
 pub mod daemon;
-pub mod deps;
 pub mod diff_review;
 pub mod doctor;
 pub mod favorites;
@@ -34,12 +32,13 @@ pub mod registry;
 pub mod rtk;
 pub mod run;
 pub mod status;
-pub mod statusline;
 pub mod statusline_install;
 pub mod tmux_install;
-pub mod update;
 pub mod usage;
-pub mod util;
+
+// The renderer-agnostic CLI pieces (statusline caches, dependency probes,
+// update checks, `OutputFormat`) live in `ainb-app`.
+pub use ainb_app::cli::*;
 
 use clap::{Command, ValueEnum};
 use std::path::PathBuf;
@@ -113,17 +112,6 @@ impl Tool {
             Tool::Antigravity => crate::config::CliProvider::Antigravity,
         }
     }
-}
-
-/// Output format for commands
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    #[default]
-    Text,
-    Json,
-    Csv,
-    #[value(alias = "md")]
-    Markdown,
 }
 
 // The user-facing command `about` is set in `cli/registry.rs` (`.about()`

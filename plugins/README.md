@@ -91,7 +91,7 @@ ainb init --script # print the install script instead of running it
 ```
 
 The catalog the wizard drives lives in
-`ainb-tui/crates/ainb-core/src/setup/catalog.rs` (single source of truth for
+`ainb-tui/crates/ainb-app/src/setup/catalog.rs` (single source of truth for
 TUI onboarding **and** the `ainb init` CLI).
 
 ## Cross-harness support
@@ -145,4 +145,4 @@ Legend: ✅ first-class · ◑ works with one documented gap · ➜ supported vi
    `codex/hooks.json` and `copilot/hooks.json` (see `ainb-hooks/` for the
    reference layout).
 4. Add it to the setup catalog
-   (`ainb-tui/crates/ainb-core/src/setup/catalog.rs`) so `ainb init` offers it.
+   (`ainb-tui/crates/ainb-app/src/setup/catalog.rs`) so `ainb init` offers it.

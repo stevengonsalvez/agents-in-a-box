@@ -2,34 +2,16 @@
 
 #![allow(missing_docs)]
 
-pub mod agent_parsers;
-pub mod agents;
+// The renderer-agnostic layer lives in `ainb-app`. Re-exporting it at the root
+// keeps every `ainb::config::..` and `crate::config::..` path unchanged.
+pub use ainb_app::*;
+
 pub mod app;
-pub mod audit;
-pub mod claude;
 pub mod cli;
-pub mod clipboard;
 pub mod components;
-pub mod config;
-pub mod credentials;
 pub mod docker;
-pub mod docs;
-pub mod editors;
 pub mod fleet;
-pub mod git;
-pub mod headroom;
-pub mod interactive;
-pub mod mcp_pool;
-pub mod models;
-pub mod otel;
-pub mod perf;
-pub mod plugins;
-pub mod providers;
-pub mod rtk;
-pub mod self_exec_guard;
-pub mod setup;
 pub mod tmux;
-pub mod usage_cache;
 pub mod widgets;
 
 #[cfg(any(test, feature = "test-support"))]

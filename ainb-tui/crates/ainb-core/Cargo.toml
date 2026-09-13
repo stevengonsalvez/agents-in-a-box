@@ -24,7 +24,8 @@ name = "ainb"
 path = "src/lib.rs"
 
 [dependencies]
-ainb-model-rates = { path = "../ainb-model-rates" }
+# Renderer-agnostic state and services, re-exported from `lib.rs`.
+ainb-app = { path = "../ainb-app", version = "1.28.2" }
 # Core
 tokio = { workspace = true }
 ratatui = { workspace = true }
@@ -33,10 +34,8 @@ crossterm = { workspace = true }
 # Docker
 bollard = { workspace = true }
 futures-util = { workspace = true }
-tar = { workspace = true }
 
 # Tmux/PTY support
-portable-pty = { workspace = true }
 vt100 = { workspace = true }
 tui-term = { workspace = true }
 
@@ -46,20 +45,11 @@ git2 = { workspace = true }
 # Data persistence
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 toml = { workspace = true }
-toml_edit = { workspace = true }
-
-# Claude API integration
-reqwest = { workspace = true }
-tokio-stream = { workspace = true }
-# Slack socket-mode WebSocket transport for `ainb fleet bridge`.
-tokio-tungstenite = { workspace = true }
 
 # Utils
 shell-escape = { workspace = true }
 anyhow = { workspace = true }
-thiserror = { workspace = true }
 dirs = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
@@ -68,22 +58,13 @@ tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 tempfile = { workspace = true }
-# Durable orchestration plumbing: advisory file locks (inbox).
-# (blake3, for exactly-once turn fingerprints, is already a dependency below.)
-fs2 = { workspace = true }
 nix = { workspace = true }
-# Process-identity cross-check in the Daemons liveness probe (see workspace dep).
-sysinfo = { workspace = true }
 arboard = { workspace = true }
-keyring = { workspace = true }
 regex = { workspace = true }
-semver = "1.0"
 base64 = "0.22"
 ed25519-dalek = "2.1"
-sha2 = "0.10"
 lazy_static = { workspace = true }
 which = { workspace = true }
-url = { workspace = true }
 
 # Markdown and syntax highlighting
 pulldown-cmark = { workspace = true }
@@ -101,7 +82,6 @@ time = { workspace = true }
 # Persistent usage analytics cache
 rusqlite = { workspace = true }
 blake3 = { workspace = true }
-bincode = { workspace = true }
 
 # Plugin runtime (Phase 7 — subprocess + JSON-RPC, replaces wasmi host).
 ainb-plugin-runtime = { path = "../ainb-plugin-runtime", version = "0.1.0" }
@@ -131,9 +111,6 @@ ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
 # Pure wire types for the daemon socket — the bridge reads `attention/list` and
 # routes answers through `attention/answer` on the control plane (D18).
 ainb-hangar-proto = { path = "../ainb-hangar-proto", version = "0.1.0" }
-# The one socket client (auth/hello + Content-Length JSON-RPC + the retained
-# subscriptions), re-exported unchanged at `crate::fleet::bridge::daemon`.
-ainb-hangar-client = { path = "../ainb-hangar-client", version = "0.1.0" }
 ainb-hangar-store = { path = "../ainb-hangar-store", version = "0.1.0" }
 ainb-hangar-daemon = { path = "../ainb-hangar-daemon" }
 # sqlx — the hangar CLI workspace-bootstrap path issues raw SQL against the
@@ -147,8 +124,6 @@ sqlx = { version = "0.8", default-features = false, features = [
 # `payload: bytes::Bytes` parameter, used by the Phase 7c CLI dispatcher.
 bytes = "1.6"
 
-# Fleet — filesystem watch for JSONL transcript tail (assistant-turn detection).
-notify = { workspace = true }
 # No-echo terminal read for the Grafana Cloud API token in `ainb otel setup`.
 rpassword = "7"
 
@@ -159,7 +134,7 @@ vt100-tests = []
 # Exposes shared test fixtures (test_support module) so integration
 # tests in tests/ can use them. Always enabled under #[cfg(test)] for
 # unit tests; integration tests must opt in via this feature.
-test-support = []
+test-support = ["ainb-app/test-support"]
 # CLI integration tests opt-in flag. The Phase 6c burndown/session-reader
 # subprocess assertions died with the wasmi removal in Phase 7b; the flag
 # stays so Phase 7c can hang the new CTS-driven gates off it without a
@@ -171,6 +146,8 @@ cli-tests = ["test-support"]
 tmux-tests = ["cli-tests"]
 
 [dev-dependencies]
+# Unit tests here use `ainb_app::test_support` fixtures and helpers.
+ainb-app = { path = "../ainb-app", version = "1.28.2", features = ["test-support"] }
 mockall = { workspace = true }
 pretty_assertions = { workspace = true }
 rexpect = { workspace = true }

@@ -174,8 +174,8 @@ impl Drop for PtyWrapper {
 /// help: one test's `kill_all_embed_children()` murders the other's live
 /// child, and `registered_embed_child_count()` assertions see each other's
 /// slots. Poison-tolerant — the lock guards ordering, not shared invariants.
-#[cfg(test)]
-pub(crate) fn lock_registry_for_test() -> std::sync::MutexGuard<'static, ()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn lock_registry_for_test() -> std::sync::MutexGuard<'static, ()> {
     static REGISTRY_TEST_LOCK: StdMutex<()> = StdMutex::new(());
     REGISTRY_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }

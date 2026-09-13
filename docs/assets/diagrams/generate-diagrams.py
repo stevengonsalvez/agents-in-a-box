@@ -73,7 +73,7 @@ def staged_plugins() -> list[str]:
 
 def daemon_kinds() -> list[str]:
     """Stable lowercase daemon ids, from DaemonKind::id()."""
-    txt = (ROOT / "ainb-tui/crates/ainb-core/src/fleet/daemons/probe.rs").read_text()
+    txt = (ROOT / "ainb-tui/crates/ainb-app/src/fleet/daemons/probe.rs").read_text()
     block = re.search(r"pub fn id\(self\).*?\{(.*?)\n    \}", txt, re.S)
     return re.findall(r'=>\s*"([a-z-]+)"', block.group(1)) if block else []
 
