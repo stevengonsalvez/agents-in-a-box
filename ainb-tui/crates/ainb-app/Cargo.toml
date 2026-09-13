@@ -76,6 +76,8 @@ time = { workspace = true }
 # Markdown and syntax highlighting for the agent-event widgets
 pulldown-cmark = { workspace = true }
 syntect = { workspace = true }
+# Line diff for the code review surface
+similar = { workspace = true }
 
 # Usage analytics cache
 rusqlite = { workspace = true }

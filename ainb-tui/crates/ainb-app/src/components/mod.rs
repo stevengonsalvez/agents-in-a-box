@@ -2,8 +2,10 @@
 // their impls and the reducers that do not draw. The draw functions stay in
 // `ainb-core::components`, which re-exports this module.
 
+pub mod code_review;
 pub mod config_popup;
 pub mod daemons;
+pub mod git_view;
 pub mod home_screen_v2;
 pub mod live_logs_stream;
 pub mod log_history_viewer;
