@@ -1,0 +1,84 @@
+{
+  "name": "react-native-ainb-wire",
+  "version": "0.1.0",
+  "description": "spike 5/6 wire binding",
+  "main": "./src/index.tsx",
+  "types": "./src/index.tsx",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "android",
+    "ios",
+    "cpp",
+    "*.podspec",
+    "react-native.config.js",
+    "!ios/build",
+    "!android/build",
+    "!android/gradle",
+    "!android/gradlew",
+    "!android/gradlew.bat",
+    "!android/local.properties",
+    "!**/__tests__",
+    "!**/__fixtures__",
+    "!**/__mocks__",
+    "!**/.*"
+  ],
+  "scripts": {
+    "ubrn:android": "ubrn build android --config ubrn.config.yaml --and-generate --release",
+    "ubrn:ios": "ubrn build ios --config ubrn.config.yaml --and-generate --release"
+  },
+  "keywords": [
+    "react-native",
+    "ios",
+    "android"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://example.invalid.git"
+  },
+  "author": "spike <spike@example.invalid> (https://example.invalid)",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://example.invalid/issues"
+  },
+  "homepage": "https://example.invalid#readme",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "react-native-builder-bob": {
+    "source": "src",
+    "output": "lib",
+    "targets": [
+      [
+        "module",
+        {
+          "esm": true
+        }
+      ],
+      [
+        "typescript",
+        {
+          "project": "tsconfig.build.json"
+        }
+      ],
+      "codegen"
+    ]
+  },
+  "codegenConfig": {
+    "name": "AinbWireSpec",
+    "type": "modules",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.ainbwire"
+    },
+    "includesGeneratedCode": false
+  }
+}
