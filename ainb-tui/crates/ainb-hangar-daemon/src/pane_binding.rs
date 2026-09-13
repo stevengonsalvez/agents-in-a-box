@@ -37,6 +37,17 @@ pub enum UnboundReason {
     /// no single pane can be attributed. Carries the candidate targets in
     /// scan order so the operator can see the collision.
     Ambiguous(Vec<String>),
+    /// The pane this row was bound to is now running a different process
+    /// (#961). Carries the target that was invalidated and the candidates
+    /// available now, because the operator's question is "where did my agent
+    /// go", not "why did this fail".
+    Invalidated {
+        /// The pane the row had been bound to.
+        previous_target: String,
+        /// Discovered panes for this `(provider, cwd)` right now, in scan
+        /// order. Empty is normal and means the agent is no longer in tmux.
+        candidates: Vec<String>,
+    },
 }
 
 impl UnboundReason {
@@ -54,6 +65,19 @@ impl UnboundReason {
                 candidates.len(),
                 candidates.join(", ")
             ),
+            Self::Invalidated {
+                previous_target,
+                candidates,
+            } => {
+                let now = if candidates.is_empty() {
+                    format!("no {provider} pane in {cwd} now")
+                } else {
+                    format!("{provider} panes in {cwd} now: {}", candidates.join(", "))
+                };
+                format!(
+                    "pane_unbound: {previous_target} is running a different process than the one bound to this session, so the binding was dropped rather than typed into ({now})"
+                )
+            }
         }
     }
 }
@@ -75,7 +99,7 @@ pub enum PaneBinding {
         /// The discovered row's fingerprint, when it had one.
         fingerprint: Option<String>,
         /// The discovered row's key, retired onto the managed key by the caller.
-        legacy_key: String,
+        legacy_key: Option<String>,
     },
     /// Nothing could be attributed. The row renders `pane_unbound`.
     Unbound(UnboundReason),
@@ -138,6 +162,50 @@ pub async fn resolve(
     hook_target: Option<String>,
     hook_fingerprint: Option<String>,
 ) -> Result<PaneBinding, FleetRepoError> {
+    // A binding this row already made is re-confirmed before anything else
+    // (#961). Until now a correlated decision was never checked again, so a
+    // pane that had been reused by a different agent kept receiving this
+    // session's send-keys.
+    if let Some(decision) = bound_decision(pool, managed_key).await? {
+        match confirm(
+            pool,
+            managed_key,
+            provider,
+            cwd,
+            &decision,
+            hook_fingerprint.as_deref(),
+        )
+        .await?
+        {
+            Confirmation::Holds => {
+                return Ok(PaneBinding::Correlated {
+                    target: decision.target,
+                    fingerprint: decision.fingerprint,
+                    // Nothing to retire: the legacy row was retired when this
+                    // binding was first made.
+                    legacy_key: None,
+                });
+            }
+            Confirmation::Broken(candidates) => {
+                return Ok(PaneBinding::Unbound(UnboundReason::Invalidated {
+                    previous_target: decision.target,
+                    candidates,
+                }));
+            }
+            // Nothing observed this pane on this pass, so there is no evidence
+            // either way. A binding is not dropped on silence: an unscanned
+            // pane and a reused one look identical from here, and only one of
+            // them is a reason to stop delivering.
+            Confirmation::Unobserved => {
+                return Ok(PaneBinding::Correlated {
+                    target: decision.target,
+                    fingerprint: decision.fingerprint,
+                    legacy_key: None,
+                });
+            }
+        }
+    }
+
     if let Some(target) = hook_target {
         return Ok(PaneBinding::FromHook {
             target,
@@ -146,6 +214,104 @@ pub async fn resolve(
     }
     let candidates = discovered_candidates(pool, managed_key, provider, cwd).await?;
     Ok(bind(candidates))
+}
+
+/// The binding decision a row already holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundDecision {
+    target: String,
+    fingerprint: Option<String>,
+}
+
+/// What this pass can say about a binding the row already holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Confirmation {
+    /// The bound pane still runs the process it was bound to.
+    Holds,
+    /// It runs a different one. Carries the candidates available now.
+    Broken(Vec<String>),
+    /// Nothing observed the pane on this pass.
+    Unobserved,
+}
+
+/// Read the written-once decision, if this row has made one.
+///
+/// `bound_fingerprint IS NULL` is a decision with nothing to re-confirm
+/// against, which is the pre-0099 shape and the shape a hook that knew its
+/// target but not its process produces. Those are returned too, so the target
+/// is still carried, and `confirm` answers `Unobserved` for them rather than
+/// inventing a mismatch.
+async fn bound_decision(
+    pool: &SqlitePool,
+    managed_key: &str,
+) -> Result<Option<BoundDecision>, FleetRepoError> {
+    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT bound_target, bound_fingerprint FROM fleet_session WHERE session_key = ?",
+    )
+    .bind(managed_key)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(target, fingerprint)| {
+        target.map(|target| BoundDecision {
+            target,
+            fingerprint,
+        })
+    }))
+}
+
+/// Compare the bound pane against what is in it now.
+///
+/// The hook's own fingerprint is preferred when the hook named the same pane:
+/// it is this agent reporting its own process, which is better evidence than a
+/// scan. Otherwise the tier-5 scan for `(provider, cwd)` is consulted, and a
+/// pane absent from it is `Unobserved` rather than broken.
+async fn confirm(
+    pool: &SqlitePool,
+    managed_key: &str,
+    provider: &str,
+    cwd: &str,
+    decision: &BoundDecision,
+    hook_fingerprint: Option<&str>,
+) -> Result<Confirmation, FleetRepoError> {
+    let Some(bound) = decision.fingerprint.as_deref() else {
+        return Ok(Confirmation::Unobserved);
+    };
+    if let Some(observed) = hook_fingerprint {
+        return Ok(if observed == bound {
+            Confirmation::Holds
+        } else {
+            Confirmation::Broken(
+                discovered_candidates(pool, managed_key, provider, cwd)
+                    .await?
+                    .into_iter()
+                    .map(|candidate| candidate.tmux_target)
+                    .collect(),
+            )
+        });
+    }
+    let live = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT tmux_target, process_start_fingerprint FROM fleet_session \
+         WHERE tmux_target = ? AND visible = 1 AND superseded_by IS NULL \
+           AND session_key != ? \
+         ORDER BY last_observed_at DESC LIMIT 1",
+    )
+    .bind(&decision.target)
+    .bind(managed_key)
+    .fetch_optional(pool)
+    .await?;
+    let Some((_, Some(observed))) = live else {
+        return Ok(Confirmation::Unobserved);
+    };
+    if observed == bound {
+        return Ok(Confirmation::Holds);
+    }
+    Ok(Confirmation::Broken(
+        discovered_candidates(pool, managed_key, provider, cwd)
+            .await?
+            .into_iter()
+            .map(|candidate| candidate.tmux_target)
+            .collect(),
+    ))
 }
 
 /// Choose a binding from the candidate set. Split from the query so the
@@ -158,7 +324,7 @@ pub fn bind(mut candidates: Vec<PaneCandidate>) -> PaneBinding {
             PaneBinding::Correlated {
                 target: only.tmux_target,
                 fingerprint: only.process_start_fingerprint,
-                legacy_key: only.session_key,
+                legacy_key: Some(only.session_key),
             }
         }
         0 => PaneBinding::Unbound(UnboundReason::NoCandidate),
@@ -262,6 +428,32 @@ pub async fn unbound_answer_reason(pool: &SqlitePool, provider_session_id: &str)
     Some(reason.describe(&provider, &cwd))
 }
 
+/// The operator-facing reason one row has no pane, for `ainb doctor` and the
+/// fleet panel detail.
+///
+/// Re-runs the binding decision for a row that is already known to be unbound,
+/// so the three cases stay distinguishable at the surface: nothing to bind, a
+/// collision, or a binding dropped because the pane changed hands (#961). The
+/// last one is the one an operator can act on immediately, and it is the one
+/// that used to be invisible, because the row simply stopped delivering.
+///
+/// `None` when the reason cannot be established, which is treated as "say
+/// nothing" rather than "no pane": a wrong explanation is worse than none.
+pub async fn unbound_detail(
+    pool: &SqlitePool,
+    managed_key: &str,
+    provider: &str,
+    cwd: &str,
+) -> Option<String> {
+    // A decision still on the row means the invalidation has not been written
+    // yet, or the pane is merely unobserved. Ask the same question `resolve`
+    // asks, so the surface and the router never disagree.
+    match resolve(pool, managed_key, provider, cwd, None, None).await {
+        Ok(PaneBinding::Unbound(reason)) => Some(reason.describe(provider, cwd)),
+        Ok(_) | Err(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,7 +473,8 @@ mod tests {
         assert_eq!(binding.target(), Some("dev:1.0"));
         assert!(matches!(
             binding,
-            PaneBinding::Correlated { ref legacy_key, .. } if legacy_key == "tmux:dev:1.0"
+            PaneBinding::Correlated { ref legacy_key, .. }
+                if legacy_key.as_deref() == Some("tmux:dev:1.0")
         ));
     }
 
@@ -408,6 +601,157 @@ mod tests {
             matches!(binding, PaneBinding::Unbound(UnboundReason::NoCandidate)),
             "zero candidates is `pane_unbound`, not a guess: {binding:?}"
         );
+    }
+
+    /// THE #961 hazard: a pane is reused by a different agent, and the row
+    /// bound to it keeps routing there.
+    ///
+    /// A correlated binding was never re-confirmed, so `tmux_target` survived
+    /// the pane changing hands and send-keys typed this session's answer into
+    /// whichever agent holds the pane now. The binding is dropped instead, and
+    /// the row says which pane it lost and what is available.
+    #[tokio::test]
+    async fn a_reused_pane_invalidates_the_binding_instead_of_typing_into_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.expect("open store");
+
+        apply(
+            &store,
+            "hook:bind",
+            "claude:sid-1",
+            1,
+            bound_patch("sid-1", "pane=%1;pid=1"),
+        )
+        .await;
+
+        // The same pane, now running a different process.
+        apply(
+            &store,
+            "scan:reused",
+            "tmux:dev:1.0",
+            2,
+            ainb_hangar_store::repo::fleet::FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                cwd: Some("/w/app".to_string()),
+                tmux_target: Some("dev:1.0".to_string()),
+                process_start_fingerprint: Some("pane=%1;pid=999".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let binding = resolve(store.pool(), "claude:sid-1", "claude", "/w/app", None, None)
+            .await
+            .expect("resolve");
+        let PaneBinding::Unbound(reason) = &binding else {
+            panic!("a reused pane must invalidate the binding, got {binding:?}");
+        };
+        let UnboundReason::Invalidated {
+            previous_target, ..
+        } = reason
+        else {
+            panic!("and say so as an invalidation, got {reason:?}");
+        };
+        assert_eq!(previous_target, "dev:1.0");
+        assert_eq!(
+            binding.target(),
+            None,
+            "the row must stop offering a target to send keys to"
+        );
+        assert!(
+            reason.describe("claude", "/w/app").contains("dev:1.0"),
+            "the operator is told which pane was lost: {}",
+            reason.describe("claude", "/w/app")
+        );
+    }
+
+    /// The agent's own hook re-confirms its pane, and the binding stands.
+    #[tokio::test]
+    async fn a_matching_fingerprint_confirms_the_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.expect("open store");
+        apply(
+            &store,
+            "hook:bind",
+            "claude:sid-2",
+            1,
+            bound_patch("sid-2", "pane=%1;pid=1"),
+        )
+        .await;
+
+        let binding = resolve(
+            store.pool(),
+            "claude:sid-2",
+            "claude",
+            "/w/app",
+            None,
+            Some("pane=%1;pid=1".to_string()),
+        )
+        .await
+        .expect("resolve");
+        assert_eq!(binding.target(), Some("dev:1.0"), "{binding:?}");
+    }
+
+    /// Silence is not evidence of reuse. An unscanned pane and a stolen one
+    /// look identical from here, and only one is a reason to stop delivering.
+    #[tokio::test]
+    async fn an_unobserved_pane_keeps_its_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.expect("open store");
+        apply(
+            &store,
+            "hook:bind",
+            "claude:sid-3",
+            1,
+            bound_patch("sid-3", "pane=%1;pid=1"),
+        )
+        .await;
+
+        let binding = resolve(store.pool(), "claude:sid-3", "claude", "/w/app", None, None)
+            .await
+            .expect("resolve");
+        assert_eq!(binding.target(), Some("dev:1.0"), "{binding:?}");
+    }
+
+    /// A managed row bound to `dev:1.0` while `fingerprint` was in it.
+    fn bound_patch(
+        session_id: &str,
+        fingerprint: &str,
+    ) -> ainb_hangar_store::repo::fleet::FleetSessionPatch {
+        ainb_hangar_store::repo::fleet::FleetSessionPatch {
+            provider: Some("claude".to_string()),
+            provider_session_id: Some(session_id.to_string()),
+            cwd: Some("/w/app".to_string()),
+            management_state: Some("MANAGED".to_string()),
+            tmux_target: Some("dev:1.0".to_string()),
+            process_start_fingerprint: Some(fingerprint.to_string()),
+            bound: Some(("dev:1.0".to_string(), Some(fingerprint.to_string()))),
+            ..Default::default()
+        }
+    }
+
+    /// Apply one event, for the fixtures above.
+    async fn apply(
+        store: &ainb_hangar_store::Store,
+        event_id: &str,
+        session_key: &str,
+        observed_at: i64,
+        patch: ainb_hangar_store::repo::fleet::FleetSessionPatch,
+    ) {
+        ainb_hangar_store::repo::fleet::FleetRepo::apply_event(
+            store.pool(),
+            &ainb_hangar_store::repo::fleet::NewFleetEvent {
+                event_id: event_id.to_string(),
+                session_key: session_key.to_string(),
+                observed_at,
+                authority: ainb_hangar_store::repo::fleet::ObservationAuthority::Authoritative,
+                event_type: "SessionStart".to_string(),
+                payload: "{}".to_string(),
+                patch,
+            },
+        )
+        .await
+        .expect("fixture event applies");
     }
 
     /// An empty cwd carries no information. Matching on it would correlate a

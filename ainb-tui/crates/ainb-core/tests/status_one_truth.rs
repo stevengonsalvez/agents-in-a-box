@@ -202,6 +202,7 @@ fn two_agents_in_one_directory_keep_their_own_identity() {
         evidence_observed_at: at,
         has_open_request: state == AgentState::Waiting,
         pane_unbound: false,
+        pane_unbound_detail: None,
     };
 
     let mut rows = vec![local_row("agent-a", CWD), local_row("agent-b", CWD)];
@@ -263,6 +264,7 @@ fn an_ambiguous_directory_leaves_the_row_unstamped() {
         evidence_observed_at: 1,
         has_open_request: false,
         pane_unbound: false,
+        pane_unbound_detail: None,
     };
     let mut rows = vec![local_row("something-else", CWD)];
     ainb::cli::fleet::needs::stamp_rows(&mut rows, &[row("x"), row("y")]);

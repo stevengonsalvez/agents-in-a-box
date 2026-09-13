@@ -194,6 +194,17 @@ pub struct AgentStatusRow {
     /// True when no tmux pane is bound (issue #916): the agent may be asking,
     /// and nothing can type an answer into it.
     pub pane_unbound: bool,
+    /// Why, in one operator-facing sentence, when `pane_unbound` is true.
+    ///
+    /// The three cases have different fixes, so they are never collapsed: no
+    /// candidate pane at all, two that collide, or a binding invalidated
+    /// because the pane it held is now running something else (#961). The last
+    /// one also names the pane that was lost and what is available now.
+    ///
+    /// `#[serde(default)]` so a daemon that does not compute it, and a client
+    /// reading an older reply, both see `None` rather than failing the read.
+    #[serde(default)]
+    pub pane_unbound_detail: Option<String>,
 }
 
 impl AgentStatusRow {
@@ -228,7 +239,29 @@ impl AgentStatusRow {
 /// useless when a human is the thing it is waiting on.
 #[must_use]
 pub fn status_row(session: &FleetSession, has_open_request: bool) -> AgentStatusRow {
-    let tier = tier_of(session);
+    status_row_with_tier(session, has_open_request, None)
+}
+
+/// [`status_row`] for a caller holding the row's STORED tier (D14, migration
+/// 0099).
+///
+/// `stored` is `None` for a caller that has only the wire session, and for a
+/// row written before 0099, whose tier is `unknown`. Both fall back to
+/// [`tier_of`], so the pre-migration behaviour is exactly today's and no row
+/// is given a tier that was reconstructed rather than recorded.
+///
+/// Separate from `status_row` rather than a new field on [`FleetSession`]:
+/// the wire session is built by 34 struct literals across the workspace, and
+/// the one surface that needs the stored value today is the daemon's own
+/// `fleet/status`, which holds the store row. The panel picks it up when it
+/// moves onto `fleet/status`.
+#[must_use]
+pub fn status_row_with_tier(
+    session: &FleetSession,
+    has_open_request: bool,
+    stored: Option<Tier>,
+) -> AgentStatusRow {
+    let tier = stored.unwrap_or_else(|| tier_of(session));
     let state = state_of(session, tier);
     AgentStatusRow {
         session_key: session.session_key.clone(),
@@ -241,15 +274,54 @@ pub fn status_row(session: &FleetSession, has_open_request: bool) -> AgentStatus
         evidence_observed_at: evidence_observed_at(session, state),
         has_open_request,
         pane_unbound: session.pane_binding == crate::fleet::PaneBinding::PaneUnbound,
+        // Filled in by the daemon, which holds the binding decision. The
+        // derivation here has only the wire session and cannot know why.
+        pane_unbound_detail: None,
     }
 }
 
-/// Which tier's evidence this row's state rests on.
+/// Parse a stored tier token, or `None` for `unknown` and for anything this
+/// build does not recognise.
 ///
-/// Derived from what the store already records, because the tier column itself
-/// arrives with the D14 migration. An ACP session is tier 1 by construction; a
-/// row whose state groups were written by an authoritative observer is a hook
-/// push; everything else is the tmux scan.
+/// `unknown` is not an error and not a tier: it is a row from before 0099
+/// saying so, and the caller falls back to [`tier_of`]. An unrecognised token
+/// takes the same path rather than failing the read, for the same reason the
+/// event normalizer answers `None` instead of erroring.
+#[must_use]
+pub fn parse_tier(token: &str) -> Option<Tier> {
+    match token {
+        "hook" => Some(Tier::Hook),
+        "acp_feed" => Some(Tier::AcpFeed),
+        "osc_frame" => Some(Tier::OscFrame),
+        "process" => Some(Tier::Process),
+        "transcript" => Some(Tier::Transcript),
+        "pane_text" => Some(Tier::PaneText),
+        _ => None,
+    }
+}
+
+/// The stored token for a tier, the inverse of [`parse_tier`].
+#[must_use]
+pub fn tier_token(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Hook => "hook",
+        Tier::AcpFeed => "acp_feed",
+        Tier::OscFrame => "osc_frame",
+        Tier::Process => "process",
+        Tier::Transcript => "transcript",
+        Tier::PaneText => "pane_text",
+    }
+}
+
+/// Which tier's evidence this row's state rests on, DERIVED.
+///
+/// The fallback for a row written before migration 0099, and for a caller that
+/// holds only the wire session. It reaches three of the six values: an ACP
+/// session is tier 1 by construction, a row carrying a provider session id was
+/// keyed by a hook, and everything else reads as the tmux scan. A row actually
+/// written by an OSC frame, the process table or the transcript is
+/// indistinguishable here from a pane scrape, which is why 0099 stores it and
+/// [`status_row_with_tier`] prefers the column.
 #[must_use]
 pub fn tier_of(session: &FleetSession) -> Tier {
     if session.provider == FleetProvider::Acp {

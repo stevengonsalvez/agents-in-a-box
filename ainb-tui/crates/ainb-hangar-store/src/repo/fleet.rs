@@ -174,6 +174,30 @@ pub struct FleetSessionPatch {
     pub model: Option<String>,
     /// Provider-reported reasoning effort, verbatim.
     pub reasoning_effort: Option<String>,
+    /// The evidence tier this observation came from (D14).
+    ///
+    /// A snake_case `agent_status::Tier` token. `None` leaves the row's tier
+    /// alone, which is what a patch carrying no state should do; an observation
+    /// that DOES move the state names the tier that moved it, so the row stops
+    /// having to be reverse-engineered from `management_state`.
+    pub tier: Option<String>,
+    /// The incarnation this observation belongs to: `process_start_fingerprint`
+    /// for a tmux pane, the pool session id for an ACP child.
+    ///
+    /// The fence reads it BEFORE the patch is applied, so a mismatch can be
+    /// turned into a restart or a suppression instead of an in-place update of
+    /// a row whose process has gone.
+    pub session_incarnation: Option<String>,
+    /// The pane binding decision, written once (#961).
+    ///
+    /// `Some((target, fingerprint))` records the chosen pane and the process in
+    /// it at the time. `None` leaves any existing decision standing; clearing
+    /// one is [`FleetSessionPatch::invalidate_binding`], which is a different
+    /// act and says so.
+    pub bound: Option<(String, Option<String>)>,
+    /// Clear the binding: the pane a correlated decision chose is now running
+    /// something else, so the row must stop routing to it.
+    pub invalidate_binding: bool,
 }
 
 impl FleetSessionPatch {
@@ -210,7 +234,12 @@ pub struct NewFleetEvent {
 }
 
 /// Canonical Fleet session row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` is derived so a test fixture can name the columns it cares about
+/// and inherit the rest. Every D14 column added in 0099 broke a handful of
+/// literals across the workspace before this existed, which is churn that says
+/// nothing about the change causing it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FleetSessionRow {
     /// Stable Fleet identity.
     pub session_key: String,
@@ -280,6 +309,36 @@ pub struct FleetSessionRow {
     pub version: i64,
     /// Revision that last changed this row.
     pub updated_revision: i64,
+    /// Owning host. `local` until R1 mints a real `HostId`.
+    pub host_id: String,
+    /// The evidence tier that last wrote this row's state (D14).
+    ///
+    /// `unknown` for a row written before migration 0099, which is the honest
+    /// answer rather than a tier reconstructed from columns that cannot carry
+    /// it. `agent_status::tier_of` falls back to its old derivation for those.
+    pub tier: String,
+    /// The daemon's own clock when it took delivery of the evidence.
+    ///
+    /// Distinct from `last_observed_at`, which is the SOURCE's clock. A replay
+    /// moves this and must never move that.
+    pub received_at: i64,
+    /// When the derived state last CHANGED, for "working since" and attention
+    /// ordering. A repeated observation of the same state does not move it.
+    pub state_started_at: i64,
+    /// The incarnation fence: `process_start_fingerprint` for a tmux pane, the
+    /// pool session id for an ACP child. `None` until something observes one.
+    pub session_incarnation: Option<String>,
+    /// Hydrated at boot and not yet confirmed by a tier 0/1 event in this
+    /// daemon incarnation.
+    pub restored_unconfirmed: bool,
+    /// The pane this row's binding decision chose. `tmux_target` is the live
+    /// routing field; this is the decision it came from.
+    pub bound_target: Option<String>,
+    /// The process that was in `bound_target` when the binding was made. What a
+    /// later observation is re-confirmed against.
+    pub bound_fingerprint: Option<String>,
+    /// When the binding was decided.
+    pub bound_at: i64,
 }
 
 /// One durable Fleet change-log row.
@@ -635,6 +694,35 @@ impl FleetRepo {
         Ok(result)
     }
 
+    /// Mark every live row as a memory of the last daemon incarnation (D14 boot
+    /// order).
+    ///
+    /// A row that survives a restart records what was true when the daemon
+    /// died, and rendering it as present tense is how a session that exited
+    /// during the outage keeps showing as working. The spec's order is:
+    /// hydrate and stamp every non-`exited` row, drain the tier-0 cursor, then
+    /// start the feed, so the drain is what clears the stamp for sessions that
+    /// are genuinely still there.
+    ///
+    /// `EXITED` rows are skipped because they make no present-tense claim: the
+    /// row already says the process is gone, and marking it unconfirmed would
+    /// suggest that might have changed.
+    ///
+    /// Returns the number of rows stamped, for the boot log.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn mark_restored_unconfirmed(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE fleet_session SET restored_unconfirmed = 1 \
+             WHERE lifecycle_state != 'EXITED' AND restored_unconfirmed = 0",
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Apply one normalized event inside a CALLER-OWNED transaction, without
     /// committing it.
     ///
@@ -700,6 +788,80 @@ impl FleetRepo {
                 });
             }
         }
+        // The incarnation fence (D14). An event whose incarnation differs from
+        // the live row is not an ordinary update: one of the two belongs to a
+        // process that has gone.
+        let mut prior = prior;
+        if let Some(row) = prior.as_mut() {
+            match fence(row, event) {
+                Fence::Pass => {}
+                Fence::Suppress => {
+                    // An older incarnation arriving late. Its evidence is about
+                    // a run that has already ended, so applying it would move a
+                    // live row backwards. The event is still RECORDED, with
+                    // `applied = 0`: "we saw this and refused it" is exactly
+                    // what an operator needs when a session looks stuck.
+                    let revision = insert_fleet_event(tx, event, row.version, false).await?;
+                    let session = row.clone();
+                    return Ok(ApplyFleetEventResult {
+                        revision,
+                        session_version: session.version,
+                        applied: false,
+                        duplicate: false,
+                        session,
+                    });
+                }
+                Fence::Restart => {
+                    // The agent was restarted under the same key. `session_key`
+                    // is the primary key, so this resets the row in place
+                    // rather than adding a second one: the previous run's state
+                    // is not this run's state, and carrying it over is how a
+                    // fresh agent shows as still waiting on a question that
+                    // died with the old process.
+                    //
+                    // The old lifecycle is NOT set to `EXITED`. The spec
+                    // reserves that for process proof, and a newer incarnation
+                    // proves this run started, not how the last one ended.
+                    reset_for_restart(row, event);
+                    // Clearing `attention_state` is not enough. The inbox row
+                    // is a separate table, and leaving it open means the dead
+                    // run's card keeps advertising an answer route into a
+                    // process that is gone, which is the harm #961 exists to
+                    // close arriving by another door. It also trips
+                    // `drift_against_fleet_session` permanently, on exactly its
+                    // first direction: an open card whose session is not
+                    // asking. That assertion is this lane's own regression
+                    // detector, so poisoning it is worse than the stale card.
+                    //
+                    // In THIS transaction, with the row reset, so a crash
+                    // between the two cannot leave a restarted session holding
+                    // its predecessor's question.
+                    if let Some(provider_session_id) = row.provider_session_id.clone() {
+                        let stale =
+                            crate::repo::attention::AttentionRepo::open_ask_ids_for_session_in_tx(
+                                tx,
+                                &provider_session_id,
+                            )
+                            .await?;
+                        for id in stale {
+                            crate::repo::attention::AttentionRepo::mark_answered_if_open_in_tx(
+                                tx,
+                                &id,
+                                "resolved:restart",
+                                "the agent restarted; this question died with the previous run",
+                                event.observed_at,
+                                // No client version to fence on: this close is
+                                // the store's own, driven by the incarnation
+                                // change in this same transaction.
+                                None,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+            }
+        }
+
         let is_new = prior.is_none();
         let (mut session, changed) = match prior {
             Some(mut row) => {
@@ -718,24 +880,7 @@ impl FleetRepo {
             insert_session(tx, &session).await?;
         }
 
-        let revision = sqlx::query(
-            "INSERT INTO fleet_event \
-             (event_id, session_key, observed_at, authority, event_type, payload, \
-              request_fingerprint, session_version, applied) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&event.event_id)
-        .bind(&event.session_key)
-        .bind(event.observed_at)
-        .bind(event.authority.as_str())
-        .bind(&event.event_type)
-        .bind(&event.payload)
-        .bind(event.patch.current_request_fingerprint.as_ref().and_then(Clone::clone))
-        .bind(session.version)
-        .bind(i64::from(changed))
-        .execute(&mut **tx)
-        .await?
-        .last_insert_rowid();
+        let revision = insert_fleet_event(tx, event, session.version, changed).await?;
 
         if changed {
             session.updated_revision = revision;
@@ -1400,7 +1545,9 @@ const SESSION_SELECT_BY_KEY: &str = "SELECT session_key, provider, provider_sess
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE session_key = ?";
 
 const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session_id, \
@@ -1410,7 +1557,9 @@ const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE visible = 1 ORDER BY session_key ASC";
 
 /// The ERR roster, read by [`FleetRepo::list_attention_error`]. Same column
@@ -1423,7 +1572,9 @@ const SESSION_SELECT_ERRORING: &str = "SELECT session_key, provider, provider_se
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE visible = 1 AND attention_state = 'ERROR' \
     AND lifecycle_state != 'EXITED' ORDER BY session_key ASC";
 
@@ -1437,7 +1588,9 @@ const SESSION_SELECT_ARCHIVED: &str = "SELECT session_key, provider, provider_se
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE visible = 0 AND superseded_by IS NULL \
     ORDER BY last_observed_at DESC LIMIT ?";
 
@@ -1465,6 +1618,15 @@ async fn event_by_id(
     .fetch_optional(&mut **tx)
     .await?;
     row.as_ref().map(event_from_row).transpose()
+}
+
+/// The daemon's delivery clock for an event being applied now.
+///
+/// Its own function so the two writers (a new row, and `apply_patch` on an
+/// existing one) cannot drift, and so a test can see one name to reason about.
+fn received_now() -> i64 {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    SystemClock.now_ms()
 }
 
 fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
@@ -1558,6 +1720,33 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
         },
         version: 1,
         updated_revision: 0,
+        // `local` until R1 mints a real `HostId`; the column exists now so the
+        // idempotency key can be written without a second event-table rebuild.
+        host_id: "local".to_string(),
+        // A first event that names its tier gets it. One that does not leaves
+        // the row `unknown`, which is the honest answer and what `tier_of`
+        // falls back on.
+        tier: event.patch.tier.clone().unwrap_or_else(|| "unknown".to_string()),
+        // The daemon's clock, not the source's. `observed_at` is already the
+        // source's and is kept apart from it on purpose, so a replay moves
+        // this and never moves that. Stamped here rather than passed in
+        // because "when the daemon took delivery" is a fact only the apply
+        // path knows, and threading it through 47 event constructors would
+        // invite a caller to supply the source clock twice.
+        received_at: received_now(),
+        // A row's first state is a state change.
+        state_started_at: event.observed_at,
+        session_incarnation: event.patch.session_incarnation.clone(),
+        // A row born from an event is confirmed by construction; only boot
+        // hydration sets this.
+        restored_unconfirmed: false,
+        bound_target: event.patch.bound.as_ref().map(|(target, _)| target.clone()),
+        bound_fingerprint: event
+            .patch
+            .bound
+            .as_ref()
+            .and_then(|(_, fingerprint)| fingerprint.clone()),
+        bound_at: event.patch.bound.as_ref().map_or(0, |_| event.observed_at),
     }
 }
 
@@ -1565,6 +1754,11 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
     let mut changed = false;
     let authority = event.authority;
     let authority_token = authority.as_str().to_string();
+    // Snapshotted BEFORE any group is applied. `state_started_at` asks whether
+    // this event moved the state, and by the time the groups below have run the
+    // row already holds the new value, so comparing then would compare it with
+    // itself and the clock would never move.
+    let state_before = (row.lifecycle_state.clone(), row.attention_state.clone());
 
     if event.patch.has_metadata()
         && should_replace(
@@ -1672,7 +1866,242 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
         }
     }
 
+    // The D14 identity, maintained alongside the groups above rather than as a
+    // separate pass, so a row can never record a tier for a state it did not
+    // accept.
+    //
+    // `changed` is the gate for the tier and the state clock deliberately: an
+    // observation that lost every authority check did not move this row, so it
+    // did not write its state either, and claiming its tier would attribute the
+    // row's state to evidence that was refused.
+    if changed {
+        if let Some(tier) = &event.patch.tier {
+            // A hydrated row is confirmed by a tier 0/1 event in THIS daemon
+            // incarnation, and by nothing else (D14 boot order). A tier-5 scan
+            // finding a pane proves a pane exists, not that the agent in it is
+            // the one this row remembers, which is the whole reason the stamp
+            // is not cleared by the discovery sweep.
+            if row.restored_unconfirmed && matches!(tier.as_str(), "hook" | "acp_feed") {
+                row.restored_unconfirmed = false;
+            }
+            row.tier.clone_from(tier);
+        }
+        row.received_at = received_now();
+        // Only a real transition moves the state clock. Re-observing the same
+        // state must not reset "working since", or a session that is
+        // re-observed every 3s reads as having just started, forever.
+        if row.lifecycle_state != state_before.0 || row.attention_state != state_before.1 {
+            row.state_started_at = event.observed_at;
+        }
+    }
+
+    // The incarnation and the binding are row IDENTITY, not state, so they are
+    // written whether or not a state group won. A fence that only updated on an
+    // accepted state change could never learn about the process that refused
+    // one.
+    if let Some(incarnation) = &event.patch.session_incarnation {
+        if row.session_incarnation.as_deref() != Some(incarnation.as_str()) {
+            row.session_incarnation = Some(incarnation.clone());
+            changed = true;
+        }
+    }
+    if let Some((target, fingerprint)) = &event.patch.bound {
+        // Written ONCE. A second decision for the same pane is the same
+        // decision; a decision for a different pane replaces it, which is what
+        // a re-bind after an invalidation is.
+        if row.bound_target.as_deref() != Some(target.as_str())
+            || (fingerprint.is_some() && row.bound_fingerprint != *fingerprint)
+        {
+            row.bound_target = Some(target.clone());
+            row.bound_fingerprint.clone_from(fingerprint);
+            row.bound_at = event.observed_at;
+            changed = true;
+        }
+    }
+    if event.patch.invalidate_binding && row.bound_target.is_some() {
+        // Clear the decision AND the live route it produced. Leaving
+        // `tmux_target` standing is exactly the bug: send-keys would keep
+        // typing into a pane that now belongs to someone else.
+        row.bound_target = None;
+        row.bound_fingerprint = None;
+        row.bound_at = 0;
+        row.tmux_target = None;
+        changed = true;
+    }
+
     changed
+}
+
+/// Append one row to `fleet_event`, the durable record of what the daemon was
+/// told.
+///
+/// `applied` is the honest outcome, not a success flag: an event the fence
+/// suppressed, or one that lost every authority check, is still recorded with
+/// `applied = 0`. "We saw this and refused it" is the fact that makes a stuck
+/// session diagnosable.
+///
+/// `host_id` and `tier` complete the spec's
+/// `(host_id, session_key, tier, event_id)` identity, which migration 0099
+/// indexes.
+async fn insert_fleet_event(
+    tx: &mut Transaction<'_, Sqlite>,
+    event: &NewFleetEvent,
+    session_version: i64,
+    applied: bool,
+) -> Result<i64, sqlx::Error> {
+    Ok(sqlx::query(
+        "INSERT INTO fleet_event \
+         (event_id, session_key, observed_at, authority, event_type, payload, \
+          request_fingerprint, session_version, applied, host_id, tier) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&event.event_id)
+    .bind(&event.session_key)
+    .bind(event.observed_at)
+    .bind(event.authority.as_str())
+    .bind(&event.event_type)
+    .bind(&event.payload)
+    .bind(event.patch.current_request_fingerprint.as_ref().and_then(Clone::clone))
+    .bind(session_version)
+    .bind(i64::from(applied))
+    .bind("local")
+    .bind(event.patch.tier.as_deref().unwrap_or("unknown"))
+    .execute(&mut **tx)
+    .await?
+    .last_insert_rowid())
+}
+
+/// What an event's incarnation says about the row it addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fence {
+    /// Same incarnation, or not enough information to say. Apply normally.
+    Pass,
+    /// A DIFFERENT incarnation arriving after this row was established. The
+    /// agent was restarted under the same key.
+    Restart,
+    /// An incarnation this row has already moved past.
+    Suppress,
+}
+
+/// Decide the fence for one event against the live row (D14).
+///
+/// Silence is `Pass`, in both directions and on purpose. An event that names no
+/// incarnation is most of the traffic (a model observation, a workload count, a
+/// transport flip), and refusing those would make the fence a filter on
+/// everything rather than a guard on identity. A row that names none has never
+/// been told, so it has nothing to be fenced against and the event's own
+/// incarnation becomes the row's.
+///
+/// **Which rows stay unfenced.** A row whose incarnation is `NULL` is not
+/// protected by this at all, and that is exactly the population #916 is about:
+/// a hook forked from a shared provider daemon reports no
+/// `process_start_fingerprint`, so its row carries no incarnation and any event
+/// for that key applies in place. The fence protects rows that have been told
+/// who they are; the rest are covered by pane binding and by the live
+/// fingerprint check before send-keys, not by this.
+///
+/// # Ordering
+///
+/// The two incarnations are ordered by `session_started`, which the fingerprint
+/// carries (`pane=%N;pid=N;session_started=N`) and which is the fact that
+/// actually orders two runs of one agent. A pane id is stable across a restart
+/// and a pid is not ordered at all, since the kernel recycles them.
+///
+/// Only when a `session_started` cannot be read from BOTH sides does this fall
+/// back to comparing `event.observed_at` against `last_observed_at`, and that
+/// fallback is weaker in a way worth naming: `last_observed_at` is a monotonic
+/// maximum across every tier, so it mixes provider-stamped hook clocks with
+/// daemon-stamped scan clocks. A genuine restart whose first event trails a
+/// tier-5 scan is then classified `Suppress`. It self-heals, because a
+/// suppression returns without touching the row and the next event of the new
+/// run carries a later stamp, so the cost is one refused event rather than a
+/// stranded row.
+fn fence(row: &FleetSessionRow, event: &NewFleetEvent) -> Fence {
+    let (Some(incoming), Some(current)) = (
+        event.patch.session_incarnation.as_deref(),
+        row.session_incarnation.as_deref(),
+    ) else {
+        return Fence::Pass;
+    };
+    if incoming == current {
+        return Fence::Pass;
+    }
+    if let (Some(started), Some(current_started)) =
+        (session_started(incoming), session_started(current))
+    {
+        return if started > current_started {
+            Fence::Restart
+        } else {
+            Fence::Suppress
+        };
+    }
+    if event.observed_at >= row.last_observed_at {
+        Fence::Restart
+    } else {
+        Fence::Suppress
+    }
+}
+
+/// The `session_started` stamp inside a process fingerprint, when it has one.
+///
+/// `pane=%N;pid=N;session_started=N`, as minted by the tmux scan
+/// (`discover/tmux.rs`) and by the hook (`cli/fleet/atc.rs`). Absent, or
+/// unparseable, means this fingerprint cannot order anything and the caller
+/// falls back to its clock.
+fn session_started(fingerprint: &str) -> Option<i64> {
+    fingerprint
+        .split(';')
+        .find_map(|field| field.strip_prefix("session_started="))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// Reset a row for a new incarnation of the same session key.
+///
+/// Everything the PREVIOUS run established is dropped: its state, its clocks,
+/// its authority stamps and its pane binding. A restarted agent is not waiting
+/// on the question the old process was waiting on, and the pane it now occupies
+/// is a fresh decision, so keeping either is how a new agent inherits a dead
+/// one's attention.
+///
+/// Identity is kept: the key, the provider, the cwd, the display name. Those
+/// describe the session, not the run.
+fn reset_for_restart(row: &mut FleetSessionRow, event: &NewFleetEvent) {
+    row.lifecycle_state = "UNKNOWN".to_string();
+    row.attention_state = "NONE".to_string();
+    row.current_request_fingerprint = None;
+    row.active_work_count = 0;
+    // Every group goes back to `inferred` so the incoming event's own authority
+    // decides the new run, rather than losing to a stamp the old one left.
+    for authority in [
+        &mut row.lifecycle_authority,
+        &mut row.attention_authority,
+        &mut row.transport_authority,
+        &mut row.workload_authority,
+        &mut row.metadata_authority,
+        &mut row.model_authority,
+    ] {
+        *authority = "inferred".to_string();
+    }
+    for at in [
+        &mut row.lifecycle_updated_at,
+        &mut row.attention_updated_at,
+        &mut row.transport_updated_at,
+        &mut row.workload_updated_at,
+        &mut row.model_updated_at,
+    ] {
+        *at = 0;
+    }
+    row.state_started_at = event.observed_at;
+    row.session_incarnation.clone_from(&event.patch.session_incarnation);
+    // The binding belonged to the old process. A pane that still holds the new
+    // one will be re-bound by the next observation that says so.
+    row.bound_target = None;
+    row.bound_fingerprint = None;
+    row.bound_at = 0;
+    row.tmux_target = None;
+    // A restart is confirmation that this run exists, so the row is not a
+    // hydrated memory any more.
+    row.restored_unconfirmed = false;
 }
 
 fn should_replace(
@@ -1710,8 +2139,11 @@ async fn insert_session(
             metadata_authority, lifecycle_updated_at, lifecycle_authority, \
             attention_updated_at, attention_authority, transport_updated_at, \
             transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-            model, reasoning_effort, model_updated_at, model_authority) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            model, reasoning_effort, model_updated_at, model_authority, \
+            host_id, tier, received_at, state_started_at, session_incarnation, \
+            restored_unconfirmed, bound_target, bound_fingerprint, bound_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     bind_session(query, row).execute(&mut **tx).await?;
     Ok(())
@@ -1748,7 +2180,9 @@ async fn update_session(
             metadata_authority = ?, lifecycle_updated_at = ?, lifecycle_authority = ?, \
             attention_updated_at = ?, attention_authority = ?, transport_updated_at = ?, \
             transport_authority = ?, active_work_count = ?, workload_updated_at = ?, workload_authority = ?, version = ?, updated_revision = ?, \
-            model = ?, reasoning_effort = ?, model_updated_at = ?, model_authority = ? \
+            model = ?, reasoning_effort = ?, model_updated_at = ?, model_authority = ?, \
+            tier = ?, received_at = ?, state_started_at = ?, session_incarnation = ?, \
+            restored_unconfirmed = ?, bound_target = ?, bound_fingerprint = ?, bound_at = ? \
          WHERE session_key = ?",
     )
     .bind(&row.provider)
@@ -1784,6 +2218,14 @@ async fn update_session(
     .bind(&row.reasoning_effort)
     .bind(row.model_updated_at)
     .bind(&row.model_authority)
+    .bind(&row.tier)
+    .bind(row.received_at)
+    .bind(row.state_started_at)
+    .bind(&row.session_incarnation)
+    .bind(i64::from(row.restored_unconfirmed))
+    .bind(&row.bound_target)
+    .bind(&row.bound_fingerprint)
+    .bind(row.bound_at)
     .bind(&row.session_key)
     .execute(&mut **tx)
     .await?;
@@ -1829,6 +2271,15 @@ fn bind_session<'q>(
         .bind(&row.reasoning_effort)
         .bind(row.model_updated_at)
         .bind(&row.model_authority)
+        .bind(&row.host_id)
+        .bind(&row.tier)
+        .bind(row.received_at)
+        .bind(row.state_started_at)
+        .bind(&row.session_incarnation)
+        .bind(i64::from(row.restored_unconfirmed))
+        .bind(&row.bound_target)
+        .bind(&row.bound_fingerprint)
+        .bind(row.bound_at)
 }
 
 fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sqlx::Error> {
@@ -1867,6 +2318,15 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sq
         model_authority: row.try_get("model_authority")?,
         version: row.try_get("version")?,
         updated_revision: row.try_get("updated_revision")?,
+        host_id: row.try_get("host_id")?,
+        tier: row.try_get("tier")?,
+        received_at: row.try_get("received_at")?,
+        state_started_at: row.try_get("state_started_at")?,
+        session_incarnation: row.try_get("session_incarnation")?,
+        restored_unconfirmed: row.try_get::<i64, _>("restored_unconfirmed")? != 0,
+        bound_target: row.try_get("bound_target")?,
+        bound_fingerprint: row.try_get("bound_fingerprint")?,
+        bound_at: row.try_get("bound_at")?,
     })
 }
 
@@ -2023,6 +2483,452 @@ mod tests {
         // does no work per boot beyond the rows it still cannot name.
         let second = FleetRepo::backfill_display_names(store.pool(), derive).await.unwrap();
         assert_eq!(second, 0, "second boot names nothing new");
+    }
+
+    /// A hydrated row is a memory until this incarnation confirms it, and only
+    /// a tier 0/1 event counts as confirmation.
+    ///
+    /// The failure: the daemon restarts, a session exited during the outage,
+    /// and its row keeps rendering as working on evidence from a daemon that is
+    /// no longer running. A tier-5 scan finding a pane is not confirmation
+    /// either, because a pane existing says nothing about which agent is in it.
+    #[tokio::test]
+    async fn only_a_tier_zero_or_one_event_confirms_a_hydrated_row() {
+        let (_dir, store) = store().await;
+        let base = |id: &str, at: i64, tier: &str| {
+            event(
+                id,
+                "claude:s-boot",
+                at,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    tier: Some(tier.to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            )
+        };
+        FleetRepo::apply_event(store.pool(), &base("e-1", 100, "hook")).await.unwrap();
+
+        // The daemon restarts.
+        let stamped = FleetRepo::mark_restored_unconfirmed(store.pool()).await.unwrap();
+        assert_eq!(stamped, 1, "a live row is stamped at boot");
+        assert!(
+            FleetRepo::get_session(store.pool(), "claude:s-boot")
+                .await
+                .unwrap()
+                .unwrap()
+                .restored_unconfirmed
+        );
+
+        // A pane scan finds a pane. That is not confirmation.
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-scan",
+                "claude:s-boot",
+                150,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    lifecycle_state: Some("IDLE".to_string()),
+                    tier: Some("pane_text".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            FleetRepo::get_session(store.pool(), "claude:s-boot")
+                .await
+                .unwrap()
+                .unwrap()
+                .restored_unconfirmed,
+            "a pane existing says nothing about the agent this row remembers"
+        );
+
+        // The agent's own hook does confirm it.
+        FleetRepo::apply_event(store.pool(), &base("e-2", 200, "hook")).await.unwrap();
+        assert!(
+            !FleetRepo::get_session(store.pool(), "claude:s-boot")
+                .await
+                .unwrap()
+                .unwrap()
+                .restored_unconfirmed,
+            "a tier-0 event in this incarnation confirms the row"
+        );
+    }
+
+    /// An exited row makes no present-tense claim, so it is not stamped.
+    #[tokio::test]
+    async fn boot_does_not_stamp_a_row_that_already_says_the_process_is_gone() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-exit",
+                "claude:s-dead",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    lifecycle_state: Some("EXITED".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            FleetRepo::mark_restored_unconfirmed(store.pool()).await.unwrap(),
+            0,
+            "marking a dead row unconfirmed would suggest that might have changed"
+        );
+    }
+
+    /// A restart under the same key does not inherit the previous run's state.
+    ///
+    /// The failure this prevents: an agent is killed while blocked on a
+    /// question, a new one starts in the same pane under the same session key,
+    /// and every surface shows the fresh agent as waiting on a question that
+    /// died with the old process. Nothing can answer it.
+    #[tokio::test]
+    async fn a_newer_incarnation_restarts_the_row_instead_of_inheriting_it() {
+        let (_dir, store) = store().await;
+        let asking = event(
+            "e-ask",
+            "claude:s-restart",
+            100,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                provider_session_id: Some("s-restart".to_string()),
+                session_incarnation: Some("pane=%1;pid=1".to_string()),
+                lifecycle_state: Some("IDLE".to_string()),
+                attention_state: Some("ASK".to_string()),
+                tier: Some("hook".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        FleetRepo::apply_event(store.pool(), &asking).await.unwrap();
+
+        // The card the dead run raised. This is the thing an operator can still
+        // click, so it is the thing a restart has to retire.
+        crate::repo::attention::AttentionRepo::insert_if_absent(
+            store.pool(),
+            &crate::repo::attention::NewAttention {
+                id: "att:s-restart:e-ask".to_string(),
+                session_id: "s-restart".to_string(),
+                cwd: "/w/app".to_string(),
+                workspace_id: None,
+                kind: crate::repo::attention::AttentionKind::AskUserQuestion,
+                payload: r#"{"kind":"ASK"}"#.to_string(),
+                degraded: false,
+                created_at: 100,
+                raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Same key, later, different process.
+        let restarted = event(
+            "e-restart",
+            "claude:s-restart",
+            200,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                session_incarnation: Some("pane=%1;pid=2".to_string()),
+                lifecycle_state: Some("RUNNING".to_string()),
+                tier: Some("hook".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        let applied = FleetRepo::apply_event(store.pool(), &restarted).await.unwrap();
+        assert!(applied.applied, "a newer incarnation is accepted");
+
+        let row = FleetRepo::get_session(store.pool(), "claude:s-restart")
+            .await
+            .unwrap()
+            .expect("the row survives a restart, it is the same session");
+        assert_eq!(
+            row.attention_state, "NONE",
+            "the dead run's question must not follow the new process"
+        );
+        assert_eq!(row.lifecycle_state, "RUNNING");
+        assert_eq!(row.session_incarnation.as_deref(), Some("pane=%1;pid=2"));
+        assert_eq!(
+            row.state_started_at, 200,
+            "the new run's clock starts at the restart, not at the old run's ask"
+        );
+
+        // The card died with the run that raised it. Leaving it open would
+        // advertise an answer route into a process that is gone, and would trip
+        // the drift assertion forever.
+        assert!(
+            crate::repo::attention::AttentionRepo::list_fleet(store.pool())
+                .await
+                .unwrap()
+                .is_empty(),
+            "a restart must leave no open card for the old incarnation"
+        );
+        let drift =
+            crate::repo::attention::AttentionRepo::drift_against_fleet_session(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            drift.is_clean(),
+            "and must not poison this lane's own regression detector: {drift:?}"
+        );
+    }
+
+    /// An older incarnation arriving late is recorded and refused.
+    ///
+    /// The hook spool replays from a cursor, so an event from a process that
+    /// has already been replaced can arrive after the row has moved on.
+    /// Applying it would drag a live session backwards into a dead run's state.
+    #[tokio::test]
+    async fn an_older_incarnation_is_suppressed_but_still_recorded() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-new",
+                "claude:s-suppress",
+                200,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    session_incarnation: Some("pane=%1;pid=2".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let late = event(
+            "e-late",
+            "claude:s-suppress",
+            100,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                session_incarnation: Some("pane=%1;pid=1".to_string()),
+                lifecycle_state: Some("EXITED".to_string()),
+                tier: Some("hook".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        let result = FleetRepo::apply_event(store.pool(), &late).await.unwrap();
+        assert!(
+            !result.applied,
+            "the dead run's event must not move the row"
+        );
+        assert!(!result.duplicate, "it is a real event, not a replay");
+
+        let row = FleetRepo::get_session(store.pool(), "claude:s-suppress")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.lifecycle_state, "RUNNING",
+            "the live run keeps its own state"
+        );
+        assert_eq!(row.session_incarnation.as_deref(), Some("pane=%1;pid=2"));
+
+        // Recorded, so an operator can see what was refused and why.
+        let events = FleetRepo::events_after(store.pool(), 0, 100).await.unwrap();
+        let refused = events
+            .iter()
+            .find(|row| row.event_id == "e-late")
+            .expect("a suppressed event is still durable");
+        assert!(!refused.applied, "and is marked as not applied");
+    }
+
+    /// A restart is ordered by `session_started`, not by whichever clock last
+    /// touched the row.
+    ///
+    /// `last_observed_at` is a monotonic maximum across every tier, so a
+    /// daemon-stamped tier-5 scan routinely pushes it past a provider-stamped
+    /// hook payload. Ordering on it alone classified a genuine restart as a
+    /// suppression whenever the new run's first event trailed a scan, which on
+    /// a 3s discovery loop is most of them.
+    #[tokio::test]
+    async fn a_restart_is_ordered_by_session_started_not_by_the_last_observer() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-old",
+                "claude:s-clock",
+                1_000,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    session_incarnation: Some("pane=%1;pid=1;session_started=100".to_string()),
+                    lifecycle_state: Some("IDLE".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        // A scan touches the row and pushes the high-water mark well past
+        // anything the next hook payload will carry.
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-scan",
+                "claude:s-clock",
+                9_000,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    transport_health: Some("HEALTHY".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        // The new run: a LATER `session_started`, but a payload clock behind
+        // the scan that just ran.
+        let restarted = event(
+            "e-new",
+            "claude:s-clock",
+            2_000,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                session_incarnation: Some("pane=%1;pid=2;session_started=500".to_string()),
+                lifecycle_state: Some("RUNNING".to_string()),
+                tier: Some("hook".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        let applied = FleetRepo::apply_event(store.pool(), &restarted).await.unwrap();
+        assert!(
+            applied.applied,
+            "a later session_started is a restart even when its payload clock \
+             trails the scan that last touched the row"
+        );
+        let row = FleetRepo::get_session(store.pool(), "claude:s-clock").await.unwrap().unwrap();
+        assert_eq!(
+            row.session_incarnation.as_deref(),
+            Some("pane=%1;pid=2;session_started=500")
+        );
+    }
+
+    /// And the reverse: an EARLIER `session_started` is the old run draining,
+    /// however recent its arrival.
+    #[tokio::test]
+    async fn an_earlier_session_started_is_suppressed_however_late_it_arrives() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-live",
+                "claude:s-late",
+                1_000,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    session_incarnation: Some("pane=%1;pid=2;session_started=500".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let late = event(
+            "e-drain",
+            "claude:s-late",
+            9_999,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                session_incarnation: Some("pane=%1;pid=1;session_started=100".to_string()),
+                lifecycle_state: Some("EXITED".to_string()),
+                tier: Some("hook".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        assert!(
+            !FleetRepo::apply_event(store.pool(), &late).await.unwrap().applied,
+            "the dead run cannot bury the live one by arriving last"
+        );
+        assert_eq!(
+            FleetRepo::get_session(store.pool(), "claude:s-late")
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle_state,
+            "RUNNING"
+        );
+    }
+
+    /// An event that names no incarnation is most of the traffic, and the fence
+    /// must not become a filter on everything.
+    #[tokio::test]
+    async fn an_event_with_no_incarnation_passes_the_fence() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-base",
+                "claude:s-quiet",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    session_incarnation: Some("pane=%1;pid=1".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let model_only = event(
+            "e-model",
+            "claude:s-quiet",
+            150,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                model: Some("gpt-5.6-terra".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        let result = FleetRepo::apply_event(store.pool(), &model_only).await.unwrap();
+        assert!(result.applied, "a model observation is not fenced out");
+
+        let row = FleetRepo::get_session(store.pool(), "claude:s-quiet").await.unwrap().unwrap();
+        assert_eq!(row.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(
+            row.session_incarnation.as_deref(),
+            Some("pane=%1;pid=1"),
+            "and it does not disturb the incarnation it said nothing about"
+        );
+        assert_eq!(
+            row.tier, "hook",
+            "nor re-tier the row: it made no claim about the state"
+        );
     }
 
     #[tokio::test]
