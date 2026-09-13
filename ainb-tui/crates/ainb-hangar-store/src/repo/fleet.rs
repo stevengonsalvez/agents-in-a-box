@@ -174,6 +174,30 @@ pub struct FleetSessionPatch {
     pub model: Option<String>,
     /// Provider-reported reasoning effort, verbatim.
     pub reasoning_effort: Option<String>,
+    /// The evidence tier this observation came from (D14).
+    ///
+    /// A snake_case `agent_status::Tier` token. `None` leaves the row's tier
+    /// alone, which is what a patch carrying no state should do; an observation
+    /// that DOES move the state names the tier that moved it, so the row stops
+    /// having to be reverse-engineered from `management_state`.
+    pub tier: Option<String>,
+    /// The incarnation this observation belongs to: `process_start_fingerprint`
+    /// for a tmux pane, the pool session id for an ACP child.
+    ///
+    /// The fence reads it BEFORE the patch is applied, so a mismatch can be
+    /// turned into a restart or a suppression instead of an in-place update of
+    /// a row whose process has gone.
+    pub session_incarnation: Option<String>,
+    /// The pane binding decision, written once (#961).
+    ///
+    /// `Some((target, fingerprint))` records the chosen pane and the process in
+    /// it at the time. `None` leaves any existing decision standing; clearing
+    /// one is [`FleetSessionPatch::invalidate_binding`], which is a different
+    /// act and says so.
+    pub bound: Option<(String, Option<String>)>,
+    /// Clear the binding: the pane a correlated decision chose is now running
+    /// something else, so the row must stop routing to it.
+    pub invalidate_binding: bool,
 }
 
 impl FleetSessionPatch {
@@ -280,6 +304,36 @@ pub struct FleetSessionRow {
     pub version: i64,
     /// Revision that last changed this row.
     pub updated_revision: i64,
+    /// Owning host. `local` until R1 mints a real `HostId`.
+    pub host_id: String,
+    /// The evidence tier that last wrote this row's state (D14).
+    ///
+    /// `unknown` for a row written before migration 0099, which is the honest
+    /// answer rather than a tier reconstructed from columns that cannot carry
+    /// it. `agent_status::tier_of` falls back to its old derivation for those.
+    pub tier: String,
+    /// The daemon's own clock when it took delivery of the evidence.
+    ///
+    /// Distinct from `last_observed_at`, which is the SOURCE's clock. A replay
+    /// moves this and must never move that.
+    pub received_at: i64,
+    /// When the derived state last CHANGED, for "working since" and attention
+    /// ordering. A repeated observation of the same state does not move it.
+    pub state_started_at: i64,
+    /// The incarnation fence: `process_start_fingerprint` for a tmux pane, the
+    /// pool session id for an ACP child. `None` until something observes one.
+    pub session_incarnation: Option<String>,
+    /// Hydrated at boot and not yet confirmed by a tier 0/1 event in this
+    /// daemon incarnation.
+    pub restored_unconfirmed: bool,
+    /// The pane this row's binding decision chose. `tmux_target` is the live
+    /// routing field; this is the decision it came from.
+    pub bound_target: Option<String>,
+    /// The process that was in `bound_target` when the binding was made. What a
+    /// later observation is re-confirmed against.
+    pub bound_fingerprint: Option<String>,
+    /// When the binding was decided.
+    pub bound_at: i64,
 }
 
 /// One durable Fleet change-log row.
@@ -1400,7 +1454,9 @@ const SESSION_SELECT_BY_KEY: &str = "SELECT session_key, provider, provider_sess
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE session_key = ?";
 
 const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session_id, \
@@ -1410,7 +1466,9 @@ const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE visible = 1 ORDER BY session_key ASC";
 
 /// The ERR roster, read by [`FleetRepo::list_attention_error`]. Same column
@@ -1423,7 +1481,9 @@ const SESSION_SELECT_ERRORING: &str = "SELECT session_key, provider, provider_se
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE visible = 1 AND attention_state = 'ERROR' \
     AND lifecycle_state != 'EXITED' ORDER BY session_key ASC";
 
@@ -1437,7 +1497,9 @@ const SESSION_SELECT_ARCHIVED: &str = "SELECT session_key, provider, provider_se
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
     transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-    model, reasoning_effort, model_updated_at, model_authority \
+    model, reasoning_effort, model_updated_at, model_authority, \
+    host_id, tier, received_at, state_started_at, session_incarnation, \
+    restored_unconfirmed, bound_target, bound_fingerprint, bound_at \
     FROM fleet_session WHERE visible = 0 AND superseded_by IS NULL \
     ORDER BY last_observed_at DESC LIMIT ?";
 
@@ -1465,6 +1527,15 @@ async fn event_by_id(
     .fetch_optional(&mut **tx)
     .await?;
     row.as_ref().map(event_from_row).transpose()
+}
+
+/// The daemon's delivery clock for an event being applied now.
+///
+/// Its own function so the two writers (a new row, and `apply_patch` on an
+/// existing one) cannot drift, and so a test can see one name to reason about.
+fn received_now() -> i64 {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    SystemClock.now_ms()
 }
 
 fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
@@ -1558,6 +1629,33 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
         },
         version: 1,
         updated_revision: 0,
+        // `local` until R1 mints a real `HostId`; the column exists now so the
+        // idempotency key can be written without a second event-table rebuild.
+        host_id: "local".to_string(),
+        // A first event that names its tier gets it. One that does not leaves
+        // the row `unknown`, which is the honest answer and what `tier_of`
+        // falls back on.
+        tier: event.patch.tier.clone().unwrap_or_else(|| "unknown".to_string()),
+        // The daemon's clock, not the source's. `observed_at` is already the
+        // source's and is kept apart from it on purpose, so a replay moves
+        // this and never moves that. Stamped here rather than passed in
+        // because "when the daemon took delivery" is a fact only the apply
+        // path knows, and threading it through 47 event constructors would
+        // invite a caller to supply the source clock twice.
+        received_at: received_now(),
+        // A row's first state is a state change.
+        state_started_at: event.observed_at,
+        session_incarnation: event.patch.session_incarnation.clone(),
+        // A row born from an event is confirmed by construction; only boot
+        // hydration sets this.
+        restored_unconfirmed: false,
+        bound_target: event.patch.bound.as_ref().map(|(target, _)| target.clone()),
+        bound_fingerprint: event
+            .patch
+            .bound
+            .as_ref()
+            .and_then(|(_, fingerprint)| fingerprint.clone()),
+        bound_at: event.patch.bound.as_ref().map_or(0, |_| event.observed_at),
     }
 }
 
@@ -1565,6 +1663,11 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
     let mut changed = false;
     let authority = event.authority;
     let authority_token = authority.as_str().to_string();
+    // Snapshotted BEFORE any group is applied. `state_started_at` asks whether
+    // this event moved the state, and by the time the groups below have run the
+    // row already holds the new value, so comparing then would compare it with
+    // itself and the clock would never move.
+    let state_before = (row.lifecycle_state.clone(), row.attention_state.clone());
 
     if event.patch.has_metadata()
         && should_replace(
@@ -1672,8 +1775,64 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
         }
     }
 
+    // The D14 identity, maintained alongside the groups above rather than as a
+    // separate pass, so a row can never record a tier for a state it did not
+    // accept.
+    //
+    // `changed` is the gate for the tier and the state clock deliberately: an
+    // observation that lost every authority check did not move this row, so it
+    // did not write its state either, and claiming its tier would attribute the
+    // row's state to evidence that was refused.
+    if changed {
+        if let Some(tier) = &event.patch.tier {
+            row.tier.clone_from(tier);
+        }
+        row.received_at = received_now();
+        // Only a real transition moves the state clock. Re-observing the same
+        // state must not reset "working since", or a session that is
+        // re-observed every 3s reads as having just started, forever.
+        if row.lifecycle_state != state_before.0 || row.attention_state != state_before.1 {
+            row.state_started_at = event.observed_at;
+        }
+    }
+
+    // The incarnation and the binding are row IDENTITY, not state, so they are
+    // written whether or not a state group won. A fence that only updated on an
+    // accepted state change could never learn about the process that refused
+    // one.
+    if let Some(incarnation) = &event.patch.session_incarnation {
+        if row.session_incarnation.as_deref() != Some(incarnation.as_str()) {
+            row.session_incarnation = Some(incarnation.clone());
+            changed = true;
+        }
+    }
+    if let Some((target, fingerprint)) = &event.patch.bound {
+        // Written ONCE. A second decision for the same pane is the same
+        // decision; a decision for a different pane replaces it, which is what
+        // a re-bind after an invalidation is.
+        if row.bound_target.as_deref() != Some(target.as_str())
+            || (fingerprint.is_some() && row.bound_fingerprint != *fingerprint)
+        {
+            row.bound_target = Some(target.clone());
+            row.bound_fingerprint.clone_from(fingerprint);
+            row.bound_at = event.observed_at;
+            changed = true;
+        }
+    }
+    if event.patch.invalidate_binding && row.bound_target.is_some() {
+        // Clear the decision AND the live route it produced. Leaving
+        // `tmux_target` standing is exactly the bug: send-keys would keep
+        // typing into a pane that now belongs to someone else.
+        row.bound_target = None;
+        row.bound_fingerprint = None;
+        row.bound_at = 0;
+        row.tmux_target = None;
+        changed = true;
+    }
+
     changed
 }
+
 
 fn should_replace(
     incoming: ObservationAuthority,
@@ -1710,8 +1869,11 @@ async fn insert_session(
             metadata_authority, lifecycle_updated_at, lifecycle_authority, \
             attention_updated_at, attention_authority, transport_updated_at, \
             transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision, \
-            model, reasoning_effort, model_updated_at, model_authority) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            model, reasoning_effort, model_updated_at, model_authority, \
+            host_id, tier, received_at, state_started_at, session_incarnation, \
+            restored_unconfirmed, bound_target, bound_fingerprint, bound_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     bind_session(query, row).execute(&mut **tx).await?;
     Ok(())
@@ -1748,7 +1910,9 @@ async fn update_session(
             metadata_authority = ?, lifecycle_updated_at = ?, lifecycle_authority = ?, \
             attention_updated_at = ?, attention_authority = ?, transport_updated_at = ?, \
             transport_authority = ?, active_work_count = ?, workload_updated_at = ?, workload_authority = ?, version = ?, updated_revision = ?, \
-            model = ?, reasoning_effort = ?, model_updated_at = ?, model_authority = ? \
+            model = ?, reasoning_effort = ?, model_updated_at = ?, model_authority = ?, \
+            tier = ?, received_at = ?, state_started_at = ?, session_incarnation = ?, \
+            restored_unconfirmed = ?, bound_target = ?, bound_fingerprint = ?, bound_at = ? \
          WHERE session_key = ?",
     )
     .bind(&row.provider)
@@ -1784,6 +1948,14 @@ async fn update_session(
     .bind(&row.reasoning_effort)
     .bind(row.model_updated_at)
     .bind(&row.model_authority)
+    .bind(&row.tier)
+    .bind(row.received_at)
+    .bind(row.state_started_at)
+    .bind(&row.session_incarnation)
+    .bind(i64::from(row.restored_unconfirmed))
+    .bind(&row.bound_target)
+    .bind(&row.bound_fingerprint)
+    .bind(row.bound_at)
     .bind(&row.session_key)
     .execute(&mut **tx)
     .await?;
@@ -1829,6 +2001,15 @@ fn bind_session<'q>(
         .bind(&row.reasoning_effort)
         .bind(row.model_updated_at)
         .bind(&row.model_authority)
+        .bind(&row.host_id)
+        .bind(&row.tier)
+        .bind(row.received_at)
+        .bind(row.state_started_at)
+        .bind(&row.session_incarnation)
+        .bind(i64::from(row.restored_unconfirmed))
+        .bind(&row.bound_target)
+        .bind(&row.bound_fingerprint)
+        .bind(row.bound_at)
 }
 
 fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sqlx::Error> {
@@ -1867,6 +2048,15 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sq
         model_authority: row.try_get("model_authority")?,
         version: row.try_get("version")?,
         updated_revision: row.try_get("updated_revision")?,
+        host_id: row.try_get("host_id")?,
+        tier: row.try_get("tier")?,
+        received_at: row.try_get("received_at")?,
+        state_started_at: row.try_get("state_started_at")?,
+        session_incarnation: row.try_get("session_incarnation")?,
+        restored_unconfirmed: row.try_get::<i64, _>("restored_unconfirmed")? != 0,
+        bound_target: row.try_get("bound_target")?,
+        bound_fingerprint: row.try_get("bound_fingerprint")?,
+        bound_at: row.try_get("bound_at")?,
     })
 }
 
