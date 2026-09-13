@@ -473,12 +473,29 @@ jobs:
       # shown to hold this home's socket. The proof fails closed, so without lsof
       # nothing is ever proven and reaping silently becomes a no-op, which fails
       # `reap_signals_a_notifyd_serving_this_home` on Linux while macOS passes.
-      - name: Install tmux and lsof (Linux only; macOS runner ships them)
+      # BOTH legs, and verified rather than assumed. This step used to run on
+      # Linux only, on the belief that "macOS runner ships them"; it does not
+      # ship tmux, so the surface-combo smoke printed `SKIP: tmux is not on
+      # PATH` and exited 0 there while the job reported green. That is the
+      # silently-degrading-to-SKIP trap this file already warns about for
+      # `fleet-send-tmux`, and it is why the verify step below fails closed.
+      - name: Install tmux, jq and lsof
         if: >-
-          matrix.os == 'ubuntu-latest' && !cancelled() &&
-          (github.event_name != 'pull_request' ||
+          !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
-        run: sudo apt-get update && sudo apt-get install -y tmux jq lsof
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y tmux jq lsof
+          else
+            brew install tmux jq || true
+          fi
+      - name: Verify the tools the tmux suites need are actually present
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          tmux -V
+          jq --version
       - name: Verify hook script parses on the runner
         if: >-
           !cancelled() && (github.event_name != 'pull_request' ||
@@ -510,6 +527,26 @@ jobs:
       # the hangar plugin's own `F` tab, whose reducer test is exhaustive over
       # `FleetProvider` so a new variant is a compile error rather than a
       # silent UNKNOWN.
+      #
+      # The next three steps are LINUX-ONLY at the test level, under #966. All
+      # four of their cases skip loudly on macOS:
+      #
+      #   tripwire_sessions_tab_strip
+      #     the_tab_strip_opens_every_pane_and_enter_stops_meaning_attach
+      #   tripwire_sessions_pal_engine_swap
+      #     the_engine_picker_reads_the_registry_and_a_swap_keeps_the_channel
+      #     with_no_daemon_the_pal_header_names_the_failed_call
+      #   tripwire_sessions_answer_outcome_per_question
+      #     a_failed_answer_stays_on_its_own_question_across_a_navigation
+      #
+      # They had never run on macOS: the runner ships no tmux, so their
+      # `tmux_available()` guard returned early and each counted as a pass.
+      # Installing tmux above is what surfaced them, and all four die the same
+      # way, the TUI renders its home screen, takes `s`, and is gone by the
+      # next key. Root-causing it needs a macOS machine.
+      #
+      # The gate is in the test files, not here, so the step still RUNS on
+      # macOS and reports the skip rather than vanishing from the log.
       - name: Tripwire — the sessions tab strip, ask pane and log tab
         if: >-
           !cancelled() && (github.event_name != 'pull_request' ||
@@ -547,6 +584,42 @@ jobs:
           !cancelled() && (github.event_name != 'pull_request' ||
           needs.changes.outputs.relevant != 'false')
         run: cargo test -p ainb --test sandbox_script_safety_guards --no-fail-fast
+        working-directory: ${{ env.WORKING_DIR }}
+      # ──────────────────────────────────────────────────────────────────────
+      # Surface combinations (S-D)
+      #
+      # Runs AFTER the tripwires in this job, and deliberately in it rather
+      # than in one of its own: it needs the same tmux and the same built
+      # `ainb`, and a separate job would pay for both again to assert something
+      # no single surface's test can reach.
+      #
+      # What no unit test covers: two surfaces sharing one $HOME, where the
+      # locks, the connection registry and the config read-modify-write
+      # actually meet. {tui} {web} {tui,web} {tui,tui}, each from a clean home.
+      # ──────────────────────────────────────────────────────────────────────
+      # `REQUIRE=1`: the script's own guards exit 0 when a tool is missing, so
+      # that a developer without tmux is not blocked. In CI that is exactly
+      # wrong, and it is how this ran as a no-op on macOS. Under REQUIRE the
+      # same guards exit 1.
+      - name: Surface combinations start clean and leave nothing behind
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        env:
+          REQUIRE: "1"
+        run: |
+          cargo build -p ainb
+          scripts/surface-combo-smoke.sh
+        working-directory: ${{ env.WORKING_DIR }}
+      # Named explicitly, on both platforms. The `Test` job filters out
+      # `binary(/^tripwire_/)` and `run_all_tripwires.sh` never globs
+      # ainb-core, so a tripwire nobody names here is a tripwire nobody runs.
+      - name: Tripwire, a client resizing while the daemon answers a picker
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: >-
+          cargo test -p ainb --test tripwire_multi_attach_resize --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────

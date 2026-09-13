@@ -121,7 +121,7 @@ pub fn spawn(
 /// Metadata is additive. A failed snapshot must preserve the last good values
 /// instead of blanking model and effort while the daemon is briefly busy.
 async fn poll_snapshot_once() -> Option<Vec<FleetSession>> {
-    let client = crate::fleet::bridge::daemon::DaemonClient::from_env().ok()?;
+    let client = crate::fleet::bridge::daemon::tui_client().ok()?;
     match client.fleet_snapshot().await {
         Ok(snapshot) => Some(snapshot.sessions),
         Err(error) => {
@@ -136,7 +136,7 @@ async fn poll_snapshot_once() -> Option<Vec<FleetSession>> {
 /// `last_good` is what the daemon reported when it last answered, handed back
 /// on a failure so the surface greys its chips instead of losing them.
 async fn poll_once(last_good: &DaemonAttention) -> DaemonAttention {
-    let client = match crate::fleet::bridge::daemon::DaemonClient::from_env() {
+    let client = match crate::fleet::bridge::daemon::tui_client() {
         Ok(client) => client,
         // Not an error worth a banner: no hangar home configured is the normal
         // state of a host that never ran the daemon.

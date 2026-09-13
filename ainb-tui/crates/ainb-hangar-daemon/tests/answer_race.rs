@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_daemon::rpc::{self, DaemonHealth, auth::Caller};
+use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
@@ -104,6 +105,11 @@ async fn two_surfaces_answering_one_row_yield_one_delivered_and_one_already_answ
     .unwrap();
 
     let broker = EventBroker::new();
+    // Subscribed BEFORE either answer is dispatched. The broadcast channel
+    // only reaches receivers that already exist, so a subscription taken after
+    // the race would see nothing and the assertion below would pass for the
+    // wrong reason.
+    let mut attention_events = broker.subscribe_attention();
     let (a, b) = (store.pool().clone(), store.pool().clone());
     let (sink_a, sink_b) = (broker.sink(), broker.sink());
     let left = tokio::spawn(async move {
@@ -171,6 +177,38 @@ async fn two_surfaces_answering_one_row_yield_one_delivered_and_one_already_answ
         [a.is_none(), b.is_none()].iter().filter(|gone| **gone).count(),
         1,
         "the loser's claim must be abandoned, not recorded: a={a:?} b={b:?}"
+    );
+
+    // ONE broadcast, not two. The surfaces are told an answer landed through
+    // this channel, so a second event is a second retirement: the loser's card
+    // disappearing twice, and every other surface re-rendering for a change
+    // that did not happen. A race that ends in one database row and two
+    // announcements is only half serialised.
+    let mut answered_events = Vec::new();
+    loop {
+        match attention_events.try_recv() {
+            Ok(event) => answered_events.push(event),
+            Err(_) => break,
+        }
+    }
+    let answered_count = answered_events
+        .iter()
+        .filter(|event| matches!(event, HangarEvent::AttentionAnswered { .. }))
+        .count();
+    assert_eq!(
+        answered_count, 1,
+        "exactly one AttentionAnswered may be broadcast for one answered row: \
+         {answered_events:?}"
+    );
+    let announced_by = answered_events.iter().find_map(|event| match event {
+        HangarEvent::AttentionAnswered { attention_id, by } if attention_id == "att-race" => {
+            Some(by.clone())
+        }
+        _ => None,
+    });
+    assert!(
+        announced_by.is_some(),
+        "the broadcast must name the row it answered: {answered_events:?}"
     );
 
     // And the row itself is answered exactly once, by the winner.
