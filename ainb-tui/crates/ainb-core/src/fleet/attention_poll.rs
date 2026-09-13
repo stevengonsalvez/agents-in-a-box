@@ -11,7 +11,7 @@
 // socket: a daemon that has wedged must cost a frame nothing.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -31,6 +31,16 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// The cell the render loop reads and the worker writes.
 pub type Shared = Arc<Mutex<DaemonAttention>>;
 
+/// How many times the worker has published into either cell.
+///
+/// The two cells above are `Arc<Mutex<..>>`, so the worker changes what the
+/// sessions surface shows through a shared handle the render path only ever
+/// reads by `&`. Nothing in that path takes `&mut`, so the section holding
+/// them cannot notice. This counter is the one thing the render path CAN
+/// compare cheaply, and folding it into a versioned field is what turns a
+/// daemon-side change into a section bump.
+pub type Generation = Arc<AtomicU64>;
+
 /// Last Fleet snapshot observed off the render path.
 ///
 /// This owns only metadata that attention/list cannot provide: the observed
@@ -43,12 +53,18 @@ pub type SnapshotShared = Arc<Mutex<Vec<FleetSession>>>;
 /// a render loop that would otherwise have to remember whether it had started
 /// one — and starting a second poller means two threads dialling one socket and
 /// writing one cell in an order neither controls.
-pub fn spawn(shared: &Shared, snapshot_shared: &SnapshotShared, running: &Arc<AtomicBool>) {
+pub fn spawn(
+    shared: &Shared,
+    snapshot_shared: &SnapshotShared,
+    running: &Arc<AtomicBool>,
+    generation: &Generation,
+) {
     if running.swap(true, Ordering::AcqRel) {
         return;
     }
     let shared = Arc::clone(shared);
     let snapshot_shared = Arc::clone(snapshot_shared);
+    let generation = Arc::clone(generation);
     let worker_flag = Arc::clone(running);
     let spawn_err_flag = Arc::clone(running);
     let spawned = std::thread::Builder::new().name("ainb-attention-poll".into()).spawn(move || {
@@ -87,6 +103,9 @@ pub fn spawn(shared: &Shared, snapshot_shared: &SnapshotShared, running: &Arc<At
                 if let Ok(mut cell) = snapshot_shared.lock() {
                     *cell = last_snapshot.clone();
                 }
+                // Published AFTER both cells, so a render that sees the new
+                // generation sees the rows that go with it.
+                generation.fetch_add(1, Ordering::Release);
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
         });

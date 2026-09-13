@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 fn create_test_state() -> AppState {
     let mut state = AppState::default();
-    state.session_filter = SessionFilter::All;
+    state.sessions.session_filter = SessionFilter::All;
 
     let mut workspace1 = Workspace::new("project1".to_string(), PathBuf::from("/project1"));
     let mut session1 = Session::new(
@@ -30,10 +30,10 @@ fn create_test_state() -> AppState {
     );
     workspace2.add_session(session3);
 
-    state.workspaces.push(workspace1);
-    state.workspaces.push(workspace2);
-    state.selected_workspace_index = Some(0);
-    state.selected_session_index = Some(0);
+    state.sessions.workspaces.push(workspace1);
+    state.sessions.workspaces.push(workspace2);
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
 
     state
 }
@@ -43,10 +43,10 @@ fn test_app_state_creation() {
     let state = AppState::new();
 
     // AppState::new() should create an empty initial state
-    assert!(state.workspaces.is_empty());
-    assert!(state.selected_workspace_index.is_none());
-    assert!(!state.should_quit);
-    assert!(!state.help_visible);
+    assert!(state.sessions.workspaces.is_empty());
+    assert!(state.sessions.selected_workspace_index.is_none());
+    assert!(!state.shell.should_quit);
+    assert!(!state.shell.help_visible);
 }
 
 #[test]
@@ -64,8 +64,8 @@ fn test_selected_session_none() {
     assert!(state.selected_session().is_none());
 
     let workspace = Workspace::new("empty".to_string(), PathBuf::from("/empty"));
-    state.workspaces.push(workspace);
-    state.selected_workspace_index = Some(0);
+    state.sessions.workspaces.push(workspace);
+    state.sessions.selected_workspace_index = Some(0);
 
     assert!(state.selected_session().is_none());
 }
@@ -74,93 +74,93 @@ fn test_selected_session_none() {
 fn test_next_session() {
     let mut state = create_test_state();
 
-    assert_eq!(state.selected_session_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(0));
 
     state.next_session();
-    assert_eq!(state.selected_session_index, Some(1));
+    assert_eq!(state.sessions.selected_session_index, Some(1));
 
     state.next_session();
-    assert_eq!(state.selected_session_index, Some(0)); // wraps around
+    assert_eq!(state.sessions.selected_session_index, Some(0)); // wraps around
 }
 
 #[test]
 fn test_previous_session() {
     let mut state = create_test_state();
-    state.selected_session_index = Some(1);
+    state.sessions.selected_session_index = Some(1);
 
     state.previous_session();
-    assert_eq!(state.selected_session_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(0));
 
     // previous_session does not wrap: at the first session of the first
     // workspace it stays put (unlike next_session, which wraps).
     state.previous_session();
-    assert_eq!(state.selected_session_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(0));
 }
 
 #[test]
 fn test_next_workspace() {
     let mut state = create_test_state();
 
-    assert_eq!(state.selected_workspace_index, Some(0));
-    assert_eq!(state.selected_session_index, Some(0));
+    assert_eq!(state.sessions.selected_workspace_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(0));
 
     state.next_workspace();
-    assert_eq!(state.selected_workspace_index, Some(1));
-    assert_eq!(state.selected_session_index, Some(0)); // resets to first session
+    assert_eq!(state.sessions.selected_workspace_index, Some(1));
+    assert_eq!(state.sessions.selected_session_index, Some(0)); // resets to first session
 
     state.next_workspace();
-    assert_eq!(state.selected_workspace_index, Some(0)); // wraps around
+    assert_eq!(state.sessions.selected_workspace_index, Some(0)); // wraps around
 }
 
 #[test]
 fn test_previous_workspace() {
     let mut state = create_test_state();
-    state.selected_workspace_index = Some(1);
+    state.sessions.selected_workspace_index = Some(1);
 
     state.previous_workspace();
-    assert_eq!(state.selected_workspace_index, Some(0));
-    assert_eq!(state.selected_session_index, Some(0));
+    assert_eq!(state.sessions.selected_workspace_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(0));
 
     state.previous_workspace();
-    assert_eq!(state.selected_workspace_index, Some(1)); // wraps around
+    assert_eq!(state.sessions.selected_workspace_index, Some(1)); // wraps around
 }
 
 #[test]
 fn test_toggle_help() {
     let mut state = AppState::default();
 
-    assert!(!state.help_visible);
+    assert!(!state.shell.help_visible);
 
     state.toggle_help();
-    assert!(state.help_visible);
+    assert!(state.shell.help_visible);
 
     state.toggle_help();
-    assert!(!state.help_visible);
+    assert!(!state.shell.help_visible);
 }
 
 #[test]
 fn test_quit() {
     let mut state = AppState::default();
 
-    assert!(!state.should_quit);
+    assert!(!state.shell.should_quit);
 
     state.quit();
-    assert!(state.should_quit);
+    assert!(state.shell.should_quit);
 }
 
 #[test]
 fn test_navigation_with_empty_workspace() {
     let mut state = AppState::default();
     let workspace = Workspace::new("empty".to_string(), PathBuf::from("/empty"));
-    state.workspaces.push(workspace);
-    state.selected_workspace_index = Some(0);
-    state.selected_session_index = None;
+    state.sessions.workspaces.push(workspace);
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = None;
 
     state.next_session();
-    assert_eq!(state.selected_session_index, None);
+    assert_eq!(state.sessions.selected_session_index, None);
 
     state.previous_session();
-    assert_eq!(state.selected_session_index, None);
+    assert_eq!(state.sessions.selected_session_index, None);
 }
 
 // test_usage_query_reflects_selected_controls + test_usage_duplicate_loads_are_coalesced

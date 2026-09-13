@@ -76,7 +76,7 @@ impl HomeScreenComponent {
     }
 
     fn render_tiles(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let home_state = &state.home_screen_state;
+        let home_state = &state.shell.home_screen_state;
 
         // Create a 3-row grid layout for 7 tiles
         let rows = Layout::default()
@@ -232,7 +232,7 @@ impl HomeScreenComponent {
         frame.render_widget(block, area);
 
         // Show recent session or placeholder
-        let recent_text = if let Some(workspace) = state.workspaces.first() {
+        let recent_text = if let Some(workspace) = state.sessions.workspaces.first() {
             if let Some(session) = workspace.sessions.first() {
                 let status_icon = if session.status.is_running() { "" } else { "" };
                 format!(

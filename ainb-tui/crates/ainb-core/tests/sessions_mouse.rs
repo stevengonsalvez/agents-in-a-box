@@ -28,9 +28,9 @@ fn state_with_sessions(count: usize) -> (tempfile::TempDir, AppState, UiState) {
     std::env::set_var("HOME", temp_home.path());
 
     let mut state = AppState::new();
-    state.current_screen = screen_ids::SESSION_LIST.to_string();
-    state.selected_workspace_index = Some(0);
-    state.selected_session_index = Some(0);
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    state.sessions.selected_workspace_index = Some(0);
+    state.sessions.selected_session_index = Some(0);
 
     let mut workspace = Workspace::new("repo".to_string(), "/tmp/repo".into());
     for index in 0..count {
@@ -39,7 +39,7 @@ fn state_with_sessions(count: usize) -> (tempfile::TempDir, AppState, UiState) {
             "/tmp/repo".to_string(),
         ));
     }
-    state.workspaces = vec![workspace];
+    state.sessions.workspaces = vec![workspace];
 
     let mut ui = UiState::default();
     ui.sessions_pane.set_layout(SESSIONS_RECT, Rect::new(40, 3, 80, 20));
@@ -97,9 +97,9 @@ fn sessions_mouse_click_selects_session_row_without_async_work() {
     );
 
     assert!(outcome.is_none());
-    assert_eq!(state.selected_workspace_index, Some(0));
-    assert_eq!(state.selected_session_index, Some(1));
-    assert!(state.pending_async_action.is_some());
+    assert_eq!(state.sessions.selected_workspace_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(1));
+    assert!(state.shell.pending_async_action.is_some());
 }
 
 #[test]
@@ -121,8 +121,8 @@ fn sessions_mouse_double_click_attaches_selected_session_row() {
 
     assert!(first.is_none());
     assert!(matches!(second, Some(AppEvent::AttachTmuxSession)));
-    assert_eq!(state.selected_workspace_index, Some(0));
-    assert_eq!(state.selected_session_index, Some(1));
+    assert_eq!(state.sessions.selected_workspace_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(1));
 }
 
 #[test]
@@ -148,8 +148,8 @@ fn sessions_mouse_double_click_requires_same_attachable_row() {
 
     assert!(first.is_none());
     assert!(second.is_none());
-    assert_eq!(state.selected_workspace_index, Some(0));
-    assert_eq!(state.selected_session_index, Some(1));
+    assert_eq!(state.sessions.selected_workspace_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(1));
 }
 
 #[test]
@@ -201,34 +201,34 @@ fn sessions_mouse_wheel_down_over_sessions_moves_selection() {
     let handled = state.scroll_session_list_by_mouse(&ui.sessions_pane, 8, 6, true, 3);
 
     assert!(handled);
-    assert_eq!(state.focused_pane, FocusedPane::Sessions);
-    assert_eq!(state.selected_session_index, Some(3));
-    assert!(state.pending_async_action.is_some());
+    assert_eq!(state.shell.focused_pane, FocusedPane::Sessions);
+    assert_eq!(state.sessions.selected_session_index, Some(3));
+    assert!(state.shell.pending_async_action.is_some());
 }
 
 #[test]
 fn sessions_mouse_wheel_up_over_sessions_moves_selection() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state, ui) = state_with_sessions(5);
-    state.selected_session_index = Some(3);
+    state.sessions.selected_session_index = Some(3);
 
     let handled = state.scroll_session_list_by_mouse(&ui.sessions_pane, 8, 6, false, 2);
 
     assert!(handled);
-    assert_eq!(state.focused_pane, FocusedPane::Sessions);
-    assert_eq!(state.selected_session_index, Some(1));
+    assert_eq!(state.shell.focused_pane, FocusedPane::Sessions);
+    assert_eq!(state.sessions.selected_session_index, Some(1));
 }
 
 #[test]
 fn sessions_mouse_wheel_over_preview_preserves_log_scroll_path() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state, ui) = state_with_sessions(5);
-    state.focused_pane = FocusedPane::Sessions;
+    state.shell.focused_pane = FocusedPane::Sessions;
 
     let handled = state.scroll_session_list_by_mouse(&ui.sessions_pane, 50, 6, true, 3);
 
     assert!(!handled);
-    assert_eq!(state.focused_pane, FocusedPane::LiveLogs);
-    assert_eq!(state.selected_session_index, Some(0));
-    assert!(state.pending_async_action.is_none());
+    assert_eq!(state.shell.focused_pane, FocusedPane::LiveLogs);
+    assert_eq!(state.sessions.selected_session_index, Some(0));
+    assert!(state.shell.pending_async_action.is_none());
 }

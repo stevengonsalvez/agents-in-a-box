@@ -96,7 +96,7 @@ impl ConfigScreenComponent {
     /// The title bar: the screen's name and row count normally, the live `/`
     /// filter and its match count while one is open.
     fn render_title(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let config_state = &state.config_screen_state;
+        let config_state = &state.config.config_screen_state;
         let searching = config_state.is_searching();
 
         let title_block = Block::default()
@@ -180,7 +180,7 @@ impl ConfigScreenComponent {
     /// The section tree. Depth 0 nodes are categories (icon + label); deeper
     /// nodes are the TOML sub-tables under them, indented two columns per level.
     fn render_categories(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let config_state = &state.config_screen_state;
+        let config_state = &state.config.config_screen_state;
         let is_focused =
             config_state.focused_pane == ConfigPane::Categories && !config_state.is_searching();
 
@@ -267,7 +267,7 @@ impl ConfigScreenComponent {
     /// One line per row so a 60-row section is navigable; the selected row gets
     /// a second line carrying its help text.
     fn render_settings(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let config_state = &state.config_screen_state;
+        let config_state = &state.config.config_screen_state;
         let is_focused =
             config_state.focused_pane == ConfigPane::Settings || config_state.is_searching();
         let rows = config_state.current_settings();
@@ -354,7 +354,7 @@ impl ConfigScreenComponent {
     }
 
     fn render_help_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let config_state = &state.config_screen_state;
+        let config_state = &state.config.config_screen_state;
 
         let on_secret = matches!(
             config_state.current_setting().map(|row| &row.value),

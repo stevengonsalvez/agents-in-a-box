@@ -63,8 +63,8 @@ fn painted(state: &mut AppState) -> String {
     // workspace has to be expanded for its rows to paint at all. Without both,
     // the list renders an empty tree and every label assertion below passes or
     // fails for the wrong reason.
-    state.session_filter = SessionFilter::StoppedOnly;
-    state.expand_all_workspaces = true;
+    state.sessions.session_filter = SessionFilter::StoppedOnly;
+    state.sessions.expand_all_workspaces = true;
 
     let mut list = SessionListComponent::new();
     let mut ui = ainb::app::ui_state::UiState::default();
@@ -149,6 +149,7 @@ async fn a_stopped_session_still_paints_the_label_it_ran_under() {
     state.load_real_workspaces().await;
 
     let session = state
+        .sessions
         .workspaces
         .iter()
         .flat_map(|w| w.sessions.iter())

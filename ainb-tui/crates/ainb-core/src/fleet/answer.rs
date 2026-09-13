@@ -134,10 +134,16 @@ pub fn request_id(chip: &SessionAttention) -> String {
 
 impl AskState {
     /// Point this state at `chip`, resetting it if the request changed.
-    pub fn retarget(&mut self, chip: &SessionAttention) {
+    /// Point the pane at `chip`'s request, reporting whether anything moved.
+    ///
+    /// The bool is load-bearing for the draw path: this runs on every render,
+    /// and the overwhelmingly common case is that it is already pointed at the
+    /// right question and returns without writing. `Versioned::update` uses
+    /// that answer, so an unchanged retarget does not bump the fleet section.
+    pub fn retarget(&mut self, chip: &SessionAttention) -> bool {
         let id = request_id(chip);
         if self.request.as_deref() == Some(id.as_str()) {
-            return;
+            return false;
         }
         // A cursor or a half-typed answer left over from the previous question
         // would pre-load a reply to a question nobody has read, so the per-view
@@ -164,6 +170,7 @@ impl AskState {
         // a failure they happened to be watching, so walking away from a slow
         // send — the very sends that fail — lost what they had typed.
         self.restore_failed_draft();
+        true
     }
 
     /// Put back what the operator typed, if the question now on screen failed

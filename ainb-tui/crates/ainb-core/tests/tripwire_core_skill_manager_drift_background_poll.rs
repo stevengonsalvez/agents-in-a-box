@@ -74,7 +74,7 @@ async fn drift_background_poll_populates_cache_on_tick() {
 
     let mut state = ainb::app::AppState::new();
     // Pre-condition: cache empty.
-    assert!(state.skill_manager_state.drift_cache.is_empty());
+    assert!(state.skills.skill_manager_state.drift_cache.is_empty());
 
     // Kick off the background poll the way GoToSkillManager would.
     let spawned = state.start_background_drift_load(home, Arc::new(mock));
@@ -90,13 +90,13 @@ async fn drift_background_poll_populates_cache_on_tick() {
     }
 
     assert_eq!(
-        state.skill_manager_state.drift_cache.len(),
+        state.skills.skill_manager_state.drift_cache.len(),
         1,
         "expected one drift entry to land, got: {:?}",
-        state.skill_manager_state.drift_cache
+        state.skills.skill_manager_state.drift_cache
     );
     assert_eq!(
-        state.skill_manager_state.drift_cache.get("gh:org/acme@main/skills/foo"),
+        state.skills.skill_manager_state.drift_cache.get("gh:org/acme@main/skills/foo"),
         Some(&DriftStatus::Outdated { behind: 4 })
     );
 }
@@ -125,5 +125,5 @@ async fn drift_background_poll_coalesces_in_flight_calls() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(state.skill_manager_state.drift_cache.len(), 1);
+    assert_eq!(state.skills.skill_manager_state.drift_cache.len(), 1);
 }

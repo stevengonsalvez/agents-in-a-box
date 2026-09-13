@@ -38,7 +38,7 @@ impl UITestFramework {
         // Anchor the "main" screen to the session list so opening the picker
         // (`n`) records it as `previous_screen` and Escape returns here — the
         // session list is the home surface these tests treat as "main".
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -56,7 +56,7 @@ impl UITestFramework {
 
         // Load real workspaces to test the actual issue
         app.state.load_real_workspaces().await;
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -74,7 +74,7 @@ impl UITestFramework {
 
         // Create a large mock dataset to simulate the 353 repo scenario
         app.state.load_large_mock_data();
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -92,7 +92,7 @@ impl UITestFramework {
 
         // Use mock data but with slow search simulation
         app.state.load_mock_data();
-        app.state.current_screen = screen_ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
 
         let layout = LayoutComponent::new();
 
@@ -154,22 +154,22 @@ impl UITestFramework {
 
     /// Get the current view
     pub fn current_screen(&self) -> &str {
-        self.app.state.current_screen.as_str()
+        self.app.state.shell.current_screen.as_str()
     }
 
     /// Check if new session state exists
     pub const fn has_new_session_state(&self) -> bool {
-        self.app.state.new_session_state.is_some()
+        self.app.state.new_session.new_session_state.is_some()
     }
 
     /// Get new session state step if it exists
     pub fn new_session_step(&self) -> Option<&NewSessionStep> {
-        self.app.state.new_session_state.as_ref().map(|s| &s.step)
+        self.app.state.new_session.new_session_state.as_ref().map(|s| &s.step)
     }
 
     /// Check if help is visible
     pub const fn is_help_visible(&self) -> bool {
-        self.app.state.help_visible
+        self.app.state.shell.help_visible
     }
 
     /// Count of repo rows currently visible in the new-session picker after
@@ -182,6 +182,7 @@ impl UITestFramework {
     pub fn filtered_repos_count(&self) -> usize {
         self.app
             .state
+            .new_session
             .new_session_state
             .as_ref()
             .and_then(|s| s.pick_repo_state.as_ref())
@@ -192,13 +193,14 @@ impl UITestFramework {
     /// filtering tests assert against known data instead of whatever
     /// favorites/recents/repo-cache happen to exist on the host running the
     /// suite. The picker reads its rows from disk (`PickRepoState::from_disk`),
-    /// not from `state.workspaces`, so mock workspaces never reach it — this
+    /// not from `state.sessions.workspaces`, so mock workspaces never reach it. This
     /// helper is the test-side equivalent of the old `available_repos`/
     /// `filtered_repos` priming.
     pub fn seed_picker_rows(&mut self, count: usize) {
         let Some(pick) = self
             .app
             .state
+            .new_session
             .new_session_state
             .as_mut()
             .and_then(|s| s.pick_repo_state.as_mut())
@@ -714,7 +716,7 @@ mod tests {
         );
         eprintln!(
             "After key press - pending_async_action: {:?}",
-            ui.app.state.pending_async_action
+            ui.app.state.shell.pending_async_action
         );
 
         // Process async action
@@ -729,10 +731,10 @@ mod tests {
         eprintln!("  Has new_session_state: {}", ui.has_new_session_state());
         eprintln!(
             "  Pending async action: {:?}",
-            ui.app.state.pending_async_action
+            ui.app.state.shell.pending_async_action
         );
 
-        if let Some(ref session_state) = ui.app.state.new_session_state {
+        if let Some(ref session_state) = ui.app.state.new_session.new_session_state {
             eprintln!("  New session step: {:?}", session_state.step);
         }
 

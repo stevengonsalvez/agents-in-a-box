@@ -24,7 +24,7 @@ impl ConfirmationDialogComponent {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        if let Some(dialog) = &state.confirmation_dialog {
+        if let Some(dialog) = &state.shell.confirmation_dialog {
             // Too small for a bordered box. The dialog still owns the keyboard,
             // so draw the buttons alone rather than leaving an invisible modal
             // that swallows every keypress.

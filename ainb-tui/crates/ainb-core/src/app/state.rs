@@ -3,6 +3,8 @@
 #![allow(dead_code)]
 
 use crate::app::SessionLoader;
+use crate::app::sections::*;
+use crate::app::versioned::{SectionId, SectionVersions, Versioned};
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::claude::client::ClaudeChatManager;
 use crate::claude::types::ClaudeStreamingEvent;
@@ -530,14 +532,89 @@ fn host_tmux_session_name() -> Option<&'static str> {
 }
 
 impl AppState {
+    /// Fold the poller's publish counter into the fleet section.
+    ///
+    /// `daemon_attention` and `fleet_snapshot` are `Arc<Mutex<..>>` the worker
+    /// writes through, so daemon-side news reaches the screen without anything
+    /// taking `&mut` on the section: a subscriber watching versions would never
+    /// hear about a new ASK. This reads the counter by `&` and writes the
+    /// versioned copy only when it moved, so exactly one bump lands per
+    /// publish, and none at all on a frame where the daemon said nothing.
+    pub fn refresh_daemon_attention_generation(&mut self) -> bool {
+        let published = self
+            .fleet
+            .daemon_attention_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.fleet.set_if_changed(|fleet| &mut fleet.daemon_attention_seen, published)
+    }
+
+    /// One section's current version.
+    ///
+    /// The single place that maps a [`SectionId`] to its field. `versions()`
+    /// walks [`SectionId::ALL`] through this rather than hand-listing the
+    /// nineteen in array order, so a new section cannot be added to the enum
+    /// and silently left out of the array, or land in the wrong slot.
+    #[must_use]
+    pub fn section_version(&self, id: SectionId) -> u64 {
+        match id {
+            SectionId::Sessions => self.sessions.version(),
+            SectionId::SessionLabels => self.session_labels.version(),
+            SectionId::Tmux => self.tmux.version(),
+            SectionId::Ssh => self.ssh.version(),
+            SectionId::GitView => self.git_view.version(),
+            SectionId::WorkspaceLoad => self.workspace_load.version(),
+            SectionId::NewSession => self.new_session.version(),
+            SectionId::Logs => self.log_streams.version(),
+            SectionId::ClaudeChat => self.claude_chat.version(),
+            SectionId::Fleet => self.fleet.version(),
+            SectionId::Hangar => self.hangar.version(),
+            SectionId::McpPool => self.mcp_pool.version(),
+            SectionId::Inbox => self.inbox.version(),
+            SectionId::PluginsHost => self.plugins_host.version(),
+            SectionId::Config => self.config.version(),
+            SectionId::Skills => self.skills.version(),
+            SectionId::Recovery => self.recovery.version(),
+            SectionId::Onboarding => self.onboarding.version(),
+            SectionId::Shell => self.shell.version(),
+        }
+    }
+
+    /// Every section's current version, indexed by [`SectionId::index`].
+    ///
+    /// A surface keeps the array it last saw and compares; that is 19 integer
+    /// compares, against a diff of 117 fields of which several are SQLite
+    /// handles and channel receivers that cannot be compared at all.
+    #[must_use]
+    pub fn versions(&self) -> SectionVersions {
+        let mut out: SectionVersions = [0; SectionId::COUNT];
+        for id in SectionId::ALL {
+            out[id.index()] = self.section_version(id);
+        }
+        out
+    }
+
+    /// Which sections have been borrowed mutably since `seen` was taken.
+    ///
+    /// "Borrowed mutably", not "changed": a `&mut` that writes the same value
+    /// back still counts. Over-reporting costs a surface one redundant send,
+    /// and is the direction this is allowed to be wrong in.
+    #[must_use]
+    pub fn changed_since(&self, seen: &SectionVersions) -> Vec<SectionId> {
+        let now = self.versions();
+        SectionId::ALL
+            .into_iter()
+            .filter(|id| now[id.index()] != seen[id.index()])
+            .collect()
+    }
+
     /// Enter interactive mode by replacing the selected read-only tmux client
     /// with a writable client feeding the same terminal parser path.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
         let attached_elsewhere = self.selected_session_attached_elsewhere();
-        self.observer_pending = None;
-        self.observer_failed_target = None;
-        if self.embed.is_some() {
-            if self.selected_tmux_name() == self.embed_session && self.is_interactive_pane() {
+        self.tmux.observer_pending = None;
+        self.tmux.observer_failed_target = None;
+        if self.tmux.embed.is_some() {
+            if self.selected_tmux_name() == self.tmux.embed_session && self.is_interactive_pane() {
                 return true;
             }
             self.release_interactive_pane();
@@ -551,9 +628,9 @@ impl AppState {
         // user's call, so allow it and warn (never block).
         match crate::tmux::EmbedClient::attach(&name, rows, cols) {
             Ok(client) => {
-                self.embed = Some(client);
-                self.embed_session = Some(name);
-                self.focused_pane = FocusedPane::Preview;
+                self.tmux.embed = Some(client);
+                self.tmux.embed_session = Some(name);
+                self.shell.focused_pane = FocusedPane::Preview;
                 if attached_elsewhere {
                     self.add_warning_notification(
                         "Note: session attached elsewhere — screen sizes may fight".to_string(),
@@ -577,8 +654,8 @@ impl AppState {
     pub fn sync_terminal_observer(&mut self, rows: u16, cols: u16) -> bool {
         let target = self.selected_tmux_name();
         let Some(name) = target else {
-            self.observer_pending = None;
-            self.observer_failed_target = None;
+            self.tmux.observer_pending = None;
+            self.tmux.observer_failed_target = None;
             self.release_interactive_pane();
             return false;
         };
@@ -588,25 +665,26 @@ impl AppState {
         }
         let now = Instant::now();
         if self
+            .tmux
             .observer_failed_target
             .as_ref()
             .is_some_and(|(failed, _, _)| failed != &name)
         {
-            self.observer_failed_target = None;
+            self.tmux.observer_failed_target = None;
         }
-        if self.embed_session.as_deref() == Some(name.as_str()) && self.embed.is_some() {
-            self.observer_pending = None;
+        if self.tmux.embed_session.as_deref() == Some(name.as_str()) && self.tmux.embed.is_some() {
+            self.tmux.observer_pending = None;
             return false;
         }
         if !crate::tmux::EmbedClient::read_only_observer_supported() {
             self.release_interactive_pane();
-            self.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
+            self.tmux.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
             self.add_warning_notification(
                 "Live preview requires tmux client ignore-size support".to_string(),
             );
             return false;
         }
-        if let Some((failed, retry_at, attempts)) = &self.observer_failed_target {
+        if let Some((failed, retry_at, attempts)) = &self.tmux.observer_failed_target {
             if failed == &name && (*attempts >= MAX_OBSERVER_FAILURES || now < *retry_at) {
                 self.release_interactive_pane();
                 return false;
@@ -620,13 +698,13 @@ impl AppState {
         self.release_interactive_pane();
         match crate::tmux::EmbedClient::observe(&name, rows, cols) {
             Ok(client) => {
-                self.embed = Some(client);
-                self.embed_session = Some(name);
+                self.tmux.embed = Some(client);
+                self.tmux.embed_session = Some(name);
                 // `attach-session` can spawn successfully then immediately
                 // fail (for example, if tmux rejects a client flag). Keep a
                 // prior retry count until this client survives one grace
                 // period so failed spawns cannot reset the retry cap.
-                self.observer_started_at = Some(now);
+                self.tmux.observer_started_at = Some(now);
                 true
             }
             Err(e) => {
@@ -639,12 +717,13 @@ impl AppState {
 
     fn record_observer_failure(&mut self, session: String) {
         let attempts = self
+            .tmux
             .observer_failed_target
             .as_ref()
             .filter(|(failed, _, _)| failed == &session)
             .map_or(1, |(_, _, attempts)| attempts.saturating_add(1))
             .min(MAX_OBSERVER_FAILURES);
-        self.observer_failed_target = Some((
+        self.tmux.observer_failed_target = Some((
             session.clone(),
             Instant::now() + OBSERVER_RETRY_DELAY.saturating_mul(attempts.into()),
             attempts,
@@ -657,14 +736,15 @@ impl AppState {
     }
 
     fn observer_target_settled(&mut self, target: &str, now: Instant) -> bool {
-        match self.observer_pending.as_ref() {
+        match self.tmux.observer_pending.as_ref() {
             Some((pending, ready_at)) if pending == target && now >= *ready_at => {
-                self.observer_pending = None;
+                self.tmux.observer_pending = None;
                 true
             }
             Some((pending, _)) if pending == target => false,
             _ => {
-                self.observer_pending = Some((target.to_string(), now + OBSERVER_SETTLE_DELAY));
+                self.tmux.observer_pending =
+                    Some((target.to_string(), now + OBSERVER_SETTLE_DELAY));
                 false
             }
         }
@@ -677,7 +757,7 @@ impl AppState {
     fn selected_session_attached_elsewhere(&self) -> bool {
         if self.is_ssh_session_selected() {
             self.selected_ssh_session().map(|s| s.is_attached).unwrap_or(false)
-        } else if self.shell_selected {
+        } else if self.sessions.shell_selected {
             false
         } else if self.is_other_tmux_selected() {
             self.selected_other_tmux_session().map(|s| s.attached).unwrap_or(false)
@@ -688,13 +768,13 @@ impl AppState {
 
     /// Release the ephemeral client. Read-only preview reconnects next loop.
     pub fn release_interactive_pane(&mut self) {
-        if let Some(mut client) = self.embed.take() {
+        if let Some(mut client) = self.tmux.embed.take() {
             client.shutdown();
         }
-        self.embed_session = None;
-        self.observer_started_at = None;
-        if self.focused_pane == FocusedPane::Preview {
-            self.focused_pane = FocusedPane::Sessions;
+        self.tmux.embed_session = None;
+        self.tmux.observer_started_at = None;
+        if self.shell.focused_pane == FocusedPane::Preview {
+            self.shell.focused_pane = FocusedPane::Sessions;
         }
     }
 
@@ -707,9 +787,10 @@ impl AppState {
             self.selected_ssh_session().and_then(|s| s.tmux_session_name.clone())
         } else if self.is_other_tmux_selected() {
             self.selected_other_tmux_session().map(|s| s.name.clone())
-        } else if self.shell_selected {
-            self.selected_workspace_index
-                .and_then(|i| self.workspaces.get(i))
+        } else if self.sessions.shell_selected {
+            self.sessions
+                .selected_workspace_index
+                .and_then(|i| self.sessions.workspaces.get(i))
                 .and_then(|w| w.shell_session.as_ref())
                 .map(|sh| sh.tmux_session_name.clone())
         } else {
@@ -719,7 +800,7 @@ impl AppState {
 
     /// True while an interactive embed is focused.
     pub fn is_interactive_pane(&self) -> bool {
-        self.embed.is_some() && self.focused_pane == FocusedPane::Preview
+        self.tmux.embed.is_some() && self.shell.focused_pane == FocusedPane::Preview
     }
 
     /// True when the selected terminal has a read-only observer client.
@@ -730,8 +811,8 @@ impl AppState {
 
     fn is_observing_tmux_session(&self, session: &str) -> bool {
         !self.is_interactive_pane()
-            && self.embed.is_some()
-            && self.embed_session.as_deref() == Some(session)
+            && self.tmux.embed.is_some()
+            && self.tmux.embed_session.as_deref() == Some(session)
     }
 
     /// If the observer has ended or become invisible, stop it. Keys can never
@@ -739,13 +820,13 @@ impl AppState {
     ///
     /// Returns true when it released (the layout changed → repaint needed).
     pub fn poll_embed_exit(&mut self) -> bool {
-        if self.embed.is_none() {
+        if self.tmux.embed.is_none() {
             return false;
         }
-        let exited = self.embed.as_ref().is_some_and(|e| e.has_exited());
-        let invisible = self.current_screen != screen_ids::SESSION_LIST;
+        let exited = self.tmux.embed.as_ref().is_some_and(|e| e.has_exited());
+        let invisible = self.shell.current_screen != screen_ids::SESSION_LIST;
         let interactive = self.is_interactive_pane();
-        let session = self.embed_session.clone();
+        let session = self.tmux.embed_session.clone();
         if exited || invisible {
             self.release_interactive_pane();
             if exited && interactive {
@@ -759,11 +840,12 @@ impl AppState {
         }
         if !interactive
             && self
+                .tmux
                 .observer_started_at
                 .is_some_and(|started| started.elapsed() >= OBSERVER_SUCCESS_GRACE)
         {
-            self.observer_started_at = None;
-            self.observer_failed_target = None;
+            self.tmux.observer_started_at = None;
+            self.tmux.observer_failed_target = None;
         }
         false
     }
@@ -772,8 +854,15 @@ impl AppState {
     /// The render loop polls this as a repaint trigger: live PTY output
     /// arrives without host input, so the dirty-gate (perf bead `wai`) would
     /// otherwise hold the pane at the 250ms animation floor.
-    pub fn embed_take_dirty(&self) -> bool {
-        self.embed.as_ref().is_some_and(|e| e.take_dirty())
+    /// Take the embed's dirty flag, bumping the tmux section when it was set.
+    ///
+    /// The embed is the tmux section's own interior-mutability hole: the PTY
+    /// reader thread marks it dirty as bytes stream in, through a handle the
+    /// render path holds by `&`. Taking the flag through `update` means the
+    /// one place that learns "the pane changed" is also the place that says so
+    /// to a subscriber, and a frame with no new bytes still bumps nothing.
+    pub fn embed_take_dirty(&mut self) -> bool {
+        self.tmux.update(|tmux| tmux.embed.as_ref().is_some_and(|e| e.take_dirty()))
     }
 }
 
@@ -3134,433 +3223,46 @@ impl SessionFilter {
 
 /// Payload of the Configure remote-repo pre-flight: generation guard + the
 /// `ls-remote` branch listing (or the error string to show on the form).
-type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
+pub(crate) type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
 
 #[derive(Debug)]
 pub struct AppState {
-    pub workspaces: Vec<Workspace>,
-    pub selected_workspace_index: Option<usize>,
-    pub selected_session_index: Option<usize>,
-    pub shell_selected: bool, // Whether the workspace shell is currently selected
-    pub selected_sessions: HashSet<Uuid>, // Multi-selected session IDs for bulk operations
-    pub expand_all_workspaces: bool, // When true, show all sessions across all workspaces
-    pub session_filter: SessionFilter, // View filter for Interactive sessions (Shift+F to cycle)
-    pub current_screen: ScreenId,
-    pub should_quit: bool,
-    pub logs: HashMap<Uuid, Vec<String>>,
-    pub help_visible: bool,
-    // New session creation state
-    pub new_session_state: Option<NewSessionState>,
-    // Async action processing
-    pub pending_async_action: Option<AsyncAction>,
-    /// Hangar daemon `(daemon_config key, raw value)` edits waiting to be
-    /// written to the daemon's SQLite table.
-    ///
-    /// A queue of its own rather than an `AsyncAction`: that slot holds exactly
-    /// one action and is drained once per app tick, so two settings edits
-    /// confirmed inside the same 250 ms tick would silently lose the first
-    /// while toasting success for both. Appended to, drained in
-    /// `process_async_action`.
-    pub pending_daemon_config_edits: Vec<(String, String)>,
-    /// Whether the Hangar daemon's stored `daemon_config` values have been read
-    /// into the settings rows yet.
-    ///
-    /// A one-shot of its own rather than a seeded `pending_async_action`: that
-    /// slot holds ONE keystroke-driven action, so pre-filling it both races the
-    /// first keystroke and makes "no action is pending" untestable.
-    pub hangar_daemon_config_loaded: bool,
-    // Flag to track if user cancelled during async operation
-    pub async_operation_cancelled: bool,
-    // Confirmation dialog state
-    pub confirmation_dialog: Option<ConfirmationDialog>,
-    // Shared MCP pool observability overlay (None = closed; no refresh runs).
-    pub mcp_overlay: Option<McpOverlayState>,
-    // Flag to force UI refresh after workspace changes
-    pub ui_needs_refresh: bool,
+    pub inbox: Versioned<InboxSection>,
+    pub shell: Versioned<ShellSection>,
 
-    // Claude chat visibility toggle
-    pub claude_chat_visible: bool,
+    pub fleet: Versioned<FleetSection>,
 
-    // Focus management for panes
-    pub focused_pane: FocusedPane,
-    // Live interactive embedded tmux-attach client for the preview pane.
-    // Enforced invariants (focus can drift, so none of these are assumed):
-    //  - Input forwards to the PTY only while `is_interactive_pane()` holds
-    //    (embed Some AND focused_pane == Preview).
-    //  - Ctrl+Q releases only while interactive focus owns the terminal.
-    //  - `poll_embed_exit` (run before every draw) releases on client death
-    //    or when the session-list screen is no longer current, so keys are
-    //    never forwarded to an invisible PTY.
-    // Dropping it kills the ephemeral tmux client (never the session).
-    pub embed: Option<crate::tmux::EmbedClient>,
-    // The tmux session name the live embed is attached to. Some iff `embed`
-    // is Some. Re-entering on a DIFFERENT row releases the old client and
-    // attaches to the new target instead of silently refocusing the stale
-    // one (see `enter_interactive_pane`).
-    pub embed_session: Option<String>,
-    // A changed selection must settle before starting a read-only client.
-    observer_pending: Option<(String, Instant)>,
-    // A read-only observer that dies waits before the next retry.
-    observer_failed_target: Option<(String, Instant, u8)>,
-    // A spawned observer must survive briefly before it clears a prior retry
-    // count. `tmux attach-session` reports some startup failures asynchronously.
-    observer_started_at: Option<Instant>,
-    // Track if current directory is a git repository
-    pub is_current_dir_git_repo: bool,
-    // Track which session logs were last fetched to avoid unnecessary refetches
-    pub last_logs_session_id: Option<Uuid>,
-    // Track attached terminal state
-    pub attached_session_id: Option<Uuid>,
-    // Auth setup state
-    pub auth_setup_state: Option<AuthSetupState>,
-    // Track when logs were last updated for each session
-    pub log_last_updated: HashMap<Uuid, std::time::Instant>,
-    // Track the last time we checked for log updates globally
-    pub last_log_check: Option<std::time::Instant>,
-    // Track the last time we checked for OAuth token refresh
-    pub last_token_refresh_check: Option<std::time::Instant>,
-    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
-    // session is live but the proxy died).
-    pub last_headroom_watchdog: Option<std::time::Instant>,
-    // Claude chat integration
-    pub claude_chat_state: Option<ClaudeChatState>,
-    // Live logs from Docker containers
-    pub live_logs: HashMap<Uuid, Vec<LogEntry>>,
-    // Claude API client manager (when initialized)
-    pub claude_manager: Option<ClaudeChatManager>,
-    // Docker log streaming coordinator
-    pub log_streaming_coordinator: Option<LogStreamingCoordinator>,
-    // Channel sender for log streaming
-    pub log_sender: Option<mpsc::UnboundedSender<(Uuid, LogEntry)>>,
-    // Git view state
-    pub git_view_state: Option<crate::components::GitViewState>,
-    // Previous view for navigation (e.g., to return from GitView)
-    pub previous_screen: Option<ScreenId>,
-    /// Last `ui.close_request` snapshot version consumed by
-    /// `tick_panel_close_requests`. The poll acts at most once per
-    /// plugin publish: a version is consumed (recorded here) on first
-    /// sight whether or not it triggered a navigation, so a close
-    /// request that arrives while the user is on a different screen is
-    /// absorbed instead of firing later.
-    pub last_panel_close_version: Option<u64>,
-    // Notification system
-    pub notifications: Vec<Notification>,
-    /// Sessions already told, on their CURRENT launch, that they started
-    /// without shared Codex remote control.
-    ///
-    /// The dedup key for `notify_codex_degraded`, cleared by
-    /// `begin_codex_launch` so the scope is one launch and not the session's
-    /// whole life. Kept here rather than checked against the live notification
-    /// list because notifications EXPIRE: a message-equality check would let
-    /// the same fact reappear minutes later.
-    codex_degrade_announced: std::collections::HashSet<Uuid>,
-    // Pending event to be processed in next loop iteration
-    pub pending_event: Option<crate::app::events::AppEvent>,
+    pub tmux: Versioned<TmuxSection>,
 
-    // Quick commit dialog state
-    pub quick_commit_message: Option<String>, // None = not in quick commit mode, Some = message being entered
-    pub quick_commit_cursor: usize,           // Cursor position in quick commit message
+    pub log_streams: Versioned<LogsSection>,
 
-    // Tmux integration
-    pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
-    pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
+    pub sessions: Versioned<SessionsSection>,
 
-    // Other tmux sessions (not managed by agents-in-a-box)
-    pub other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
-    pub other_tmux_expanded: bool,
-    pub selected_other_tmux_index: Option<usize>,
-    pub selected_other_tmux_sessions: HashSet<String>, // Multi-selected external tmux names
-    /// Whether we're in rename mode for the selected "Other tmux" session
-    pub other_tmux_rename_mode: bool,
-    /// Buffer for the new name being typed during rename
-    pub other_tmux_rename_buffer: String,
+    pub new_session: Versioned<NewSessionSection>,
 
-    // SSH Sessions (Claude-managed sessions with agent_type=Ssh)
-    /// SSH sessions displayed in their own section
-    pub ssh_sessions: Vec<crate::models::Session>,
-    /// Whether the SSH sessions section is expanded
-    pub ssh_sessions_expanded: bool,
-    /// Currently selected SSH session index (within ssh_sessions vec)
-    pub selected_ssh_session_index: Option<usize>,
-    /// Whether we're in rename mode for the selected SSH session
-    pub ssh_session_rename_mode: bool,
-    /// Buffer for the new display name being typed during rename
-    pub ssh_session_rename_buffer: String,
-    /// Persistent store for durable session labels.
-    pub session_label_store: SessionLabelStore,
-    /// Durable-label text popup state for managed and SSH sessions.
-    pub session_label_rename_mode: bool,
-    pub session_label_rename_buffer: String,
-    pub session_label_rename_target: Option<AttachableRef>,
-    pub session_context_menu: Option<SessionContextMenu>,
+    pub workspace_load: Versioned<WorkspaceLoadSection>,
 
-    // AINB 2.0: Home screen and agent selection
-    pub home_screen_state: HomeScreenState,
-    pub home_screen_v2_state: HomeScreenV2State,
-    pub config_screen_state: ConfigScreenState,
-    pub auth_provider_popup_state: AuthProviderPopupState,
-    /// Config popup state for choice/text input popups in config screen
-    pub config_popup_state: crate::components::config_popup::ConfigPopupState,
+    pub config: Versioned<ConfigSection>,
 
-    // Onboarding wizard state
-    pub onboarding_state: Option<crate::components::onboarding::OnboardingState>,
+    pub session_labels: Versioned<SessionLabelsSection>,
 
-    // Setup menu state
-    pub setup_menu_state: crate::components::setup_menu::SetupMenuState,
+    pub ssh: Versioned<SshSection>,
 
-    // Persistent configuration (saved to ~/.agents-in-a-box/config/config.toml)
-    pub app_config: AppConfig,
+    pub onboarding: Versioned<OnboardingSection>,
 
-    // Log history viewer state
-    pub log_history_state: crate::components::LogHistoryViewerState,
+    pub skills: Versioned<SkillsSection>,
 
-    // Changelog viewer state
-    pub changelog_state: crate::components::ChangelogState,
+    pub plugins_host: Versioned<PluginsHostSection>,
 
-    // Session recovery state (for orphaned agent sessions)
-    pub session_recovery_state: crate::components::SessionRecoveryState,
+    pub hangar: Versioned<HangarSection>,
 
-    /// Inbox screen state (ainb-hooks notifications: selection,
-    /// filters, in-process SQLite store handle).
+    pub claude_chat: Versioned<ClaudeChatSection>,
 
-    /// Daemons screen state (cached runtime-health snapshot + poll tick).
-    pub daemons_state: crate::components::daemons::DaemonsState,
+    pub git_view: Versioned<GitViewSection>,
 
-    /// Fleet control-panel state (cached `current_state` rows + selection +
-    /// shared action-feedback cell).
+    pub recovery: Versioned<RecoverySection>,
 
-    /// WireBuffers freshly drained from plugins, keyed by screen id.
-    /// `App::tick_plugin_renders` populates this before each frame so
-    /// `PluginScreen::render` can paint without needing access to the
-    /// plugin runtime (which lives on `App`, not `AppState`).
-    pub pending_plugin_renders:
-        std::collections::HashMap<crate::app::screens::ScreenId, ainb_plugin_runtime::WireBuffer>,
-
-    /// Cache of workspace paths that are currently favorited (starred).
-    /// Computed by `recompute_favorite_workspaces()` whenever the workspace
-    /// list or the favorites store changes — NOT in the render path. The
-    /// session-list render reads this set with an O(1) lookup, so it never
-    /// re-parses `favorites.yaml` or opens a git repo per frame.
-    pub favorite_workspace_paths: HashSet<PathBuf>,
-
-    /// Whether each plugin-owned screen's focused surface is currently capturing
-    /// free text (a title/filter/compose/search/API-key input), as reported by
-    /// its last frame's `RenderResult.captures_text`. Refreshed every tick by
-    /// `tick_plugin_renders` from `RuntimeHandle::captures_text`.
-    ///
-    /// While the entry for `current_screen` is `true`, the host key dispatch
-    /// (`is_text_input_context` + the plugin key-forwarder) suppresses its own
-    /// global single-character shortcuts (`H`/`?`/`W`) and forwards `?`/`H` to
-    /// the plugin so keystrokes land in the input verbatim instead of toggling
-    /// help / wiring the statusline (8hx). Absent entry (never painted, or not a
-    /// plugin screen) reads as `false`.
-    pub plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
-
-    /// Last `plugin/render` failure per plugin-owned screen id, as reported by
-    /// the render oneshot that `tick_plugin_renders` now keeps instead of
-    /// dropping. Set on `RenderOutcome::RuntimeError` / `PluginError`, cleared
-    /// the moment a frame renders successfully.
-    ///
-    /// `PluginScreen::render` paints this instead of the "connecting…"
-    /// placeholder, which is the difference between a screen that explains it
-    /// cannot start the plugin and one that claims to be loading forever.
-    pub plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
-
-    /// Cheap Send + Clone façade onto the plugin runtime, populated by
-    /// `App::init`. `None` when running plugin-free (e.g. tests, or
-    /// installs that haven't completed bundled-plugin discovery yet).
-    ///
-    /// Lives on `AppState` rather than `App` so the key-dispatch path
-    /// in `app::events::handle_key_event` can forward keystrokes to
-    /// the focused plugin without needing access to `App`. `App` still
-    /// owns the underlying `Runtime` via `plugin_runtime_owner` so the
-    /// tokio executor is torn down when `App` drops.
-    pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
-
-    /// Background poller for the live OAuth-window snapshot. The render
-    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
-    /// calling `live_window::current()` directly — Tier 2's JSONL walk
-    /// would otherwise stall input handling on every frame.
-    pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
-
-    // Usage analytics state: removed. Burndown plugin owns usage state
-    // (provider, period, filters, zoom). Host no longer reads or writes
-    // `usage_state` / `usage_load_receiver`. Statusline-related state
-    // (live_window_watcher, statusline_status_cache) stays in core
-    // because that's a host CLI install concern, not a plugin one.
-
-    // Skills browser state
-    pub skills_state: crate::components::skills::SkillsViewState,
-    /// Channel receiver for background skills+agents scan.
-    /// Present only while a scan is in flight; `tick()` drains it.
-    pub skills_load_receiver: Option<mpsc::UnboundedReceiver<crate::models::SkillsData>>,
-
-    // Skill-manager screen state (spec §10.1)
-    pub skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData,
-    /// Background drift-poll receiver. Present only while a drift scan
-    /// (kicked off by `GoToSkillManager`) is in flight; `tick()`
-    /// drains it into `skill_manager_state.drift_cache`.
-    pub drift_load_receiver: Option<
-        mpsc::UnboundedReceiver<
-            std::collections::BTreeMap<String, ainb_skill_core::drift::DriftStatus>,
-        >,
-    >,
-    /// Background base-branch refresh for the Configure picker. The fetch +
-    /// re-list runs on `spawn_blocking`; the result lands here and is applied
-    /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
-    /// generation guard — results from a closed/reopened picker are dropped.
-    pub branch_refresh_receiver: Option<
-        mpsc::UnboundedReceiver<(
-            u64,
-            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
-        )>,
-    >,
-    /// Current branch-refresh generation (bumped on every picker open).
-    pub branch_refresh_seq: u64,
-
-    /// Background remote-repo pre-flight for the Configure screen (ls-remote
-    /// at open: does the repo exist, does it have branches). Applied by
-    /// `check_repo_check_complete` on the next tick; the `u64` is a
-    /// generation guard so a stale check can't stamp a newer Configure form.
-    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
-    /// Current repo-check generation (bumped on every Configure open).
-    pub repo_check_seq: u64,
-
-    /// Background empty-remote initialization (`[i]` on Configure: README +
-    /// initial commit + push). `Ok(branch)` carries the branch the commit
-    /// landed on. Applied by `check_repo_init_complete` on the next tick.
-    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
-    /// Current repo-init generation.
-    pub repo_init_seq: u64,
-
-    // Periodic session snapshot tracking
-    pub last_snapshot_time: Option<Instant>,
-
-    // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
-    pub last_preview_update: Option<Instant>,
-
-    // Throttle for the cheaper non-selected-session status sweep. Status
-    // (running/idle) is not time-critical, so it polls on a longer cadence than
-    // the selected session's live preview — one `capture-pane` subprocess per
-    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
-    // every 5s preview refresh. (perf: bead 9pb)
-    pub last_status_check: Option<Instant>,
-
-    // Background workspace loading state
-    pub is_loading_workspaces: bool,
-    pub workspace_load_error: Option<String>,
-    pub workspace_load_started: Option<Instant>,
-    /// Channel receiver for background workspace loading results
-    pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
-
-    /// Per-session "cleared up to" timestamp (epoch ms). A hook event
-    /// only marks a session if its `ts` is newer than this. Defaults to
-    /// `0` (any event in the lookback window can mark); bumped to "now"
-    /// while the user is attached, so re-marking only happens for
-    /// activity that arrives after they look away.
-    pub attention_baseline: HashMap<Uuid, i64>,
-
-    /// The `ask` pane's own state: which option is selected, what has been
-    /// typed, and what the last send did.
-    pub ask_state: crate::fleet::answer::AskState,
-
-    /// The Pal conversation, opened lazily the first time the tab is.
-    ///
-    /// Lazy because opening it dials the daemon to resolve the minted channel
-    /// scope, and an operator who never opens the tab should never pay for it.
-    pub pal_chat: Option<crate::fleet::chat_host::ChatHost>,
-
-    /// The Pal pane's engine / model / guardrail header.
-    ///
-    /// NOT lazy like the conversation: the header is how an operator recovers
-    /// from an adapter that will not spawn, so it reads the registry the first
-    /// time the tab is rendered rather than waiting for a chat that may never
-    /// open. It costs one `fleet/adapter_list` per session.
-    pub pal_dial: crate::fleet::pal_dial::PalDial,
-
-    /// The Pal pane's offer to start the hangar daemon it needs.
-    ///
-    /// One per process, not one per pane: the offer starts the daemon the whole
-    /// TUI talks to, and a second copy would let two panes each shell a start
-    /// into the same home.
-    pub daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta,
-
-    /// The broadcast composer, shown on `thread` while rows are checked.
-    ///
-    /// Survives a change of checkbox set on purpose: an operator who ticks a
-    /// fifth session halfway through typing must not lose what they typed.
-    pub broadcast: crate::fleet::broadcast::Broadcast,
-
-    /// The selected session's own thread, rebuilt when the selection moves to a
-    /// different session.
-    ///
-    /// One host, not one per session: a thread the operator has navigated away
-    /// from is not being read, and keeping N of them alive means N poll loops
-    /// against the daemon for conversations nobody is looking at.
-    pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
-
-    /// The active right-pane tab. Reconciled every frame against what is
-    /// actually available, so a tab cannot stay open on a pane that has gone
-    /// dead under the operator.
-    pub session_tab: crate::components::session_tabs::SessionTab,
-
-    /// The daemon's half of the attention picture, refreshed by
-    /// [`crate::fleet::attention_poll`] on its own thread.
-    ///
-    /// Read on the render path, never dialled there: a wedged daemon socket
-    /// must cost a frame nothing.
-    pub daemon_attention: crate::fleet::attention_poll::Shared,
-
-    /// Last Hangar Fleet snapshot, refreshed beside daemon attention off the
-    /// render path.
-    pub fleet_snapshot: crate::fleet::attention_poll::SnapshotShared,
-
-    /// Snapshot metadata matched to local session identities. This avoids
-    /// assigning a child sharing a cwd to its parent by accident.
-    pub fleet_metadata: HashMap<Uuid, SessionFleetMetadata>,
-
-    /// Whether the attention poller thread is alive, so the render loop can
-    /// start one without having to remember whether it already did.
-    pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
-
-    /// The `log` tab's history, filled by [`crate::fleet::session_log`] on its
-    /// own thread.
-    ///
-    /// Read on the render path, never QUERIED there: the store read used to
-    /// live inside `terminal.draw` and cost a real store up to 948 ms a frame.
-    pub session_log: Arc<crate::fleet::session_log::Shared>,
-
-    /// Whether the session-log worker is alive. Same idempotence flag, and the
-    /// same reason, as [`Self::attention_poll_running`].
-    pub session_log_running: Arc<std::sync::atomic::AtomicBool>,
-
-    /// Daemon attention rows whose cwd matched no row on this screen, counted
-    /// for the header so the ONE attention surface never silently swallows a
-    /// request it could not place.
-    pub attention_elsewhere: usize,
-
-    /// Per-session instant (epoch ms) the ERR chip's failure was FIRST
-    /// observed. `SessionStatus::Error` carries no timestamp of its own, so
-    /// without this the chip's age would reset to `0s` on every refresh and an
-    /// hour-old failure would read as brand new. Cleared the moment the session
-    /// recovers or leaves the tree, so a later failure starts its own clock.
-    pub attention_error_since: HashMap<Uuid, i64>,
-    /// When each LOCAL blocking chip was first observed, keyed by session and
-    /// chip kind.
-    ///
-    /// `attention_for_session` returns the newest QUALIFYING hook row, so a
-    /// producer that re-reports an unanswered question — which Claude Code
-    /// does, it re-emits `Notification` while a prompt stays open — hands back
-    /// a newer `ts` every time. Two things broke on that moving value: the
-    /// chip's age reset to `0s` on every repeat, defeating the oldest-wins rule
-    /// `attention::normalise` documents; and `request_id` is derived from
-    /// `since_ms`, so a landed answer outcome was filed under a key that then
-    /// changed underneath it and the `✗ not answered` line vanished from a
-    /// question that had genuinely failed.
-    ///
-    /// Same shape as [`Self::attention_error_since`]: stamped once, reused
-    /// while the chip stays that kind, dropped when it does not.
-    pub attention_local_since: HashMap<(Uuid, AttentionKind, Option<String>), i64>,
+    pub mcp_pool: Versioned<McpPoolSection>,
 }
 
 /// Result of background workspace loading
@@ -3872,171 +3574,80 @@ impl Default for AppState {
         });
         let mut home_screen_v2_state = HomeScreenV2State::default();
         home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
+        // Read before the literal moves `app_config` into its section.
+        let session_filter = app_config.ui_preferences.session_filter;
         Self {
-            workspaces: Vec::new(),
-            selected_workspace_index: None,
-            selected_session_index: None,
-            shell_selected: false,
-            selected_sessions: HashSet::new(),
-            expand_all_workspaces: true, // Default to expanded view
-            session_filter: app_config.ui_preferences.session_filter,
-            current_screen: screen_ids::HOME.to_string(),
-            should_quit: false,
-            logs: HashMap::new(),
-            help_visible: false,
-            new_session_state: None,
-            pending_async_action: None,
-            pending_daemon_config_edits: Vec::new(),
-            hangar_daemon_config_loaded: false,
-            async_operation_cancelled: false,
-            confirmation_dialog: None,
-            mcp_overlay: None,
-            ui_needs_refresh: false,
-            claude_chat_visible: false,
-            focused_pane: FocusedPane::Sessions,
-            embed: None,
-            embed_session: None,
-            observer_pending: None,
-            observer_failed_target: None,
-            observer_started_at: None,
-            is_current_dir_git_repo: false,
-            last_logs_session_id: None,
-            attached_session_id: None,
-            auth_setup_state: None,
-            log_last_updated: HashMap::new(),
-            last_log_check: None,
-            last_token_refresh_check: None,
-            last_headroom_watchdog: None,
-            claude_chat_state: None,
-            live_logs: HashMap::new(),
-            claude_manager: None,
-            log_streaming_coordinator: None,
-            log_sender: None,
-            git_view_state: None,
-            previous_screen: None,
-            last_panel_close_version: None,
-            notifications: Vec::new(),
-            codex_degrade_announced: std::collections::HashSet::new(),
-            pending_event: None,
-
+            inbox: Versioned::default(),
+            shell: Versioned::new(ShellSection {
+                home_screen_v2_state,
+                ..ShellSection::default()
+            }),
+            fleet: Versioned::default(),
+            tmux: Versioned::default(),
+            log_streams: Versioned::default(),
+            sessions: Versioned::default(),
+            new_session: Versioned::default(),
+            workspace_load: Versioned::default(),
+            session_labels: Versioned::default(),
+            ssh: Versioned::default(),
+            onboarding: Versioned::new(OnboardingSection {
+                // The popup's provider rows come from the config this function
+                // just loaded, not from a second read of disk.
+                auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
+                ..OnboardingSection::default()
+            }),
+            config: Versioned::new(ConfigSection {
+                config_screen_state: ConfigScreenState::from_app_config(&app_config),
+                app_config,
+                ..ConfigSection::default()
+            }),
+            skills: Versioned::default(),
+            plugins_host: Versioned::default(),
+            hangar: Versioned::default(),
+            claude_chat: Versioned::default(),
+            git_view: Versioned::default(),
+            recovery: Versioned::default(),
+            mcp_pool: Versioned::default(),
             // Initialize quick commit state
-            quick_commit_message: None,
-            quick_commit_cursor: 0,
-
-            // Initialize tmux integration
-            tmux_sessions: HashMap::new(),
-            preview_update_task: None,
 
             // Initialize other tmux sessions
-            other_tmux_sessions: Vec::new(),
-            other_tmux_expanded: true, // Default to expanded
-            selected_other_tmux_index: None,
-            selected_other_tmux_sessions: HashSet::new(),
-            other_tmux_rename_mode: false,
-            other_tmux_rename_buffer: String::new(),
 
             // Initialize SSH sessions (separate section)
-            ssh_sessions: Vec::new(),
-            ssh_sessions_expanded: true, // Default to expanded
-            selected_ssh_session_index: None,
-            ssh_session_rename_mode: false,
-            ssh_session_rename_buffer: String::new(),
-            session_label_store: SessionLabelStore::load(),
-            session_label_rename_mode: false,
-            session_label_rename_buffer: String::new(),
-            session_label_rename_target: None,
-            session_context_menu: None,
 
             // AINB 2.0: Home screen and agent selection
-            home_screen_state: HomeScreenState::default(),
-            home_screen_v2_state,
-            config_screen_state: ConfigScreenState::from_app_config(&app_config),
-            auth_provider_popup_state: AuthProviderPopupState::from_app_config(&app_config),
-            config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
 
             // Onboarding wizard state (initialized to None, set during app init)
-            onboarding_state: None,
 
             // Setup menu state
-            setup_menu_state: crate::components::setup_menu::SetupMenuState::new(),
 
             // Persistent configuration
-            app_config,
 
             // Log history viewer state
-            log_history_state: crate::components::LogHistoryViewerState::new(),
 
             // Changelog viewer state
-            changelog_state: crate::components::ChangelogState::new(),
 
             // Session recovery state (lazy-load when entering view)
-            session_recovery_state: crate::components::SessionRecoveryState::default(),
 
             // ainb-hooks inbox (lazy-opens SQLite on first refresh)
 
             // Daemons observability (collects health on first/periodic render)
-            daemons_state: crate::components::daemons::DaemonsState::default(),
 
             // Fleet control panel (reads current_state on entry/tick)
-            pending_plugin_renders: std::collections::HashMap::new(),
-            favorite_workspace_paths: HashSet::new(),
-            plugin_captures_text: std::collections::HashMap::new(),
-            plugin_render_errors: std::collections::HashMap::new(),
-            plugin_runtime: None,
-
-            live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
 
             // Skills browser state
-            skills_state: crate::components::skills::SkillsViewState::default(),
-            skills_load_receiver: None,
 
             // Skill-manager screen state (spec §10.1)
-            skill_manager_state: crate::components::skill_manager_screen::SkillsScreenData::default(
-            ),
-            drift_load_receiver: None,
             // Configure base-branch picker background refresh
-            branch_refresh_receiver: None,
-            branch_refresh_seq: 0,
             // Configure remote-repo pre-flight (ls-remote at open)
-            repo_check_receiver: None,
-            repo_check_seq: 0,
             // Configure empty-remote initialization ([i] → README + push)
-            repo_init_receiver: None,
-            repo_init_seq: 0,
 
             // Periodic session snapshot tracking
-            last_snapshot_time: None,
 
             // Throttled tmux preview updates
-            last_preview_update: None,
-            last_status_check: None,
 
             // Background workspace loading state
-            is_loading_workspaces: false,
-            workspace_load_error: None,
-            workspace_load_started: None,
-            workspace_load_receiver: None,
 
             // Per-session attention markers, driven by ainb-hooks events.
-            attention_baseline: HashMap::new(),
-            attention_error_since: HashMap::new(),
-            attention_local_since: HashMap::new(),
-            daemon_attention: Arc::new(Mutex::new(
-                crate::fleet::attention::DaemonAttention::default(),
-            )),
-            fleet_snapshot: Arc::new(Mutex::new(Vec::new())),
-            fleet_metadata: HashMap::new(),
-            attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            session_log: Arc::new(crate::fleet::session_log::Shared::default()),
-            session_log_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            attention_elsewhere: 0,
-            session_tab: crate::components::session_tabs::SessionTab::default(),
-            ask_state: crate::fleet::answer::AskState::default(),
-            pal_dial: crate::fleet::pal_dial::PalDial::new(),
-            daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
-            broadcast: crate::fleet::broadcast::Broadcast::default(),
-            pal_chat: None,
-            session_chat: None,
         }
     }
 }
@@ -4114,8 +3725,8 @@ impl AppState {
                             Ok(()) => {
                                 let mut manager = ClaudeChatManager::new(client);
                                 manager.create_session(None);
-                                self.claude_manager = Some(manager);
-                                self.claude_chat_state = Some(ClaudeChatState::new());
+                                self.claude_chat.claude_manager = Some(manager);
+                                self.claude_chat.claude_chat_state = Some(ClaudeChatState::new());
                                 info!("Claude integration initialized successfully");
                                 Ok(())
                             }
@@ -4144,9 +3755,14 @@ impl AppState {
         &mut self,
         message: String,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let (Some(chat_state), Some(manager)) =
-            (&mut self.claude_chat_state, &mut self.claude_manager)
-        {
+        // The second split-borrow the plan called out: the chat state and its
+        // manager are one section now, so two separate `&mut` paths borrow that
+        // section twice. One `get_mut` bumps once and hands out both.
+        let claude_chat = self.claude_chat.get_mut();
+        if let (Some(chat_state), Some(manager)) = (
+            claude_chat.claude_chat_state.as_mut(),
+            claude_chat.claude_manager.as_mut(),
+        ) {
             chat_state.start_streaming(message.clone());
 
             // Start streaming response
@@ -4157,11 +3773,11 @@ impl AppState {
                         match event {
                             Ok(ClaudeStreamingEvent::ContentBlockDelta { delta, .. }) => {
                                 chat_state.append_streaming_response(&delta.text);
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                             }
                             Ok(ClaudeStreamingEvent::MessageStop) => {
                                 chat_state.finish_streaming();
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                                 break;
                             }
                             Ok(ClaudeStreamingEvent::Error { error }) => {
@@ -4193,16 +3809,20 @@ impl AppState {
 
     /// Add a log entry to live logs
     pub fn add_live_log(&mut self, session_id: Uuid, log_entry: LogEntry) {
-        self.live_logs.entry(session_id).or_insert_with(Vec::new).push(log_entry);
+        self.log_streams
+            .live_logs
+            .entry(session_id)
+            .or_insert_with(Vec::new)
+            .push(log_entry);
 
         // Limit log entries to prevent memory issues (keep last 1000)
-        if let Some(logs) = self.live_logs.get_mut(&session_id) {
+        if let Some(logs) = self.log_streams.live_logs.get_mut(&session_id) {
             if logs.len() > 1000 {
                 logs.drain(0..logs.len() - 1000);
             }
         }
 
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
     }
 
     /// Start log streaming for a session when it becomes active
@@ -4210,9 +3830,10 @@ impl AppState {
         &mut self,
         session_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(coordinator) = &mut self.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.log_streams.log_streaming_coordinator {
             // Find the session to get container info
             let session_info = self
+                .sessions
                 .workspaces
                 .iter()
                 .flat_map(|w| &w.sessions)
@@ -4245,7 +3866,7 @@ impl AppState {
         &mut self,
         session_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(coordinator) = &mut self.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.log_streams.log_streaming_coordinator {
             info!("Stopping log streaming for session {}", session_id);
             coordinator.stop_streaming(session_id).await?;
         }
@@ -4254,13 +3875,13 @@ impl AppState {
 
     /// Clear live logs for a session
     pub fn clear_live_logs(&mut self, session_id: Uuid) {
-        self.live_logs.remove(&session_id);
-        self.ui_needs_refresh = true;
+        self.log_streams.live_logs.remove(&session_id);
+        self.shell.ui_needs_refresh = true;
     }
 
     /// Get total live log count across all sessions
     pub fn total_live_log_count(&self) -> usize {
-        self.live_logs.values().map(|logs| logs.len()).sum()
+        self.log_streams.live_logs.values().map(|logs| logs.len()).sum()
     }
 
     /// Check if this is first time setup (no auth configured)
@@ -4432,7 +4053,7 @@ impl AppState {
             .map(|c| c.git_directories)
             .unwrap_or_default();
         let saved = if saved.is_empty() {
-            self.app_config.workspace_defaults.workspace_scan_paths.clone()
+            self.config.app_config.workspace_defaults.workspace_scan_paths.clone()
         } else {
             saved
         };
@@ -4461,8 +4082,8 @@ impl AppState {
         // always opens showing real current values (config + keychain).
         state.refresh_auth_statuses();
 
-        self.onboarding_state = Some(state);
-        self.current_screen = screen_ids::ONBOARDING.to_string();
+        self.onboarding.onboarding_state = Some(state);
+        self.shell.current_screen = screen_ids::ONBOARDING.to_string();
     }
 
     /// Map a finished wizard `OnboardingState` onto the persisted
@@ -4497,7 +4118,7 @@ impl AppState {
     pub fn persist_onboarding_git_dirs(&mut self) {
         use crate::config::OnboardingConfig;
 
-        let Some(state) = self.onboarding_state.as_ref() else {
+        let Some(state) = self.onboarding.onboarding_state.as_ref() else {
             return;
         };
         let valid = state.get_valid_directories();
@@ -4513,25 +4134,26 @@ impl AppState {
         }
 
         // App-config scan paths (what session creation actually reads).
-        self.app_config.workspace_defaults.workspace_scan_paths = valid;
-        if let Err(e) = self.app_config.save() {
+        self.config.app_config.workspace_defaults.workspace_scan_paths = valid;
+        if let Err(e) = self.config.app_config.save() {
             warn!("Failed to persist workspace scan paths: {}", e);
         }
     }
 
     /// Complete the onboarding process
     pub fn complete_onboarding(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(state) = &self.onboarding_state {
+        if let Some(state) = &self.onboarding.onboarding_state {
             // Save onboarding config
             let config = Self::onboarding_config_from_state(state);
             config.save().map_err(|e| format!("Failed to save onboarding config: {}", e))?;
 
             // Update app config with git directories
-            self.app_config.workspace_defaults.workspace_scan_paths = state.get_valid_directories();
+            self.config.app_config.workspace_defaults.workspace_scan_paths =
+                state.get_valid_directories();
 
             // Save selected editor preference
             if let Some(editor) = state.get_selected_editor() {
-                self.app_config.ui_preferences.preferred_editor = Some(editor);
+                self.config.app_config.ui_preferences.preferred_editor = Some(editor);
             }
 
             // Optional OpenTelemetry -> Grafana Cloud setup. Best-effort: a
@@ -4562,7 +4184,7 @@ impl AppState {
                 }
             }
 
-            if let Err(e) = self.app_config.save() {
+            if let Err(e) = self.config.app_config.save() {
                 warn!(
                     "Failed to save app config during onboarding completion: {}",
                     e
@@ -4571,8 +4193,8 @@ impl AppState {
         }
 
         // Clean up and return to home
-        self.onboarding_state = None;
-        self.current_screen = screen_ids::HOME.to_string();
+        self.onboarding.onboarding_state = None;
+        self.shell.current_screen = screen_ids::HOME.to_string();
 
         // New-user path: now that onboarding is done, offer to install
         // the ainb-hooks notification plugin (existing users get this at
@@ -4584,8 +4206,8 @@ impl AppState {
 
     /// Cancel onboarding and return to home (for factory reset scenario)
     pub fn cancel_onboarding(&mut self) {
-        self.onboarding_state = None;
-        self.current_screen = screen_ids::HOME.to_string();
+        self.onboarding.onboarding_state = None;
+        self.shell.current_screen = screen_ids::HOME.to_string();
     }
 
     /// Leave the onboarding wizard and drop into the Setup menu.
@@ -4597,9 +4219,9 @@ impl AppState {
     /// always clean (selection at the top, no stale confirmation open).
     pub fn onboarding_to_menu(&mut self) {
         use crate::components::setup_menu::SetupMenuState;
-        self.onboarding_state = None;
-        self.setup_menu_state = SetupMenuState::new();
-        self.current_screen = screen_ids::SETUP_MENU.to_string();
+        self.onboarding.onboarding_state = None;
+        self.onboarding.setup_menu_state = SetupMenuState::new();
+        self.shell.current_screen = screen_ids::SETUP_MENU.to_string();
     }
 
     /// Refresh OAuth tokens using the refresh token
@@ -4699,10 +4321,10 @@ impl AppState {
         use std::env;
 
         if let Ok(current_dir) = env::current_dir() {
-            self.is_current_dir_git_repo =
+            self.git_view.is_current_dir_git_repo =
                 WorkspaceScanner::validate_workspace(&current_dir).unwrap_or(false);
 
-            if self.is_current_dir_git_repo {
+            if self.git_view.is_current_dir_git_repo {
                 info!(
                     "Current directory is a valid git repository: {:?}",
                     current_dir
@@ -4716,7 +4338,7 @@ impl AppState {
             }
         } else {
             warn!("Could not determine current directory");
-            self.is_current_dir_git_repo = false;
+            self.git_view.is_current_dir_git_repo = false;
         }
     }
 
@@ -4729,13 +4351,14 @@ impl AppState {
             std::path::PathBuf,
             crate::models::ShellSession,
         > = self
+            .sessions
             .workspaces
             .iter()
             .filter_map(|w| w.shell_session.clone().map(|s| (w.path.clone(), s)))
             .collect();
 
         // Clear existing workspaces before loading to prevent duplicates
-        self.workspaces.clear();
+        self.sessions.workspaces.clear();
 
         // Check and refresh OAuth tokens if needed (only if Docker is available)
         let home_dir = dirs::home_dir();
@@ -4796,7 +4419,7 @@ impl AppState {
                 "Restoring {} preserved shell sessions",
                 preserved_shells.len()
             );
-            for workspace in &mut self.workspaces {
+            for workspace in &mut self.sessions.workspaces {
                 if let Some(shell) = preserved_shells.get(&workspace.path) {
                     // Only restore if the tmux session still exists
                     let check = tokio::process::Command::new("tmux")
@@ -4829,20 +4452,20 @@ impl AppState {
 
         // Reset selection state before setting new selection
         // This is critical to avoid stale indices after refresh that break navigation
-        self.selected_workspace_index = None;
-        self.selected_session_index = None;
-        self.shell_selected = false;
-        self.selected_ssh_session_index = None;
-        self.selected_other_tmux_index = None;
+        self.sessions.selected_workspace_index = None;
+        self.sessions.selected_session_index = None;
+        self.sessions.shell_selected = false;
+        self.ssh.selected_ssh_session_index = None;
+        self.tmux.selected_other_tmux_index = None;
 
         // Set initial selection from rows visible under the active filter.
         if !self.select_first_visible_workspace_item_from(0) {
-            if !self.ssh_sessions.is_empty() {
+            if !self.ssh.ssh_sessions.is_empty() {
                 // No workspaces but there are SSH sessions - select the first one
-                self.selected_ssh_session_index = Some(0);
-            } else if !self.other_tmux_sessions.is_empty() {
+                self.ssh.selected_ssh_session_index = Some(0);
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
                 // No workspaces or SSH sessions but there are "Other tmux" sessions - select the first one
-                self.selected_other_tmux_index = Some(0);
+                self.tmux.selected_other_tmux_index = Some(0);
             } else {
                 info!("No active sessions found. Use 'n' to create a new session.");
                 // Selection indices already reset above
@@ -4862,21 +4485,21 @@ impl AppState {
         &mut self,
     ) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.workspace_load_receiver = Some(rx);
-        self.is_loading_workspaces = true;
-        self.workspace_load_started = Some(Instant::now());
-        self.workspace_load_error = None;
+        self.workspace_load.workspace_load_receiver = Some(rx);
+        self.workspace_load.is_loading_workspaces = true;
+        self.workspace_load.workspace_load_started = Some(Instant::now());
+        self.workspace_load.workspace_load_error = None;
         tx
     }
 
     /// Check for completed background workspace loading and apply results
     /// Returns true if workspaces were updated
     pub fn check_workspace_loading_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.workspace_load_receiver {
+        if let Some(ref mut receiver) = self.workspace_load.workspace_load_receiver {
             match receiver.try_recv() {
                 Ok(result) => {
-                    self.is_loading_workspaces = false;
-                    self.workspace_load_receiver = None;
+                    self.workspace_load.is_loading_workspaces = false;
+                    self.workspace_load.workspace_load_receiver = None;
 
                     match result {
                         WorkspaceLoadResult::Success(mut workspaces) => {
@@ -4906,9 +4529,9 @@ impl AppState {
                                 workspaces.len()
                             );
 
-                            self.workspaces = workspaces;
-                            self.ssh_sessions = ssh_sessions;
-                            self.workspace_load_error = None;
+                            self.sessions.workspaces = workspaces;
+                            self.ssh.ssh_sessions = ssh_sessions;
+                            self.workspace_load.workspace_load_error = None;
 
                             // Resolve favorite status once per workspace now
                             // that the list changed, so the session-list render
@@ -4918,7 +4541,7 @@ impl AppState {
 
                             // Populate tmux_sessions HashMap for Interactive mode sessions
                             // This is needed for update_tmux_previews() to capture pane content
-                            for workspace in &self.workspaces {
+                            for workspace in &self.sessions.workspaces {
                                 for session in &workspace.sessions {
                                     if session.mode == crate::models::SessionMode::Interactive {
                                         // Use tmux_session_name if available, otherwise generate from session name
@@ -4930,7 +4553,7 @@ impl AppState {
                                             tmux_name,
                                             "claude".to_string(),
                                         );
-                                        self.tmux_sessions.insert(session.id, tmux_session);
+                                        self.tmux.tmux_sessions.insert(session.id, tmux_session);
                                         debug!(
                                             "Populated tmux_sessions for session {}: {}",
                                             session.id, session.name
@@ -4940,23 +4563,23 @@ impl AppState {
                             }
                             info!(
                                 "Populated tmux_sessions with {} entries",
-                                self.tmux_sessions.len()
+                                self.tmux.tmux_sessions.len()
                             );
 
                             // Set initial selection
-                            self.selected_workspace_index = None;
-                            self.selected_session_index = None;
-                            self.shell_selected = false;
-                            self.selected_ssh_session_index = None;
-                            self.selected_other_tmux_index = None;
+                            self.sessions.selected_workspace_index = None;
+                            self.sessions.selected_session_index = None;
+                            self.sessions.shell_selected = false;
+                            self.ssh.selected_ssh_session_index = None;
+                            self.tmux.selected_other_tmux_index = None;
 
                             if !self.select_first_visible_workspace_item_from(0) {
-                                if !self.ssh_sessions.is_empty() {
+                                if !self.ssh.ssh_sessions.is_empty() {
                                     // No workspaces but there are SSH sessions - select the first one
-                                    self.selected_ssh_session_index = Some(0);
-                                } else if !self.other_tmux_sessions.is_empty() {
+                                    self.ssh.selected_ssh_session_index = Some(0);
+                                } else if !self.tmux.other_tmux_sessions.is_empty() {
                                     // No workspaces or SSH sessions but there are "Other tmux" sessions
-                                    self.selected_other_tmux_index = Some(0);
+                                    self.tmux.selected_other_tmux_index = Some(0);
                                 }
                             }
 
@@ -4977,15 +4600,16 @@ impl AppState {
                             // `load_real_workspaces` doesn't re-arm it — no loop.
                             // Guard on `None` so a user-queued action is never
                             // clobbered.
-                            if self.pending_async_action.is_none() {
-                                self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            if self.shell.pending_async_action.is_none() {
+                                self.shell.pending_async_action =
+                                    Some(AsyncAction::RefreshWorkspaces);
                             }
 
                             return true;
                         }
                         WorkspaceLoadResult::Error(err) => {
                             warn!("Background workspace loading failed: {}", err);
-                            self.workspace_load_error = Some(err.clone());
+                            self.workspace_load.workspace_load_error = Some(err.clone());
                             self.add_warning_notification(format!(
                                 "Failed to load sessions: {}",
                                 err
@@ -4994,7 +4618,7 @@ impl AppState {
                         }
                         WorkspaceLoadResult::Timeout => {
                             warn!("Background workspace loading timed out");
-                            self.workspace_load_error =
+                            self.workspace_load.workspace_load_error =
                                 Some("Docker operation timed out".to_string());
                             self.add_warning_notification(
                                 "Docker is slow - sessions may be incomplete".to_string(),
@@ -5005,13 +4629,14 @@ impl AppState {
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {
                     // Still loading, check for timeout
-                    if let Some(started) = self.workspace_load_started {
+                    if let Some(started) = self.workspace_load.workspace_load_started {
                         if started.elapsed().as_secs() > Self::DOCKER_TIMEOUT_SECS * 3 {
                             // Hard timeout - stop waiting
                             warn!("Workspace loading hard timeout reached");
-                            self.is_loading_workspaces = false;
-                            self.workspace_load_receiver = None;
-                            self.workspace_load_error = Some("Loading timed out".to_string());
+                            self.workspace_load.is_loading_workspaces = false;
+                            self.workspace_load.workspace_load_receiver = None;
+                            self.workspace_load.workspace_load_error =
+                                Some("Loading timed out".to_string());
                             self.add_warning_notification(
                                 "Session loading timed out - using cached data".to_string(),
                             );
@@ -5021,9 +4646,10 @@ impl AppState {
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // Channel closed without result - error
-                    self.is_loading_workspaces = false;
-                    self.workspace_load_receiver = None;
-                    self.workspace_load_error = Some("Loading task failed".to_string());
+                    self.workspace_load.is_loading_workspaces = false;
+                    self.workspace_load.workspace_load_receiver = None;
+                    self.workspace_load.workspace_load_error =
+                        Some("Loading task failed".to_string());
                     return true;
                 }
             }
@@ -5039,12 +4665,12 @@ impl AppState {
     pub fn recompute_favorite_workspaces(&mut self) {
         let favorites = crate::config::FavoritesStore::load();
         let mut starred: HashSet<PathBuf> = HashSet::new();
-        for workspace in &self.workspaces {
+        for workspace in &self.sessions.workspaces {
             if Self::workspace_is_favorite(&workspace.path, &favorites) {
                 starred.insert(workspace.path.clone());
             }
         }
-        self.favorite_workspace_paths = starred;
+        self.sessions.favorite_workspace_paths = starred;
     }
 
     /// True if `path` is favorited, by local-path match or by the repo's git
@@ -5090,15 +4716,15 @@ impl AppState {
     /// Mirrors `start_background_usage_load` so Skills screen navigation
     /// never blocks the event thread.
     pub fn start_background_skills_load(&mut self, force: bool) -> bool {
-        if self.skills_load_receiver.is_some() {
+        if self.skills.skills_load_receiver.is_some() {
             return false;
         }
-        if !force && self.skills_state.data.is_some() {
+        if !force && self.skills.skills_state.data.is_some() {
             return false;
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        self.skills_load_receiver = Some(rx);
-        self.skills_state.loading = true;
+        self.skills.skills_load_receiver = Some(rx);
+        self.skills.skills_state.loading = true;
         tokio::spawn(async move {
             match tokio::task::spawn_blocking(crate::models::skills::parse_skills).await {
                 Ok(data) => {
@@ -5114,18 +4740,18 @@ impl AppState {
 
     /// Poll the background scan. Returns true if data was applied this tick.
     pub fn check_skills_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.skills_load_receiver {
+        if let Some(ref mut receiver) = self.skills.skills_load_receiver {
             match receiver.try_recv() {
                 Ok(data) => {
-                    self.skills_state.data = Some(data);
-                    self.skills_state.loading = false;
-                    self.skills_load_receiver = None;
+                    self.skills.skills_state.data = Some(data);
+                    self.skills.skills_state.loading = false;
+                    self.skills.skills_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.skills_state.loading = false;
-                    self.skills_load_receiver = None;
+                    self.skills.skills_state.loading = false;
+                    self.skills.skills_load_receiver = None;
                     warn!("Skills parse task dropped its sender without delivering data");
                     self.add_warning_notification(
                         "Failed to parse skills; keeping cached data".to_string(),
@@ -5153,11 +4779,11 @@ impl AppState {
         home: &std::path::Path,
         backend: std::sync::Arc<dyn ainb_skill_core::drift::DriftBackend + Send + Sync>,
     ) -> bool {
-        if self.drift_load_receiver.is_some() {
+        if self.skills.drift_load_receiver.is_some() {
             return false;
         }
         let (tx, rx) = mpsc::unbounded_channel();
-        self.drift_load_receiver = Some(rx);
+        self.skills.drift_load_receiver = Some(rx);
         let home = home.to_path_buf();
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || {
@@ -5185,16 +4811,16 @@ impl AppState {
     /// applied this tick. Drains a single message — backend returns
     /// the whole map in one go so a single drain is enough.
     pub fn check_drift_load_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.drift_load_receiver {
+        if let Some(ref mut receiver) = self.skills.drift_load_receiver {
             match receiver.try_recv() {
                 Ok(map) => {
-                    self.skill_manager_state.drift_cache = map;
-                    self.drift_load_receiver = None;
+                    self.skills.skill_manager_state.drift_cache = map;
+                    self.skills.drift_load_receiver = None;
                     true
                 }
                 Err(mpsc::error::TryRecvError::Empty) => false,
                 Err(mpsc::error::TryRecvError::Disconnected) => {
-                    self.drift_load_receiver = None;
+                    self.skills.drift_load_receiver = None;
                     warn!("Drift detect task dropped its sender without delivering data");
                     true
                 }
@@ -5212,12 +4838,12 @@ impl AppState {
     /// Toggle the MCP pool overlay. Opening seeds config + fires the first
     /// fetch; closing drops the snapshot (and thus all refresh activity).
     pub fn toggle_mcp_overlay(&mut self) {
-        if self.mcp_overlay.is_some() {
-            self.mcp_overlay = None;
+        if self.mcp_pool.mcp_overlay.is_some() {
+            self.mcp_pool.mcp_overlay = None;
             return;
         }
         let config = crate::config::AppConfig::load().unwrap_or_default();
-        self.mcp_overlay = Some(McpOverlayState {
+        self.mcp_pool.mcp_overlay = Some(McpOverlayState {
             pool_enabled: config.mcp_pool.enabled,
             daemon_running: false,
             servers: Vec::new(),
@@ -5232,11 +4858,11 @@ impl AppState {
     }
 
     pub fn close_mcp_overlay(&mut self) {
-        self.mcp_overlay = None;
+        self.mcp_pool.mcp_overlay = None;
     }
 
     pub fn mcp_overlay_move(&mut self, delta: i32) {
-        if let Some(o) = self.mcp_overlay.as_mut() {
+        if let Some(o) = self.mcp_pool.mcp_overlay.as_mut() {
             if o.servers.is_empty() {
                 return;
             }
@@ -5249,7 +4875,7 @@ impl AppState {
     /// in flight (the one-outstanding-request guard). The blocking control
     /// socket call runs on the blocking pool so the executor never stalls.
     pub fn spawn_mcp_fetch(&mut self) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
         if o.fetch_rx.is_some() {
@@ -5277,7 +4903,7 @@ impl AppState {
     /// `try_recv` never waits, and no fetch is spawned when one is pending or
     /// the cadence is disabled. Called from the 250ms app tick.
     pub fn check_mcp_overlay(&mut self) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
 
@@ -5326,7 +4952,7 @@ impl AppState {
     /// import + control-socket calls run on the blocking pool and the result
     /// (summary + fresh snapshot) is delivered through the overlay channel.
     pub fn mcp_import(&mut self, to_user: bool) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
         let (tx, rx) = mpsc::unbounded_channel();
@@ -5357,7 +4983,7 @@ impl AppState {
     /// change as soon as the stop completes (no immediate-fetch race that
     /// reads pre-stop state).
     fn mcp_stop_then_refresh<F: FnOnce() + Send + 'static>(&mut self, stop: F) {
-        let Some(o) = self.mcp_overlay.as_mut() else {
+        let Some(o) = self.mcp_pool.mcp_overlay.as_mut() else {
             return;
         };
         let (tx, rx) = mpsc::unbounded_channel();
@@ -5395,13 +5021,14 @@ impl AppState {
         const INTERVAL_SECS: u64 = 10;
         let now = std::time::Instant::now();
         let due = self
+            .fleet
             .last_headroom_watchdog
             .map(|last| now.duration_since(last).as_secs() >= INTERVAL_SECS)
             .unwrap_or(true);
         if !due {
             return;
         }
-        self.last_headroom_watchdog = Some(now);
+        self.fleet.last_headroom_watchdog = Some(now);
 
         let has_headroom_session = crate::interactive::SessionStore::load()
             .sessions
@@ -5429,7 +5056,11 @@ impl AppState {
         use crate::git::branch_list::{self, BranchEntry};
         use crate::git::repo_source::RepoSource;
 
-        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         else {
             return;
         };
@@ -5470,10 +5101,10 @@ impl AppState {
 
         // Background refresh — generation-guarded so a stale result can't
         // repopulate a closed/reopened picker.
-        self.branch_refresh_seq += 1;
-        let seq = self.branch_refresh_seq;
+        self.new_session.branch_refresh_seq += 1;
+        let seq = self.new_session.branch_refresh_seq;
         let (tx, rx) = mpsc::unbounded_channel();
-        self.branch_refresh_receiver = Some(rx);
+        self.new_session.branch_refresh_receiver = Some(rx);
         tokio::spawn(async move {
             let join = tokio::task::spawn_blocking(move || -> Result<Vec<BranchEntry>, String> {
                 match list_path {
@@ -5512,26 +5143,29 @@ impl AppState {
     pub fn check_branch_refresh_complete(&mut self) -> bool {
         use crate::components::new_session::configure::PickerBranchEntry;
 
-        let Some(ref mut receiver) = self.branch_refresh_receiver else {
+        let Some(ref mut receiver) = self.new_session.branch_refresh_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.branch_refresh_receiver = None;
+                self.new_session.branch_refresh_receiver = None;
                 return false;
             }
         };
-        self.branch_refresh_receiver = None;
-        if seq != self.branch_refresh_seq {
+        self.new_session.branch_refresh_receiver = None;
+        if seq != self.new_session.branch_refresh_seq {
             // A newer picker session superseded this refresh.
             return false;
         }
 
         let mut warn_msg: Option<String> = None;
-        if let Some(cfg) =
-            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        if let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         {
             let existing = cfg.existing_branches.clone();
             // Capture the fresh branch names for the base-off "⚠ exists" guard
@@ -5579,11 +5213,11 @@ impl AppState {
                 match loader.load_active_sessions().await {
                     Ok(mut workspaces) => {
                         // Append to existing workspaces instead of replacing
-                        self.workspaces.append(&mut workspaces);
+                        self.sessions.workspaces.append(&mut workspaces);
                         info!(
                             "Loaded {} Boss mode workspaces (total: {})",
                             workspaces.len(),
-                            self.workspaces.len()
+                            self.sessions.workspaces.len()
                         );
                     }
                     Err(e) => {
@@ -5635,8 +5269,10 @@ impl AppState {
                 for interactive_session in sessions {
                     live_tmux_names.insert(interactive_session.tmux_session_name.clone());
                     let mut session = interactive_session.to_session_model();
-                    if let Some(label) =
-                        self.session_label_store.get(&interactive_session.tmux_session_name)
+                    if let Some(label) = self
+                        .session_labels
+                        .session_label_store
+                        .get(&interactive_session.tmux_session_name)
                     {
                         session.display_name = Some(label.clone());
                     }
@@ -5660,12 +5296,13 @@ impl AppState {
                     };
 
                     // Remove any stale entries for this session (e.g., added by Boss-mode loader)
-                    for workspace in &mut self.workspaces {
+                    for workspace in &mut self.sessions.workspaces {
                         workspace.sessions.retain(|s| s.id != interactive_session.session_id);
                     }
 
                     let workspace_key = canonical_key(workspace_path);
                     if let Some(workspace) = self
+                        .sessions
                         .workspaces
                         .iter_mut()
                         .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
@@ -5679,7 +5316,7 @@ impl AppState {
                             workspace_path.to_path_buf(),
                         );
                         workspace.sessions.push(session);
-                        self.workspaces.push(workspace);
+                        self.sessions.workspaces.push(workspace);
                     }
 
                     // Store tmux session for attach operations
@@ -5689,7 +5326,7 @@ impl AppState {
                         interactive_session.tmux_session_name.clone(),
                         "claude".to_string(),
                     );
-                    self.tmux_sessions.insert(interactive_session.session_id, tmux_session);
+                    self.tmux.tmux_sessions.insert(interactive_session.session_id, tmux_session);
                 }
             }
             Err(e) => {
@@ -5735,7 +5372,10 @@ impl AppState {
                 continue;
             };
 
-            let stopped = Self::stopped_session_from_metadata(metadata, &self.session_label_store);
+            let stopped = Self::stopped_session_from_metadata(
+                metadata,
+                &self.session_labels.session_label_store,
+            );
             // Group by the actual source repository (matches Phase 1's
             // grouping above). The previous `worktree_path.parent()` key was
             // always the shared `~/.agents-in-a-box/worktrees/` dir, which
@@ -5744,6 +5384,7 @@ impl AppState {
             let workspace_key = canonical_key(&workspace_path);
 
             if let Some(workspace) = self
+                .sessions
                 .workspaces
                 .iter_mut()
                 .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
@@ -5759,7 +5400,7 @@ impl AppState {
                     );
                 let mut workspace = crate::models::Workspace::new(workspace_name, workspace_path);
                 workspace.sessions.push(stopped);
-                self.workspaces.push(workspace);
+                self.sessions.workspaces.push(workspace);
             }
         }
     }
@@ -5828,16 +5469,16 @@ impl AppState {
                     "Failed to list tmux sessions: {} (tmux might not be running)",
                     e
                 );
-                self.other_tmux_sessions.clear();
-                self.selected_other_tmux_sessions.clear();
+                self.tmux.other_tmux_sessions.clear();
+                self.tmux.selected_other_tmux_sessions.clear();
                 return;
             }
         };
 
         if !output.status.success() {
             debug!("No tmux sessions found (tmux might not be running)");
-            self.other_tmux_sessions.clear();
-            self.selected_other_tmux_sessions.clear();
+            self.tmux.other_tmux_sessions.clear();
+            self.tmux.selected_other_tmux_sessions.clear();
             return;
         }
 
@@ -5846,6 +5487,7 @@ impl AppState {
 
         // Collect tmux names that appear in loaded workspaces (successfully matched)
         let matched_tmux_names: std::collections::HashSet<&str> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|ws| ws.sessions.iter())
@@ -5915,7 +5557,8 @@ impl AppState {
                     }
 
                     // Restore display_name from persistent store
-                    if let Some(preserved_name) = self.session_label_store.get(&name) {
+                    if let Some(preserved_name) = self.session_labels.session_label_store.get(&name)
+                    {
                         ssh_session.display_name = Some(preserved_name.clone());
                     }
 
@@ -5963,11 +5606,17 @@ impl AppState {
             other_sessions.len(),
             ssh_sessions.len()
         );
-        self.other_tmux_sessions = other_sessions;
-        let live_other_names: HashSet<String> =
-            self.other_tmux_sessions.iter().map(|session| session.name.clone()).collect();
-        self.selected_other_tmux_sessions.retain(|name| live_other_names.contains(name));
-        self.ssh_sessions = ssh_sessions;
+        self.tmux.other_tmux_sessions = other_sessions;
+        let live_other_names: HashSet<String> = self
+            .tmux
+            .other_tmux_sessions
+            .iter()
+            .map(|session| session.name.clone())
+            .collect();
+        self.tmux
+            .selected_other_tmux_sessions
+            .retain(|name| live_other_names.contains(name));
+        self.ssh.ssh_sessions = ssh_sessions;
     }
 
     /// Auto-detect workspace shell sessions from tmux
@@ -6019,7 +5668,7 @@ impl AppState {
                 // Then, try parent directory match (for worktree subdirectories)
                 let mut matched_workspace_idx = None;
 
-                for (idx, workspace) in self.workspaces.iter().enumerate() {
+                for (idx, workspace) in self.sessions.workspaces.iter().enumerate() {
                     // Skip workspaces that already have a shell session
                     if workspace.shell_session.is_some() {
                         continue;
@@ -6049,9 +5698,9 @@ impl AppState {
                     // Create a ShellSession for this detected session
                     let shell = ShellSession {
                         id: uuid::Uuid::new_v4(),
-                        name: format!("🐚 {}", self.workspaces[idx].name),
+                        name: format!("🐚 {}", self.sessions.workspaces[idx].name),
                         tmux_session_name: session_name.to_string(),
-                        workspace_path: self.workspaces[idx].path.clone(),
+                        workspace_path: self.sessions.workspaces[idx].path.clone(),
                         working_dir: session_path.clone(),
                         created_at: chrono::Utc::now(),
                         last_accessed: chrono::Utc::now(),
@@ -6061,10 +5710,10 @@ impl AppState {
 
                     info!(
                         "Auto-detected shell session '{}' for workspace '{}'",
-                        session_name, self.workspaces[idx].name
+                        session_name, self.sessions.workspaces[idx].name
                     );
 
-                    self.workspaces[idx].set_shell_session(shell);
+                    self.sessions.workspaces[idx].set_shell_session(shell);
                     detected_count += 1;
                 } else {
                     debug!(
@@ -6126,15 +5775,15 @@ impl AppState {
 
         workspace2.add_session(session4);
 
-        self.workspaces.push(workspace1);
-        self.workspaces.push(workspace2);
+        self.sessions.workspaces.push(workspace1);
+        self.sessions.workspaces.push(workspace2);
 
         // Reset selection state before setting new selection
-        self.selected_workspace_index = None;
-        self.selected_session_index = None;
-        self.shell_selected = false;
-        self.selected_ssh_session_index = None;
-        self.selected_other_tmux_index = None;
+        self.sessions.selected_workspace_index = None;
+        self.sessions.selected_session_index = None;
+        self.sessions.shell_selected = false;
+        self.ssh.selected_ssh_session_index = None;
+        self.tmux.selected_other_tmux_index = None;
 
         self.select_first_visible_workspace_item_from(0);
     }
@@ -6150,29 +5799,29 @@ impl AppState {
                 format!("test-project-{:03}", i),
                 format!("/Users/user/projects/test-project-{:03}", i).into(),
             );
-            self.workspaces.push(workspace);
+            self.sessions.workspaces.push(workspace);
         }
 
         info!(
             "Loaded large mock dataset with {} workspaces",
-            self.workspaces.len()
+            self.sessions.workspaces.len()
         );
     }
 
     pub fn selected_session(&self) -> Option<&Session> {
-        let workspace_idx = self.selected_workspace_index?;
-        let session_idx = self.selected_session_index?;
-        self.workspaces.get(workspace_idx)?.sessions.get(session_idx)
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        let session_idx = self.sessions.selected_session_index?;
+        self.sessions.workspaces.get(workspace_idx)?.sessions.get(session_idx)
     }
 
     /// Toggle multi-select for the currently highlighted session
     pub fn toggle_select_session(&mut self) {
         if let Some(session) = self.selected_session() {
             let id = session.id;
-            if self.selected_sessions.contains(&id) {
-                self.selected_sessions.remove(&id);
+            if self.sessions.selected_sessions.contains(&id) {
+                self.sessions.selected_sessions.remove(&id);
             } else {
-                self.selected_sessions.insert(id);
+                self.sessions.selected_sessions.insert(id);
             }
         } else if self.is_other_tmux_selected() {
             self.toggle_select_other_tmux_session();
@@ -6206,17 +5855,23 @@ impl AppState {
     pub fn selected_session_ids_in_order(&self) -> Vec<Uuid> {
         let mut seen: HashSet<Uuid> = HashSet::new();
         let mut ordered: Vec<Uuid> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| w.sessions.iter())
             .map(|s| s.id)
-            .filter(|id| self.selected_sessions.contains(id) && seen.insert(*id))
+            .filter(|id| self.sessions.selected_sessions.contains(id) && seen.insert(*id))
             .collect();
         // Ids that resolve to no session have no list position, so they are
         // sorted rather than left in HashSet order, which Rust randomises per
         // process and would make the dialog text differ run to run.
-        let mut orphans: Vec<Uuid> =
-            self.selected_sessions.iter().copied().filter(|id| !seen.contains(id)).collect();
+        let mut orphans: Vec<Uuid> = self
+            .sessions
+            .selected_sessions
+            .iter()
+            .copied()
+            .filter(|id| !seen.contains(id))
+            .collect();
         orphans.sort();
         ordered.extend(orphans);
         ordered
@@ -6226,25 +5881,25 @@ impl AppState {
     pub fn toggle_select_other_tmux_session(&mut self) {
         if let Some(session) = self.selected_other_tmux_session() {
             let name = session.name.clone();
-            if self.selected_other_tmux_sessions.contains(&name) {
-                self.selected_other_tmux_sessions.remove(&name);
+            if self.tmux.selected_other_tmux_sessions.contains(&name) {
+                self.tmux.selected_other_tmux_sessions.remove(&name);
             } else {
-                self.selected_other_tmux_sessions.insert(name);
+                self.tmux.selected_other_tmux_sessions.insert(name);
             }
         }
     }
 
     pub fn selected_shell_session(&self) -> Option<&crate::models::ShellSession> {
-        if !self.shell_selected {
+        if !self.sessions.shell_selected {
             return None;
         }
-        let workspace_idx = self.selected_workspace_index?;
-        self.workspaces.get(workspace_idx)?.shell_session.as_ref()
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        self.sessions.workspaces.get(workspace_idx)?.shell_session.as_ref()
     }
 
     pub fn selected_workspace(&self) -> Option<&Workspace> {
-        let workspace_idx = self.selected_workspace_index?;
-        self.workspaces.get(workspace_idx)
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        self.sessions.workspaces.get(workspace_idx)
     }
 
     /// Every attachable leaf row in the *current* render order.
@@ -6253,9 +5908,10 @@ impl AppState {
     pub fn attachable_items_in_order(&self) -> Vec<AttachableRef> {
         let mut out = Vec::new();
 
-        for (workspace_idx, workspace) in self.workspaces.iter().enumerate() {
-            let is_selected_workspace = self.selected_workspace_index == Some(workspace_idx);
-            let is_expanded = is_selected_workspace || self.expand_all_workspaces;
+        for (workspace_idx, workspace) in self.sessions.workspaces.iter().enumerate() {
+            let is_selected_workspace =
+                self.sessions.selected_workspace_index == Some(workspace_idx);
+            let is_expanded = is_selected_workspace || self.sessions.expand_all_workspaces;
 
             // Match session_list: workspaces with no visible content are hidden
             // entirely, and collapsed workspaces don't contribute their leaves.
@@ -6280,14 +5936,14 @@ impl AppState {
             }
         }
 
-        if !self.ssh_sessions.is_empty() && self.ssh_sessions_expanded {
-            for ssh_idx in 0..self.ssh_sessions.len() {
+        if !self.ssh.ssh_sessions.is_empty() && self.ssh.ssh_sessions_expanded {
+            for ssh_idx in 0..self.ssh.ssh_sessions.len() {
                 out.push(AttachableRef::SshSession { ssh_idx });
             }
         }
 
-        if !self.other_tmux_sessions.is_empty() && self.other_tmux_expanded {
-            for other_idx in 0..self.other_tmux_sessions.len() {
+        if !self.tmux.other_tmux_sessions.is_empty() && self.tmux.other_tmux_expanded {
+            for other_idx in 0..self.tmux.other_tmux_sessions.len() {
                 out.push(AttachableRef::OtherTmux { other_idx });
             }
         }
@@ -6304,32 +5960,32 @@ impl AppState {
                 workspace_idx,
                 session_idx,
             } => {
-                self.selected_workspace_index = Some(workspace_idx);
-                self.selected_session_index = Some(session_idx);
-                self.shell_selected = false;
-                self.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
+                self.sessions.selected_workspace_index = Some(workspace_idx);
+                self.sessions.selected_session_index = Some(session_idx);
+                self.sessions.shell_selected = false;
+                self.ssh.selected_ssh_session_index = None;
+                self.tmux.selected_other_tmux_index = None;
             }
             AttachableRef::WorkspaceShell { workspace_idx } => {
-                self.selected_workspace_index = Some(workspace_idx);
-                self.selected_session_index = None;
-                self.shell_selected = true;
-                self.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
+                self.sessions.selected_workspace_index = Some(workspace_idx);
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = true;
+                self.ssh.selected_ssh_session_index = None;
+                self.tmux.selected_other_tmux_index = None;
             }
             AttachableRef::SshSession { ssh_idx } => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
-                self.selected_other_tmux_index = None;
-                self.selected_ssh_session_index = Some(ssh_idx);
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
+                self.tmux.selected_other_tmux_index = None;
+                self.ssh.selected_ssh_session_index = Some(ssh_idx);
             }
             AttachableRef::OtherTmux { other_idx } => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
-                self.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = Some(other_idx);
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
+                self.ssh.selected_ssh_session_index = None;
+                self.tmux.selected_other_tmux_index = Some(other_idx);
             }
         }
     }
@@ -6345,31 +6001,31 @@ impl AppState {
     }
 
     pub fn select_session_list_row(&mut self, target: SessionListRowTarget) {
-        self.focused_pane = FocusedPane::Sessions;
+        self.shell.focused_pane = FocusedPane::Sessions;
 
         match target {
             SessionListRowTarget::WorkspaceHeader { workspace_idx } => {
-                self.selected_workspace_index = Some(workspace_idx);
-                self.selected_session_index = None;
-                self.shell_selected = false;
-                self.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
+                self.sessions.selected_workspace_index = Some(workspace_idx);
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
+                self.ssh.selected_ssh_session_index = None;
+                self.tmux.selected_other_tmux_index = None;
             }
             SessionListRowTarget::SshHeader => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
-                self.selected_other_tmux_index = None;
-                self.selected_ssh_session_index = None;
-                self.ssh_sessions_expanded = !self.ssh_sessions_expanded;
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
+                self.tmux.selected_other_tmux_index = None;
+                self.ssh.selected_ssh_session_index = None;
+                self.ssh.ssh_sessions_expanded = !self.ssh.ssh_sessions_expanded;
             }
             SessionListRowTarget::OtherTmuxHeader => {
-                self.selected_workspace_index = None;
-                self.selected_session_index = None;
-                self.shell_selected = false;
-                self.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = None;
-                self.other_tmux_expanded = !self.other_tmux_expanded;
+                self.sessions.selected_workspace_index = None;
+                self.sessions.selected_session_index = None;
+                self.sessions.shell_selected = false;
+                self.ssh.selected_ssh_session_index = None;
+                self.tmux.selected_other_tmux_index = None;
+                self.tmux.other_tmux_expanded = !self.tmux.other_tmux_expanded;
             }
             SessionListRowTarget::Attachable(target) => {
                 self.select_attachable(target);
@@ -6393,24 +6049,24 @@ impl AppState {
         is_down: bool,
         steps: usize,
     ) -> bool {
-        if self.current_screen != screen_ids::SESSION_LIST || self.help_visible {
+        if self.shell.current_screen != screen_ids::SESSION_LIST || self.shell.help_visible {
             return false;
         }
 
         if pane.contains_preview_point(x, y) {
-            self.focused_pane = FocusedPane::LiveLogs;
+            self.shell.focused_pane = FocusedPane::LiveLogs;
             return false;
         }
 
         let over_sessions = pane.contains_sessions_point(x, y) && !pane.collapsed;
         let should_scroll_sessions =
-            over_sessions || matches!(self.focused_pane, FocusedPane::Sessions);
+            over_sessions || matches!(self.shell.focused_pane, FocusedPane::Sessions);
 
         if !should_scroll_sessions {
             return false;
         }
 
-        self.focused_pane = FocusedPane::Sessions;
+        self.shell.focused_pane = FocusedPane::Sessions;
         for _ in 0..steps.max(1) {
             if is_down {
                 self.next_session();
@@ -6418,16 +6074,17 @@ impl AppState {
                 self.previous_session();
             }
         }
-        self.last_preview_update = None;
+        self.workspace_load.last_preview_update = None;
         true
     }
 
     pub fn session_list_row_target(&self, row_index: usize) -> Option<SessionListRowTarget> {
         let mut current_row = 0usize;
 
-        for (workspace_idx, workspace) in self.workspaces.iter().enumerate() {
-            let is_selected_workspace = self.selected_workspace_index == Some(workspace_idx);
-            let is_expanded = is_selected_workspace || self.expand_all_workspaces;
+        for (workspace_idx, workspace) in self.sessions.workspaces.iter().enumerate() {
+            let is_selected_workspace =
+                self.sessions.selected_workspace_index == Some(workspace_idx);
+            let is_expanded = is_selected_workspace || self.sessions.expand_all_workspaces;
 
             let visible_sessions: Vec<(usize, &Session)> = workspace
                 .sessions
@@ -6470,7 +6127,7 @@ impl AppState {
             }
         }
 
-        if !self.ssh_sessions.is_empty() {
+        if !self.ssh.ssh_sessions.is_empty() {
             if current_row > 0 {
                 if current_row == row_index {
                     return None;
@@ -6483,8 +6140,8 @@ impl AppState {
             }
             current_row += 1;
 
-            if self.ssh_sessions_expanded {
-                for ssh_idx in 0..self.ssh_sessions.len() {
+            if self.ssh.ssh_sessions_expanded {
+                for ssh_idx in 0..self.ssh.ssh_sessions.len() {
                     if current_row == row_index {
                         return Some(SessionListRowTarget::Attachable(
                             AttachableRef::SshSession { ssh_idx },
@@ -6495,7 +6152,7 @@ impl AppState {
             }
         }
 
-        if !self.other_tmux_sessions.is_empty() {
+        if !self.tmux.other_tmux_sessions.is_empty() {
             if current_row > 0 {
                 if current_row == row_index {
                     return None;
@@ -6508,8 +6165,8 @@ impl AppState {
             }
             current_row += 1;
 
-            if self.other_tmux_expanded {
-                for other_idx in 0..self.other_tmux_sessions.len() {
+            if self.tmux.other_tmux_expanded {
+                for other_idx in 0..self.tmux.other_tmux_sessions.len() {
                     if current_row == row_index {
                         return Some(SessionListRowTarget::Attachable(AttachableRef::OtherTmux {
                             other_idx,
@@ -6525,48 +6182,48 @@ impl AppState {
 
     pub fn next_session(&mut self) {
         // Check if we're in the "Other tmux" section
-        if self.selected_other_tmux_index.is_some() {
+        if self.tmux.selected_other_tmux_index.is_some() {
             // Navigate within other tmux sessions
-            let current = self.selected_other_tmux_index.unwrap_or(0);
-            if current + 1 < self.other_tmux_sessions.len() {
-                self.selected_other_tmux_index = Some(current + 1);
+            let current = self.tmux.selected_other_tmux_index.unwrap_or(0);
+            if current + 1 < self.tmux.other_tmux_sessions.len() {
+                self.tmux.selected_other_tmux_index = Some(current + 1);
             }
             // At the end - stay at last item (no wrap)
             return;
         }
 
         // Check if we're in the "SSH Sessions" section
-        if self.selected_ssh_session_index.is_some() {
+        if self.ssh.selected_ssh_session_index.is_some() {
             // Navigate within SSH sessions
-            let current = self.selected_ssh_session_index.unwrap_or(0);
-            if current + 1 < self.ssh_sessions.len() {
-                self.selected_ssh_session_index = Some(current + 1);
-            } else if !self.other_tmux_sessions.is_empty() {
+            let current = self.ssh.selected_ssh_session_index.unwrap_or(0);
+            if current + 1 < self.ssh.ssh_sessions.len() {
+                self.ssh.selected_ssh_session_index = Some(current + 1);
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
                 // At end of SSH sessions - move to "Other tmux"
-                self.selected_ssh_session_index = None;
-                self.selected_other_tmux_index = Some(0);
+                self.ssh.selected_ssh_session_index = None;
+                self.tmux.selected_other_tmux_index = Some(0);
             }
             // Else: stay at last SSH session (no wrap)
             return;
         }
 
         // If nothing is selected, try SSH sessions first, then "Other tmux"
-        if self.selected_workspace_index.is_none() {
-            if !self.ssh_sessions.is_empty() {
-                self.selected_ssh_session_index = Some(0);
+        if self.sessions.selected_workspace_index.is_none() {
+            if !self.ssh.ssh_sessions.is_empty() {
+                self.ssh.selected_ssh_session_index = Some(0);
                 return;
-            } else if !self.other_tmux_sessions.is_empty() {
-                self.selected_other_tmux_index = Some(0);
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
+                self.tmux.selected_other_tmux_index = Some(0);
                 return;
             }
         }
 
-        if let Some(workspace_idx) = self.selected_workspace_index {
-            if let Some(workspace) = self.workspaces.get(workspace_idx) {
+        if let Some(workspace_idx) = self.sessions.selected_workspace_index {
+            if let Some(workspace) = self.sessions.workspaces.get(workspace_idx) {
                 // Currently on shell session?
-                if self.shell_selected {
+                if self.sessions.shell_selected {
                     // Shell is last in workspace - try next workspace first
-                    self.shell_selected = false;
+                    self.sessions.shell_selected = false;
                     self.move_to_next_workspace_first_item(workspace_idx);
                     return;
                 }
@@ -6574,7 +6231,7 @@ impl AppState {
                 // Currently in regular sessions. Find the next *visible*
                 // session (skipping any that the active filter hides) so j/k
                 // doesn't land on a row that isn't rendered.
-                if let Some(session_idx) = self.selected_session_index {
+                if let Some(session_idx) = self.sessions.selected_session_index {
                     let next_visible = workspace
                         .sessions
                         .iter()
@@ -6583,11 +6240,11 @@ impl AppState {
                         .find(|(_, s)| self.session_passes_filter(s))
                         .map(|(i, _)| i);
                     if let Some(next_idx) = next_visible {
-                        self.selected_session_index = Some(next_idx);
+                        self.sessions.selected_session_index = Some(next_idx);
                         self.queue_logs_fetch();
                     } else if workspace.shell_session.is_some() {
-                        self.selected_session_index = None;
-                        self.shell_selected = true;
+                        self.sessions.selected_session_index = None;
+                        self.sessions.shell_selected = true;
                     } else {
                         self.move_to_next_workspace_first_item(workspace_idx);
                     }
@@ -6595,10 +6252,10 @@ impl AppState {
                     let first_visible =
                         workspace.sessions.iter().position(|s| self.session_passes_filter(s));
                     if let Some(first_idx) = first_visible {
-                        self.selected_session_index = Some(first_idx);
+                        self.sessions.selected_session_index = Some(first_idx);
                         self.queue_logs_fetch();
                     } else if workspace.shell_session.is_some() {
-                        self.shell_selected = true;
+                        self.sessions.shell_selected = true;
                     }
                 }
             }
@@ -6606,18 +6263,18 @@ impl AppState {
     }
 
     fn select_workspace_item(&mut self, workspace_idx: usize, session_idx: Option<usize>) {
-        self.selected_workspace_index = Some(workspace_idx);
-        self.selected_session_index = session_idx;
-        self.shell_selected = session_idx.is_none();
-        self.selected_ssh_session_index = None;
-        self.selected_other_tmux_index = None;
+        self.sessions.selected_workspace_index = Some(workspace_idx);
+        self.sessions.selected_session_index = session_idx;
+        self.sessions.shell_selected = session_idx.is_none();
+        self.ssh.selected_ssh_session_index = None;
+        self.tmux.selected_other_tmux_index = None;
         if session_idx.is_some() {
             self.queue_logs_fetch();
         }
     }
 
     fn select_first_visible_workspace_item_from(&mut self, start: usize) -> bool {
-        let target = self.workspaces.iter().enumerate().skip(start).find_map(
+        let target = self.sessions.workspaces.iter().enumerate().skip(start).find_map(
             |(workspace_idx, workspace)| {
                 workspace
                     .sessions
@@ -6636,7 +6293,7 @@ impl AppState {
     }
 
     fn select_last_visible_workspace_item_before(&mut self, end: usize) -> bool {
-        let target = self.workspaces.iter().enumerate().take(end).rev().find_map(
+        let target = self.sessions.workspaces.iter().enumerate().take(end).rev().find_map(
             |(workspace_idx, workspace)| {
                 workspace.shell_session.as_ref().map(|_| (workspace_idx, None)).or_else(|| {
                     workspace
@@ -6656,7 +6313,7 @@ impl AppState {
     }
 
     fn select_first_visible_workspace_item_before(&mut self, end: usize) -> bool {
-        let target = self.workspaces.iter().enumerate().take(end).rev().find_map(
+        let target = self.sessions.workspaces.iter().enumerate().take(end).rev().find_map(
             |(workspace_idx, workspace)| {
                 workspace
                     .sessions
@@ -6681,78 +6338,78 @@ impl AppState {
         }
 
         // No more workspaces - move to SSH sessions if available
-        if !self.ssh_sessions.is_empty() {
-            self.selected_workspace_index = None;
-            self.selected_session_index = None;
-            self.shell_selected = false;
-            self.selected_ssh_session_index = Some(0);
+        if !self.ssh.ssh_sessions.is_empty() {
+            self.sessions.selected_workspace_index = None;
+            self.sessions.selected_session_index = None;
+            self.sessions.shell_selected = false;
+            self.ssh.selected_ssh_session_index = Some(0);
             return;
         }
 
         // No SSH sessions - move to "Other tmux" if available
-        if !self.other_tmux_sessions.is_empty() {
-            self.selected_workspace_index = None;
-            self.selected_session_index = None;
-            self.shell_selected = false;
-            self.selected_other_tmux_index = Some(0);
+        if !self.tmux.other_tmux_sessions.is_empty() {
+            self.sessions.selected_workspace_index = None;
+            self.sessions.selected_session_index = None;
+            self.sessions.shell_selected = false;
+            self.tmux.selected_other_tmux_index = Some(0);
         }
         // Else: stay at current position (no wrap)
     }
 
     pub fn previous_session(&mut self) {
         // Check if we're in the "Other tmux" section
-        if let Some(other_idx) = self.selected_other_tmux_index {
+        if let Some(other_idx) = self.tmux.selected_other_tmux_index {
             if other_idx > 0 {
                 // Move up within other tmux sessions
-                self.selected_other_tmux_index = Some(other_idx - 1);
+                self.tmux.selected_other_tmux_index = Some(other_idx - 1);
             } else {
                 // At first other_tmux session - move to SSH sessions if available
-                self.selected_other_tmux_index = None;
-                if !self.ssh_sessions.is_empty() {
-                    self.selected_ssh_session_index = Some(self.ssh_sessions.len() - 1);
+                self.tmux.selected_other_tmux_index = None;
+                if !self.ssh.ssh_sessions.is_empty() {
+                    self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 } else {
-                    self.select_last_visible_workspace_item_before(self.workspaces.len());
+                    self.select_last_visible_workspace_item_before(self.sessions.workspaces.len());
                 }
             }
             return;
         }
 
         // Check if we're in the "SSH Sessions" section
-        if let Some(ssh_idx) = self.selected_ssh_session_index {
+        if let Some(ssh_idx) = self.ssh.selected_ssh_session_index {
             if ssh_idx > 0 {
                 // Move up within SSH sessions
-                self.selected_ssh_session_index = Some(ssh_idx - 1);
+                self.ssh.selected_ssh_session_index = Some(ssh_idx - 1);
             } else {
                 // At first SSH session - move back to workspaces
-                self.selected_ssh_session_index = None;
-                self.select_last_visible_workspace_item_before(self.workspaces.len());
+                self.ssh.selected_ssh_session_index = None;
+                self.select_last_visible_workspace_item_before(self.sessions.workspaces.len());
             }
             return;
         }
 
         // If nothing is selected, try SSH sessions, then "Other tmux"
-        if self.selected_workspace_index.is_none() {
-            if !self.ssh_sessions.is_empty() {
-                self.selected_ssh_session_index = Some(self.ssh_sessions.len() - 1);
+        if self.sessions.selected_workspace_index.is_none() {
+            if !self.ssh.ssh_sessions.is_empty() {
+                self.ssh.selected_ssh_session_index = Some(self.ssh.ssh_sessions.len() - 1);
                 return;
-            } else if !self.other_tmux_sessions.is_empty() {
-                self.selected_other_tmux_index = Some(self.other_tmux_sessions.len() - 1);
+            } else if !self.tmux.other_tmux_sessions.is_empty() {
+                self.tmux.selected_other_tmux_index = Some(self.tmux.other_tmux_sessions.len() - 1);
                 return;
             }
         }
 
-        if let Some(workspace_idx) = self.selected_workspace_index {
-            if let Some(workspace) = self.workspaces.get(workspace_idx) {
+        if let Some(workspace_idx) = self.sessions.selected_workspace_index {
+            if let Some(workspace) = self.sessions.workspaces.get(workspace_idx) {
                 // Currently on shell session?
-                if self.shell_selected {
+                if self.sessions.shell_selected {
                     if let Some(session_idx) = workspace
                         .sessions
                         .iter()
                         .rposition(|session| self.session_passes_filter(session))
                     {
                         // Go back to last regular session
-                        self.shell_selected = false;
-                        self.selected_session_index = Some(session_idx);
+                        self.sessions.shell_selected = false;
+                        self.sessions.selected_session_index = Some(session_idx);
                         self.queue_logs_fetch();
                     }
                     // Else: stay at shell session (it's the only item)
@@ -6762,7 +6419,7 @@ impl AppState {
                 // Currently in regular sessions. Find the previous *visible*
                 // session under the active filter so k doesn't land on a
                 // hidden row.
-                if let Some(session_idx) = self.selected_session_index {
+                if let Some(session_idx) = self.sessions.selected_session_index {
                     let prev_visible = workspace
                         .sessions
                         .iter()
@@ -6772,7 +6429,7 @@ impl AppState {
                         .find(|(_, s)| self.session_passes_filter(s))
                         .map(|(i, _)| i);
                     if let Some(prev_idx) = prev_visible {
-                        self.selected_session_index = Some(prev_idx);
+                        self.sessions.selected_session_index = Some(prev_idx);
                         self.queue_logs_fetch();
                     } else {
                         // At first session - try to move to previous workspace's last item
@@ -6785,9 +6442,9 @@ impl AppState {
     }
 
     pub fn next_workspace(&mut self) {
-        if !self.workspaces.is_empty() {
-            let current = self.selected_workspace_index.unwrap_or(0);
-            let start = (current + 1) % self.workspaces.len();
+        if !self.sessions.workspaces.is_empty() {
+            let current = self.sessions.selected_workspace_index.unwrap_or(0);
+            let start = (current + 1) % self.sessions.workspaces.len();
             if !self.select_first_visible_workspace_item_from(start) && start > 0 {
                 self.select_first_visible_workspace_item_from(0);
             }
@@ -6795,17 +6452,17 @@ impl AppState {
     }
 
     pub fn previous_workspace(&mut self) {
-        if !self.workspaces.is_empty() {
-            let current = self.selected_workspace_index.unwrap_or(0);
+        if !self.sessions.workspaces.is_empty() {
+            let current = self.sessions.selected_workspace_index.unwrap_or(0);
             if !self.select_first_visible_workspace_item_before(current) {
-                self.select_first_visible_workspace_item_before(self.workspaces.len());
+                self.select_first_visible_workspace_item_before(self.sessions.workspaces.len());
             }
         }
     }
 
     pub fn select_first_visible_session_in_current_workspace(&mut self) {
-        let session_idx = self.selected_workspace_index.and_then(|workspace_idx| {
-            self.workspaces.get(workspace_idx).and_then(|workspace| {
+        let session_idx = self.sessions.selected_workspace_index.and_then(|workspace_idx| {
+            self.sessions.workspaces.get(workspace_idx).and_then(|workspace| {
                 workspace
                     .sessions
                     .iter()
@@ -6813,15 +6470,15 @@ impl AppState {
             })
         });
         if let Some(session_idx) = session_idx {
-            self.selected_session_index = Some(session_idx);
-            self.shell_selected = false;
+            self.sessions.selected_session_index = Some(session_idx);
+            self.sessions.shell_selected = false;
             self.queue_logs_fetch();
         }
     }
 
     pub fn select_last_visible_session_in_current_workspace(&mut self) {
-        let session_idx = self.selected_workspace_index.and_then(|workspace_idx| {
-            self.workspaces.get(workspace_idx).and_then(|workspace| {
+        let session_idx = self.sessions.selected_workspace_index.and_then(|workspace_idx| {
+            self.sessions.workspaces.get(workspace_idx).and_then(|workspace| {
                 workspace
                     .sessions
                     .iter()
@@ -6829,25 +6486,25 @@ impl AppState {
             })
         });
         if let Some(session_idx) = session_idx {
-            self.selected_session_index = Some(session_idx);
-            self.shell_selected = false;
+            self.sessions.selected_session_index = Some(session_idx);
+            self.sessions.shell_selected = false;
             self.queue_logs_fetch();
         }
     }
 
     pub fn toggle_help(&mut self) {
-        self.help_visible = !self.help_visible;
+        self.shell.help_visible = !self.shell.help_visible;
     }
 
     pub fn toggle_expand_all_workspaces(&mut self) {
-        self.expand_all_workspaces = !self.expand_all_workspaces;
+        self.sessions.expand_all_workspaces = !self.sessions.expand_all_workspaces;
     }
 
     /// Hide/show the Sessions bottom keymap legend (⇧M) and persist the choice.
     pub fn toggle_session_menu_bar(&mut self) {
-        let show = !self.app_config.ui_preferences.show_session_menu_bar;
-        self.app_config.ui_preferences.show_session_menu_bar = show;
-        if let Err(e) = self.app_config.save() {
+        let show = !self.config.app_config.ui_preferences.show_session_menu_bar;
+        self.config.app_config.ui_preferences.show_session_menu_bar = show;
+        if let Err(e) = self.config.app_config.save() {
             warn!("Failed to persist show_session_menu_bar: {}", e);
         }
         self.add_info_notification(if show {
@@ -6860,32 +6517,32 @@ impl AppState {
     /// Cycle the session-status filter (Shift+F): All → ActiveOnly → StoppedOnly → All.
     /// Resets the session selection so it doesn't point to a now-hidden row.
     pub fn cycle_session_filter(&mut self) {
-        self.session_filter = self.session_filter.next();
-        self.app_config.ui_preferences.session_filter = self.session_filter;
-        if let Err(e) = self.app_config.save() {
+        self.sessions.session_filter = self.sessions.session_filter.next();
+        self.config.app_config.ui_preferences.session_filter = self.sessions.session_filter;
+        if let Err(e) = self.config.app_config.save() {
             warn!("Failed to persist session filter: {}", e);
         }
         // Selection indices are positional over the *displayed* list. Resetting
         // to the first session of the first workspace is simplest and matches
         // what `load_real_workspaces` already does after a refresh.
-        self.selected_session_index = None;
-        self.shell_selected = false;
-        if let Some(idx) = self.selected_workspace_index {
+        self.sessions.selected_session_index = None;
+        self.sessions.shell_selected = false;
+        if let Some(idx) = self.sessions.selected_workspace_index {
             // Clamp workspace index too, in case the active workspace gets
             // hidden (no sessions match the filter and no shell).
-            if self.workspaces.get(idx).map(|w| {
+            if self.sessions.workspaces.get(idx).map(|w| {
                 w.sessions.iter().any(|s| self.session_passes_filter(s))
                     || w.shell_session.is_some()
             }) != Some(true)
             {
-                let new_idx = self.workspaces.iter().position(|w| {
+                let new_idx = self.sessions.workspaces.iter().position(|w| {
                     w.sessions.iter().any(|s| self.session_passes_filter(s))
                         || w.shell_session.is_some()
                 });
-                self.selected_workspace_index = new_idx;
+                self.sessions.selected_workspace_index = new_idx;
             }
         }
-        self.last_preview_update = None;
+        self.workspace_load.last_preview_update = None;
     }
 
     /// Predicate used by both rendering and counts so the displayed list and
@@ -6899,7 +6556,7 @@ impl AppState {
         if !matches!(session.mode, SessionMode::Interactive) {
             return true;
         }
-        match self.session_filter {
+        match self.sessions.session_filter {
             SessionFilter::All => true,
             SessionFilter::ActiveOnly => !matches!(session.status, SessionStatus::Stopped),
             SessionFilter::StoppedOnly => matches!(session.status, SessionStatus::Stopped),
@@ -6908,69 +6565,73 @@ impl AppState {
 
     /// Toggle the expand/collapse state of the "Other tmux" section
     pub fn toggle_other_tmux_expanded(&mut self) {
-        self.other_tmux_expanded = !self.other_tmux_expanded;
+        self.tmux.other_tmux_expanded = !self.tmux.other_tmux_expanded;
     }
 
     /// Get the currently selected other tmux session, if any
     pub fn selected_other_tmux_session(&self) -> Option<&crate::models::OtherTmuxSession> {
-        self.selected_other_tmux_index.and_then(|idx| self.other_tmux_sessions.get(idx))
+        self.tmux
+            .selected_other_tmux_index
+            .and_then(|idx| self.tmux.other_tmux_sessions.get(idx))
     }
 
     /// Selected "Other tmux" names in current render order.
     pub fn selected_other_tmux_names_in_order(&self) -> Vec<String> {
-        self.other_tmux_sessions
+        self.tmux
+            .other_tmux_sessions
             .iter()
-            .filter(|session| self.selected_other_tmux_sessions.contains(&session.name))
+            .filter(|session| self.tmux.selected_other_tmux_sessions.contains(&session.name))
             .map(|session| session.name.clone())
             .collect()
     }
 
     /// Check if the selection is in the "Other tmux" section
     pub fn is_other_tmux_selected(&self) -> bool {
-        self.selected_other_tmux_index.is_some() && self.selected_workspace_index.is_none()
+        self.tmux.selected_other_tmux_index.is_some()
+            && self.sessions.selected_workspace_index.is_none()
     }
 
     /// Start rename mode for the selected "Other tmux" session
     pub fn start_other_tmux_rename(&mut self) {
         if let Some(session) = self.selected_other_tmux_session() {
-            self.other_tmux_rename_buffer = session.name.clone();
-            self.other_tmux_rename_mode = true;
+            self.tmux.other_tmux_rename_buffer = session.name.clone();
+            self.tmux.other_tmux_rename_mode = true;
         }
     }
 
     /// Cancel rename mode
     pub fn cancel_other_tmux_rename(&mut self) {
-        self.other_tmux_rename_mode = false;
-        self.other_tmux_rename_buffer.clear();
+        self.tmux.other_tmux_rename_mode = false;
+        self.tmux.other_tmux_rename_buffer.clear();
     }
 
     /// Add a character to the rename buffer
     pub fn other_tmux_rename_char(&mut self, c: char) {
-        if self.other_tmux_rename_mode {
-            self.other_tmux_rename_buffer.push(c);
+        if self.tmux.other_tmux_rename_mode {
+            self.tmux.other_tmux_rename_buffer.push(c);
         }
     }
 
     /// Remove a character from the rename buffer
     pub fn other_tmux_rename_backspace(&mut self) {
-        if self.other_tmux_rename_mode {
-            self.other_tmux_rename_buffer.pop();
+        if self.tmux.other_tmux_rename_mode {
+            self.tmux.other_tmux_rename_buffer.pop();
         }
     }
 
     /// Execute the rename using tmux rename-session
     pub async fn confirm_other_tmux_rename(&mut self) -> Result<(), String> {
-        if !self.other_tmux_rename_mode {
+        if !self.tmux.other_tmux_rename_mode {
             return Err("Not in rename mode".to_string());
         }
 
-        let new_name = self.other_tmux_rename_buffer.trim().to_string();
+        let new_name = self.tmux.other_tmux_rename_buffer.trim().to_string();
         if new_name.is_empty() {
             return Err("Name cannot be empty".to_string());
         }
 
-        if let Some(idx) = self.selected_other_tmux_index {
-            if let Some(session) = self.other_tmux_sessions.get(idx) {
+        if let Some(idx) = self.tmux.selected_other_tmux_index {
+            if let Some(session) = self.tmux.other_tmux_sessions.get(idx) {
                 let old_name = session.name.clone();
 
                 // Sanitize new name (tmux compatible)
@@ -6985,8 +6646,8 @@ impl AppState {
 
                 if output.status.success() {
                     // Exit rename mode
-                    self.other_tmux_rename_mode = false;
-                    self.other_tmux_rename_buffer.clear();
+                    self.tmux.other_tmux_rename_mode = false;
+                    self.tmux.other_tmux_rename_buffer.clear();
 
                     // Reload other tmux sessions to reflect the change
                     self.load_other_tmux_sessions().await;
@@ -7007,65 +6668,68 @@ impl AppState {
 
     /// Toggle the expand/collapse state of the "SSH Sessions" section
     pub fn toggle_ssh_sessions_expanded(&mut self) {
-        self.ssh_sessions_expanded = !self.ssh_sessions_expanded;
+        self.ssh.ssh_sessions_expanded = !self.ssh.ssh_sessions_expanded;
     }
 
     /// Get the currently selected SSH session, if any
     pub fn selected_ssh_session(&self) -> Option<&crate::models::Session> {
-        self.selected_ssh_session_index.and_then(|idx| self.ssh_sessions.get(idx))
+        self.ssh
+            .selected_ssh_session_index
+            .and_then(|idx| self.ssh.ssh_sessions.get(idx))
     }
 
     /// Check if the selection is in the "SSH Sessions" section
     pub fn is_ssh_session_selected(&self) -> bool {
-        self.selected_ssh_session_index.is_some()
-            && self.selected_workspace_index.is_none()
-            && self.selected_other_tmux_index.is_none()
+        self.ssh.selected_ssh_session_index.is_some()
+            && self.sessions.selected_workspace_index.is_none()
+            && self.tmux.selected_other_tmux_index.is_none()
     }
 
     /// Start rename mode for the selected SSH session
     pub fn start_ssh_session_rename(&mut self) {
         if let Some(session) = self.selected_ssh_session() {
             // Start with existing display_name or ssh_target display
-            self.ssh_session_rename_buffer = session.display_name.clone().unwrap_or_else(|| {
-                session
-                    .ssh_target
-                    .as_ref()
-                    .map(|t| t.display_name())
-                    .unwrap_or_else(|| session.name.clone())
-            });
-            self.ssh_session_rename_mode = true;
+            self.ssh.ssh_session_rename_buffer =
+                session.display_name.clone().unwrap_or_else(|| {
+                    session
+                        .ssh_target
+                        .as_ref()
+                        .map(|t| t.display_name())
+                        .unwrap_or_else(|| session.name.clone())
+                });
+            self.ssh.ssh_session_rename_mode = true;
         }
     }
 
     /// Cancel SSH session rename mode
     pub fn cancel_ssh_session_rename(&mut self) {
-        self.ssh_session_rename_mode = false;
-        self.ssh_session_rename_buffer.clear();
+        self.ssh.ssh_session_rename_mode = false;
+        self.ssh.ssh_session_rename_buffer.clear();
     }
 
     /// Add a character to the SSH session rename buffer
     pub fn ssh_session_rename_char(&mut self, c: char) {
-        if self.ssh_session_rename_mode {
-            self.ssh_session_rename_buffer.push(c);
+        if self.ssh.ssh_session_rename_mode {
+            self.ssh.ssh_session_rename_buffer.push(c);
         }
     }
 
     /// Remove a character from the SSH session rename buffer
     pub fn ssh_session_rename_backspace(&mut self) {
-        if self.ssh_session_rename_mode {
-            self.ssh_session_rename_buffer.pop();
+        if self.ssh.ssh_session_rename_mode {
+            self.ssh.ssh_session_rename_buffer.pop();
         }
     }
 
     /// Confirm the SSH session rename (updates display_name in memory)
     pub fn confirm_ssh_session_rename(&mut self) {
-        if !self.ssh_session_rename_mode {
+        if !self.ssh.ssh_session_rename_mode {
             return;
         }
 
-        let new_name = self.ssh_session_rename_buffer.trim().to_string();
-        if let Some(idx) = self.selected_ssh_session_index {
-            if let Some(session) = self.ssh_sessions.get_mut(idx) {
+        let new_name = self.ssh.ssh_session_rename_buffer.trim().to_string();
+        if let Some(idx) = self.ssh.selected_ssh_session_index {
+            if let Some(session) = self.ssh.ssh_sessions.get_mut(idx) {
                 // Get tmux session name for persistence key
                 let tmux_name = session.tmux_session_name.clone();
 
@@ -7078,29 +6742,31 @@ impl AppState {
 
                 // Persist to disk
                 if let Some(key) = tmux_name {
-                    self.session_label_store.set(key, session.display_name.clone());
-                    if let Err(e) = self.session_label_store.save() {
+                    self.session_labels.session_label_store.set(key, session.display_name.clone());
+                    if let Err(e) = self.session_labels.session_label_store.save() {
                         warn!("Failed to save session labels: {}", e);
                     }
                 }
             }
         }
 
-        self.ssh_session_rename_mode = false;
-        self.ssh_session_rename_buffer.clear();
+        self.ssh.ssh_session_rename_mode = false;
+        self.ssh.ssh_session_rename_buffer.clear();
     }
 
     /// Open durable-label editing for the selected managed or SSH session.
     pub fn start_session_label_rename(&mut self) {
-        let target = if let (Some(workspace_idx), Some(session_idx)) =
-            (self.selected_workspace_index, self.selected_session_index)
-        {
+        let target = if let (Some(workspace_idx), Some(session_idx)) = (
+            self.sessions.selected_workspace_index,
+            self.sessions.selected_session_index,
+        ) {
             Some(AttachableRef::WorkspaceSession {
                 workspace_idx,
                 session_idx,
             })
         } else {
-            self.selected_ssh_session_index
+            self.ssh
+                .selected_ssh_session_index
                 .map(|ssh_idx| AttachableRef::SshSession { ssh_idx })
         };
         let Some(target) = target else {
@@ -7112,45 +6778,49 @@ impl AppState {
                 workspace_idx,
                 session_idx,
             } => self
+                .sessions
                 .workspaces
                 .get(workspace_idx)
                 .and_then(|workspace| workspace.sessions.get(session_idx))
                 .and_then(|session| session.display_name.clone()),
-            AttachableRef::SshSession { ssh_idx } => {
-                self.ssh_sessions.get(ssh_idx).and_then(|session| session.display_name.clone())
-            }
+            AttachableRef::SshSession { ssh_idx } => self
+                .ssh
+                .ssh_sessions
+                .get(ssh_idx)
+                .and_then(|session| session.display_name.clone()),
             _ => None,
         };
-        self.session_label_rename_target = Some(target);
-        self.session_label_rename_buffer = current.unwrap_or_default();
-        self.session_label_rename_mode = true;
+        self.session_labels.session_label_rename_target = Some(target);
+        self.session_labels.session_label_rename_buffer = current.unwrap_or_default();
+        self.session_labels.session_label_rename_mode = true;
     }
 
     pub fn cancel_session_label_rename(&mut self) {
-        self.session_label_rename_mode = false;
-        self.session_label_rename_buffer.clear();
-        self.session_label_rename_target = None;
+        self.session_labels.session_label_rename_mode = false;
+        self.session_labels.session_label_rename_buffer.clear();
+        self.session_labels.session_label_rename_target = None;
     }
 
     pub fn session_label_rename_char(&mut self, c: char) {
-        if self.session_label_rename_mode {
-            self.session_label_rename_buffer.push(c);
+        if self.session_labels.session_label_rename_mode {
+            self.session_labels.session_label_rename_buffer.push(c);
         }
     }
 
     pub fn session_label_rename_backspace(&mut self) {
-        if self.session_label_rename_mode {
-            self.session_label_rename_buffer.pop();
+        if self.session_labels.session_label_rename_mode {
+            self.session_labels.session_label_rename_buffer.pop();
         }
     }
 
     /// Validate, persist, and immediately render a durable session label.
     pub fn confirm_session_label_rename(&mut self) {
-        let Some(target) = self.session_label_rename_target else {
+        let Some(target) = self.session_labels.session_label_rename_target else {
             return self.cancel_session_label_rename();
         };
-        let label = match crate::config::normalize_session_label(&self.session_label_rename_buffer)
-        {
+        let label = match crate::config::normalize_session_label(
+            &self.session_labels.session_label_rename_buffer,
+        ) {
             Ok(label) => label,
             Err(error) => {
                 self.add_error_notification(error);
@@ -7163,10 +6833,11 @@ impl AppState {
                 workspace_idx,
                 session_idx,
             } => self
+                .sessions
                 .workspaces
                 .get_mut(workspace_idx)
                 .and_then(|workspace| workspace.sessions.get_mut(session_idx)),
-            AttachableRef::SshSession { ssh_idx } => self.ssh_sessions.get_mut(ssh_idx),
+            AttachableRef::SshSession { ssh_idx } => self.ssh.ssh_sessions.get_mut(ssh_idx),
             _ => None,
         }
         .and_then(|session| {
@@ -7175,8 +6846,8 @@ impl AppState {
         });
 
         if let Some(tmux_name) = tmux_name {
-            self.session_label_store.set(tmux_name, label);
-            if let Err(error) = self.session_label_store.save() {
+            self.session_labels.session_label_store.set(tmux_name, label);
+            if let Err(error) = self.session_labels.session_label_store.save() {
                 self.add_error_notification(format!("Failed to save session label: {error}"));
                 return;
             }
@@ -7186,14 +6857,14 @@ impl AppState {
 
     pub fn open_session_context_menu(&mut self, target: AttachableRef) {
         self.select_attachable(target);
-        self.session_context_menu = Some(SessionContextMenu {
+        self.session_labels.session_context_menu = Some(SessionContextMenu {
             target,
             selected: 0,
         });
     }
 
     pub fn close_session_context_menu(&mut self) {
-        self.session_context_menu = None;
+        self.session_labels.session_context_menu = None;
     }
 
     pub fn session_context_actions(&self) -> &'static [SessionContextAction] {
@@ -7212,7 +6883,7 @@ impl AppState {
             SessionContextAction::EditLabel,
             SessionContextAction::Delete,
         ];
-        match self.session_context_menu.map(|menu| menu.target) {
+        match self.session_labels.session_context_menu.map(|menu| menu.target) {
             Some(AttachableRef::SshSession { .. }) => SSH,
             _ => MANAGED,
         }
@@ -7220,32 +6891,32 @@ impl AppState {
 
     pub fn session_context_next(&mut self, delta: isize) {
         let len = self.session_context_actions().len();
-        if let Some(menu) = self.session_context_menu.as_mut() {
+        if let Some(menu) = self.session_labels.session_context_menu.as_mut() {
             menu.selected = (menu.selected as isize + delta).rem_euclid(len as isize) as usize;
         }
     }
 
     pub fn take_session_context_action(&mut self) -> Option<SessionContextAction> {
-        let selected = self.session_context_menu?.selected;
+        let selected = self.session_labels.session_context_menu?.selected;
         let action = self.session_context_actions().get(selected).copied();
         self.close_session_context_menu();
         action
     }
 
     pub fn toggle_claude_chat(&mut self) {
-        if self.current_screen == screen_ids::CLAUDE_CHAT {
+        if self.shell.current_screen == screen_ids::CLAUDE_CHAT {
             // Close Claude chat popup and return to main view
-            self.current_screen = screen_ids::SESSION_LIST.to_string();
-            self.claude_chat_visible = false;
+            self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+            self.claude_chat.claude_chat_visible = false;
         } else {
             // Open Claude chat popup
-            self.current_screen = screen_ids::CLAUDE_CHAT.to_string();
-            self.claude_chat_visible = true;
+            self.shell.current_screen = screen_ids::CLAUDE_CHAT.to_string();
+            self.claude_chat.claude_chat_visible = true;
         }
     }
 
     pub fn quit(&mut self) {
-        self.should_quit = true;
+        self.shell.should_quit = true;
     }
 
     pub fn show_delete_confirmation(&mut self, session_id: Uuid) {
@@ -7257,7 +6928,7 @@ impl AppState {
         // Check for uncommitted changes in the session's worktree
         let warning = self.check_session_uncommitted_warning(session_id);
 
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Delete Session".to_string(),
             message: "Are you sure you want to delete this session? This will stop the container and remove the git worktree.".to_string(),
             confirm_action: ConfirmAction::DeleteSession(session_id),
@@ -7281,7 +6952,7 @@ impl AppState {
 
         let warning = self.check_session_uncommitted_warning(session_id);
 
-        self.confirmation_dialog = Some(stop_or_delete_dialog(
+        self.shell.confirmation_dialog = Some(stop_or_delete_dialog(
             "Stop or Delete Session".to_string(),
             "Stop keeps the worktree and resumes later. Delete removes the worktree.".to_string(),
             warning,
@@ -7363,7 +7034,7 @@ impl AppState {
         let warning = Self::format_bulk_uncommitted_warning(&status.dirty, status.unchecked, count);
         let summary = Self::format_bulk_session_summary(&id_names);
 
-        self.confirmation_dialog = Some(if stoppable.len() == count {
+        self.shell.confirmation_dialog = Some(if stoppable.len() == count {
             stop_or_delete_dialog(
                 format!("Stop or Delete {count} Session(s)"),
                 format!(
@@ -7599,7 +7270,7 @@ impl AppState {
     /// open abtop; only "Enable" also runs the setup, and "Don't ask again"
     /// suppresses the offer permanently.
     pub fn show_abtop_setup_prompt(&mut self) {
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Enable abtop rate-limit tracking?".to_string(),
             message: "abtop can show Claude rate-limit usage (5-hour + weekly \
                       windows). This installs a StatusLine hook into \
@@ -7633,7 +7304,7 @@ impl AppState {
             "Showing kill confirmation for other tmux session: {}",
             session_name
         );
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Session".to_string(),
             message: format!(
                 "Are you sure you want to kill tmux session '{}'?",
@@ -7656,7 +7327,7 @@ impl AppState {
         let count = session_names.len();
         info!("Showing kill confirmation for {count} other tmux sessions");
         let listed = truncate_list(session_names.iter().cloned());
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill tmux Sessions".to_string(),
             message: format!(
                 "Kill {count} tmux session(s): {listed}?\nThese are not managed by ainb, so \
@@ -7682,7 +7353,7 @@ impl AppState {
     pub fn maybe_prompt_notify_install(&mut self) {
         use ainb_plugin_notifyd::{InstallPrompt, Paths, prompt_state};
 
-        if self.confirmation_dialog.is_some() {
+        if self.shell.confirmation_dialog.is_some() {
             return;
         }
         let Ok(paths) = Paths::from_home() else {
@@ -7719,7 +7390,7 @@ impl AppState {
             ),
             InstallPrompt::None => return,
         };
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title,
             message,
             // Binary mode is unused here; tri-option drives the choice.
@@ -7756,7 +7427,7 @@ impl AppState {
             "Showing kill confirmation for SSH session: {} (display: {})",
             session_name, display_text
         );
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill SSH Session".to_string(),
             message: format!(
                 "Are you sure you want to kill SSH session '{}'?",
@@ -7773,6 +7444,7 @@ impl AppState {
     /// Show confirmation dialog for killing a workspace shell session
     pub fn show_kill_shell_confirmation(&mut self, workspace_index: usize) {
         let shell_name = self
+            .sessions
             .workspaces
             .get(workspace_index)
             .and_then(|w| w.shell_session.as_ref())
@@ -7780,6 +7452,7 @@ impl AppState {
             .unwrap_or_else(|| "shell".to_string());
 
         let workspace_name = self
+            .sessions
             .workspaces
             .get(workspace_index)
             .map(|w| w.name.clone())
@@ -7789,7 +7462,7 @@ impl AppState {
             "Showing kill confirmation for workspace shell: {} in {}",
             shell_name, workspace_name
         );
-        self.confirmation_dialog = Some(ConfirmationDialog {
+        self.shell.confirmation_dialog = Some(ConfirmationDialog {
             title: "Kill Shell Session".to_string(),
             message: format!(
                 "Are you sure you want to kill shell '{}' in workspace '{}'?",
@@ -7808,26 +7481,31 @@ impl AppState {
         // Get session ID without borrowing self
         if let Some(session_id) = self.get_selected_session_id() {
             // Only fetch if we haven't already fetched logs for this session
-            if self.last_logs_session_id != Some(session_id) {
-                self.pending_async_action = Some(AsyncAction::FetchContainerLogs(session_id));
-                self.last_logs_session_id = Some(session_id);
+            if self.log_streams.last_logs_session_id != Some(session_id) {
+                self.shell.pending_async_action = Some(AsyncAction::FetchContainerLogs(session_id));
+                self.log_streams.last_logs_session_id = Some(session_id);
             }
         }
     }
 
     /// Get the ID of the currently selected session without borrowing self
     pub fn get_selected_session_id(&self) -> Option<Uuid> {
-        let workspace_idx = self.selected_workspace_index?;
-        let session_idx = self.selected_session_index?;
-        self.workspaces.get(workspace_idx)?.sessions.get(session_idx).map(|s| s.id)
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        let session_idx = self.sessions.selected_session_index?;
+        self.sessions
+            .workspaces
+            .get(workspace_idx)?
+            .sessions
+            .get(session_idx)
+            .map(|s| s.id)
     }
 
     /// Get a reference to the currently selected session
     pub fn get_selected_session(&self) -> Option<&crate::models::Session> {
-        let workspace_idx = self.selected_workspace_index?;
-        let session_idx = self.selected_session_index?;
+        let workspace_idx = self.sessions.selected_workspace_index?;
+        let session_idx = self.sessions.selected_session_index?;
 
-        self.workspaces.get(workspace_idx)?.sessions.get(session_idx)
+        self.sessions.workspaces.get(workspace_idx)?.sessions.get(session_idx)
     }
 
     /// Attach to a container session using docker exec with proper terminal handling
@@ -7839,6 +7517,7 @@ impl AppState {
 
         // Find the session to get container ID
         let container_id = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -7911,6 +7590,7 @@ impl AppState {
 
         // Find the session to get container ID
         let container_id = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -7925,10 +7605,10 @@ impl AppState {
             );
 
             // Clear attached session if we're currently attached to this session
-            if self.attached_session_id == Some(session_id) {
-                self.attached_session_id = None;
-                self.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
-                self.ui_needs_refresh = true;
+            if self.sessions.attached_session_id == Some(session_id) {
+                self.sessions.attached_session_id = None;
+                self.shell.current_screen = crate::app::screens::ids::SESSION_LIST.to_string();
+                self.shell.ui_needs_refresh = true;
             }
 
             let container_manager = ContainerManager::new().await?;
@@ -7980,6 +7660,7 @@ impl AppState {
 
         // Find the session to get container ID
         let container_id = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -7992,12 +7673,13 @@ impl AppState {
             let logs = container_manager.get_container_logs(&container_id, Some(50)).await?;
 
             // Update the logs cache
-            self.logs.insert(session_id, logs.clone());
+            self.log_streams.logs.insert(session_id, logs.clone());
 
             Ok(logs)
         } else {
             // No container ID - return session creation logs if available
             Ok(self
+                .log_streams
                 .logs
                 .get(&session_id)
                 .cloned()
@@ -8014,6 +7696,7 @@ impl AppState {
 
         // Find the session to get container ID and update recent_logs
         let container_id = self
+            .sessions
             .workspaces
             .iter_mut()
             .flat_map(|w| &mut w.sessions)
@@ -8030,6 +7713,7 @@ impl AppState {
 
             // Update the session's recent_logs field
             if let Some(session) = self
+                .sessions
                 .workspaces
                 .iter_mut()
                 .flat_map(|w| &mut w.sessions)
@@ -8045,25 +7729,26 @@ impl AppState {
     }
 
     pub fn cancel_new_session(&mut self) {
-        // INVARIANT: must NOT clear `self.notifications`. Callers post an error
+        // INVARIANT: must NOT clear `self.shell.notifications`. Callers post an error
         // toast immediately before cancelling (e.g. the worktree-create failure
         // arm in `create_session_from_configure`) and rely on it surviving the
         // teardown — clearing here would re-introduce the silent-flash bug
         // (Stevie 2026-06-06).
-        self.new_session_state = None;
+        self.new_session.new_session_state = None;
         // Return to whichever screen the user opened new-session from
         // (Home / Sessions / …). Falls back to SESSION_LIST if no
         // previous screen was recorded — matches the pre-redesign
         // contract for the legacy 13-step wizard's Cancel path.
         let prev = self
+            .shell
             .previous_screen
             .take()
             .unwrap_or_else(|| screen_ids::SESSION_LIST.to_string());
-        self.current_screen = prev;
+        self.shell.current_screen = prev;
         // Also clear any pending async actions to prevent race conditions
-        self.pending_async_action = None;
+        self.shell.pending_async_action = None;
         // Set cancellation flag to prevent race conditions
-        self.async_operation_cancelled = true;
+        self.shell.async_operation_cancelled = true;
     }
 
     pub async fn create_session_from_configure(
@@ -8171,8 +7856,8 @@ impl AppState {
                 info!(
                     "Boss mode selected but authentication not set up, switching to auth setup view"
                 );
-                self.current_screen = screen_ids::AUTH_SETUP.to_string();
-                self.auth_setup_state = Some(AuthSetupState {
+                self.shell.current_screen = screen_ids::AUTH_SETUP.to_string();
+                self.onboarding.auth_setup_state = Some(AuthSetupState {
                     selected_method: AuthMethod::OAuth,
                     api_key_input: String::new(),
                     is_processing: false,
@@ -8181,7 +7866,7 @@ impl AppState {
                     ),
                     show_cursor: false,
                 });
-                self.new_session_state = None;
+                self.new_session.new_session_state = None;
                 return;
             }
         } else {
@@ -8223,7 +7908,7 @@ impl AppState {
 
         // Mark step = Creating so the existing render machinery (legacy.rs)
         // picks up the in-flight UI.
-        if let Some(ns) = self.new_session_state.as_mut() {
+        if let Some(ns) = self.new_session.new_session_state.as_mut() {
             ns.step = NewSessionStep::Creating;
         }
 
@@ -8293,8 +7978,10 @@ impl AppState {
                         .find_session(session_id)
                         .and_then(|session| session.tmux_session_name.clone());
                     if let Some(tmux_name) = tmux_name {
-                        self.session_label_store.set(tmux_name, Some(prefix.clone()));
-                        if let Err(error) = self.session_label_store.save() {
+                        self.session_labels
+                            .session_label_store
+                            .set(tmux_name, Some(prefix.clone()));
+                        if let Err(error) = self.session_labels.session_label_store.save() {
                             self.add_error_notification(format!(
                                 "Session started but prefix could not be saved: {error}"
                             ));
@@ -8309,7 +7996,7 @@ impl AppState {
                         session_id, e
                     );
                 }
-                self.ui_needs_refresh = true;
+                self.shell.ui_needs_refresh = true;
                 self.cancel_new_session();
             }
             Err(e) => {
@@ -8322,7 +8009,7 @@ impl AppState {
                 // tearing down the modal. Without this the error only hit the
                 // log and the modal closed silently — the user saw a flash and
                 // never learned why (Stevie 2026-06-06). cancel_new_session()
-                // leaves self.notifications intact, so the 5s toast survives.
+                // leaves self.shell.notifications intact, so the 5s toast survives.
                 // `{e:#}` for the same reason the `error!` above uses it: with
                 // `{e}` the toast showed only the outermost context and dropped
                 // the cause the user needs. The log and the screen must not
@@ -8448,8 +8135,11 @@ impl AppState {
         use crate::config::session_defaults::SessionDefaults;
         use crate::git::repo_source::head_branch;
 
-        if let Some(pick) =
-            self.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
+        if let Some(pick) = self
+            .new_session
+            .new_session_state
+            .as_ref()
+            .and_then(|ns| ns.pick_repo_state.as_ref())
         {
             let path = SessionDefaults::default_path();
             if let Err(err) = pick.defaults.save_to(&path) {
@@ -8462,7 +8152,7 @@ impl AppState {
             crate::git::repo_source::RepoSource::LocalPath(p) => head_branch(p),
             _ => None,
         };
-        let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+        let branch_prefix = self.config.app_config.workspace_defaults.branch_prefix.clone();
         // Every branch already checked out in any worktree (ainb's by-session
         // worktrees + the repo's own checkout + manual worktrees). Single
         // source of truth so the collision guard matches what `git worktree
@@ -8505,7 +8195,7 @@ impl AppState {
             existing_branches,
             repo_branch_names,
         );
-        if let Some(ns) = self.new_session_state.as_mut() {
+        if let Some(ns) = self.new_session.new_session_state.as_mut() {
             ns.configure_state = Some(cfg);
             ns.step = NewSessionStep::Configure;
         }
@@ -8522,10 +8212,10 @@ impl AppState {
         // decision — the two must agree or the form waits on a verdict that
         // never comes.
         if source.is_remote() {
-            self.repo_check_seq += 1;
-            let seq = self.repo_check_seq;
+            self.new_session.repo_check_seq += 1;
+            let seq = self.new_session.repo_check_seq;
             let (tx, rx) = mpsc::unbounded_channel();
-            self.repo_check_receiver = Some(rx);
+            self.new_session.repo_check_receiver = Some(rx);
             tokio::spawn(async move {
                 let join = tokio::task::spawn_blocking(move || {
                     crate::git::RemoteRepoManager::new()
@@ -8541,7 +8231,7 @@ impl AppState {
                 let _ = tx.send((seq, payload));
             });
         }
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
     }
 
     /// Poll the background remote-repo pre-flight. Applies the verdict to the
@@ -8553,23 +8243,27 @@ impl AppState {
     pub fn check_repo_check_complete(&mut self) -> bool {
         use crate::components::new_session::configure::RepoCheck;
 
-        let Some(ref mut receiver) = self.repo_check_receiver else {
+        let Some(ref mut receiver) = self.new_session.repo_check_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.repo_check_receiver = None;
+                self.new_session.repo_check_receiver = None;
                 return false;
             }
         };
-        self.repo_check_receiver = None;
-        if seq != self.repo_check_seq {
+        self.new_session.repo_check_receiver = None;
+        if seq != self.new_session.repo_check_seq {
             // A newer Configure form superseded this check.
             return false;
         }
-        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         else {
             return false;
         };
@@ -8633,6 +8327,7 @@ impl AppState {
     /// verdict lands via `check_repo_init_complete`.
     pub fn initialize_remote_repo(&mut self) {
         let Some(source) = self
+            .new_session
             .new_session_state
             .as_ref()
             .and_then(|ns| ns.configure_state.as_ref())
@@ -8640,10 +8335,10 @@ impl AppState {
         else {
             return;
         };
-        self.repo_init_seq += 1;
-        let seq = self.repo_init_seq;
+        self.new_session.repo_init_seq += 1;
+        let seq = self.new_session.repo_init_seq;
         let (tx, rx) = mpsc::unbounded_channel();
-        self.repo_init_receiver = Some(rx);
+        self.new_session.repo_init_receiver = Some(rx);
         tokio::spawn(async move {
             let join = tokio::task::spawn_blocking(move || {
                 let manager = crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
@@ -8666,24 +8361,27 @@ impl AppState {
     pub fn check_repo_init_complete(&mut self) -> bool {
         use crate::components::new_session::configure::RepoCheck;
 
-        let Some(ref mut receiver) = self.repo_init_receiver else {
+        let Some(ref mut receiver) = self.new_session.repo_init_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.repo_init_receiver = None;
+                self.new_session.repo_init_receiver = None;
                 return false;
             }
         };
-        self.repo_init_receiver = None;
-        if seq != self.repo_init_seq {
+        self.new_session.repo_init_receiver = None;
+        if seq != self.new_session.repo_init_seq {
             return false;
         }
         let mut toast: Option<Result<String, String>> = None;
-        if let Some(cfg) =
-            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        if let Some(cfg) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.configure_state.as_mut())
         {
             // Apply-side state gate (mirrors check_repo_check_complete): only
             // a form that is actually Initializing takes the verdict. Without
@@ -8777,8 +8475,11 @@ impl AppState {
                 }
             };
 
-        if let Some(pick) =
-            self.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
+        if let Some(pick) = self
+            .new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|ns| ns.pick_repo_state.as_mut())
         {
             if auth_ok {
                 tracing::info!("GitHub auth check passed");
@@ -8797,7 +8498,7 @@ impl AppState {
                 pick.git_auth_error = Some(auth_msg);
             }
         }
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
     }
 
     /// The clone itself runs on `spawn_blocking` because `git2` / `git` CLI
@@ -8822,7 +8523,7 @@ impl AppState {
             "Cloning {}/{}/{}…",
             parsed.host, parsed.owner, parsed.repo_name
         ));
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         let manager = match RemoteRepoManager::new() {
             Ok(m) => m,
@@ -8867,7 +8568,7 @@ impl AppState {
             parsed.repo_name,
             cache_path.display()
         ));
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
         Ok(cache_path)
     }
 
@@ -8891,10 +8592,10 @@ impl AppState {
         };
 
         // Mark step = Creating so the in-flight UI is shown until tmux returns.
-        if let Some(ns) = self.new_session_state.as_mut() {
+        if let Some(ns) = self.new_session.new_session_state.as_mut() {
             ns.step = NewSessionStep::Creating;
         }
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         // tmux session name: `ssh-<host>-<port>` matches the convention parsed
         // by `auto-detect` in load_real_workspaces (search "name.starts_with(\"ssh-\")").
@@ -8919,9 +8620,9 @@ impl AppState {
                 let mut session = Session::new_ssh_session(display.clone(), target);
                 session.tmux_session_name = Some(tmux_name.clone());
                 session.status = crate::models::SessionStatus::Idle;
-                self.ssh_sessions.push(session);
+                self.ssh.ssh_sessions.push(session);
                 self.add_info_notification(format!("SSH session ready: {}", display));
-                self.ui_needs_refresh = true;
+                self.shell.ui_needs_refresh = true;
                 // Refresh workspaces / sessions list so the new bucket entry is
                 // discoverable through the normal flow too.
                 self.load_real_workspaces().await;
@@ -8969,7 +8670,7 @@ impl AppState {
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(
+        self.log_streams.logs.insert(
             session_id,
             vec!["Restarting session with updated configuration...".to_string()],
         );
@@ -9013,7 +8714,7 @@ impl AppState {
         };
 
         // Add initial log message
-        if let Some(session_logs) = self.logs.get_mut(&session_id) {
+        if let Some(session_logs) = self.log_streams.logs.get_mut(&session_id) {
             session_logs.push("Checking for existing worktree...".to_string());
         }
 
@@ -9021,6 +8722,7 @@ impl AppState {
 
         // Check if worktree exists from the previous session
         let existing_worktree_path = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|w| &w.sessions)
@@ -9034,7 +8736,7 @@ impl AppState {
                     worktree_path.display()
                 );
 
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     logs.push(format!(
                         "Reusing existing worktree at {}",
                         worktree_path.display()
@@ -9054,7 +8756,7 @@ impl AppState {
             } else {
                 info!("Worktree path no longer exists, creating fresh session");
 
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     logs.push("Worktree not found, creating fresh session...".to_string());
                 }
 
@@ -9063,7 +8765,7 @@ impl AppState {
         } else {
             info!("No existing worktree info found, creating fresh session");
 
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.push("Creating fresh session...".to_string());
             }
 
@@ -9075,13 +8777,13 @@ impl AppState {
 
         // Transfer collected logs to our main logs HashMap
         if let Ok(collected_logs) = session_logs.lock() {
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.extend(collected_logs.clone());
             }
         }
 
         // Add completion log based on result
-        if let Some(logs) = self.logs.get_mut(&session_id) {
+        if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
             match &result {
                 Ok(_) => logs
                     .push("Session restarted successfully with updated configuration!".to_string()),
@@ -9122,7 +8824,7 @@ impl AppState {
                             }
 
                             // Store tmux session in our map
-                            self.tmux_sessions.insert(session_id, tmux_session);
+                            self.tmux.tmux_sessions.insert(session_id, tmux_session);
 
                             let _ =
                                 log_sender.send("Tmux session created successfully!".to_string());
@@ -9234,7 +8936,7 @@ impl AppState {
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(
+        self.log_streams.logs.insert(
             session_id,
             vec!["Starting Interactive session creation...".to_string()],
         );
@@ -9310,7 +9012,7 @@ impl AppState {
 
         // Transfer collected logs
         if let Ok(collected_logs) = session_logs.lock() {
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.extend(collected_logs.clone());
             }
         }
@@ -9318,7 +9020,7 @@ impl AppState {
         match result {
             Ok(interactive_session) => {
                 // Send success log
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     logs.push("Interactive session created successfully!".to_string());
                 }
 
@@ -9326,32 +9028,39 @@ impl AppState {
 
                 // Convert to Session model and add to workspaces
                 let mut session = interactive_session.to_session_model();
-                if let Some(label) =
-                    self.session_label_store.get(&interactive_session.tmux_session_name)
+                if let Some(label) = self
+                    .session_labels
+                    .session_label_store
+                    .get(&interactive_session.tmux_session_name)
                 {
                     session.display_name = Some(label.clone());
                 }
 
                 // Find or create workspace for this repo
                 if let Some((ws_idx, workspace)) =
-                    self.workspaces.iter_mut().enumerate().find(|(_, w)| {
+                    self.sessions.workspaces.iter_mut().enumerate().find(|(_, w)| {
                         std::path::Path::new(&w.path).canonicalize().ok()
                             == repo_path.canonicalize().ok()
                     })
                 {
                     workspace.sessions.push(session);
-                    // Auto-select the new session so the list scrolls to show it
-                    self.selected_workspace_index = Some(ws_idx);
-                    self.selected_session_index = Some(workspace.sessions.len() - 1);
+                    // Auto-select the new session so the list scrolls to show it.
+                    // The workspace is borrowed out of this same section, so the
+                    // two cursors are set through one `get_mut` rather than two.
+                    let session_index = workspace.sessions.len() - 1;
+                    let sessions = self.sessions.get_mut();
+                    sessions.selected_workspace_index = Some(ws_idx);
+                    sessions.selected_session_index = Some(session_index);
                 } else {
                     // Create new workspace
                     let mut workspace =
                         crate::models::Workspace::new(workspace_name, repo_path.to_path_buf());
                     workspace.sessions.push(session);
-                    self.workspaces.push(workspace);
+                    self.sessions.workspaces.push(workspace);
                     // Auto-select the new workspace and session
-                    self.selected_workspace_index = Some(self.workspaces.len() - 1);
-                    self.selected_session_index = Some(0);
+                    self.sessions.selected_workspace_index =
+                        Some(self.sessions.workspaces.len() - 1);
+                    self.sessions.selected_session_index = Some(0);
                 }
 
                 // Store tmux session for attach operations
@@ -9361,7 +9070,7 @@ impl AppState {
                     interactive_session.branch_name.clone(),
                     "claude".to_string(),
                 );
-                self.tmux_sessions.insert(session_id, tmux_session);
+                self.tmux.tmux_sessions.insert(session_id, tmux_session);
 
                 info!("Successfully created Interactive session {}", session_id);
                 Ok(())
@@ -9369,7 +9078,7 @@ impl AppState {
             Err(e) => {
                 // See the configure-flow comment: `{:#}` keeps the cause.
                 error!("Failed to create Interactive session: {:#}", e);
-                if let Some(logs) = self.logs.get_mut(&session_id) {
+                if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                     // `{:#}`, matching the `error!` above: the session log is
                     // read instead of the daemon log, so dropping the cause
                     // chain here hides it from the person most likely to look.
@@ -9400,7 +9109,7 @@ impl AppState {
         let (log_sender, mut log_receiver) = mpsc::unbounded_channel::<String>();
 
         // Initialize logs for this session
-        self.logs.insert(
+        self.log_streams.logs.insert(
             session_id,
             vec!["Starting Boss session creation...".to_string()],
         );
@@ -9441,7 +9150,7 @@ impl AppState {
         };
 
         // Add initial log message
-        if let Some(session_logs) = self.logs.get_mut(&session_id) {
+        if let Some(session_logs) = self.log_streams.logs.get_mut(&session_id) {
             session_logs.push("Creating worktree...".to_string());
         }
 
@@ -9456,13 +9165,13 @@ impl AppState {
 
         // Transfer collected logs to our main logs HashMap
         if let Ok(collected_logs) = session_logs.lock() {
-            if let Some(logs) = self.logs.get_mut(&session_id) {
+            if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
                 logs.extend(collected_logs.clone());
             }
         }
 
         // Add completion log based on result
-        if let Some(logs) = self.logs.get_mut(&session_id) {
+        if let Some(logs) = self.log_streams.logs.get_mut(&session_id) {
             match &result {
                 Ok(_) => logs.push("Boss session created successfully!".to_string()),
                 Err(e) => logs.push(format!("Session creation failed: {}", e)),
@@ -9523,7 +9232,7 @@ impl AppState {
         let mut orphaned_sessions = Vec::new();
 
         // Collect all session IDs from all workspaces
-        for workspace in &self.workspaces {
+        for workspace in &self.sessions.workspaces {
             for session in &workspace.sessions {
                 // Check if this session's name starts with "orphaned-"
                 if session.name.starts_with("orphaned-") {
@@ -9546,12 +9255,12 @@ impl AppState {
             info!("Removing orphaned session state: {}", session_id);
 
             // Remove from workspaces
-            for workspace in &mut self.workspaces {
+            for workspace in &mut self.sessions.workspaces {
                 workspace.sessions.retain(|s| s.id != *session_id);
             }
 
             // Clean up any remaining state
-            self.live_logs.remove(session_id);
+            self.log_streams.live_logs.remove(session_id);
 
             cleaned_up += 1;
         }
@@ -9620,7 +9329,7 @@ impl AppState {
 
             // Reload workspaces to reflect changes
             self.load_real_workspaces().await;
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
 
             // Audit log the overall cleanup
             audit::audit_orphaned_cleanup(
@@ -9796,7 +9505,7 @@ impl AppState {
 
         // ALWAYS reload workspaces to ensure UI reflects the actual state
         self.load_real_workspaces().await;
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         result
     }
@@ -9808,7 +9517,7 @@ impl AppState {
         info!("=== DELETE INTERACTIVE SESSION START: {} ===", session_id);
 
         // Cleanup tmux session if it exists
-        if let Some(mut tmux_session) = self.tmux_sessions.remove(&session_id) {
+        if let Some(mut tmux_session) = self.tmux.tmux_sessions.remove(&session_id) {
             info!("Found tmux session in state, cleaning up: {}", session_id);
             if let Err(e) = tmux_session.cleanup().await {
                 warn!("Failed to cleanup tmux session from state: {}", e);
@@ -9861,6 +9570,7 @@ impl AppState {
         // Resolve tmux session name preferring the in-memory map, falling back to
         // sessions.json (handles edge case where the live map is out of sync).
         let tmux_name = self
+            .tmux
             .tmux_sessions
             .get(&session_id)
             .map(|t| t.name().to_string())
@@ -9937,7 +9647,7 @@ impl AppState {
         // the live agent.
         if result.is_ok() {
             // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
-            self.tmux_sessions.remove(&session_id);
+            self.tmux.tmux_sessions.remove(&session_id);
 
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_status(SessionStatus::Stopped);
@@ -9982,7 +9692,7 @@ impl AppState {
             return false;
         }
 
-        self.tmux_sessions.remove(&session_id);
+        self.tmux.tmux_sessions.remove(&session_id);
         if let Some(session) = self.find_session_mut(session_id) {
             session.set_status(SessionStatus::Stopped);
             session.is_attached = false;
@@ -10026,7 +9736,7 @@ impl AppState {
                 // The row was unchecked optimistically when the user confirmed.
                 // It is still running, so put the check back rather than making
                 // the user hunt for it.
-                self.selected_sessions.insert(id);
+                self.sessions.selected_sessions.insert(id);
             } else {
                 stopped += 1;
             }
@@ -10214,7 +9924,7 @@ impl AppState {
                 metadata.tmux_session_name.clone(),
                 metadata.agent_type.name().to_string(),
             );
-            self.tmux_sessions.insert(session_id, tmux_session);
+            self.tmux.tmux_sessions.insert(session_id, tmux_session);
 
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_status(SessionStatus::Running);
@@ -10262,7 +9972,7 @@ impl AppState {
 
         if result.is_ok() {
             self.load_real_workspaces().await;
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
         }
 
         result
@@ -10353,7 +10063,7 @@ impl AppState {
         info!("Deleting Boss mode session: {}", session_id);
 
         // Cleanup tmux session if it exists (Boss mode might have tmux for attach)
-        if let Some(mut tmux_session) = self.tmux_sessions.remove(&session_id) {
+        if let Some(mut tmux_session) = self.tmux.tmux_sessions.remove(&session_id) {
             info!("Cleaning up tmux session for Boss session {}", session_id);
             if let Err(e) = tmux_session.cleanup().await {
                 warn!("Failed to cleanup tmux session: {}", e);
@@ -10419,7 +10129,7 @@ impl AppState {
     /// be what is stored.
     async fn load_hangar_daemon_config(&mut self) {
         match read_daemon_config().await {
-            Ok(Some(stored)) => self.config_screen_state.seed_hangar_daemon_rows(&stored),
+            Ok(Some(stored)) => self.config.config_screen_state.seed_hangar_daemon_rows(&stored),
             Ok(None) => {}
             Err(error) => {
                 warn!(%error, "hangar daemon config: could not read stored values");
@@ -10467,7 +10177,7 @@ impl AppState {
         // for today. The error notification names the row, so the failure is
         // never silent; re-typing it is the recovery.
         for row_key in failed_rows {
-            self.config_screen_state.dirty.insert(row_key);
+            self.config.config_screen_state.dirty.insert(row_key);
         }
     }
 
@@ -10475,15 +10185,15 @@ impl AppState {
         // Once, on the first app tick: the `Hangar Daemon` settings rows are
         // seeded with coded defaults synchronously (the store is async and the
         // screen is not), and this replaces them with what is actually stored.
-        if !self.hangar_daemon_config_loaded {
-            self.hangar_daemon_config_loaded = true;
+        if !self.hangar.hangar_daemon_config_loaded {
+            self.hangar.hangar_daemon_config_loaded = true;
             self.load_hangar_daemon_config().await;
         }
-        if !self.pending_daemon_config_edits.is_empty() {
-            let edits = std::mem::take(&mut self.pending_daemon_config_edits);
+        if !self.hangar.pending_daemon_config_edits.is_empty() {
+            let edits = std::mem::take(&mut self.hangar.pending_daemon_config_edits);
             self.set_hangar_daemon_config(edits).await;
         }
-        if let Some(action) = self.pending_async_action.take() {
+        if let Some(action) = self.shell.pending_async_action.take() {
             info!(
                 ">>> process_async_action() called with action: {:?}",
                 action
@@ -10507,7 +10217,7 @@ impl AppState {
                     }
                     // Refresh so the Stopped indicator is rendered.
                     self.load_real_workspaces().await;
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::ResumeSession(session_id, trigger) => {
                     if let Err(e) = self.resume_interactive_session(session_id, trigger).await {
@@ -10538,12 +10248,12 @@ impl AppState {
                     } else {
                         self.add_success_notification(format!("Resumed {} session(s)", resumed));
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkStopSessions(session_ids) => {
                     self.bulk_stop_sessions(session_ids).await;
                     self.load_real_workspaces().await;
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::BulkDeleteSessions(session_ids) => {
                     let total = session_ids.len();
@@ -10555,7 +10265,7 @@ impl AppState {
                             failed += 1;
                             // Still there, so keep it checked: the row was
                             // unchecked optimistically on confirmation.
-                            self.selected_sessions.insert(id);
+                            self.sessions.selected_sessions.insert(id);
                         } else {
                             deleted += 1;
                         }
@@ -10570,7 +10280,7 @@ impl AppState {
                     } else {
                         self.add_success_notification(format!("Deleted {} session(s)", deleted));
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::RefreshWorkspaces => {
                     info!("Manual refresh triggered");
@@ -10581,7 +10291,7 @@ impl AppState {
                     invalidate_docker_probe_cache(&DOCKER_PROBE);
                     // Reload workspace data and force UI refresh
                     self.load_real_workspaces().await;
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::FetchContainerLogs(session_id) => {
                     info!("Fetching container logs for session {}", session_id);
@@ -10591,7 +10301,7 @@ impl AppState {
                             session_id, e
                         );
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::AttachToContainer(session_id) => {
                     info!("Attaching to container for session {}", session_id);
@@ -10601,26 +10311,26 @@ impl AppState {
                             session_id, e
                         );
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::AttachToTmuxSession(_session_id) => {
                     // NOTE: This action must be handled in main.rs where terminal access is available
                     // The terminal handle is needed to call attach_to_tmux_session
                     warn!("AttachToTmuxSession action should be handled in main loop, not here");
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::KillContainer(session_id) => {
                     info!("Killing container for session {}", session_id);
                     if let Err(e) = self.kill_container(session_id).await {
                         error!("Failed to kill container for session {}: {}", session_id, e);
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::AuthSetupOAuth => {
                     info!("Starting OAuth authentication setup");
                     if let Err(e) = self.run_oauth_setup().await {
                         error!("Failed to setup OAuth authentication: {}", e);
-                        if let Some(ref mut auth_state) = self.auth_setup_state {
+                        if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                             auth_state.error_message = Some(format!("OAuth setup failed: {}", e));
                             auth_state.is_processing = false;
                         }
@@ -10630,7 +10340,7 @@ impl AppState {
                     info!("Saving API key authentication");
                     if let Err(e) = self.save_api_key().await {
                         error!("Failed to save API key: {}", e);
-                        if let Some(ref mut auth_state) = self.auth_setup_state {
+                        if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                             auth_state.error_message =
                                 Some(format!("Failed to save API key: {}", e));
                             auth_state.is_processing = false;
@@ -10673,27 +10383,27 @@ impl AppState {
                 // PUT THE ACTION BACK so main loop can handle it
                 action @ AsyncAction::AttachToOtherTmux(_) => {
                     debug!("AttachToOtherTmux action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::AttachWitr => {
                     debug!("AttachWitr action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::AttachAbtop => {
                     debug!("AttachAbtop action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::SetupAbtopRateLimits => {
                     debug!("SetupAbtopRateLimits action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillOtherTmuxSessions(_) => {
                     debug!("KillOtherTmuxSessions action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 AsyncAction::ConfirmOtherTmuxRename => {
                     info!("Executing Other tmux rename");
@@ -10702,7 +10412,7 @@ impl AppState {
                             self.add_success_notification(
                                 "Session renamed successfully".to_string(),
                             );
-                            self.ui_needs_refresh = true;
+                            self.shell.ui_needs_refresh = true;
                         }
                         Err(e) => {
                             warn!("Failed to rename session: {}", e);
@@ -10712,19 +10422,19 @@ impl AppState {
                 }
                 action @ AsyncAction::OpenWorkspaceShell { .. } => {
                     debug!("OpenWorkspaceShell action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::OpenShellAtPath(_) => {
                     debug!("OpenShellAtPath action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillWorkspaceShell(_) => {
                     debug!("KillWorkspaceShell action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::OpenInEditor(_) => {
                     debug!("OpenInEditor action deferred to main loop");
-                    self.pending_async_action = Some(action);
+                    self.shell.pending_async_action = Some(action);
                 }
                 AsyncAction::OnboardingInstallDep(dep_id) => {
                     use crate::components::onboarding::state::DepInstall;
@@ -10738,7 +10448,7 @@ impl AppState {
                             .unwrap_or_else(|e| Err(e.to_string())),
                         None => Err("unknown dependency".to_string()),
                     };
-                    if let Some(os) = &mut self.onboarding_state {
+                    if let Some(os) = &mut self.onboarding.onboarding_state {
                         match result {
                             Ok(()) => {
                                 // Mark done; the row keeps a ✓ marker until the
@@ -10757,7 +10467,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
                 AsyncAction::OnboardingCheckDeps => {
                     info!("Running onboarding dependency check");
@@ -10765,15 +10475,17 @@ impl AppState {
                     // Run blocking I/O on dedicated thread pool to avoid blocking async runtime
                     match tokio::task::spawn_blocking(|| detect_all(&RealEnv)).await {
                         Ok(status) => {
-                            if let Some(ref mut onboarding_state) = self.onboarding_state {
+                            if let Some(ref mut onboarding_state) = self.onboarding.onboarding_state
+                            {
                                 onboarding_state.dependency_status = Some(status);
                                 onboarding_state.dependency_check_running = false;
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                             }
                         }
                         Err(e) => {
                             warn!("Dependency check task failed: {}", e);
-                            if let Some(ref mut onboarding_state) = self.onboarding_state {
+                            if let Some(ref mut onboarding_state) = self.onboarding.onboarding_state
+                            {
                                 onboarding_state.dependency_check_running = false;
                             }
                         }
@@ -10788,7 +10500,7 @@ impl AppState {
                         ainb_cli::source::preview_source(&ainb_home, &fetch_uri)
                     })
                     .await;
-                    self.skill_manager_state.preview_loading = None;
+                    self.skills.skill_manager_state.preview_loading = None;
                     match result {
                         Ok(Ok(preview)) if preview.units.is_empty() => {
                             self.add_warning_notification(format!(
@@ -10803,12 +10515,13 @@ impl AppState {
                             // track. `declared_uri` is the same
                             // `<source>@<ref>/<path>` shape the picker rebuilds.
                             let installed_uris: std::collections::HashSet<String> = self
+                                .skills
                                 .skill_manager_state
                                 .units
                                 .iter()
                                 .map(|u| u.declared_uri.clone())
                                 .collect();
-                            self.skill_manager_state.preview = Some(
+                            self.skills.skill_manager_state.preview = Some(
                                 crate::components::skill_manager_screen::SourcePreviewViewState::new(
                                     preview,
                                     &installed_uris,
@@ -10822,7 +10535,7 @@ impl AppState {
                             self.add_error_notification(format!("preview task failed: {e}"));
                         }
                     }
-                    self.ui_needs_refresh = true;
+                    self.shell.ui_needs_refresh = true;
                 }
             }
         }
@@ -10848,7 +10561,7 @@ impl AppState {
         std::fs::create_dir_all(&auth_dir)?;
 
         // Update UI state to show we're starting
-        if let Some(ref mut auth_state) = self.auth_setup_state {
+        if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
             auth_state.is_processing = true;
             auth_state.error_message = Some("Preparing authentication setup...".to_string());
         }
@@ -10860,7 +10573,7 @@ impl AppState {
             auth_setup_docker_gate(&DOCKER_PROBE, DOCKER_PROBE_TTL, Self::probe_docker_async).await
         {
             warn!("Docker is not available or not running");
-            if let Some(ref mut auth_state) = self.auth_setup_state {
+            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                 auth_state.error_message = Some(message);
                 auth_state.is_processing = false;
             }
@@ -10880,7 +10593,7 @@ impl AppState {
                 .status()?;
 
             if !build_status.success() {
-                if let Some(ref mut auth_state) = self.auth_setup_state {
+                if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                     auth_state.error_message = Some(
                         "❌ Failed to build claude-dev image\n\n\
                          Please check Docker and try again."
@@ -10950,16 +10663,16 @@ impl AppState {
             let _ = std::io::stdin().read_line(&mut String::new());
 
             // Success - transition to main view
-            self.auth_setup_state = None;
-            self.current_screen = screen_ids::SESSION_LIST.to_string();
+            self.onboarding.auth_setup_state = None;
+            self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
             self.check_current_directory_status();
-            self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+            self.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
         } else {
             println!("\n❌ Authentication failed!");
             println!("Press Enter to return to the authentication menu...");
             let _ = std::io::stdin().read_line(&mut String::new());
 
-            if let Some(ref mut auth_state) = self.auth_setup_state {
+            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                 auth_state.error_message = Some(
                     "❌ Authentication failed\n\n\
                      Please try again or use API Key method."
@@ -10982,7 +10695,7 @@ impl AppState {
         );
 
         // Force UI refresh
-        self.ui_needs_refresh = true;
+        self.shell.ui_needs_refresh = true;
 
         Ok(())
     }
@@ -11084,7 +10797,7 @@ impl AppState {
 
     /// Save API key authentication
     async fn save_api_key(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let api_key = match &self.auth_setup_state {
+        let api_key = match &self.onboarding.auth_setup_state {
             Some(auth_state) => auth_state.api_key_input.clone(),
             None => return Err("No API key to save".into()),
         };
@@ -11105,10 +10818,10 @@ impl AppState {
         info!("API key saved to {:?}", env_path);
 
         // Success - transition to main view
-        self.auth_setup_state = None;
-        self.current_screen = screen_ids::SESSION_LIST.to_string();
+        self.onboarding.auth_setup_state = None;
+        self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
         self.check_current_directory_status();
-        self.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+        self.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
 
         Ok(())
     }
@@ -11116,8 +10829,12 @@ impl AppState {
     /// Handle re-authentication of Claude credentials
     async fn handle_reauthenticate(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // Check if any sessions are currently running
-        let running_session_count =
-            self.workspaces.iter().map(|w| w.running_sessions().len()).sum::<usize>();
+        let running_session_count = self
+            .sessions
+            .workspaces
+            .iter()
+            .map(|w| w.running_sessions().len())
+            .sum::<usize>();
 
         if running_session_count > 0 {
             warn!(
@@ -11127,7 +10844,7 @@ impl AppState {
 
             // For now, we'll show an error and require manual session cleanup
             // TODO: Add confirmation dialog with option to stop sessions automatically
-            if let Some(ref mut auth_state) = self.auth_setup_state {
+            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
                 auth_state.error_message = Some(format!(
                     "❌ Cannot re-authenticate with {} running sessions\n\n\
                      Running sessions use the current credentials.\n\
@@ -11138,7 +10855,7 @@ impl AppState {
                 auth_state.is_processing = false;
             } else {
                 // Create auth state to show the error
-                self.auth_setup_state = Some(AuthSetupState {
+                self.onboarding.auth_setup_state = Some(AuthSetupState {
                     selected_method: AuthMethod::OAuth,
                     api_key_input: String::new(),
                     is_processing: false,
@@ -11151,7 +10868,7 @@ impl AppState {
                         running_session_count
                     )),
                 });
-                self.current_screen = screen_ids::AUTH_SETUP.to_string();
+                self.shell.current_screen = screen_ids::AUTH_SETUP.to_string();
             }
             return Ok(());
         }
@@ -11192,7 +10909,7 @@ impl AppState {
         }
 
         // Initialize auth setup state and switch to auth view
-        self.auth_setup_state = Some(AuthSetupState {
+        self.onboarding.auth_setup_state = Some(AuthSetupState {
             selected_method: AuthMethod::OAuth, // Default to OAuth
             api_key_input: String::new(),
             is_processing: false,
@@ -11201,7 +10918,7 @@ impl AppState {
                 "🔄 Previous credentials cleared - please authenticate again".to_string(),
             ),
         });
-        self.current_screen = screen_ids::AUTH_SETUP.to_string();
+        self.shell.current_screen = screen_ids::AUTH_SETUP.to_string();
 
         info!("Re-authentication initiated - switched to auth setup view");
         Ok(())
@@ -11214,7 +10931,7 @@ impl AppState {
         info!("Initiating restart UI flow for session {}", session_id);
 
         // Find the session in our workspace list
-        let session_info = self.workspaces.iter().find_map(|workspace| {
+        let session_info = self.sessions.workspaces.iter().find_map(|workspace| {
             workspace
                 .sessions
                 .iter()
@@ -11247,7 +10964,8 @@ impl AppState {
                         .map(str::to_string)
                         .unwrap_or_else(|| workspace.path.display().to_string());
                     let branch_source = crate::git::repo_source::head_branch(&workspace.path);
-                    let branch_prefix = self.app_config.workspace_defaults.branch_prefix.clone();
+                    let branch_prefix =
+                        self.config.app_config.workspace_defaults.branch_prefix.clone();
                     // Same complete in-use list the repo-picker path uses. The
                     // legacy `list_worktrees()` here only saw legacy UUID dirs
                     // and missed every by-name worktree, so a re-launch onto an
@@ -11273,8 +10991,8 @@ impl AppState {
                         repo_branch_names,
                     );
 
-                    self.current_screen = screen_ids::NEW_SESSION.to_string();
-                    self.new_session_state = Some(NewSessionState {
+                    self.shell.current_screen = screen_ids::NEW_SESSION.to_string();
+                    self.new_session.new_session_state = Some(NewSessionState {
                         step: NewSessionStep::Configure,
                         configure_state: Some(configure_state),
                         ..Default::default()
@@ -11340,17 +11058,17 @@ impl AppState {
             // Build the Warp-style Code Review model for the default Review tab.
             git_state.refresh_review();
 
-            self.git_view_state = Some(git_state);
+            self.git_view.git_view_state = Some(git_state);
             // Store current view so we can return to it
-            self.previous_screen = Some(self.current_screen.clone());
-            self.current_screen = screen_ids::GIT_VIEW.to_string();
+            self.shell.previous_screen = Some(self.shell.current_screen.clone());
+            self.shell.current_screen = screen_ids::GIT_VIEW.to_string();
         } else {
             tracing::warn!("No session selected for git view");
         }
     }
 
     pub fn git_commit_and_push(&mut self) {
-        let result = if let Some(git_state) = self.git_view_state.as_mut() {
+        let result = if let Some(git_state) = self.git_view.git_view_state.as_mut() {
             git_state.commit_and_push()
         } else {
             return;
@@ -11360,9 +11078,10 @@ impl AppState {
             Ok(message) => {
                 tracing::info!("Git commit and push successful: {}", message);
                 // Set pending event to be processed in next loop iteration
-                self.pending_event = Some(crate::app::events::AppEvent::GitCommitSuccess(message));
+                self.shell.pending_event =
+                    Some(crate::app::events::AppEvent::GitCommitSuccess(message));
                 // Refresh git status after successful push
-                if let Some(git_state) = self.git_view_state.as_mut() {
+                if let Some(git_state) = self.git_view.git_view_state.as_mut() {
                     if let Err(e) = git_state.refresh_git_status() {
                         tracing::error!("Failed to refresh git status after push: {}", e);
                         self.add_warning_notification(
@@ -11380,7 +11099,7 @@ impl AppState {
 
     // Quick commit dialog methods
     pub fn is_in_quick_commit_mode(&self) -> bool {
-        self.quick_commit_message.is_some()
+        self.git_view.quick_commit_message.is_some()
     }
 
     pub fn start_quick_commit(&mut self) {
@@ -11391,8 +11110,8 @@ impl AppState {
             let git_dir = workspace_path.join(".git");
 
             if git_dir.exists() {
-                self.quick_commit_message = Some(String::new());
-                self.quick_commit_cursor = 0;
+                self.git_view.quick_commit_message = Some(String::new());
+                self.git_view.quick_commit_cursor = 0;
                 self.add_info_notification(
                     "📝 Enter commit message and press Enter to commit & push".to_string(),
                 );
@@ -11407,43 +11126,58 @@ impl AppState {
     }
 
     pub fn cancel_quick_commit(&mut self) {
-        self.quick_commit_message = None;
-        self.quick_commit_cursor = 0;
+        self.git_view.quick_commit_message = None;
+        self.git_view.quick_commit_cursor = 0;
         self.add_info_notification("❌ Quick commit cancelled".to_string());
     }
 
     pub fn add_char_to_quick_commit(&mut self, ch: char) {
-        if let Some(ref mut message) = self.quick_commit_message {
-            message.insert(self.quick_commit_cursor, ch);
-            self.quick_commit_cursor += 1;
+        // One `get_mut` for the section, then two field borrows of the inner
+        // struct: the buffer and its cursor are the same section, so taking
+        // them one at a time through `DerefMut` would borrow the whole section
+        // twice.
+        // The guard reads through `Deref` first: `get_mut` bumps whether or not
+        // the body runs, and a keystroke outside quick-commit mode changes
+        // nothing.
+        if self.git_view.quick_commit_message.is_none() {
+            return;
+        }
+        let git_view = self.git_view.get_mut();
+        if let Some(message) = git_view.quick_commit_message.as_mut() {
+            message.insert(git_view.quick_commit_cursor, ch);
+            git_view.quick_commit_cursor += 1;
         }
     }
 
     pub fn backspace_quick_commit(&mut self) {
-        if let Some(ref mut message) = self.quick_commit_message {
-            if self.quick_commit_cursor > 0 {
-                self.quick_commit_cursor -= 1;
-                message.remove(self.quick_commit_cursor);
+        if self.git_view.quick_commit_message.is_none() || self.git_view.quick_commit_cursor == 0 {
+            return;
+        }
+        let git_view = self.git_view.get_mut();
+        if let Some(message) = git_view.quick_commit_message.as_mut() {
+            if git_view.quick_commit_cursor > 0 {
+                git_view.quick_commit_cursor -= 1;
+                message.remove(git_view.quick_commit_cursor);
             }
         }
     }
 
     pub fn move_quick_commit_cursor_left(&mut self) {
-        if self.quick_commit_cursor > 0 {
-            self.quick_commit_cursor -= 1;
+        if self.git_view.quick_commit_cursor > 0 {
+            self.git_view.quick_commit_cursor -= 1;
         }
     }
 
     pub fn move_quick_commit_cursor_right(&mut self) {
-        if let Some(ref message) = self.quick_commit_message {
-            if self.quick_commit_cursor < message.len() {
-                self.quick_commit_cursor += 1;
+        if let Some(ref message) = self.git_view.quick_commit_message {
+            if self.git_view.quick_commit_cursor < message.len() {
+                self.git_view.quick_commit_cursor += 1;
             }
         }
     }
 
     pub fn confirm_quick_commit(&mut self) {
-        if let Some(ref message) = self.quick_commit_message {
+        if let Some(ref message) = self.git_view.quick_commit_message {
             if message.trim().is_empty() {
                 self.add_warning_notification("⚠️ Commit message cannot be empty".to_string());
                 return;
@@ -11460,8 +11194,8 @@ impl AppState {
         } else {
             tracing::warn!("Quick commit failed: no session selected");
             self.add_error_notification("❌ No session selected for commit".to_string());
-            self.quick_commit_message = None;
-            self.quick_commit_cursor = 0;
+            self.git_view.quick_commit_message = None;
+            self.git_view.quick_commit_cursor = 0;
             return;
         };
 
@@ -11470,12 +11204,12 @@ impl AppState {
             Ok(success_message) => {
                 tracing::info!("Quick commit successful: {}", success_message);
                 // Set pending event to be processed in next loop iteration
-                self.pending_event = Some(crate::app::events::AppEvent::GitCommitSuccess(
+                self.shell.pending_event = Some(crate::app::events::AppEvent::GitCommitSuccess(
                     success_message,
                 ));
                 // Clear quick commit state
-                self.quick_commit_message = None;
-                self.quick_commit_cursor = 0;
+                self.git_view.quick_commit_message = None;
+                self.git_view.quick_commit_cursor = 0;
             }
             Err(e) => {
                 tracing::error!("Quick commit failed: {}", e);
@@ -11516,7 +11250,7 @@ impl AppState {
         Self::log_notification(&notification);
 
         if coalesces(&notification.notification_type) {
-            if let Some(existing) = self.notifications.iter_mut().find(|n| {
+            if let Some(existing) = self.shell.notifications.iter_mut().find(|n| {
                 n.notification_type == notification.notification_type
                     && n.message == notification.message
             }) {
@@ -11525,10 +11259,10 @@ impl AppState {
             }
         }
 
-        self.notifications.push(notification);
-        let overflow = self.notifications.len().saturating_sub(MAX_STORED_NOTIFICATIONS);
+        self.shell.notifications.push(notification);
+        let overflow = self.shell.notifications.len().saturating_sub(MAX_STORED_NOTIFICATIONS);
         if overflow > 0 {
-            self.notifications.drain(..overflow);
+            self.shell.notifications.drain(..overflow);
         }
     }
 
@@ -11597,7 +11331,7 @@ impl AppState {
     /// to fix it. Only `create` is exempt, and only because it mints a fresh
     /// id, so per-session and per-launch already coincide there.
     pub fn begin_codex_launch(&mut self, session_id: Uuid) {
-        self.codex_degrade_announced.remove(&session_id);
+        self.shell.codex_degrade_announced.remove(&session_id);
     }
 
     /// Say ONCE per launch, on screen, that a Codex session started without shared remote
@@ -11616,7 +11350,7 @@ impl AppState {
         session_id: Uuid,
         degrade: crate::interactive::session_manager::SharedThreadDegrade,
     ) {
-        if !self.codex_degrade_announced.insert(session_id) {
+        if !self.shell.codex_degrade_announced.insert(session_id) {
             return;
         }
         self.add_info_notification(degrade.notice());
@@ -11626,7 +11360,12 @@ impl AppState {
     /// filling the notification queue while a scroll key repeats.
     pub fn notify_live_preview_no_scrollback(&mut self) {
         const MESSAGE: &str = "Live preview has no scrollback. Press A to interact.";
-        if !self.notifications.iter().any(|notification| notification.message == MESSAGE) {
+        if !self
+            .shell
+            .notifications
+            .iter()
+            .any(|notification| notification.message == MESSAGE)
+        {
             self.add_info_notification(MESSAGE.to_string());
         }
     }
@@ -11638,7 +11377,7 @@ impl AppState {
 
     /// Remove expired notifications
     pub fn cleanup_expired_notifications(&mut self) {
-        self.notifications.retain(|n| !n.is_expired());
+        self.shell.notifications.retain(|n| !n.is_expired());
     }
 
     /// Retire every notice currently on screen (`Ctrl+X`).
@@ -11653,18 +11392,18 @@ impl AppState {
         if !self.has_visible_notifications() {
             return false;
         }
-        self.notifications.clear();
+        self.shell.notifications.clear();
         true
     }
 
     /// Is at least one notice on screen right now?
     pub fn has_visible_notifications(&self) -> bool {
-        self.notifications.iter().any(|n| !n.is_expired())
+        self.shell.notifications.iter().any(|n| !n.is_expired())
     }
 
     /// Get current notifications (non-expired)
     pub fn get_current_notifications(&self) -> Vec<&Notification> {
-        self.notifications.iter().filter(|n| !n.is_expired()).collect()
+        self.shell.notifications.iter().filter(|n| !n.is_expired()).collect()
     }
 
     // ============================================================================
@@ -11682,7 +11421,7 @@ impl AppState {
 
     /// Stop the preview update task
     pub fn stop_preview_updates(&mut self) {
-        if let Some(task) = self.preview_update_task.take() {
+        if let Some(task) = self.tmux.preview_update_task.take() {
             task.abort();
         }
     }
@@ -12002,8 +11741,8 @@ impl AppState {
     #[must_use]
     pub fn session_chat_open(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
-        self.current_screen == crate::app::screens::ids::SESSION_LIST
-            && matches!(self.session_tab, SessionTab::Thread | SessionTab::Pal)
+        self.shell.current_screen == crate::app::screens::ids::SESSION_LIST
+            && matches!(self.shell.session_tab, SessionTab::Thread | SessionTab::Pal)
     }
 
     /// Whether the hangar daemon is DOWN, as opposed to merely not answering.
@@ -12018,7 +11757,7 @@ impl AppState {
     /// would put a fresh lie on the surface the offer exists to fix.
     #[must_use]
     pub fn hangar_daemon_not_running(&self) -> bool {
-        self.daemon_attention.lock().map_or_else(
+        self.fleet.daemon_attention.lock().map_or_else(
             |poisoned| {
                 let daemon = poisoned.into_inner();
                 (!daemon.reachable) && daemon.not_running
@@ -12034,7 +11773,7 @@ impl AppState {
     /// one.
     #[must_use]
     pub fn pal_daemon_cta_open(&self) -> bool {
-        self.session_tab == crate::components::session_tabs::SessionTab::Pal
+        self.shell.session_tab == crate::components::session_tabs::SessionTab::Pal
             && self.hangar_daemon_not_running()
     }
 
@@ -12057,8 +11796,8 @@ impl AppState {
             // The right pane. `SessionTabNext` puts focus here whenever it
             // lands on a tab that takes input, and takes it away again when it
             // lands on one that does not.
-            && self.focused_pane == FocusedPane::LiveLogs
-            && *self.daemon_start_cta.status() != crate::fleet::daemon_cta::CtaStatus::Starting
+            && self.shell.focused_pane == FocusedPane::LiveLogs
+            && *self.fleet.daemon_start_cta.status() != crate::fleet::daemon_cta::CtaStatus::Starting
     }
 
     /// Why a conversation tab cannot send right now, in the pane's own words.
@@ -12080,8 +11819,8 @@ impl AppState {
             return None;
         }
         match tab {
-            SessionTab::Pal => self.pal_chat.as_ref(),
-            SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
+            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?
         .state()
@@ -12100,15 +11839,15 @@ impl AppState {
     #[must_use]
     pub fn session_tab_owns_keys(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
-        if self.current_screen != crate::app::screens::ids::SESSION_LIST {
+        if self.shell.current_screen != crate::app::screens::ids::SESSION_LIST {
             return false;
         }
-        match self.session_tab {
-            SessionTab::Pal => self.pal_chat.is_some(),
+        match self.shell.session_tab {
+            SessionTab::Pal => self.fleet.pal_chat.is_some(),
             // A broadcast owns the keyboard whether or not a thread host has
             // been opened: the composer is there the moment rows are checked.
             SessionTab::Thread => {
-                self.session_chat.is_some() || !self.broadcast_targets().is_empty()
+                self.fleet.session_chat.is_some() || !self.broadcast_targets().is_empty()
             }
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => false,
         }
@@ -12126,12 +11865,12 @@ impl AppState {
     #[must_use]
     pub fn session_composer_captures_text(&self) -> bool {
         use crate::components::session_tabs::SessionTab;
-        if self.session_tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
-            return self.broadcast.capturing();
+        if self.shell.session_tab == SessionTab::Thread && !self.broadcast_targets().is_empty() {
+            return self.fleet.broadcast.capturing();
         }
-        let host = match self.session_tab {
-            SessionTab::Pal => self.pal_chat.as_ref(),
-            SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
+        let host = match self.shell.session_tab {
+            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
+            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         };
         host.is_some_and(|host| host.state().is_capturing_text())
@@ -12152,9 +11891,18 @@ impl AppState {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match tab {
             SessionTab::Pal => {
-                let host = self.pal_chat.get_or_insert_with(ChatHost::pal);
-                if host.tick(now_ms) {
-                    self.ui_needs_refresh = true;
+                // Runs every frame, so the bump is gated on the two things that
+                // are real changes: opening the conversation, and a tick that
+                // reports it moved.
+                let mut ticked = false;
+                self.fleet.update(|fleet| {
+                    let opened = fleet.pal_chat.is_none();
+                    let host = fleet.pal_chat.get_or_insert_with(ChatHost::pal);
+                    ticked = host.tick(now_ms);
+                    opened || ticked
+                });
+                if ticked {
+                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 self.chat_host(tab)
             }
@@ -12163,14 +11911,20 @@ impl AppState {
                 // Re-target when the cursor moves to a different session. The
                 // old conversation is dropped rather than cached: nobody is
                 // reading it, and a cached host keeps polling the daemon for it.
-                let stale = self.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
-                if stale {
-                    self.session_chat = Some((key.clone(), ChatHost::thread(key)));
-                }
-                if let Some((_, host)) = self.session_chat.as_mut() {
-                    if host.tick(now_ms) {
-                        self.ui_needs_refresh = true;
+                let stale =
+                    self.fleet.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
+                let mut ticked = false;
+                self.fleet.update(|fleet| {
+                    if stale {
+                        fleet.session_chat = Some((key.clone(), ChatHost::thread(key)));
                     }
+                    if let Some((_, host)) = fleet.session_chat.as_mut() {
+                        ticked = host.tick(now_ms);
+                    }
+                    stale || ticked
+                });
+                if ticked {
+                    self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 self.chat_host(tab)
             }
@@ -12194,8 +11948,8 @@ impl AppState {
     ) -> Option<&crate::fleet::chat_host::ChatHost> {
         use crate::components::session_tabs::SessionTab;
         match tab {
-            SessionTab::Pal => self.pal_chat.as_ref(),
-            SessionTab::Thread => self.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
+            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }
     }
@@ -12242,10 +11996,11 @@ impl AppState {
     }
 
     fn checked_sessions(&self) -> impl Iterator<Item = &crate::models::Session> {
-        self.workspaces
+        self.sessions
+            .workspaces
             .iter()
             .flat_map(|workspace| workspace.sessions.iter())
-            .filter(|session| self.selected_sessions.contains(&session.id))
+            .filter(|session| self.sessions.selected_sessions.contains(&session.id))
     }
 
     /// One session's `provider:<agent session>` chat key, when it has one.
@@ -12382,7 +12137,7 @@ impl AppState {
     #[must_use]
     pub fn selected_fleet_metadata(&self) -> Option<&SessionFleetMetadata> {
         self.get_selected_session()
-            .and_then(|session| self.fleet_metadata.get(&session.id))
+            .and_then(|session| self.fleet.fleet_metadata.get(&session.id))
     }
 
     /// Hold each LOCAL chip at the instant it was FIRST seen.
@@ -12412,7 +12167,7 @@ impl AppState {
             // (`ASK:<since_ms>`) collided with the older one — which is how a
             // previous question's draft could land under a new one.
             let key = (id, chip.kind, chip.detail.clone());
-            let first_seen = *self.attention_local_since.entry(key).or_insert(chip.since_ms);
+            let first_seen = *self.fleet.attention_local_since.entry(key).or_insert(chip.since_ms);
             chip.since_ms = first_seen;
         }
     }
@@ -12429,16 +12184,19 @@ impl AppState {
         // Snapshot the daemon's half once. Holding the lock across the whole
         // loop would put the poller's 5-second write behind a render pass.
         let daemon = self
+            .fleet
             .daemon_attention
             .lock()
             .map(|cell| cell.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let snapshot = self
+            .fleet
             .fleet_snapshot
             .lock()
             .map(|cell| cell.clone())
             .unwrap_or_else(|poisoned| poisoned.into_inner().clone());
         let fleet_metadata: HashMap<Uuid, SessionFleetMetadata> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.sessions.iter())
@@ -12446,9 +12204,9 @@ impl AppState {
                 Self::fleet_metadata_for(session, &snapshot).map(|metadata| (session.id, metadata))
             })
             .collect();
-        let metadata_changed = self.fleet_metadata != fleet_metadata;
+        let metadata_changed = self.fleet.fleet_metadata != fleet_metadata;
         if metadata_changed {
-            self.fleet_metadata = fleet_metadata.clone();
+            self.fleet.fleet_metadata = fleet_metadata.clone();
         }
         // Exact daemon attention ids consumed by a local row. Keeping this as
         // ids rather than cwds prevents a parent's ASK leaking onto every
@@ -12456,6 +12214,7 @@ impl AppState {
         // through their provider-session identity.
         let mut claimed_attention_ids: HashSet<String> = HashSet::new();
         let sessions_per_cwd: HashMap<String, usize> = self
+            .sessions
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.sessions.iter())
@@ -12484,7 +12243,7 @@ impl AppState {
             Option<crate::models::SessionStatus>,
             Option<String>,
         )> = Vec::new();
-        for ws in &self.workspaces {
+        for ws in &self.sessions.workspaces {
             for s in &ws.sessions {
                 // Snapshot metadata remains useful while a daemon is briefly
                 // down, but lifecycle must be live: a retained old EXITED may
@@ -12517,7 +12276,7 @@ impl AppState {
                     provider_session_id.as_deref(),
                     allow_unidentified_cwd,
                     true,
-                    self.attention_baseline.get(&s.id).copied().unwrap_or(0),
+                    self.fleet.attention_baseline.get(&s.id).copied().unwrap_or(0),
                     &recent,
                 );
                 let projected_status =
@@ -12565,7 +12324,7 @@ impl AppState {
                 // Default 0: with no per-session clear point yet, any event in
                 // the lookback window can mark — so pre-launch waiters show up.
                 // Attaching advances this to "now" (see below).
-                let baseline = self.attention_baseline.get(&s.id).copied().unwrap_or(0);
+                let baseline = self.fleet.attention_baseline.get(&s.id).copied().unwrap_or(0);
                 let mut chips = Vec::new();
                 // The exact tmux target is gone. A retained daemon snapshot
                 // can still describe an older ASK/WAIT, but it has no pane to
@@ -12625,14 +12384,14 @@ impl AppState {
         // on the refresh that reads the poller's cell every tick, rather than
         // on the pane: a daemon that came up and went down again while the
         // operator was on another tab is still a change this sees.
-        if self.daemon_start_cta.observe_daemon((!reachable) && daemon.not_running) {
+        if self.fleet.daemon_start_cta.observe_daemon((!reachable) && daemon.not_running) {
             changed = true;
         }
         let live: HashSet<Uuid> = marks.iter().map(|(id, ..)| *id).collect();
         // A session that recovered (or vanished) must lose its ERR clock, or a
         // later failure would render with the age of the previous one.
-        self.attention_error_since.retain(|id, _| live.contains(id));
-        self.attention_local_since.retain(|(id, ..), _| live.contains(id));
+        self.fleet.attention_error_since.retain(|id, _| live.contains(id));
+        self.fleet.attention_local_since.retain(|(id, ..), _| live.contains(id));
         // Every (session, kind) a LOCAL chip still claims this pass. Anything
         // else loses its clock below, so a question that closed and a later one
         // of the same kind do not share an instant.
@@ -12645,10 +12404,10 @@ impl AppState {
                     .map(move |chip| (*id, chip.kind, chip.detail.clone()))
             })
             .collect();
-        self.attention_local_since.retain(|key, _| still_open.contains(key));
+        self.fleet.attention_local_since.retain(|key, _| still_open.contains(key));
         for (id, mut chips, attached, failure, projected_status, provider_session_id) in marks {
             if attached {
-                self.attention_baseline.insert(id, now_ms);
+                self.fleet.attention_baseline.insert(id, now_ms);
             }
             self.stamp_local_since(id, &mut chips);
             if let Some(status) = projected_status {
@@ -12690,10 +12449,10 @@ impl AppState {
                 // so the first refresh that observes it stamps the clock and
                 // every later one reuses it — the age must not restart at 0s
                 // five times a minute.
-                let since = *self.attention_error_since.entry(id).or_insert(now_ms);
+                let since = *self.fleet.attention_error_since.entry(id).or_insert(now_ms);
                 chips.push(SessionAttention::local(AttentionKind::Err, since).with_detail(reason));
             } else {
-                self.attention_error_since.remove(&id);
+                self.fleet.attention_error_since.remove(&id);
             }
             let mut chips = crate::fleet::attention::normalise(chips);
             // Split the errors off BEFORE the window is applied, and from the
@@ -12763,12 +12522,12 @@ impl AppState {
             }
         }
         let elsewhere = daemon.elsewhere(&claimed_attention_ids);
-        if self.attention_elsewhere != elsewhere {
-            self.attention_elsewhere = elsewhere;
+        if self.fleet.attention_elsewhere != elsewhere {
+            self.fleet.attention_elsewhere = elsewhere;
             changed = true;
         }
         if changed {
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
         }
     }
 
@@ -12781,24 +12540,24 @@ impl AppState {
         // This prevents spawning N tmux capture-pane subprocesses per tick
         const PREVIEW_INTERVAL_SECS: u64 = 5;
         let now = std::time::Instant::now();
-        if let Some(last) = self.last_preview_update {
+        if let Some(last) = self.workspace_load.last_preview_update {
             if now.duration_since(last).as_secs() < PREVIEW_INTERVAL_SECS {
                 return Ok(());
             }
         }
-        self.last_preview_update = Some(now);
+        self.workspace_load.last_preview_update = Some(now);
 
         // Non-selected sessions only need a status (running/idle) refresh, which
         // is not time-critical — sweep them on a longer cadence so we don't
         // spawn one `capture-pane` per non-selected session on every 5s preview
         // refresh. (perf: bead 9pb)
         const STATUS_INTERVAL_SECS: u64 = 20;
-        let do_status_check = match self.last_status_check {
+        let do_status_check = match self.workspace_load.last_status_check {
             Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
             None => true,
         };
         if do_status_check {
-            self.last_status_check = Some(now);
+            self.workspace_load.last_status_check = Some(now);
         }
 
         // updates: (session_id, content, claude_running) for the selected session.
@@ -12813,8 +12572,9 @@ impl AppState {
         // For all other sessions, just do a quick status check (visible area only).
         let selected_session_id = self.get_selected_session_id();
 
-        for (session_id, tmux_session) in &self.tmux_sessions {
+        for (session_id, tmux_session) in &self.tmux.tmux_sessions {
             let should_update = self
+                .sessions
                 .workspaces
                 .iter()
                 .flat_map(|w| &w.sessions)
@@ -12831,7 +12591,7 @@ impl AppState {
             // The selected session renders from the observer's vt100 screen,
             // so a parallel capture would waste work and rebuild terminal
             // text through the lossy legacy path.
-            if is_selected && self.embed_session.as_deref() != Some(tmux_session.name()) {
+            if is_selected && self.tmux.embed_session.as_deref() != Some(tmux_session.name()) {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {
@@ -12868,7 +12628,7 @@ impl AppState {
         // Apply status-only updates for non-selected sessions
         for (session_id, claude_running) in status_updates {
             // Accumulate the change flag inside the session borrow, then
-            // touch `self.ui_needs_refresh` only after it ends (avoids a
+            // touch `self.shell.ui_needs_refresh` only after it ends (avoids a
             // borrow conflict between `find_session_mut` and `self`).
             let mut changed = false;
             if let Some(session) = self.find_session_mut(session_id) {
@@ -12884,7 +12644,7 @@ impl AppState {
                 }
             }
             if changed {
-                self.ui_needs_refresh = true;
+                self.shell.ui_needs_refresh = true;
             }
         }
 
@@ -12906,7 +12666,7 @@ impl AppState {
                 }
             }
 
-            self.ui_needs_refresh = true;
+            self.shell.ui_needs_refresh = true;
         }
 
         // Now that per-session running/idle status is current, recompute each
@@ -12918,16 +12678,19 @@ impl AppState {
         // rendered, so a `ainb` invocation that never opens the TUI never dials
         // the socket. `spawn` is idempotent.
         crate::fleet::attention_poll::spawn(
-            &self.daemon_attention,
-            &self.fleet_snapshot,
-            &self.attention_poll_running,
+            &self.fleet.daemon_attention,
+            &self.fleet.fleet_snapshot,
+            &self.fleet.attention_poll_running,
+            &self.fleet.daemon_attention_generation,
         );
+        self.refresh_daemon_attention_generation();
         self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
 
         // Update shell session preview (only the selected workspace's shell)
-        let selected_workspace_idx = self.selected_workspace_index;
+        let selected_workspace_idx = self.sessions.selected_workspace_index;
         if let Some(ws_idx) = selected_workspace_idx {
             if let Some(tmux_name) = self
+                .sessions
                 .workspaces
                 .get(ws_idx)
                 .and_then(|w| w.shell_session.as_ref())
@@ -12941,10 +12704,10 @@ impl AppState {
                 };
                 match capture_pane(&tmux_name, opts).await {
                     Ok(content) => {
-                        if let Some(workspace) = self.workspaces.get_mut(ws_idx) {
+                        if let Some(workspace) = self.sessions.workspaces.get_mut(ws_idx) {
                             if let Some(shell) = workspace.shell_session.as_mut() {
                                 shell.preview_content = Some(content);
-                                self.ui_needs_refresh = true;
+                                self.shell.ui_needs_refresh = true;
                             }
                         }
                     }
@@ -13279,7 +13042,7 @@ impl AppState {
 
     /// Helper to find a session by ID across all workspaces
     fn find_session(&self, session_id: uuid::Uuid) -> Option<&crate::models::session::Session> {
-        for workspace in &self.workspaces {
+        for workspace in &self.sessions.workspaces {
             for session in &workspace.sessions {
                 if session.id == session_id {
                     return Some(session);
@@ -13294,7 +13057,7 @@ impl AppState {
         &mut self,
         session_id: uuid::Uuid,
     ) -> Option<&mut crate::models::session::Session> {
-        for workspace in &mut self.workspaces {
+        for workspace in &mut self.sessions.workspaces {
             for session in &mut workspace.sessions {
                 if session.id == session_id {
                     return Some(session);
@@ -13325,24 +13088,25 @@ impl AppState {
         else {
             return;
         };
-        if self.last_panel_close_version == Some(version) {
+        if self.shell.last_panel_close_version == Some(version) {
             return;
         }
-        self.last_panel_close_version = Some(version);
-        if !panel_close_matches(&self.current_screen, &payload, publisher.as_str()) {
+        self.shell.last_panel_close_version = Some(version);
+        if !panel_close_matches(&self.shell.current_screen, &payload, publisher.as_str()) {
             return;
         }
         let target = self
+            .shell
             .previous_screen
             .take()
             .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
         tracing::info!(
-            from = %self.current_screen,
+            from = %self.shell.current_screen,
             to = %target,
             "ui.close_request: closing plugin panel"
         );
-        self.current_screen = target;
-        self.ui_needs_refresh = true;
+        self.shell.current_screen = target;
+        self.shell.ui_needs_refresh = true;
     }
 }
 
@@ -13628,7 +13392,7 @@ pub struct App {
     /// Owning handle to the plugin runtime's tokio executor. Held by `App`
     /// so dropping `App` joins every plugin task and tears down the runtime.
     /// `None` until [`App::init`] runs. The cheap Send + Clone façade lives
-    /// on `state.plugin_runtime` so dispatchers reach it without needing
+    /// on `state.plugins_host.plugin_runtime` so dispatchers reach it without needing
     /// access to `App`.
     plugin_runtime_owner: Option<ainb_plugin_runtime::Runtime>,
     /// Filesystem watcher that keeps the burndown usage snapshot live by
@@ -13648,7 +13412,7 @@ pub struct App {
     /// key and mouse events were silently dropped (`child.is_none()`).
     /// Holding the receiver for one tick and polling it with `try_recv`
     /// keeps `tick_plugin_renders` synchronous while letting the failure
-    /// reach `state.plugin_render_errors` and the user.
+    /// reach `state.plugins_host.plugin_render_errors` and the user.
     plugin_render_outcomes: std::collections::HashMap<
         crate::app::screens::ScreenId,
         tokio::sync::oneshot::Receiver<ainb_plugin_runtime::RenderOutcome>,
@@ -13676,7 +13440,7 @@ impl App {
     }
 
     /// Drain any freshly-painted plugin frames into
-    /// `state.pending_plugin_renders` so the next `terminal.draw` paints
+    /// `state.plugins_host.pending_plugin_renders` so the next `terminal.draw` paints
     /// the latest buffer per plugin-owned screen.
     ///
     /// Architectural contract (enforced by `build.rs` lint): this method
@@ -13696,7 +13460,7 @@ impl App {
         // Clone the cheap Send + Clone handle so we can hold a reference
         // to the runtime while also mutably borrowing the various
         // `state.*` plugin caches below.
-        let Some(handle) = self.state.plugin_runtime.clone() else {
+        let Some(handle) = self.state.plugins_host.plugin_runtime.clone() else {
             return false;
         };
         let mut drained = false;
@@ -13707,7 +13471,7 @@ impl App {
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
-        // `state.current_screen`) with the plugin id that owns it.
+        // `state.shell.current_screen`) with the plugin id that owns it.
         const PLUGIN_SCREENS: &[(&str, &str)] = &[
             (crate::app::screens::ids::ANALYTICS, "burndown"),
             (crate::app::screens::ids::WITR, "witr"),
@@ -13726,6 +13490,7 @@ impl App {
             // (8hx). Done before the lifecycle skip so an unregistered plugin's
             // stale flag is cleared to false rather than lingering true.
             self.state
+                .plugins_host
                 .plugin_captures_text
                 .insert((*screen_id).to_string(), handle.captures_text(&pid));
 
@@ -13751,13 +13516,16 @@ impl App {
             // user navigated away must still land in the cache so the
             // screen repaints instantly on return.
             if let Some(buf) = handle.try_recv_render(&pid) {
-                self.state.pending_plugin_renders.insert((*screen_id).to_string(), buf);
+                self.state
+                    .plugins_host
+                    .pending_plugin_renders
+                    .insert((*screen_id).to_string(), buf);
                 drained = true;
             }
 
             // Visibility gate: only the plugin owning the focused screen
             // gets render kicks. `LayoutComponent::render` dispatches
-            // exactly `state.current_screen` through the screen registry,
+            // exactly `state.shell.current_screen` through the screen registry,
             // so a hidden screen's buffer is never painted — kicking its
             // renders only burns CPU. Concretely this stops (a) a
             // self-animating plugin (search spinner returning
@@ -13775,7 +13543,7 @@ impl App {
             // consume, so a hidden plugin's dirty flag survives until the
             // user opens the screen and the first tick after the switch
             // kicks the deferred paint.
-            if self.state.current_screen != *screen_id {
+            if self.state.shell.current_screen != *screen_id {
                 continue;
             }
 
@@ -13840,7 +13608,7 @@ impl App {
     }
 
     /// Poll the parked `plugin/render` oneshot for `screen_id`, recording any
-    /// failure in `state.plugin_render_errors` (and clearing it on success).
+    /// failure in `state.plugins_host.plugin_render_errors` (and clearing it on success).
     ///
     /// Non-blocking by construction — `try_recv` never awaits, so
     /// `tick_plugin_renders` stays synchronous per its `build.rs`-enforced
@@ -13860,7 +13628,7 @@ impl App {
         };
         let message = match rx.try_recv() {
             Ok(RenderOutcome::Ok(_)) => {
-                self.state.plugin_render_errors.remove(screen_id);
+                self.state.plugins_host.plugin_render_errors.remove(screen_id);
                 return;
             }
             Ok(RenderOutcome::RuntimeError(e)) => e,
@@ -13879,11 +13647,14 @@ impl App {
 
         // Log once per distinct message so a failing screen doesn't spam the
         // log at tick cadence while the user sits on it.
-        let is_new = self.state.plugin_render_errors.get(screen_id) != Some(&message);
+        let is_new = self.state.plugins_host.plugin_render_errors.get(screen_id) != Some(&message);
         if is_new {
             warn!(screen = %screen_id, error = %message, "plugin render failed");
         }
-        self.state.plugin_render_errors.insert(screen_id.to_string(), message);
+        self.state
+            .plugins_host
+            .plugin_render_errors
+            .insert(screen_id.to_string(), message);
     }
 
     pub async fn init(&mut self) {
@@ -13899,7 +13670,7 @@ impl App {
                     warn!(plugin = %name, error = %err, "plugin failed to load");
                 }
                 self.plugin_runtime_owner = Some(runtime);
-                self.state.plugin_runtime = Some(handle.clone());
+                self.state.plugins_host.plugin_runtime = Some(handle.clone());
 
                 // Surface each loaded plugin's `[[config]]` schema in the
                 // Settings ▸ Plugins category. `from_app_config` built the
@@ -13911,16 +13682,22 @@ impl App {
                 // rebuilt; the static enable/disable rows are kept.
                 let manifests: Vec<ainb_plugin_protocol::manifest::Manifest> =
                     handle.registered_plugins().iter().map(|p| p.manifest.clone()).collect();
-                self.state
-                    .config_screen_state
-                    .apply_plugin_manifests(&manifests, &self.state.app_config.plugins);
+                // The rows and the table they read defaults from are one
+                // section now, so the plugin list is cloned out before the
+                // section is borrowed mutably.
+                self.state.config.update(|config| {
+                    config
+                        .config_screen_state
+                        .apply_plugin_manifests(&manifests, &config.app_config.plugins);
+                    true
+                });
 
                 // A fresh runtime means a fresh snapshot store whose
                 // version counter restarts at 0 — drop any version
                 // watermark from a previous runtime so an equal-valued
                 // version can't mask a new close request. Init runs once
                 // today; this keeps any future runtime-restart path safe.
-                self.state.last_panel_close_version = None;
+                self.state.shell.last_panel_close_version = None;
                 // Keep the burndown usage snapshot live: watch provider
                 // session dirs and nudge session-reader to rescan on
                 // change, so "today" appears without the user pressing
@@ -13935,7 +13712,7 @@ impl App {
 
         // Kick off the live-window background poller. Render path reads
         // from its snapshot — never calls live_window::current() inline.
-        self.state.live_window_watcher.start();
+        self.state.fleet.live_window_watcher.start();
 
         // Initialize log streaming coordinator
         let (mut coordinator, log_sender) = LogStreamingCoordinator::new();
@@ -13957,8 +13734,8 @@ impl App {
             info!("Log streaming will be available when Docker is started");
         }
 
-        self.state.log_streaming_coordinator = Some(coordinator);
-        self.state.log_sender = Some(log_sender);
+        self.state.log_streams.log_streaming_coordinator = Some(coordinator);
+        self.state.log_streams.log_sender = Some(log_sender);
 
         // Try to refresh OAuth tokens if they're expired (before checking first-time setup)
         let home_dir = dirs::home_dir();
@@ -14045,10 +13822,11 @@ impl App {
 
     /// Initialize log streaming for all running sessions
     async fn init_log_streaming_for_sessions(&mut self) -> anyhow::Result<()> {
-        if let Some(coordinator) = &mut self.state.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.state.log_streams.log_streaming_coordinator {
             // Collect session info for streaming
             let sessions: Vec<(Uuid, String, String, crate::models::SessionMode)> = self
                 .state
+                .sessions
                 .workspaces
                 .iter()
                 .flat_map(|w| &w.sessions)
@@ -14104,30 +13882,30 @@ impl App {
             }
             // Also load other tmux sessions (quick operation)
             self.state.load_other_tmux_sessions().await;
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
 
         // Check for completed background skills scan
         if self.state.check_skills_load_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
 
         // Check for completed background drift scan
         // (skill-manager v1.2 bead v12.E.4).
         if self.state.check_drift_load_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
         // Check for a completed base-branch refresh (Configure picker)
         if self.state.check_branch_refresh_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
         // Check for a completed remote-repo pre-flight (Configure screen)
         if self.state.check_repo_check_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
         // Check for a completed empty-remote initialization ([i] on Configure)
         if self.state.check_repo_init_complete() {
-            self.state.ui_needs_refresh = true;
+            self.state.shell.ui_needs_refresh = true;
         }
 
         // Drain + lazily refresh the MCP pool overlay (no-op when closed).
@@ -14140,12 +13918,13 @@ impl App {
         let now = Instant::now();
         let should_check_token = self
             .state
+            .fleet
             .last_token_refresh_check
             .map(|last| now.duration_since(last).as_secs() >= 300) // Check every 5 minutes
             .unwrap_or(true); // First time
 
         if should_check_token {
-            self.state.last_token_refresh_check = Some(now);
+            self.state.fleet.last_token_refresh_check = Some(now);
 
             // Check if we need to refresh OAuth tokens
             let home_dir = dirs::home_dir();
@@ -14197,12 +13976,13 @@ impl App {
         // Periodic session snapshot (every 30 minutes)
         let should_snapshot = self
             .state
+            .workspace_load
             .last_snapshot_time
             .map(|last| now.duration_since(last).as_secs() >= 1800)
             .unwrap_or(true);
 
         if should_snapshot {
-            self.state.last_snapshot_time = Some(now);
+            self.state.workspace_load.last_snapshot_time = Some(now);
             tokio::spawn(async {
                 match crate::app::snapshot::SnapshotManager::take_snapshot().await {
                     Ok(snapshot) => {
@@ -14225,7 +14005,7 @@ impl App {
 
         // Process incoming log entries (non-blocking)
         let mut log_entries = Vec::new();
-        if let Some(coordinator) = &mut self.state.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.state.log_streams.log_streaming_coordinator {
             // Collect all available log entries without blocking
             while let Some((session_id, log_entry)) = coordinator.try_next_log() {
                 log_entries.push((session_id, log_entry));
@@ -14244,18 +14024,18 @@ impl App {
         }
 
         // Process any pending async actions
-        if self.state.pending_async_action.is_some() {
+        if self.state.shell.pending_async_action.is_some() {
             info!(
                 ">>> tick() detected pending_async_action: {:?}",
-                self.state.pending_async_action
+                self.state.shell.pending_async_action
             );
         }
         match self.state.process_async_action().await {
             Ok(()) => {
-                if self.state.pending_async_action.is_some() {
+                if self.state.shell.pending_async_action.is_some() {
                     info!(
                         ">>> After process_async_action, still pending: {:?}",
-                        self.state.pending_async_action
+                        self.state.shell.pending_async_action
                     );
                 }
             }
@@ -14263,13 +14043,13 @@ impl App {
                 warn!("Error processing async action: {}", e);
                 // Return to safe state if there was an error
                 // BUT don't interrupt onboarding wizard or setup menu
-                if self.state.current_screen != screen_ids::ONBOARDING
-                    && self.state.current_screen != screen_ids::SETUP_MENU
+                if self.state.shell.current_screen != screen_ids::ONBOARDING
+                    && self.state.shell.current_screen != screen_ids::SETUP_MENU
                 {
-                    self.state.new_session_state = None;
-                    self.state.current_screen = screen_ids::SESSION_LIST.to_string();
+                    self.state.new_session.new_session_state = None;
+                    self.state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
                 }
-                self.state.pending_async_action = None;
+                self.state.shell.pending_async_action = None;
             }
         }
 
@@ -14279,18 +14059,20 @@ impl App {
         let now = Instant::now();
         let should_update_logs = self
             .state
+            .log_streams
             .last_log_check
             .map(|last| now.duration_since(last).as_secs() >= 3) // Update every 3 seconds
             .unwrap_or(true); // First time
 
         if should_update_logs {
-            self.state.last_log_check = Some(now);
+            self.state.log_streams.last_log_check = Some(now);
 
             // If we have an attached session, fetch its logs
-            if let Some(attached_id) = self.state.attached_session_id {
+            if let Some(attached_id) = self.state.sessions.attached_session_id {
                 // Check if we should update this session's logs (don't spam updates)
                 let should_update_session = self
                     .state
+                    .log_streams
                     .log_last_updated
                     .get(&attached_id)
                     .map(|last| now.duration_since(*last).as_secs() >= 2) // Update session logs every 2 seconds
@@ -14301,9 +14083,9 @@ impl App {
                     if let Err(e) = self.state.fetch_claude_logs(attached_id).await {
                         warn!("Failed to fetch logs for session {}: {}", attached_id, e);
                     } else {
-                        self.state.log_last_updated.insert(attached_id, now);
+                        self.state.log_streams.log_last_updated.insert(attached_id, now);
                         // Set flag to refresh UI with new logs
-                        self.state.ui_needs_refresh = true;
+                        self.state.shell.ui_needs_refresh = true;
                     }
                 }
             }
@@ -14314,8 +14096,8 @@ impl App {
 
     /// Check if UI needs immediate refresh and clear the flag
     pub fn needs_ui_refresh(&mut self) -> bool {
-        if self.state.ui_needs_refresh {
-            self.state.ui_needs_refresh = false;
+        if self.state.shell.ui_needs_refresh {
+            self.state.shell.ui_needs_refresh = false;
             true
         } else {
             false
@@ -14337,7 +14119,7 @@ mod state_tests;
 #[cfg(test)]
 mod plugin_render_gate_tests {
     //! Visibility gate on the render-tick loop: only the plugin owning
-    //! `state.current_screen` gets render kicks. A hidden plugin's dirty
+    //! `state.shell.current_screen` gets render kicks. A hidden plugin's dirty
     //! flag must SURVIVE the gate (it is consumed by `take_render_dirty`
     //! only after the screen check) so the deferred first paint happens
     //! on the first tick after the user opens the screen.
@@ -14385,7 +14167,7 @@ mod plugin_render_gate_tests {
             ));
         }
         let mut app = App::new();
-        app.state.plugin_runtime = Some(handle);
+        app.state.plugins_host.plugin_runtime = Some(handle);
         (runtime, app)
     }
 
@@ -14393,10 +14175,10 @@ mod plugin_render_gate_tests {
     fn hidden_screen_gets_no_render_kick_and_stays_dirty() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut ui = crate::app::ui_state::UiState::default();
-        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
-        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = ids::SESSION_LIST.to_string();
         app.tick_plugin_renders(&mut ui);
         app.tick_plugin_renders(&mut ui);
 
@@ -14420,18 +14202,18 @@ mod plugin_render_gate_tests {
     fn dirty_plugin_kick_deferred_until_viewport_known() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut ui = crate::app::ui_state::UiState::default();
-        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
 
         // Ticks while hidden: gated, dirty preserved (proved above).
-        app.state.current_screen = ids::SESSION_LIST.to_string();
+        app.state.shell.current_screen = ids::SESSION_LIST.to_string();
         app.tick_plugin_renders(&mut ui);
 
         // User opens the learnings screen. No allocated area is stashed yet,
         // so the tick must NOT kick: a (0, 0) seed kick made the plugin paint
         // its 80×24 fallback across the real (larger) area — the blank-flash
         // bug on first entry.
-        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.state.shell.current_screen = ids::LEARNINGS.to_string();
         app.tick_plugin_renders(&mut ui);
         assert!(
             !ui.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
@@ -14459,9 +14241,9 @@ mod plugin_render_gate_tests {
     fn only_the_focused_plugin_screen_is_kicked() {
         let (runtime, mut app) = app_with_plugins(&["learnings", "burndown"]);
         let mut ui = crate::app::ui_state::UiState::default();
-        let handle = app.state.plugin_runtime.clone().expect("handle wired");
+        let handle = app.state.plugins_host.plugin_runtime.clone().expect("handle wired");
 
-        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.state.shell.current_screen = ids::LEARNINGS.to_string();
         // Focused screen has painted once (area known); the hidden one hasn't.
         ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (100, 30));
         app.tick_plugin_renders(&mut ui);
@@ -14496,7 +14278,7 @@ mod plugin_render_gate_tests {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let mut ui = crate::app::ui_state::UiState::default();
 
-        app.state.current_screen = ids::LEARNINGS.to_string();
+        app.state.shell.current_screen = ids::LEARNINGS.to_string();
         ui.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
 
         // First tick kicks the render; the spawn attempt and its failure
@@ -14505,7 +14287,7 @@ mod plugin_render_gate_tests {
         let mut recorded = None;
         for _ in 0..200 {
             app.tick_plugin_renders(&mut ui);
-            if let Some(err) = app.state.plugin_render_errors.get(ids::LEARNINGS) {
+            if let Some(err) = app.state.plugins_host.plugin_render_errors.get(ids::LEARNINGS) {
                 recorded = Some(err.clone());
                 break;
             }
@@ -15334,13 +15116,13 @@ mod codex_degrade_notice_tests {
     fn a_degraded_launch_is_announced_once_within_one_launch() {
         let mut state = AppState::new();
         let session = Uuid::new_v4();
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
 
-        let added: Vec<_> = state.notifications[before..]
+        let added: Vec<_> = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .collect();
@@ -15372,7 +15154,7 @@ mod codex_degrade_notice_tests {
     fn a_relaunch_of_the_same_session_is_announced_again() {
         let mut state = AppState::new();
         let session = Uuid::new_v4();
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         // Launch 1: degraded, announced, and not re-announced within itself.
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
@@ -15385,7 +15167,7 @@ mod codex_degrade_notice_tests {
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
         state.notify_codex_degraded(session, SharedThreadDegrade::StoreBusy);
 
-        let announced = state.notifications[before..]
+        let announced = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .count();
@@ -15406,11 +15188,11 @@ mod codex_degrade_notice_tests {
     fn a_first_launch_that_degraded_is_announced() {
         let mut state = AppState::new();
         let session = degraded_session(Some(SharedThreadDegrade::StoreBusy));
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.announce_created_session_degrade(&session);
 
-        let added: Vec<_> = state.notifications[before..]
+        let added: Vec<_> = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .collect();
@@ -15435,11 +15217,11 @@ mod codex_degrade_notice_tests {
     fn a_healthy_first_launch_is_silent() {
         let mut state = AppState::new();
         let session = degraded_session(None);
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.announce_created_session_degrade(&session);
 
-        let added = state.notifications[before..]
+        let added = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .count();
@@ -15473,12 +15255,12 @@ mod codex_degrade_notice_tests {
     #[test]
     fn a_second_session_gets_its_own_notice() {
         let mut state = AppState::new();
-        let before = state.notifications.len();
+        let before = state.shell.notifications.len();
 
         state.notify_codex_degraded(Uuid::new_v4(), SharedThreadDegrade::NoDaemon);
         state.notify_codex_degraded(Uuid::new_v4(), SharedThreadDegrade::NoDaemon);
 
-        let added = state.notifications[before..]
+        let added = state.shell.notifications[before..]
             .iter()
             .filter(|n| n.message.contains("without shared remote control"))
             .count();

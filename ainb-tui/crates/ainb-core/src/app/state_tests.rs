@@ -20,10 +20,10 @@ mod tests {
 
     fn state_with_other_tmux_sessions(names: &[&str]) -> AppState {
         let mut state = AppState::new();
-        state.selected_workspace_index = None;
-        state.selected_session_index = None;
-        state.selected_other_tmux_index = Some(0);
-        state.other_tmux_sessions = names
+        state.sessions.selected_workspace_index = None;
+        state.sessions.selected_session_index = None;
+        state.tmux.selected_other_tmux_index = Some(0);
+        state.tmux.other_tmux_sessions = names
             .iter()
             .map(|name| OtherTmuxSession::new((*name).to_string(), false, 1))
             .collect();
@@ -48,7 +48,7 @@ mod tests {
     #[test]
     fn missing_exact_tmux_target_becomes_stopped_and_resumable() {
         let mut state = AppState::new();
-        state.workspaces.clear();
+        state.sessions.workspaces.clear();
         let mut workspace = crate::models::Workspace::new("ws".to_string(), "/tmp/ws".into());
         let mut session = crate::models::Session::new_with_options(
             "agent".to_string(),
@@ -68,10 +68,10 @@ mod tests {
             1,
         ));
         workspace.add_session(session);
-        state.workspaces.push(workspace);
+        state.sessions.workspaces.push(workspace);
 
         assert!(state.mark_session_stopped_for_missing_tmux(id, "tmux_missing_exact"));
-        let session = state.workspaces[0].sessions.first().expect("session");
+        let session = state.sessions.workspaces[0].sessions.first().expect("session");
         assert!(matches!(
             session.status,
             crate::models::SessionStatus::Stopped
@@ -83,7 +83,7 @@ mod tests {
             Vec::<uuid::Uuid>::new()
         );
 
-        state.selected_sessions.insert(id);
+        state.sessions.selected_sessions.insert(id);
         assert_eq!(state.selected_resumable_session_ids(), vec![id]);
     }
 
@@ -122,7 +122,7 @@ mod tests {
 
         let missing = format!("ainb-missing-observer-{}", std::process::id());
         let mut state = state_with_other_tmux_sessions(&[missing.as_str()]);
-        state.current_screen = "session_list".to_string();
+        state.shell.current_screen = "session_list".to_string();
 
         assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -134,18 +134,18 @@ mod tests {
         }
 
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
+            state.tmux.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
             Some(missing.as_str())
         );
-        assert!(state.embed.is_none(), "dead observer must release");
+        assert!(state.tmux.embed.is_none(), "dead observer must release");
         assert!(
             !state.sync_terminal_observer(24, 80),
             "same stale selection must not respawn an observer"
         );
 
-        state.selected_other_tmux_index = None;
+        state.tmux.selected_other_tmux_index = None;
         assert!(!state.sync_terminal_observer(24, 80));
-        assert!(state.observer_failed_target.is_none());
+        assert!(state.tmux.observer_failed_target.is_none());
     }
 
     #[test]
@@ -156,10 +156,10 @@ mod tests {
         }
 
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3)
         );
-        assert!(state.notifications.iter().any(|notification| {
+        assert!(state.shell.notifications.iter().any(|notification| {
             notification.message.contains("Live preview unavailable for 'stale'")
         }));
     }
@@ -189,13 +189,13 @@ mod tests {
         assert!(created, "failed to create tmux session");
 
         let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
-        state.current_screen = "session_list".to_string();
-        state.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
+        state.shell.current_screen = "session_list".to_string();
+        state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
         assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80), "observer starts");
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(2),
             "a spawned client can still fail asynchronously"
         );
@@ -203,7 +203,7 @@ mod tests {
         state.release_interactive_pane();
         state.record_observer_failure(session.clone());
         assert_eq!(
-            state.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3),
             "a failed spawn must advance the existing retry count"
         );
@@ -238,14 +238,14 @@ mod tests {
         assert!(created, "failed to create tmux session");
 
         let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
-        state.current_screen = "session_list".to_string();
-        state.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
+        state.shell.current_screen = "session_list".to_string();
+        state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
         assert!(!state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!state.poll_embed_exit());
-        assert!(state.observer_failed_target.is_none());
+        assert!(state.tmux.observer_failed_target.is_none());
 
         state.release_interactive_pane();
         let _ = std::process::Command::new("tmux")
@@ -279,16 +279,16 @@ mod tests {
         assert!(created, "failed to create tmux session");
 
         let mut state = state_with_other_tmux_sessions(&[active.as_str(), blocked.as_str()]);
-        state.current_screen = "session_list".to_string();
+        state.shell.current_screen = "session_list".to_string();
         assert!(!state.sync_terminal_observer(24, 80));
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(state.sync_terminal_observer(24, 80));
 
-        state.selected_other_tmux_index = Some(1);
-        state.observer_failed_target =
+        state.tmux.selected_other_tmux_index = Some(1);
+        state.tmux.observer_failed_target =
             Some((blocked, std::time::Instant::now(), MAX_OBSERVER_FAILURES));
         assert!(!state.sync_terminal_observer(24, 80));
-        assert!(state.embed.is_none());
+        assert!(state.tmux.embed.is_none());
 
         let _ = std::process::Command::new("tmux")
             .args(["kill-session", "-t", &format!("={active}")])
@@ -303,6 +303,7 @@ mod tests {
 
         assert_eq!(
             state
+                .shell
                 .notifications
                 .iter()
                 .filter(|notification| {
@@ -318,12 +319,12 @@ mod tests {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
 
         state.toggle_select_session();
-        state.selected_other_tmux_index = Some(1);
+        state.tmux.selected_other_tmux_index = Some(1);
         state.toggle_select_session();
 
-        assert_eq!(state.selected_other_tmux_sessions.len(), 2);
-        assert!(state.selected_other_tmux_sessions.contains("alpha"));
-        assert!(state.selected_other_tmux_sessions.contains("beta"));
+        assert_eq!(state.tmux.selected_other_tmux_sessions.len(), 2);
+        assert!(state.tmux.selected_other_tmux_sessions.contains("alpha"));
+        assert!(state.tmux.selected_other_tmux_sessions.contains("beta"));
         assert_eq!(
             state.selected_other_tmux_names_in_order(),
             vec!["alpha".to_string(), "beta".to_string()]
@@ -333,12 +334,12 @@ mod tests {
     #[test]
     fn test_delete_selected_other_tmux_sessions_opens_bulk_kill_confirmation() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
-        state.selected_other_tmux_sessions.insert("alpha".to_string());
-        state.selected_other_tmux_sessions.insert("beta".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("beta".to_string());
 
         EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("bulk kill confirmation");
+        let dialog = state.shell.confirmation_dialog.as_ref().expect("bulk kill confirmation");
         assert_eq!(dialog.title, "Kill tmux Sessions");
         assert!(matches!(
             &dialog.confirm_action,
@@ -350,13 +351,13 @@ mod tests {
     #[test]
     fn test_delete_session_uses_checked_other_tmux_sessions_before_cursor_row() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
-        state.selected_other_tmux_index = Some(1);
-        state.selected_other_tmux_sessions.insert("alpha".to_string());
-        state.selected_other_tmux_sessions.insert("beta".to_string());
+        state.tmux.selected_other_tmux_index = Some(1);
+        state.tmux.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("beta".to_string());
 
         EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("bulk kill confirmation");
+        let dialog = state.shell.confirmation_dialog.as_ref().expect("bulk kill confirmation");
         assert!(matches!(
             &dialog.confirm_action,
             ConfirmAction::KillOtherTmuxSessions(names)
@@ -367,20 +368,21 @@ mod tests {
     #[test]
     fn test_confirm_selected_other_tmux_sessions_queues_bulk_kill() {
         let mut state = state_with_other_tmux_sessions(&["alpha", "beta"]);
-        state.selected_other_tmux_sessions.insert("alpha".to_string());
-        state.selected_other_tmux_sessions.insert("beta".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("alpha".to_string());
+        state.tmux.selected_other_tmux_sessions.insert("beta".to_string());
         EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
         state
+            .shell
             .confirmation_dialog
             .as_mut()
             .expect("bulk kill confirmation")
             .selected_option = true;
         EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-        assert!(state.selected_other_tmux_sessions.is_empty());
+        assert!(state.tmux.selected_other_tmux_sessions.is_empty());
         assert!(matches!(
-            state.pending_async_action,
+            state.shell.pending_async_action,
             Some(AsyncAction::KillOtherTmuxSessions(ref names))
                 if names == &vec!["alpha".to_string(), "beta".to_string()]
         ));
@@ -395,7 +397,7 @@ mod tests {
 
         state.show_delete_or_stop_confirmation(session_id);
 
-        let dialog = state.confirmation_dialog.as_ref().expect("Dialog should be present");
+        let dialog = state.shell.confirmation_dialog.as_ref().expect("Dialog should be present");
         let opts = dialog.options.as_ref().expect("Tri-option dialog");
         assert_eq!(opts.len(), 3, "Stop / Delete / Cancel");
         assert_eq!(opts[0].label, "Stop");
@@ -463,7 +465,7 @@ mod tests {
         let session_id = uuid::Uuid::new_v4();
         let mut state = AppState::new();
         state.show_delete_confirmation(session_id);
-        let dialog = state.confirmation_dialog.as_ref().unwrap();
+        let dialog = state.shell.confirmation_dialog.as_ref().unwrap();
         assert!(dialog.options.is_none(), "Legacy binary dialog");
         assert!(!dialog.selected_option, "Default = No");
         assert!(matches!(
@@ -901,7 +903,7 @@ mod tests {
     #[test]
     fn test_session_passes_filter_all_lets_everything_through() {
         let mut state = AppState::new();
-        state.session_filter = SessionFilter::All;
+        state.sessions.session_filter = SessionFilter::All;
         for mode in [SessionMode::Interactive, SessionMode::Boss] {
             for status in [Status::Running, Status::Stopped, Status::Idle] {
                 assert!(
@@ -917,7 +919,7 @@ mod tests {
     #[test]
     fn test_session_passes_filter_active_only_hides_stopped_interactive() {
         let mut state = AppState::new();
-        state.session_filter = SessionFilter::ActiveOnly;
+        state.sessions.session_filter = SessionFilter::ActiveOnly;
 
         // Interactive Stopped → hidden
         assert!(!state.session_passes_filter(&make_filter_session(
@@ -938,7 +940,7 @@ mod tests {
     #[test]
     fn test_session_passes_filter_stopped_only() {
         let mut state = AppState::new();
-        state.session_filter = SessionFilter::StoppedOnly;
+        state.sessions.session_filter = SessionFilter::StoppedOnly;
 
         assert!(state.session_passes_filter(&make_filter_session(
             SessionMode::Interactive,
@@ -959,21 +961,21 @@ mod tests {
         let mut state = AppState::new();
         // AppState restores the user's persisted UI preference; cycle behavior
         // itself must remain independent of that ambient configuration.
-        state.session_filter = SessionFilter::All;
-        assert_eq!(state.session_filter, SessionFilter::All);
+        state.sessions.session_filter = SessionFilter::All;
+        assert_eq!(state.sessions.session_filter, SessionFilter::All);
         state.cycle_session_filter();
-        assert_eq!(state.session_filter, SessionFilter::ActiveOnly);
+        assert_eq!(state.sessions.session_filter, SessionFilter::ActiveOnly);
         state.cycle_session_filter();
-        assert_eq!(state.session_filter, SessionFilter::StoppedOnly);
+        assert_eq!(state.sessions.session_filter, SessionFilter::StoppedOnly);
         state.cycle_session_filter();
-        assert_eq!(state.session_filter, SessionFilter::All);
+        assert_eq!(state.sessions.session_filter, SessionFilter::All);
     }
 
     #[test]
     fn filtered_navigation_skips_hidden_sessions_across_workspaces() {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.session_filter = SessionFilter::ActiveOnly;
+        state.sessions.workspaces.clear();
+        state.sessions.session_filter = SessionFilter::ActiveOnly;
 
         let mut first = Workspace::new("first".to_string(), "/tmp/first".into());
         first.add_session(make_filter_session(
@@ -999,37 +1001,37 @@ mod tests {
             Status::Running,
         ));
 
-        state.workspaces = vec![first, second];
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = Some(0);
+        state.sessions.workspaces = vec![first, second];
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
 
         state.next_session();
-        assert_eq!(state.selected_workspace_index, Some(1));
-        assert_eq!(state.selected_session_index, Some(1));
+        assert_eq!(state.sessions.selected_workspace_index, Some(1));
+        assert_eq!(state.sessions.selected_session_index, Some(1));
 
         state.previous_session();
-        assert_eq!(state.selected_workspace_index, Some(0));
-        assert_eq!(state.selected_session_index, Some(0));
+        assert_eq!(state.sessions.selected_workspace_index, Some(0));
+        assert_eq!(state.sessions.selected_session_index, Some(0));
 
         state.next_workspace();
-        assert_eq!(state.selected_workspace_index, Some(1));
-        assert_eq!(state.selected_session_index, Some(1));
+        assert_eq!(state.sessions.selected_workspace_index, Some(1));
+        assert_eq!(state.sessions.selected_session_index, Some(1));
 
         EventHandler::process_event(AppEvent::GoToBottom, &mut state);
-        assert_eq!(state.selected_session_index, Some(3));
+        assert_eq!(state.sessions.selected_session_index, Some(3));
         EventHandler::process_event(AppEvent::GoToTop, &mut state);
-        assert_eq!(state.selected_session_index, Some(1));
+        assert_eq!(state.sessions.selected_session_index, Some(1));
 
         state.previous_workspace();
-        assert_eq!(state.selected_workspace_index, Some(0));
-        assert_eq!(state.selected_session_index, Some(0));
+        assert_eq!(state.sessions.selected_workspace_index, Some(0));
+        assert_eq!(state.sessions.selected_session_index, Some(0));
     }
 
     #[test]
     fn initial_filtered_selection_skips_hidden_workspaces() {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.session_filter = SessionFilter::ActiveOnly;
+        state.sessions.workspaces.clear();
+        state.sessions.session_filter = SessionFilter::ActiveOnly;
 
         let mut hidden = Workspace::new("hidden".to_string(), "/tmp/hidden".into());
         hidden.add_session(make_filter_session(
@@ -1047,17 +1049,17 @@ mod tests {
             Status::Running,
         ));
 
-        state.workspaces = vec![hidden, visible];
+        state.sessions.workspaces = vec![hidden, visible];
         assert!(state.select_first_visible_workspace_item_from(0));
-        assert_eq!(state.selected_workspace_index, Some(1));
-        assert_eq!(state.selected_session_index, Some(1));
+        assert_eq!(state.sessions.selected_workspace_index, Some(1));
+        assert_eq!(state.sessions.selected_session_index, Some(1));
     }
 
     #[test]
     fn previous_workspace_selects_its_first_visible_session() {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.session_filter = SessionFilter::ActiveOnly;
+        state.sessions.workspaces.clear();
+        state.sessions.session_filter = SessionFilter::ActiveOnly;
 
         let mut first = Workspace::new("first".to_string(), "/tmp/first".into());
         first.add_session(make_filter_session(
@@ -1079,13 +1081,13 @@ mod tests {
             Status::Running,
         ));
 
-        state.workspaces = vec![first, second];
-        state.selected_workspace_index = Some(1);
-        state.selected_session_index = Some(0);
+        state.sessions.workspaces = vec![first, second];
+        state.sessions.selected_workspace_index = Some(1);
+        state.sessions.selected_session_index = Some(0);
         state.previous_workspace();
 
-        assert_eq!(state.selected_workspace_index, Some(0));
-        assert_eq!(state.selected_session_index, Some(1));
+        assert_eq!(state.sessions.selected_workspace_index, Some(0));
+        assert_eq!(state.sessions.selected_session_index, Some(1));
     }
 
     #[test]
@@ -1534,7 +1536,8 @@ mod tests {
     #[test]
     fn cancelling_a_keychain_prompt_disarms_the_row() {
         let mut state = crate::app::state::AppState::new();
-        state.config_screen_state.keychain_target = Some("fleet.bridge.telegram.token".to_string());
+        state.config.config_screen_state.keychain_target =
+            Some("fleet.bridge.telegram.token".to_string());
 
         crate::app::EventHandler::process_event(
             crate::app::events::AppEvent::ConfigPopupCancel,
@@ -1542,7 +1545,7 @@ mod tests {
         );
 
         assert_eq!(
-            state.config_screen_state.keychain_target, None,
+            state.config.config_screen_state.keychain_target, None,
             "an escaped Ctrl+K prompt left the row armed; the next edit of it \
              would be stored in the keychain"
         );
@@ -2253,7 +2256,7 @@ mod tests {
     fn a_new_question_does_not_inherit_an_older_questions_clock() {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
         let mut state = state_with_session_at("/work/two-questions", Some("tmux_proj"));
-        let id = state.workspaces[0].sessions[0].id;
+        let id = state.sessions.workspaces[0].sessions[0].id;
         let mut chips = vec![
             SessionAttention::local(AttentionKind::Ask, 1_000).with_detail("Which sqlite path?"),
         ];
@@ -2465,7 +2468,7 @@ mod tests {
         assert_eq!(projected, Some(SessionStatus::Stopped));
 
         let mut state = AppState::new();
-        state.session_filter = crate::app::state::SessionFilter::ActiveOnly;
+        state.sessions.session_filter = crate::app::state::SessionFilter::ActiveOnly;
         let mut session = Session::new("ended".to_string(), CWD.to_string());
         session.status = projected.expect("terminal stop projects");
         assert!(
@@ -2663,13 +2666,13 @@ mod tests {
     fn state_with_session_at(cwd: &str, tmux: Option<&str>) -> AppState {
         use crate::models::{Session, SessionStatus, Workspace};
         let mut state = AppState::new();
-        state.workspaces.clear();
+        state.sessions.workspaces.clear();
         let mut workspace = Workspace::new("proj".to_string(), PathBuf::from(cwd));
         let mut session = Session::new("proj".to_string(), cwd.to_string());
         session.status = SessionStatus::Idle;
         session.tmux_session_name = tmux.map(str::to_string);
         workspace.add_session(session);
-        state.workspaces.push(workspace);
+        state.sessions.workspaces.push(workspace);
         state
     }
 
@@ -2682,7 +2685,7 @@ mod tests {
         use crate::fleet::attention::DaemonAttention;
         let mut by_cwd = std::collections::HashMap::new();
         by_cwd.insert(cwd.to_string(), vec![chip]);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up(by_cwd);
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up(by_cwd);
     }
 
     /// A question the agent RE-REPORTS keeps the instant it was first seen.
@@ -2702,7 +2705,7 @@ mod tests {
         use crate::fleet::answer::request_id;
         use crate::fleet::attention::{AttentionKind, SessionAttention};
         let mut state = state_with_session_at("/work/repeat", Some("tmux_proj"));
-        let id = state.workspaces[0].sessions[0].id;
+        let id = state.sessions.workspaces[0].sessions[0].id;
 
         let mut first = [SessionAttention::local(AttentionKind::Ask, 1_000)];
         state.stamp_local_since(id, &mut first);
@@ -2728,7 +2731,7 @@ mod tests {
     fn stamping_does_not_touch_a_daemon_row() {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
         let mut state = state_with_session_at("/work/daemonrow", Some("tmux_proj"));
-        let id = state.workspaces[0].sessions[0].id;
+        let id = state.sessions.workspaces[0].sessions[0].id;
         let mut chips = [SessionAttention::daemon(
             AttentionKind::Ask,
             9_000,
@@ -2737,7 +2740,7 @@ mod tests {
         state.stamp_local_since(id, &mut chips);
         assert_eq!(chips[0].since_ms, 9_000);
         assert!(
-            state.attention_local_since.is_empty(),
+            state.fleet.attention_local_since.is_empty(),
             "a daemon row must not take a local clock"
         );
     }
@@ -2759,7 +2762,7 @@ mod tests {
 
         state.refresh_attention_markers(2_000);
 
-        let chips = &state.workspaces[0].sessions[0].live_attention;
+        let chips = &state.sessions.workspaces[0].sessions[0].live_attention;
         assert_eq!(chips.len(), 1, "the daemon row must land: {chips:?}");
         assert_eq!(chips[0].kind, AttentionKind::Ask);
         assert_eq!(chips[0].source, AttentionSource::Daemon);
@@ -2771,7 +2774,7 @@ mod tests {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
         let cwd = "/work/missing-tmux";
         let mut state = state_with_session_at(cwd, Some("tmux_missing"));
-        let id = state.workspaces[0].sessions[0].id;
+        let id = state.sessions.workspaces[0].sessions[0].id;
         install_daemon_row(
             &state,
             cwd,
@@ -2782,7 +2785,7 @@ mod tests {
         state.refresh_attention_markers(2_000);
 
         assert!(
-            state.workspaces[0].sessions[0].live_attention.is_empty(),
+            state.sessions.workspaces[0].sessions[0].live_attention.is_empty(),
             "a stopped row must not regain an unanswerable daemon question"
         );
     }
@@ -2792,7 +2795,7 @@ mod tests {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
         let cwd = "/work/missing-tmux-error";
         let mut state = state_with_session_at(cwd, Some("tmux_missing_error"));
-        let id = state.workspaces[0].sessions[0].id;
+        let id = state.sessions.workspaces[0].sessions[0].id;
         install_daemon_row(
             &state,
             cwd,
@@ -2801,12 +2804,12 @@ mod tests {
         );
 
         state.refresh_attention_markers(2_000);
-        assert_eq!(state.workspaces[0].sessions[0].errors.len(), 1);
+        assert_eq!(state.sessions.workspaces[0].sessions[0].errors.len(), 1);
 
         assert!(state.mark_session_stopped_for_missing_tmux(id, "tmux_missing_error"));
         state.refresh_attention_markers(3_000);
 
-        let session = &state.workspaces[0].sessions[0];
+        let session = &state.sessions.workspaces[0].sessions[0];
         assert!(session.live_attention.is_empty());
         assert_eq!(
             session.errors.len(),
@@ -2826,13 +2829,14 @@ mod tests {
 
         let cwd = "/work/shared";
         let mut state = state_with_session_at(cwd, Some("tmux_parent"));
-        let parent_id = state.workspaces[0].sessions[0].id;
-        state.workspaces[0].sessions[0].provider_session_id = Some("parent-provider-id".into());
+        let parent_id = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].provider_session_id =
+            Some("parent-provider-id".into());
         let mut child = Session::new("child".into(), cwd.into());
         child.tmux_session_name = Some("tmux_child".into());
         child.provider_session_id = Some("child-provider-id".into());
         let child_id = child.id;
-        state.workspaces[0].add_session(child);
+        state.sessions.workspaces[0].add_session(child);
 
         let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-parent".into());
         let mut by_session_id = std::collections::HashMap::new();
@@ -2841,7 +2845,7 @@ mod tests {
         by_cwd.insert(cwd.into(), vec![chip.clone()]);
         let mut all = std::collections::HashMap::new();
         all.insert("att-parent".into(), chip);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
             by_session_id,
             by_cwd,
             std::collections::HashMap::new(),
@@ -2867,8 +2871,8 @@ mod tests {
 
         let cwd = "/work/known-id";
         let mut state = state_with_session_at(cwd, Some("tmux_parent"));
-        let id = state.workspaces[0].sessions[0].id;
-        state.workspaces[0].sessions[0].provider_session_id = Some("local-parent".into());
+        let id = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].provider_session_id = Some("local-parent".into());
         let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-child".into());
         let mut by_session_id = std::collections::HashMap::new();
         by_session_id.insert("hidden-child".into(), vec![chip.clone()]);
@@ -2876,7 +2880,7 @@ mod tests {
         by_cwd.insert(cwd.into(), vec![chip.clone()]);
         let mut all = std::collections::HashMap::new();
         all.insert("att-child".into(), chip);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
             by_session_id,
             by_cwd,
             std::collections::HashMap::new(),
@@ -2896,15 +2900,16 @@ mod tests {
         use crate::fleet::attention::{AttentionKind, DaemonAttention, SessionAttention};
 
         let mut state = state_with_session_at("/work/codex", Some("tmux_codex"));
-        let id = state.workspaces[0].sessions[0].id;
-        state.workspaces[0].sessions[0].agent_type = crate::models::SessionAgentType::Codex;
-        state.workspaces[0].sessions[0].provider_session_id = Some("codex-thread".into());
+        let id = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].agent_type =
+            crate::models::SessionAgentType::Codex;
+        state.sessions.workspaces[0].sessions[0].provider_session_id = Some("codex-thread".into());
         let chip = SessionAttention::daemon(AttentionKind::Ask, 1_000, "att-codex".into());
         let mut by_session_id = std::collections::HashMap::new();
         by_session_id.insert("codex-thread".into(), vec![chip.clone()]);
         let mut all = std::collections::HashMap::new();
         all.insert("att-codex".into(), chip);
-        *state.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention::up_indexed(
             by_session_id,
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
@@ -2930,7 +2935,7 @@ mod tests {
         state.refresh_attention_markers(2_000);
 
         assert_eq!(
-            state.workspaces[0].sessions[0].live_attention[0].answerable,
+            state.sessions.workspaces[0].sessions[0].live_attention[0].answerable,
             Answerable::Daemon {
                 attention_id: "att-9".into()
             }
@@ -2953,7 +2958,7 @@ mod tests {
                 "att-1".into(),
             )],
         );
-        *state.daemon_attention.lock().unwrap() = DaemonAttention {
+        *state.fleet.daemon_attention.lock().unwrap() = DaemonAttention {
             by_session_id: std::collections::HashMap::new(),
             by_cwd_without_session_id: by_cwd.clone(),
             by_cwd,
@@ -2965,7 +2970,7 @@ mod tests {
 
         state.refresh_attention_markers(2_000);
 
-        let chip = &state.workspaces[0].sessions[0].live_attention[0];
+        let chip = &state.sessions.workspaces[0].sessions[0].live_attention[0];
         assert!(
             !chip.answerable.is_answerable(),
             "an ACP-backed row with no daemon must not look answerable"
@@ -2988,12 +2993,12 @@ mod tests {
         use crate::fleet::attention::AttentionKind;
         use crate::models::SessionStatus;
         let mut state = state_with_session_at("/work/broken", Some("tmux_proj"));
-        state.workspaces[0].sessions[0].status =
+        state.sessions.workspaces[0].sessions[0].status =
             SessionStatus::Error("adapter exited 1: no such model".to_string());
 
         state.refresh_attention_markers(2_000);
 
-        let chip = state.workspaces[0].sessions[0]
+        let chip = state.sessions.workspaces[0].sessions[0]
             .live_attention
             .iter()
             .find(|chip| chip.kind == AttentionKind::Err)
@@ -3027,14 +3032,14 @@ mod tests {
         crate::config::tunables::install_snapshot(config);
 
         let mut state = state_with_session_at("/work/broken", Some("tmux_proj"));
-        state.workspaces[0].sessions[0].status =
+        state.sessions.workspaces[0].sessions[0].status =
             SessionStatus::Error("worktree vanished".to_string());
 
         // First observation stamps the clock.
         let raised_at = 1_000_000_000_000;
         state.refresh_attention_markers(raised_at);
         assert!(
-            state.workspaces[0].sessions[0]
+            state.sessions.workspaces[0].sessions[0]
                 .live_attention
                 .iter()
                 .any(|chip| chip.kind == AttentionKind::Err),
@@ -3044,7 +3049,7 @@ mod tests {
         // Three hours later, still failed, still the same failure.
         state.refresh_attention_markers(raised_at + 3 * 60 * 60 * 1000);
 
-        let session = &state.workspaces[0].sessions[0];
+        let session = &state.sessions.workspaces[0].sessions[0];
         assert!(
             !session.live_attention.iter().any(|chip| chip.kind == AttentionKind::Err),
             "an error older than the window must stop lighting the row"
@@ -3086,7 +3091,7 @@ mod tests {
 
         state.refresh_attention_markers(raised_at + 5 * 60 * 60 * 1000);
 
-        let session = &state.workspaces[0].sessions[0];
+        let session = &state.sessions.workspaces[0].sessions[0];
         assert!(
             !session.live_attention.iter().any(|chip| chip.kind == AttentionKind::Err),
             "a five-hour-old escalation must not still be lighting the row"
@@ -3117,9 +3122,9 @@ mod tests {
 
         state.refresh_attention_markers(2_000);
 
-        assert!(state.workspaces[0].sessions[0].live_attention.is_empty());
+        assert!(state.sessions.workspaces[0].sessions[0].live_attention.is_empty());
         assert_eq!(
-            state.attention_elsewhere, 1,
+            state.fleet.attention_elsewhere, 1,
             "a request the screen cannot place is still a request"
         );
     }
@@ -3129,7 +3134,7 @@ mod tests {
         use crate::fleet::attention::{AttentionKind, SessionAttention};
         let cwd = "/work/attached";
         let mut state = state_with_session_at(cwd, Some("tmux_proj"));
-        state.workspaces[0].sessions[0].is_attached = true;
+        state.sessions.workspaces[0].sessions[0].is_attached = true;
         install_daemon_row(
             &state,
             cwd,
@@ -3139,11 +3144,11 @@ mod tests {
         state.refresh_attention_markers(2_000);
 
         assert!(
-            state.workspaces[0].sessions[0].live_attention.is_empty(),
+            state.sessions.workspaces[0].sessions[0].live_attention.is_empty(),
             "an attached session never nags — the operator is looking at it"
         );
         assert_eq!(
-            state.attention_elsewhere, 0,
+            state.fleet.attention_elsewhere, 0,
             "the session under the cursor must not be reported as waiting elsewhere"
         );
     }
@@ -3159,7 +3164,7 @@ mod tests {
         // watching a spinner that is waiting on them.
         let cwd = "/work/busy";
         let mut state = state_with_session_at(cwd, Some("tmux_proj"));
-        state.workspaces[0].sessions[0].status = SessionStatus::Running;
+        state.sessions.workspaces[0].sessions[0].status = SessionStatus::Running;
         install_daemon_row(
             &state,
             cwd,
@@ -3169,7 +3174,7 @@ mod tests {
         state.refresh_attention_markers(2_000);
 
         assert_eq!(
-            state.workspaces[0].sessions[0].live_attention.len(),
+            state.sessions.workspaces[0].sessions[0].live_attention.len(),
             1,
             "a generating session can still be blocked on an approval"
         );
@@ -3264,10 +3269,10 @@ mod tests {
         ws.add_session(shell_stopped);
 
         let mut state = AppState::new();
-        state.workspaces.push(ws);
+        state.sessions.workspaces.push(ws);
         // Mark all five as multi-selected.
         for id in all_ids {
-            state.selected_sessions.insert(id);
+            state.sessions.selected_sessions.insert(id);
         }
 
         let mut got = state.selected_resumable_session_ids();
@@ -3294,7 +3299,7 @@ mod tests {
         use crate::app::state::WorkspaceLoadResult;
 
         let mut state = AppState::new();
-        state.pending_async_action = None;
+        state.shell.pending_async_action = None;
 
         // Simulate the startup background load completing.
         let tx = state.start_background_workspace_loading();
@@ -3304,7 +3309,7 @@ mod tests {
 
         assert!(updated, "applying the background result reports an update");
         assert_eq!(
-            state.pending_async_action,
+            state.shell.pending_async_action,
             Some(AsyncAction::RefreshWorkspaces),
             "fast startup load must enqueue a full refresh so stopped sessions surface"
         );
@@ -3316,14 +3321,14 @@ mod tests {
 
         let mut state = AppState::new();
         // A user-queued action is already pending when the load completes.
-        state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+        state.shell.pending_async_action = Some(AsyncAction::CleanupOrphaned);
 
         let tx = state.start_background_workspace_loading();
         tx.send(WorkspaceLoadResult::Success(Vec::new())).expect("send load result");
         state.check_workspace_loading_complete();
 
         assert_eq!(
-            state.pending_async_action,
+            state.shell.pending_async_action,
             Some(AsyncAction::CleanupOrphaned),
             "an already-queued action must not be overwritten by the refresh hand-off"
         );
@@ -3480,9 +3485,9 @@ mod tests {
         }
 
         let mut state = AppState::new();
-        state.workspaces.push(ws);
+        state.sessions.workspaces.push(ws);
         for id in &ids {
-            state.selected_sessions.insert(*id);
+            state.sessions.selected_sessions.insert(*id);
         }
         (state, ids)
     }
@@ -3497,10 +3502,11 @@ mod tests {
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
             assert!(
-                state.pending_async_action.is_none(),
+                state.shell.pending_async_action.is_none(),
                 "bulk delete must not queue any action before the user confirms"
             );
-            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            let dialog =
+                state.shell.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
             let opts = dialog.options.as_ref().expect("tri-option dialog");
             assert_eq!(opts.len(), 3, "Stop all / Delete all / Cancel");
             assert_eq!(opts[0].label, "Stop all");
@@ -3517,7 +3523,7 @@ mod tests {
             ));
             assert!(matches!(opts[2].action, ConfirmAction::Cancel));
             assert_eq!(
-                state.selected_sessions.len(),
+                state.sessions.selected_sessions.len(),
                 2,
                 "selection survives until the user picks an outcome"
             );
@@ -3532,8 +3538,9 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSelectedSessions, &mut state);
 
-            assert!(state.pending_async_action.is_none());
-            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            assert!(state.shell.pending_async_action.is_none());
+            let dialog =
+                state.shell.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
             assert!(matches!(
                 &dialog.options.as_ref().expect("tri-option dialog")[0].action,
                 ConfirmAction::BulkStopSessions(got) if got == &ids
@@ -3549,7 +3556,8 @@ mod tests {
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
+            let dialog =
+                state.shell.confirmation_dialog.as_ref().expect("bulk confirmation dialog");
             assert_eq!(dialog.title, "Stop or Delete 2 Session(s)");
             assert!(
                 dialog.message.contains("2 session(s): alpha, beta"),
@@ -3574,11 +3582,14 @@ mod tests {
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(matches!(
-                state.pending_async_action,
+                state.shell.pending_async_action,
                 Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
             ));
-            assert!(state.selected_sessions.is_empty(), "selection consumed");
-            assert!(state.confirmation_dialog.is_none());
+            assert!(
+                state.sessions.selected_sessions.is_empty(),
+                "selection consumed"
+            );
+            assert!(state.shell.confirmation_dialog.is_none());
         });
     }
 
@@ -3594,7 +3605,7 @@ mod tests {
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(matches!(
-                state.pending_async_action,
+                state.shell.pending_async_action,
                 Some(AsyncAction::BulkDeleteSessions(ref got)) if got == &ids
             ));
         });
@@ -3612,17 +3623,21 @@ mod tests {
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(
-                state.pending_async_action.is_none(),
+                state.shell.pending_async_action.is_none(),
                 "Cancel queues nothing"
             );
-            assert_eq!(state.selected_sessions.len(), 2, "selection untouched");
+            assert_eq!(
+                state.sessions.selected_sessions.len(),
+                2,
+                "selection untouched"
+            );
 
             // Esc on a freshly-opened dialog is equally inert.
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
             EventHandler::process_event(AppEvent::ConfirmationCancel, &mut state);
-            assert!(state.confirmation_dialog.is_none());
-            assert!(state.pending_async_action.is_none());
-            assert_eq!(state.selected_sessions.len(), 2);
+            assert!(state.shell.confirmation_dialog.is_none());
+            assert!(state.shell.pending_async_action.is_none());
+            assert_eq!(state.sessions.selected_sessions.len(), 2);
         });
     }
 
@@ -3703,15 +3718,18 @@ mod tests {
                     SessionAgentType::Claude,
                     SessionStatus::Running,
                 );
-                state.selected_sessions.insert(session.id);
+                state.sessions.selected_sessions.insert(session.id);
                 ws.add_session(session);
             }
-            state.workspaces.push(ws);
+            state.sessions.workspaces.push(ws);
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            assert!(state.pending_async_action.is_none(), "still asks first");
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            assert!(
+                state.shell.pending_async_action.is_none(),
+                "still asks first"
+            );
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             assert!(dialog.options.is_none(), "no Stop option for Boss sessions");
             assert!(!dialog.selected_option, "Default = No");
             assert!(matches!(
@@ -3737,12 +3755,12 @@ mod tests {
                 SessionStatus::Running,
             );
             let boss_id = boss.id;
-            state.workspaces[0].add_session(boss);
-            state.selected_sessions.insert(boss_id);
+            state.sessions.workspaces[0].add_session(boss);
+            state.sessions.selected_sessions.insert(boss_id);
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             let opts = dialog.options.as_ref().expect("tri-option dialog");
             assert_eq!(dialog.selected_index, 0, "Stop is still the default");
             assert_eq!(opts[0].label, "Stop 2", "names how many Stop covers");
@@ -3778,12 +3796,12 @@ mod tests {
                 SessionAgentType::Claude,
                 SessionStatus::Stopped,
             );
-            state.selected_sessions.insert(stopped.id);
-            state.workspaces[0].add_session(stopped);
+            state.sessions.selected_sessions.insert(stopped.id);
+            state.sessions.workspaces[0].add_session(stopped);
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             let opts = dialog.options.as_ref().expect("tri-option dialog");
             assert!(
                 matches!(&opts[0].action, ConfirmAction::BulkStopSessions(got) if got == &ids),
@@ -3805,11 +3823,11 @@ mod tests {
         with_ainb_home(|| {
             let (mut state, ids) = state_with_checked_sessions(&["alpha"]);
             let stale = uuid::Uuid::new_v4();
-            state.selected_sessions.insert(stale);
+            state.sessions.selected_sessions.insert(stale);
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             assert!(dialog.message.contains("unknown ("), "{}", dialog.message);
             assert!(
                 !dialog.message.contains(&stale.to_string()),
@@ -3851,11 +3869,12 @@ mod tests {
                 ws.add_session(session);
             }
             let mut state = AppState::new();
-            state.workspaces.push(ws);
+            state.sessions.workspaces.push(ws);
 
             state.bulk_stop_sessions(ids).await;
 
             let message = state
+                .shell
                 .notifications
                 .iter()
                 .map(|n| n.message.clone())
@@ -3884,14 +3903,14 @@ mod tests {
                     SessionAgentType::Claude,
                     SessionStatus::Stopped,
                 );
-                state.selected_sessions.insert(session.id);
+                state.sessions.selected_sessions.insert(session.id);
                 ws.add_session(session);
             }
-            state.workspaces.push(ws);
+            state.sessions.workspaces.push(ws);
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
 
-            let dialog = state.confirmation_dialog.as_ref().expect("confirmation dialog");
+            let dialog = state.shell.confirmation_dialog.as_ref().expect("confirmation dialog");
             assert!(dialog.options.is_none(), "nothing left to stop");
             assert!(!dialog.selected_option, "Default = No");
             assert!(
@@ -3924,18 +3943,18 @@ mod tests {
                 SessionStatus::Running,
             );
             let boss_id = boss.id;
-            state.workspaces[0].add_session(boss);
-            state.selected_sessions.insert(boss_id);
+            state.sessions.workspaces[0].add_session(boss);
+            state.sessions.selected_sessions.insert(boss_id);
 
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
             assert!(matches!(
-                state.pending_async_action,
+                state.shell.pending_async_action,
                 Some(AsyncAction::BulkStopSessions(ref got)) if got == &ids
             ));
             assert_eq!(
-                state.selected_sessions.iter().copied().collect::<Vec<_>>(),
+                state.sessions.selected_sessions.iter().copied().collect::<Vec<_>>(),
                 vec![boss_id],
                 "the row Stop did not touch stays checked"
             );
@@ -3949,8 +3968,8 @@ mod tests {
         with_ainb_home(|| {
             let mut state = AppState::new();
             state.show_bulk_delete_or_stop_confirmation(Vec::new());
-            assert!(state.confirmation_dialog.is_none());
-            assert!(state.pending_async_action.is_none());
+            assert!(state.shell.confirmation_dialog.is_none());
+            assert!(state.shell.pending_async_action.is_none());
         });
     }
 
@@ -4001,7 +4020,7 @@ mod tests {
                 ws.add_session(session);
             }
             let mut state = AppState::new();
-            state.workspaces.push(ws);
+            state.sessions.workspaces.push(ws);
 
             let id_names: Vec<(uuid::Uuid, String)> = ids
                 .iter()
@@ -4050,7 +4069,7 @@ mod tests {
             let mut ws = crate::models::Workspace::new("ws".to_string(), tree);
             ws.add_session(session);
             let mut state = AppState::new();
-            state.workspaces.push(ws);
+            state.sessions.workspaces.push(ws);
 
             let status = AppState::bulk_uncommitted_counts(&[(id, "shell".to_string())]);
 
@@ -4182,20 +4201,20 @@ mod tests {
             }
 
             let mut state = AppState::new();
-            state.workspaces.push(ws);
+            state.sessions.workspaces.push(ws);
             for id in &ids {
-                state.selected_sessions.insert(*id);
+                state.sessions.selected_sessions.insert(*id);
             }
 
             // `d` with rows checked, then Enter on the default option.
             EventHandler::process_event(AppEvent::DeleteSession, &mut state);
             assert!(
-                state.pending_async_action.is_none(),
+                state.shell.pending_async_action.is_none(),
                 "the keypress must not queue anything before the user confirms"
             );
             EventHandler::process_event(AppEvent::ConfirmationConfirm, &mut state);
 
-            let queued = state.pending_async_action.take();
+            let queued = state.shell.pending_async_action.take();
             let stop_ids = match queued {
                 Some(AsyncAction::BulkStopSessions(stop_ids)) => stop_ids,
                 other => panic!("the default must be a stop, not {other:?}"),
@@ -4222,7 +4241,7 @@ mod tests {
                     matches!(session.status, SessionStatus::Stopped),
                     "session {id} is {:?}, not Stopped. Notifications: {:?}",
                     session.status,
-                    state.notifications.iter().map(|n| &n.message).collect::<Vec<_>>()
+                    state.shell.notifications.iter().map(|n| &n.message).collect::<Vec<_>>()
                 );
             }
         })

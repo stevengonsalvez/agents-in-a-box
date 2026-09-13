@@ -17,7 +17,7 @@ impl AttachedTerminalComponent {
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        if let Some(session_id) = state.attached_session_id {
+        if let Some(session_id) = state.sessions.attached_session_id {
             self.render_attached_terminal(frame, area, state, session_id);
         } else {
             self.render_error_state(frame, area);
@@ -32,8 +32,12 @@ impl AttachedTerminalComponent {
         session_id: uuid::Uuid,
     ) {
         // Get session info
-        let session =
-            state.workspaces.iter().flat_map(|w| &w.sessions).find(|s| s.id == session_id);
+        let session = state
+            .sessions
+            .workspaces
+            .iter()
+            .flat_map(|w| &w.sessions)
+            .find(|s| s.id == session_id);
 
         let (title, recent_logs) = if let Some(session) = session {
             (

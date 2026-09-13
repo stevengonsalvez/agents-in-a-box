@@ -66,7 +66,7 @@ impl ClaudeChatComponent {
             .border_style(Style::default().fg(Color::Gray));
 
         // Get messages from state
-        let messages = if let Some(chat_state) = &state.claude_chat_state {
+        let messages = if let Some(chat_state) = &state.claude_chat.claude_chat_state {
             &chat_state.messages
         } else {
             // Show welcome message if no chat state
@@ -102,7 +102,7 @@ impl ClaudeChatComponent {
 
         // Show streaming indicator if currently streaming
         let mut items = message_items;
-        if let Some(chat_state) = &state.claude_chat_state {
+        if let Some(chat_state) = &state.claude_chat.claude_chat_state {
             if chat_state.is_streaming {
                 let streaming_text = chat_state
                     .current_streaming_response
@@ -172,14 +172,18 @@ impl ClaudeChatComponent {
     }
 
     fn render_input(&self, frame: &mut Frame, area: Rect, state: &AppState) {
-        let input_text = if let Some(chat_state) = &state.claude_chat_state {
+        let input_text = if let Some(chat_state) = &state.claude_chat.claude_chat_state {
             &chat_state.input_buffer
         } else {
             ""
         };
 
-        let is_streaming =
-            state.claude_chat_state.as_ref().map(|s| s.is_streaming).unwrap_or(false);
+        let is_streaming = state
+            .claude_chat
+            .claude_chat_state
+            .as_ref()
+            .map(|s| s.is_streaming)
+            .unwrap_or(false);
 
         let (title, border_color) = if is_streaming {
             (" Input (Claude is responding...) ", Color::Yellow)

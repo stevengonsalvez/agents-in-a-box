@@ -79,8 +79,9 @@ async fn test_n_key_triggers_new_session() {
     }
 
     // Should have navigated to the NEW_SESSION screen at the PickRepo step.
-    assert_eq!(state.current_screen, screen_ids::NEW_SESSION);
+    assert_eq!(state.shell.current_screen, screen_ids::NEW_SESSION);
     let ns = state
+        .new_session
         .new_session_state
         .as_ref()
         .expect("new_session_state should be primed after pressing 'n'");
@@ -91,7 +92,7 @@ async fn test_n_key_triggers_new_session() {
     );
 
     // The legacy async-action queue is not used by this flow.
-    assert!(state.pending_async_action.is_none());
+    assert!(state.shell.pending_async_action.is_none());
 }
 
 #[test]
@@ -144,7 +145,7 @@ fn test_help_key_event() {
 #[test]
 fn test_help_visible_only_responds_to_help_and_esc() {
     let mut state = AppState::default();
-    state.help_visible = true;
+    state.shell.help_visible = true;
 
     let help_event =
         EventHandler::handle_key_event(create_key_event(KeyCode::Char('?')), &mut state);
@@ -186,7 +187,7 @@ fn test_unknown_key_returns_none() {
 fn test_process_quit_event() {
     let mut state = AppState::default();
 
-    assert!(!state.should_quit);
+    assert!(!state.shell.should_quit);
 
     if let Some(event) =
         EventHandler::handle_key_event(create_key_event(KeyCode::Char('q')), &mut state)
@@ -194,14 +195,14 @@ fn test_process_quit_event() {
         EventHandler::process_event(event, &mut state);
     }
 
-    assert!(state.should_quit);
+    assert!(state.shell.should_quit);
 }
 
 #[test]
 fn test_process_help_toggle_event() {
     let mut state = AppState::default();
 
-    assert!(!state.help_visible);
+    assert!(!state.shell.help_visible);
 
     if let Some(event) =
         EventHandler::handle_key_event(create_key_event(KeyCode::Char('?')), &mut state)
@@ -209,7 +210,7 @@ fn test_process_help_toggle_event() {
         EventHandler::process_event(event, &mut state);
     }
 
-    assert!(state.help_visible);
+    assert!(state.shell.help_visible);
 }
 
 // test_usage_period_and_provider_events removed — the burndown plugin

@@ -267,9 +267,9 @@ fn state_with_selected_stopped_managed_session() -> AppState {
     workspace.add_session(managed);
 
     let mut state = AppState::new();
-    state.current_screen = screen_ids::SESSION_LIST.to_string();
-    state.workspaces.push(workspace);
-    state.selected_sessions.insert(selected_id);
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    state.sessions.workspaces.push(workspace);
+    state.sessions.selected_sessions.insert(selected_id);
     state
 }
 
@@ -287,12 +287,12 @@ fn is_bulk_resume_on_enter(event: Option<AppEvent>) -> bool {
 #[test]
 fn selected_managed_sessions_resume_after_cursor_moves_to_attachable_rows() {
     let mut terminal = state_with_selected_stopped_managed_session();
-    terminal.other_tmux_sessions.push(OtherTmuxSession::new(
+    terminal.tmux.other_tmux_sessions.push(OtherTmuxSession::new(
         "external-terminal".to_string(),
         false,
         1,
     ));
-    terminal.selected_other_tmux_index = Some(0);
+    terminal.tmux.selected_other_tmux_index = Some(0);
     assert!(
         is_bulk_resume_on_enter(enter_event(&mut terminal)),
         "selected managed sessions must resume before an Other tmux cursor attaches"
@@ -301,21 +301,21 @@ fn selected_managed_sessions_resume_after_cursor_moves_to_attachable_rows() {
     let mut ssh = state_with_selected_stopped_managed_session();
     let mut ssh_session = Session::new("remote".to_string(), "/tmp/remote".to_string());
     ssh_session.agent_type = SessionAgentType::Ssh;
-    ssh.ssh_sessions.push(ssh_session);
-    ssh.selected_ssh_session_index = Some(0);
+    ssh.ssh.ssh_sessions.push(ssh_session);
+    ssh.ssh.selected_ssh_session_index = Some(0);
     assert!(
         is_bulk_resume_on_enter(enter_event(&mut ssh)),
         "selected managed sessions must resume before an SSH cursor attaches"
     );
 
     let mut shell = state_with_selected_stopped_managed_session();
-    shell.workspaces[0].set_shell_session(ShellSession::new_workspace_shell(
+    shell.sessions.workspaces[0].set_shell_session(ShellSession::new_workspace_shell(
         PathBuf::from("/tmp/workspace"),
         "workspace",
     ));
-    shell.selected_workspace_index = Some(0);
-    shell.selected_session_index = None;
-    shell.shell_selected = true;
+    shell.sessions.selected_workspace_index = Some(0);
+    shell.sessions.selected_session_index = None;
+    shell.sessions.shell_selected = true;
     assert!(
         is_bulk_resume_on_enter(enter_event(&mut shell)),
         "selected managed sessions must resume before a shell cursor attaches"

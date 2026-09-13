@@ -234,8 +234,11 @@ pub struct SessionListComponent {
 }
 
 fn selected_row_target(state: &AppState) -> Option<SessionListRowTarget> {
-    if let Some(workspace_idx) = state.selected_workspace_index {
-        return match (state.selected_session_index, state.shell_selected) {
+    if let Some(workspace_idx) = state.sessions.selected_workspace_index {
+        return match (
+            state.sessions.selected_session_index,
+            state.sessions.shell_selected,
+        ) {
             (Some(session_idx), _) => Some(SessionListRowTarget::Attachable(
                 AttachableRef::WorkspaceSession {
                     workspace_idx,
@@ -249,10 +252,11 @@ fn selected_row_target(state: &AppState) -> Option<SessionListRowTarget> {
         };
     }
     state
+        .ssh
         .selected_ssh_session_index
         .map(|ssh_idx| SessionListRowTarget::Attachable(AttachableRef::SshSession { ssh_idx }))
         .or_else(|| {
-            state.selected_other_tmux_index.map(|other_idx| {
+            state.tmux.selected_other_tmux_index.map(|other_idx| {
                 SessionListRowTarget::Attachable(AttachableRef::OtherTmux { other_idx })
             })
         })
@@ -289,7 +293,7 @@ impl SessionListComponent {
 
         // Show focus indicator with premium colors
         use crate::app::state::FocusedPane;
-        let (border_color, is_focused) = match state.focused_pane {
+        let (border_color, is_focused) = match state.shell.focused_pane {
             FocusedPane::Sessions => (SELECTION_GREEN, true),
             FocusedPane::LiveLogs | FocusedPane::Preview => (SUBDUED_BORDER, false),
         };
@@ -303,6 +307,7 @@ impl SessionListComponent {
         // all their sessions to the filter (and have no shell) are dropped
         // from the rendered list, so the header should match.
         let workspace_count = state
+            .sessions
             .workspaces
             .iter()
             .filter(|w| {
@@ -316,7 +321,7 @@ impl SessionListComponent {
         // here would tell the operator there is more waiting on them than there
         // is. Counts ROWS, so a session with both an ASK and an APPROVE is one
         // session needing one human.
-        let needs_you = needs_you_count(state.workspaces.iter().flat_map(|w| {
+        let needs_you = needs_you_count(state.sessions.workspaces.iter().flat_map(|w| {
             w.sessions
                 .iter()
                 .filter(|s| state.session_passes_filter(s))
@@ -350,7 +355,7 @@ impl SessionListComponent {
             ),
             Span::raw(if needs_you_label.is_empty() { "" } else { " " }),
         ];
-        let filter_label = format!("F [{}]", state.session_filter.label());
+        let filter_label = format!("F [{}]", state.sessions.session_filter.label());
         let title_prefix = format!(" \u{f07b} Workspaces ({workspace_count}){needs_you_label} ");
         ui.sessions_pane.set_filter_toggle_area(Rect::new(
             area.x.saturating_add(1 + title_prefix.chars().count() as u16),
@@ -380,9 +385,9 @@ impl SessionListComponent {
                     .style(Style::default().bg(DARK_BG))
                     .title(Line::from(title_spans))
                     .title_bottom(
-                        if state.ssh_session_rename_mode
-                            || state.other_tmux_rename_mode
-                            || state.session_label_rename_mode
+                        if state.ssh.ssh_session_rename_mode
+                            || state.tmux.other_tmux_rename_mode
+                            || state.session_labels.session_label_rename_mode
                         {
                             // Rename mode help (SSH or Other tmux)
                             Line::from(vec![
@@ -475,7 +480,7 @@ impl SessionListComponent {
 
         frame.render_stateful_widget(list, area, &mut self.list_state);
 
-        if state.session_label_rename_mode {
+        if state.session_labels.session_label_rename_mode {
             let width = area.width.min(54);
             let height = 7;
             let popup = Rect::new(
@@ -495,7 +500,7 @@ impl SessionListComponent {
             frame.render_widget(block, popup);
             let text = format!(
                 "Durable name, Git branch unchanged\n\n{}|\n\nEnter save   Esc cancel   blank clears",
-                state.session_label_rename_buffer
+                state.session_labels.session_label_rename_buffer
             );
             frame.render_widget(
                 Paragraph::new(text).style(Style::default().fg(SOFT_WHITE).bg(DARK_BG)),
@@ -503,7 +508,7 @@ impl SessionListComponent {
             );
         }
 
-        if let Some(menu) = state.session_context_menu {
+        if let Some(menu) = state.session_labels.session_context_menu {
             let actions = state.session_context_actions();
             let width = area.width.min(30);
             let height = (actions.len() as u16 + 3).min(area.height);
@@ -558,11 +563,11 @@ impl SessionListComponent {
         row_width: usize,
         now_ms: i64,
     ) -> Vec<ListItem<'static>> {
-        let elsewhere = state.attention_elsewhere;
+        let elsewhere = state.fleet.attention_elsewhere;
         let mut items = Vec::new();
 
         // Favorite status is precomputed off the render path into
-        // `state.favorite_workspace_paths` (see
+        // `state.sessions.favorite_workspace_paths` (see
         // `AppState::recompute_favorite_workspaces`), so this hot loop does an
         // O(1) set lookup instead of re-parsing favorites.yaml and opening a
         // git repo per workspace on every frame. (perf: beads 9ov + 8rn)
@@ -571,8 +576,9 @@ impl SessionListComponent {
         // divergence would attach the wrong session for a given digit.
         let mut attach_no: usize = 0;
 
-        for (workspace_idx, workspace) in state.workspaces.iter().enumerate() {
-            let is_selected_workspace = state.selected_workspace_index == Some(workspace_idx);
+        for (workspace_idx, workspace) in state.sessions.workspaces.iter().enumerate() {
+            let is_selected_workspace =
+                state.sessions.selected_workspace_index == Some(workspace_idx);
             // Apply the session filter (Shift+F cycles): only count sessions
             // that pass the predicate so the workspace `(N)` matches what the
             // user actually sees rendered below.
@@ -589,7 +595,7 @@ impl SessionListComponent {
             }
 
             // Determine expand state: expanded if selected OR if expand_all is true
-            let is_expanded = is_selected_workspace || state.expand_all_workspaces;
+            let is_expanded = is_selected_workspace || state.sessions.expand_all_workspaces;
 
             let workspace_symbol = if total_count == 0 {
                 "▷"
@@ -617,7 +623,7 @@ impl SessionListComponent {
             // Favorite status: O(1) lookup against the precomputed cache
             // (resolved off the render path in
             // `AppState::recompute_favorite_workspaces`). No git2 / YAML here.
-            let is_favorite = state.favorite_workspace_paths.contains(&workspace.path);
+            let is_favorite = state.sessions.favorite_workspace_paths.contains(&workspace.path);
             let star_indicator = if is_favorite { "\u{f005} " } else { "" }; // fa-star, 1-cell
 
             let workspace_line = Line::from(vec![
@@ -663,8 +669,8 @@ impl SessionListComponent {
                     *title_counts.entry(session_list_name(session)).or_default() += 1;
                 }
                 for (visible_pos, &(session_idx, session)) in visible.iter().enumerate() {
-                    let is_selected_session =
-                        is_selected_workspace && state.selected_session_index == Some(session_idx);
+                    let is_selected_session = is_selected_workspace
+                        && state.sessions.selected_session_index == Some(session_idx);
                     let is_last_session = visible_pos == visible_len - 1;
 
                     // Tree line characters with subdued color
@@ -674,7 +680,7 @@ impl SessionListComponent {
                     let lifecycle_label = session_lifecycle_label(state, session);
 
                     // Git changes (controlled by show_git_status config)
-                    let changes_text = if state.app_config.ui_preferences.show_git_status
+                    let changes_text = if state.config.app_config.ui_preferences.show_git_status
                         && session.git_changes.total() > 0
                     {
                         format!(" ({})", session.git_changes.format())
@@ -699,7 +705,7 @@ impl SessionListComponent {
                     let branch_color = state_color;
                     let agent_icon = session.agent_type.icon();
                     let agent_color = agent_brand_color(&session.agent_type);
-                    let is_multi_selected = state.selected_sessions.contains(&session.id);
+                    let is_multi_selected = state.sessions.selected_sessions.contains(&session.id);
                     let title = session_list_name(session);
                     let collision_id = session_collision_id(
                         session,
@@ -751,7 +757,7 @@ impl SessionListComponent {
                     // SENT, and this one keeps reading SENT after the operator
                     // has navigated to a different question.
                     let sending =
-                        session_alert.iter().find(|chip| state.ask_state.is_sending(chip));
+                        session_alert.iter().find(|chip| state.fleet.ask_state.is_sending(chip));
                     push_status_gutter(
                         &mut title_spans,
                         status_indicator,
@@ -797,8 +803,8 @@ impl SessionListComponent {
                 // Render workspace shell (single shell per workspace)
                 if let Some(shell_session) = &workspace.shell_session {
                     let is_selected_shell = is_selected_workspace
-                        && state.selected_session_index.is_none()
-                        && state.shell_selected;
+                        && state.sessions.selected_session_index.is_none()
+                        && state.sessions.shell_selected;
 
                     // Shell is always last
                     let tree_prefix = "└─";
@@ -839,30 +845,30 @@ impl SessionListComponent {
         }
 
         // Add "SSH Sessions" section if there are SSH sessions
-        if !state.ssh_sessions.is_empty() {
+        if !state.ssh.ssh_sessions.is_empty() {
             // Add separator line
             if !items.is_empty() {
                 items.push(ListItem::new(Line::from("")));
             }
 
-            let session_count = state.ssh_sessions.len();
-            let is_selected_ssh = state.selected_workspace_index.is_none()
-                && state.selected_other_tmux_index.is_none()
-                && state.selected_ssh_session_index.is_some();
+            let session_count = state.ssh.ssh_sessions.len();
+            let is_selected_ssh = state.sessions.selected_workspace_index.is_none()
+                && state.tmux.selected_other_tmux_index.is_none()
+                && state.ssh.selected_ssh_session_index.is_some();
 
-            let ssh_symbol = if state.ssh_sessions_expanded {
+            let ssh_symbol = if state.ssh.ssh_sessions_expanded {
                 "▼"
             } else {
                 "▶"
             };
 
             // Orange color scheme for SSH section
-            let ssh_header_color = if is_selected_ssh || state.selected_ssh_session_index.is_some()
-            {
-                WARNING_ORANGE
-            } else {
-                MUTED_GRAY
-            };
+            let ssh_header_color =
+                if is_selected_ssh || state.ssh.selected_ssh_session_index.is_some() {
+                    WARNING_ORANGE
+                } else {
+                    MUTED_GRAY
+                };
 
             let ssh_header = Line::from(vec![
                 empty_badge(),
@@ -885,20 +891,20 @@ impl SessionListComponent {
             items.push(ListItem::new(ssh_header));
 
             // Show SSH sessions if expanded
-            if state.ssh_sessions_expanded {
-                let session_len = state.ssh_sessions.len();
-                for (idx, ssh_session) in state.ssh_sessions.iter().enumerate() {
+            if state.ssh.ssh_sessions_expanded {
+                let session_len = state.ssh.ssh_sessions.len();
+                for (idx, ssh_session) in state.ssh.ssh_sessions.iter().enumerate() {
                     let is_selected =
-                        is_selected_ssh && state.selected_ssh_session_index == Some(idx);
+                        is_selected_ssh && state.ssh.selected_ssh_session_index == Some(idx);
                     let is_last = idx == session_len - 1;
-                    let is_being_renamed = is_selected && state.ssh_session_rename_mode;
+                    let is_being_renamed = is_selected && state.ssh.ssh_session_rename_mode;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };
 
                     // Use display_name if set, otherwise fall back to ssh_target.display_name() or name
                     let display_text = if is_being_renamed {
                         // Show inline rename editor with cursor
-                        format!("✏️ {}_", state.ssh_session_rename_buffer)
+                        format!("✏️ {}_", state.ssh.ssh_session_rename_buffer)
                     } else {
                         ssh_session.display_name.clone().unwrap_or_else(|| {
                             if let Some(ref target) = ssh_session.ssh_target {
@@ -949,23 +955,23 @@ impl SessionListComponent {
         }
 
         // Add "Other tmux" section if there are other tmux sessions
-        if !state.other_tmux_sessions.is_empty() {
+        if !state.tmux.other_tmux_sessions.is_empty() {
             // Add separator line
             if !items.is_empty() {
                 items.push(ListItem::new(Line::from("")));
             }
 
-            let session_count = state.other_tmux_sessions.len();
-            let is_selected_other = state.selected_workspace_index.is_none()
-                && state.selected_other_tmux_index.is_some();
+            let session_count = state.tmux.other_tmux_sessions.len();
+            let is_selected_other = state.sessions.selected_workspace_index.is_none()
+                && state.tmux.selected_other_tmux_index.is_some();
 
-            let other_symbol = if state.other_tmux_expanded {
+            let other_symbol = if state.tmux.other_tmux_expanded {
                 "▼"
             } else {
                 "▶"
             };
 
-            let header_color = if state.selected_workspace_index.is_none() {
+            let header_color = if state.sessions.selected_workspace_index.is_none() {
                 CORNFLOWER_BLUE
             } else {
                 MUTED_GRAY
@@ -992,13 +998,13 @@ impl SessionListComponent {
             items.push(ListItem::new(other_header));
 
             // Show other tmux sessions if expanded
-            if state.other_tmux_expanded {
-                let session_len = state.other_tmux_sessions.len();
-                for (idx, other_session) in state.other_tmux_sessions.iter().enumerate() {
+            if state.tmux.other_tmux_expanded {
+                let session_len = state.tmux.other_tmux_sessions.len();
+                for (idx, other_session) in state.tmux.other_tmux_sessions.iter().enumerate() {
                     let is_selected =
-                        is_selected_other && state.selected_other_tmux_index == Some(idx);
+                        is_selected_other && state.tmux.selected_other_tmux_index == Some(idx);
                     let is_multi_selected =
-                        state.selected_other_tmux_sessions.contains(&other_session.name);
+                        state.tmux.selected_other_tmux_sessions.contains(&other_session.name);
                     let is_last = idx == session_len - 1;
 
                     let tree_prefix = if is_last { "└─" } else { "├─" };
@@ -1019,7 +1025,7 @@ impl SessionListComponent {
                     };
 
                     // Check if this session is being renamed
-                    let is_being_renamed = is_selected && state.other_tmux_rename_mode;
+                    let is_being_renamed = is_selected && state.tmux.other_tmux_rename_mode;
 
                     let badge = next_badge(&mut attach_no);
                     let checkbox = ballot_checkbox(is_multi_selected);
@@ -1032,7 +1038,7 @@ impl SessionListComponent {
                             Span::styled(format!(" {} ", status), Style::default()),
                             Span::styled("✏️ ", Style::default()),
                             Span::styled(
-                                format!("{}_", state.other_tmux_rename_buffer),
+                                format!("{}_", state.tmux.other_tmux_rename_buffer),
                                 Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
                             ),
                         ])
@@ -1067,7 +1073,7 @@ impl SessionListComponent {
             // "we haven't looked yet". Spinner matches the one used in
             // the home screen's recent-activity strip so the two
             // surfaces share a vocabulary.
-            let empty_line = if state.is_loading_workspaces {
+            let empty_line = if state.workspace_load.is_loading_workspaces {
                 let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                 let frame_idx = (std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -1154,9 +1160,9 @@ impl SessionListComponent {
         let mut count = 0;
 
         // Count workspace items
-        for workspace in &state.workspaces {
+        for workspace in &state.sessions.workspaces {
             count += 1; // Workspace header
-            if state.expand_all_workspaces {
+            if state.sessions.expand_all_workspaces {
                 count += workspace.sessions.len();
                 if workspace.shell_session.is_some() {
                     count += 1;
@@ -1165,25 +1171,26 @@ impl SessionListComponent {
         }
 
         // Count "SSH Sessions" section items
-        if !state.ssh_sessions.is_empty() {
-            if !state.workspaces.is_empty() {
+        if !state.ssh.ssh_sessions.is_empty() {
+            if !state.sessions.workspaces.is_empty() {
                 count += 1; // Empty separator line
             }
             count += 1; // "SSH Sessions" header
-            if state.ssh_sessions_expanded {
-                count += state.ssh_sessions.len();
+            if state.ssh.ssh_sessions_expanded {
+                count += state.ssh.ssh_sessions.len();
             }
         }
 
         // Count "Other tmux" section items
-        if !state.other_tmux_sessions.is_empty() {
-            let has_items_above = !state.workspaces.is_empty() || !state.ssh_sessions.is_empty();
+        if !state.tmux.other_tmux_sessions.is_empty() {
+            let has_items_above =
+                !state.sessions.workspaces.is_empty() || !state.ssh.ssh_sessions.is_empty();
             if has_items_above {
                 count += 1; // Empty separator line
             }
             count += 1; // "Other tmux" header
-            if state.other_tmux_expanded {
-                count += state.other_tmux_sessions.len();
+            if state.tmux.other_tmux_expanded {
+                count += state.tmux.other_tmux_sessions.len();
             }
         }
 
@@ -1218,10 +1225,19 @@ fn session_collision_id(session: &Session, has_collision: bool) -> Option<String
 fn session_lifecycle_label(state: &AppState, session: &Session) -> &'static str {
     if matches!(session.status, SessionStatus::Idle)
         && matches!(
-            state.fleet_metadata.get(&session.id).and_then(|metadata| metadata.lifecycle),
+            state
+                .fleet
+                .fleet_metadata
+                .get(&session.id)
+                .and_then(|metadata| metadata.lifecycle),
             Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete)
         )
-        && state.daemon_attention.lock().map(|daemon| daemon.reachable).unwrap_or(false)
+        && state
+            .fleet
+            .daemon_attention
+            .lock()
+            .map(|daemon| daemon.reachable)
+            .unwrap_or(false)
         && session.live_attention.is_empty()
     {
         return "DONE";
@@ -1266,7 +1282,7 @@ fn truncate_text(text: &str, width: usize) -> String {
 /// The field intentionally has no guessed fallback. A missing model or effort
 /// means no Fleet observation exists yet, not that a provider default is known.
 fn session_model_effort_label(state: &AppState, session: &Session) -> Option<String> {
-    let metadata = state.fleet_metadata.get(&session.id)?;
+    let metadata = state.fleet.fleet_metadata.get(&session.id)?;
     match (
         metadata.model.as_deref(),
         metadata.reasoning_effort.as_deref(),
@@ -1379,6 +1395,7 @@ mod tests {
     /// badge, without the mouse-hit-area bookkeeping `render` also does.
     fn panel_title_for_test(state: &AppState) -> String {
         let workspaces = state
+            .sessions
             .workspaces
             .iter()
             .filter(|w| {
@@ -1386,7 +1403,7 @@ mod tests {
                     || w.shell_session.is_some()
             })
             .count();
-        let needs_you = needs_you_count(state.workspaces.iter().flat_map(|w| {
+        let needs_you = needs_you_count(state.sessions.workspaces.iter().flat_map(|w| {
             w.sessions
                 .iter()
                 .filter(|s| state.session_passes_filter(s))
@@ -1403,8 +1420,8 @@ mod tests {
     /// an APPROVE, a DONE, and a quiet row.
     fn chip_state() -> AppState {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.expand_all_workspaces = true;
+        state.sessions.workspaces.clear();
+        state.sessions.expand_all_workspaces = true;
         let mut workspace = Workspace::new("agents-in-a-box".to_string(), "/tmp/aib".into());
         let rows: [(&str, Vec<SessionAttention>); 5] = [
             (
@@ -1443,18 +1460,18 @@ mod tests {
             session.live_attention = chips;
             workspace.add_session(session);
         }
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = Some(0);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
         state
     }
 
     #[test]
     fn sidebar_shows_observed_model_and_effort_on_each_session_row() {
         let mut state = chip_state();
-        let first = state.workspaces[0].sessions[0].id;
-        let second = state.workspaces[0].sessions[1].id;
-        state.fleet_metadata.insert(
+        let first = state.sessions.workspaces[0].sessions[0].id;
+        let second = state.sessions.workspaces[0].sessions[1].id;
+        state.fleet.fleet_metadata.insert(
             first,
             crate::app::state::SessionFleetMetadata {
                 model: Some("gpt-5.6-terra".to_string()),
@@ -1462,7 +1479,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        state.fleet_metadata.insert(
+        state.fleet.fleet_metadata.insert(
             second,
             crate::app::state::SessionFleetMetadata {
                 model: Some("claude-opus-5".to_string()),
@@ -1498,8 +1515,8 @@ mod tests {
     #[test]
     fn sidebar_keeps_model_effort_on_its_own_line_at_narrow_width() {
         let mut state = chip_state();
-        let first = state.workspaces[0].sessions[0].id;
-        state.fleet_metadata.insert(
+        let first = state.sessions.workspaces[0].sessions[0].id;
+        state.fleet.fleet_metadata.insert(
             first,
             crate::app::state::SessionFleetMetadata {
                 model: Some("gpt-5.6-terra".to_string()),
@@ -1519,12 +1536,13 @@ mod tests {
     #[test]
     fn sidebar_shows_lifecycle_words_separate_from_attention() {
         let mut state = chip_state();
-        state.workspaces[0].sessions[0].status = SessionStatus::Running;
-        state.workspaces[0].sessions[1].status = SessionStatus::Idle;
-        state.workspaces[0].sessions[2].status = SessionStatus::Stopped;
-        state.workspaces[0].sessions[3].status = SessionStatus::Error("lost transport".into());
+        state.sessions.workspaces[0].sessions[0].status = SessionStatus::Running;
+        state.sessions.workspaces[0].sessions[1].status = SessionStatus::Idle;
+        state.sessions.workspaces[0].sessions[2].status = SessionStatus::Stopped;
+        state.sessions.workspaces[0].sessions[3].status =
+            SessionStatus::Error("lost transport".into());
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[2]),
+            session_lifecycle_label(&state, &state.sessions.workspaces[0].sessions[2]),
             "STOP"
         );
 
@@ -1546,10 +1564,10 @@ mod tests {
     #[test]
     fn sidebar_uses_fleet_turn_complete_for_done_gutter() {
         let mut state = chip_state();
-        let session = state.workspaces[0].sessions[0].id;
-        state.workspaces[0].sessions[0].live_attention.clear();
-        state.daemon_attention.lock().unwrap().reachable = true;
-        state.fleet_metadata.insert(
+        let session = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].live_attention.clear();
+        state.fleet.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet.fleet_metadata.insert(
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
@@ -1575,8 +1593,8 @@ mod tests {
     #[test]
     fn stale_or_contradicted_fleet_done_never_overrides_live_status() {
         let mut state = chip_state();
-        let session = state.workspaces[0].sessions[0].id;
-        state.fleet_metadata.insert(
+        let session = state.sessions.workspaces[0].sessions[0].id;
+        state.fleet.fleet_metadata.insert(
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
@@ -1586,7 +1604,7 @@ mod tests {
 
         // A current ASK is newer operator-facing evidence than an old turn
         // completion and must not create the impossible `DONE ASK` row.
-        state.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet.daemon_attention.lock().unwrap().reachable = true;
         let with_ask = render_panel(&mut state, 100, 16);
         let ask_row = with_ask
             .lines()
@@ -1600,8 +1618,8 @@ mod tests {
 
         // A retained snapshot cannot drive lifecycle after daemon reachability
         // is lost, even when no current attention chip exists.
-        state.workspaces[0].sessions[0].live_attention.clear();
-        state.daemon_attention.lock().unwrap().reachable = false;
+        state.sessions.workspaces[0].sessions[0].live_attention.clear();
+        state.fleet.daemon_attention.lock().unwrap().reachable = false;
         let unreachable = render_panel(&mut state, 100, 16);
         let row = unreachable
             .lines()
@@ -1614,11 +1632,11 @@ mod tests {
     #[test]
     fn retained_fleet_done_never_relabels_a_stopped_session() {
         let mut state = chip_state();
-        let session = state.workspaces[0].sessions[0].id;
-        state.workspaces[0].sessions[0].status = SessionStatus::Stopped;
-        state.workspaces[0].sessions[0].live_attention.clear();
-        state.daemon_attention.lock().unwrap().reachable = true;
-        state.fleet_metadata.insert(
+        let session = state.sessions.workspaces[0].sessions[0].id;
+        state.sessions.workspaces[0].sessions[0].status = SessionStatus::Stopped;
+        state.sessions.workspaces[0].sessions[0].live_attention.clear();
+        state.fleet.daemon_attention.lock().unwrap().reachable = true;
+        state.fleet.fleet_metadata.insert(
             session,
             crate::app::state::SessionFleetMetadata {
                 lifecycle: Some(ainb_hangar_proto::fleet::LifecycleState::TurnComplete),
@@ -1627,7 +1645,7 @@ mod tests {
         );
 
         assert_eq!(
-            session_lifecycle_label(&state, &state.workspaces[0].sessions[0]),
+            session_lifecycle_label(&state, &state.sessions.workspaces[0].sessions[0]),
             "STOP"
         );
     }
@@ -1708,10 +1726,11 @@ mod tests {
     #[test]
     fn a_row_with_both_an_ask_and_an_err_paints_the_ask_first() {
         let mut state = chip_state();
-        state.workspaces[0].sessions[1].live_attention = crate::fleet::attention::normalise(vec![
-            SessionAttention::local(AttentionKind::Err, CHIP_NOW - 9 * 60_000),
-            SessionAttention::local(AttentionKind::Ask, CHIP_NOW - 40_000),
-        ]);
+        state.sessions.workspaces[0].sessions[1].live_attention =
+            crate::fleet::attention::normalise(vec![
+                SessionAttention::local(AttentionKind::Err, CHIP_NOW - 9 * 60_000),
+                SessionAttention::local(AttentionKind::Ask, CHIP_NOW - 40_000),
+            ]);
         let rendered = render_panel(&mut state, 100, 16);
         let row = rendered
             .lines()
@@ -1786,7 +1805,7 @@ mod tests {
     #[test]
     fn a_request_the_screen_cannot_place_gets_its_own_row_not_a_truncated_badge() {
         let mut state = chip_state();
-        state.attention_elsewhere = 1;
+        state.fleet.attention_elsewhere = 1;
         let rendered = render_panel(&mut state, 42, 16);
         assert!(
             rendered.contains("1 waiting elsewhere"),
@@ -1800,7 +1819,7 @@ mod tests {
     #[test]
     fn no_elsewhere_row_when_every_request_found_its_session() {
         let mut state = chip_state();
-        state.attention_elsewhere = 0;
+        state.fleet.attention_elsewhere = 0;
         let rendered = render_panel(&mut state, 42, 16);
         assert!(
             !rendered.contains("elsewhere"),
@@ -1814,9 +1833,9 @@ mod tests {
         // session's shortcut by one — the exact lockstep
         // `attachable_items_in_order` exists to hold.
         let mut with_row = chip_state();
-        with_row.attention_elsewhere = 3;
+        with_row.fleet.attention_elsewhere = 3;
         let mut without = chip_state();
-        without.attention_elsewhere = 0;
+        without.fleet.attention_elsewhere = 0;
         let digits = |state: &mut AppState| -> Vec<String> {
             render_panel(state, 100, 16)
                 .lines()
@@ -1837,7 +1856,7 @@ mod tests {
     #[test]
     fn a_quiet_fleet_shows_no_badge() {
         let mut state = chip_state();
-        for session in &mut state.workspaces[0].sessions {
+        for session in &mut state.sessions.workspaces[0].sessions {
             session.live_attention.clear();
         }
         let rendered = render_panel(&mut state, 100, 16);
@@ -1850,9 +1869,9 @@ mod tests {
     #[test]
     fn selection_uses_visible_row_when_stopped_sessions_are_filtered() {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.session_filter = SessionFilter::ActiveOnly;
-        state.expand_all_workspaces = true;
+        state.sessions.workspaces.clear();
+        state.sessions.session_filter = SessionFilter::ActiveOnly;
+        state.sessions.expand_all_workspaces = true;
 
         let mut workspace = Workspace::new("workspace".to_string(), "/tmp/workspace".into());
         let stopped = Session::new("stopped".to_string(), "/tmp/workspace".to_string());
@@ -1860,9 +1879,9 @@ mod tests {
         running.status = SessionStatus::Running;
         workspace.add_session(stopped);
         workspace.add_session(running);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = Some(1);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(1);
 
         let mut list = SessionListComponent::new();
         list.update_selection(&state);
@@ -1917,13 +1936,13 @@ mod tests {
         assert!(matches!(session.status, SessionStatus::Stopped));
 
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.expand_all_workspaces = true;
-        state.session_filter = SessionFilter::All;
+        state.sessions.workspaces.clear();
+        state.sessions.expand_all_workspaces = true;
+        state.sessions.session_filter = SessionFilter::All;
         let mut workspace = Workspace::new("ws".to_string(), "/tmp/ainb-stopped-label".into());
         workspace.add_session(session);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
 
         let mut list = SessionListComponent::new();
         let mut ui = crate::app::ui_state::UiState::default();
@@ -1964,8 +1983,8 @@ mod tests {
     #[test]
     fn narrow_duplicate_rows_keep_their_short_id_visible() {
         let mut state = AppState::new();
-        state.workspaces.clear();
-        state.expand_all_workspaces = true;
+        state.sessions.workspaces.clear();
+        state.sessions.expand_all_workspaces = true;
 
         let mut workspace = Workspace::new("ws".to_string(), "/tmp/ws".into());
         let mut first = Session::new("first".to_string(), "/tmp/ws/first".to_string());
@@ -1979,7 +1998,7 @@ mod tests {
         let second_id = second.id.to_string()[..8].to_string();
         workspace.add_session(first);
         workspace.add_session(second);
-        state.workspaces.push(workspace);
+        state.sessions.workspaces.push(workspace);
 
         let painted = render_panel(&mut state, 24, 8);
         assert!(

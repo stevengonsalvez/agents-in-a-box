@@ -253,19 +253,40 @@ fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
 /// and this hands it back once the frame is out — which is exactly when the
 /// hit tests and scroll clamps that read them next run.
 pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
-    if let Some((rows, cols)) = ui.embed_desired_size.take() {
-        if let Some(embed) = state.embed.as_mut() {
-            let _ = embed.resize(rows, cols);
+    // Everything here runs on EVERY painted frame and almost always recomputes
+    // the value it already published. Each write is therefore compare-then-set:
+    // an unconditional `&mut` would bump the tmux, shell and logs sections once
+    // a frame, and a section that changes every frame tells a subscriber
+    // nothing at all.
+    if let Some(size) = ui.embed_desired_size.take() {
+        if ui.last_embed_size != Some(size) {
+            let (rows, cols) = size;
+            if let Some(embed) = state.tmux.get_mut().embed.as_mut() {
+                let _ = embed.resize(rows, cols);
+                ui.last_embed_size = Some(size);
+            }
         }
     }
 
-    let home = &mut state.home_screen_v2_state;
     if ui.home_sidebar_rect.is_some() {
-        home.last_sidebar_rect = ui.home_sidebar_rect;
+        state.shell.set_if_changed(
+            |shell| &mut shell.home_screen_v2_state.last_sidebar_rect,
+            ui.home_sidebar_rect,
+        );
     }
-    (home.welcome.content_height, home.welcome.visible_height) = ui.welcome_viewport;
+    state.shell.set_if_changed(
+        |shell| &mut shell.home_screen_v2_state.welcome.content_height,
+        ui.welcome_viewport.0,
+    );
+    state.shell.set_if_changed(
+        |shell| &mut shell.home_screen_v2_state.welcome.visible_height,
+        ui.welcome_viewport.1,
+    );
 
-    state.log_history_state.log_entries_area = ui.log_entries_area;
+    state.log_streams.set_if_changed(
+        |logs| &mut logs.log_history_state.log_entries_area,
+        ui.log_entries_area,
+    );
 }
 
 pub struct LayoutComponent {
@@ -361,7 +382,7 @@ impl LayoutComponent {
                 let log = state.get_selected_session().map_or(
                     crate::fleet::session_log::Log::Rows(Vec::new()),
                     |session| {
-                        state.session_log.read(&crate::fleet::session_log::LogKey::new(
+                        state.log_streams.session_log.read(&crate::fleet::session_log::LogKey::new(
                             &session.workspace_path,
                             AppState::agent_hook_name(session.agent_type),
                         ))
@@ -374,13 +395,13 @@ impl LayoutComponent {
             // state machine either way, so the two cannot drift in what they
             // render or which failures they report.
             SessionTab::Pal => {
-                let header = session_tabs::pal_header(&state.pal_dial);
+                let header = session_tabs::pal_header(&state.fleet.pal_dial);
                 // Inserted between the header and the conversation rather than
                 // replacing either. Both still have something true to say with
                 // the daemon down — the dials an operator recovers an adapter
                 // with, and the call the chat could not make — and the offer is
                 // the one thing neither of them could say.
-                let offer = state.pal_daemon_cta_open().then_some(&state.daemon_start_cta);
+                let offer = state.pal_daemon_cta_open().then_some(&state.fleet.daemon_start_cta);
                 // `chat_host`, not `chat_host_for`: the conversation was ticked
                 // in `tick_before_draw`, and `chat_host_for` ENDS by calling
                 // this, so what is painted is what was ticked rather than a
@@ -410,7 +431,7 @@ impl LayoutComponent {
                     session_tabs::render_broadcast(
                         frame,
                         inner,
-                        &state.broadcast,
+                        &state.fleet.broadcast,
                         &targets,
                         unreachable,
                     );
@@ -435,12 +456,12 @@ impl LayoutComponent {
         // alive. Gated on the screen for the same reason `DaemonsScreen::render`
         // was the only caller: an operator who never opens it never starts a
         // collector thread.
-        if state.current_screen == screen_ids::DAEMONS {
-            state.daemons_state.tick();
+        if state.shell.current_screen == screen_ids::DAEMONS {
+            state.hangar.daemons_state.tick();
         }
 
         // Registry-routed screens return before any of this in `render`.
-        if self.screens.contains(&state.current_screen) {
+        if self.screens.contains(&state.shell.current_screen) {
             return;
         }
 
@@ -448,15 +469,15 @@ impl LayoutComponent {
         // can go dead under the operator (the ASK is answered, the cursor moves
         // off a session row) and leaving them on a stale pane shows a question
         // they can no longer act on.
-        let active = session_tabs::resolve(state, state.session_tab);
-        state.session_tab = active;
+        let active = session_tabs::resolve(state, state.shell.session_tab);
+        state.shell.set_if_changed(|shell| &mut shell.session_tab, active);
 
         // Fold in whatever the answer worker reported. EVERY frame, not only on
         // the `ask` tab: the row's `SENT` chip is painted by the session list,
         // so an operator who sends and then switches tabs would otherwise watch
         // that chip stay SENT forever.
-        if state.ask_state.tick() {
-            state.ui_needs_refresh = true;
+        if state.fleet.update(|fleet| fleet.ask_state.tick()) {
+            state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
         }
 
         // An attached embed owns the right pane outright, and `preview` is a
@@ -474,7 +495,7 @@ impl LayoutComponent {
                 // unfocused — no cursor, no caret, and the operator's first
                 // characters fall through to the session shortcuts.
                 if let Some(chip) = session_tabs::selected_blocking(state).cloned() {
-                    state.ask_state.retarget(&chip);
+                    state.fleet.update(|fleet| fleet.ask_state.retarget(&chip));
                 }
             }
             SessionTab::Log => {
@@ -482,20 +503,23 @@ impl LayoutComponent {
                 // the attention poller is: an `ainb` invocation that never opens
                 // this pane never opens the notifications store. `spawn` is
                 // idempotent.
-                crate::fleet::session_log::spawn(&state.session_log, &state.session_log_running);
+                crate::fleet::session_log::spawn(
+                    &state.log_streams.session_log,
+                    &state.log_streams.session_log_running,
+                );
             }
             SessionTab::Pal => {
                 // The dial ticks with the pane, so the registry read and any
                 // in-flight configure land without the operator pressing
                 // anything, exactly like the chat host's own tick.
-                if state.pal_dial.tick() {
-                    state.ui_needs_refresh = true;
+                if state.fleet.update(|fleet| fleet.pal_dial.tick()) {
+                    state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 // The offer's own tick, for the same reason: the start runs on
                 // a detached worker, and its result has to reach the pane
                 // without the operator pressing anything else.
-                if state.daemon_start_cta.tick() {
-                    state.ui_needs_refresh = true;
+                if state.fleet.update(|fleet| fleet.daemon_start_cta.tick()) {
+                    state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 let _ = state.chat_host_for(active);
             }
@@ -506,8 +530,8 @@ impl LayoutComponent {
                 // private thread.
                 if state.broadcast_targets().is_empty() {
                     let _ = state.chat_host_for(active);
-                } else if state.broadcast.tick() {
-                    state.ui_needs_refresh = true;
+                } else if state.fleet.update(|fleet| fleet.broadcast.tick()) {
+                    state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
             }
         }
@@ -525,8 +549,11 @@ impl LayoutComponent {
         // (e.g. Config's auth-provider/config popups). Help overlay is
         // rendered post-screen as it's universal across full-screen views.
         let frame_size = frame.area();
-        if let Some(screen) = self.screens.get_mut(&state.current_screen) {
-            tracing::debug!("Rendering screen via registry: {}", state.current_screen);
+        if let Some(screen) = self.screens.get_mut(&state.shell.current_screen) {
+            tracing::debug!(
+                "Rendering screen via registry: {}",
+                state.shell.current_screen
+            );
             screen.render(frame, frame_size, state, ui);
             // Notifications must render on registry-routed screens too —
             // before this fix they only painted on the legacy
@@ -536,8 +563,8 @@ impl LayoutComponent {
             // bead v12.1.T3). Painted before the help overlay so the
             // help panel still wins z-order if both are visible.
             self.render_notifications(frame, frame_size, state);
-            if state.help_visible {
-                tracing::debug!("Rendering help overlay on {}", state.current_screen);
+            if state.shell.help_visible {
+                tracing::debug!("Rendering help overlay on {}", state.shell.current_screen);
                 self.help.render(frame, frame_size);
             }
             // The confirmation dialog is a universal, highest-priority
@@ -549,10 +576,10 @@ impl LayoutComponent {
             // on the HomeScreen).
             // MCP pool overlay paints above the screen, below a confirmation
             // dialog (so a stop confirmation sits on top of it).
-            if let Some(ref overlay) = state.mcp_overlay {
+            if let Some(ref overlay) = state.mcp_pool.mcp_overlay {
                 crate::components::mcp_overlay::render(frame, frame_size, overlay);
             }
-            if state.confirmation_dialog.is_some() {
+            if state.shell.confirmation_dialog.is_some() {
                 self.confirmation_dialog.render(frame, frame_size, state);
             }
             return;
@@ -561,7 +588,7 @@ impl LayoutComponent {
         // The bottom keymap legend can be hidden (⇧M) to give the session list
         // more room; hidden it collapses to a single hint row.
         let menu_bar_h =
-            session_menu_bar_height(state.app_config.ui_preferences.show_session_menu_bar);
+            session_menu_bar_height(state.config.app_config.ui_preferences.show_session_menu_bar);
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -609,7 +636,7 @@ impl LayoutComponent {
 
         // Already reconciled by `tick_before_draw` against what is actually
         // available, so this is a read of a settled value, not a second guess.
-        let active_tab = state.session_tab;
+        let active_tab = state.shell.session_tab;
 
         if state.is_interactive_pane() {
             // Live interactive embed occupies the right pane. Resize the embed to
@@ -674,30 +701,30 @@ impl LayoutComponent {
         self.render_menu_bar(frame, main_layout[3], state);
 
         // Render help overlay if visible
-        if state.help_visible {
+        if state.shell.help_visible {
             self.help.render(frame, frame.area());
         }
 
         // Render new session overlay if visible
-        if state.current_screen == screen_ids::NEW_SESSION
-            || state.current_screen == screen_ids::SEARCH_WORKSPACE
+        if state.shell.current_screen == screen_ids::NEW_SESSION
+            || state.shell.current_screen == screen_ids::SEARCH_WORKSPACE
         {
             self.new_session.render(frame, frame.area(), state);
         }
 
         // Render Claude chat popup if visible
-        if state.current_screen == screen_ids::CLAUDE_CHAT {
+        if state.shell.current_screen == screen_ids::CLAUDE_CHAT {
             let popup_area = centered_rect(80, 80, frame.area());
             self.claude_chat.render(frame, popup_area, state);
         }
 
         // MCP pool overlay (above the screen, below the confirmation dialog).
-        if let Some(ref overlay) = state.mcp_overlay {
+        if let Some(ref overlay) = state.mcp_pool.mcp_overlay {
             crate::components::mcp_overlay::render(frame, frame.size(), overlay);
         }
 
         // Render confirmation dialog if visible (highest priority overlay)
-        if state.confirmation_dialog.is_some() {
+        if state.shell.confirmation_dialog.is_some() {
             self.confirmation_dialog.render(frame, frame.area(), state);
         }
 
@@ -729,7 +756,7 @@ impl LayoutComponent {
     ) {
         let border_color = if ui.sessions_pane.edge_highlighted() {
             GOLD
-        } else if state.focused_pane == crate::app::state::FocusedPane::Sessions {
+        } else if state.shell.focused_pane == crate::app::state::FocusedPane::Sessions {
             SELECTION_GREEN
         } else {
             SUBDUED_BORDER
@@ -773,7 +800,7 @@ impl LayoutComponent {
     fn render_menu_bar(&self, frame: &mut Frame, area: Rect, state: &AppState) {
         // Hidden legend → a single muted hint row (still discoverable: shows the
         // ⇧M un-hide key plus help/home).
-        if !state.app_config.ui_preferences.show_session_menu_bar {
+        if !state.config.app_config.ui_preferences.show_session_menu_bar {
             self.render_menu_bar_collapsed(frame, area);
             return;
         }
@@ -1087,7 +1114,7 @@ impl LayoutComponent {
         // top bar is now a dedicated, full-width live-quota line so both
         // providers fit (and degrade gracefully) instead of being squeezed
         // out by that duplicated content.
-        if state.claude_chat_visible {
+        if state.claude_chat.claude_chat_visible {
             status_spans.push(Span::styled("🗨️ ", Style::default().fg(SELECTION_GREEN)));
             status_spans.push(Span::styled("ON", Style::default().fg(SELECTION_GREEN)));
         } else {
@@ -1330,11 +1357,11 @@ impl LayoutComponent {
 
         // Render input field with block cursor
         let empty_string = String::new();
-        let commit_message = state.quick_commit_message.as_ref().unwrap_or(&empty_string);
+        let commit_message = state.git_view.quick_commit_message.as_ref().unwrap_or(&empty_string);
 
         // Create spans with cursor visualization
         let (before_cursor, after_cursor) =
-            commit_message.split_at(state.quick_commit_cursor.min(commit_message.len()));
+            commit_message.split_at(state.git_view.quick_commit_cursor.min(commit_message.len()));
 
         let input_line = Line::from(vec![
             Span::styled(before_cursor, Style::default().fg(SOFT_WHITE)),
@@ -1392,7 +1419,7 @@ mod menu_bar_render_tests {
 
     fn painted_menu_bar(width: u16, shown: bool) -> String {
         let mut state = AppState::default();
-        state.app_config.ui_preferences.show_session_menu_bar = shown;
+        state.config.app_config.ui_preferences.show_session_menu_bar = shown;
         let component = LayoutComponent::new();
         let height = session_menu_bar_height(shown);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
@@ -1448,8 +1475,8 @@ pub fn build_live_status_spans(
     use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
 
-    let status = ui.statusline_status(state);
-    let decision = state.app_config.ui_preferences.statusline_decision;
+    let status = ui.statusline_status();
+    let decision = state.config.app_config.ui_preferences.statusline_decision;
 
     // Trust the cache: if Tier1 data is flowing — whether it came from
     // our own command in settings.json (Configured) or from a user's
@@ -1459,7 +1486,7 @@ pub fn build_live_status_spans(
     //
     // The snapshot is maintained by a background tokio poller so this
     // hot path never touches the filesystem itself.
-    let live = state.live_window_watcher.snapshot();
+    let live = state.fleet.live_window_watcher.snapshot();
     // Render the widget when Claude Tier1 data is flowing OR Codex usage is
     // present — Codex is overlaid independently (separate cache, its own
     // poller), so a user who runs Codex but never wired the Claude

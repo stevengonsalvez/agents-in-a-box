@@ -40,7 +40,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 /// Plugin-owned screen wrapper. Reads the WireBuffer that
 /// `App::tick_plugin_renders` drained into
-/// `state.pending_plugin_renders[screen_id]` and paints it cell-by-cell
+/// `state.plugins_host.pending_plugin_renders[screen_id]` and paints it cell-by-cell
 /// onto the host's ratatui Frame.
 ///
 /// Falls back to a single-line "loading" message if the plugin hasn't
@@ -145,8 +145,13 @@ pub fn crossterm_to_protocol_key(
 /// has never painted) read `false`.
 #[must_use]
 pub fn focused_plugin_captures_text(state: &AppState) -> bool {
-    plugin_id_for_screen(&state.current_screen).is_some()
-        && state.plugin_captures_text.get(&state.current_screen).copied().unwrap_or(false)
+    plugin_id_for_screen(&state.shell.current_screen).is_some()
+        && state
+            .plugins_host
+            .plugin_captures_text
+            .get(&state.shell.current_screen)
+            .copied()
+            .unwrap_or(false)
 }
 
 /// `true` if the host reserves this key — it MUST NOT be forwarded to
@@ -205,7 +210,7 @@ pub const PLUGINS_WITH_OWN_HELP: &[&str] = &["hangar-tui"];
 /// the per-frame `captures_text` flag alone is not a safe gate.
 #[must_use]
 pub fn plugin_owns_help_keys(state: &AppState) -> bool {
-    plugin_id_for_screen(&state.current_screen)
+    plugin_id_for_screen(&state.shell.current_screen)
         .is_some_and(|id| PLUGINS_WITH_OWN_HELP.contains(&id))
 }
 
@@ -218,7 +223,7 @@ pub fn forward_key_to_focused_plugin(
     state: &mut AppState,
     key: &crossterm::event::KeyEvent,
 ) -> EventOutcome {
-    let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
+    let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
         return EventOutcome::NotHandled;
     };
     let capturing = focused_plugin_captures_text(state);
@@ -227,7 +232,7 @@ pub fn forward_key_to_focused_plugin(
         // `events.rs` resolve it to Quit / ToggleHelp / etc.
         return EventOutcome::NotHandled;
     }
-    let Some(runtime) = state.plugin_runtime.as_ref() else {
+    let Some(runtime) = state.plugins_host.plugin_runtime.as_ref() else {
         return EventOutcome::NotHandled;
     };
     let Some(protocol_key) = crossterm_to_protocol_key(key) else {
@@ -236,7 +241,7 @@ pub fn forward_key_to_focused_plugin(
         return EventOutcome::Handled;
     };
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let delivered = runtime.send_key(&pid, state.current_screen.clone(), protocol_key);
+    let delivered = runtime.send_key(&pid, state.shell.current_screen.clone(), protocol_key);
     // A plugin whose render has blown its budget is holding the one mutex its
     // inline `handle_key` dispatch also needs, so the key WAS delivered and
     // will simply sit in its channel unserviced. That is indistinguishable from
@@ -337,10 +342,10 @@ pub fn forward_mouse_to_focused_plugin(
 ) -> EventOutcome {
     use ainb_plugin_runtime::MouseKind;
 
-    let Some(plugin_name) = plugin_id_for_screen(&state.current_screen) else {
+    let Some(plugin_name) = plugin_id_for_screen(&state.shell.current_screen) else {
         return EventOutcome::NotHandled;
     };
-    let Some(runtime) = state.plugin_runtime.as_ref() else {
+    let Some(runtime) = state.plugins_host.plugin_runtime.as_ref() else {
         return EventOutcome::NotHandled;
     };
 
@@ -357,8 +362,16 @@ pub fn forward_mouse_to_focused_plugin(
     // Translate absolute terminal coords → plugin-viewport coords. Drop
     // (still Handled) when the point falls outside the plugin's painted
     // rect rather than forwarding a click the plugin would mis-hit-test.
-    let origin = ui.plugin_render_origins.get(&state.current_screen).copied().unwrap_or((0, 0));
-    let area = ui.plugin_render_areas.get(&state.current_screen).copied().unwrap_or((0, 0));
+    let origin = ui
+        .plugin_render_origins
+        .get(&state.shell.current_screen)
+        .copied()
+        .unwrap_or((0, 0));
+    let area = ui
+        .plugin_render_areas
+        .get(&state.shell.current_screen)
+        .copied()
+        .unwrap_or((0, 0));
     let Some((col, row)) = click_to_viewport(mouse.col, mouse.row, origin, area) else {
         return EventOutcome::Handled;
     };
@@ -366,7 +379,7 @@ pub fn forward_mouse_to_focused_plugin(
     mouse.row = row;
 
     let pid = ainb_plugin_runtime::PluginId::from(plugin_name);
-    let _ = runtime.send_mouse(&pid, state.current_screen.clone(), mouse);
+    let _ = runtime.send_mouse(&pid, state.shell.current_screen.clone(), mouse);
     EventOutcome::Handled
 }
 
@@ -430,7 +443,7 @@ fn build_placeholder_for_unloaded_plugin(
     };
 
     let plugin_name = plugin_id_for_screen(screen_id);
-    let plugin_registered = match (plugin_name, state.plugin_runtime.as_ref()) {
+    let plugin_registered = match (plugin_name, state.plugins_host.plugin_runtime.as_ref()) {
         (Some(name), Some(rt)) => {
             let pid = ainb_plugin_runtime::PluginId::from(name);
             rt.lifecycle_state(&pid).is_some()
@@ -441,7 +454,7 @@ fn build_placeholder_for_unloaded_plugin(
     // A recorded render failure outranks the loading beat: the plugin is
     // registered, so case 3 would otherwise paint "connecting…" forever.
     let render_error = if plugin_registered {
-        state.plugin_render_errors.get(screen_id)
+        state.plugins_host.plugin_render_errors.get(screen_id)
     } else {
         None
     };
@@ -641,7 +654,7 @@ impl Screen for PluginScreen {
         // absolute terminal click into this plugin's viewport space.
         ui.plugin_render_origins.insert(self.screen_id.to_string(), (area.x, area.y));
 
-        let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
+        let Some(wire) = state.plugins_host.pending_plugin_renders.get(self.screen_id) else {
             let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state, area);
             frame.render_widget(placeholder, area);
             return;
@@ -712,7 +725,7 @@ impl Screen for SkillsScreen {
         ids::SKILLS
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        crate::components::skills::render(frame, area, &state.skills_state);
+        crate::components::skills::render(frame, area, &state.skills.skills_state);
     }
 }
 
@@ -723,7 +736,11 @@ impl Screen for SkillManagerScreen {
         ids::SKILL_MANAGER
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        crate::components::skill_manager_screen::render(frame, area, &state.skill_manager_state);
+        crate::components::skill_manager_screen::render(
+            frame,
+            area,
+            &state.skills.skill_manager_state,
+        );
     }
 }
 
@@ -734,7 +751,7 @@ impl Screen for ChangelogScreen {
         ids::CHANGELOG
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        ChangelogComponent::render(frame, area, &state.changelog_state);
+        ChangelogComponent::render(frame, area, &state.config.changelog_state);
     }
 }
 
@@ -745,7 +762,7 @@ impl Screen for GitViewScreen {
         ids::GIT_VIEW
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        if let Some(ref git_state) = state.git_view_state {
+        if let Some(ref git_state) = state.git_view.git_view_state {
             GitViewComponent::render(frame, area, git_state);
         }
     }
@@ -758,7 +775,7 @@ impl Screen for SessionRecoveryScreen {
         ids::SESSION_RECOVERY
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
-        SessionRecovery::render(frame, area, &state.session_recovery_state, ui);
+        SessionRecovery::render(frame, area, &state.recovery.session_recovery_state, ui);
     }
 }
 
@@ -776,7 +793,7 @@ impl Screen for DaemonsScreen {
         ids::DAEMONS
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        crate::components::daemons::render(frame, area, &state.daemons_state);
+        crate::components::daemons::render(frame, area, &state.hangar.daemons_state);
     }
 }
 
@@ -811,9 +828,9 @@ impl Screen for HomeScreen {
         self.component.render_with_loading(
             frame,
             area,
-            &state.home_screen_v2_state,
-            &state.workspaces,
-            state.is_loading_workspaces,
+            &state.shell.home_screen_v2_state,
+            &state.sessions.workspaces,
+            state.workspace_load.is_loading_workspaces,
             ui,
         );
     }
@@ -848,11 +865,11 @@ impl Screen for ConfigScreen {
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
         self.component.render(frame, area, state);
-        if state.auth_provider_popup_state.show_popup {
+        if state.onboarding.auth_provider_popup_state.show_popup {
             self.auth_provider_popup.render(frame, area, state);
         }
-        if state.config_popup_state.show_popup {
-            self.config_popup.render(frame, area, &state.config_popup_state);
+        if state.config.config_popup_state.show_popup {
+            self.config_popup.render(frame, area, &state.config.config_popup_state);
         }
     }
 }
@@ -881,7 +898,7 @@ impl Screen for LogHistoryScreen {
         ids::LOG_HISTORY
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
-        self.component.render(frame, area, &state.log_history_state, ui);
+        self.component.render(frame, area, &state.log_streams.log_history_state, ui);
     }
 }
 
@@ -909,7 +926,7 @@ impl Screen for OnboardingScreen {
         ids::ONBOARDING
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        if let Some(ref onboarding_state) = state.onboarding_state {
+        if let Some(ref onboarding_state) = state.onboarding.onboarding_state {
             self.component.render(frame, area, onboarding_state);
         }
     }
@@ -947,12 +964,12 @@ impl Screen for SetupMenuScreen {
         self.backdrop.render_with_loading(
             frame,
             area,
-            &state.home_screen_v2_state,
-            &state.workspaces,
-            state.is_loading_workspaces,
+            &state.shell.home_screen_v2_state,
+            &state.sessions.workspaces,
+            state.workspace_load.is_loading_workspaces,
             ui,
         );
-        self.setup_menu.render(frame, area, &state.setup_menu_state);
+        self.setup_menu.render(frame, area, &state.onboarding.setup_menu_state);
     }
 }
 
@@ -1299,8 +1316,8 @@ mod tests {
         let (runtime, handle) =
             ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
         let mut state = crate::app::state::AppState::default();
-        state.plugin_runtime = Some(handle);
-        state.current_screen = ids::ANALYTICS.to_string();
+        state.plugins_host.plugin_runtime = Some(handle);
+        state.shell.current_screen = ids::ANALYTICS.to_string();
 
         let mk = |code| CtEvent {
             code,
@@ -1352,8 +1369,8 @@ mod tests {
         let (runtime, handle) =
             ainb_plugin_runtime::Runtime::new().expect("runtime constructs without plugins");
         let mut state = crate::app::state::AppState::default();
-        state.plugin_runtime = Some(handle);
-        state.current_screen = ids::HANGAR.to_string();
+        state.plugins_host.plugin_runtime = Some(handle);
+        state.shell.current_screen = ids::HANGAR.to_string();
 
         let mk = |code, mods| CtEvent {
             code,
@@ -1384,7 +1401,7 @@ mod tests {
 
         // Declare text-capture (as the plugin's `captures_text` frame would):
         // unchanged, still forwarded.
-        state.plugin_captures_text.insert(ids::HANGAR.to_string(), true);
+        state.plugins_host.plugin_captures_text.insert(ids::HANGAR.to_string(), true);
         assert!(
             focused_plugin_captures_text(&state),
             "the stash drives focused_plugin_captures_text"

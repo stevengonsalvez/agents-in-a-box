@@ -217,9 +217,9 @@ impl SessionTab {
                 // set, so it needs no cursor session at all.
                 if !state.broadcast_targets().is_empty() {
                     None
-                } else if state.selected_sessions.is_empty() && !has_session {
+                } else if state.sessions.selected_sessions.is_empty() && !has_session {
                     Some("select a session first")
-                } else if !state.selected_sessions.is_empty() {
+                } else if !state.sessions.selected_sessions.is_empty() {
                     // Rows ARE checked, but not one of them has a scope.
                     Some("no checked session has fired a hook yet, so none can be reached")
                 } else if state.selected_session_chat_key().is_none() {
@@ -489,7 +489,7 @@ pub fn render_ask(frame: &mut Frame, area: Rect, state: &AppState) {
         );
         return;
     };
-    let ask = &state.ask_state;
+    let ask = &state.fleet.ask_state;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
@@ -1504,16 +1504,16 @@ mod tests {
         select: bool,
     ) -> AppState {
         let mut state = AppState::new();
-        state.workspaces.clear();
+        state.sessions.workspaces.clear();
         let mut workspace = Workspace::new("proj".to_string(), "/work/proj".into());
         let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
         session.status = SessionStatus::Idle;
         session.live_attention = chips;
         session.errors = errors;
         workspace.add_session(session);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = select.then_some(0);
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = select.then_some(0);
         state
     }
 
@@ -1672,7 +1672,7 @@ mod tests {
     /// Put the attention poller's cell in the state it reaches when the socket
     /// is dialled and nothing accepts.
     fn with_daemon(state: &mut AppState, reachable: bool, not_running: bool) {
-        *state.daemon_attention.lock().unwrap() = crate::fleet::attention::DaemonAttention {
+        *state.fleet.daemon_attention.lock().unwrap() = crate::fleet::attention::DaemonAttention {
             by_session_id: std::collections::HashMap::new(),
             by_cwd: std::collections::HashMap::new(),
             by_cwd_without_session_id: std::collections::HashMap::new(),
@@ -1689,8 +1689,8 @@ mod tests {
     #[test]
     fn a_pane_offering_a_daemon_advertises_that_and_not_a_send() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         with_daemon(&mut state, false, true);
 
         assert!(state.pal_daemon_cta_open());
@@ -1714,8 +1714,8 @@ mod tests {
     #[test]
     fn an_unreachable_daemon_that_is_still_running_is_not_offered_a_start() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         with_daemon(&mut state, false, false);
 
         assert!(!state.hangar_daemon_not_running());
@@ -1734,12 +1734,12 @@ mod tests {
     #[test]
     fn a_pane_that_cannot_send_advertises_no_verb_at_all() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         // Daemon UP: this is not the offer's case, it is the one where the
         // conversation opened and its scope never resolved.
         with_daemon(&mut state, true, false);
-        state.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
+        state.fleet.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
 
         assert!(
             state.session_tab_send_block(SessionTab::Pal).is_some(),
@@ -1808,8 +1808,8 @@ mod tests {
     #[test]
     fn the_offer_neither_claims_enter_nor_advertises_it_from_the_session_list() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
         with_daemon(&mut state, false, true);
 
         assert!(
@@ -1832,12 +1832,12 @@ mod tests {
     #[test]
     fn a_start_in_flight_disarms_the_key_and_the_verb() {
         let mut state = state_with(Vec::new(), true);
-        state.session_tab = SessionTab::Pal;
-        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+        state.shell.session_tab = SessionTab::Pal;
+        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
         with_daemon(&mut state, false, true);
         assert!(state.pal_daemon_cta_armed());
 
-        state.daemon_start_cta.start();
+        state.fleet.daemon_start_cta.start();
         assert!(!state.pal_daemon_cta_armed());
         assert!(!footer_text(&state, SessionTab::Pal, true).contains(START_DAEMON_VERB));
     }
@@ -1852,7 +1852,8 @@ mod tests {
     #[test]
     fn ticking_a_tabs_host_and_painting_it_resolve_to_the_same_conversation() {
         let mut state = state_with(Vec::new(), true);
-        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        state.sessions.workspaces[0].sessions[0].provider_session_id =
+            Some("hook-sess-1".to_string());
 
         for tab in ALL_TABS {
             let ticked = state.chat_host_for(tab).map(std::ptr::from_ref);
@@ -1889,8 +1890,8 @@ mod tests {
         assert_eq!(SessionTab::Ask.enter_verb_in(&state), "");
 
         // The chat case: a Pal whose scope the daemon never minted.
-        state.session_tab = SessionTab::Pal;
-        state.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
+        state.shell.session_tab = SessionTab::Pal;
+        state.fleet.pal_chat = Some(crate::fleet::chat_host::ChatHost::pal());
         with_daemon(&mut state, true, false);
         assert!(
             SessionTab::Pal.enter_refusal(&state).is_some(),
@@ -1944,7 +1945,7 @@ mod tests {
             SessionTab::Thread.disabled_reason(&selected),
             Some("this session has not fired a hook yet, so its thread has no scope"),
         );
-        selected.workspaces[0].sessions[0].provider_session_id = Some("abc".to_string());
+        selected.sessions.workspaces[0].sessions[0].provider_session_id = Some("abc".to_string());
         assert!(SessionTab::Thread.enabled(&selected));
     }
 
@@ -1954,9 +1955,10 @@ mod tests {
         // has never heard of: an empty timeline forever against a real daemon,
         // with every unit test still green.
         let mut state = state_with(Vec::new(), true);
-        state.workspaces[0].sessions[0].tmux_session_name = Some("tmux_proj".to_string());
+        state.sessions.workspaces[0].sessions[0].tmux_session_name = Some("tmux_proj".to_string());
         assert_eq!(state.selected_session_chat_key(), None);
-        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        state.sessions.workspaces[0].sessions[0].provider_session_id =
+            Some("hook-sess-1".to_string());
         assert_eq!(
             state.selected_session_chat_key().as_deref(),
             Some("claude:hook-sess-1")
@@ -1982,7 +1984,8 @@ mod tests {
             true,
         );
         // The thread needs a scope before it is reachable.
-        state.workspaces[0].sessions[0].provider_session_id = Some("hook-sess-1".to_string());
+        state.sessions.workspaces[0].sessions[0].provider_session_id =
+            Some("hook-sess-1".to_string());
         let state = state;
         let mut seen = vec![SessionTab::Preview];
         let mut at = SessionTab::Preview;
@@ -2061,8 +2064,8 @@ mod tests {
     #[test]
     fn selected_footer_shows_observed_model_effort_and_direct_children() {
         let mut state = state_with(Vec::new(), true);
-        let id = state.workspaces[0].sessions[0].id;
-        state.fleet_metadata.insert(
+        let id = state.sessions.workspaces[0].sessions[0].id;
+        state.fleet.fleet_metadata.insert(
             id,
             crate::app::state::SessionFleetMetadata {
                 model: Some("gpt-5.6".to_string()),

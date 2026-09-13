@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 // there first before exercising the refresh keybinding.
 fn go_to_session_list(app: &mut App) {
     EventHandler::process_event(AppEvent::GoToSessionList, &mut app.state);
-    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+    assert_eq!(app.state.shell.current_screen, screen_ids::SESSION_LIST);
 }
 
 #[tokio::test]
@@ -20,7 +20,7 @@ async fn test_manual_refresh_key() {
     // Load initial mock data
     app.state.load_mock_data();
     go_to_session_list(&mut app);
-    let initial_workspace_count = app.state.workspaces.len();
+    let initial_workspace_count = app.state.sessions.workspaces.len();
     assert!(
         initial_workspace_count > 0,
         "Should have initial workspaces"
@@ -35,7 +35,7 @@ async fn test_manual_refresh_key() {
     // Should have set pending async action for refresh
     assert!(
         matches!(
-            app.state.pending_async_action,
+            app.state.shell.pending_async_action,
             Some(AsyncAction::RefreshWorkspaces)
         ),
         "Should have RefreshWorkspaces async action pending"
@@ -45,7 +45,7 @@ async fn test_manual_refresh_key() {
     app.tick().await.expect("Tick should succeed");
 
     // Should no longer have RefreshWorkspaces action, but might have FetchContainerLogs
-    match &app.state.pending_async_action {
+    match &app.state.shell.pending_async_action {
         None => {}                                     // No action is fine
         Some(AsyncAction::FetchContainerLogs(_)) => {} // FetchContainerLogs is expected after refresh
         Some(other) => panic!("Unexpected async action after refresh: {other:?}"),
@@ -68,11 +68,11 @@ async fn test_manual_refresh_key() {
 async fn test_refresh_from_session_list_view() {
     let mut app = App::new();
     app.state.load_mock_data();
-    let _initial_workspace_count = app.state.workspaces.len();
+    let _initial_workspace_count = app.state.sessions.workspaces.len();
 
     // Navigate to the SessionList view (manual refresh lives here).
     go_to_session_list(&mut app);
-    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+    assert_eq!(app.state.shell.current_screen, screen_ids::SESSION_LIST);
 
     // Press 'f' to refresh
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
@@ -84,7 +84,7 @@ async fn test_refresh_from_session_list_view() {
     let _ = app.tick().await; // Ignore result since Docker operations fail in test
 
     // Should still be in SessionList view
-    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+    assert_eq!(app.state.shell.current_screen, screen_ids::SESSION_LIST);
 
     // In test environment, real workspace loading fails, so we check that
     // the refresh mechanism at least attempted to run by checking the UI refresh flag was used
@@ -93,7 +93,7 @@ async fn test_refresh_from_session_list_view() {
     // but we can at least verify the key handling worked correctly
 
     // Verify the async action was processed (RefreshWorkspaces should be gone, might have FetchContainerLogs)
-    match &app.state.pending_async_action {
+    match &app.state.shell.pending_async_action {
         None => {}                                     // No action is fine
         Some(AsyncAction::FetchContainerLogs(_)) => {} // FetchContainerLogs is expected after refresh
         Some(other) => panic!("Unexpected async action after refresh: {other:?}"),
@@ -111,7 +111,7 @@ async fn test_refresh_event_handling() {
     // Should set the async action
     assert!(
         matches!(
-            app.state.pending_async_action,
+            app.state.shell.pending_async_action,
             Some(AsyncAction::RefreshWorkspaces)
         ),
         "RefreshWorkspaces event should set async action"
@@ -144,9 +144,9 @@ async fn test_multiple_refreshes() {
         );
 
         // Verify state is consistent
-        assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+        assert_eq!(app.state.shell.current_screen, screen_ids::SESSION_LIST);
         // After refresh, we might have FetchContainerLogs action queued, which is expected
-        match &app.state.pending_async_action {
+        match &app.state.shell.pending_async_action {
             None => {}                                     // No action is fine
             Some(AsyncAction::FetchContainerLogs(_)) => {} // FetchContainerLogs is expected after refresh
             Some(other) => panic!(
@@ -169,7 +169,7 @@ async fn test_refresh_doesnt_interfere_with_help() {
     if let Some(event) = EventHandler::handle_key_event(help_key, &mut app.state) {
         EventHandler::process_event(event, &mut app.state);
     }
-    assert!(app.state.help_visible);
+    assert!(app.state.shell.help_visible);
 
     // Try to refresh while help is visible - should not trigger refresh in help mode
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
@@ -186,7 +186,7 @@ async fn test_refresh_doesnt_interfere_with_help() {
     if let Some(event) = EventHandler::handle_key_event(esc_key, &mut app.state) {
         EventHandler::process_event(event, &mut app.state);
     }
-    assert!(!app.state.help_visible);
+    assert!(!app.state.shell.help_visible);
 
     // Now refresh should work
     let refresh_key = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE);
@@ -197,7 +197,7 @@ async fn test_refresh_doesnt_interfere_with_help() {
     // Should have pending refresh action
     assert!(
         matches!(
-            app.state.pending_async_action,
+            app.state.shell.pending_async_action,
             Some(AsyncAction::RefreshWorkspaces)
         ),
         "Should have refresh action after help is closed"

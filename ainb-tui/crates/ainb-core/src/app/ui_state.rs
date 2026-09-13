@@ -302,6 +302,14 @@ pub struct UiState {
     /// run loop applies it once the frame is out. Cleared before every draw so
     /// a size from a frame that no longer paints the embed cannot be replayed.
     pub embed_desired_size: Option<(u16, u16)>,
+
+    /// The size the embed was last resized to.
+    ///
+    /// Renderer-local so the resize can be skipped when the layout recomputes
+    /// the same size, which it does on almost every frame. Without it
+    /// `publish_after_draw` takes `&mut` on the tmux section every single
+    /// frame and that section then reads as "changed" forever.
+    pub last_embed_size: Option<(u16, u16)>,
     /// Sidebar rect the HomeScreen last painted, and the welcome panel's
     /// `(content_height, visible_height)`. Both are measurements of what was
     /// drawn, so only a draw can know them; [`crate::components::layout::publish_after_draw`]
@@ -340,12 +348,14 @@ impl UiState {
     ///
     /// The probe reads `~/.claude/settings.json`; the status bar asks for it
     /// once a frame and the `W` shortcut once a keystroke, so without the TTL
-    /// both would pay a filesystem read every time. `state` is taken (and
-    /// ignored) so the call site reads as a projection of app state rather than
-    /// a free-floating global.
+    /// both would pay a filesystem read every time.
+    ///
+    /// It took an `&AppState` it never read, to make the call site look like a
+    /// projection of app state. It is not one: nothing here depends on app
+    /// state, and a parameter that exists to suggest otherwise is worse than
+    /// no parameter.
     pub fn statusline_status(
         &mut self,
-        _state: &AppState,
     ) -> Option<crate::cli::statusline_install::StatuslineStatus> {
         AppState::statusline_status_cached_inner(
             &mut self.statusline_status_cache,
@@ -380,7 +390,7 @@ impl UiState {
     /// routed straight back out to the `LayoutComponent`, which is what this
     /// does, without a round trip through core state.
     pub fn apply(&mut self, action: ScrollAction, layout: &mut LayoutComponent, state: &AppState) {
-        let total_logs = || state.live_logs.values().map(Vec::len).sum::<usize>();
+        let total_logs = || state.log_streams.live_logs.values().map(Vec::len).sum::<usize>();
         match action {
             ScrollAction::ScrollLogsUp => layout.live_logs_mut().scroll_up(),
             ScrollAction::ScrollLogsDown => layout.live_logs_mut().scroll_down(total_logs()),

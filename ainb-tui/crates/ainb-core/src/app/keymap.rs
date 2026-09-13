@@ -383,6 +383,7 @@ impl KeyContext {
 /// four of them did not. A free function over the four inputs that decide it is
 /// something a test can walk exhaustively; a match buried in a 600-line
 /// dispatcher is not.
+#[must_use]
 pub(crate) fn onboarding_sub_context(
     step: &crate::components::onboarding::OnboardingStep,
     auth_pane: &crate::components::onboarding::AuthPane,
@@ -415,8 +416,9 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     let mut contexts = Vec::new();
     let mut text_context_pushed = false;
     let text_input_active = crate::app::events::EventHandler::is_in_text_input_context(state);
-    let auth_setup_api_input = state.current_screen == screen_ids::AUTH_SETUP
+    let auth_setup_api_input = state.shell.current_screen == screen_ids::AUTH_SETUP
         && state
+            .onboarding
             .auth_setup_state
             .as_ref()
             .is_some_and(|auth| auth.selected_method == crate::app::state::AuthMethod::ApiKey);
@@ -424,10 +426,10 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     // accepts text after the API-key method has been selected. Neither may
     // consume host-owned table rows through the generic text fallback.
     let table_text_input_active = text_input_active
-        && state.current_screen != screen_ids::ATTACHED_TERMINAL
-        && (state.current_screen != screen_ids::AUTH_SETUP || auth_setup_api_input);
+        && state.shell.current_screen != screen_ids::ATTACHED_TERMINAL
+        && (state.shell.current_screen != screen_ids::AUTH_SETUP || auth_setup_api_input);
     let plugin_screen_active =
-        crate::app::screens::builtin::plugin_id_for_screen(&state.current_screen).is_some();
+        crate::app::screens::builtin::plugin_id_for_screen(&state.shell.current_screen).is_some();
 
     if host.embed_interactive {
         contexts.push(KeyContext::EmbedInteractive);
@@ -435,25 +437,25 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     if host.preview_scroll_mode {
         contexts.push(KeyContext::PreviewScroll);
     }
-    if state.confirmation_dialog.is_some() {
+    if state.shell.confirmation_dialog.is_some() {
         contexts.push(KeyContext::ConfirmDialog);
     }
-    if state.mcp_overlay.is_some() {
+    if state.mcp_pool.mcp_overlay.is_some() {
         contexts.push(KeyContext::McpOverlay);
     }
-    if state.other_tmux_rename_mode {
+    if state.tmux.other_tmux_rename_mode {
         contexts.push(KeyContext::OtherTmuxRename);
     }
-    if state.ssh_session_rename_mode {
+    if state.ssh.ssh_session_rename_mode {
         contexts.push(KeyContext::SshRename);
     }
-    if state.session_label_rename_mode {
+    if state.session_labels.session_label_rename_mode {
         contexts.push(KeyContext::SessionRename);
     }
-    if state.session_context_menu.is_some() {
+    if state.session_labels.session_context_menu.is_some() {
         contexts.push(KeyContext::SessionContextMenu);
     }
-    if state.help_visible {
+    if state.shell.help_visible {
         if text_input_active {
             contexts.push(KeyContext::Screen("help", SubContext::Named("text")));
         } else {
@@ -469,10 +471,10 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     if state.is_in_quick_commit_mode() {
         contexts.push(KeyContext::QuickCommit);
     }
-    if state.current_screen == screen_ids::SESSION_LIST {
+    if state.shell.current_screen == screen_ids::SESSION_LIST {
         use crate::components::session_tabs::{SessionTab, resolve};
 
-        match resolve(state, state.session_tab) {
+        match resolve(state, state.shell.session_tab) {
             SessionTab::Ask => contexts.push(KeyContext::Screen(
                 screen_ids::SESSION_LIST,
                 SubContext::Named("ask"),
@@ -483,8 +485,8 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
             _ => {}
         }
     }
-    if state.auth_provider_popup_state.show_popup {
-        if state.auth_provider_popup_state.is_entering_key {
+    if state.onboarding.auth_provider_popup_state.show_popup {
+        if state.onboarding.auth_provider_popup_state.is_entering_key {
             contexts.push(KeyContext::Screen(
                 "auth_provider_popup",
                 SubContext::Named("input"),
@@ -496,8 +498,8 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
         }
         contexts.push(KeyContext::AuthProviderPopup);
     }
-    if state.config_popup_state.show_popup {
-        if state.config_popup_state.is_text_entry() {
+    if state.config.config_popup_state.show_popup {
+        if state.config.config_popup_state.is_text_entry() {
             contexts.push(KeyContext::Screen(
                 "config_popup",
                 SubContext::Named("input"),
@@ -509,7 +511,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
         contexts.push(KeyContext::ConfigPopup);
     }
 
-    let screen = match state.current_screen.as_str() {
+    let screen = match state.shell.current_screen.as_str() {
         screen_ids::HOME => Some(screen_ids::HOME),
         screen_ids::SESSION_LIST => Some(screen_ids::SESSION_LIST),
         screen_ids::CONFIG => Some(screen_ids::CONFIG),
@@ -533,7 +535,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
     let mut base_screen = None;
     if let Some(screen) = screen {
         match screen {
-            screen_ids::SESSION_LIST => match state.focused_pane {
+            screen_ids::SESSION_LIST => match state.shell.focused_pane {
                 FocusedPane::Sessions => contexts.push(KeyContext::Screen(
                     screen,
                     SubContext::Named("sessions_pane"),
@@ -547,7 +549,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 )),
             },
             screen_ids::HOME => {
-                let focus = format!("{:?}", state.home_screen_v2_state.focus);
+                let focus = format!("{:?}", state.shell.home_screen_v2_state.focus);
                 let sub = if focus == "Sidebar" {
                     "sidebar"
                 } else {
@@ -556,16 +558,16 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
             }
             screen_ids::CONFIG => {
-                if state.config_screen_state.api_key_input_mode {
+                if state.config.config_screen_state.api_key_input_mode {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("api_key")));
-                } else if state.config_screen_state.editing {
+                } else if state.config.config_screen_state.editing {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("editing")));
-                } else if state.config_screen_state.is_searching() {
+                } else if state.config.config_screen_state.is_searching() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
                 }
             }
             screen_ids::GIT_VIEW => {
-                if let Some(git) = &state.git_view_state {
+                if let Some(git) = &state.git_view.git_view_state {
                     if git.is_in_commit_mode() {
                         contexts.push(KeyContext::Screen(screen, SubContext::Named("commit")));
                     } else if matches!(git.active_tab, crate::components::git_view::GitTab::Review)
@@ -575,7 +577,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::LOG_HISTORY => {
-                let sub = match state.log_history_state.focus {
+                let sub = match state.log_streams.log_history_state.focus {
                     crate::components::log_history_viewer::LogViewerFocus::SessionList => {
                         "sessions"
                     }
@@ -584,21 +586,21 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
             }
             screen_ids::SESSION_RECOVERY => {
-                if state.session_recovery_state.recovery_overlay.is_some() {
+                if state.recovery.session_recovery_state.recovery_overlay.is_some() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("overlay")));
-                } else if state.session_recovery_state.search_active {
+                } else if state.recovery.session_recovery_state.search_active {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
-                } else if !state.session_recovery_state.search_query.is_empty() {
+                } else if !state.recovery.session_recovery_state.search_query.is_empty() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("filtered")));
                 }
             }
-            screen_ids::SKILLS if state.skills_state.search_active => {
+            screen_ids::SKILLS if state.skills.skills_state.search_active => {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
             }
             screen_ids::SKILL_MANAGER => {
                 use crate::components::skill_manager_screen::{BrowseMode, FocusedSkillPane};
 
-                let skills = &state.skill_manager_state;
+                let skills = &state.skills.skill_manager_state;
                 if skills.input.is_some() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("input")));
                 } else if skills.sync_confirm.is_some() {
@@ -628,7 +630,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::AUTH_SETUP => {
-                if state.auth_setup_state.is_some() {
+                if state.onboarding.auth_setup_state.is_some() {
                     if auth_setup_api_input {
                         contexts.push(KeyContext::Screen(screen, SubContext::Named("input")));
                     } else {
@@ -637,7 +639,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::ONBOARDING => {
-                if let Some(onboarding) = &state.onboarding_state {
+                if let Some(onboarding) = &state.onboarding.onboarding_state {
                     let sub = onboarding_sub_context(
                         &onboarding.current_step,
                         &onboarding.auth_pane,
@@ -648,7 +650,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 }
             }
             screen_ids::SETUP_MENU => {
-                let sub = if state.setup_menu_state.showing_confirmation {
+                let sub = if state.onboarding.setup_menu_state.showing_confirmation {
                     "confirm"
                 } else {
                     "menu"
@@ -656,7 +658,7 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                 contexts.push(KeyContext::Screen(screen, SubContext::Named(sub)));
             }
             screen_ids::DAEMONS => {
-                let sub = if state.daemons_state.has_overlay() {
+                let sub = if state.hangar.daemons_state.has_overlay() {
                     "overlay"
                 } else {
                     "list"
@@ -668,12 +670,12 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
         base_screen = Some(screen);
     }
 
-    let ask_free_text = state.current_screen == screen_ids::SESSION_LIST
+    let ask_free_text = state.shell.current_screen == screen_ids::SESSION_LIST
         && matches!(
-            crate::components::session_tabs::resolve(state, state.session_tab),
+            crate::components::session_tabs::resolve(state, state.shell.session_tab),
             crate::components::session_tabs::SessionTab::Ask
         )
-        && state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText;
+        && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText;
     if (table_text_input_active || ask_free_text) && !text_context_pushed {
         contexts.push(KeyContext::TextInput);
     }

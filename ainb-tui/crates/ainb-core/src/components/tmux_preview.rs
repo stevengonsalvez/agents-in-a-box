@@ -99,7 +99,7 @@ impl TmuxPreviewPane {
             .style(Style::default().bg(DARK_BG))
             .title(title);
 
-        match state.embed.as_ref() {
+        match state.tmux.embed.as_ref() {
             Some(embed) => {
                 let parser = embed.parser();
                 let guard = parser.read();
@@ -125,7 +125,7 @@ impl TmuxPreviewPane {
         use crate::app::state::FocusedPane;
         // Focused pane gets a green border; unfocused panes a subtle grey one,
         // consistent with the session list + live logs.
-        let is_focused = matches!(state.focused_pane, FocusedPane::Preview);
+        let is_focused = matches!(state.shell.focused_pane, FocusedPane::Preview);
         // First check for regular Claude sessions
         if let Some(session) = state.selected_session() {
             if session.is_attached {

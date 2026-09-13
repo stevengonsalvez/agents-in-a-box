@@ -803,11 +803,11 @@ impl PersistOutcome {
 
 impl EventHandler {
     pub fn persist_sessions_pane_preferences(state: &mut AppState, ui: &UiState) {
-        state.app_config.ui_preferences.sessions_sidebar_width =
+        state.config.app_config.ui_preferences.sessions_sidebar_width =
             Some(ui.sessions_pane.preferred_width);
-        state.app_config.ui_preferences.sessions_sidebar_collapsed =
+        state.config.app_config.ui_preferences.sessions_sidebar_collapsed =
             Some(ui.sessions_pane.collapsed);
-        if let Err(e) = state.app_config.save() {
+        if let Err(e) = state.config.app_config.save() {
             tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
         }
     }
@@ -817,9 +817,9 @@ impl EventHandler {
     /// (32). The width is clamped against the current terminal so a
     /// stale oversized value can never starve the Units table.
     fn apply_skill_manager_sources_width(state: &mut AppState) {
-        if let Some(width) = state.app_config.ui_preferences.skill_manager_sources_width {
+        if let Some(width) = state.config.app_config.ui_preferences.skill_manager_sources_width {
             let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-            state.skill_manager_state.sources_width =
+            state.skills.skill_manager_state.sources_width =
                 crate::components::skill_manager_screen::clamp_sources_width(width, term_w);
         }
     }
@@ -827,9 +827,9 @@ impl EventHandler {
     /// Persist the current SkillManager Sources-panel width to config.
     /// Called on `[`/`]` resize and on divider-drag-end.
     fn persist_skill_manager_sources_width(state: &mut AppState) {
-        state.app_config.ui_preferences.skill_manager_sources_width =
-            Some(state.skill_manager_state.sources_width);
-        if let Err(e) = state.app_config.save() {
+        state.config.app_config.ui_preferences.skill_manager_sources_width =
+            Some(state.skills.skill_manager_state.sources_width);
+        if let Err(e) = state.config.app_config.save() {
             tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
         }
     }
@@ -840,8 +840,8 @@ impl EventHandler {
     /// active surface. Mouse hit-testing on the panels is suppressed in
     /// that case so a click meant for the modal doesn't leak through.
     fn skill_manager_overlay_open(state: &AppState) -> bool {
-        let s = &state.skill_manager_state;
-        state.help_visible
+        let s = &state.skills.skill_manager_state;
+        state.shell.help_visible
             || s.banner.is_active()
             || s.input.is_some()
             || s.library.is_some()
@@ -876,7 +876,7 @@ impl EventHandler {
             return None;
         }
         let sources_w = crate::components::skill_manager_screen::clamp_sources_width(
-            state.skill_manager_state.sources_width,
+            state.skills.skill_manager_state.sources_width,
             term_w,
         );
         let sources_rect = Rect::new(0, 0, sources_w, top_h);
@@ -900,12 +900,12 @@ impl EventHandler {
     /// renders meanwhile; a second request while one is in flight is
     /// ignored. Nothing is persisted until the picker's import confirms.
     fn open_source_preview(state: &mut AppState, uri: &str) {
-        if state.skill_manager_state.preview_loading.is_some() {
+        if state.skills.skill_manager_state.preview_loading.is_some() {
             state.add_warning_notification("a source fetch is already running".to_string());
             return;
         }
-        state.skill_manager_state.preview_loading = Some(uri.to_string());
-        state.pending_async_action = Some(crate::app::state::AsyncAction::SkillPreviewFetch(
+        state.skills.skill_manager_state.preview_loading = Some(uri.to_string());
+        state.shell.pending_async_action = Some(crate::app::state::AsyncAction::SkillPreviewFetch(
             uri.to_string(),
         ));
     }
@@ -943,7 +943,9 @@ impl EventHandler {
         }
         match event {
             AppEvent::MouseRightClick { x, y } => {
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     if let Some(crate::app::state::SessionListRowTarget::Attachable(target)) =
                         state.session_list_row_at_mouse(&ui.sessions_pane, x, y)
                     {
@@ -959,13 +961,13 @@ impl EventHandler {
                 None
             }
             AppEvent::MouseClick { x, y } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
-                    if state.home_screen_v2_state.begin_sidebar_resize(x, y) {
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
+                    if state.shell.home_screen_v2_state.begin_sidebar_resize(x, y) {
                         return None;
                     }
 
                     if let Some(outcome) =
-                        state.home_screen_v2_state.click_sidebar_item_at(x, y, Instant::now())
+                        state.shell.home_screen_v2_state.click_sidebar_item_at(x, y, Instant::now())
                     {
                         if outcome.double_click {
                             return Some(AppEvent::HomeScreenSidebarSelect);
@@ -979,7 +981,7 @@ impl EventHandler {
                 // Sources / Units. Guarded so clicks meant for an open
                 // overlay (banner / input / library / browse / help)
                 // don't leak through to the panels.
-                if state.current_screen == screen_ids::SKILL_MANAGER
+                if state.shell.current_screen == screen_ids::SKILL_MANAGER
                     && !Self::skill_manager_overlay_open(state)
                 {
                     if let Some((sources_rect, units_rect, sources_w)) =
@@ -993,7 +995,7 @@ impl EventHandler {
                             && y >= sources_rect.y
                             && y < sources_rect.y.saturating_add(sources_rect.height);
                         if on_edge {
-                            state.skill_manager_state.resize_active = true;
+                            state.skills.skill_manager_state.resize_active = true;
                             return None;
                         }
 
@@ -1009,11 +1011,11 @@ impl EventHandler {
                                 return Some(AppEvent::SkillManagerClearSourceFilter);
                             }
                             let index = usize::from(row.saturating_sub(1));
-                            if index < state.skill_manager_state.sources.len() {
+                            if index < state.skills.skill_manager_state.sources.len() {
                                 return Some(AppEvent::SkillManagerSourceClick { index });
                             }
                             // Empty area inside the panel → just focus it.
-                            state.skill_manager_state.focused_pane =
+                            state.skills.skill_manager_state.focused_pane =
                                 crate::components::skill_manager_screen::FocusedSkillPane::Sources;
                             return None;
                         }
@@ -1026,12 +1028,13 @@ impl EventHandler {
                             let data_y = sources_rect.y.saturating_add(2);
                             if y >= data_y {
                                 let position = usize::from(y - data_y);
-                                let visible_len = state.skill_manager_state.visible_indices().len();
+                                let visible_len =
+                                    state.skills.skill_manager_state.visible_indices().len();
                                 if position < visible_len {
                                     return Some(AppEvent::SkillManagerUnitClick { position });
                                 }
                             }
-                            state.skill_manager_state.focused_pane =
+                            state.skills.skill_manager_state.focused_pane =
                                 crate::components::skill_manager_screen::FocusedSkillPane::Units;
                             return None;
                         }
@@ -1045,7 +1048,9 @@ impl EventHandler {
                 let split_point = (term_width as f32 * SESSIONS_PANE_WIDTH_PERCENTAGE) as u16;
 
                 // Check if we're in the main view (not in overlays)
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     // Click on the bottom keymap legend (or its collapsed hint
                     // row) toggles it — the mouse twin of ⇧M.
                     if let Some(area) = ui.menu_bar_area {
@@ -1079,19 +1084,19 @@ impl EventHandler {
                     }
 
                     if ui.sessions_pane.contains_sessions_point(x, y) {
-                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                         return None;
                     }
 
                     if ui.sessions_pane.contains_preview_point(x, y) {
-                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
                         return None;
                     }
 
                     if x < split_point {
-                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                     } else {
-                        state.focused_pane = crate::app::state::FocusedPane::LiveLogs;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::LiveLogs;
                     }
                     None
                 } else {
@@ -1100,7 +1105,7 @@ impl EventHandler {
             }
             AppEvent::MouseDragStart { x: _, y: _ } => {
                 // Start text selection in logs pane
-                if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
+                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
                     None
                 } else {
@@ -1108,13 +1113,15 @@ impl EventHandler {
                 }
             }
             AppEvent::MouseDragging { x, y: _ } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
                     let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                    state.home_screen_v2_state.drag_sidebar_resize(x, term_width);
+                    state.shell.home_screen_v2_state.drag_sidebar_resize(x, term_width);
                     return None;
                 }
 
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     let width = ui
                         .sessions_pane
                         .last_content_width()
@@ -1126,12 +1133,12 @@ impl EventHandler {
                 // SkillManager divider drag: the new Sources width is the
                 // pointer's x + 1 (the panel spans columns 0..=x). Clamped
                 // by `grow`/`shrink`'s shared clamp via the setter below.
-                if state.current_screen == screen_ids::SKILL_MANAGER
-                    && state.skill_manager_state.resize_active
+                if state.shell.current_screen == screen_ids::SKILL_MANAGER
+                    && state.skills.skill_manager_state.resize_active
                 {
                     let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
                     let requested = x.saturating_add(1);
-                    state.skill_manager_state.sources_width =
+                    state.skills.skill_manager_state.sources_width =
                         crate::components::skill_manager_screen::clamp_sources_width(
                             requested, term_w,
                         );
@@ -1139,7 +1146,7 @@ impl EventHandler {
                 }
 
                 // Update selection during drag
-                if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
+                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
                     None
                 } else {
@@ -1147,19 +1154,21 @@ impl EventHandler {
                 }
             }
             AppEvent::MouseDragEnd { x, y } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
-                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
-                    if state.home_screen_v2_state.finish_sidebar_resize() {
-                        let width = state.home_screen_v2_state.sidebar.preferred_width;
-                        state.app_config.ui_preferences.home_sidebar_width = Some(width);
-                        if let Err(e) = state.app_config.save() {
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
+                    state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                    if state.shell.home_screen_v2_state.finish_sidebar_resize() {
+                        let width = state.shell.home_screen_v2_state.sidebar.preferred_width;
+                        state.config.app_config.ui_preferences.home_sidebar_width = Some(width);
+                        if let Err(e) = state.config.app_config.save() {
                             tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
                         }
                     }
                     return None;
                 }
 
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     ui.sessions_pane.update_hover(x, y);
                     if ui.sessions_pane.finish_resize() {
                         Self::persist_sessions_pane_preferences(state, ui);
@@ -1167,17 +1176,17 @@ impl EventHandler {
                     return None;
                 }
 
-                if state.current_screen == screen_ids::SKILL_MANAGER {
+                if state.shell.current_screen == screen_ids::SKILL_MANAGER {
                     let _ = (x, y);
-                    if state.skill_manager_state.resize_active {
-                        state.skill_manager_state.resize_active = false;
+                    if state.skills.skill_manager_state.resize_active {
+                        state.skills.skill_manager_state.resize_active = false;
                         return Some(AppEvent::SkillManagerPersistSourcesWidth);
                     }
                     return None;
                 }
 
                 // Finalize text selection
-                if state.focused_pane == crate::app::state::FocusedPane::LiveLogs {
+                if state.shell.focused_pane == crate::app::state::FocusedPane::LiveLogs {
                     // This will be handled in Phase 2
                     None
                 } else {
@@ -1185,10 +1194,12 @@ impl EventHandler {
                 }
             }
             AppEvent::MouseMove { x, y } => {
-                if state.current_screen == screen_ids::HOME && !state.help_visible {
-                    state.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
+                    state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
                 }
-                if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                if state.shell.current_screen == screen_ids::SESSION_LIST
+                    && !state.shell.help_visible
+                {
                     ui.sessions_pane.update_hover(x, y);
                 }
                 None
@@ -1219,7 +1230,7 @@ impl EventHandler {
     /// has to be forwarded here or it gets dropped silently (the bug where
     /// you couldn't paste a path into the workspace folder field).
     pub fn handle_paste_event(text: String, state: &AppState) -> Option<AppEvent> {
-        if state.config_popup_state.is_text_entry() {
+        if state.config.config_popup_state.is_text_entry() {
             return Some(AppEvent::ConfigPopupPaste(text));
         }
         // New Session repo picker: the filter field accepts pasted
@@ -1229,8 +1240,9 @@ impl EventHandler {
         // screen too — `new_session_state` can linger after navigating away
         // (e.g. via the sidebar), and a paste must not leak into a hidden
         // picker.
-        let on_pick_repo = state.current_screen == crate::app::screens::ids::NEW_SESSION
+        let on_pick_repo = state.shell.current_screen == crate::app::screens::ids::NEW_SESSION
             && state
+                .new_session
                 .new_session_state
                 .as_ref()
                 .map(|s| s.step == crate::app::state::NewSessionStep::PickRepo)
@@ -1301,8 +1313,8 @@ impl EventHandler {
         // Modal text-entry overlays. These early-return higher up in
         // handle_key_event, but listing them keeps this helper a
         // complete predicate.
-        if state.other_tmux_rename_mode
-            || state.ssh_session_rename_mode
+        if state.tmux.other_tmux_rename_mode
+            || state.ssh.ssh_session_rename_mode
             || state.is_in_quick_commit_mode()
         {
             return true;
@@ -1313,8 +1325,9 @@ impl EventHandler {
         // textarea. Both accept colon-bearing input (URLs, prompts), so
         // global single-character shortcuts must be suppressed while they
         // own focus.
-        let new_session_text_active = state.current_screen == screen_ids::NEW_SESSION
+        let new_session_text_active = state.shell.current_screen == screen_ids::NEW_SESSION
             && state
+                .new_session
                 .new_session_state
                 .as_ref()
                 .map(|s| matches!(s.step, NewSessionStep::PickRepo | NewSessionStep::Configure))
@@ -1335,12 +1348,12 @@ impl EventHandler {
         // sessions screen binds bare `d` to delete-session and bare `q` to
         // leave, so without this a message typed into the thread composer would
         // fire session shortcuts one character at a time.
-        let session_composer_active = state.current_screen == screen_ids::SESSION_LIST
+        let session_composer_active = state.shell.current_screen == screen_ids::SESSION_LIST
             && state.session_composer_captures_text();
-        let skills_text_active =
-            state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
-        let recovery_text_active = state.current_screen == screen_ids::SESSION_RECOVERY
-            && state.session_recovery_state.search_active;
+        let skills_text_active = state.shell.current_screen == screen_ids::SKILLS
+            && state.skills.skills_state.search_active;
+        let recovery_text_active = state.shell.current_screen == screen_ids::SESSION_RECOVERY
+            && state.recovery.session_recovery_state.search_active;
         // SkillManager add-source / search prompt — when its input
         // overlay is open the user is typing a URI or filter, which
         // routinely contains `:` (e.g. `gh:owner/repo`,
@@ -1348,13 +1361,18 @@ impl EventHandler {
         // palette would open mid-URI and swallow the rest of the
         // keystrokes — exactly the bug that made `[i] add source`
         // appear broken.
-        let skill_manager_input_active = state.current_screen == screen_ids::SKILL_MANAGER
-            && (state.skill_manager_state.input.is_some()
-                || state.skill_manager_state.browse.as_ref().is_some_and(|b| {
+        let skill_manager_input_active = state.shell.current_screen == screen_ids::SKILL_MANAGER
+            && (state.skills.skill_manager_state.input.is_some()
+                || state.skills.skill_manager_state.browse.as_ref().is_some_and(|b| {
                     b.mode == crate::components::skill_manager_screen::BrowseMode::Query
                 }));
-        let git_view_text_active = state.current_screen == screen_ids::GIT_VIEW
-            && state.git_view_state.as_ref().map(|gv| gv.is_in_commit_mode()).unwrap_or(false);
+        let git_view_text_active = state.shell.current_screen == screen_ids::GIT_VIEW
+            && state
+                .git_view
+                .git_view_state
+                .as_ref()
+                .map(|gv| gv.is_in_commit_mode())
+                .unwrap_or(false);
 
         // Config is multi-mode — only the states that accept free-form
         // character input count as text-entry. Plain navigation of
@@ -1364,17 +1382,17 @@ impl EventHandler {
         // `TextInput` / `NumberInput` variants (via
         // `ConfigPopupState::is_text_entry`); `Choice` and `Boolean`
         // popups are navigation-only, so `H` is still allowed there.
-        let config_text_active = state.current_screen == screen_ids::CONFIG
-            && (state.config_screen_state.editing
-                || state.config_screen_state.api_key_input_mode
-                || state.config_popup_state.is_text_entry());
+        let config_text_active = state.shell.current_screen == screen_ids::CONFIG
+            && (state.config.config_screen_state.editing
+                || state.config.config_screen_state.api_key_input_mode
+                || state.config.config_popup_state.is_text_entry());
 
         // Onboarding wizard text-entry steps: git-directories path input,
         // the OTEL credential form, and the auth API-key entry pane. These
         // must accept bracketed paste (endpoints/tokens/paths are exactly
         // the values users paste).
-        let onboarding_text_active = state.current_screen == screen_ids::ONBOARDING
-            && state.onboarding_state.as_ref().is_some_and(|o| {
+        let onboarding_text_active = state.shell.current_screen == screen_ids::ONBOARDING
+            && state.onboarding.onboarding_state.as_ref().is_some_and(|o| {
                 use crate::components::onboarding::{AuthPane, OnboardingStep};
                 match o.current_step {
                     OnboardingStep::GitDirectories | OnboardingStep::OtelSetup => true,
@@ -1397,14 +1415,14 @@ impl EventHandler {
             || plugin_capturing_text
             || onboarding_text_active
             || matches!(
-                state.current_screen.as_str(),
+                state.shell.current_screen.as_str(),
                 screen_ids::SEARCH_WORKSPACE
                     | screen_ids::CLAUDE_CHAT
                     | screen_ids::AUTH_SETUP
                     | screen_ids::ATTACHED_TERMINAL
             )
             || config_text_active
-            || state.auth_provider_popup_state.show_popup
+            || state.onboarding.auth_provider_popup_state.show_popup
             || skills_text_active
             || recovery_text_active
             || skill_manager_input_active
@@ -1441,8 +1459,8 @@ impl EventHandler {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
-        let live_source = state.live_window_watcher.snapshot().source;
-        let status = ui.statusline_status(state);
+        let live_source = state.fleet.live_window_watcher.snapshot().source;
+        let status = ui.statusline_status();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
 
@@ -1467,7 +1485,7 @@ impl EventHandler {
         let chord = Chord::from_key_event(&key_event);
         // New Session delegates to component-owned handlers in this phase, but
         // Help remains a host modal and therefore wins before that delegation.
-        if state.help_visible {
+        if state.shell.help_visible {
             let context = if Self::is_text_input_context(state) {
                 KeyContext::Screen("help", crate::app::keymap::SubContext::Named("text"))
             } else {
@@ -1480,14 +1498,14 @@ impl EventHandler {
                 return None;
             }
         }
-        if state.current_screen == screen_ids::NEW_SESSION {
+        if state.shell.current_screen == screen_ids::NEW_SESSION {
             return Self::handle_new_session_keys(key_event, state);
         }
 
         let contexts = active_contexts(state, &HostFlags::default());
         match keymap.resolve_with_context(&contexts, &chord) {
             Some((context, _))
-                if state.help_visible
+                if state.shell.help_visible
                     && context != KeyContext::HelpVisible
                     && !Self::is_text_input_context(state) =>
             {
@@ -1509,59 +1527,63 @@ impl EventHandler {
 
     /// Map a table-owned printable glyph onto the reducer's input intent.
     fn keymap_text_event(character: char, state: &mut AppState) -> Option<AppEvent> {
-        if state.current_screen == screen_ids::SESSION_LIST && state.session_tab_owns_keys() {
+        if state.shell.current_screen == screen_ids::SESSION_LIST && state.session_tab_owns_keys() {
             return Self::route_session_composer_char(character, state);
         }
-        if state.current_screen == screen_ids::SESSION_LIST
-            && crate::components::session_tabs::resolve(state, state.session_tab)
+        if state.shell.current_screen == screen_ids::SESSION_LIST
+            && crate::components::session_tabs::resolve(state, state.shell.session_tab)
                 == crate::components::session_tabs::SessionTab::Ask
-            && state.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
+            && state.fleet.ask_state.focus() == crate::fleet::answer::AskFocus::FreeText
         {
             return Self::route_session_ask_text(character, state);
         }
-        if state.other_tmux_rename_mode {
+        if state.tmux.other_tmux_rename_mode {
             return Some(AppEvent::OtherTmuxRenameChar(character));
         }
-        if state.ssh_session_rename_mode {
+        if state.ssh.ssh_session_rename_mode {
             return Some(AppEvent::SshSessionRenameChar(character));
         }
-        if state.session_label_rename_mode {
+        if state.session_labels.session_label_rename_mode {
             return Some(AppEvent::SessionLabelRenameChar(character));
         }
         if state.is_in_quick_commit_mode() {
             return Some(AppEvent::QuickCommitInputChar(character));
         }
-        if state.config_popup_state.show_popup {
+        if state.config.config_popup_state.show_popup {
             return Some(AppEvent::ConfigPopupInputChar(character));
         }
-        if state.auth_provider_popup_state.show_popup
-            && state.auth_provider_popup_state.is_entering_key
+        if state.onboarding.auth_provider_popup_state.show_popup
+            && state.onboarding.auth_provider_popup_state.is_entering_key
         {
             return Some(AppEvent::AuthProviderPopupInputChar(character));
         }
 
-        match state.current_screen.as_str() {
+        match state.shell.current_screen.as_str() {
             screen_ids::CONFIG
-                if state.config_screen_state.editing
-                    || state.config_screen_state.api_key_input_mode =>
+                if state.config.config_screen_state.editing
+                    || state.config.config_screen_state.api_key_input_mode =>
             {
                 Some(AppEvent::ConfigEditChar(character))
             }
-            screen_ids::CONFIG if state.config_screen_state.is_searching() => {
+            screen_ids::CONFIG if state.config.config_screen_state.is_searching() => {
                 Some(AppEvent::ConfigSearchChar(character))
             }
             screen_ids::GIT_VIEW
-                if state.git_view_state.as_ref().is_some_and(|git| git.is_in_commit_mode()) =>
+                if state
+                    .git_view
+                    .git_view_state
+                    .as_ref()
+                    .is_some_and(|git| git.is_in_commit_mode()) =>
             {
                 Some(AppEvent::GitViewCommitInputChar(character))
             }
-            screen_ids::SKILLS if state.skills_state.search_active => {
+            screen_ids::SKILLS if state.skills.skills_state.search_active => {
                 Some(AppEvent::SkillsSearchChar(character))
             }
-            screen_ids::SESSION_RECOVERY if state.session_recovery_state.search_active => {
+            screen_ids::SESSION_RECOVERY if state.recovery.session_recovery_state.search_active => {
                 Some(AppEvent::SessionRecoverySearchChar(character))
             }
-            screen_ids::SKILL_MANAGER if state.skill_manager_state.input.is_some() => {
+            screen_ids::SKILL_MANAGER if state.skills.skill_manager_state.input.is_some() => {
                 Some(AppEvent::SkillManagerInputChar(character))
             }
             // The browse overlay's Query phase is a free-form buffer: `/`, `:`
@@ -1571,7 +1593,7 @@ impl EventHandler {
             // resolved as `KeyAction::Text` and then dropped here, which is
             // what broke `[b]` search after the dispatcher moved to the table.
             screen_ids::SKILL_MANAGER
-                if state.skill_manager_state.browse.as_ref().is_some_and(|browse| {
+                if state.skills.skill_manager_state.browse.as_ref().is_some_and(|browse| {
                     browse.mode == crate::components::skill_manager_screen::BrowseMode::Query
                 }) =>
             {
@@ -1579,25 +1601,28 @@ impl EventHandler {
             }
             screen_ids::AUTH_SETUP
                 if state
+                    .onboarding
                     .auth_setup_state
                     .as_ref()
                     .is_some_and(|auth| auth.selected_method == AuthMethod::ApiKey) =>
             {
                 Some(AppEvent::AuthSetupInputChar(character))
             }
-            screen_ids::ONBOARDING => state.onboarding_state.as_ref().map(|onboarding| {
-                use crate::components::onboarding::{AuthPane, OnboardingStep};
+            screen_ids::ONBOARDING => {
+                state.onboarding.onboarding_state.as_ref().map(|onboarding| {
+                    use crate::components::onboarding::{AuthPane, OnboardingStep};
 
-                match onboarding.current_step {
-                    OnboardingStep::OtelSetup => AppEvent::OnboardingOtelChar(character),
-                    OnboardingStep::Authentication
-                        if matches!(onboarding.auth_pane, AuthPane::KeyEntry { .. }) =>
-                    {
-                        AppEvent::OnboardingAuthKeyChar(character)
+                    match onboarding.current_step {
+                        OnboardingStep::OtelSetup => AppEvent::OnboardingOtelChar(character),
+                        OnboardingStep::Authentication
+                            if matches!(onboarding.auth_pane, AuthPane::KeyEntry { .. }) =>
+                        {
+                            AppEvent::OnboardingAuthKeyChar(character)
+                        }
+                        _ => AppEvent::OnboardingInputChar(character),
                     }
-                    _ => AppEvent::OnboardingInputChar(character),
-                }
-            }),
+                })
+            }
             _ => None,
         }
     }
@@ -1657,7 +1682,7 @@ impl EventHandler {
             PalCycleMode => Self::route_pal_dial(|dial| dial.cycle_mode(), state),
             PalRetry
                 if matches!(
-                    state.pal_dial.status(),
+                    state.fleet.pal_dial.status(),
                     crate::fleet::pal_dial::DialStatus::Failed { .. }
                 ) =>
             {
@@ -1665,34 +1690,35 @@ impl EventHandler {
             }
             PalRetry => None,
             UiAction::DaemonsCloseOverlay => {
-                state.daemons_state.close_overlay();
+                state.hangar.daemons_state.close_overlay();
                 None
             }
             UiAction::DaemonsCloseAndBack => {
-                state.daemons_state.close_all_overlays();
+                state.hangar.daemons_state.close_all_overlays();
                 Some(AppEvent::PanelBack)
             }
             UiAction::DaemonsConfirmMenu => {
-                state.daemons_state.confirm_menu();
-                if let Some(session) = state.daemons_state.take_attach_request() {
-                    state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session));
+                state.hangar.daemons_state.confirm_menu();
+                if let Some(session) = state.hangar.daemons_state.take_attach_request() {
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::AttachToOtherTmux(session));
                 }
                 None
             }
             UiAction::DaemonsOpenMenu => {
-                state.daemons_state.open_menu();
+                state.hangar.daemons_state.open_menu();
                 None
             }
             UiAction::DaemonsMoveOverlay(delta) => {
-                state.daemons_state.move_menu(delta);
+                state.hangar.daemons_state.move_menu(delta);
                 None
             }
             UiAction::DaemonsMoveSelection(delta) => {
-                state.daemons_state.move_selection(delta);
+                state.hangar.daemons_state.move_selection(delta);
                 None
             }
             UiAction::SkillManagerSyncOrConflict => {
-                if state.skill_manager_state.focused_pane
+                if state.skills.skill_manager_state.focused_pane
                     == crate::components::skill_manager_screen::FocusedSkillPane::Sources
                 {
                     return Some(AppEvent::SkillManagerSync);
@@ -1705,7 +1731,7 @@ impl EventHandler {
                 })
             }
             UiAction::SkillManagerRemoveOrSource => Some(
-                if state.skill_manager_state.focused_pane
+                if state.skills.skill_manager_state.focused_pane
                     == crate::components::skill_manager_screen::FocusedSkillPane::Sources
                 {
                     AppEvent::SkillManagerSourceRemoveOpen
@@ -1713,16 +1739,18 @@ impl EventHandler {
                     AppEvent::SkillManagerRemove
                 },
             ),
-            UiAction::SkillManagerOpenUnitIfFocused => (state.skill_manager_state.focused_pane
-                != crate::components::skill_manager_screen::FocusedSkillPane::Sources)
-                .then_some(AppEvent::SkillManagerOpenUnitInEditor),
+            UiAction::SkillManagerOpenUnitIfFocused => {
+                (state.skills.skill_manager_state.focused_pane
+                    != crate::components::skill_manager_screen::FocusedSkillPane::Sources)
+                    .then_some(AppEvent::SkillManagerOpenUnitInEditor)
+            }
             UiAction::SkillManagerCopyToLibraryIfFocused => {
-                (state.skill_manager_state.focused_pane
+                (state.skills.skill_manager_state.focused_pane
                     != crate::components::skill_manager_screen::FocusedSkillPane::Sources)
                     .then_some(AppEvent::SkillManagerCopyToLibrary)
             }
             UiAction::SkillManagerBackOrClearFilter => {
-                if state.skill_manager_state.source_filter.is_some() {
+                if state.skills.skill_manager_state.source_filter.is_some() {
                     Some(AppEvent::SkillManagerClearSourceFilter)
                 } else {
                     Some(AppEvent::SkillManagerBack)
@@ -1768,7 +1796,7 @@ impl EventHandler {
         use crate::components::session_tabs::SessionTab;
         use crate::models::SessionStatus;
 
-        match crate::components::session_tabs::resolve(state, state.session_tab) {
+        match crate::components::session_tabs::resolve(state, state.shell.session_tab) {
             SessionTab::Preview => {}
             SessionTab::Ask => return Some(AppEvent::SessionAskSend),
             SessionTab::Thread | SessionTab::Pal => return Some(AppEvent::SessionTabComposerSend),
@@ -1776,11 +1804,11 @@ impl EventHandler {
         }
         // Checked managed rows remain the action target even after the cursor
         // moves to a terminal, SSH, shell, or Other tmux row.
-        if !state.selected_sessions.is_empty() {
+        if !state.sessions.selected_sessions.is_empty() {
             Some(AppEvent::ResumeSelectedSessions("Enter".to_string()))
         } else if state.is_ssh_session_selected()
             || state.is_other_tmux_selected()
-            || state.shell_selected
+            || state.sessions.shell_selected
         {
             Some(AppEvent::AttachTmuxSession)
         } else if let Some(session) = state.selected_session() {
@@ -1798,7 +1826,7 @@ impl EventHandler {
     fn resume_selected_session(state: &AppState) -> Option<AppEvent> {
         use crate::models::SessionStatus;
 
-        if !state.selected_sessions.is_empty() {
+        if !state.sessions.selected_sessions.is_empty() {
             Some(AppEvent::ResumeSelectedSessions("r".to_string()))
         } else if let Some(session) = state.selected_session() {
             let interactive = crate::app::state::is_stoppable_interactive(session);
@@ -1838,28 +1866,28 @@ impl EventHandler {
 
     fn route_session_ask_move(delta: isize, state: &mut AppState) -> Option<AppEvent> {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
-        state.ask_state.retarget(&chip);
-        state.ask_state.move_cursor(&chip, delta);
-        state.ui_needs_refresh = true;
+        state.fleet.ask_state.retarget(&chip);
+        state.fleet.ask_state.move_cursor(&chip, delta);
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
     fn route_session_ask_backspace(state: &mut AppState) -> Option<AppEvent> {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
-        state.ask_state.retarget(&chip);
-        state.ask_state.backspace();
-        state.ui_needs_refresh = true;
+        state.fleet.ask_state.retarget(&chip);
+        state.fleet.ask_state.backspace();
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
     fn route_session_ask_text(character: char, state: &mut AppState) -> Option<AppEvent> {
         let chip = crate::components::session_tabs::selected_blocking(state)?.clone();
-        state.ask_state.retarget(&chip);
-        if state.ask_state.focus() != crate::fleet::answer::AskFocus::FreeText {
+        state.fleet.ask_state.retarget(&chip);
+        if state.fleet.ask_state.focus() != crate::fleet::answer::AskFocus::FreeText {
             return None;
         }
-        state.ask_state.push_char(character);
-        state.ui_needs_refresh = true;
+        state.fleet.ask_state.push_char(character);
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
@@ -1867,11 +1895,11 @@ impl EventHandler {
     where
         F: FnOnce(&mut crate::fleet::pal_dial::PalDial),
     {
-        if state.session_tab != crate::components::session_tabs::SessionTab::Pal {
+        if state.shell.session_tab != crate::components::session_tabs::SessionTab::Pal {
             return None;
         }
-        turn(&mut state.pal_dial);
-        state.ui_needs_refresh = true;
+        turn(&mut state.fleet.pal_dial);
+        state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
 
@@ -1898,53 +1926,53 @@ impl EventHandler {
         if matches!(action, ChatKey::Enter) && state.pal_daemon_cta_armed() {
             return Some(AppEvent::SessionStartHangarDaemon);
         }
-        if state.session_tab == SessionTab::Thread {
+        if state.shell.session_tab == SessionTab::Thread {
             let targets = state.broadcast_targets();
             if !targets.is_empty() {
                 let handled = match action {
                     ChatKey::Enter => {
-                        state.broadcast.send(targets);
+                        state.fleet.broadcast.send(targets);
                         true
                     }
                     ChatKey::Backspace => {
-                        state.broadcast.backspace();
+                        state.fleet.broadcast.backspace();
                         true
                     }
                     ChatKey::Esc => {
-                        state.session_tab = SessionTab::Preview;
-                        state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                        state.shell.session_tab = SessionTab::Preview;
+                        state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                         true
                     }
                     ChatKey::Char(character) => {
-                        state.broadcast.push(character);
+                        state.fleet.broadcast.push(character);
                         true
                     }
                     ChatKey::Space => {
-                        state.broadcast.push(' ');
+                        state.fleet.broadcast.push(' ');
                         true
                     }
                     _ => false,
                 };
                 if handled {
-                    state.ui_needs_refresh = true;
+                    state.shell.ui_needs_refresh = true;
                     return Some(AppEvent::Consumed);
                 }
                 return None;
             }
         }
 
-        let host = match state.session_tab {
-            SessionTab::Pal => state.pal_chat.as_mut(),
-            SessionTab::Thread => state.session_chat.as_mut().map(|(_, host)| host),
+        let host = match state.shell.session_tab {
+            SessionTab::Pal => state.fleet.pal_chat.as_mut(),
+            SessionTab::Thread => state.fleet.session_chat.as_mut().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?;
         let outcome = reduce_chat_key(host.state_mut(), action);
-        state.ui_needs_refresh = true;
+        state.shell.ui_needs_refresh = true;
         match outcome {
             ChatKeyOutcome::Handled => Some(AppEvent::Consumed),
             ChatKeyOutcome::Close => {
-                state.session_tab = SessionTab::Preview;
-                state.focused_pane = crate::app::state::FocusedPane::Sessions;
+                state.shell.session_tab = SessionTab::Preview;
+                state.shell.focused_pane = crate::app::state::FocusedPane::Sessions;
                 Some(AppEvent::Consumed)
             }
             ChatKeyOutcome::Intent(intent) => {
@@ -1962,12 +1990,14 @@ impl EventHandler {
         // Phase 5 (new-session redesign): Configure screen — own key handler.
         // Process BEFORE PickRepo so the step check stays linear.
         let on_configure = state
+            .new_session
             .new_session_state
             .as_ref()
             .map(|s| s.step == NewSessionStep::Configure)
             .unwrap_or(false);
         if on_configure {
             let outcome = state
+                .new_session
                 .new_session_state
                 .as_mut()
                 .and_then(|s| s.configure_state.as_mut())
@@ -1989,12 +2019,14 @@ impl EventHandler {
         // `&mut` borrow on `pick_repo_state` without fighting the immutable
         // borrow used by the following component state handling.
         let on_pick_repo = state
+            .new_session
             .new_session_state
             .as_ref()
             .map(|s| s.step == NewSessionStep::PickRepo)
             .unwrap_or(false);
         if on_pick_repo {
             let outcome = state
+                .new_session
                 .new_session_state
                 .as_mut()
                 .and_then(|s| s.pick_repo_state.as_mut())
@@ -2007,13 +2039,14 @@ impl EventHandler {
                     // Checking (user pressed Enter to retry auth).
                     use crate::components::new_session::pick_repo::GitAuthStatus;
                     let needs_recheck = state
+                        .new_session
                         .new_session_state
                         .as_ref()
                         .and_then(|ns| ns.pick_repo_state.as_ref())
                         .and_then(|p| p.git_auth_status.as_ref())
                         == Some(&GitAuthStatus::Checking);
                     if needs_recheck {
-                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                        state.shell.pending_async_action = Some(AsyncAction::CheckGitAuth);
                     }
                     None
                 }
@@ -2033,6 +2066,7 @@ impl EventHandler {
                     match Self::get_clipboard_text() {
                         Ok(text) => {
                             if let Some(pick) = state
+                                .new_session
                                 .new_session_state
                                 .as_mut()
                                 .and_then(|s| s.pick_repo_state.as_mut())
@@ -2053,8 +2087,11 @@ impl EventHandler {
                     // (finding #3) so arrow/Esc no longer write on every
                     // keypress. Best-effort — non-fatal IO error.
                     use crate::config::session_defaults::SessionDefaults;
-                    if let Some(pick) =
-                        state.new_session_state.as_ref().and_then(|ns| ns.pick_repo_state.as_ref())
+                    if let Some(pick) = state
+                        .new_session
+                        .new_session_state
+                        .as_ref()
+                        .and_then(|ns| ns.pick_repo_state.as_ref())
                     {
                         let path = SessionDefaults::default_path();
                         if let Err(err) = pick.defaults.save_to(&path) {
@@ -2066,12 +2103,13 @@ impl EventHandler {
                     // dropping him on Home even when he opened it from
                     // Sessions (2026-05-22). Fall back to Home if no
                     // previous screen recorded.
-                    state.new_session_state = None;
+                    state.new_session.new_session_state = None;
                     let prev = state
+                        .shell
                         .previous_screen
                         .take()
                         .unwrap_or_else(|| crate::app::screens::ids::HOME.to_string());
-                    state.current_screen = prev;
+                    state.shell.current_screen = prev;
                     None
                 }
                 PickRepoOutcome::AdvanceTo(source) => {
@@ -2094,6 +2132,7 @@ impl EventHandler {
                     };
                     if needs_auth_check {
                         if let Some(pick) = state
+                            .new_session
                             .new_session_state
                             .as_mut()
                             .and_then(|ns| ns.pick_repo_state.as_mut())
@@ -2101,7 +2140,7 @@ impl EventHandler {
                             pick.git_auth_status = Some(GitAuthStatus::Checking);
                             pick.pending_clone_source = Some(source);
                         }
-                        state.pending_async_action = Some(AsyncAction::CheckGitAuth);
+                        state.shell.pending_async_action = Some(AsyncAction::CheckGitAuth);
                     } else {
                         // SSH (key-based auth), local paths, and non-GitHub
                         // HTTPS remotes skip the GitHub pre-check.
@@ -2115,7 +2154,7 @@ impl EventHandler {
         // Phase 6 (new-session redesign): the only steps remaining are
         // PickRepo (handled above), Configure (handled above), and Creating —
         // the in-flight state which only accepts Esc to cancel.
-        if let Some(ref session_state) = state.new_session_state {
+        if let Some(ref session_state) = state.new_session.new_session_state {
             match session_state.step {
                 NewSessionStep::Configure => None, // handled above
                 NewSessionStep::PickRepo => None,  // handled above
@@ -2157,24 +2196,29 @@ impl EventHandler {
     /// rest. On success the edits are cleared, so a later save cannot rewrite a
     /// value another process has since changed.
     fn persist_config_screen(state: &mut AppState) -> anyhow::Result<PersistOutcome> {
-        let pending = state.config_screen_state.pending_edits().len();
+        let pending = state.config.config_screen_state.pending_edits().len();
         // Daemon rows are excluded: they go to SQLite, and
         // `apply_to_app_config` deliberately skips them, so a save that touched
         // only daemon rows changed nothing in `app_config`. Counting them here
         // let it fall through and rewrite config.toml from the startup
         // snapshot — the exact revert this guard exists to prevent.
         let dirty_before = state
+            .config
             .config_screen_state
             .dirty
             .iter()
             .any(|key| !key.starts_with("hangar_daemon."));
         let plugin_written = state
+            .config
             .config_screen_state
             .dirty
             .iter()
             .filter(|key| key.starts_with("plugin:") || key.starts_with("plugin-enabled:"))
             .count();
-        let mut applied = state.config_screen_state.apply_to_app_config(&mut state.app_config)?;
+        // The rows and the table they write into are one section, so this takes
+        // the section once and borrows the two fields off the inner struct.
+        let config = state.config.get_mut();
+        let mut applied = config.config_screen_state.apply_to_app_config(&mut config.app_config)?;
         // Nothing to write: return before touching the file. `save()` renders
         // the whole AppConfig from the snapshot loaded at startup, so pressing
         // `S` with no edits would revert anything `ainb config set` or another
@@ -2192,15 +2236,15 @@ impl EventHandler {
         // for both. Queue them before the early return, so a save that touched
         // only daemon rows still writes.
         let queued_for_daemon = applied.daemon.len();
-        state.pending_daemon_config_edits.append(&mut applied.daemon);
+        state.hangar.pending_daemon_config_edits.append(&mut applied.daemon);
         if !dirty_before && applied.external.is_empty() {
-            state.config_screen_state.mark_saved();
+            state.config.config_screen_state.mark_saved();
             return Ok(PersistOutcome {
                 written: 0,
                 queued_for_daemon,
             });
         }
-        state.app_config.save()?;
+        state.config.app_config.save()?;
         // Collected, not propagated — the same rule the modelled rows already
         // follow. An external value the registry rejects (a `0` in a
         // `min: 1` row, say) used to fail the whole save with `?`, so
@@ -2217,7 +2261,7 @@ impl EventHandler {
                 .join(", ");
             rejected.push((keys, err.to_string()));
         }
-        state.config_screen_state.mark_saved();
+        state.config.config_screen_state.mark_saved();
         for (key, why) in &rejected {
             tracing::warn!(key, error = %why, "settings edit rejected");
             state.add_error_notification(format!("{key}: {why}"));
@@ -2246,7 +2290,7 @@ impl EventHandler {
             return;
         };
         if literal.is_empty() {
-            state.config_screen_state.set_row_value(
+            state.config.config_screen_state.set_row_value(
                 row_key,
                 crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue::default()),
             );
@@ -2254,7 +2298,7 @@ impl EventHandler {
             let service = crate::config::screen_model::keychain_service(row_key);
             match crate::credentials::store_keychain_secret(&service, literal) {
                 Ok(()) => {
-                    state.config_screen_state.set_row_value(
+                    state.config.config_screen_state.set_row_value(
                         row_key,
                         crate::app::state::ConfigValue::Secret(crate::app::state::SecretValue {
                             reference: format!("keychain:{service}"),
@@ -2287,17 +2331,20 @@ impl EventHandler {
             AppEvent::Quit => state.quit(),
             AppEvent::GoToHomeScreen => {
                 tracing::info!("Navigating to HomeScreen");
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::PanelBack => {
                 // Panels (inbox, stats, skills, plugin screens) open from
                 // either the home menu or the session list; closing one
                 // returns to wherever it was opened from rather than
                 // hardcoding HOME. Mirrors GitViewBack's pop semantics.
-                let target =
-                    state.previous_screen.take().unwrap_or_else(|| screen_ids::HOME.to_string());
+                let target = state
+                    .shell
+                    .previous_screen
+                    .take()
+                    .unwrap_or_else(|| screen_ids::HOME.to_string());
                 tracing::info!(target_screen = %target, "PanelBack: returning to origin screen");
-                state.current_screen = target;
+                state.shell.current_screen = target;
             }
             AppEvent::ToggleHelp => state.toggle_help(),
             AppEvent::McpOverlayOpen => state.toggle_mcp_overlay(),
@@ -2307,9 +2354,9 @@ impl EventHandler {
             AppEvent::McpOverlayRefresh => state.spawn_mcp_fetch(),
             AppEvent::McpOverlayStopServer => {
                 if let Some(name) =
-                    state.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
+                    state.mcp_pool.mcp_overlay.as_ref().and_then(|o| o.selected_server_name())
                 {
-                    state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                    state.shell.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
                         title: "Stop MCP server".to_string(),
                         message: format!(
                             "Stop pooled server '{name}'? Its process is reaped; attached sessions reconnect and the next attach respawns it."
@@ -2324,6 +2371,7 @@ impl EventHandler {
             }
             AppEvent::McpOverlayStopDaemon => {
                 let (servers, sessions) = state
+                    .mcp_pool
                     .mcp_overlay
                     .as_ref()
                     .map(|o| {
@@ -2331,7 +2379,7 @@ impl EventHandler {
                         (o.servers.len(), s)
                     })
                     .unwrap_or((0, 0));
-                state.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
+                state.shell.confirmation_dialog = Some(crate::app::state::ConfirmationDialog {
                     title: "Stop the MCP pool".to_string(),
                     message: format!(
                         "Stop the whole pool daemon? {servers} server(s) and {sessions} attached session(s) lose pooled MCP (each falls back to its own process)."
@@ -2348,12 +2396,14 @@ impl EventHandler {
             // from anywhere. cwd's .mcp.json is still pulled in as a source.
             // Additive (never overwrites), so it fires without a confirmation.
             AppEvent::McpOverlayImport => state.mcp_import(true),
-            AppEvent::DaemonsRefresh => state.daemons_state.force_collect(),
+            AppEvent::DaemonsRefresh => state.hangar.daemons_state.force_collect(),
             // Kept next to the two hook events it belongs with.
             AppEvent::DaemonsRepairHooks => state
+                .hangar
                 .daemons_state
                 .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::Install),
             AppEvent::DaemonsPinHookBinary => state
+                .hangar
                 .daemons_state
                 .dispatch_hooks(ainb_plugin_notifyd::install::BinaryIntent::PinRunning),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
@@ -2362,6 +2412,14 @@ impl EventHandler {
             // Applied in the main loop: the sidebar's collapsed flag is
             // renderer state (`UiState::sessions_pane`), which the reducer does
             // not hold. Same path the [-]/[+] mouse glyph takes.
+            // The sidebar's collapsed flag is renderer state, so the host
+            // applies it in the main loop where `UiState` is in scope and
+            // persists it. Same shape as EnterInteractivePane below: the arm
+            // exists for exhaustiveness, not to do nothing quietly.
+            // The sidebar's collapsed flag is renderer state, so the host
+            // applies it in the main loop where `UiState` is in scope and
+            // persists it there. The arm exists for exhaustiveness, not to do
+            // nothing quietly.
             AppEvent::ToggleSessionsSidebar => {}
             // Entering the interactive embed is handled in the main loop (it needs
             // the terminal size and the embed lives in the event loop) — no-op here.
@@ -2372,7 +2430,7 @@ impl EventHandler {
             AppEvent::OtherTmuxRenameBackspace => state.other_tmux_rename_backspace(),
             AppEvent::OtherTmuxCancelRename => state.cancel_other_tmux_rename(),
             AppEvent::OtherTmuxConfirmRename => {
-                state.pending_async_action = Some(AsyncAction::ConfirmOtherTmuxRename);
+                state.shell.pending_async_action = Some(AsyncAction::ConfirmOtherTmuxRename);
             }
             // SSH session rename events
             AppEvent::SshSessionStartRename => state.start_ssh_session_rename(),
@@ -2422,33 +2480,33 @@ impl EventHandler {
             }
             AppEvent::RefreshWorkspaces => {
                 // Mark for async processing to reload workspace data
-                state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
             AppEvent::CycleSessionFilter => {
                 state.cycle_session_filter();
-                let label = match state.session_filter {
+                let label = match state.sessions.session_filter {
                     crate::app::state::SessionFilter::All => "all sessions",
                     crate::app::state::SessionFilter::ActiveOnly => "active only",
                     crate::app::state::SessionFilter::StoppedOnly => "stopped only",
                 };
                 state.add_success_notification(format!("Filter: {}", label));
-                state.ui_needs_refresh = true;
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::NextSession => {
                 state.next_session();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::PreviousSession => {
                 state.previous_session();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::NextWorkspace => {
                 state.next_workspace();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::PreviousWorkspace => {
                 state.previous_workspace();
-                state.last_preview_update = None;
+                state.workspace_load.last_preview_update = None;
             }
             AppEvent::GoToTop => {
                 state.select_first_visible_session_in_current_workspace();
@@ -2474,7 +2532,8 @@ impl EventHandler {
                 // here (2026-05-22). `picker_local_paths` also drops entries
                 // whose directory no longer exists, so a repo deleted since
                 // the last scan can't appear as a selectable dead row.
-                let local_paths = picker_local_paths(RepositoryCache::load(), &state.workspaces);
+                let local_paths =
+                    picker_local_paths(RepositoryCache::load(), &state.sessions.workspaces);
 
                 // Refresh the cache off the UI thread so a newly-created repo
                 // surfaces on a later open. `scan()` is read-through: instant
@@ -2486,8 +2545,9 @@ impl EventHandler {
                 // — consistent with every other blocking offload, and unlike a
                 // detached `std::thread` it is not torn down mid-write at
                 // shutdown.
-                let scan_paths = state.app_config.workspace_defaults.workspace_scan_paths.clone();
-                let defaults = state.app_config.workspace_defaults.clone();
+                let scan_paths =
+                    state.config.app_config.workspace_defaults.workspace_scan_paths.clone();
+                let defaults = state.config.app_config.workspace_defaults.clone();
                 tokio::task::spawn_blocking(move || {
                     let scanner = WorkspaceScanner::with_additional_paths(scan_paths)
                         .with_workspace_defaults(&defaults);
@@ -2500,11 +2560,11 @@ impl EventHandler {
                     pick_repo_state: Some(PickRepoState::from_disk(&local_paths)),
                     ..Default::default()
                 };
-                state.new_session_state = Some(ns);
-                state.previous_screen = Some(state.current_screen.clone());
-                state.current_screen = crate::app::screens::ids::NEW_SESSION.to_string();
+                state.new_session.new_session_state = Some(ns);
+                state.shell.previous_screen = Some(state.shell.current_screen.clone());
+                state.shell.current_screen = crate::app::screens::ids::NEW_SESSION.to_string();
                 tracing::debug!(
-                    previous = %state.previous_screen.as_deref().unwrap_or(""),
+                    previous = %state.shell.previous_screen.as_deref().unwrap_or(""),
                     "AppEvent::NewSession -> PickRepo opened"
                 );
             }
@@ -2519,8 +2579,11 @@ impl EventHandler {
                 state.cancel_new_session();
             }
             AppEvent::PickRepoPaste(text) => {
-                if let Some(pick) =
-                    state.new_session_state.as_mut().and_then(|s| s.pick_repo_state.as_mut())
+                if let Some(pick) = state
+                    .new_session
+                    .new_session_state
+                    .as_mut()
+                    .and_then(|s| s.pick_repo_state.as_mut())
                 {
                     pick.append_filter(&text);
                 }
@@ -2533,6 +2596,7 @@ impl EventHandler {
                 use crate::app::state::NewSessionStep;
                 use crate::config::session_defaults::SessionDefaults;
                 let (repo_label, prompt_text) = state
+                    .new_session
                     .new_session_state
                     .as_ref()
                     .and_then(|ns| ns.configure_state.as_ref())
@@ -2557,6 +2621,7 @@ impl EventHandler {
                         // from open time; mutations elsewhere are invisible
                         // to it.
                         if let Some(pick) = state
+                            .new_session
                             .new_session_state
                             .as_mut()
                             .and_then(|ns| ns.pick_repo_state.as_mut())
@@ -2565,7 +2630,7 @@ impl EventHandler {
                         }
                     }
                 }
-                if let Some(ns) = state.new_session_state.as_mut() {
+                if let Some(ns) = state.new_session.new_session_state.as_mut() {
                     ns.configure_state = None;
                     ns.step = NewSessionStep::PickRepo;
                 }
@@ -2602,10 +2667,11 @@ impl EventHandler {
                 // Move into the Creating step so the in-flight UI is shown
                 // until the async create resolves. Keep `configure_state`
                 // intact — `create_session_from_configure` reads it.
-                if let Some(ns) = state.new_session_state.as_mut() {
+                if let Some(ns) = state.new_session.new_session_state.as_mut() {
                     ns.step = crate::app::state::NewSessionStep::Creating;
                 }
-                state.pending_async_action = Some(AsyncAction::CreateSessionFromConfigure(spec));
+                state.shell.pending_async_action =
+                    Some(AsyncAction::CreateSessionFromConfigure(spec));
             }
             AppEvent::ConfigureOpenPresetManager => {
                 // Phase 7 polish — stub for now.
@@ -2632,20 +2698,21 @@ impl EventHandler {
             }
             AppEvent::AttachSession => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    state.pending_async_action = Some(AsyncAction::AttachToContainer(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::AttachToContainer(session_id));
                 }
             }
             AppEvent::AttachTmuxSession => {
                 tracing::info!("[ACTION] Processing AttachTmuxSession event");
                 tracing::debug!(
                     "[ACTION] State: workspace_idx={:?}, session_idx={:?}, shell_selected={}, is_ssh={}, ssh_idx={:?}, is_other_tmux={}, other_tmux_idx={:?}",
-                    state.selected_workspace_index,
-                    state.selected_session_index,
-                    state.shell_selected,
+                    state.sessions.selected_workspace_index,
+                    state.sessions.selected_session_index,
+                    state.sessions.shell_selected,
                     state.is_ssh_session_selected(),
-                    state.selected_ssh_session_index,
+                    state.ssh.selected_ssh_session_index,
                     state.is_other_tmux_selected(),
-                    state.selected_other_tmux_index
+                    state.tmux.selected_other_tmux_index
                 );
 
                 // Check if we're in the "SSH Sessions" section
@@ -2654,7 +2721,7 @@ impl EventHandler {
                         if let Some(tmux_name) = &ssh_session.tmux_session_name {
                             let session_name = tmux_name.clone();
                             tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
-                            state.pending_async_action =
+                            state.shell.pending_async_action =
                                 Some(AsyncAction::AttachToOtherTmux(session_name));
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux session name");
@@ -2673,22 +2740,22 @@ impl EventHandler {
                             "[ACTION] Attaching to other tmux session: {}",
                             session_name
                         );
-                        state.pending_async_action =
+                        state.shell.pending_async_action =
                             Some(AsyncAction::AttachToOtherTmux(session_name));
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
                     }
-                } else if state.shell_selected {
+                } else if state.sessions.shell_selected {
                     // Shell session selected - attach to its tmux session
-                    if let Some(workspace_idx) = state.selected_workspace_index {
-                        if let Some(workspace) = state.workspaces.get(workspace_idx) {
+                    if let Some(workspace_idx) = state.sessions.selected_workspace_index {
+                        if let Some(workspace) = state.sessions.workspaces.get(workspace_idx) {
                             if let Some(shell) = &workspace.shell_session {
                                 let session_name = shell.tmux_session_name.clone();
                                 tracing::info!(
                                     "[ACTION] Attaching to workspace shell: {}",
                                     session_name
                                 );
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::AttachToOtherTmux(session_name));
                             } else {
                                 tracing::warn!(
@@ -2709,12 +2776,13 @@ impl EventHandler {
                             session.status
                         );
                     }
-                    state.pending_async_action = Some(AsyncAction::AttachToTmuxSession(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::AttachToTmuxSession(session_id));
                 } else {
                     tracing::warn!(
                         "[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
-                        state.selected_workspace_index,
-                        state.selected_session_index
+                        state.sessions.selected_workspace_index,
+                        state.sessions.selected_session_index
                     );
                     // Says what to do, not just what failed. A notice that
                     // lives for a minute and can be dismissed has room for
@@ -2729,9 +2797,9 @@ impl EventHandler {
             }
             AppEvent::DetachSession => {
                 // Clear attached session and return to home screen
-                state.attached_session_id = None;
-                state.current_screen = screen_ids::HOME.to_string();
-                state.ui_needs_refresh = true;
+                state.sessions.attached_session_id = None;
+                state.shell.current_screen = screen_ids::HOME.to_string();
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::DetachTmuxSession => {
                 // Detaching from tmux is handled by AttachHandler (Ctrl+Q)
@@ -2739,36 +2807,38 @@ impl EventHandler {
                 tracing::debug!("DetachTmuxSession event received (no-op)");
             }
             AppEvent::KillContainer => {
-                if let Some(session_id) = state.attached_session_id {
-                    state.pending_async_action = Some(AsyncAction::KillContainer(session_id));
+                if let Some(session_id) = state.sessions.attached_session_id {
+                    state.shell.pending_async_action = Some(AsyncAction::KillContainer(session_id));
                 }
             }
             AppEvent::ReauthenticateCredentials => {
                 info!("Queueing re-authentication request");
-                state.pending_async_action = Some(AsyncAction::ReauthenticateCredentials);
+                state.shell.pending_async_action = Some(AsyncAction::ReauthenticateCredentials);
             }
             AppEvent::RestartSession => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    state.pending_async_action = Some(AsyncAction::RestartSession(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::RestartSession(session_id));
                 }
             }
             AppEvent::DowngradeHeadroom => {
                 if let Some(session_id) = state.get_selected_session_id() {
-                    state.pending_async_action = Some(AsyncAction::DowngradeHeadroom(session_id));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::DowngradeHeadroom(session_id));
                 }
             }
             AppEvent::DeleteSession => {
                 tracing::info!("[ACTION] Processing DeleteSession event");
                 tracing::debug!(
                     "[ACTION] Delete state: workspace_idx={:?}, session_idx={:?}, shell_selected={}, is_other_tmux={}, other_tmux_idx={:?}",
-                    state.selected_workspace_index,
-                    state.selected_session_index,
-                    state.shell_selected,
+                    state.sessions.selected_workspace_index,
+                    state.sessions.selected_session_index,
+                    state.sessions.shell_selected,
                     state.is_other_tmux_selected(),
-                    state.selected_other_tmux_index
+                    state.tmux.selected_other_tmux_index
                 );
 
-                let managed_count = state.selected_sessions.len();
+                let managed_count = state.sessions.selected_sessions.len();
                 let other_names = state.selected_other_tmux_names_in_order();
                 let other_count = other_names.len();
 
@@ -2806,7 +2876,7 @@ impl EventHandler {
                     } else {
                         tracing::warn!(
                             "[ACTION] SSH session selected but no session found at index {:?}",
-                            state.selected_ssh_session_index
+                            state.ssh.selected_ssh_session_index
                         );
                     }
                 // Check if we're in the "Other tmux" section
@@ -2820,13 +2890,14 @@ impl EventHandler {
                     } else {
                         tracing::warn!(
                             "[ACTION] Other tmux selected but no session found at index {:?}",
-                            state.selected_other_tmux_index
+                            state.tmux.selected_other_tmux_index
                         );
                     }
-                } else if state.shell_selected {
+                } else if state.sessions.shell_selected {
                     // Shell session selected - show kill shell confirmation
-                    if let Some(workspace_idx) = state.selected_workspace_index {
+                    if let Some(workspace_idx) = state.sessions.selected_workspace_index {
                         if state
+                            .sessions
                             .workspaces
                             .get(workspace_idx)
                             .and_then(|w| w.shell_session.as_ref())
@@ -2850,18 +2921,18 @@ impl EventHandler {
                 } else {
                     tracing::warn!(
                         "[ACTION] DeleteSession: No item to delete (workspace_idx={:?}, session_idx={:?}, shell={}, other_tmux_idx={:?})",
-                        state.selected_workspace_index,
-                        state.selected_session_index,
-                        state.shell_selected,
-                        state.selected_other_tmux_index
+                        state.sessions.selected_workspace_index,
+                        state.sessions.selected_session_index,
+                        state.sessions.shell_selected,
+                        state.tmux.selected_other_tmux_index
                     );
                     state.add_warning_notification("No session selected to delete".to_string());
                 }
             }
             AppEvent::ToggleSelectSession => {
                 state.toggle_select_session();
-                let count =
-                    state.selected_sessions.len() + state.selected_other_tmux_sessions.len();
+                let count = state.sessions.selected_sessions.len()
+                    + state.tmux.selected_other_tmux_sessions.len();
                 if count > 0 {
                     state.add_success_notification(format!(
                         "{} session(s) selected — Enter to start, Shift+D to delete",
@@ -2870,7 +2941,7 @@ impl EventHandler {
                 }
             }
             AppEvent::DeleteSelectedSessions => {
-                let managed_count = state.selected_sessions.len();
+                let managed_count = state.sessions.selected_sessions.len();
                 let other_names = state.selected_other_tmux_names_in_order();
                 let other_count = other_names.len();
                 if managed_count == 0 && other_count == 0 {
@@ -2895,7 +2966,7 @@ impl EventHandler {
                         session_id,
                         trigger
                     );
-                    state.pending_async_action =
+                    state.shell.pending_async_action =
                         Some(AsyncAction::ResumeSession(session_id, trigger));
                 } else {
                     state.add_warning_notification("No session selected to resume".to_string());
@@ -2906,7 +2977,7 @@ impl EventHandler {
                 // multi-selected, start every resumable one, not just the
                 // highlighted row. Running selections are skipped so we never
                 // kill+recreate a live tmux session.
-                let total_selected = state.selected_sessions.len();
+                let total_selected = state.sessions.selected_sessions.len();
                 let ids = state.selected_resumable_session_ids();
                 if ids.is_empty() {
                     state.add_warning_notification(format!(
@@ -2924,27 +2995,28 @@ impl EventHandler {
                         "Resuming {} selected session(s)...",
                         ids.len()
                     ));
-                    state.pending_async_action =
+                    state.shell.pending_async_action =
                         Some(AsyncAction::BulkResumeSessions(ids, trigger));
-                    state.selected_sessions.clear();
+                    state.sessions.selected_sessions.clear();
                 }
             }
             AppEvent::OpenInEditor => {
                 // Open session's workspace in preferred editor
                 if let Some(session) = state.selected_session() {
                     let workspace_path = std::path::PathBuf::from(&session.workspace_path);
-                    state.pending_async_action = Some(AsyncAction::OpenInEditor(workspace_path));
+                    state.shell.pending_async_action =
+                        Some(AsyncAction::OpenInEditor(workspace_path));
                 } else {
                     state.add_warning_notification("⚠️ No session selected".to_string());
                 }
             }
             AppEvent::CleanupOrphaned => {
                 // Queue cleanup of orphaned containers
-                state.pending_async_action = Some(AsyncAction::CleanupOrphaned);
+                state.shell.pending_async_action = Some(AsyncAction::CleanupOrphaned);
             }
             AppEvent::OpenQuickShell => {
                 // Open workspace shell and optionally cd to session's worktree
-                if let Some(workspace_idx) = state.selected_workspace_index {
+                if let Some(workspace_idx) = state.sessions.selected_workspace_index {
                     // Get target directory - session worktree if selected, otherwise workspace root
                     let target_dir = if let Some(session) = state.selected_session() {
                         // Session selected - cd to its worktree
@@ -2955,7 +3027,7 @@ impl EventHandler {
                     };
 
                     tracing::info!("Opening workspace shell, target_dir: {:?}", target_dir);
-                    state.pending_async_action = Some(AsyncAction::OpenWorkspaceShell {
+                    state.shell.pending_async_action = Some(AsyncAction::OpenWorkspaceShell {
                         workspace_index: workspace_idx,
                         target_dir,
                     });
@@ -2975,20 +3047,20 @@ impl EventHandler {
                 use crate::app::state::FocusedPane;
                 use crate::components::session_tabs::{SessionTab, cycle, resolve};
                 let forward = matches!(event, AppEvent::SessionTabNext);
-                let from = resolve(state, state.session_tab);
-                state.session_tab = cycle(state, from, forward);
+                let from = resolve(state, state.shell.session_tab);
+                state.shell.session_tab = cycle(state, from, forward);
                 // Focus follows the tab. The composer tabs take typed input, so
                 // the right pane owns the keyboard there; `preview` and `log`
                 // do not, so the list keeps it. This is the whole of what
                 // `SwitchPaneFocus` used to provide, now derived rather than
                 // toggled by a second key.
-                state.focused_pane = match state.session_tab {
+                state.shell.focused_pane = match state.shell.session_tab {
                     SessionTab::Ask | SessionTab::Thread | SessionTab::Pal => FocusedPane::LiveLogs,
                     SessionTab::Preview | SessionTab::Err | SessionTab::Log => {
                         FocusedPane::Sessions
                     }
                 };
-                state.ui_needs_refresh = true;
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::SessionAskSend => {
                 let Some(chip) = crate::components::session_tabs::selected_blocking(state).cloned()
@@ -3009,14 +3081,14 @@ impl EventHandler {
                         )
                     },
                 );
-                state.ask_state.retarget(&chip);
-                if let Err(refusal) = state.ask_state.send(&chip, &session_id, &cwd) {
+                state.fleet.ask_state.retarget(&chip);
+                if let Err(refusal) = state.fleet.ask_state.send(&chip, &session_id, &cwd) {
                     // Refusals are shown, never swallowed: a send that silently
                     // does nothing is the failure mode this screen exists to
                     // remove.
                     state.add_info_notification(refusal);
                 }
-                state.ui_needs_refresh = true;
+                state.shell.ui_needs_refresh = true;
             }
             // The composer tabs fire their own send through the chat reducer,
             // which is reached by the key routing above. Reaching here means
@@ -3029,13 +3101,13 @@ impl EventHandler {
             // cannot open was to already know it was the hangar daemon, and to
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
-                state.daemon_start_cta.start();
-                state.ui_needs_refresh = true;
+                state.fleet.daemon_start_cta.start();
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::SwitchPaneFocus => {
                 use crate::app::state::FocusedPane;
-                let old_pane = state.focused_pane.clone();
-                state.focused_pane = match state.focused_pane {
+                let old_pane = state.shell.focused_pane.clone();
+                state.shell.focused_pane = match state.shell.focused_pane {
                     FocusedPane::Sessions => FocusedPane::LiveLogs,
                     // Preview is entered via 'l' / exited via Ctrl+Q, not Tab —
                     // Tab while focused is intercepted upstream, so this is only a
@@ -3045,11 +3117,11 @@ impl EventHandler {
                 tracing::debug!(
                     "Switched focus from {:?} to {:?}",
                     old_pane,
-                    state.focused_pane
+                    state.shell.focused_pane
                 );
             }
             AppEvent::ConfirmationToggle => {
-                if let Some(ref mut dialog) = state.confirmation_dialog {
+                if let Some(ref mut dialog) = state.shell.confirmation_dialog {
                     if let Some(ref options) = dialog.options {
                         let len = options.len().max(1);
                         dialog.selected_index = (dialog.selected_index + 1) % len;
@@ -3059,7 +3131,7 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfirmationPrev => {
-                if let Some(ref mut dialog) = state.confirmation_dialog {
+                if let Some(ref mut dialog) = state.shell.confirmation_dialog {
                     if let Some(ref options) = dialog.options {
                         let len = options.len().max(1);
                         dialog.selected_index = (dialog.selected_index + len - 1) % len;
@@ -3069,7 +3141,7 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfirmationConfirm => {
-                if let Some(dialog) = state.confirmation_dialog.take() {
+                if let Some(dialog) = state.shell.confirmation_dialog.take() {
                     let action = if let Some(options) = dialog.options.as_ref() {
                         // Tri-option mode: pick the highlighted option's action.
                         options.get(dialog.selected_index).map(|o| o.action.clone())
@@ -3082,11 +3154,11 @@ impl EventHandler {
                     if let Some(action) = action {
                         match action {
                             crate::app::state::ConfirmAction::DeleteSession(session_id) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::DeleteSession(session_id));
                             }
                             crate::app::state::ConfirmAction::StopSession(session_id) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::StopSession(session_id));
                             }
                             crate::app::state::ConfirmAction::BulkDeleteSessions(session_ids) => {
@@ -3099,9 +3171,9 @@ impl EventHandler {
                                 // silently dropping the rest would make the user
                                 // re-select them.
                                 for id in &session_ids {
-                                    state.selected_sessions.remove(id);
+                                    state.sessions.selected_sessions.remove(id);
                                 }
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::BulkDeleteSessions(session_ids));
                             }
                             crate::app::state::ConfirmAction::BulkStopSessions(session_ids) => {
@@ -3110,39 +3182,39 @@ impl EventHandler {
                                     session_ids.len()
                                 ));
                                 for id in &session_ids {
-                                    state.selected_sessions.remove(id);
+                                    state.sessions.selected_sessions.remove(id);
                                 }
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::BulkStopSessions(session_ids));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmux(session_name) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::KillOtherTmux(session_name));
                             }
                             crate::app::state::ConfirmAction::KillOtherTmuxSessions(
                                 session_names,
                             ) => {
-                                state.selected_other_tmux_sessions.clear();
-                                state.pending_async_action =
+                                state.tmux.selected_other_tmux_sessions.clear();
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::KillOtherTmuxSessions(session_names));
                             }
                             crate::app::state::ConfirmAction::KillWorkspaceShell(workspace_idx) => {
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::KillWorkspaceShell(workspace_idx));
                             }
                             crate::app::state::ConfirmAction::SetupAbtopRateLimits => {
                                 // Run `abtop --setup`, then open abtop.
-                                state.pending_async_action =
+                                state.shell.pending_async_action =
                                     Some(AsyncAction::SetupAbtopRateLimits);
                             }
                             crate::app::state::ConfirmAction::OpenAbtopSkipSetup => {
                                 // Decline setup this time; open abtop now.
-                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                             }
                             crate::app::state::ConfirmAction::DismissAbtopSetup => {
                                 // Never offer again, then open abtop.
                                 state.dismiss_abtop_setup();
-                                state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                             }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
                                 // Install the ainb-hooks plugin for both agents.
@@ -3209,10 +3281,10 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfirmationCancel => {
-                state.confirmation_dialog = None;
+                state.shell.confirmation_dialog = None;
             }
             AppEvent::AuthSetupNext => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.selected_method = match auth_state.selected_method {
                         AuthMethod::OAuth => AuthMethod::ApiKey,
                         AuthMethod::ApiKey => AuthMethod::Skip,
@@ -3221,7 +3293,7 @@ impl EventHandler {
                 }
             }
             AppEvent::AuthSetupPrevious => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.selected_method = match auth_state.selected_method {
                         AuthMethod::OAuth => AuthMethod::Skip,
                         AuthMethod::ApiKey => AuthMethod::OAuth,
@@ -3230,48 +3302,50 @@ impl EventHandler {
                 }
             }
             AppEvent::AuthSetupSelect => {
-                if let Some(ref auth_state) = state.auth_setup_state {
+                if let Some(ref auth_state) = state.onboarding.auth_setup_state {
                     match auth_state.selected_method {
                         AuthMethod::OAuth => {
                             // Mark for async OAuth processing
-                            state.pending_async_action = Some(AsyncAction::AuthSetupOAuth);
+                            state.shell.pending_async_action = Some(AsyncAction::AuthSetupOAuth);
                         }
                         AuthMethod::ApiKey => {
                             if auth_state.api_key_input.is_empty() {
                                 // Enter API key input mode
-                                if let Some(ref mut auth_state) = state.auth_setup_state {
+                                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state
+                                {
                                     auth_state.api_key_input = "sk-".to_string();
                                     auth_state.show_cursor = true;
                                 }
                             } else {
                                 // Save the API key
-                                state.pending_async_action = Some(AsyncAction::AuthSetupApiKey);
+                                state.shell.pending_async_action =
+                                    Some(AsyncAction::AuthSetupApiKey);
                             }
                         }
                         AuthMethod::Skip => {
                             // Skip auth setup and go to home screen
-                            state.auth_setup_state = None;
-                            state.current_screen = screen_ids::HOME.to_string();
+                            state.onboarding.auth_setup_state = None;
+                            state.shell.current_screen = screen_ids::HOME.to_string();
                             state.check_current_directory_status();
-                            state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                            state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                         }
                     }
                 }
             }
             AppEvent::AuthSetupCancel => {
                 // Same as skip - go to home screen without auth
-                state.auth_setup_state = None;
-                state.current_screen = screen_ids::HOME.to_string();
+                state.onboarding.auth_setup_state = None;
+                state.shell.current_screen = screen_ids::HOME.to_string();
                 state.check_current_directory_status();
-                state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
             }
             AppEvent::AuthSetupInputChar(ch) => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.api_key_input.push(ch);
                 }
             }
             AppEvent::AuthSetupBackspace => {
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     if auth_state.api_key_input.is_empty() {
                         // Exit API key input mode
                         auth_state.show_cursor = false;
@@ -3282,23 +3356,23 @@ impl EventHandler {
             }
             AppEvent::AuthSetupCheckStatus => {
                 // Check if authentication was completed and transition if so
-                if state.auth_setup_state.is_some() && !AppState::is_first_time_setup() {
+                if state.onboarding.auth_setup_state.is_some() && !AppState::is_first_time_setup() {
                     // Authentication completed!
-                    state.auth_setup_state = None;
-                    state.current_screen = screen_ids::HOME.to_string();
+                    state.onboarding.auth_setup_state = None;
+                    state.shell.current_screen = screen_ids::HOME.to_string();
                     state.check_current_directory_status();
-                    state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                    state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                 }
             }
             AppEvent::AuthSetupRefresh => {
                 // Manual refresh - check authentication status immediately
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     if !AppState::is_first_time_setup() {
                         // Authentication completed!
-                        state.auth_setup_state = None;
-                        state.current_screen = screen_ids::HOME.to_string();
+                        state.onboarding.auth_setup_state = None;
+                        state.shell.current_screen = screen_ids::HOME.to_string();
                         state.check_current_directory_status();
-                        state.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                        state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
                     } else {
                         // Still waiting - update message
                         auth_state.error_message = Some("Still waiting for authentication. Complete the process in the terminal window.\n\nPress 'r' to refresh or 'Esc' to cancel.".to_string());
@@ -3307,7 +3381,7 @@ impl EventHandler {
             }
             AppEvent::AuthSetupShowCommand => {
                 // Show alternative authentication methods
-                if let Some(ref mut auth_state) = state.auth_setup_state {
+                if let Some(ref mut auth_state) = state.onboarding.auth_setup_state {
                     auth_state.error_message = Some(
                         "📋 Alternative Authentication Methods:\n\n\
                          1. If the OAuth URL didn't appear, check the container logs\n\n\
@@ -3336,27 +3410,27 @@ impl EventHandler {
                 state.show_git_view();
                 tracing::info!(
                     "Git view state after show: current_screen = {:?}, git_state = {}",
-                    state.current_screen,
-                    state.git_view_state.is_some()
+                    state.shell.current_screen,
+                    state.git_view.git_view_state.is_some()
                 );
             }
             AppEvent::GitViewSwitchTab => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.switch_tab();
                 }
             }
             AppEvent::GitViewNextFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.next_file();
                 }
             }
             AppEvent::GitViewPrevFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.previous_file();
                 }
             }
             AppEvent::GitViewScrollUp => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     match git_state.active_tab {
                         crate::components::git_view::GitTab::Review => {
                             git_state.review_scroll_up(1)
@@ -3370,7 +3444,7 @@ impl EventHandler {
                 }
             }
             AppEvent::GitViewScrollDown => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     match git_state.active_tab {
                         crate::components::git_view::GitTab::Review => {
                             git_state.review_scroll_down(1)
@@ -3384,71 +3458,71 @@ impl EventHandler {
                 }
             }
             AppEvent::GitReviewToggleCollapse => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_toggle_collapse();
                 }
             }
             AppEvent::GitReviewExpandContext => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_expand_context();
                 }
             }
             AppEvent::GitReviewNextHunk => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_next_hunk();
                 }
             }
             AppEvent::GitReviewPrevHunk => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_prev_hunk();
                 }
             }
             AppEvent::GitReviewNextReviewFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_next_file();
                 }
             }
             AppEvent::GitReviewPrevReviewFile => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_prev_file();
                 }
             }
             AppEvent::GitReviewSidebarUp => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_sidebar_up();
                 }
             }
             AppEvent::GitReviewSidebarDown => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_sidebar_down();
                 }
             }
             AppEvent::GitReviewExpandAllFolders => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_expand_all_folders();
                 }
             }
             AppEvent::GitReviewCollapseAllFolders => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.review_collapse_all_folders();
                 }
             }
             AppEvent::GitViewNextCommit => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     if git_state.selected_commit_index < git_state.commits.len().saturating_sub(1) {
                         git_state.selected_commit_index += 1;
                     }
                 }
             }
             AppEvent::GitViewPrevCommit => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     if git_state.selected_commit_index > 0 {
                         git_state.selected_commit_index -= 1;
                     }
                 }
             }
             AppEvent::GitViewShowCommitDiff => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     // Get the selected commit hash
                     if let Some(commit) = git_state.commits.get(git_state.selected_commit_index) {
                         let commit_hash = commit.hash_short.clone();
@@ -3475,17 +3549,17 @@ impl EventHandler {
                 }
             }
             AppEvent::GitViewToggleFolder => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.toggle_folder();
                 }
             }
             AppEvent::GitViewExpandAll => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.expand_all_folders();
                 }
             }
             AppEvent::GitViewCollapseAll => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.collapse_all_folders();
                 }
             }
@@ -3494,16 +3568,17 @@ impl EventHandler {
             }
             AppEvent::GitViewBack => {
                 // Return to the previous view (where user was before opening Git view)
-                state.current_screen = state
+                state.shell.current_screen = state
+                    .shell
                     .previous_screen
                     .take()
                     .unwrap_or(crate::app::screens::ids::SESSION_LIST.to_string());
-                state.git_view_state = None;
+                state.git_view.git_view_state = None;
             }
             // Commit message input events
             AppEvent::GitViewStartCommit => {
                 tracing::info!("Processing GitViewStartCommit event");
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     tracing::info!("Git state found, starting commit message input");
                     git_state.start_commit_message_input();
                     state.add_info_notification(
@@ -3514,27 +3589,27 @@ impl EventHandler {
                 }
             }
             AppEvent::GitViewCommitInputChar(ch) => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.add_char_to_commit_message(ch);
                 }
             }
             AppEvent::GitViewCommitBackspace => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.backspace_commit_message();
                 }
             }
             AppEvent::GitViewCommitCursorLeft => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.move_commit_cursor_left();
                 }
             }
             AppEvent::GitViewCommitCursorRight => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.move_commit_cursor_right();
                 }
             }
             AppEvent::GitViewCommitCancel => {
-                if let Some(ref mut git_state) = state.git_view_state {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
                     git_state.cancel_commit_message_input();
                 }
             }
@@ -3572,36 +3647,36 @@ impl EventHandler {
                 // Add success notification
                 state.add_success_notification(format!("✅ {}", message));
                 // Exit git view and return to home screen
-                state.current_screen = crate::app::screens::ids::HOME.to_string();
-                state.git_view_state = None;
+                state.shell.current_screen = crate::app::screens::ids::HOME.to_string();
+                state.git_view.git_view_state = None;
                 tracing::info!("Returned to home screen after successful commit");
             }
             // AINB 2.0: Home screen events
             AppEvent::HomeScreenSelectTile => {
                 use crate::app::state::HomeTile;
                 tracing::info!("HomeScreenSelectTile event - processing tile selection");
-                if let Some(tile) = state.home_screen_state.selected().cloned() {
+                if let Some(tile) = state.shell.home_screen_state.selected().cloned() {
                     tracing::info!("Selected tile: {:?}", tile);
                     match tile {
                         HomeTile::Sessions => {
                             tracing::info!("Navigating to SessionList view");
-                            state.current_screen = screen_ids::SESSION_LIST.to_string();
+                            state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
                         }
                         HomeTile::Help => {
                             tracing::info!("Toggling help overlay visible");
-                            state.help_visible = true;
+                            state.shell.help_visible = true;
                         }
                         HomeTile::Config => {
                             tracing::info!("Navigating to Config view");
-                            state.current_screen = screen_ids::CONFIG.to_string();
+                            state.shell.current_screen = screen_ids::CONFIG.to_string();
                         }
                         HomeTile::Recovery => {
                             tracing::info!("Navigating to SessionRecovery view");
-                            state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                            state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                         }
                         HomeTile::SkillManager => {
                             tracing::info!("Navigating to SkillManager view (spec §10.1)");
-                            state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                            state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
                             Self::apply_skill_manager_sources_width(state);
                         }
                         HomeTile::Mcp => {
@@ -3624,47 +3699,47 @@ impl EventHandler {
             }
             AppEvent::HomeScreenNavigateUp => {
                 tracing::debug!("HomeScreen navigate up");
-                state.home_screen_state.select_up();
+                state.shell.home_screen_state.select_up();
             }
             AppEvent::HomeScreenNavigateDown => {
                 tracing::debug!("HomeScreen navigate down");
-                state.home_screen_state.select_down();
+                state.shell.home_screen_state.select_down();
             }
             AppEvent::HomeScreenNavigateLeft => {
                 tracing::debug!("HomeScreen navigate left");
-                state.home_screen_state.select_left();
+                state.shell.home_screen_state.select_left();
             }
             AppEvent::HomeScreenNavigateRight => {
                 tracing::debug!("HomeScreen navigate right");
-                state.home_screen_state.select_right();
+                state.shell.home_screen_state.select_right();
             }
             // AINB 2.0: Home screen V2 events
             AppEvent::HomeScreenSidebarUp => {
                 tracing::debug!("HomeScreen V2 sidebar up");
-                state.home_screen_v2_state.sidebar.move_up();
+                state.shell.home_screen_v2_state.sidebar.move_up();
             }
             AppEvent::HomeScreenSidebarDown => {
                 tracing::debug!("HomeScreen V2 sidebar down");
-                state.home_screen_v2_state.sidebar.move_down();
+                state.shell.home_screen_v2_state.sidebar.move_down();
             }
             AppEvent::HomeScreenSidebarSelect => {
                 use crate::components::sidebar::SidebarItem;
                 tracing::debug!("HomeScreen V2 sidebar select");
-                let selected = state.home_screen_v2_state.sidebar.selected_item();
+                let selected = state.shell.home_screen_v2_state.sidebar.selected_item();
                 match selected {
                     SidebarItem::Config => {
-                        state.current_screen = screen_ids::CONFIG.to_string();
+                        state.shell.current_screen = screen_ids::CONFIG.to_string();
                     }
                     SidebarItem::Sessions => {
-                        state.current_screen = screen_ids::SESSION_LIST.to_string();
+                        state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
                     }
                     SidebarItem::Daemons => {
                         // Same canonical-event routing as Inbox.
                         Self::process_event(AppEvent::GoToDaemons, state);
                     }
                     SidebarItem::Recovery => {
-                        state.session_recovery_state.refresh();
-                        state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                        state.recovery.session_recovery_state.refresh();
+                        state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
                     }
                     SidebarItem::Mcp => {
                         // Opens the overlay on top of the current screen (not a
@@ -3674,10 +3749,10 @@ impl EventHandler {
                     SidebarItem::Logs => {
                         // Initialize log history viewer with log directory
                         if let Some(log_dir) = state.log_dir() {
-                            state.log_history_state.set_log_dir(log_dir);
+                            state.log_streams.log_history_state.set_log_dir(log_dir);
                         }
-                        state.log_history_state.show();
-                        state.current_screen = screen_ids::LOG_HISTORY.to_string();
+                        state.log_streams.log_history_state.show();
+                        state.shell.current_screen = screen_ids::LOG_HISTORY.to_string();
                     }
                     SidebarItem::Stats => {
                         tracing::info!("Navigating to Usage Analytics from sidebar");
@@ -3693,7 +3768,7 @@ impl EventHandler {
                         // Hand the terminal to witr's own interactive TUI
                         // (see AppEvent::GoToWitr) rather than a
                         // plugin-rendered screen.
-                        state.pending_async_action = Some(AsyncAction::AttachWitr);
+                        state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
                     }
                     SidebarItem::Abtop => {
                         tracing::info!("Launching abtop (top-for-agents) from sidebar");
@@ -3704,7 +3779,7 @@ impl EventHandler {
                         if state.should_offer_abtop_setup() {
                             state.show_abtop_setup_prompt();
                         } else {
-                            state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                         }
                     }
                     SidebarItem::Skills => {
@@ -3723,11 +3798,11 @@ impl EventHandler {
                         // `hangar-tui` screen renders itself and owns its
                         // own data load (snapshot RPCs over the daemon
                         // socket).
-                        state.current_screen = screen_ids::HANGAR.to_string();
+                        state.shell.current_screen = screen_ids::HANGAR.to_string();
                     }
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
-                        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                        state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
                         Self::apply_skill_manager_sources_width(state);
                         // Mirror the discovery flow from the `m` keybind
                         // handler (AppEvent::GoToSkillManager) — sidebar entry
@@ -3735,7 +3810,7 @@ impl EventHandler {
                         // hdt.6 banner overlay, otherwise the screen opens
                         // empty and the user never sees their orphan units.
                         let ainb_home = ainb_skill_core::default_ainb_home();
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                         // Also start the drift poll (bead v12.E.4).
                         let backend: std::sync::Arc<
                             dyn ainb_skill_core::drift::DriftBackend + Send + Sync,
@@ -3749,32 +3824,33 @@ impl EventHandler {
                             &claude_home,
                         );
                         crate::components::skill_manager_screen::maybe_show_discovery_banner(
-                            &mut state.skill_manager_state,
+                            &mut state.skills.skill_manager_state,
                             &ainb_home,
                             walker,
                         );
                     }
                     SidebarItem::Changelog => {
-                        state.current_screen = screen_ids::CHANGELOG.to_string();
+                        state.shell.current_screen = screen_ids::CHANGELOG.to_string();
                     }
                     SidebarItem::Setup => {
-                        state.current_screen = screen_ids::SETUP_MENU.to_string();
+                        state.shell.current_screen = screen_ids::SETUP_MENU.to_string();
                     }
                     SidebarItem::Help => {
-                        state.help_visible = true;
+                        state.shell.help_visible = true;
                     }
                 }
             }
             AppEvent::HomeScreenToggleFocus => {
                 tracing::debug!("HomeScreen V2 toggle focus");
-                state.home_screen_v2_state.toggle_focus();
+                state.shell.home_screen_v2_state.toggle_focus();
             }
             AppEvent::StarSelectedWorkspace => {
                 tracing::info!("StarSelectedWorkspace event triggered");
-                if let Some(workspace_idx) = state.selected_workspace_index {
+                if let Some(workspace_idx) = state.sessions.selected_workspace_index {
                     // Clone the bits we need so the immutable borrow of `state`
                     // ends before we notify (which borrows `state` mutably).
                     if let Some((workspace_name, workspace_path)) = state
+                        .sessions
                         .workspaces
                         .get(workspace_idx)
                         .map(|w| (w.name.clone(), w.path.clone()))
@@ -3879,23 +3955,23 @@ impl EventHandler {
             }
             AppEvent::WelcomePanelScrollUp => {
                 tracing::debug!("Welcome panel scroll up");
-                state.home_screen_v2_state.welcome.scroll_up();
+                state.shell.home_screen_v2_state.welcome.scroll_up();
             }
             AppEvent::WelcomePanelScrollDown => {
                 tracing::debug!("Welcome panel scroll down");
-                state.home_screen_v2_state.welcome.scroll_down();
+                state.shell.home_screen_v2_state.welcome.scroll_down();
             }
             AppEvent::WelcomePanelPageUp => {
                 tracing::debug!("Welcome panel page up");
-                state.home_screen_v2_state.welcome.page_up();
+                state.shell.home_screen_v2_state.welcome.page_up();
             }
             AppEvent::WelcomePanelPageDown => {
                 tracing::debug!("Welcome panel page down");
-                state.home_screen_v2_state.welcome.page_down();
+                state.shell.home_screen_v2_state.welcome.page_down();
             }
             AppEvent::WelcomePanelCopyContent => {
                 tracing::debug!("Welcome panel copy content");
-                match state.home_screen_v2_state.welcome.copy_content_to_clipboard() {
+                match state.shell.home_screen_v2_state.welcome.copy_content_to_clipboard() {
                     Ok(()) => {
                         state.add_success_notification("Content copied to clipboard".to_string());
                     }
@@ -3906,28 +3982,28 @@ impl EventHandler {
             }
             AppEvent::GoToConfig => {
                 tracing::info!("Navigating to Config");
-                state.current_screen = screen_ids::CONFIG.to_string();
+                state.shell.current_screen = screen_ids::CONFIG.to_string();
             }
             AppEvent::GoToSetupMenu => {
-                state.current_screen = screen_ids::SETUP_MENU.to_string();
+                state.shell.current_screen = screen_ids::SETUP_MENU.to_string();
             }
             AppEvent::GoToLogHistory => {
                 if let Some(log_dir) = state.log_dir() {
-                    state.log_history_state.set_log_dir(log_dir);
+                    state.log_streams.log_history_state.set_log_dir(log_dir);
                 }
-                state.log_history_state.show();
-                state.current_screen = screen_ids::LOG_HISTORY.to_string();
+                state.log_streams.log_history_state.show();
+                state.shell.current_screen = screen_ids::LOG_HISTORY.to_string();
             }
             AppEvent::GoToSessionList => {
                 tracing::info!("Navigating to SessionList");
-                state.current_screen = screen_ids::SESSION_LIST.to_string();
+                state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
             }
             AppEvent::GoToStats => {
                 tracing::info!("Navigating to Usage Analytics");
-                if state.current_screen != screen_ids::ANALYTICS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::ANALYTICS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::ANALYTICS.to_string();
+                state.shell.current_screen = screen_ids::ANALYTICS.to_string();
                 // Plugin owns its own data load; host no longer
                 // pre-populates analytics state.
             }
@@ -3941,7 +4017,7 @@ impl EventHandler {
                 // agent session) and resume ainb when the user quits it.
                 // The witr plugin still owns the `ainb witr` CLI + `/witr`
                 // slash; only the screen is the embedded binary.
-                state.pending_async_action = Some(AsyncAction::AttachWitr);
+                state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
             }
             AppEvent::GoToLearnings => {
                 tracing::info!("Navigating to Learnings (knowledge-base browser)");
@@ -3951,10 +4027,10 @@ impl EventHandler {
                 // origin like every other panel so Esc/PanelBack (and the
                 // plugin's `ui.close_request`) pops back to where the
                 // panel was opened from instead of falling back to home.
-                if state.current_screen != screen_ids::LEARNINGS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::LEARNINGS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::LEARNINGS.to_string();
+                state.shell.current_screen = screen_ids::LEARNINGS.to_string();
             }
             AppEvent::GoToAbtop => {
                 tracing::info!("Launching abtop (top-for-agents)");
@@ -3972,20 +4048,20 @@ impl EventHandler {
                 if state.should_offer_abtop_setup() {
                     state.show_abtop_setup_prompt();
                 } else {
-                    state.pending_async_action = Some(AsyncAction::AttachAbtop);
+                    state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
                 }
             }
             AppEvent::GoToSkills => {
                 tracing::info!("Navigating to Skills");
-                if state.current_screen != screen_ids::SKILLS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::SKILLS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::SKILLS.to_string();
+                state.shell.current_screen = screen_ids::SKILLS.to_string();
                 state.start_background_skills_load(false);
             }
             AppEvent::GoToSkillManager => {
                 tracing::info!("Navigating to SkillManager (spec §10.1)");
-                state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+                state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
                 Self::apply_skill_manager_sources_width(state);
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 // P8 live-data binding (hdt.9): rehydrate Sources /
@@ -3999,7 +4075,7 @@ impl EventHandler {
                 // banner to Visible when the manifest is empty AND
                 // walkers find candidates, so the two steps compose
                 // cleanly.
-                state.skill_manager_state.reload_from_disk(&ainb_home);
+                state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                 // Bead v12.E.4: kick off a background drift scan so
                 // the Units panel's `status` column fills in (`✓` /
                 // `⚠` / `▲` / `⟷`) on the next tick. Until results
@@ -4025,7 +4101,7 @@ impl EventHandler {
                 let walker =
                     crate::components::skill_manager_screen::run_discovery_walkers(&claude_home);
                 crate::components::skill_manager_screen::maybe_show_discovery_banner(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                     walker,
                 );
@@ -4033,14 +4109,14 @@ impl EventHandler {
             AppEvent::SkillManagerBack => {
                 tracing::info!("Returning to home from SkillManager (Esc/q)");
                 // Leaving the screen cancels any armed remove confirm.
-                state.skill_manager_state.pending_remove_confirm = None;
-                state.current_screen = screen_ids::HOME.to_string();
+                state.skills.skill_manager_state.pending_remove_confirm = None;
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::SkillManagerDiscoveryImport => {
                 tracing::info!("Discovery banner: import all");
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 if let Err(e) = crate::components::skill_manager_screen::apply_discovery_import(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                 ) {
                     tracing::warn!(error = %e, "discovery import failed");
@@ -4048,14 +4124,14 @@ impl EventHandler {
             }
             AppEvent::SkillManagerDiscoveryToggleDetails => {
                 crate::components::skill_manager_screen::toggle_discovery_details(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                 );
             }
             AppEvent::SkillManagerDiscoverySkip => {
                 tracing::info!("Discovery banner: skip + persist marker");
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 if let Err(e) = crate::components::skill_manager_screen::apply_discovery_skip(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                 ) {
                     tracing::warn!(error = %e, "discovery skip failed");
@@ -4068,13 +4144,14 @@ impl EventHandler {
                 // the user applies with Enter (see SkillManagerSyncConfirm).
                 // Scope: the focused source (all its units) or the selected
                 // unit. `source_or_unit` accepts a source name OR a unit URI.
-                let sources_focused = state.skill_manager_state.focused_pane
+                let sources_focused = state.skills.skill_manager_state.focused_pane
                     == crate::components::skill_manager_screen::FocusedSkillPane::Sources;
                 let (target, label) = if sources_focused {
                     match state
+                        .skills
                         .skill_manager_state
                         .sources
-                        .get(state.skill_manager_state.source_selected)
+                        .get(state.skills.skill_manager_state.source_selected)
                     {
                         Some(s) => (s.name.clone(), format!("source {}", s.name)),
                         None => {
@@ -4085,12 +4162,13 @@ impl EventHandler {
                 } else {
                     // Act on the unit the user SEES highlighted, not a stale
                     // absolute `selected` that drifted out of the filter.
-                    let Some(idx) = state.skill_manager_state.highlighted_unit_index() else {
+                    let Some(idx) = state.skills.skill_manager_state.highlighted_unit_index()
+                    else {
                         state.add_warning_notification("sync: no unit selected".to_string());
                         return;
                     };
-                    state.skill_manager_state.selected = idx;
-                    match state.skill_manager_state.units.get(idx) {
+                    state.skills.skill_manager_state.selected = idx;
+                    match state.skills.skill_manager_state.units.get(idx) {
                         Some(u) => (u.declared_uri.clone(), format!("unit {}", u.name)),
                         None => {
                             state.add_warning_notification("sync: no unit selected".to_string());
@@ -4124,7 +4202,7 @@ impl EventHandler {
                     .map(|l| l.trim_end().to_string())
                     .filter(|l| !l.is_empty())
                     .collect();
-                state.skill_manager_state.sync_confirm =
+                state.skills.skill_manager_state.sync_confirm =
                     Some(crate::components::skill_manager_screen::SyncConfirmState {
                         target,
                         label,
@@ -4133,17 +4211,17 @@ impl EventHandler {
                     });
             }
             AppEvent::SkillManagerSyncScroll(delta) => {
-                if let Some(sc) = state.skill_manager_state.sync_confirm.as_mut() {
+                if let Some(sc) = state.skills.skill_manager_state.sync_confirm.as_mut() {
                     sc.scroll_by(delta);
                 }
             }
             AppEvent::SkillManagerSyncCancel => {
-                state.skill_manager_state.sync_confirm = None;
+                state.skills.skill_manager_state.sync_confirm = None;
             }
             AppEvent::SkillManagerSyncConfirm => {
                 // Apply the previewed plan: re-run the identical scope with
                 // `--yes`. Then reload so fresh deployed paths / usage paint.
-                let Some(sc) = state.skill_manager_state.sync_confirm.take() else {
+                let Some(sc) = state.skills.skill_manager_state.sync_confirm.take() else {
                     return;
                 };
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -4155,7 +4233,7 @@ impl EventHandler {
                     to_repo: false,
                 });
                 let (ok, msg) = run_skill_cli(&ainb_home, cmd);
-                state.skill_manager_state.reload_from_disk(&ainb_home);
+                state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                 if ok {
                     state.add_success_notification(format!("synced {}", sc.label));
                 } else {
@@ -4167,9 +4245,10 @@ impl EventHandler {
                 // Toggle by the row's current `is_library` flag.
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 let src = state
+                    .skills
                     .skill_manager_state
                     .sources
-                    .get(state.skill_manager_state.source_selected)
+                    .get(state.skills.skill_manager_state.source_selected)
                     .map(|s| (s.name.clone(), s.is_library));
                 let Some((name, was_library)) = src else {
                     state.add_warning_notification("library: no source selected".to_string());
@@ -4185,7 +4264,7 @@ impl EventHandler {
                     }
                 };
                 let (ok, msg) = run_skill_cli(&ainb_home, cmd);
-                state.skill_manager_state.reload_from_disk(&ainb_home);
+                state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                 if ok {
                     let verb = if was_library { "unmarked" } else { "marked" };
                     state.add_success_notification(format!("{verb} library: {name}"));
@@ -4199,12 +4278,13 @@ impl EventHandler {
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 // Copy the unit the user SEES highlighted, not a stale
                 // absolute `selected` that drifted out of the filter.
-                let Some(idx) = state.skill_manager_state.highlighted_unit_index() else {
+                let Some(idx) = state.skills.skill_manager_state.highlighted_unit_index() else {
                     state.add_warning_notification("copy: no unit selected".to_string());
                     return;
                 };
-                state.skill_manager_state.selected = idx;
-                let uri = state.skill_manager_state.units.get(idx).map(|u| u.declared_uri.clone());
+                state.skills.skill_manager_state.selected = idx;
+                let uri =
+                    state.skills.skill_manager_state.units.get(idx).map(|u| u.declared_uri.clone());
                 let Some(uri) = uri else {
                     state.add_warning_notification("copy: no unit selected".to_string());
                     return;
@@ -4216,7 +4296,7 @@ impl EventHandler {
                     },
                 };
                 let (ok, msg) = run_skill_cli(&ainb_home, cmd);
-                state.skill_manager_state.reload_from_disk(&ainb_home);
+                state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                 if ok {
                     state.add_success_notification(format!("copied to library: {msg}"));
                 } else {
@@ -4227,12 +4307,13 @@ impl EventHandler {
                 tracing::info!("Units panel: flip shadowed_by on selected unit");
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 let unit_name = state
+                    .skills
                     .skill_manager_state
                     .units
-                    .get(state.skill_manager_state.selected)
+                    .get(state.skills.skill_manager_state.selected)
                     .map(|u| u.name.clone());
                 match crate::components::skill_manager_screen::apply_conflict_flip(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                 ) {
                     // `[s]` on a conflict-peer unit flips which side wins.
@@ -4254,7 +4335,7 @@ impl EventHandler {
                 // homes + force the banner even past a prior skip-marker.
                 tracing::info!("SkillManager: refresh discovery (m)");
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                state.skill_manager_state.reload_from_disk(&ainb_home);
+                state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                 let claude_home = std::env::var_os("HOME")
                     .map(std::path::PathBuf::from)
                     .map(|h| h.join(".claude"))
@@ -4262,11 +4343,11 @@ impl EventHandler {
                 let walker =
                     crate::components::skill_manager_screen::run_discovery_walkers(&claude_home);
                 crate::components::skill_manager_screen::force_show_discovery_banner(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                     walker,
                 );
-                if !state.skill_manager_state.banner.is_active() {
+                if !state.skills.skill_manager_state.banner.is_active() {
                     state.add_info_notification("discovery: no un-adopted units found".to_string());
                 }
             }
@@ -4287,9 +4368,10 @@ impl EventHandler {
                 // `[u]` — re-fetch + apply for the selected unit.
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 let uri = state
+                    .skills
                     .skill_manager_state
                     .units
-                    .get(state.skill_manager_state.selected)
+                    .get(state.skills.skill_manager_state.selected)
                     .map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
@@ -4304,7 +4386,7 @@ impl EventHandler {
                             dry_run: false,
                         });
                         let (ok, msg) = run_skill_cli(&ainb_home, cmd);
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                         if ok {
                             state.add_success_notification(format!("updated: {msg}"));
                         } else {
@@ -4320,16 +4402,16 @@ impl EventHandler {
                 // VISIBLE under the current filter — otherwise `[r]` would act
                 // on an off-screen unit (e.g. filtering to a 0-unit source left
                 // `selected` on an unrelated row, so `[r]` removed *that*).
-                let visible = state.skill_manager_state.visible_indices();
+                let visible = state.skills.skill_manager_state.visible_indices();
                 if visible.is_empty() {
                     // Nothing removable in view. If it's empty because of a
                     // source filter, the obvious intent is "remove this source"
                     // (the user filtered to the repo they want gone) — route
                     // there rather than touching a hidden unit.
-                    if state.skill_manager_state.source_filter.is_some() {
+                    if state.skills.skill_manager_state.source_filter.is_some() {
                         Self::process_event(AppEvent::SkillManagerSourceRemoveOpen, state);
                     } else {
-                        state.skill_manager_state.pending_remove_confirm = None;
+                        state.skills.skill_manager_state.pending_remove_confirm = None;
                         state.add_warning_notification("remove: no unit selected".to_string());
                     }
                     return;
@@ -4341,26 +4423,32 @@ impl EventHandler {
                 // unit). Sync `selected` so the arm/confirm keys agree.
                 let pos = visible
                     .iter()
-                    .position(|&i| i == state.skill_manager_state.selected)
+                    .position(|&i| i == state.skills.skill_manager_state.selected)
                     .unwrap_or(0);
                 let target = visible[pos];
-                state.skill_manager_state.selected = target;
-                let uri =
-                    state.skill_manager_state.units.get(target).map(|u| u.declared_uri.clone());
+                state.skills.skill_manager_state.selected = target;
+                let uri = state
+                    .skills
+                    .skill_manager_state
+                    .units
+                    .get(target)
+                    .map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
-                        state.skill_manager_state.pending_remove_confirm = None;
+                        state.skills.skill_manager_state.pending_remove_confirm = None;
                         state.add_warning_notification("remove: no unit selected".to_string());
                     }
                     Some(uri) => {
-                        let armed = state.skill_manager_state.pending_remove_confirm.as_deref()
-                            == Some(uri.as_str());
+                        let armed =
+                            state.skills.skill_manager_state.pending_remove_confirm.as_deref()
+                                == Some(uri.as_str());
                         if !armed {
                             // First `[r]`: arm a one-shot confirm for THIS unit.
                             // Moving the cursor changes the selected URI and
                             // re-arms for the new row, so a stray `r` can't
                             // uninstall.
-                            state.skill_manager_state.pending_remove_confirm = Some(uri.clone());
+                            state.skills.skill_manager_state.pending_remove_confirm =
+                                Some(uri.clone());
                             state.add_warning_notification(format!(
                                 "remove {uri}? press r again to confirm"
                             ));
@@ -4386,7 +4474,7 @@ impl EventHandler {
                             });
                             let (lockfile_ok, msg) = run_skill_cli(&ainb_home, cmd);
                             let manifest_dropped = drop_unit_from_manifest(&ainb_home, &uri);
-                            state.skill_manager_state.reload_from_disk(&ainb_home);
+                            state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                             if lockfile_ok {
                                 state.add_success_notification(format!("removed: {msg}"));
                             } else if manifest_dropped {
@@ -4399,7 +4487,7 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerOpenAddSource => {
-                state.skill_manager_state.input =
+                state.skills.skill_manager_state.input =
                     Some(crate::components::skill_manager_screen::InputState::new(
                         crate::components::skill_manager_screen::InputKind::AddSource,
                     ));
@@ -4410,40 +4498,41 @@ impl EventHandler {
                 let mut input = crate::components::skill_manager_screen::InputState::new(
                     crate::components::skill_manager_screen::InputKind::Search,
                 );
-                if let Some(existing) = &state.skill_manager_state.search {
+                if let Some(existing) = &state.skills.skill_manager_state.search {
                     input.buffer = existing.clone();
                 }
-                state.skill_manager_state.input = Some(input);
+                state.skills.skill_manager_state.input = Some(input);
             }
             AppEvent::SkillManagerInputChar(c) => {
-                if let Some(input) = state.skill_manager_state.input.as_mut() {
+                if let Some(input) = state.skills.skill_manager_state.input.as_mut() {
                     input.buffer.push(c);
                 }
             }
             AppEvent::SkillManagerInputBackspace => {
-                if let Some(input) = state.skill_manager_state.input.as_mut() {
+                if let Some(input) = state.skills.skill_manager_state.input.as_mut() {
                     input.buffer.pop();
                 }
             }
             AppEvent::SkillManagerInputCancel => {
-                state.skill_manager_state.input = None;
+                state.skills.skill_manager_state.input = None;
             }
             AppEvent::SkillManagerInputSubmit => {
-                let Some(input) = state.skill_manager_state.input.take() else {
+                let Some(input) = state.skills.skill_manager_state.input.take() else {
                     return;
                 };
                 use crate::components::skill_manager_screen::InputKind;
                 match input.kind {
                     InputKind::Search => {
                         let q = input.buffer.trim().to_lowercase();
-                        state.skill_manager_state.search =
+                        state.skills.skill_manager_state.search =
                             if q.is_empty() { None } else { Some(q) };
                         // Reset the cursor to the first row visible under the new
                         // filter (mirrors the source-filter handlers). Otherwise
                         // `selected` keeps its old absolute index — which the new
                         // filter may hide — so the highlighted row and the unit
                         // that `[r]` remove / `[i]` install act on would diverge.
-                        state.skill_manager_state.selected = state
+                        state.skills.skill_manager_state.selected = state
+                            .skills
                             .skill_manager_state
                             .visible_indices()
                             .first()
@@ -4471,7 +4560,7 @@ impl EventHandler {
             AppEvent::SkillManagerSelectPrev => {
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::move_selection(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                     crate::components::skill_manager_screen::SelectionMove::Prev,
                 );
@@ -4479,7 +4568,7 @@ impl EventHandler {
             AppEvent::SkillManagerSelectNext => {
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::move_selection(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                     crate::components::skill_manager_screen::SelectionMove::Next,
                 );
@@ -4487,7 +4576,7 @@ impl EventHandler {
             AppEvent::SkillManagerSelectFirst => {
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::move_selection(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                     crate::components::skill_manager_screen::SelectionMove::First,
                 );
@@ -4495,31 +4584,31 @@ impl EventHandler {
             AppEvent::SkillManagerSelectLast => {
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::move_selection(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                     crate::components::skill_manager_screen::SelectionMove::Last,
                 );
             }
             AppEvent::SkillManagerToggleFocus => {
-                state.skill_manager_state.toggle_focus();
+                state.skills.skill_manager_state.toggle_focus();
             }
             AppEvent::SkillManagerSourceSelectPrev => {
-                state.skill_manager_state.move_source_selection(
+                state.skills.skill_manager_state.move_source_selection(
                     crate::components::skill_manager_screen::SelectionMove::Prev,
                 );
             }
             AppEvent::SkillManagerSourceSelectNext => {
-                state.skill_manager_state.move_source_selection(
+                state.skills.skill_manager_state.move_source_selection(
                     crate::components::skill_manager_screen::SelectionMove::Next,
                 );
             }
             AppEvent::SkillManagerApplySourceFilter
             | AppEvent::SkillManagerApplySourceFilterKey => {
-                state.skill_manager_state.apply_selected_source_filter();
+                state.skills.skill_manager_state.apply_selected_source_filter();
                 // Refresh the detail pane against the newly-selected unit.
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::recompute_detail(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                 );
             }
@@ -4533,15 +4622,16 @@ impl EventHandler {
                 // Resolve the unit the user SEES highlighted and refresh the
                 // detail pane against it first — `detail` is keyed off
                 // `selected`, which can drift out of the active filter.
-                if let Some(idx) = state.skill_manager_state.highlighted_unit_index() {
-                    state.skill_manager_state.selected = idx;
+                if let Some(idx) = state.skills.skill_manager_state.highlighted_unit_index() {
+                    state.skills.skill_manager_state.selected = idx;
                     let ainb_home = ainb_skill_core::default_ainb_home();
                     crate::components::skill_manager_screen::recompute_detail(
-                        &mut state.skill_manager_state,
+                        &mut state.skills.skill_manager_state,
                         &ainb_home,
                     );
                 }
                 let deployed = state
+                    .skills
                     .skill_manager_state
                     .detail
                     .as_ref()
@@ -4554,7 +4644,7 @@ impl EventHandler {
                         } else {
                             p
                         };
-                        state.pending_async_action = Some(AsyncAction::OpenInEditor(target));
+                        state.shell.pending_async_action = Some(AsyncAction::OpenInEditor(target));
                     }
                     None => {
                         state.add_warning_notification(
@@ -4564,41 +4654,41 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerClearSourceFilter => {
-                state.skill_manager_state.clear_source_filter();
+                state.skills.skill_manager_state.clear_source_filter();
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::recompute_detail(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                 );
             }
             AppEvent::SkillManagerShrinkSources => {
                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                state.skill_manager_state.shrink_sources(2, term_w);
+                state.skills.skill_manager_state.shrink_sources(2, term_w);
                 Self::persist_skill_manager_sources_width(state);
             }
             AppEvent::SkillManagerGrowSources => {
                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                state.skill_manager_state.grow_sources(2, term_w);
+                state.skills.skill_manager_state.grow_sources(2, term_w);
                 Self::persist_skill_manager_sources_width(state);
             }
             AppEvent::SkillManagerSourceClick { index } => {
-                state.skill_manager_state.source_selected = index;
-                state.skill_manager_state.apply_selected_source_filter();
+                state.skills.skill_manager_state.source_selected = index;
+                state.skills.skill_manager_state.apply_selected_source_filter();
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 crate::components::skill_manager_screen::recompute_detail(
-                    &mut state.skill_manager_state,
+                    &mut state.skills.skill_manager_state,
                     &ainb_home,
                 );
             }
             AppEvent::SkillManagerUnitClick { position } => {
                 use crate::components::skill_manager_screen::FocusedSkillPane;
-                state.skill_manager_state.focused_pane = FocusedSkillPane::Units;
-                let visible = state.skill_manager_state.visible_indices();
+                state.skills.skill_manager_state.focused_pane = FocusedSkillPane::Units;
+                let visible = state.skills.skill_manager_state.visible_indices();
                 if let Some(&abs) = visible.get(position) {
-                    state.skill_manager_state.selected = abs;
+                    state.skills.skill_manager_state.selected = abs;
                     let ainb_home = ainb_skill_core::default_ainb_home();
                     crate::components::skill_manager_screen::recompute_detail(
-                        &mut state.skill_manager_state,
+                        &mut state.skills.skill_manager_state,
                         &ainb_home,
                     );
                 }
@@ -4612,33 +4702,33 @@ impl EventHandler {
                 // out-of-band `ainb skill library` edits are reflected.
                 tracing::info!("SkillManager: open own-skill Library (l)");
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                state.skill_manager_state.library = Some(
+                state.skills.skill_manager_state.library = Some(
                     crate::components::skill_manager_screen::LibraryViewState::load_from_disk(
                         &ainb_home,
                     ),
                 );
             }
             AppEvent::SkillManagerLibrarySelectPrev => {
-                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                if let Some(lib) = state.skills.skill_manager_state.library.as_mut() {
                     lib.select_prev();
                 }
             }
             AppEvent::SkillManagerLibrarySelectNext => {
-                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                if let Some(lib) = state.skills.skill_manager_state.library.as_mut() {
                     lib.select_next();
                 }
             }
             AppEvent::SkillManagerLibraryEnter => {
                 // Enter expands the selected own-skill into its Detail
                 // band (idempotent — pressing again keeps it open).
-                if let Some(lib) = state.skill_manager_state.library.as_mut() {
+                if let Some(lib) = state.skills.skill_manager_state.library.as_mut() {
                     if lib.selected_row().is_some() {
                         lib.show_detail = true;
                     }
                 }
             }
             AppEvent::SkillManagerLibraryClose => {
-                state.skill_manager_state.library = None;
+                state.skills.skill_manager_state.library = None;
             }
             AppEvent::SkillManagerOpenBrowse => {
                 // `[b]` — open the catalog browse modal in Query mode,
@@ -4647,17 +4737,17 @@ impl EventHandler {
                 // lists the shelf, so opening the modal never blocks the
                 // event loop on a network call.
                 tracing::info!("SkillManager: open catalog browse (b)");
-                state.skill_manager_state.browse =
+                state.skills.skill_manager_state.browse =
                     Some(crate::components::skill_manager_screen::BrowseViewState::new());
             }
             AppEvent::SkillManagerBrowseInputChar(c) => {
-                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                     b.query.push(c);
                     b.status = None;
                 }
             }
             AppEvent::SkillManagerBrowseInputBackspace => {
-                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                     b.query.pop();
                     b.status = None;
                 }
@@ -4669,18 +4759,19 @@ impl EventHandler {
                 // under AINB_CATALOG_MOCK=1) — both keep the tripwire offline.
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 let (query, kind) = state
+                    .skills
                     .skill_manager_state
                     .browse
                     .as_ref()
                     .map(|b| (b.query.clone(), b.catalog))
                     .unwrap_or_default();
                 if query.trim().is_empty() && !kind.lists_on_blank() {
-                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                         b.set_error("type a query to search the catalog");
                     }
                 } else {
                     let result = run_catalog_search(&ainb_home, query.trim(), kind);
-                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                         match result {
                             Ok(rows) => b.set_results(rows),
                             Err(msg) => b.set_error(msg),
@@ -4694,24 +4785,25 @@ impl EventHandler {
                 // await a typed query unless one is already buffered.
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 let next_and_query = state
+                    .skills
                     .skill_manager_state
                     .browse
                     .as_ref()
                     .map(|b| (b.catalog.toggled(), b.query.clone()));
                 if let Some((next, query)) = next_and_query {
-                    if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                         b.catalog = next;
                         b.status = None;
                     }
                     if next.lists_on_blank() || !query.trim().is_empty() {
                         let result = run_catalog_search(&ainb_home, query.trim(), next);
-                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                             match result {
                                 Ok(rows) => b.set_results(rows),
                                 Err(msg) => b.set_error(msg),
                             }
                         }
-                    } else if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                    } else if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                         // skills.sh with no query → Query mode, cleared results.
                         b.results.clear();
                         b.selected = 0;
@@ -4721,12 +4813,12 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerBrowseSelectPrev => {
-                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                     b.select_prev();
                 }
             }
             AppEvent::SkillManagerBrowseSelectNext => {
-                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                     b.select_next();
                 }
             }
@@ -4734,7 +4826,7 @@ impl EventHandler {
                 // `/` in Results mode — back to Query mode to refine. Disarm
                 // any pending command-install confirm (keeps the gate invariant
                 // local rather than relying on a downstream reset).
-                if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                     b.mode = crate::components::skill_manager_screen::BrowseMode::Query;
                     b.status = None;
                     b.pending_command_confirm = false;
@@ -4746,7 +4838,7 @@ impl EventHandler {
                 // shell command, so the FIRST Enter only arms a confirm (shows
                 // the exact command); a SECOND Enter runs it.
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                let selected = state.skill_manager_state.browse.as_ref().and_then(|b| {
+                let selected = state.skills.skill_manager_state.browse.as_ref().and_then(|b| {
                     b.selected_row()
                         .map(|r| (r.install_uri.clone(), r.kind, b.pending_command_confirm))
                 });
@@ -4756,21 +4848,21 @@ impl EventHandler {
                     }
                     Some((uri, kind, pending)) if kind.is_command() && !pending => {
                         // First Enter on a command-kind — arm the confirm.
-                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                             b.pending_command_confirm = true;
                             b.set_status_confirm(&uri);
                         }
                     }
                     Some((uri, kind, _)) => {
                         let (ok, msg) = install_catalog_hit(&ainb_home, &uri, kind);
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
-                        if let Some(b) = state.skill_manager_state.browse.as_mut() {
+                        state.skills.skill_manager_state.reload_from_disk(&ainb_home);
+                        if let Some(b) = state.skills.skill_manager_state.browse.as_mut() {
                             b.pending_command_confirm = false;
                         }
                         if ok {
                             // Close the modal on a successful install so the
                             // user lands back on the (now-updated) Units table.
-                            state.skill_manager_state.browse = None;
+                            state.skills.skill_manager_state.browse = None;
                             state.add_success_notification(format!("installed: {msg}"));
                         } else {
                             state.add_error_notification(format!("install failed: {msg}"));
@@ -4779,50 +4871,51 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerBrowseClose => {
-                state.skill_manager_state.browse = None;
+                state.skills.skill_manager_state.browse = None;
             }
             AppEvent::SkillManagerPreviewUp => {
-                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                if let Some(p) = state.skills.skill_manager_state.preview.as_mut() {
                     p.move_cursor(-1);
                 }
             }
             AppEvent::SkillManagerPreviewDown => {
-                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                if let Some(p) = state.skills.skill_manager_state.preview.as_mut() {
                     p.move_cursor(1);
                 }
             }
             AppEvent::SkillManagerPreviewToggle => {
-                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                if let Some(p) = state.skills.skill_manager_state.preview.as_mut() {
                     p.toggle_current();
                 }
             }
             AppEvent::SkillManagerPreviewAll => {
-                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                if let Some(p) = state.skills.skill_manager_state.preview.as_mut() {
                     p.set_all(true);
                 }
             }
             AppEvent::SkillManagerPreviewNone => {
-                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                if let Some(p) = state.skills.skill_manager_state.preview.as_mut() {
                     p.set_all(false);
                 }
             }
             AppEvent::SkillManagerPreviewTool(i) => {
-                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                if let Some(p) = state.skills.skill_manager_state.preview.as_mut() {
                     p.toggle_tool(i);
                 }
             }
             AppEvent::SkillManagerPreviewClose => {
                 // Discard — preview never persisted anything.
-                state.skill_manager_state.preview = None;
+                state.skills.skill_manager_state.preview = None;
             }
             AppEvent::SkillManagerPreviewSource => {
                 // `[p]` on a source row — reopen the picker for that source,
                 // at its DECLARED ref (bare uri would default to `main`,
                 // silently swapping the name-keyed cache checkout).
                 let row = state
+                    .skills
                     .skill_manager_state
                     .sources
-                    .get(state.skill_manager_state.source_selected)
+                    .get(state.skills.skill_manager_state.source_selected)
                     .cloned();
                 if let Some(row) = row {
                     if !row.enabled {
@@ -4840,9 +4933,10 @@ impl EventHandler {
             AppEvent::SkillManagerSourceRemoveOpen => {
                 use crate::components::skill_manager_screen::SourceRemoveConfirm;
                 let Some(row) = state
+                    .skills
                     .skill_manager_state
                     .sources
-                    .get(state.skill_manager_state.source_selected)
+                    .get(state.skills.skill_manager_state.source_selected)
                     .cloned()
                 else {
                     state.add_warning_notification("remove: no source selected".to_string());
@@ -4850,34 +4944,37 @@ impl EventHandler {
                 };
                 let prefix = format!("{}@", row.uri);
                 let unit_count = state
+                    .skills
                     .skill_manager_state
                     .units
                     .iter()
                     .filter(|u| u.declared_uri.starts_with(&prefix))
                     .count();
-                state.skill_manager_state.source_remove_confirm = Some(SourceRemoveConfirm {
-                    source_name: row.name,
-                    source_uri: row.uri,
-                    unit_count,
-                    cursor: 0,
-                });
+                state.skills.skill_manager_state.source_remove_confirm =
+                    Some(SourceRemoveConfirm {
+                        source_name: row.name,
+                        source_uri: row.uri,
+                        unit_count,
+                        cursor: 0,
+                    });
             }
             AppEvent::SkillManagerSourceRemoveMove(delta) => {
-                if let Some(c) = state.skill_manager_state.source_remove_confirm.as_mut() {
+                if let Some(c) = state.skills.skill_manager_state.source_remove_confirm.as_mut() {
                     c.move_cursor(delta);
                 }
             }
             AppEvent::SkillManagerSourceRemoveCancel => {
-                state.skill_manager_state.source_remove_confirm = None;
+                state.skills.skill_manager_state.source_remove_confirm = None;
             }
             AppEvent::SkillManagerSourceRemoveConfirm => {
                 use crate::components::skill_manager_screen::SourceRemoveChoice;
-                let Some(confirm) = state.skill_manager_state.source_remove_confirm.clone() else {
+                let Some(confirm) = state.skills.skill_manager_state.source_remove_confirm.clone()
+                else {
                     return;
                 };
                 let choice = confirm.choice();
                 if choice == SourceRemoveChoice::Cancel {
-                    state.skill_manager_state.source_remove_confirm = None;
+                    state.skills.skill_manager_state.source_remove_confirm = None;
                     return;
                 }
                 let keep_source = choice.keeps_source();
@@ -4889,8 +4986,8 @@ impl EventHandler {
                     keep_source,
                     &mut buf,
                 );
-                state.skill_manager_state.source_remove_confirm = None;
-                state.skill_manager_state.reload_from_disk(&ainb_home);
+                state.skills.skill_manager_state.source_remove_confirm = None;
+                state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                 match result {
                     Ok(removed) if keep_source => {
                         state.add_success_notification(format!(
@@ -4915,7 +5012,7 @@ impl EventHandler {
                 // Validate on a borrow (no deep clone of a potentially
                 // 95-unit view); only take() the state once we commit.
                 let (paths, targets) = {
-                    let Some(view) = state.skill_manager_state.preview.as_ref() else {
+                    let Some(view) = state.skills.skill_manager_state.preview.as_ref() else {
                         return;
                     };
                     let paths = view.checked_paths();
@@ -4933,7 +5030,7 @@ impl EventHandler {
                     };
                     (paths, targets)
                 };
-                let Some(view) = state.skill_manager_state.preview.take() else {
+                let Some(view) = state.skills.skill_manager_state.preview.take() else {
                     return;
                 };
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -4946,7 +5043,7 @@ impl EventHandler {
                     &mut buf,
                 ) {
                     Ok((installed, failed)) => {
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        state.skills.skill_manager_state.reload_from_disk(&ainb_home);
                         if failed == 0 {
                             state.add_success_notification(format!(
                                 "imported {installed} unit(s) → {targets}"
@@ -4964,22 +5061,22 @@ impl EventHandler {
                     Err(e) => {
                         state.add_error_notification(format!("import failed: {e:#}"));
                         // Reopen the picker with the user's selection intact.
-                        state.skill_manager_state.preview = Some(view);
+                        state.skills.skill_manager_state.preview = Some(view);
                     }
                 }
             }
             AppEvent::GoToDaemons => {
                 tracing::info!("Navigating to Daemons");
-                if state.current_screen != screen_ids::DAEMONS {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::DAEMONS {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::DAEMONS.to_string();
+                state.shell.current_screen = screen_ids::DAEMONS.to_string();
                 // Arm the background collector on entry (H-D2): collection runs
                 // off the UI thread, never on render, so this only spawns/keeps
                 // the collector — it does no disk I/O on the event loop.
                 // MCP, Headroom, Hangar and notifyd are rows in that same
                 // collect, so there is nothing else to arm.
-                state.daemons_state.arm();
+                state.hangar.daemons_state.arm();
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
@@ -4989,88 +5086,88 @@ impl EventHandler {
                 // screens resolves to `PanelBack`, and via `ui.close_request` once
                 // hangar-tui adopts it) pops back to where it was opened from
                 // rather than a stale `previous_screen` left by an earlier panel.
-                if state.current_screen != screen_ids::HANGAR {
-                    state.previous_screen = Some(state.current_screen.clone());
+                if state.shell.current_screen != screen_ids::HANGAR {
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
                 }
-                state.current_screen = screen_ids::HANGAR.to_string();
+                state.shell.current_screen = screen_ids::HANGAR.to_string();
             }
             AppEvent::GoToRecovery => {
                 tracing::info!("Navigating to Session Recovery");
-                state.session_recovery_state.refresh();
-                state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+                state.recovery.session_recovery_state.refresh();
+                state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
             } // AINB 2.0: Config screen events
             AppEvent::ConfigBack => {
                 tracing::info!("Navigating back from Config to HomeScreen");
                 // One write on the way out, and only when a node actually
                 // toggled — a user who just looked around leaves the file alone.
-                if let Some(ids) = state.config_screen_state.take_expansion_to_persist() {
-                    state.app_config.ui_preferences.config_tree_expanded = ids.clone();
+                if let Some(ids) = state.config.config_screen_state.take_expansion_to_persist() {
+                    state.config.app_config.ui_preferences.config_tree_expanded = ids.clone();
                     if let Err(e) = crate::config::AppConfig::save_tree_expansion(&ids) {
                         tracing::warn!(error = %e, "could not persist config tree expansion");
                     }
                 }
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ConfigNextCategory => {
-                state.config_screen_state.select_next_category();
+                state.config.config_screen_state.select_next_category();
             }
             AppEvent::ConfigPrevCategory => {
-                state.config_screen_state.select_prev_category();
+                state.config.config_screen_state.select_prev_category();
             }
             AppEvent::ConfigNextSetting => {
-                state.config_screen_state.select_next_setting();
+                state.config.config_screen_state.select_next_setting();
             }
             AppEvent::ConfigPrevSetting => {
-                state.config_screen_state.select_prev_setting();
+                state.config.config_screen_state.select_prev_setting();
             }
             AppEvent::ConfigSwitchPane => {
                 // Toggle focus between categories and settings panes
-                state.config_screen_state.focused_pane =
-                    match state.config_screen_state.focused_pane {
+                state.config.config_screen_state.focused_pane =
+                    match state.config.config_screen_state.focused_pane {
                         ConfigPane::Categories => ConfigPane::Settings,
                         ConfigPane::Settings => ConfigPane::Categories,
                     };
                 tracing::debug!(
                     "Config switch pane - focus is now on {:?}",
-                    state.config_screen_state.focused_pane
+                    state.config.config_screen_state.focused_pane
                 );
             }
-            AppEvent::ConfigNavigateUp => match state.config_screen_state.focused_pane {
-                ConfigPane::Categories => state.config_screen_state.select_prev_category(),
-                ConfigPane::Settings => state.config_screen_state.select_prev_setting(),
+            AppEvent::ConfigNavigateUp => match state.config.config_screen_state.focused_pane {
+                ConfigPane::Categories => state.config.config_screen_state.select_prev_category(),
+                ConfigPane::Settings => state.config.config_screen_state.select_prev_setting(),
             },
-            AppEvent::ConfigNavigateDown => match state.config_screen_state.focused_pane {
-                ConfigPane::Categories => state.config_screen_state.select_next_category(),
-                ConfigPane::Settings => state.config_screen_state.select_next_setting(),
+            AppEvent::ConfigNavigateDown => match state.config.config_screen_state.focused_pane {
+                ConfigPane::Categories => state.config.config_screen_state.select_next_category(),
+                ConfigPane::Settings => state.config.config_screen_state.select_next_setting(),
             },
             AppEvent::ConfigFocusCategories => {
-                state.config_screen_state.focused_pane = ConfigPane::Categories;
+                state.config.config_screen_state.focused_pane = ConfigPane::Categories;
                 tracing::debug!("Config focus switched to Categories pane");
             }
             AppEvent::ConfigFocusSettings => {
-                state.config_screen_state.focused_pane = ConfigPane::Settings;
+                state.config.config_screen_state.focused_pane = ConfigPane::Settings;
                 tracing::debug!("Config focus switched to Settings pane");
             }
             AppEvent::ConfigToggleExpand => {
                 // In-memory only. Persisting here meant a read-parse-write of
                 // config.toml inside the event loop on every keypress; the flush
                 // happens once, on ConfigBack.
-                state.config_screen_state.toggle_expanded();
+                state.config.config_screen_state.toggle_expanded();
             }
             AppEvent::ConfigSearchStart => {
-                state.config_screen_state.start_search();
+                state.config.config_screen_state.start_search();
             }
             AppEvent::ConfigSearchChar(c) => {
-                state.config_screen_state.push_search_char(c);
+                state.config.config_screen_state.push_search_char(c);
             }
             AppEvent::ConfigSearchBackspace => {
-                state.config_screen_state.pop_search_char();
+                state.config.config_screen_state.pop_search_char();
             }
             AppEvent::ConfigSearchCancel => {
-                state.config_screen_state.clear_search();
+                state.config.config_screen_state.clear_search();
             }
             AppEvent::ConfigEditSetting => {
-                let selected = state.config_screen_state.current_setting().cloned();
+                let selected = state.config.config_screen_state.current_setting().cloned();
                 if let Some(setting) = selected {
                     // A row core cannot persist says so instead of opening an
                     // editor that would throw the value away.
@@ -5085,7 +5182,7 @@ impl EventHandler {
 
                         match &setting.value {
                             crate::app::state::ConfigValue::Choice(options, selected_idx) => {
-                                state.config_popup_state.open_choice(
+                                state.config.config_popup_state.open_choice(
                                     &title,
                                     &description,
                                     &key,
@@ -5094,7 +5191,7 @@ impl EventHandler {
                                 );
                             }
                             crate::app::state::ConfigValue::Text(text) => {
-                                state.config_popup_state.open_text(
+                                state.config.config_popup_state.open_text(
                                     &title,
                                     &description,
                                     &key,
@@ -5108,7 +5205,7 @@ impl EventHandler {
                                 // land in config.toml. Ctrl+K is the path that
                                 // takes a literal, and it writes it to the
                                 // keychain instead.
-                                state.config_popup_state.open_text(
+                                state.config.config_popup_state.open_text(
                                     &title,
                                     "reference: $ENV_VAR or keychain:<service> — Ctrl+K stores a literal in the keychain",
                                     &key,
@@ -5116,7 +5213,7 @@ impl EventHandler {
                                 );
                             }
                             crate::app::state::ConfigValue::Bool(value) => {
-                                state.config_popup_state.open_boolean(
+                                state.config.config_popup_state.open_boolean(
                                     &title,
                                     &description,
                                     &key,
@@ -5124,7 +5221,7 @@ impl EventHandler {
                                 );
                             }
                             crate::app::state::ConfigValue::Number(value) => {
-                                state.config_popup_state.open_number(
+                                state.config.config_popup_state.open_number(
                                     &title,
                                     &description,
                                     &key,
@@ -5137,7 +5234,7 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfigSecretToKeychain => {
-                let selected = state.config_screen_state.current_setting().cloned();
+                let selected = state.config.config_screen_state.current_setting().cloned();
                 match selected.as_ref().map(|setting| (&setting.value, setting)) {
                     Some((crate::app::state::ConfigValue::Secret(secret), setting)) => {
                         // Pre-fill with an existing literal so migrating one out
@@ -5149,8 +5246,9 @@ impl EventHandler {
                             secret.reference.as_str()
                         };
                         let service = crate::config::screen_model::keychain_service(&setting.key);
-                        state.config_screen_state.keychain_target = Some(setting.key.clone());
-                        state.config_popup_state.open_text(
+                        state.config.config_screen_state.keychain_target =
+                            Some(setting.key.clone());
+                        state.config.config_popup_state.open_text(
                             &format!("{} → keychain", setting.label),
                             &format!(
                                 "stored under '{service}'; config.toml keeps only the reference"
@@ -5166,8 +5264,8 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfigSaveEdit => {
-                let new_value = state.config_screen_state.edit_buffer.clone();
-                if let Some(setting) = state.config_screen_state.current_setting().cloned() {
+                let new_value = state.config.config_screen_state.edit_buffer.clone();
+                if let Some(setting) = state.config.config_screen_state.current_setting().cloned() {
                     let updated = match &setting.value {
                         crate::app::state::ConfigValue::Text(_) => {
                             crate::app::state::ConfigValue::Text(new_value)
@@ -5192,21 +5290,21 @@ impl EventHandler {
                         }
                     };
                     tracing::info!("Saved setting: {} = {}", setting.label, updated.display());
-                    state.config_screen_state.set_row_value(&setting.key, updated);
+                    state.config.config_screen_state.set_row_value(&setting.key, updated);
                 }
-                state.config_screen_state.editing = false;
-                state.config_screen_state.edit_buffer.clear();
+                state.config.config_screen_state.editing = false;
+                state.config.config_screen_state.edit_buffer.clear();
             }
             AppEvent::ConfigCancelEdit => {
-                state.config_screen_state.editing = false;
-                state.config_screen_state.edit_buffer.clear();
+                state.config.config_screen_state.editing = false;
+                state.config.config_screen_state.edit_buffer.clear();
                 tracing::info!("Cancelled editing");
             }
             AppEvent::ConfigEditChar(c) => {
-                state.config_screen_state.edit_buffer.push(c);
+                state.config.config_screen_state.edit_buffer.push(c);
             }
             AppEvent::ConfigEditBackspace => {
-                state.config_screen_state.edit_buffer.pop();
+                state.config.config_screen_state.edit_buffer.pop();
             }
             AppEvent::ConfigSaveAll => {
                 tracing::info!("Saving all settings to config file");
@@ -5224,14 +5322,14 @@ impl EventHandler {
             // API Key configuration events
             AppEvent::ConfigApiKeyStart => {
                 tracing::info!("Starting API key input mode");
-                state.config_screen_state.api_key_input_mode = true;
-                state.config_screen_state.edit_buffer.clear();
+                state.config.config_screen_state.api_key_input_mode = true;
+                state.config.config_screen_state.edit_buffer.clear();
                 state.add_info_notification(
                     "Enter your Anthropic API key (starts with sk-ant-)".to_string(),
                 );
             }
             AppEvent::ConfigApiKeySave => {
-                let api_key = state.config_screen_state.edit_buffer.clone();
+                let api_key = state.config.config_screen_state.edit_buffer.clone();
                 tracing::info!("Saving API key to keychain");
 
                 match credentials::store_anthropic_api_key(&api_key) {
@@ -5246,9 +5344,10 @@ impl EventHandler {
                         let status = format!("API Key ({})", masked);
                         // Reseed from the live config: this row is a registry Choice,
                         // keyed by its dotted path, not the deleted `claude_auth` key.
-                        state.config_screen_state.reseed_row(
+                        let config = state.config.get_mut();
+                        config.config_screen_state.reseed_row(
                             crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
-                            &state.app_config,
+                            &config.app_config,
                         );
                     }
                     Err(e) => {
@@ -5257,8 +5356,8 @@ impl EventHandler {
                     }
                 }
 
-                state.config_screen_state.api_key_input_mode = false;
-                state.config_screen_state.edit_buffer.clear();
+                state.config.config_screen_state.api_key_input_mode = false;
+                state.config.config_screen_state.edit_buffer.clear();
             }
             AppEvent::ConfigApiKeyDelete => {
                 tracing::info!("Deleting API key from keychain");
@@ -5273,9 +5372,10 @@ impl EventHandler {
                         // Update auth status to show system auth
                         // Reseed from the live config: this row is a registry Choice,
                         // keyed by its dotted path, not the deleted `claude_auth` key.
-                        state.config_screen_state.reseed_row(
+                        let config = state.config.get_mut();
+                        config.config_screen_state.reseed_row(
                             crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
-                            &state.app_config,
+                            &config.app_config,
                         );
                     }
                     Err(e) => {
@@ -5287,23 +5387,23 @@ impl EventHandler {
             // Auth provider popup events
             AppEvent::AuthProviderPopupOpen => {
                 tracing::info!("Opening auth provider popup");
-                state.auth_provider_popup_state.show_popup = true;
-                state.auth_provider_popup_state.refresh_providers();
+                state.onboarding.auth_provider_popup_state.show_popup = true;
+                state.onboarding.auth_provider_popup_state.refresh_providers();
             }
             AppEvent::AuthProviderPopupClose => {
                 tracing::info!("Closing auth provider popup");
-                state.auth_provider_popup_state.show_popup = false;
-                state.auth_provider_popup_state.is_entering_key = false;
-                state.auth_provider_popup_state.api_key_input.clear();
+                state.onboarding.auth_provider_popup_state.show_popup = false;
+                state.onboarding.auth_provider_popup_state.is_entering_key = false;
+                state.onboarding.auth_provider_popup_state.api_key_input.clear();
             }
             AppEvent::AuthProviderPopupNext => {
-                state.auth_provider_popup_state.select_next();
+                state.onboarding.auth_provider_popup_state.select_next();
             }
             AppEvent::AuthProviderPopupPrev => {
-                state.auth_provider_popup_state.select_prev();
+                state.onboarding.auth_provider_popup_state.select_prev();
             }
             AppEvent::AuthProviderPopupSelect => {
-                let popup_state = &state.auth_provider_popup_state;
+                let popup_state = &state.onboarding.auth_provider_popup_state;
 
                 if popup_state.is_entering_key {
                     // Save the API key
@@ -5321,23 +5421,24 @@ impl EventHandler {
                             let status = format!("API Key ({})", masked);
                             // Reseed from the live config: this row is a registry Choice,
                             // keyed by its dotted path, not the deleted `claude_auth` key.
-                            state.config_screen_state.reseed_row(
+                            let config = state.config.get_mut();
+                            config.config_screen_state.reseed_row(
                                 crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
-                                &state.app_config,
+                                &config.app_config,
                             );
 
                             // Persist auth provider to config.toml
-                            state.app_config.authentication.claude_provider =
+                            state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::ApiKey;
-                            if let Err(e) = state.app_config.save() {
+                            if let Err(e) = state.config.app_config.save() {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
                             // Close popup and refresh
-                            state.auth_provider_popup_state.show_popup = false;
-                            state.auth_provider_popup_state.is_entering_key = false;
-                            state.auth_provider_popup_state.api_key_input.clear();
-                            state.auth_provider_popup_state.refresh_providers();
+                            state.onboarding.auth_provider_popup_state.show_popup = false;
+                            state.onboarding.auth_provider_popup_state.is_entering_key = false;
+                            state.onboarding.auth_provider_popup_state.api_key_input.clear();
+                            state.onboarding.auth_provider_popup_state.refresh_providers();
                         }
                         Err(e) => {
                             state.add_error_notification(format!("Failed to save API key: {}", e));
@@ -5351,7 +5452,7 @@ impl EventHandler {
                                 .add_info_notification(format!("{} - Coming Soon!", provider.name));
                         } else if provider.id == "api_key" {
                             // Start API key input mode
-                            state.auth_provider_popup_state.start_key_input();
+                            state.onboarding.auth_provider_popup_state.start_key_input();
                         } else if provider.id == "system" {
                             // System auth - just close and confirm
                             state.add_success_notification(
@@ -5364,33 +5465,34 @@ impl EventHandler {
                             // Update config screen status
                             // Reseed from the live config: this row is a registry Choice,
                             // keyed by its dotted path, not the deleted `claude_auth` key.
-                            state.config_screen_state.reseed_row(
+                            let config = state.config.get_mut();
+                            config.config_screen_state.reseed_row(
                                 crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
-                                &state.app_config,
+                                &config.app_config,
                             );
 
                             // Persist auth provider to config.toml
-                            state.app_config.authentication.claude_provider =
+                            state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::SystemAuth;
-                            if let Err(e) = state.app_config.save() {
+                            if let Err(e) = state.config.app_config.save() {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
-                            state.auth_provider_popup_state.show_popup = false;
-                            state.auth_provider_popup_state.refresh_providers();
+                            state.onboarding.auth_provider_popup_state.show_popup = false;
+                            state.onboarding.auth_provider_popup_state.refresh_providers();
                         }
                     }
                 }
             }
             AppEvent::AuthProviderPopupInputChar(c) => {
-                state.auth_provider_popup_state.api_key_input.push(c);
+                state.onboarding.auth_provider_popup_state.api_key_input.push(c);
             }
             AppEvent::AuthProviderPopupBackspace => {
-                if state.auth_provider_popup_state.api_key_input.is_empty() {
+                if state.onboarding.auth_provider_popup_state.api_key_input.is_empty() {
                     // Exit key input mode
-                    state.auth_provider_popup_state.cancel_key_input();
+                    state.onboarding.auth_provider_popup_state.cancel_key_input();
                 } else {
-                    state.auth_provider_popup_state.api_key_input.pop();
+                    state.onboarding.auth_provider_popup_state.api_key_input.pop();
                 }
             }
             AppEvent::AuthProviderPopupDeleteKey => {
@@ -5398,20 +5500,21 @@ impl EventHandler {
                 match credentials::delete_anthropic_api_key() {
                     Ok(()) => {
                         state.add_success_notification("API key removed".to_string());
-                        state.auth_provider_popup_state.refresh_providers();
+                        state.onboarding.auth_provider_popup_state.refresh_providers();
 
                         // Update config screen
                         // Reseed from the live config: this row is a registry Choice,
                         // keyed by its dotted path, not the deleted `claude_auth` key.
-                        state.config_screen_state.reseed_row(
+                        let config = state.config.get_mut();
+                        config.config_screen_state.reseed_row(
                             crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
-                            &state.app_config,
+                            &config.app_config,
                         );
 
                         // Persist switch to system auth in config.toml
-                        state.app_config.authentication.claude_provider =
+                        state.config.app_config.authentication.claude_provider =
                             crate::config::ClaudeAuthProvider::SystemAuth;
-                        if let Err(e) = state.app_config.save() {
+                        if let Err(e) = state.config.app_config.save() {
                             tracing::warn!("Failed to save config: {}", e);
                         }
                     }
@@ -5422,21 +5525,22 @@ impl EventHandler {
             }
             // Config popup events (choice/text input popups)
             AppEvent::ConfigPopupNavigateUp => {
-                state.config_popup_state.navigate_up();
+                state.config.config_popup_state.navigate_up();
             }
             AppEvent::ConfigPopupNavigateDown => {
-                state.config_popup_state.navigate_down();
+                state.config.config_popup_state.navigate_down();
             }
             AppEvent::ConfigPopupConfirm => {
                 use crate::components::config_popup::ConfigPopupValue;
 
-                if let Some(value) = state.config_popup_state.get_value() {
-                    let setting_key = state.config_popup_state.setting_key.clone();
+                if let Some(value) = state.config.config_popup_state.get_value() {
+                    let setting_key = state.config.config_popup_state.setting_key.clone();
 
                     // Ctrl+K flow: the popup collected a plaintext credential.
                     // It goes to the OS keychain and the row keeps only the
                     // reference, so the literal never reaches config.toml.
                     let keychain_row = state
+                        .config
                         .config_screen_state
                         .keychain_target
                         .take()
@@ -5445,25 +5549,30 @@ impl EventHandler {
                         if let ConfigPopupValue::Text(literal) = &value {
                             Self::store_secret_in_keychain(state, &row_key, literal);
                         }
-                        state.config_popup_state.close();
+                        state.config.config_popup_state.close();
                     } else {
                         let updated = match &value {
-                            ConfigPopupValue::Choice(_, idx) => state
-                                .config_screen_state
-                                .current_setting()
-                                .and_then(|row| match &row.value {
-                                    crate::app::state::ConfigValue::Choice(options, _) => {
-                                        Some(crate::app::state::ConfigValue::Choice(
-                                            options.clone(),
-                                            *idx,
-                                        ))
+                            ConfigPopupValue::Choice(_, idx) => {
+                                state.config.config_screen_state.current_setting().and_then(|row| {
+                                    match &row.value {
+                                        crate::app::state::ConfigValue::Choice(options, _) => {
+                                            Some(crate::app::state::ConfigValue::Choice(
+                                                options.clone(),
+                                                *idx,
+                                            ))
+                                        }
+                                        _ => None,
                                     }
-                                    _ => None,
-                                }),
+                                })
+                            }
                             ConfigPopupValue::Text(text) => {
                                 // A secret row edits its reference, so the text has
                                 // to go back as a reference, not as a plain value.
-                                match state.config_screen_state.current_setting().map(|r| &r.value)
+                                match state
+                                    .config
+                                    .config_screen_state
+                                    .current_setting()
+                                    .map(|r| &r.value)
                                 {
                                     Some(crate::app::state::ConfigValue::Secret(_)) => {
                                         Some(crate::app::state::ConfigValue::Secret(
@@ -5501,7 +5610,7 @@ impl EventHandler {
                                 setting_key,
                                 updated.display()
                             );
-                            state.config_screen_state.set_row_value(&setting_key, updated);
+                            state.config.config_screen_state.set_row_value(&setting_key, updated);
                         }
 
                         // Auto-persist: write config.toml immediately, so the change
@@ -5522,7 +5631,7 @@ impl EventHandler {
                         }
                     }
                 }
-                state.config_popup_state.close();
+                state.config.config_popup_state.close();
             }
             AppEvent::ConfigPopupCancel => {
                 tracing::debug!("Config popup cancelled");
@@ -5531,23 +5640,23 @@ impl EventHandler {
                 // the keychain, storing the typed "$MY_TOKEN" as a secret and
                 // rewriting the row to a `keychain:` ref — silently discarding
                 // the env reference the user actually asked for.
-                state.config_screen_state.keychain_target = None;
-                state.config_popup_state.close();
+                state.config.config_screen_state.keychain_target = None;
+                state.config.config_popup_state.close();
             }
             AppEvent::ConfigPopupInputChar(c) => {
-                state.config_popup_state.input_char(c);
+                state.config.config_popup_state.input_char(c);
             }
             AppEvent::ConfigPopupBackspace => {
-                state.config_popup_state.backspace();
+                state.config.config_popup_state.backspace();
             }
             AppEvent::ConfigPopupPaste(text) => {
-                state.config_popup_state.insert_str(&text);
+                state.config.config_popup_state.insert_str(&text);
             }
             AppEvent::ConfigPopupPasteClipboard => {
                 // Ctrl+V: read the OS clipboard directly (works regardless of
                 // whether the terminal delivers bracketed-paste events).
                 match Self::get_clipboard_text() {
-                    Ok(text) => state.config_popup_state.insert_str(&text),
+                    Ok(text) => state.config.config_popup_state.insert_str(&text),
                     Err(e) => {
                         tracing::warn!("Clipboard paste failed: {}", e);
                         state.add_error_notification(format!("Could not read clipboard: {}", e));
@@ -5555,69 +5664,69 @@ impl EventHandler {
                 }
             }
             AppEvent::ConfigPopupDelete => {
-                state.config_popup_state.delete_forward();
+                state.config.config_popup_state.delete_forward();
             }
             AppEvent::ConfigPopupCursorLeft => {
-                state.config_popup_state.cursor_left();
+                state.config.config_popup_state.cursor_left();
             }
             AppEvent::ConfigPopupCursorRight => {
-                state.config_popup_state.cursor_right();
+                state.config.config_popup_state.cursor_right();
             }
             AppEvent::ConfigPopupCursorHome => {
-                state.config_popup_state.cursor_home();
+                state.config.config_popup_state.cursor_home();
             }
             AppEvent::ConfigPopupCursorEnd => {
-                state.config_popup_state.cursor_end();
+                state.config.config_popup_state.cursor_end();
             }
             // Log history viewer events
             AppEvent::LogHistoryBack => {
                 tracing::debug!("Log history back");
-                state.log_history_state.hide();
-                state.current_screen = screen_ids::HOME.to_string();
+                state.log_streams.log_history_state.hide();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::LogHistoryNextSession => {
                 tracing::debug!("Log history next session");
-                state.log_history_state.select_next_session();
+                state.log_streams.log_history_state.select_next_session();
             }
             AppEvent::LogHistoryPrevSession => {
                 tracing::debug!("Log history prev session");
-                state.log_history_state.select_prev_session();
+                state.log_streams.log_history_state.select_prev_session();
             }
             AppEvent::LogHistorySelectSession => {
                 tracing::debug!("Log history select session");
-                state.log_history_state.load_selected_session();
+                state.log_streams.log_history_state.load_selected_session();
             }
             AppEvent::LogHistoryToggleFocus => {
                 tracing::debug!("Log history toggle focus");
-                state.log_history_state.toggle_focus();
+                state.log_streams.log_history_state.toggle_focus();
             }
             AppEvent::LogHistoryScrollUp => {
                 tracing::debug!("Log history scroll up");
-                state.log_history_state.scroll_up();
+                state.log_streams.log_history_state.scroll_up();
             }
             AppEvent::LogHistoryScrollDown => {
                 tracing::debug!("Log history scroll down");
-                state.log_history_state.scroll_down();
+                state.log_streams.log_history_state.scroll_down();
             }
             AppEvent::LogHistoryPageUp => {
                 tracing::debug!("Log history page up");
-                state.log_history_state.page_up(20);
+                state.log_streams.log_history_state.page_up(20);
             }
             AppEvent::LogHistoryPageDown => {
                 tracing::debug!("Log history page down");
-                state.log_history_state.page_down(20);
+                state.log_streams.log_history_state.page_down(20);
             }
             AppEvent::LogHistoryCycleFilter => {
                 tracing::debug!("Log history cycle filter");
-                state.log_history_state.cycle_filter();
+                state.log_streams.log_history_state.cycle_filter();
             }
             AppEvent::LogHistoryRefresh => {
                 tracing::debug!("Log history refresh");
-                state.log_history_state.refresh_sessions();
+                state.log_streams.log_history_state.refresh_sessions();
             }
             AppEvent::LogHistoryCopySelection => {
                 tracing::debug!("Log history copy selection");
-                if let Err(e) = state.log_history_state.copy_selection_to_clipboard() {
+                if let Err(e) = state.log_streams.log_history_state.copy_selection_to_clipboard() {
                     tracing::warn!("Failed to copy to clipboard: {}", e);
                 } else {
                     tracing::info!("Copied selection to clipboard");
@@ -5625,22 +5734,22 @@ impl EventHandler {
             }
             AppEvent::LogHistoryScrollLeft => {
                 tracing::debug!("Log history scroll left");
-                state.log_history_state.scroll_left(4);
+                state.log_streams.log_history_state.scroll_left(4);
             }
             AppEvent::LogHistoryScrollRight => {
                 tracing::debug!("Log history scroll right");
-                state.log_history_state.scroll_right(4);
+                state.log_streams.log_history_state.scroll_right(4);
             }
             AppEvent::LogHistoryScrollHome => {
                 tracing::debug!("Log history scroll home");
-                state.log_history_state.scroll_home();
+                state.log_streams.log_history_state.scroll_home();
             }
             AppEvent::LogHistoryCleanup => {
                 tracing::info!("Log history cleanup requested");
-                match state.log_history_state.delete_all_logs() {
+                match state.log_streams.log_history_state.delete_all_logs() {
                     Ok(count) => {
                         tracing::info!("Deleted {} log files", count);
-                        state.log_history_state.refresh_sessions();
+                        state.log_streams.log_history_state.refresh_sessions();
                     }
                     Err(e) => {
                         tracing::error!("Failed to delete log files: {}", e);
@@ -5650,36 +5759,36 @@ impl EventHandler {
             // Changelog viewer events
             AppEvent::ShowChangelog => {
                 tracing::debug!("Show changelog");
-                state.current_screen = screen_ids::CHANGELOG.to_string();
+                state.shell.current_screen = screen_ids::CHANGELOG.to_string();
             }
             AppEvent::ChangelogBack => {
                 tracing::debug!("Changelog back");
-                state.current_screen = screen_ids::HOME.to_string();
+                state.shell.current_screen = screen_ids::HOME.to_string();
             }
             AppEvent::ChangelogScrollUp => {
                 tracing::debug!("Changelog scroll up");
-                state.changelog_state.scroll_up();
+                state.config.changelog_state.scroll_up();
             }
             AppEvent::ChangelogScrollDown => {
                 tracing::debug!("Changelog scroll down");
                 // Use a reasonable visible height for scrolling
-                state.changelog_state.scroll_down(30);
+                state.config.changelog_state.scroll_down(30);
             }
             AppEvent::ChangelogPageUp => {
                 tracing::debug!("Changelog page up");
-                state.changelog_state.page_up(30);
+                state.config.changelog_state.page_up(30);
             }
             AppEvent::ChangelogPageDown => {
                 tracing::debug!("Changelog page down");
-                state.changelog_state.page_down(30);
+                state.config.changelog_state.page_down(30);
             }
             AppEvent::ChangelogToTop => {
                 tracing::debug!("Changelog scroll to top");
-                state.changelog_state.scroll_to_top();
+                state.config.changelog_state.scroll_to_top();
             }
             AppEvent::ChangelogToBottom => {
                 tracing::debug!("Changelog scroll to bottom");
-                state.changelog_state.scroll_to_bottom(30);
+                state.config.changelog_state.scroll_to_bottom(30);
             }
             // Usage analytics events: removed. The burndown plugin owns
             // every Analytics-screen state mutation now (period, filters,
@@ -5694,7 +5803,7 @@ impl EventHandler {
                 // already carry our block. This event is reachable from the
                 // global `W` shortcut as well as the legacy Burndown route,
                 // so the guard lives here rather than at the keymap.
-                if state.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
+                if state.fleet.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
                     return;
                 }
                 // Read uncached: the install is a once-per-session action, so
@@ -5710,18 +5819,18 @@ impl EventHandler {
                 let outcome = install_statusline();
                 match outcome {
                     Ok(InstallOutcome::Installed) => {
-                        state.app_config.ui_preferences.statusline_decision =
+                        state.config.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
-                        let _ = state.app_config.save();
+                        let _ = state.config.app_config.save();
                         state.add_success_notification(
                             "Wired Claude Code statusline. Live data appears next prompt render."
                                 .to_string(),
                         );
                     }
                     Ok(InstallOutcome::AlreadyInstalled) => {
-                        state.app_config.ui_preferences.statusline_decision =
+                        state.config.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
-                        let _ = state.app_config.save();
+                        let _ = state.config.app_config.save();
                         state.add_success_notification(
                             "Statusline already wired — waiting for first prompt render."
                                 .to_string(),
@@ -5731,9 +5840,9 @@ impl EventHandler {
                         // Legacy `ainb statusline` was rewritten in
                         // place to `ainb claudecode statusline`. The
                         // user already opted in; surface as a success.
-                        state.app_config.ui_preferences.statusline_decision =
+                        state.config.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
-                        let _ = state.app_config.save();
+                        let _ = state.config.app_config.save();
                         state.add_success_notification(
                             "Migrated existing ainb statusline → ainb claudecode statusline."
                                 .to_string(),
@@ -5755,43 +5864,43 @@ impl EventHandler {
                 Self::process_event(AppEvent::PanelBack, state);
             }
             AppEvent::SkillsNextProvider => {
-                state.skills_state.next_provider();
-                if state.skills_state.provider.has_data() {
+                state.skills.skills_state.next_provider();
+                if state.skills.skills_state.provider.has_data() {
                     state.start_background_skills_load(false);
                 }
             }
             AppEvent::SkillsPrevProvider => {
-                state.skills_state.prev_provider();
-                if state.skills_state.provider.has_data() {
+                state.skills.skills_state.prev_provider();
+                if state.skills.skills_state.provider.has_data() {
                     state.start_background_skills_load(false);
                 }
             }
             AppEvent::SkillsNextTab => {
-                state.skills_state.next_tab();
+                state.skills.skills_state.next_tab();
             }
             AppEvent::SkillsPrevTab => {
-                state.skills_state.prev_tab();
+                state.skills.skills_state.prev_tab();
             }
             AppEvent::SkillsScrollUp => {
-                state.skills_state.scroll_up();
+                state.skills.skills_state.scroll_up();
             }
             AppEvent::SkillsScrollDown => {
-                let max = state.skills_state.row_count();
-                state.skills_state.scroll_down(max);
+                let max = state.skills.skills_state.row_count();
+                state.skills.skills_state.scroll_down(max);
             }
             AppEvent::SkillsPageUp => {
-                state.skills_state.page_up(20);
+                state.skills.skills_state.page_up(20);
             }
             AppEvent::SkillsPageDown => {
-                let max = state.skills_state.row_count();
-                state.skills_state.page_down(max, 20);
+                let max = state.skills.skills_state.row_count();
+                state.skills.skills_state.page_down(max, 20);
             }
             AppEvent::SkillsToTop => {
-                state.skills_state.scroll_to_top();
+                state.skills.skills_state.scroll_to_top();
             }
             AppEvent::SkillsToBottom => {
-                let max = state.skills_state.row_count();
-                state.skills_state.scroll_to_bottom(max);
+                let max = state.skills.skills_state.row_count();
+                state.skills.skills_state.scroll_to_bottom(max);
             }
             AppEvent::SkillsRefresh => {
                 tracing::info!("Refreshing skills data");
@@ -5803,67 +5912,68 @@ impl EventHandler {
                 state.add_success_notification(msg.to_string());
             }
             AppEvent::SkillsSearchStart => {
-                state.skills_state.search_active = true;
-                state.skills_state.search_query.clear();
-                state.skills_state.selected_index = 0;
+                state.skills.skills_state.search_active = true;
+                state.skills.skills_state.search_query.clear();
+                state.skills.skills_state.selected_index = 0;
             }
             AppEvent::SkillsSearchChar(c) => {
-                state.skills_state.search_push(c);
-                let max = state.skills_state.row_count();
-                state.skills_state.clamp_selection(max);
+                state.skills.skills_state.search_push(c);
+                let max = state.skills.skills_state.row_count();
+                state.skills.skills_state.clamp_selection(max);
             }
             AppEvent::SkillsSearchBackspace => {
-                state.skills_state.search_pop();
-                let max = state.skills_state.row_count();
-                state.skills_state.clamp_selection(max);
+                state.skills.skills_state.search_pop();
+                let max = state.skills.skills_state.row_count();
+                state.skills.skills_state.clamp_selection(max);
             }
             AppEvent::SkillsSearchClose => {
-                state.skills_state.search_active = false;
+                state.skills.skills_state.search_active = false;
                 // Query is preserved so the filter stays applied after exit.
             }
             // Session recovery events
             AppEvent::SessionRecoverySearchStart => {
                 // Reuse cancel to drop any prior query and re-anchor the
                 // selection, then take focus.
-                state.session_recovery_state.search_cancel();
-                state.session_recovery_state.search_active = true;
+                state.recovery.session_recovery_state.search_cancel();
+                state.recovery.session_recovery_state.search_active = true;
             }
             AppEvent::SessionRecoverySearchChar(c) => {
-                state.session_recovery_state.search_push(c);
+                state.recovery.session_recovery_state.search_push(c);
             }
             AppEvent::SessionRecoverySearchBackspace => {
-                state.session_recovery_state.search_pop();
+                state.recovery.session_recovery_state.search_pop();
             }
             AppEvent::SessionRecoverySearchClose => {
                 // Query is preserved so the narrowed list stays actionable.
-                state.session_recovery_state.search_active = false;
+                state.recovery.session_recovery_state.search_active = false;
             }
             AppEvent::SessionRecoverySearchCancel => {
-                state.session_recovery_state.search_cancel();
+                state.recovery.session_recovery_state.search_cancel();
             }
             AppEvent::SessionRecoveryBack => {
                 // If overlay is showing, dismiss it first
-                if state.session_recovery_state.recovery_overlay.is_some() {
+                if state.recovery.session_recovery_state.recovery_overlay.is_some() {
                     tracing::debug!("Dismissing recovery overlay");
-                    state.session_recovery_state.dismiss_overlay();
+                    state.recovery.session_recovery_state.dismiss_overlay();
                 } else {
                     tracing::debug!("Session recovery back");
-                    state.current_screen = screen_ids::HOME.to_string();
+                    state.shell.current_screen = screen_ids::HOME.to_string();
                 }
             }
             AppEvent::SessionRecoveryNext => {
                 tracing::debug!("Session recovery next");
-                state.session_recovery_state.next();
+                state.recovery.session_recovery_state.next();
             }
             AppEvent::SessionRecoveryPrev => {
                 tracing::debug!("Session recovery prev");
-                state.session_recovery_state.previous();
+                state.recovery.session_recovery_state.previous();
             }
             AppEvent::SessionRecoveryResume => {
                 tracing::debug!("Session recovery resume");
-                if state.session_recovery_state.has_multi_selection() {
+                if state.recovery.session_recovery_state.has_multi_selection() {
                     // Bulk resume all multi-selected items
-                    let (resumed, failed) = state.session_recovery_state.resume_multi_selected();
+                    let (resumed, failed) =
+                        state.recovery.session_recovery_state.resume_multi_selected();
                     if failed == 0 {
                         state.add_success_notification(format!("Resumed {} sessions", resumed));
                     } else {
@@ -5874,21 +5984,30 @@ impl EventHandler {
                     }
                 } else {
                     // Single item resume (worktree or session)
-                    let (name, result) = if state.session_recovery_state.is_worktree_selected() {
-                        let name = state
-                            .session_recovery_state
-                            .selected_worktree()
-                            .map(|w| w.name.clone())
-                            .unwrap_or_default();
-                        (name, state.session_recovery_state.resume_worktree())
-                    } else {
-                        let name = state
-                            .session_recovery_state
-                            .selected()
-                            .map(|s| s.session.clone())
-                            .unwrap_or_default();
-                        (name, state.session_recovery_state.resume_selected())
-                    };
+                    let (name, result) =
+                        if state.recovery.session_recovery_state.is_worktree_selected() {
+                            let name = state
+                                .recovery
+                                .session_recovery_state
+                                .selected_worktree()
+                                .map(|w| w.name.clone())
+                                .unwrap_or_default();
+                            (
+                                name,
+                                state.recovery.session_recovery_state.resume_worktree(),
+                            )
+                        } else {
+                            let name = state
+                                .recovery
+                                .session_recovery_state
+                                .selected()
+                                .map(|s| s.session.clone())
+                                .unwrap_or_default();
+                            (
+                                name,
+                                state.recovery.session_recovery_state.resume_selected(),
+                            )
+                        };
 
                     let overlay_result = match result {
                         Ok(ref tmux_name) => {
@@ -5910,7 +6029,7 @@ impl EventHandler {
                         Err(e) => (format!("Failed: {}", e), false),
                     };
 
-                    state.session_recovery_state.recovery_overlay =
+                    state.recovery.session_recovery_state.recovery_overlay =
                         Some(crate::components::session_recovery::RecoveryOverlay {
                             title,
                             results: vec![overlay_result],
@@ -5925,8 +6044,8 @@ impl EventHandler {
             AppEvent::SessionRecoveryArchive => {
                 tracing::debug!("Session recovery archive/delete");
                 // Use delete_selected() which handles both sessions (archive) and worktrees (delete)
-                let is_worktree = state.session_recovery_state.is_worktree_selected();
-                match state.session_recovery_state.delete_selected() {
+                let is_worktree = state.recovery.session_recovery_state.is_worktree_selected();
+                match state.recovery.session_recovery_state.delete_selected() {
                     Ok(()) => {
                         if is_worktree {
                             state.add_info_notification("Worktree deleted".to_string());
@@ -5945,15 +6064,15 @@ impl EventHandler {
             }
             AppEvent::SessionRecoveryRefresh => {
                 tracing::debug!("Session recovery refresh");
-                state.session_recovery_state.refresh();
+                state.recovery.session_recovery_state.refresh();
             }
             AppEvent::SessionRecoveryToggleView => {
                 tracing::debug!("Session recovery toggle view");
-                state.session_recovery_state.toggle_view_mode();
+                state.recovery.session_recovery_state.toggle_view_mode();
             }
             AppEvent::SessionRecoveryRecoverAll => {
                 tracing::info!("Session recovery: recovering all worktrees");
-                let result = state.session_recovery_state.recover_all_worktrees();
+                let result = state.recovery.session_recovery_state.recover_all_worktrees();
                 let total = result.succeeded.len() + result.failed.len();
                 if result.failed.is_empty() {
                     state.add_info_notification(format!(
@@ -5970,21 +6089,22 @@ impl EventHandler {
                 }
             }
             AppEvent::SessionRecoveryToggleSelect => {
-                state.session_recovery_state.toggle_select();
-                let count = state.session_recovery_state.selected_items.len();
+                state.recovery.session_recovery_state.toggle_select();
+                let count = state.recovery.session_recovery_state.selected_items.len();
                 if count > 0 {
                     state.add_info_notification(format!("{} items selected", count));
                 }
             }
             AppEvent::SessionRecoveryDeleteSelected => {
-                let count = state.session_recovery_state.selected_items.len();
+                let count = state.recovery.session_recovery_state.selected_items.len();
                 if count == 0 {
                     state.add_info_notification(
                         "No items selected. Use Space to select items first.".to_string(),
                     );
                 } else {
                     tracing::info!("Session recovery: deleting {} selected items", count);
-                    let (deleted, failed) = state.session_recovery_state.delete_multi_selected();
+                    let (deleted, failed) =
+                        state.recovery.session_recovery_state.delete_multi_selected();
                     if failed == 0 {
                         state.add_info_notification(format!("Deleted {} items", deleted));
                     } else {
@@ -6007,6 +6127,7 @@ impl EventHandler {
                 // the bool under an immutable borrow, then warn under a mutable
                 // one (borrow dance).
                 let otel_partial = state
+                    .onboarding
                     .onboarding_state
                     .as_ref()
                     .map(|o| o.current_step == OnboardingStep::OtelSetup && o.otel_creds_partial())
@@ -6021,13 +6142,13 @@ impl EventHandler {
                 }
                 // Save git directories as soon as the user leaves the step,
                 // not only on wizard finish.
-                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                if state.onboarding.onboarding_state.as_ref().map(|o| o.current_step)
                     == Some(OnboardingStep::GitDirectories)
                 {
                     state.persist_onboarding_git_dirs();
                 }
                 let mut trigger_dep_check = false;
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if onboarding_state.is_final_step() {
                         // On final step, finish onboarding
                         if let Err(e) = state.complete_onboarding() {
@@ -6055,22 +6176,22 @@ impl EventHandler {
                 // Queue as async action so UI shows loading state immediately
                 if trigger_dep_check {
                     tracing::debug!("Queuing dependency check as async action");
-                    if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                         onboarding_state.dependency_check_running = true;
                     }
-                    state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
+                    state.shell.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
                 }
             }
             AppEvent::OnboardingBack => {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding back step");
                 // Persist git dirs when stepping back out of the step too.
-                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                if state.onboarding.onboarding_state.as_ref().map(|o| o.current_step)
                     == Some(OnboardingStep::GitDirectories)
                 {
                     state.persist_onboarding_git_dirs();
                 }
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.go_back();
                     // Refresh per-agent auth when stepping back into the step.
                     if onboarding_state.current_step == OnboardingStep::Authentication {
@@ -6084,7 +6205,7 @@ impl EventHandler {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Leaving onboarding wizard for the Setup menu");
                 // Persist git dirs before dropping the wizard state.
-                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                if state.onboarding.onboarding_state.as_ref().map(|o| o.current_step)
                     == Some(OnboardingStep::GitDirectories)
                 {
                     state.persist_onboarding_git_dirs();
@@ -6092,58 +6213,58 @@ impl EventHandler {
                 state.onboarding_to_menu();
             }
             AppEvent::OnboardingInputChar(ch) => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.input_char(ch);
                 }
             }
             AppEvent::OnboardingBackspace => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.backspace();
                 }
             }
             AppEvent::OnboardingDelete => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.delete();
                 }
             }
             AppEvent::OnboardingCursorLeft => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_left();
                 }
             }
             AppEvent::OnboardingCursorRight => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_right();
                 }
             }
             AppEvent::OnboardingCursorHome => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_home();
                 }
             }
             AppEvent::OnboardingCursorEnd => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.cursor_end();
                 }
             }
             AppEvent::OnboardingCheckDeps => {
                 tracing::debug!("Queuing dependency check as async action");
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.dependency_check_running = true;
                 }
-                state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
+                state.shell.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
             }
             AppEvent::OnboardingSkipAuth => {
                 // "Configure later" — advance without changing anything. The
                 // per-agent statuses already reflect the real current auth.
                 tracing::debug!("Skipping authentication configuration");
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.advance();
                 }
             }
             AppEvent::OnboardingAuthUp => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     match &mut o.auth_pane {
                         AuthPane::MethodPicker { cursor, .. } => {
                             *cursor = cursor.saturating_sub(1);
@@ -6155,7 +6276,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingAuthDown => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     match &mut o.auth_pane {
                         AuthPane::MethodPicker { cursor, .. } => {
                             if *cursor < 2 {
@@ -6169,7 +6290,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingAuthKeyChar(ch) => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.push(ch);
                     }
@@ -6177,7 +6298,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingAuthKeyBackspace => {
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.pop();
                     }
@@ -6187,7 +6308,7 @@ impl EventHandler {
                 // Esc backs out one level: key entry → its method picker,
                 // method picker → the agent list.
                 use crate::components::onboarding::AuthPane;
-                if let Some(o) = state.onboarding_state.as_mut() {
+                if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                     o.auth_pane = match &o.auth_pane {
                         AuthPane::KeyEntry { agent, .. } => AuthPane::MethodPicker {
                             agent: *agent,
@@ -6202,7 +6323,7 @@ impl EventHandler {
                 use crate::config::{AppConfig, ClaudeAuthProvider};
 
                 // Read the active pane, then mutate/notify without a held borrow.
-                let pane = state.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
+                let pane = state.onboarding.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
 
                 // Persist the Claude auth provider so build_env_setup() honours it.
                 let set_claude_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
@@ -6219,7 +6340,7 @@ impl EventHandler {
                     // Drill into the focused agent's method picker, defaulting the
                     // cursor to that agent's current method.
                     Some(AuthPane::AgentList) => {
-                        if let Some(o) = state.onboarding_state.as_mut() {
+                        if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                             if let Some(st) = o.auth_statuses.get(o.auth_agent_cursor) {
                                 let agent = st.agent;
                                 let cursor = match st.method {
@@ -6256,7 +6377,7 @@ impl EventHandler {
                                     }
                                 }
                             }
-                            if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                 o.auth_pane = AuthPane::AgentList;
                                 o.refresh_auth_statuses();
                             }
@@ -6268,7 +6389,7 @@ impl EventHandler {
                         }
                         // API key → inline entry seeded with the expected prefix.
                         1 => {
-                            if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                 o.auth_pane = AuthPane::KeyEntry {
                                     agent,
                                     buf: agent.key_seed().to_string(),
@@ -6277,7 +6398,7 @@ impl EventHandler {
                         }
                         // Back
                         _ => {
-                            if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                 o.auth_pane = AuthPane::AgentList;
                             }
                         }
@@ -6308,7 +6429,7 @@ impl EventHandler {
                                     if agent == AuthAgent::Claude {
                                         set_claude_provider(ClaudeAuthProvider::ApiKey);
                                     }
-                                    if let Some(o) = state.onboarding_state.as_mut() {
+                                    if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                         o.auth_pane = AuthPane::AgentList;
                                         o.refresh_auth_statuses();
                                     }
@@ -6332,14 +6453,14 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingEditorUp => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if onboarding_state.selected_editor_index > 0 {
                         onboarding_state.selected_editor_index -= 1;
                     }
                 }
             }
             AppEvent::OnboardingEditorDown => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     let max_idx = onboarding_state.available_editors.len().saturating_sub(1);
                     if onboarding_state.selected_editor_index < max_idx {
                         onboarding_state.selected_editor_index += 1;
@@ -6348,7 +6469,7 @@ impl EventHandler {
             }
             AppEvent::OnboardingQuestionUp => {
                 use crate::components::onboarding::QuestionnaireKind;
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
                         onboarding_state.questionnaire_select_up(kind);
                     }
@@ -6356,39 +6477,39 @@ impl EventHandler {
             }
             AppEvent::OnboardingQuestionDown => {
                 use crate::components::onboarding::QuestionnaireKind;
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
                         onboarding_state.questionnaire_select_down(kind);
                     }
                 }
             }
             AppEvent::OnboardingOtelChar(ch) => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_input_char(ch);
                 }
             }
             AppEvent::OnboardingOtelBackspace => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_backspace();
                 }
             }
             AppEvent::OnboardingOtelNextField => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_next_field();
                 }
             }
             AppEvent::OnboardingOtelPrevField => {
-                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.otel_prev_field();
                 }
             }
             AppEvent::OnboardingDepCursorUp => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.move_dep_cursor(-1);
                 }
             }
             AppEvent::OnboardingDepCursorDown => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.move_dep_cursor(1);
                 }
             }
@@ -6397,11 +6518,11 @@ impl EventHandler {
                 // Snapshot the focused dep, then queue the install. The drain
                 // does the catalog lookup + run (and reports manual-only deps as
                 // an error via install_dep_capture).
-                let target = state.onboarding_state.as_ref().and_then(|os| {
+                let target = state.onboarding.onboarding_state.as_ref().and_then(|os| {
                     os.focused_dep().map(|d| (d.id.to_string(), d.name.to_string(), d.satisfied))
                 });
                 if let (Some((id, name, satisfied)), Some(os)) =
-                    (target, state.onboarding_state.as_mut())
+                    (target, state.onboarding.onboarding_state.as_mut())
                 {
                     if satisfied {
                         os.status_message = Some(format!("{name} is already installed"));
@@ -6409,7 +6530,8 @@ impl EventHandler {
                         os.error_message = None;
                         os.status_message = Some(format!("installing {name}…"));
                         os.install_states.insert(id.clone(), DepInstall::Installing);
-                        state.pending_async_action = Some(AsyncAction::OnboardingInstallDep(id));
+                        state.shell.pending_async_action =
+                            Some(AsyncAction::OnboardingInstallDep(id));
                     }
                 }
             }
@@ -6420,17 +6542,17 @@ impl EventHandler {
                     Ok(()) => {
                         tracing::info!("Successfully installed tmux.conf");
                         // Re-run dependency check to update status
-                        if let Some(ref mut onboarding_state) = state.onboarding_state {
+                        if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                             onboarding_state.error_message = None;
                             onboarding_state.status_message =
                                 Some("✓ Installed optimized tmux.conf → ~/.tmux.conf (backup saved if one existed)".to_string());
                             onboarding_state.dependency_check_running = true;
                         }
-                        state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
+                        state.shell.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
                     }
                     Err(e) => {
                         tracing::error!("Failed to install tmux.conf: {}", e);
-                        if let Some(ref mut onboarding_state) = state.onboarding_state {
+                        if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                             onboarding_state.status_message = None;
                             onboarding_state.error_message =
                                 Some(format!("✗ tmux.conf install failed: {e}"));
@@ -6439,20 +6561,20 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingScriptPrompt => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.agent_pick_open = true;
                     os.error_message = None;
                     os.status_message = None;
                 }
             }
             AppEvent::OnboardingCancelScriptPrompt => {
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.agent_pick_open = false;
                 }
             }
             AppEvent::OnboardingGenerateScript(agent) => {
                 use crate::setup::{RealEnv, generate_install_script};
-                if let Some(os) = &mut state.onboarding_state {
+                if let Some(os) = &mut state.onboarding.onboarding_state {
                     os.agent_pick_open = false;
                 }
                 match generate_install_script(agent, &RealEnv) {
@@ -6462,7 +6584,7 @@ impl EventHandler {
                         // you can't mouse-select in the TUI. Best-effort.
                         let run_cmd = format!("bash {}", path.display());
                         let copied = crate::clipboard::copy_osc52(&run_cmd).is_ok();
-                        if let Some(os) = &mut state.onboarding_state {
+                        if let Some(os) = &mut state.onboarding.onboarding_state {
                             os.error_message = None;
                             let suffix = if copied { " (copied to clipboard)" } else { "" };
                             os.status_message = Some(format!(
@@ -6475,7 +6597,7 @@ impl EventHandler {
                     }
                     Err(e) => {
                         tracing::error!("Failed to generate installer: {}", e);
-                        if let Some(os) = &mut state.onboarding_state {
+                        if let Some(os) = &mut state.onboarding.onboarding_state {
                             os.status_message = None;
                             os.error_message = Some(format!("✗ installer generation failed: {e}"));
                         }
@@ -6491,10 +6613,10 @@ impl EventHandler {
             // Setup menu events
             AppEvent::SetupMenuBack => {
                 tracing::debug!("Setup menu back");
-                if state.setup_menu_state.showing_confirmation {
-                    state.setup_menu_state.cancel_action();
+                if state.onboarding.setup_menu_state.showing_confirmation {
+                    state.onboarding.setup_menu_state.cancel_action();
                 } else {
-                    state.current_screen = screen_ids::HOME.to_string();
+                    state.shell.current_screen = screen_ids::HOME.to_string();
                 }
             }
             AppEvent::SetupMenuSelect => {
@@ -6502,9 +6624,9 @@ impl EventHandler {
                 use crate::components::setup_menu::SetupMenuItem;
 
                 // Check if showing confirmation dialog
-                if state.setup_menu_state.showing_confirmation {
+                if state.onboarding.setup_menu_state.showing_confirmation {
                     // Confirmed action
-                    if let Some(item) = state.setup_menu_state.confirm_action() {
+                    if let Some(item) = state.onboarding.setup_menu_state.confirm_action() {
                         match item {
                             SetupMenuItem::FactoryReset => {
                                 use crate::config::OnboardingConfig;
@@ -6521,7 +6643,7 @@ impl EventHandler {
                 } else {
                     // Request action (may show confirmation for dangerous actions)
                     use crate::components::onboarding::OnboardingStep;
-                    if let Some(item) = state.setup_menu_state.request_action() {
+                    if let Some(item) = state.onboarding.setup_menu_state.request_action() {
                         match item {
                             SetupMenuItem::RerunWizard => {
                                 state.start_onboarding(true, None);
@@ -6547,14 +6669,14 @@ impl EventHandler {
             }
             AppEvent::SetupMenuUp => {
                 tracing::debug!("Setup menu up");
-                if !state.setup_menu_state.showing_confirmation {
-                    state.setup_menu_state.move_up();
+                if !state.onboarding.setup_menu_state.showing_confirmation {
+                    state.onboarding.setup_menu_state.move_up();
                 }
             }
             AppEvent::SetupMenuDown => {
                 tracing::debug!("Setup menu down");
-                if !state.setup_menu_state.showing_confirmation {
-                    state.setup_menu_state.move_down();
+                if !state.onboarding.setup_menu_state.showing_confirmation {
+                    state.onboarding.setup_menu_state.move_down();
                 }
             }
             AppEvent::StartOnboarding => {
@@ -6597,14 +6719,14 @@ impl EventHandler {
                 // Phase 2c integration step: route through the screen-id table
                 // landed by Phase 2a. We validate against the built-in `ids`
                 // constants statically; layout dispatch reads
-                // `state.current_screen` and looks up the matching `Screen`
+                // `state.shell.current_screen` and looks up the matching `Screen`
                 // impl in `LayoutComponent::screens` (the in-tree
                 // `ScreenRegistry`). Plugin-supplied screens (Phase 4) will
                 // register additional ids into that same registry, at which
                 // point this validation switches to a registry probe.
                 if is_known_screen_id(&screen_id) {
-                    state.previous_screen = Some(state.current_screen.clone());
-                    state.current_screen = screen_id;
+                    state.shell.previous_screen = Some(state.shell.current_screen.clone());
+                    state.shell.current_screen = screen_id;
                 } else {
                     tracing::warn!(
                         target: "navigation",
@@ -6924,7 +7046,7 @@ fn selected_unit_has_conflict_peer(state: &AppState, ainb_home: &std::path::Path
     let Ok(manifest) = Manifest::load_from(&manifest_path) else {
         return false;
     };
-    let sel = state.skill_manager_state.selected;
+    let sel = state.skills.skill_manager_state.selected;
     let Some(unit) = manifest.units.get(sel) else {
         return false;
     };
@@ -6979,8 +7101,8 @@ mod session_recovery_key_tests {
 
     fn recovery_state() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_RECOVERY.to_string();
-        state.session_recovery_state.recovery_overlay = None;
+        state.shell.current_screen = ids::SESSION_RECOVERY.to_string();
+        state.recovery.session_recovery_state.recovery_overlay = None;
         state
     }
 
@@ -7002,7 +7124,7 @@ mod session_recovery_key_tests {
     #[test]
     fn typing_a_query_does_not_trigger_panel_actions() {
         let mut state = recovery_state();
-        state.session_recovery_state.search_active = true;
+        state.recovery.session_recovery_state.search_active = true;
         for c in ['d', 'D', 'A', 'r', 'R', ' ', 'j', 'k'] {
             assert!(
                 matches!(key(&mut state, c), Some(AppEvent::SessionRecoverySearchChar(got)) if got == c),
@@ -7017,8 +7139,8 @@ mod session_recovery_key_tests {
     #[test]
     fn escape_clears_an_applied_filter_before_leaving_the_screen() {
         let mut state = recovery_state();
-        state.session_recovery_state.search_query = "zzzz".to_string();
-        state.session_recovery_state.search_active = false;
+        state.recovery.session_recovery_state.search_query = "zzzz".to_string();
+        state.recovery.session_recovery_state.search_active = false;
 
         let esc = KeyEvent::new(Esc, KeyModifiers::NONE);
         assert!(matches!(
@@ -7027,7 +7149,7 @@ mod session_recovery_key_tests {
         ));
 
         // Second Esc, with no filter left to drop, leaves as it always did.
-        state.session_recovery_state.search_query.clear();
+        state.recovery.session_recovery_state.search_query.clear();
         assert!(matches!(
             EventHandler::handle_key_event(esc, &mut state),
             Some(AppEvent::SessionRecoveryBack)
@@ -7039,7 +7161,7 @@ mod session_recovery_key_tests {
     #[test]
     fn escape_cancels_and_enter_keeps_the_filter() {
         let mut state = recovery_state();
-        state.session_recovery_state.search_active = true;
+        state.recovery.session_recovery_state.search_active = true;
         assert!(matches!(
             EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state),
             Some(AppEvent::SessionRecoverySearchCancel)
@@ -7063,7 +7185,7 @@ mod session_list_key_tests {
 
     fn session_list_state() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         state
     }
 
@@ -7157,21 +7279,24 @@ mod navigate_to_tests {
     #[test]
     fn navigate_to_known_screen_updates_current() {
         let mut state = fresh_state();
-        let starting = state.current_screen.clone();
+        let starting = state.shell.current_screen.clone();
         EventHandler::process_event(AppEvent::NavigateTo(ids::ANALYTICS.to_string()), &mut state);
-        assert_eq!(state.current_screen, ids::ANALYTICS);
-        assert_eq!(state.previous_screen.as_deref(), Some(starting.as_str()));
+        assert_eq!(state.shell.current_screen, ids::ANALYTICS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(starting.as_str())
+        );
     }
 
     #[test]
     fn navigate_to_unknown_screen_does_not_change_current() {
         let mut state = fresh_state();
-        let starting = state.current_screen.clone();
+        let starting = state.shell.current_screen.clone();
         EventHandler::process_event(
             AppEvent::NavigateTo("definitely-not-a-real-screen".to_string()),
             &mut state,
         );
-        assert_eq!(state.current_screen, starting);
+        assert_eq!(state.shell.current_screen, starting);
     }
 
     #[test]
@@ -7223,16 +7348,19 @@ mod panel_back_tests {
     #[test]
     fn go_to_stats_saves_origin_and_panel_back_returns_there() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToStats, &mut state);
-        assert_eq!(state.current_screen, ids::ANALYTICS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::ANALYTICS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
         assert!(
-            state.previous_screen.is_none(),
+            state.shell.previous_screen.is_none(),
             "pop must consume the origin"
         );
     }
@@ -7243,7 +7371,7 @@ mod panel_back_tests {
     fn click_on_menu_bar_toggles_the_legend() {
         use ratatui::layout::Rect;
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         let mut ui = UiState::default();
         ui.menu_bar_area = Some(Rect::new(0, 20, 100, 6));
 
@@ -7269,27 +7397,28 @@ mod panel_back_tests {
     #[test]
     fn skill_manager_remove_arms_on_first_r_and_back_cancels() {
         let mut state = AppState::default();
-        state.skill_manager_state.units = vec![crate::components::skill_manager_screen::UnitRow {
-            idx: 0,
-            name: "foo".to_string(),
-            kind: "skill".to_string(),
-            source: "gh:o/r".to_string(),
-            git_ref: "main".to_string(),
-            targets: vec!["claude".to_string()],
-            declared_uri: "gh:o/r@main/skills/foo".to_string(),
-        }];
-        state.skill_manager_state.selected = 0;
-        assert!(state.skill_manager_state.pending_remove_confirm.is_none());
+        state.skills.skill_manager_state.units =
+            vec![crate::components::skill_manager_screen::UnitRow {
+                idx: 0,
+                name: "foo".to_string(),
+                kind: "skill".to_string(),
+                source: "gh:o/r".to_string(),
+                git_ref: "main".to_string(),
+                targets: vec!["claude".to_string()],
+                declared_uri: "gh:o/r@main/skills/foo".to_string(),
+            }];
+        state.skills.skill_manager_state.selected = 0;
+        assert!(state.skills.skill_manager_state.pending_remove_confirm.is_none());
 
         // First [r]: arms for the selected unit; does NOT remove it.
         EventHandler::process_event(AppEvent::SkillManagerRemove, &mut state);
         assert_eq!(
-            state.skill_manager_state.pending_remove_confirm.as_deref(),
+            state.skills.skill_manager_state.pending_remove_confirm.as_deref(),
             Some("gh:o/r@main/skills/foo"),
             "first r must arm the confirm"
         );
         assert_eq!(
-            state.skill_manager_state.units.len(),
+            state.skills.skill_manager_state.units.len(),
             1,
             "the unit must still be present after the first r"
         );
@@ -7297,7 +7426,7 @@ mod panel_back_tests {
         // Leaving the screen cancels the arm.
         EventHandler::process_event(AppEvent::SkillManagerBack, &mut state);
         assert!(
-            state.skill_manager_state.pending_remove_confirm.is_none(),
+            state.skills.skill_manager_state.pending_remove_confirm.is_none(),
             "SkillManagerBack must cancel a pending remove confirm"
         );
     }
@@ -7319,23 +7448,27 @@ mod panel_back_tests {
             declared_uri: format!("gh:o/r@main/skills/{name}"),
         };
         let mut state = AppState::default();
-        state.skill_manager_state.units = vec![mk(0, "alpha"), mk(1, "beta"), mk(2, "gamma")];
-        state.skill_manager_state.selected = 0;
+        state.skills.skill_manager_state.units =
+            vec![mk(0, "alpha"), mk(1, "beta"), mk(2, "gamma")];
+        state.skills.skill_manager_state.selected = 0;
 
         // Submit a search that matches only the last unit.
         let mut input = InputState::new(InputKind::Search);
         input.buffer = "gamma".to_string();
-        state.skill_manager_state.input = Some(input);
+        state.skills.skill_manager_state.input = Some(input);
         EventHandler::process_event(AppEvent::SkillManagerInputSubmit, &mut state);
 
-        assert_eq!(state.skill_manager_state.search.as_deref(), Some("gamma"));
         assert_eq!(
-            state.skill_manager_state.visible_indices(),
+            state.skills.skill_manager_state.search.as_deref(),
+            Some("gamma")
+        );
+        assert_eq!(
+            state.skills.skill_manager_state.visible_indices(),
             vec![2],
             "only gamma should be visible under the filter"
         );
         assert_eq!(
-            state.skill_manager_state.selected, 2,
+            state.skills.skill_manager_state.selected, 2,
             "cursor must reset onto the visible unit, not stay at hidden index 0"
         );
     }
@@ -7347,17 +7480,17 @@ mod panel_back_tests {
     fn skill_manager_remove_on_empty_filtered_source_opens_source_remove() {
         use crate::components::skill_manager_screen::{SourceRow, UnitRow};
         let mut state = AppState::default();
-        state.current_screen = ids::SKILL_MANAGER.to_string();
+        state.shell.current_screen = ids::SKILL_MANAGER.to_string();
         // One source with zero units of its own, plus an unrelated unit
         // that `selected` happens to point at.
-        state.skill_manager_state.sources = vec![SourceRow {
+        state.skills.skill_manager_state.sources = vec![SourceRow {
             name: "toolkit".to_string(),
             uri: "gh:o/toolkit".to_string(),
             r#ref: "main".to_string(),
             enabled: true,
             is_library: false,
         }];
-        state.skill_manager_state.units = vec![UnitRow {
+        state.skills.skill_manager_state.units = vec![UnitRow {
             idx: 0,
             name: "other".to_string(),
             kind: "skill".to_string(),
@@ -7366,21 +7499,21 @@ mod panel_back_tests {
             targets: vec!["claude".to_string()],
             declared_uri: "local:x@head/other".to_string(),
         }];
-        state.skill_manager_state.source_selected = 0;
-        state.skill_manager_state.source_filter = Some("gh:o/toolkit".to_string());
-        state.skill_manager_state.selected = 0; // the off-filter unit
+        state.skills.skill_manager_state.source_selected = 0;
+        state.skills.skill_manager_state.source_filter = Some("gh:o/toolkit".to_string());
+        state.skills.skill_manager_state.selected = 0; // the off-filter unit
 
-        assert!(state.skill_manager_state.visible_indices().is_empty());
+        assert!(state.skills.skill_manager_state.visible_indices().is_empty());
         EventHandler::process_event(AppEvent::SkillManagerRemove, &mut state);
 
         // The unrelated unit is untouched; the source-remove dialog opened.
         assert_eq!(
-            state.skill_manager_state.units.len(),
+            state.skills.skill_manager_state.units.len(),
             1,
             "off-filter unit not removed"
         );
         assert!(
-            state.skill_manager_state.source_remove_confirm.is_some(),
+            state.skills.skill_manager_state.source_remove_confirm.is_some(),
             "[r] on an empty filtered source must open source-remove"
         );
     }
@@ -7391,14 +7524,14 @@ mod panel_back_tests {
     #[test]
     fn go_to_hangar_saves_origin_and_panel_back_returns_there() {
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
 
         EventHandler::process_event(AppEvent::GoToHangar, &mut state);
-        assert_eq!(state.current_screen, ids::HANGAR);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        assert_eq!(state.shell.current_screen, ids::HANGAR);
+        assert_eq!(state.shell.previous_screen.as_deref(), Some(ids::HOME));
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::HOME);
+        assert_eq!(state.shell.current_screen, ids::HOME);
     }
 
     /// Regression for the stale-origin edge the review flagged: open a
@@ -7408,16 +7541,16 @@ mod panel_back_tests {
     #[test]
     fn hangar_does_not_pop_a_stale_origin_from_an_earlier_panel() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         EventHandler::process_event(AppEvent::GoToStats, &mut state); // previous=session_list
         EventHandler::process_event(AppEvent::GoToHomeScreen, &mut state); // leave without Esc
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
 
         EventHandler::process_event(AppEvent::GoToHangar, &mut state);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        assert_eq!(state.shell.previous_screen.as_deref(), Some(ids::HOME));
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             ids::HOME,
             "Hangar must not pop the stale session_list origin"
         );
@@ -7433,11 +7566,14 @@ mod panel_back_tests {
         use crossterm::event::KeyEvent;
 
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
-        assert_eq!(state.current_screen, ids::DAEMONS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::DAEMONS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         // The key dispatcher must turn Esc on the Daemons screen into PanelBack
         // (the pre-fix bug produced GoToHomeScreen, ignoring the saved origin).
@@ -7449,7 +7585,7 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             ids::SESSION_LIST,
             "Daemons must pop back to the screen it was opened from"
         );
@@ -7461,7 +7597,7 @@ mod panel_back_tests {
         use crossterm::event::KeyEvent;
 
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
         EventHandler::process_event(AppEvent::GoToDaemons, &mut state);
 
         let event = EventHandler::handle_key_event(KeyEvent::from(Char('q')), &mut state);
@@ -7545,11 +7681,11 @@ mod panel_back_tests {
     #[test]
     fn panel_back_falls_back_to_home_when_no_origin() {
         let mut state = AppState::default();
-        state.current_screen = ids::DAEMONS.to_string();
-        state.previous_screen = None;
+        state.shell.current_screen = ids::DAEMONS.to_string();
+        state.shell.previous_screen = None;
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::HOME);
+        assert_eq!(state.shell.current_screen, ids::HOME);
     }
 
     /// Learnings (memory) is a plugin screen. Esc on it resolves to
@@ -7560,14 +7696,17 @@ mod panel_back_tests {
     #[test]
     fn go_to_learnings_saves_origin_and_panel_back_returns_there() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
-        assert_eq!(state.current_screen, ids::LEARNINGS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::LEARNINGS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
     }
 
     /// Same self-loop guard as stats: re-firing GoToLearnings while
@@ -7576,11 +7715,14 @@ mod panel_back_tests {
     #[test]
     fn reopening_learnings_does_not_overwrite_origin_with_itself() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
         EventHandler::process_event(AppEvent::GoToLearnings, &mut state);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
     }
 
     /// The session list advertises `m memory` on its menu legend — the
@@ -7588,7 +7730,7 @@ mod panel_back_tests {
     #[test]
     fn session_list_m_key_dispatches_go_to_learnings() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         let key = KeyEvent::new(Char('m'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(key, &mut state)
@@ -7607,13 +7749,13 @@ mod panel_back_tests {
     fn home_sidebar_memory_tile_opens_learnings() {
         use crate::components::sidebar::SidebarItem;
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
-        state.home_screen_v2_state.sidebar.select(SidebarItem::Memory);
+        state.shell.current_screen = ids::HOME.to_string();
+        state.shell.home_screen_v2_state.sidebar.select(SidebarItem::Memory);
 
         EventHandler::process_event(AppEvent::HomeScreenSidebarSelect, &mut state);
 
-        assert_eq!(state.current_screen, ids::LEARNINGS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::HOME));
+        assert_eq!(state.shell.current_screen, ids::LEARNINGS);
+        assert_eq!(state.shell.previous_screen.as_deref(), Some(ids::HOME));
     }
 
     /// The MCP pool overlay opens on `p` (for *pool*), NOT `m` — `m` is
@@ -7623,7 +7765,7 @@ mod panel_back_tests {
     #[test]
     fn home_p_key_opens_mcp_overlay_and_m_stays_memory() {
         let mut state = AppState::default();
-        state.current_screen = ids::HOME.to_string();
+        state.shell.current_screen = ids::HOME.to_string();
 
         let p = KeyEvent::new(Char('p'), KeyModifiers::NONE);
         let evt = EventHandler::handle_key_event(p, &mut state)
@@ -7648,7 +7790,7 @@ mod panel_back_tests {
     #[test]
     fn mcp_overlay_import_key_dispatches() {
         let mut state = AppState::default();
-        state.mcp_overlay = Some(crate::app::state::McpOverlayState {
+        state.mcp_pool.mcp_overlay = Some(crate::app::state::McpOverlayState {
             pool_enabled: true,
             daemon_running: true,
             servers: vec![],
@@ -7675,11 +7817,14 @@ mod panel_back_tests {
     #[test]
     fn reopening_panel_does_not_overwrite_origin_with_itself() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToStats, &mut state);
         EventHandler::process_event(AppEvent::GoToStats, &mut state);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
     }
 
     /// Skills uses GoToSkills (spawns a background load → needs a
@@ -7687,14 +7832,17 @@ mod panel_back_tests {
     #[tokio::test]
     async fn skills_back_returns_to_origin() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
 
         EventHandler::process_event(AppEvent::GoToSkills, &mut state);
-        assert_eq!(state.current_screen, ids::SKILLS);
-        assert_eq!(state.previous_screen.as_deref(), Some(ids::SESSION_LIST));
+        assert_eq!(state.shell.current_screen, ids::SKILLS);
+        assert_eq!(
+            state.shell.previous_screen.as_deref(),
+            Some(ids::SESSION_LIST)
+        );
 
         EventHandler::process_event(AppEvent::SkillsBack, &mut state);
-        assert_eq!(state.current_screen, ids::SESSION_LIST);
+        assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
     }
 }
 
@@ -7796,7 +7944,7 @@ mod text_input_guard_tests {
     #[test]
     fn global_h_still_toggles_help_outside_text_input() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HOME.to_string();
+        state.shell.current_screen = screen_ids::HOME.to_string();
 
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
             .expect("Shift+H outside text input must dispatch ToggleHelp");
@@ -7811,7 +7959,7 @@ mod text_input_guard_tests {
     #[test]
     fn global_h_still_toggles_help_during_config_navigation() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         // editing = false, api_key_input_mode = false by default
 
         let evt = EventHandler::handle_key_event(char_key('H'), &mut state)
@@ -7826,8 +7974,8 @@ mod text_input_guard_tests {
     #[test]
     fn ctrl_v_in_config_text_popup_routes_to_clipboard_paste() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::CONFIG.to_string();
-        state.config_popup_state.open_text(
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
+        state.config.config_popup_state.open_text(
             "Default Workspace",
             "Default directory for new sessions",
             "default_workspace",
@@ -7851,8 +7999,8 @@ mod text_input_guard_tests {
     #[test]
     fn bracketed_paste_on_pick_repo_routes_to_filter() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::NEW_SESSION.to_string();
-        state.new_session_state = Some(NewSessionState {
+        state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::PickRepo,
             ..NewSessionState::default()
         });
@@ -7870,7 +8018,7 @@ mod text_input_guard_tests {
     fn paste_lands_in_onboarding_otel_field() {
         let mut state = AppState::default();
         state.start_onboarding(false, None);
-        if let Some(o) = state.onboarding_state.as_mut() {
+        if let Some(o) = state.onboarding.onboarding_state.as_mut() {
             o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
             // `start_onboarding` re-populates this form from the HOST's saved
             // Grafana creds (`otel::read_grafana_creds`), so on a machine that
@@ -7885,7 +8033,7 @@ mod text_input_guard_tests {
             &mut state,
         );
         assert!(consumed, "OTEL form must be a paste-accepting context");
-        let o = state.onboarding_state.as_ref().unwrap();
+        let o = state.onboarding.onboarding_state.as_ref().unwrap();
         assert_eq!(
             o.otel_otlp_endpoint,
             "https://otlp-gateway.grafana.net/otlp"
@@ -7902,7 +8050,7 @@ mod text_input_guard_tests {
     #[test]
     fn paste_outside_text_input_is_refused() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::SESSION_LIST.to_string();
+        state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
         assert!(!EventHandler::paste_into_text_input("abc", &mut state));
     }
 
@@ -7914,12 +8062,12 @@ mod text_input_guard_tests {
     #[test]
     fn esc_closes_help_inside_text_input_without_cancelling_form() {
         let mut state = AppState::default();
-        state.current_screen = screen_ids::NEW_SESSION.to_string();
-        state.new_session_state = Some(NewSessionState {
+        state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::PickRepo,
             ..NewSessionState::default()
         });
-        state.help_visible = true;
+        state.shell.help_visible = true;
 
         let evt =
             EventHandler::handle_key_event(KeyEvent::new(Esc, KeyModifiers::NONE), &mut state)
@@ -7942,16 +8090,16 @@ mod text_input_guard_tests {
         use std::path::PathBuf;
 
         fn reset_text_context_state(state: &mut AppState) {
-            state.current_screen = screen_ids::HOME.to_string();
-            state.other_tmux_rename_mode = false;
-            state.ssh_session_rename_mode = false;
-            state.quick_commit_message = None;
-            state.auth_provider_popup_state.show_popup = false;
-            state.config_screen_state = Default::default();
-            state.config_popup_state = Default::default();
-            state.skills_state.search_active = false;
-            state.session_recovery_state.search_active = false;
-            state.git_view_state = None;
+            state.shell.current_screen = screen_ids::HOME.to_string();
+            state.tmux.other_tmux_rename_mode = false;
+            state.ssh.ssh_session_rename_mode = false;
+            state.git_view.quick_commit_message = None;
+            state.onboarding.auth_provider_popup_state.show_popup = false;
+            state.config.config_screen_state = Default::default();
+            state.config.config_popup_state = Default::default();
+            state.skills.skills_state.search_active = false;
+            state.recovery.session_recovery_state.search_active = false;
+            state.git_view.git_view_state = None;
         }
 
         // AppState construction refreshes session recovery from disk. Reuse one
@@ -7968,7 +8116,7 @@ mod text_input_guard_tests {
             screen_ids::ATTACHED_TERMINAL,
         ] {
             reset_text_context_state(&mut state);
-            state.current_screen = (*screen).to_string();
+            state.shell.current_screen = (*screen).to_string();
             assert!(
                 EventHandler::is_text_input_context(&state),
                 "screen `{}` must be treated as text input",
@@ -7981,23 +8129,23 @@ mod text_input_guard_tests {
         // categories list. Suppressing globals during plain navigation
         // would regress the help shortcut UX.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "Config without edit mode must NOT be treated as text input"
         );
 
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
-        state.config_screen_state.editing = true;
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
+        state.config.config_screen_state.editing = true;
         assert!(
             EventHandler::is_text_input_context(&state),
             "Config + editing = true must be treated as text input"
         );
 
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
-        state.config_screen_state.api_key_input_mode = true;
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
+        state.config.config_screen_state.api_key_input_mode = true;
         assert!(
             EventHandler::is_text_input_context(&state),
             "Config + api_key_input_mode = true must be treated as text input"
@@ -8010,8 +8158,8 @@ mod text_input_guard_tests {
         // popup-open code path and stays valid if the popup_type
         // representation changes.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
-        state.config_popup_state.open_text("Title", "Desc", "key", "value");
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
+        state.config.config_popup_state.open_text("Title", "Desc", "key", "value");
         assert!(
             EventHandler::is_text_input_context(&state),
             "Config + config_popup TextInput must be treated as text input"
@@ -8020,8 +8168,8 @@ mod text_input_guard_tests {
         // Negative control: a Choice popup is navigation-only (arrow
         // keys / Enter), so `H` should still toggle help.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::CONFIG.to_string();
-        state.config_popup_state.open_choice(
+        state.shell.current_screen = screen_ids::CONFIG.to_string();
+        state.config.config_popup_state.open_choice(
             "Title",
             "Desc",
             "key",
@@ -8037,16 +8185,16 @@ mod text_input_guard_tests {
         // predicate to true.
         let cases: Vec<(&str, fn(&mut AppState))> = vec![
             ("other_tmux_rename_mode", |s| {
-                s.other_tmux_rename_mode = true
+                s.tmux.other_tmux_rename_mode = true
             }),
             ("ssh_session_rename_mode", |s| {
-                s.ssh_session_rename_mode = true
+                s.ssh.ssh_session_rename_mode = true
             }),
             ("quick_commit_message", |s| {
-                s.quick_commit_message = Some(String::new())
+                s.git_view.quick_commit_message = Some(String::new())
             }),
             ("auth_provider_popup", |s| {
-                s.auth_provider_popup_state.show_popup = true
+                s.onboarding.auth_provider_popup_state.show_popup = true
             }),
         ];
         for (label, setup) in cases {
@@ -8069,8 +8217,8 @@ mod text_input_guard_tests {
 
         // Skills search overlay.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::SKILLS.to_string();
-        state.skills_state.search_active = true;
+        state.shell.current_screen = screen_ids::SKILLS.to_string();
+        state.skills.skills_state.search_active = true;
         assert!(
             EventHandler::is_text_input_context(&state),
             "Skills search_active must be treated as text input"
@@ -8078,8 +8226,8 @@ mod text_input_guard_tests {
 
         // Session recovery filter bar.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::SESSION_RECOVERY.to_string();
-        state.session_recovery_state.search_active = true;
+        state.shell.current_screen = screen_ids::SESSION_RECOVERY.to_string();
+        state.recovery.session_recovery_state.search_active = true;
         assert!(
             EventHandler::is_text_input_context(&state),
             "Session recovery search_active must be treated as text input"
@@ -8087,10 +8235,10 @@ mod text_input_guard_tests {
 
         // GitView commit-message mode.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::GIT_VIEW.to_string();
+        state.shell.current_screen = screen_ids::GIT_VIEW.to_string();
         let mut git_state = GitViewState::new(PathBuf::from("/tmp"));
         git_state.start_commit_message_input();
-        state.git_view_state = Some(git_state);
+        state.git_view.git_view_state = Some(git_state);
         assert!(
             EventHandler::is_text_input_context(&state),
             "GitView commit-message mode must be treated as text input"
@@ -8099,8 +8247,8 @@ mod text_input_guard_tests {
         // Negative control: GitView without commit mode active is NOT
         // a text input — it's a navigable screen.
         reset_text_context_state(&mut state);
-        state.current_screen = screen_ids::GIT_VIEW.to_string();
-        state.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
+        state.shell.current_screen = screen_ids::GIT_VIEW.to_string();
+        state.git_view.git_view_state = Some(GitViewState::new(PathBuf::from("/tmp")));
         assert!(
             !EventHandler::is_text_input_context(&state),
             "GitView outside commit mode must NOT be treated as text input"
@@ -8129,7 +8277,7 @@ mod text_input_guard_tests {
         // fallthrough short-circuit must stay off so Ctrl+C / Esc / q keep
         // working when the plugin is unavailable)...
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HANGAR.to_string();
+        state.shell.current_screen = screen_ids::HANGAR.to_string();
         assert!(
             !EventHandler::is_text_input_context(&state),
             "plugin screen without the capture flag must NOT be text-input"
@@ -8170,7 +8318,10 @@ mod text_input_guard_tests {
         // Declare text-capture (as the plugin's frame would via
         // `RenderResult.captures_text`): now the host must treat it as
         // text-input and NOT convert `H` into a help toggle.
-        state.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        state
+            .plugins_host
+            .plugin_captures_text
+            .insert(screen_ids::HANGAR.to_string(), true);
         assert!(
             EventHandler::is_text_input_context(&state),
             "plugin screen WITH the capture flag must be treated as text-input"
@@ -8186,8 +8337,11 @@ mod text_input_guard_tests {
         // The flag is scoped to the focused plugin screen: an unrelated
         // non-plugin screen with a stale entry is unaffected.
         let mut other = AppState::default();
-        other.current_screen = screen_ids::HOME.to_string();
-        other.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        other.shell.current_screen = screen_ids::HOME.to_string();
+        other
+            .plugins_host
+            .plugin_captures_text
+            .insert(screen_ids::HANGAR.to_string(), true);
         assert!(
             !EventHandler::is_text_input_context(&other),
             "capture flag for a background screen must not leak into HOME"
@@ -8205,8 +8359,8 @@ mod text_input_guard_tests {
         let text_steps = [NewSessionStep::PickRepo, NewSessionStep::Configure];
         for step in &text_steps {
             let mut state = AppState::default();
-            state.current_screen = screen_ids::NEW_SESSION.to_string();
-            state.new_session_state = Some(NewSessionState {
+            state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
+            state.new_session.new_session_state = Some(NewSessionState {
                 step: step.clone(),
                 ..NewSessionState::default()
             });
@@ -8220,8 +8374,8 @@ mod text_input_guard_tests {
         // Sanity: the Creating step is a render-only spinner and must
         // NOT be treated as a text-input context.
         let mut state = AppState::default();
-        state.current_screen = screen_ids::NEW_SESSION.to_string();
-        state.new_session_state = Some(NewSessionState {
+        state.shell.current_screen = screen_ids::NEW_SESSION.to_string();
+        state.new_session.new_session_state = Some(NewSessionState {
             step: NewSessionStep::Creating,
             ..NewSessionState::default()
         });
@@ -8249,7 +8403,7 @@ mod skill_manager_sync_keybind_tests {
     }
 
     fn switch_to_skill_manager(state: &mut AppState) {
-        state.current_screen = screen_ids::SKILL_MANAGER.to_string();
+        state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
     }
 
     /// AINB_HOME points at the supplied tempdir for the duration of
@@ -8311,7 +8465,7 @@ mod skill_manager_sync_keybind_tests {
 
             let mut state = AppState::default();
             switch_to_skill_manager(&mut state);
-            state.skill_manager_state.selected = 0; // unit with shadowed_by
+            state.skills.skill_manager_state.selected = 0; // unit with shadowed_by
             let ev = press_s(&mut state);
             assert!(
                 matches!(ev, Some(AppEvent::SkillManagerConflictFlip)),
@@ -8340,7 +8494,7 @@ mod skill_manager_sync_keybind_tests {
 
             let mut state = AppState::default();
             switch_to_skill_manager(&mut state);
-            state.skill_manager_state.selected = 0; // active side
+            state.skills.skill_manager_state.selected = 0; // active side
             let ev = press_s(&mut state);
             assert!(
                 matches!(ev, Some(AppEvent::SkillManagerConflictFlip)),
@@ -8379,10 +8533,10 @@ mod slash_command_dispatch_tests {
         // …and processing that event actually opens the learnings screen
         // (same end-state the `m` shortcut produces).
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HOME.to_string();
+        state.shell.current_screen = screen_ids::HOME.to_string();
         EventHandler::process_event(evt, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             screen_ids::LEARNINGS,
             "dispatching /recall must set current_screen to learnings"
         );
@@ -8399,10 +8553,10 @@ mod slash_command_dispatch_tests {
         );
 
         let mut state = AppState::default();
-        state.current_screen = screen_ids::HOME.to_string();
+        state.shell.current_screen = screen_ids::HOME.to_string();
         EventHandler::process_event(evt, &mut state);
         assert_eq!(
-            state.current_screen,
+            state.shell.current_screen,
             screen_ids::LEARNINGS,
             "dispatching /memory must set current_screen to learnings"
         );
@@ -8495,18 +8649,23 @@ mod hangar_daemon_persist_tests {
             let mut state = AppState::default();
 
             state
+                .config
                 .config_screen_state
                 .set_row_value("hangar_daemon.autostandup.enabled", ConfigValue::Bool(true));
             EventHandler::persist_config_screen(&mut state).expect("first persist");
 
-            state.config_screen_state.set_row_value(
+            state.config.config_screen_state.set_row_value(
                 "hangar_daemon.autostandup.stagnant_min",
                 ConfigValue::Number(30),
             );
             EventHandler::persist_config_screen(&mut state).expect("second persist");
 
-            let queued: Vec<&str> =
-                state.pending_daemon_config_edits.iter().map(|(k, _)| k.as_str()).collect();
+            let queued: Vec<&str> = state
+                .hangar
+                .pending_daemon_config_edits
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect();
             assert_eq!(
                 queued.len(),
                 2,
@@ -8525,6 +8684,7 @@ mod hangar_daemon_persist_tests {
         with_isolated_home(|| {
             let mut state = AppState::default();
             state
+                .config
                 .config_screen_state
                 .set_row_value("hangar_daemon.autostandup.enabled", ConfigValue::Bool(true));
 
@@ -8573,9 +8733,9 @@ mod session_composer_key_tests {
     /// The sessions screen with a LIVE Pal composer.
     fn composing() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
-        state.session_tab = SessionTab::Pal;
-        state.pal_chat = Some(ChatHost::pal());
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.session_tab = SessionTab::Pal;
+        state.fleet.pal_chat = Some(ChatHost::pal());
         assert!(
             state.session_composer_captures_text(),
             "the fixture must actually be capturing, or every assertion below is vacuous"
@@ -8612,7 +8772,7 @@ mod session_composer_key_tests {
     #[test]
     fn the_same_keys_still_work_with_no_composer_open() {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
         assert!(matches!(
             press(&mut state, Char('d')),
             Some(AppEvent::DeleteSession)
@@ -8647,7 +8807,7 @@ mod session_composer_key_tests {
     fn esc_leaves_the_composer_for_a_pane_that_is_always_live() {
         let mut state = composing();
         press(&mut state, Esc);
-        assert_eq!(state.session_tab, SessionTab::Preview);
+        assert_eq!(state.shell.session_tab, SessionTab::Preview);
     }
 }
 
@@ -8668,8 +8828,8 @@ mod session_ask_key_tests {
     /// The sessions screen on the `ask` tab, with a structured ASK selected.
     fn asking() -> AppState {
         let mut state = AppState::default();
-        state.current_screen = ids::SESSION_LIST.to_string();
-        state.workspaces.clear();
+        state.shell.current_screen = ids::SESSION_LIST.to_string();
+        state.sessions.workspaces.clear();
         let mut workspace = Workspace::new("proj".to_string(), "/work/proj".into());
         let mut session = Session::new("proj".to_string(), "/work/proj".to_string());
         session.status = SessionStatus::Idle;
@@ -8690,10 +8850,10 @@ mod session_ask_key_tests {
                 .over_tmux(),
         ];
         workspace.add_session(session);
-        state.workspaces.push(workspace);
-        state.selected_workspace_index = Some(0);
-        state.selected_session_index = Some(0);
-        state.session_tab = SessionTab::Ask;
+        state.sessions.workspaces.push(workspace);
+        state.sessions.selected_workspace_index = Some(0);
+        state.sessions.selected_session_index = Some(0);
+        state.shell.session_tab = SessionTab::Ask;
         assert!(
             SessionTab::Ask.enabled(&state),
             "the fixture must open the ask tab"
@@ -8709,7 +8869,7 @@ mod session_ask_key_tests {
         // Reach the composer row.
         press(&mut state, Down);
         press(&mut state, Down);
-        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+        assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
         for c in ['d', 'D', 'x', 'e', 'n', 'q'] {
             let event = press(&mut state, Char(c));
             assert!(
@@ -8717,7 +8877,7 @@ mod session_ask_key_tests {
                 "`{c}` in the answer composer produced {event:?}"
             );
         }
-        assert_eq!(state.ask_state.free_text(), "dDxenq");
+        assert_eq!(state.fleet.ask_state.free_text(), "dDxenq");
     }
 
     /// On the OPTION rows a bare letter is not swallowed: the operator has not
@@ -8726,7 +8886,7 @@ mod session_ask_key_tests {
     #[test]
     fn a_letter_on_the_option_list_falls_through_to_the_screen() {
         let mut state = asking();
-        assert_eq!(state.ask_state.focus(), AskFocus::Options);
+        assert_eq!(state.fleet.ask_state.focus(), AskFocus::Options);
         assert!(matches!(
             press(&mut state, Char('d')),
             Some(AppEvent::DeleteSession)
@@ -8737,9 +8897,9 @@ mod session_ask_key_tests {
     fn the_arrows_walk_the_options_and_reach_the_composer() {
         let mut state = asking();
         press(&mut state, Down);
-        assert_eq!(state.ask_state.cursor(), 1);
+        assert_eq!(state.fleet.ask_state.cursor(), 1);
         press(&mut state, Down);
-        assert_eq!(state.ask_state.focus(), AskFocus::FreeText);
+        assert_eq!(state.fleet.ask_state.focus(), AskFocus::FreeText);
     }
 
     #[test]
