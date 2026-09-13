@@ -1992,10 +1992,30 @@ enum Fence {
 /// been told, so it has nothing to be fenced against and the event's own
 /// incarnation becomes the row's.
 ///
-/// Restart and suppress are told apart by the CLOCK, not by the strings: a
-/// fingerprint is opaque and carries no order. An event at or after the
-/// incarnation the row last accepted is the new run; one from before it is the
-/// old run still draining.
+/// **Which rows stay unfenced.** A row whose incarnation is `NULL` is not
+/// protected by this at all, and that is exactly the population #916 is about:
+/// a hook forked from a shared provider daemon reports no
+/// `process_start_fingerprint`, so its row carries no incarnation and any event
+/// for that key applies in place. The fence protects rows that have been told
+/// who they are; the rest are covered by pane binding and by the live
+/// fingerprint check before send-keys, not by this.
+///
+/// # Ordering
+///
+/// The two incarnations are ordered by `session_started`, which the fingerprint
+/// carries (`pane=%N;pid=N;session_started=N`) and which is the fact that
+/// actually orders two runs of one agent. A pane id is stable across a restart
+/// and a pid is not ordered at all, since the kernel recycles them.
+///
+/// Only when a `session_started` cannot be read from BOTH sides does this fall
+/// back to comparing `event.observed_at` against `last_observed_at`, and that
+/// fallback is weaker in a way worth naming: `last_observed_at` is a monotonic
+/// maximum across every tier, so it mixes provider-stamped hook clocks with
+/// daemon-stamped scan clocks. A genuine restart whose first event trails a
+/// tier-5 scan is then classified `Suppress`. It self-heals, because a
+/// suppression returns without touching the row and the next event of the new
+/// run carries a later stamp, so the cost is one refused event rather than a
+/// stranded row.
 fn fence(row: &FleetSessionRow, event: &NewFleetEvent) -> Fence {
     let (Some(incoming), Some(current)) = (
         event.patch.session_incarnation.as_deref(),
@@ -2006,11 +2026,33 @@ fn fence(row: &FleetSessionRow, event: &NewFleetEvent) -> Fence {
     if incoming == current {
         return Fence::Pass;
     }
+    if let (Some(started), Some(current_started)) =
+        (session_started(incoming), session_started(current))
+    {
+        return if started > current_started {
+            Fence::Restart
+        } else {
+            Fence::Suppress
+        };
+    }
     if event.observed_at >= row.last_observed_at {
         Fence::Restart
     } else {
         Fence::Suppress
     }
+}
+
+/// The `session_started` stamp inside a process fingerprint, when it has one.
+///
+/// `pane=%N;pid=N;session_started=N`, as minted by the tmux scan
+/// (`discover/tmux.rs`) and by the hook (`cli/fleet/atc.rs`). Absent, or
+/// unparseable, means this fingerprint cannot order anything and the caller
+/// falls back to its clock.
+fn session_started(fingerprint: &str) -> Option<i64> {
+    fingerprint
+        .split(';')
+        .find_map(|field| field.strip_prefix("session_started="))
+        .and_then(|value| value.trim().parse().ok())
 }
 
 /// Reset a row for a new incarnation of the same session key.
@@ -2710,6 +2752,133 @@ mod tests {
             .find(|row| row.event_id == "e-late")
             .expect("a suppressed event is still durable");
         assert!(!refused.applied, "and is marked as not applied");
+    }
+
+    /// A restart is ordered by `session_started`, not by whichever clock last
+    /// touched the row.
+    ///
+    /// `last_observed_at` is a monotonic maximum across every tier, so a
+    /// daemon-stamped tier-5 scan routinely pushes it past a provider-stamped
+    /// hook payload. Ordering on it alone classified a genuine restart as a
+    /// suppression whenever the new run's first event trailed a scan, which on
+    /// a 3s discovery loop is most of them.
+    #[tokio::test]
+    async fn a_restart_is_ordered_by_session_started_not_by_the_last_observer() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-old",
+                "claude:s-clock",
+                1_000,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    session_incarnation: Some("pane=%1;pid=1;session_started=100".to_string()),
+                    lifecycle_state: Some("IDLE".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        // A scan touches the row and pushes the high-water mark well past
+        // anything the next hook payload will carry.
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-scan",
+                "claude:s-clock",
+                9_000,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    transport_health: Some("HEALTHY".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        // The new run: a LATER `session_started`, but a payload clock behind
+        // the scan that just ran.
+        let restarted = event(
+            "e-new",
+            "claude:s-clock",
+            2_000,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                session_incarnation: Some("pane=%1;pid=2;session_started=500".to_string()),
+                lifecycle_state: Some("RUNNING".to_string()),
+                tier: Some("hook".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        let applied = FleetRepo::apply_event(store.pool(), &restarted).await.unwrap();
+        assert!(
+            applied.applied,
+            "a later session_started is a restart even when its payload clock \
+             trails the scan that last touched the row"
+        );
+        let row = FleetRepo::get_session(store.pool(), "claude:s-clock").await.unwrap().unwrap();
+        assert_eq!(
+            row.session_incarnation.as_deref(),
+            Some("pane=%1;pid=2;session_started=500")
+        );
+    }
+
+    /// And the reverse: an EARLIER `session_started` is the old run draining,
+    /// however recent its arrival.
+    #[tokio::test]
+    async fn an_earlier_session_started_is_suppressed_however_late_it_arrives() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-live",
+                "claude:s-late",
+                1_000,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    session_incarnation: Some("pane=%1;pid=2;session_started=500".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        let late = event(
+            "e-drain",
+            "claude:s-late",
+            9_999,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                session_incarnation: Some("pane=%1;pid=1;session_started=100".to_string()),
+                lifecycle_state: Some("EXITED".to_string()),
+                tier: Some("hook".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        assert!(
+            !FleetRepo::apply_event(store.pool(), &late).await.unwrap().applied,
+            "the dead run cannot bury the live one by arriving last"
+        );
+        assert_eq!(
+            FleetRepo::get_session(store.pool(), "claude:s-late")
+                .await
+                .unwrap()
+                .unwrap()
+                .lifecycle_state,
+            "RUNNING"
+        );
     }
 
     /// An event that names no incarnation is most of the traffic, and the fence
