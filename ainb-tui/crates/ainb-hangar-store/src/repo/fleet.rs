@@ -801,8 +801,7 @@ impl FleetRepo {
                     // live row backwards. The event is still RECORDED, with
                     // `applied = 0`: "we saw this and refused it" is exactly
                     // what an operator needs when a session looks stuck.
-                    let revision =
-                        insert_fleet_event(tx, event, row.version, false).await?;
+                    let revision = insert_fleet_event(tx, event, row.version, false).await?;
                     let session = row.clone();
                     return Ok(ApplyFleetEventResult {
                         revision,
@@ -1847,9 +1846,7 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
             // finding a pane proves a pane exists, not that the agent in it is
             // the one this row remembers, which is the whole reason the stamp
             // is not cleared by the discovery sweep.
-            if row.restored_unconfirmed
-                && matches!(tier.as_str(), "hook" | "acp_feed")
-            {
+            if row.restored_unconfirmed && matches!(tier.as_str(), "hook" | "acp_feed") {
                 row.restored_unconfirmed = false;
             }
             row.tier.clone_from(tier);
@@ -1899,7 +1896,6 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
 
     changed
 }
-
 
 /// Append one row to `fleet_event`, the durable record of what the daemon was
 /// told.
@@ -1966,9 +1962,10 @@ enum Fence {
 /// incarnation the row last accepted is the new run; one from before it is the
 /// old run still draining.
 fn fence(row: &FleetSessionRow, event: &NewFleetEvent) -> Fence {
-    let (Some(incoming), Some(current)) =
-        (event.patch.session_incarnation.as_deref(), row.session_incarnation.as_deref())
-    else {
+    let (Some(incoming), Some(current)) = (
+        event.patch.session_incarnation.as_deref(),
+        row.session_incarnation.as_deref(),
+    ) else {
         return Fence::Pass;
     };
     if incoming == current {
@@ -2614,7 +2611,10 @@ mod tests {
             },
         );
         let result = FleetRepo::apply_event(store.pool(), &late).await.unwrap();
-        assert!(!result.applied, "the dead run's event must not move the row");
+        assert!(
+            !result.applied,
+            "the dead run's event must not move the row"
+        );
         assert!(!result.duplicate, "it is a real event, not a replay");
 
         let row = FleetRepo::get_session(store.pool(), "claude:s-suppress")

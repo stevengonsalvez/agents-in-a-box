@@ -427,9 +427,7 @@ pub async fn apply_hook_with_attention(
     // (#961). `bound` records what was chosen; `invalidate_binding` clears both
     // the decision and the live route when the pane it chose has been taken
     // over, which is what stops send-keys typing into the new occupant.
-    let bound = tmux_target
-        .clone()
-        .map(|target| (target, process_start_fingerprint.clone()));
+    let bound = tmux_target.clone().map(|target| (target, process_start_fingerprint.clone()));
     let invalidate_binding = matches!(
         &binding,
         crate::pane_binding::PaneBinding::Unbound(
@@ -484,10 +482,12 @@ pub async fn apply_hook_with_attention(
             // Tier 0, recorded rather than left to be reverse-engineered. This
             // is the one producer that may assert a human is needed, so it is
             // the one whose tier the read path must not have to guess.
-            tier: Some(ainb_hangar_proto::agent_status::tier_token(
-                ainb_hangar_proto::agent_status::Tier::Hook,
-            )
-            .to_string()),
+            tier: Some(
+                ainb_hangar_proto::agent_status::tier_token(
+                    ainb_hangar_proto::agent_status::Tier::Hook,
+                )
+                .to_string(),
+            ),
             // The pane's process IS the incarnation for a tmux-hosted session:
             // the same session id in a pane whose process has been replaced is
             // a different run of the agent, which is what the fence is for.
@@ -752,17 +752,19 @@ pub async fn status_rows(
     // over what can be guessed from it. A row from before migration 0099 says
     // `unknown` and `parse_tier` answers `None`, which falls back to the old
     // derivation: pre-migration rows read exactly as they do today.
-    let stored_tiers: std::collections::HashMap<&str, Option<ainb_hangar_proto::agent_status::Tier>> =
-        projection
-            .sessions
-            .iter()
-            .map(|row| {
-                (
-                    row.session.session_key.as_str(),
-                    ainb_hangar_proto::agent_status::parse_tier(&row.session.tier),
-                )
-            })
-            .collect();
+    let stored_tiers: std::collections::HashMap<
+        &str,
+        Option<ainb_hangar_proto::agent_status::Tier>,
+    > = projection
+        .sessions
+        .iter()
+        .map(|row| {
+            (
+                row.session.session_key.as_str(),
+                ainb_hangar_proto::agent_status::parse_tier(&row.session.tier),
+            )
+        })
+        .collect();
     let mut rows: Vec<_> = snapshot
         .sessions
         .iter()
@@ -776,6 +778,29 @@ pub async fn status_rows(
             )
         })
         .collect();
+    // Why each unbound row is unbound. Computed only for the rows that are,
+    // because it re-runs the candidate query per row and an unbound row is the
+    // rare case: a healthy fleet pays nothing for this.
+    for row in rows.iter_mut().filter(|row| row.pane_unbound) {
+        // The STORE row, not the wire session: the provider token the binding
+        // query matches on is the stored string, and round-tripping it through
+        // the wire enum would turn an unrecognised provider into `unknown` and
+        // silently match nothing.
+        let Some(stored) = projection
+            .sessions
+            .iter()
+            .find(|candidate| candidate.session.session_key == row.session_key)
+        else {
+            continue;
+        };
+        row.pane_unbound_detail = crate::pane_binding::unbound_detail(
+            pool,
+            &row.session_key,
+            &stored.session.provider,
+            &stored.session.cwd,
+        )
+        .await;
+    }
     rows.sort_by(|a, b| a.session_key.cmp(&b.session_key));
     Ok(ainb_hangar_proto::agent_status::AgentStatusResult {
         rows,
@@ -2631,10 +2656,12 @@ fn tmux_event(session: &FleetSession, observed_at: i64) -> NewFleetEvent {
         payload,
         patch: FleetSessionPatch {
             // Tier 5. A scan reads a pane; it never hears from the agent.
-            tier: Some(ainb_hangar_proto::agent_status::tier_token(
-                ainb_hangar_proto::agent_status::Tier::PaneText,
-            )
-            .to_string()),
+            tier: Some(
+                ainb_hangar_proto::agent_status::tier_token(
+                    ainb_hangar_proto::agent_status::Tier::PaneText,
+                )
+                .to_string(),
+            ),
             session_incarnation: session.process_start_fingerprint.clone(),
             provider: Some(session.provider.as_str().to_string()),
             tmux_target: session.exact_tmux_target.clone(),

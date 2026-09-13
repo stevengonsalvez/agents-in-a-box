@@ -194,6 +194,17 @@ pub struct AgentStatusRow {
     /// True when no tmux pane is bound (issue #916): the agent may be asking,
     /// and nothing can type an answer into it.
     pub pane_unbound: bool,
+    /// Why, in one operator-facing sentence, when `pane_unbound` is true.
+    ///
+    /// The three cases have different fixes, so they are never collapsed: no
+    /// candidate pane at all, two that collide, or a binding invalidated
+    /// because the pane it held is now running something else (#961). The last
+    /// one also names the pane that was lost and what is available now.
+    ///
+    /// `#[serde(default)]` so a daemon that does not compute it, and a client
+    /// reading an older reply, both see `None` rather than failing the read.
+    #[serde(default)]
+    pub pane_unbound_detail: Option<String>,
 }
 
 impl AgentStatusRow {
@@ -263,6 +274,9 @@ pub fn status_row_with_tier(
         evidence_observed_at: evidence_observed_at(session, state),
         has_open_request,
         pane_unbound: session.pane_binding == crate::fleet::PaneBinding::PaneUnbound,
+        // Filled in by the daemon, which holds the binding decision. The
+        // derivation here has only the wire session and cannot know why.
+        pane_unbound_detail: None,
     }
 }
 

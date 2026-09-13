@@ -153,6 +153,9 @@ mod tests {
             model_authority: "inferred".to_string(),
             version: 1,
             updated_revision: 0,
+            // The D14 columns are not what this fixture is about: it exists to
+            // put delimiters through the renderer.
+            ..FleetSessionRow::default()
         }
     }
 

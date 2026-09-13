@@ -167,8 +167,15 @@ pub async fn resolve(
     // pane that had been reused by a different agent kept receiving this
     // session's send-keys.
     if let Some(decision) = bound_decision(pool, managed_key).await? {
-        match confirm(pool, managed_key, provider, cwd, &decision, hook_fingerprint.as_deref())
-            .await?
+        match confirm(
+            pool,
+            managed_key,
+            provider,
+            cwd,
+            &decision,
+            hook_fingerprint.as_deref(),
+        )
+        .await?
         {
             Confirmation::Holds => {
                 return Ok(PaneBinding::Correlated {
@@ -419,6 +426,32 @@ pub async fn unbound_answer_reason(pool: &SqlitePool, provider_session_id: &str)
         PaneBinding::Correlated { .. } | PaneBinding::FromHook { .. } => return None,
     };
     Some(reason.describe(&provider, &cwd))
+}
+
+/// The operator-facing reason one row has no pane, for `ainb doctor` and the
+/// fleet panel detail.
+///
+/// Re-runs the binding decision for a row that is already known to be unbound,
+/// so the three cases stay distinguishable at the surface: nothing to bind, a
+/// collision, or a binding dropped because the pane changed hands (#961). The
+/// last one is the one an operator can act on immediately, and it is the one
+/// that used to be invisible, because the row simply stopped delivering.
+///
+/// `None` when the reason cannot be established, which is treated as "say
+/// nothing" rather than "no pane": a wrong explanation is worse than none.
+pub async fn unbound_detail(
+    pool: &SqlitePool,
+    managed_key: &str,
+    provider: &str,
+    cwd: &str,
+) -> Option<String> {
+    // A decision still on the row means the invalidation has not been written
+    // yet, or the pane is merely unobserved. Ask the same question `resolve`
+    // asks, so the surface and the router never disagree.
+    match resolve(pool, managed_key, provider, cwd, None, None).await {
+        Ok(PaneBinding::Unbound(reason)) => Some(reason.describe(provider, cwd)),
+        Ok(_) | Err(_) => None,
+    }
 }
 
 #[cfg(test)]

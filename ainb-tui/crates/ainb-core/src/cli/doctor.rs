@@ -34,6 +34,10 @@ struct PaneUnboundRow {
     session_key: String,
     provider: String,
     cwd: String,
+    /// Why, when the daemon could establish it. The three cases have different
+    /// fixes, and an invalidated binding (#961) also names the pane that was
+    /// lost, which is the one an operator can act on straight away.
+    detail: Option<String>,
 }
 
 // `--offline` skips skill-source NETWORK probes. It deliberately does NOT skip
@@ -198,6 +202,7 @@ async fn collect_fleet_status() -> (
                     }
                     .to_string(),
                     cwd: row.cwd.clone(),
+                    detail: row.pane_unbound_detail.clone(),
                 })
                 .collect(),
             status.unknown_events,
@@ -251,6 +256,11 @@ fn print_pane_unbound_text(rows: &[PaneUnboundRow], error: Option<&str>) {
             "  pane_unbound  {}  {}  {}",
             row.session_key, row.provider, row.cwd
         );
+        // Indented under its row: the reason is a sentence, and a row that has
+        // one is the row the operator is looking for.
+        if let Some(detail) = &row.detail {
+            println!("                {detail}");
+        }
     }
 }
 

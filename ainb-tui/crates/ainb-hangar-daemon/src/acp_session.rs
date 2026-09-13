@@ -148,10 +148,12 @@ pub async fn ensure(
             // Tier 1. An ACP child reports its own state over its feed, which
             // is second only to a provider hook and, like it, may assert that a
             // human is needed.
-            tier: Some(ainb_hangar_proto::agent_status::tier_token(
-                ainb_hangar_proto::agent_status::Tier::AcpFeed,
-            )
-            .to_string()),
+            tier: Some(
+                ainb_hangar_proto::agent_status::tier_token(
+                    ainb_hangar_proto::agent_status::Tier::AcpFeed,
+                )
+                .to_string(),
+            ),
             // An ACP child's incarnation is its pool session id: the child dies
             // with the daemon, so a row carrying an older one belongs to a
             // process that is already gone.
