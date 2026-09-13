@@ -130,6 +130,8 @@ Getting to the control center on `v2` at `026f40828`: from home press `g`, then 
 
 ## 8. Preview scroll, and Esc out of it (Phase 3, PR #945)
 
+**Attach and press:** `env -u TMUX TMUX_TMPDIR=/tmp/g6h/tmux tmux attach -t g6-manual`, then `s`, leave the cursor on row 1 (`ainb/session-e855a16b`, a live pane printing `agent tick`), then `shift+up`, `up` `k` `down` `j` `pageup` `pagedown`, then `esc`; leave with `ctrl+b` `d`. Never select the `g6-manual` row under `Other tmux`: selecting the TUI's own tmux session panics it.
+
 The chords in steps 8 and 9 are not transcribed from the plan. They are what
 the binary itself prints:
 
@@ -151,6 +153,8 @@ Before Phase 3 those six keys were `AppEvent` variants that the reducer handed s
 
 ## 9. Logs scroll and auto-scroll (Phase 3)
 
+**Attach and press:** `env -u TMUX TMUX_TMPDIR=/tmp/g6h/tmux tmux attach -t g6-manual`, then `s`, move to a row whose right pane shows the `[Space]AutoScroll:ON` hint, click once inside the right pane, then `up` `up` `up`, `space`, `end`, `home`. The G6 run on 2026-09-13 could not produce such a row: the log stream only renders for a selected row with no tmux session name, and every `ainb run` session and every `Other tmux` row has one, so if no row shows the hint, report that as the result of this step.
+
 Same screen, a session with no tmux pane, so the right pane is the live log stream. The hint line at its foot reads `[Space]AutoScroll:ON`.
 
 Click once inside the right pane, then:
@@ -166,6 +170,8 @@ up  up  up
 The click matters: focus follows the mouse into the right pane, and the scroll rows only resolve while that pane owns the keyboard.
 
 ## 10. Mouse: three on the sidebar, one on the legend (Phase 3)
+
+**Attach and press:** `env -u TMUX TMUX_TMPDIR=/tmp/g6h/tmux tmux attach -t g6-manual` (the private server has `mouse off`, so clicks reach ainb), then from the session list `q` for home; click a sidebar item once, click it twice inside 300 ms, drag the sidebar's right border; quit with `ctrl+c`, relaunch with `/tmp/g6h/start-manual.sh`, attach again and check the width; then `s` and click the bottom legend, then the collapsed hint row.
 
 Home screen (`q` from the session list).
 
