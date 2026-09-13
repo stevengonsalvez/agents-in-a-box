@@ -9,6 +9,7 @@ pub mod deps;
 pub mod fleet;
 pub mod hangar;
 pub mod statusline;
+pub mod statusline_install;
 pub mod update;
 pub mod util;
 
