@@ -30,6 +30,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -46,7 +47,38 @@ use fleet_hangar::{EnvGuard, FleetHangar};
 
 const ATTENTION_ID: &str = "att-multiattach-1";
 
+/// Redirect every tmux call this process makes onto a private socket dir.
+///
+/// Runs once, and before the first tmux invocation, so the holder sessions and
+/// the daemon's own `send-keys` children inherit it too. Without it this test
+/// creates sessions and, worse, RESIZES CLIENTS on whatever server the machine
+/// already has: on a developer box that is the one their editor is attached
+/// to. Same reasoning, and the same `/tmp` rather than `$TMPDIR` (a unix
+/// socket path is capped at 104 bytes on macOS), as `resume_command_tmux.rs`.
+///
+/// `TMUX` is cleared as well: it names the current client's socket and takes
+/// precedence over `TMUX_TMPDIR`, so leaving it set would quietly put the
+/// sessions back on the ambient server.
+fn private_tmux_server() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        let dir = PathBuf::from("/tmp").join(format!(
+            "ainb-multiattach-tmux-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create the private tmux socket dir");
+        std::env::set_var("TMUX_TMPDIR", &dir);
+        std::env::remove_var("TMUX");
+        dir
+    })
+}
+
 fn tmux_available() -> bool {
+    private_tmux_server();
     Command::new("tmux")
         .arg("-V")
         .output()
