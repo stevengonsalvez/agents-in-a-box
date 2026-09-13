@@ -10,12 +10,14 @@ pub mod audit;
 pub mod claude;
 pub mod cli;
 pub mod clipboard;
+pub mod components;
 pub mod config;
 pub mod credentials;
 pub mod docker;
 pub mod docs;
 pub mod editors;
 pub mod fleet;
+pub mod geometry;
 pub mod git;
 pub mod headroom;
 pub mod interactive;
@@ -28,8 +30,11 @@ pub mod providers;
 pub mod rtk;
 pub mod self_exec_guard;
 pub mod setup;
+pub mod text_editor;
 pub mod tmux;
 pub mod usage_cache;
+pub mod viewport;
+pub mod widgets;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

@@ -4,6 +4,8 @@
 // - Premium VS Code/Discord-style sidebar navigation with shortcuts
 // - Welcome panel with getting started guide and architecture overview
 
+pub use ainb_app::components::home_screen_v2::*;
+
 use crate::app::ui_state::UiState;
 use ratatui::{
     Frame,
@@ -12,11 +14,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph},
 };
-use std::time::{Duration, Instant};
 
-use super::mascot::{MascotAnimation, render_mascot};
-use super::sidebar::{SidebarComponent, SidebarItem, SidebarState};
-use super::welcome_panel::{WelcomePanelComponent, WelcomePanelState};
+use super::mascot::render_mascot;
+use super::sidebar::SidebarComponent;
+use super::welcome_panel::WelcomePanelComponent;
 use crate::models::Workspace;
 
 // Color palette from TUI style guide
@@ -29,193 +30,6 @@ const SOFT_WHITE: Color = Color::Rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
 const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 const DISPLAY_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-const SIDEBAR_EDGE_HIT_SLOP: u16 = 1;
-/// Window in which two sidebar clicks count as a double-click, from
-/// `ui.double_click_ms`. A function rather than a const because the value is a
-/// preference now, for the same reason a slow-hands accessibility setting exists.
-pub fn sidebar_double_click_window() -> Duration {
-    Duration::from_millis(crate::config::tunables::snapshot().ui.double_click_ms)
-}
-
-/// Focus area on the home screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HomeScreenFocus {
-    Sidebar,
-    ContentPanel,
-}
-
-/// State for the refreshed home screen
-#[derive(Debug)]
-pub struct HomeScreenV2State {
-    /// Current focus (always sidebar for now)
-    pub focus: HomeScreenFocus,
-    /// Sidebar state
-    pub sidebar: SidebarState,
-    /// Welcome panel state
-    pub welcome: WelcomePanelState,
-    /// Mascot animation
-    pub mascot: MascotAnimation,
-    /// Last sidebar area rendered by HomeScreen V2.
-    pub last_sidebar_rect: Option<Rect>,
-    /// Whether the mouse is currently over the sidebar resize edge.
-    pub sidebar_edge_hovered: bool,
-    /// Whether a sidebar resize drag is active.
-    pub sidebar_resize_active: bool,
-    last_sidebar_click: Option<(usize, Instant)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SidebarClickOutcome {
-    pub item: SidebarItem,
-    pub double_click: bool,
-}
-
-impl HomeScreenV2State {
-    pub fn new() -> Self {
-        let mut state = Self {
-            focus: HomeScreenFocus::Sidebar,
-            sidebar: SidebarState::new(),
-            welcome: WelcomePanelState::new(),
-            mascot: MascotAnimation::new(),
-            last_sidebar_rect: None,
-            sidebar_edge_hovered: false,
-            sidebar_resize_active: false,
-            last_sidebar_click: None,
-        };
-        // Sidebar starts focused
-        state.sidebar.is_focused = true;
-        state.welcome.is_focused = false;
-        state
-    }
-
-    /// Toggle focus between sidebar and content panel
-    pub fn toggle_focus(&mut self) {
-        match self.focus {
-            HomeScreenFocus::Sidebar => {
-                self.focus = HomeScreenFocus::ContentPanel;
-                self.sidebar.is_focused = false;
-                self.welcome.is_focused = true;
-            }
-            HomeScreenFocus::ContentPanel => {
-                self.focus = HomeScreenFocus::Sidebar;
-                self.sidebar.is_focused = true;
-                self.welcome.is_focused = false;
-            }
-        }
-    }
-
-    /// Update mascot animation
-    pub fn tick_mascot(&mut self) {
-        self.mascot.tick();
-    }
-
-    /// Update session count badge
-    pub fn set_active_sessions(&mut self, count: usize) {
-        self.sidebar.active_sessions_count = count;
-    }
-
-    pub fn restore_sidebar_width(&mut self, width: Option<u16>) {
-        if let Some(width) = width {
-            self.sidebar.preferred_width = width.max(super::sidebar::MIN_SIDEBAR_WIDTH);
-        }
-    }
-
-    pub fn rendered_sidebar_width(&self) -> Option<u16> {
-        self.last_sidebar_rect.map(|rect| rect.width)
-    }
-
-    pub fn sidebar_edge_highlighted(&self) -> bool {
-        self.sidebar_edge_hovered || self.sidebar_resize_active
-    }
-
-    pub fn update_sidebar_edge_hover(&mut self, x: u16, y: u16) {
-        self.sidebar_edge_hovered = self.is_on_sidebar_edge(x, y);
-    }
-
-    pub fn is_on_sidebar_edge(&self, x: u16, y: u16) -> bool {
-        let Some(rect) = self.last_sidebar_rect else {
-            return false;
-        };
-        if y < rect.y || y >= rect.y.saturating_add(rect.height) || rect.width == 0 {
-            return false;
-        }
-
-        let edge_x = rect.x.saturating_add(rect.width.saturating_sub(1));
-        x.abs_diff(edge_x) <= SIDEBAR_EDGE_HIT_SLOP
-    }
-
-    pub fn begin_sidebar_resize(&mut self, x: u16, y: u16) -> bool {
-        let on_edge = self.is_on_sidebar_edge(x, y);
-        self.sidebar_resize_active = on_edge;
-        self.sidebar_edge_hovered = on_edge;
-        on_edge
-    }
-
-    pub fn drag_sidebar_resize(&mut self, x: u16, terminal_width: u16) -> bool {
-        if !self.sidebar_resize_active {
-            return false;
-        }
-        let Some(rect) = self.last_sidebar_rect else {
-            return false;
-        };
-
-        let requested_width = x.saturating_sub(rect.x).saturating_add(1);
-        self.sidebar.set_preferred_width(requested_width, terminal_width);
-        true
-    }
-
-    pub fn finish_sidebar_resize(&mut self) -> bool {
-        let was_active = self.sidebar_resize_active;
-        self.sidebar_resize_active = false;
-        was_active
-    }
-
-    pub fn click_sidebar_item_at(
-        &mut self,
-        x: u16,
-        y: u16,
-        now: Instant,
-    ) -> Option<SidebarClickOutcome> {
-        let rect = self.last_sidebar_rect?;
-        if !rect_contains(rect, x, y) || self.is_on_sidebar_edge(x, y) {
-            return None;
-        }
-
-        let item_index = SidebarComponent::item_index_at(rect, y, self.sidebar.selected_index)?;
-        self.sidebar.select_index(item_index);
-        self.focus = HomeScreenFocus::Sidebar;
-        self.sidebar.is_focused = true;
-        self.welcome.is_focused = false;
-
-        let double_click = self
-            .last_sidebar_click
-            .map(|(last_index, last_at)| {
-                last_index == item_index
-                    && now.saturating_duration_since(last_at) <= sidebar_double_click_window()
-            })
-            .unwrap_or(false);
-        self.last_sidebar_click = Some((item_index, now));
-
-        Some(SidebarClickOutcome {
-            item: self.sidebar.selected_item(),
-            double_click,
-        })
-    }
-}
-
-impl Default for HomeScreenV2State {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
-    x >= rect.x
-        && x < rect.x.saturating_add(rect.width)
-        && y >= rect.y
-        && y < rect.y.saturating_add(rect.height)
-}
-
 /// Layout mode based on terminal size
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
@@ -688,7 +502,9 @@ impl Default for HomeScreenV2Component {
 
 #[cfg(test)]
 mod tests {
+    use super::super::sidebar::SidebarItem;
     use super::*;
+    use std::time::{Duration, Instant};
 
     fn render_to_string(width: u16, height: u16) -> String {
         let component = HomeScreenV2Component::new();
@@ -742,7 +558,7 @@ mod tests {
     #[test]
     fn detects_sidebar_drag_start_band() {
         let mut state = HomeScreenV2State::new();
-        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 20));
+        state.last_sidebar_rect = Some(crate::geometry::Area::new(0, 4, 26, 20));
 
         assert!(state.begin_sidebar_resize(24, 8));
         assert!(state.sidebar_resize_active);
@@ -761,7 +577,7 @@ mod tests {
     #[test]
     fn drag_resize_updates_width_with_bounds() {
         let mut state = HomeScreenV2State::new();
-        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 20));
+        state.last_sidebar_rect = Some(crate::geometry::Area::new(0, 4, 26, 20));
         assert!(state.begin_sidebar_resize(25, 8));
         assert!(state.drag_sidebar_resize(44, 120));
         assert_eq!(state.sidebar.preferred_width, 45);
@@ -776,7 +592,7 @@ mod tests {
     #[test]
     fn sidebar_click_selects_then_double_click_navigates() {
         let mut state = HomeScreenV2State::new();
-        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
+        state.last_sidebar_rect = Some(crate::geometry::Area::new(0, 4, 26, 30));
         let now = Instant::now();
 
         // first_item_y = rect.y + 3 = 7. Sessions (item 0) is selected and 2 rows
@@ -795,7 +611,7 @@ mod tests {
     #[test]
     fn slow_second_sidebar_click_is_not_double_click() {
         let mut state = HomeScreenV2State::new();
-        state.last_sidebar_rect = Some(Rect::new(0, 4, 26, 30));
+        state.last_sidebar_rect = Some(crate::geometry::Area::new(0, 4, 26, 30));
         let now = Instant::now();
 
         assert!(!state.click_sidebar_item_at(3, 10, now).unwrap().double_click);

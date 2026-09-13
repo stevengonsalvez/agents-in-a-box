@@ -8,6 +8,9 @@ use anyhow::{Result, bail};
 
 use crate::cli::OutputFormat;
 
+// `fleet daemons` lives in `ainb-app` beside the daemons screen state.
+pub use ainb_app::cli::fleet::*;
+
 pub mod acp;
 pub mod approve;
 pub mod archived;
@@ -18,7 +21,6 @@ pub mod budget_alert;
 pub mod chat;
 pub mod cost;
 pub mod daemon;
-pub mod daemons;
 pub mod enrich_cache;
 pub mod interview;
 pub mod msg;
