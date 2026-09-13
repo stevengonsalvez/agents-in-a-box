@@ -823,6 +823,41 @@ impl FleetRepo {
                     // reserves that for process proof, and a newer incarnation
                     // proves this run started, not how the last one ended.
                     reset_for_restart(row, event);
+                    // Clearing `attention_state` is not enough. The inbox row
+                    // is a separate table, and leaving it open means the dead
+                    // run's card keeps advertising an answer route into a
+                    // process that is gone, which is the harm #961 exists to
+                    // close arriving by another door. It also trips
+                    // `drift_against_fleet_session` permanently, on exactly its
+                    // first direction: an open card whose session is not
+                    // asking. That assertion is this lane's own regression
+                    // detector, so poisoning it is worse than the stale card.
+                    //
+                    // In THIS transaction, with the row reset, so a crash
+                    // between the two cannot leave a restarted session holding
+                    // its predecessor's question.
+                    if let Some(provider_session_id) = row.provider_session_id.clone() {
+                        let stale =
+                            crate::repo::attention::AttentionRepo::open_ask_ids_for_session_in_tx(
+                                tx,
+                                &provider_session_id,
+                            )
+                            .await?;
+                        for id in stale {
+                            crate::repo::attention::AttentionRepo::mark_answered_if_open_in_tx(
+                                tx,
+                                &id,
+                                "resolved:restart",
+                                "the agent restarted; this question died with the previous run",
+                                event.observed_at,
+                                // No client version to fence on: this close is
+                                // the store's own, driven by the incarnation
+                                // change in this same transaction.
+                                None,
+                            )
+                            .await?;
+                        }
+                    }
                 }
             }
         }
@@ -2528,6 +2563,7 @@ mod tests {
             ObservationAuthority::Authoritative,
             FleetSessionPatch {
                 provider: Some("claude".to_string()),
+                provider_session_id: Some("s-restart".to_string()),
                 session_incarnation: Some("pane=%1;pid=1".to_string()),
                 lifecycle_state: Some("IDLE".to_string()),
                 attention_state: Some("ASK".to_string()),
@@ -2536,6 +2572,27 @@ mod tests {
             },
         );
         FleetRepo::apply_event(store.pool(), &asking).await.unwrap();
+
+        // The card the dead run raised. This is the thing an operator can still
+        // click, so it is the thing a restart has to retire.
+        crate::repo::attention::AttentionRepo::insert_if_absent(
+            store.pool(),
+            &crate::repo::attention::NewAttention {
+                id: "att:s-restart:e-ask".to_string(),
+                session_id: "s-restart".to_string(),
+                cwd: "/w/app".to_string(),
+                workspace_id: None,
+                kind: crate::repo::attention::AttentionKind::AskUserQuestion,
+                payload: r#"{"kind":"ASK"}"#.to_string(),
+                degraded: false,
+                created_at: 100,
+                raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
+            },
+            None,
+        )
+        .await
+        .unwrap();
 
         // Same key, later, different process.
         let restarted = event(
@@ -2567,6 +2624,25 @@ mod tests {
         assert_eq!(
             row.state_started_at, 200,
             "the new run's clock starts at the restart, not at the old run's ask"
+        );
+
+        // The card died with the run that raised it. Leaving it open would
+        // advertise an answer route into a process that is gone, and would trip
+        // the drift assertion forever.
+        assert!(
+            crate::repo::attention::AttentionRepo::list_fleet(store.pool())
+                .await
+                .unwrap()
+                .is_empty(),
+            "a restart must leave no open card for the old incarnation"
+        );
+        let drift =
+            crate::repo::attention::AttentionRepo::drift_against_fleet_session(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            drift.is_clean(),
+            "and must not poison this lane's own regression detector: {drift:?}"
         );
     }
 
