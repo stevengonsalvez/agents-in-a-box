@@ -466,6 +466,17 @@ pub async fn apply_hook_with_attention(
             provider_session_id: Some(observation.provider_session_id.to_string()),
             tmux_target: tmux_target.clone(),
             process_start_fingerprint: process_start_fingerprint.clone(),
+            // Tier 0, recorded rather than left to be reverse-engineered. This
+            // is the one producer that may assert a human is needed, so it is
+            // the one whose tier the read path must not have to guess.
+            tier: Some(ainb_hangar_proto::agent_status::tier_token(
+                ainb_hangar_proto::agent_status::Tier::Hook,
+            )
+            .to_string()),
+            // The pane's process IS the incarnation for a tmux-hosted session:
+            // the same session id in a pane whose process has been replaced is
+            // a different run of the agent, which is what the fence is for.
+            session_incarnation: process_start_fingerprint.clone(),
             cwd: Some(observation.cwd.to_string()),
             display_name: display_name_for_cwd(observation.cwd),
             management_state: (provider == Provider::Claude).then(|| "MANAGED".to_string()),
@@ -722,13 +733,32 @@ pub async fn status_rows(
         .into_iter()
         .map(|row| row.session_id)
         .collect();
+    // The STORED tier, keyed by session, so the read prefers what wrote the row
+    // over what can be guessed from it. A row from before migration 0099 says
+    // `unknown` and `parse_tier` answers `None`, which falls back to the old
+    // derivation: pre-migration rows read exactly as they do today.
+    let stored_tiers: std::collections::HashMap<&str, Option<ainb_hangar_proto::agent_status::Tier>> =
+        projection
+            .sessions
+            .iter()
+            .map(|row| {
+                (
+                    row.session.session_key.as_str(),
+                    ainb_hangar_proto::agent_status::parse_tier(&row.session.tier),
+                )
+            })
+            .collect();
     let mut rows: Vec<_> = snapshot
         .sessions
         .iter()
         .map(|session| {
             let has_open_request =
                 session.provider_session_id.as_deref().is_some_and(|id| open.contains(id));
-            ainb_hangar_proto::agent_status::status_row(session, has_open_request)
+            ainb_hangar_proto::agent_status::status_row_with_tier(
+                session,
+                has_open_request,
+                stored_tiers.get(session.session_key.as_str()).copied().flatten(),
+            )
         })
         .collect();
     rows.sort_by(|a, b| a.session_key.cmp(&b.session_key));
@@ -2585,6 +2615,12 @@ fn tmux_event(session: &FleetSession, observed_at: i64) -> NewFleetEvent {
         event_type: "tmux_discovered".to_string(),
         payload,
         patch: FleetSessionPatch {
+            // Tier 5. A scan reads a pane; it never hears from the agent.
+            tier: Some(ainb_hangar_proto::agent_status::tier_token(
+                ainb_hangar_proto::agent_status::Tier::PaneText,
+            )
+            .to_string()),
+            session_incarnation: session.process_start_fingerprint.clone(),
             provider: Some(session.provider.as_str().to_string()),
             tmux_target: session.exact_tmux_target.clone(),
             process_start_fingerprint: session.process_start_fingerprint.clone(),
