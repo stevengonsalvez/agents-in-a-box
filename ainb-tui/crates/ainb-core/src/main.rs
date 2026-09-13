@@ -473,6 +473,14 @@ async fn run_tui_loop(
     let mut slash_palette = SlashPalette::new(SlashCommandRegistry::built_ins());
 
     loop {
+        // Effects the previous iteration's events queued. They run here, after
+        // the step that queued them finished writing state, and before the
+        // frame that shows their result.
+        for effect in app.state.take_effects() {
+            ainb::effect_host::execute(effect, app);
+            needs_redraw = true;
+        }
+
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted
         // WireBuffer into `state.plugins_host.pending_plugin_renders`, so layout's
@@ -839,8 +847,11 @@ async fn run_tui_loop(
                                 use tracing::{error, info};
                                 info!(">>> Immediately processing async action for responsive UI");
                                 match app.tick().await {
-                                    Ok(()) => {
+                                    Ok(effects) => {
                                         info!(">>> Immediate tick completed successfully");
+                                        for effect in effects {
+                                            ainb::effect_host::execute(effect, app);
+                                        }
                                         last_app_tick = Instant::now();
                                         // Force UI refresh. The tick runs here
                                         // for the same reason it runs before the
@@ -1498,44 +1509,6 @@ async fn run_tui_loop(
                         app.state.shell.ui_needs_refresh = true;
                     }
 
-                    AsyncAction::OpenInEditor(workspace_path) => {
-                        info!("[ACTION] Opening workspace in editor: {:?}", workspace_path);
-
-                        // Resolve editor using fallback chain
-                        let editor = resolve_editor(&app.state.config.app_config);
-
-                        match editor {
-                            Some(cmd) => {
-                                info!("Opening {} in {}", workspace_path.display(), cmd);
-
-                                let result =
-                                    std::process::Command::new(&cmd).arg(&workspace_path).spawn();
-
-                                match result {
-                                    Ok(_) => {
-                                        app.state.add_success_notification(format!(
-                                            "📝 Opened in {}",
-                                            cmd
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to open editor: {}", e);
-                                        app.state.add_error_notification(format!(
-                                            "❌ Failed to open editor: {}",
-                                            e
-                                        ));
-                                    }
-                                }
-                            }
-                            None => {
-                                warn!("No editor found in fallback chain");
-                                app.state.add_error_notification(
-                                    "❌ No editor found. Set preferred editor in settings or install VS Code.".to_string()
-                                );
-                            }
-                        }
-                    }
-
                     // Workspace shell handling (one shell per workspace, cd to switch directories)
                     AsyncAction::OpenWorkspaceShell {
                         workspace_index,
@@ -1985,7 +1958,10 @@ async fn run_tui_loop(
             }
 
             match app.tick().await {
-                Ok(()) => {
+                Ok(effects) => {
+                    for effect in effects {
+                        ainb::effect_host::execute(effect, app);
+                    }
                     last_app_tick = Instant::now();
                     // Consume the refresh flag; the repaint is handled by the
                     // app-tick redraw below (perf: bead `wai`).
@@ -2424,44 +2400,6 @@ fn setup_panic_handler() {
         eprintln!("Application panicked: {}", panic_info);
         eprintln!("Please check the logs for more details.");
     }));
-}
-
-/// Resolve which editor to use via fallback chain:
-/// 1. preferred_editor from config
-/// 2. 'code' (VS Code)
-/// 3. $EDITOR env var
-/// 4. None (error)
-fn resolve_editor(config: &crate::config::AppConfig) -> Option<String> {
-    // 1. Check preferred_editor from config
-    if let Some(ref editor) = config.ui_preferences.preferred_editor {
-        if command_exists(editor) {
-            return Some(editor.clone());
-        }
-    }
-
-    // 2. Fallback to 'code' (VS Code)
-    if command_exists("code") {
-        return Some("code".to_string());
-    }
-
-    // 3. Fallback to $EDITOR env var
-    if let Ok(editor) = std::env::var("EDITOR") {
-        if command_exists(&editor) {
-            return Some(editor);
-        }
-    }
-
-    // 4. No editor found
-    None
-}
-
-/// Check if a command exists on the system
-fn command_exists(cmd: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -2752,8 +2752,7 @@ impl EventHandler {
                 // Open session's workspace in preferred editor
                 if let Some(session) = state.selected_session() {
                     let workspace_path = std::path::PathBuf::from(&session.workspace_path);
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::OpenInEditor(workspace_path));
+                    state.emit(crate::app::effect::Effect::OpenEditor(workspace_path));
                 } else {
                     state.add_warning_notification("⚠️ No session selected".to_string());
                 }
@@ -4362,8 +4361,8 @@ impl EventHandler {
             }
             AppEvent::SkillManagerOpenUnitInEditor => {
                 // `[o]` — open the selected unit's deployed skill dir in the
-                // user's editor. Reuses the generic OpenInEditor async action
-                // (resolve_editor → $EDITOR fallback chain). Open the parent
+                // user's editor through the host's `Effect::OpenEditor`
+                // (preferred editor, `code`, then `$EDITOR`). Open the parent
                 // dir when the deployed path is a file (e.g. SKILL.md) so the
                 // whole skill folder lands in the editor.
                 //
@@ -4392,7 +4391,7 @@ impl EventHandler {
                         } else {
                             p
                         };
-                        state.shell.pending_async_action = Some(AsyncAction::OpenInEditor(target));
+                        state.emit(crate::app::effect::Effect::OpenEditor(target));
                     }
                     None => {
                         state.add_warning_notification(

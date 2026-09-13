@@ -2698,6 +2698,10 @@ pub struct AppState {
     pub recovery: Versioned<RecoverySection>,
 
     pub mcp_pool: Versioned<McpPoolSection>,
+
+    /// Effects queued by the step being applied, for the host to drain. Not a
+    /// section: see [`crate::app::effect::EffectOutbox`].
+    effects: crate::app::effect::EffectOutbox,
 }
 
 /// Result of background workspace loading
@@ -2991,13 +2995,26 @@ pub enum AsyncAction {
     OpenShellAtPath(std::path::PathBuf), // Open shell directly at a path (no workspace required)
     KillWorkspaceShell(usize),           // Kill workspace shell by workspace index
     // Editor action
-    OpenInEditor(std::path::PathBuf), // Open workspace in preferred editor
     // Onboarding actions
     OnboardingCheckDeps,          // Run dependency check during onboarding
     OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
     /// Fetch + parse a skill source (git clone) off the event loop, then
     /// open the Skill Manager's source-preview picker with the result.
     SkillPreviewFetch(String),
+}
+
+impl AppState {
+    /// Queue work for the host. The reducer calls this instead of performing
+    /// the side effect itself.
+    pub fn emit(&mut self, effect: crate::app::effect::Effect) {
+        self.effects.push(effect);
+    }
+
+    /// Hand the queued effects to the host, oldest first.
+    #[must_use]
+    pub fn take_effects(&mut self) -> Vec<crate::app::effect::Effect> {
+        self.effects.take()
+    }
 }
 
 impl Default for AppState {
@@ -3043,6 +3060,7 @@ impl Default for AppState {
             git_view: Versioned::default(),
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
+            effects: crate::app::effect::EffectOutbox::default(),
             // Initialize quick commit state
 
             // Initialize other tmux sessions
@@ -9866,10 +9884,6 @@ impl AppState {
                     debug!("KillWorkspaceShell action deferred to main loop");
                     self.shell.pending_async_action = Some(action);
                 }
-                action @ AsyncAction::OpenInEditor(_) => {
-                    debug!("OpenInEditor action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
                 AsyncAction::OnboardingInstallDep(dep_id) => {
                     use crate::components::onboarding::state::DepInstall;
                     use crate::setup::{catalog, install_dep_capture};
@@ -13284,7 +13298,16 @@ impl App {
         Ok(())
     }
 
-    pub async fn tick(&mut self) -> anyhow::Result<()> {
+    /// Advance background work one step and hand back the effects it queued.
+    ///
+    /// Effects are returned only after the whole step has written state, so
+    /// the host acts on committed state.
+    pub async fn tick(&mut self) -> anyhow::Result<Vec<crate::app::effect::Effect>> {
+        self.tick_inner().await?;
+        Ok(self.state.take_effects())
+    }
+
+    async fn tick_inner(&mut self) -> anyhow::Result<()> {
         // Clean up expired notifications
         self.state.cleanup_expired_notifications();
 

@@ -41,5 +41,6 @@ pub mod widgets;
 pub mod test_support;
 
 pub use app::{
-    AppState, Btn, Chord, CommandId, Intent, Key, Keymap, Mods, Pos, SectionId, Versioned, dispatch,
+    AppState, Btn, Chord, CommandId, Effect, Intent, Key, Keymap, Mods, Pos, SectionId, Versioned,
+    dispatch,
 };

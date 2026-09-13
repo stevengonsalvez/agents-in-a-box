@@ -3,6 +3,7 @@
 // them. Renderers draw from it; `ainb-core::app` re-exports it and adds the
 // terminal's UiState, attach handler and screen registry.
 
+pub mod effect;
 pub mod event_bus;
 pub mod events;
 pub mod intent;
@@ -16,6 +17,7 @@ pub mod snapshot;
 pub mod state;
 pub mod versioned;
 
+pub use effect::Effect;
 pub use events::{EventHandler, NoRenderer, RendererHost};
 pub use intent::{Args, Btn, Intent, Pos, dispatch};
 pub use keymap::{Chord, CommandId, Key, Keymap, Mods};

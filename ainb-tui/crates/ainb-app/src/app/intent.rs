@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::effect::Effect;
 use crate::app::events::{EventHandler, RendererHost};
 use crate::app::keymap::{Chord, CommandId, Keymap};
 use crate::app::state::AppState;
@@ -41,7 +42,8 @@ pub enum Btn {
     Middle,
 }
 
-/// Apply one intent to `state`.
+/// Apply one intent to `state` and return the effects it queued, for the host
+/// to execute now that the state is written.
 ///
 /// This is the whole input surface for a renderer with no host-side events of
 /// its own. The TUI host uses [`EventHandler::resolve_intent`] instead,
@@ -52,8 +54,9 @@ pub fn dispatch(
     keymap: &Keymap,
     host: &mut dyn RendererHost,
     intent: Intent,
-) {
+) -> Vec<Effect> {
     if let Some(event) = EventHandler::resolve_intent(intent, state, keymap, host) {
         EventHandler::process_event(event, state);
     }
+    state.take_effects()
 }
