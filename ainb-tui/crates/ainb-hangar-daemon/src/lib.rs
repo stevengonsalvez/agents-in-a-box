@@ -877,6 +877,24 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
         let store: Store = Store::open_in(&dir).await?;
 
+        // D14 boot order, step one: every row that survived the restart is a
+        // MEMORY of the last incarnation until something in this one confirms
+        // it. A session that exited during the outage would otherwise keep
+        // rendering as working, on evidence from a daemon that is no longer
+        // running. The tier-0 drain below is what clears the stamp for the
+        // sessions that are genuinely still there, which is why this has to
+        // happen before the feed starts rather than alongside it.
+        match ainb_hangar_store::repo::fleet::FleetRepo::mark_restored_unconfirmed(store.pool())
+            .await
+        {
+            Ok(0) => {}
+            Ok(stamped) => tracing::info!(stamped, "hydrated fleet rows pending confirmation"),
+            // Non-fatal, like every other boot step here: a daemon that cannot
+            // stamp must still serve. The cost is that a stale row reads as
+            // confirmed, which is today's behaviour.
+            Err(error) => tracing::warn!(error = %error, "restored-unconfirmed stamp failed"),
+        }
+
         // Fresh-home boot seed: lay down the default workspace + runtime + one
         // starter agent so an empty home "just works" (a runtime shows in the Daemon
         // pane, the agent picker is non-empty, and the Squad create gate is already

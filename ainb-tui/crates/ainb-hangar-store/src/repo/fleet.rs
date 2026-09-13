@@ -689,6 +689,35 @@ impl FleetRepo {
         Ok(result)
     }
 
+    /// Mark every live row as a memory of the last daemon incarnation (D14 boot
+    /// order).
+    ///
+    /// A row that survives a restart records what was true when the daemon
+    /// died, and rendering it as present tense is how a session that exited
+    /// during the outage keeps showing as working. The spec's order is:
+    /// hydrate and stamp every non-`exited` row, drain the tier-0 cursor, then
+    /// start the feed, so the drain is what clears the stamp for sessions that
+    /// are genuinely still there.
+    ///
+    /// `EXITED` rows are skipped because they make no present-tense claim: the
+    /// row already says the process is gone, and marking it unconfirmed would
+    /// suggest that might have changed.
+    ///
+    /// Returns the number of rows stamped, for the boot log.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn mark_restored_unconfirmed(pool: &SqlitePool) -> Result<u64, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE fleet_session SET restored_unconfirmed = 1 \
+             WHERE lifecycle_state != 'EXITED' AND restored_unconfirmed = 0",
+        )
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Apply one normalized event inside a CALLER-OWNED transaction, without
     /// committing it.
     ///
@@ -1808,6 +1837,16 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
     // row's state to evidence that was refused.
     if changed {
         if let Some(tier) = &event.patch.tier {
+            // A hydrated row is confirmed by a tier 0/1 event in THIS daemon
+            // incarnation, and by nothing else (D14 boot order). A tier-5 scan
+            // finding a pane proves a pane exists, not that the agent in it is
+            // the one this row remembers, which is the whole reason the stamp
+            // is not cleared by the discovery sweep.
+            if row.restored_unconfirmed
+                && matches!(tier.as_str(), "hook" | "acp_feed")
+            {
+                row.restored_unconfirmed = false;
+            }
             row.tier.clone_from(tier);
         }
         row.received_at = received_now();
@@ -2365,6 +2404,110 @@ mod tests {
         // does no work per boot beyond the rows it still cannot name.
         let second = FleetRepo::backfill_display_names(store.pool(), derive).await.unwrap();
         assert_eq!(second, 0, "second boot names nothing new");
+    }
+
+    /// A hydrated row is a memory until this incarnation confirms it, and only
+    /// a tier 0/1 event counts as confirmation.
+    ///
+    /// The failure: the daemon restarts, a session exited during the outage,
+    /// and its row keeps rendering as working on evidence from a daemon that is
+    /// no longer running. A tier-5 scan finding a pane is not confirmation
+    /// either, because a pane existing says nothing about which agent is in it.
+    #[tokio::test]
+    async fn only_a_tier_zero_or_one_event_confirms_a_hydrated_row() {
+        let (_dir, store) = store().await;
+        let base = |id: &str, at: i64, tier: &str| {
+            event(
+                id,
+                "claude:s-boot",
+                at,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    tier: Some(tier.to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            )
+        };
+        FleetRepo::apply_event(store.pool(), &base("e-1", 100, "hook")).await.unwrap();
+
+        // The daemon restarts.
+        let stamped = FleetRepo::mark_restored_unconfirmed(store.pool()).await.unwrap();
+        assert_eq!(stamped, 1, "a live row is stamped at boot");
+        assert!(
+            FleetRepo::get_session(store.pool(), "claude:s-boot")
+                .await
+                .unwrap()
+                .unwrap()
+                .restored_unconfirmed
+        );
+
+        // A pane scan finds a pane. That is not confirmation.
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-scan",
+                "claude:s-boot",
+                150,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    lifecycle_state: Some("IDLE".to_string()),
+                    tier: Some("pane_text".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(
+            FleetRepo::get_session(store.pool(), "claude:s-boot")
+                .await
+                .unwrap()
+                .unwrap()
+                .restored_unconfirmed,
+            "a pane existing says nothing about the agent this row remembers"
+        );
+
+        // The agent's own hook does confirm it.
+        FleetRepo::apply_event(store.pool(), &base("e-2", 200, "hook")).await.unwrap();
+        assert!(
+            !FleetRepo::get_session(store.pool(), "claude:s-boot")
+                .await
+                .unwrap()
+                .unwrap()
+                .restored_unconfirmed,
+            "a tier-0 event in this incarnation confirms the row"
+        );
+    }
+
+    /// An exited row makes no present-tense claim, so it is not stamped.
+    #[tokio::test]
+    async fn boot_does_not_stamp_a_row_that_already_says_the_process_is_gone() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-exit",
+                "claude:s-dead",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    lifecycle_state: Some("EXITED".to_string()),
+                    tier: Some("hook".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            FleetRepo::mark_restored_unconfirmed(store.pool()).await.unwrap(),
+            0,
+            "marking a dead row unconfirmed would suggest that might have changed"
+        );
     }
 
     /// A restart under the same key does not inherit the previous run's state.
