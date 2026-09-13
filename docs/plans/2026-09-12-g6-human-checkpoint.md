@@ -1,11 +1,13 @@
 # G6 human checkpoint: slice 1
 
-**Date:** 2026-09-12
+**Date:** 2026-09-12, re-verified 2026-09-13 against `v2` at `4cbab0970`
 **For:** Stevie, two terminals.
 **Covers:** the `[CHECKPOINT:human-verify]` for Phase 1 (keymap) and Phase 3 (scroll and mouse), the manual rows for S-A and S-B, and the manual row for S-C.
 **Also published as a page:** https://claude.ai/code/artifact/892c7758-68ef-48a3-831a-176386ac0657
 
-Every command below is literal. The paths and chord names were run against `ainb 1.28.2` from this branch, not copied from the plan.
+Every command below is literal. The paths and chord names were re-run against `ainb 1.28.2 (4cbab0970)`, built from `v2` after all seven slice-1 nodes landed, not copied from the plan.
+
+**What this is checking:** Phase 1 `2230c1b8`-era keymap, S-A, S-B, S-C `ba1590cc`, Phase 3 `2230c1b8`, Phase 2 `fbbe22e2`, S-D `83d1a87f`.
 
 ## Build the binary you are checking
 
@@ -98,7 +100,13 @@ Terminal B (a third shell, or after backgrounding web):
 ./target/debug/ainb hangar connections list
 ```
 
-- **Pass:** one `tui` row and one `web` row, each with a pid and the daemon host.
+- **Pass:** a `web` row with a pid and the daemon host.
+- **Known broken, do not fail the checkpoint on it:** there will be NO `tui` row. This is issue #963, found by S-D's surface-combination smoke and not by this
+  page: `DaemonClient::from_env` labels every client `cli`, and separately the TUI holds no connection for the registry to list at all. S-D fixed the first
+  half (the TUI now says `tui` when it dials); the connection lifecycle is S-B's and is still open.
+
+  So what this step can still tell you: the registry answers, and it names the web surface correctly. If you see a `tui` row, #963 has been fixed and this
+  note is stale.
 
 ## 7. An answered card retires everywhere (S-C, PR #936)
 
@@ -161,3 +169,19 @@ Every rect these four clicks hit test against now lives in `UiState`, published 
 ## What to do with the result
 
 Reply `approved`, or name the step and what you saw instead. A failure here is a real regression: every step above has an automated test behind it, so a red step means the test is lying about something.
+
+## Proof, if you want to check my working rather than the app
+
+| Node | PR | Merge |
+|---|---|---|
+| slice-1 CI gates | #933 | `82f8e90a` |
+| Phase 3 UiState | #945 | `2230c1b8` |
+| S-C card retirement | #936 | `ba1590cc` |
+| Phase 2 versioned sections | #956 | `fbbe22e2` |
+| S-D concurrency | #964 | `83d1a87f` |
+| G6 page, Phase 3 half | #950 | `cd597bb9` |
+
+S-D's merged head is the first in this lane with a fully green board: 26 pass, 1 skip, 0 fail, both OS legs.
+
+Known limitations you may run into, all filed rather than absorbed: #963 (above), #951 (`tripwire_burndown_keys` asserts a `p filter:` chip the plugin no longer
+renders, so it cannot pass on any head), #966 (four sessions tripwires die mid-key-sequence on macOS, gated to Linux with the evidence attached).
