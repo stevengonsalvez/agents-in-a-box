@@ -1,6 +1,6 @@
 # G6 human checkpoint: slice 1
 
-**Date:** 2026-09-12, re-verified 2026-09-13 against `v2` at `4cbab0970`
+**Date:** 2026-09-12, re-verified 2026-09-13 against `v2` at `4cbab0970`, steps 1 to 7 re-run 2026-09-13 against `v2` at `026f40828`
 **For:** Stevie, two terminals.
 **Covers:** the `[CHECKPOINT:human-verify]` for Phase 1 (keymap) and Phase 3 (scroll and mouse), the manual rows for S-A and S-B, and the manual row for S-C.
 **Also published as a page:** https://claude.ai/code/artifact/892c7758-68ef-48a3-831a-176386ac0657
@@ -11,13 +11,18 @@ Every command below is literal. The paths and chord names were re-run against `a
 
 ## Build the binary you are checking
 
+From the root of any checkout of this repository (this adds a fresh worktree, it does not touch the checkout you run it from):
+
 ```
-cd ~/orca/workspaces/agents-in-a-box/p0-closure/ainb-tui
-cargo build -p ainb -p ainb-hangar-daemon
+git fetch origin v2
+git worktree add --detach ../g6-v2 origin/v2
+cd ../g6-v2/ainb-tui
+CARGO_INCREMENTAL=0 cargo build -p ainb -p ainb-hangar-daemon
 bash scripts/build-plugins.sh
+./target/debug/ainb --version
 ```
 
-`target/debug/ainb` is the binary every step below means.
+`target/debug/ainb` is the binary every step below means, and every `./target/debug/ainb` below is run from that `ainb-tui` directory. The version line must name the `v2` SHA you checked out. Do not build from a closed lane's worktree: those branches are behind `v2`.
 
 ## 1. Keymap override (Phase 1)
 
