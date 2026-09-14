@@ -1473,7 +1473,8 @@ async fn run_effects(
 ) -> Result<()> {
     let mut queue = std::collections::VecDeque::from(effects);
     while let Some(effect) = queue.pop_front() {
-        for report in ainb::effect_host::execute(effect, &app.state, terminal, ui).await? {
+        let plugins = app.state.plugins_host.plugin_runtime.clone();
+        for report in ainb::effect_host::execute(effect, terminal, ui, plugins.as_ref()).await? {
             queue.extend(ainb::dispatch(&mut app.state, keymap, ui, report));
         }
     }
