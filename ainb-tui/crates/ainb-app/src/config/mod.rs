@@ -2112,6 +2112,12 @@ impl AppConfig {
     /// count is dropped either way, so the next save writes only fractions.
     /// Returns whether anything changed.
     pub fn migrate_layout_widths(&mut self, columns: u16) -> bool {
+        // A host that measured no width yet (a zero-width first frame) cannot
+        // turn a column count into a fraction; keep the count for a later
+        // report rather than dropping it.
+        if columns == 0 {
+            return false;
+        }
         let prefs = &mut self.ui_preferences;
         let mut changed = false;
         for (legacy, fraction) in [
@@ -2126,7 +2132,7 @@ impl AppConfig {
         ] {
             if let Some(width) = legacy.take() {
                 changed = true;
-                if fraction.is_none() && columns > 0 {
+                if fraction.is_none() {
                     *fraction = Some((f64::from(width) / f64::from(columns)).clamp(0.0, 1.0));
                 }
             }
@@ -4214,6 +4220,19 @@ skill_manager_sources_width = 30
         assert!(!written.contains("sidebar_width = 40"), "{written}");
         assert!(!written.contains("sources_width"), "{written}");
         assert!(written.contains("home_sidebar_fraction"), "{written}");
+    }
+
+    #[test]
+    fn a_zero_width_report_keeps_the_legacy_width_for_a_later_one() {
+        let legacy = r#"
+[ui_preferences]
+home_sidebar_width = 40
+"#;
+        let mut config = AppConfig::from_layers([legacy]).expect("layers");
+        assert!(!config.migrate_layout_widths(0), "nothing to save");
+        assert_eq!(config.ui_preferences.home_sidebar_width, Some(40));
+        assert!(config.migrate_layout_widths(160));
+        assert_eq!(config.ui_preferences.home_sidebar_fraction, Some(0.25));
     }
 
     #[test]
