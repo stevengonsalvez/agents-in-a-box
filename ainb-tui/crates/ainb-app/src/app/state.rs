@@ -296,6 +296,16 @@ impl AppState {
             self.add_warning_notification("No tmux session on this row".to_string());
             return false;
         };
+        // The same own-session rule the observer and the preview placeholder
+        // use, by detection rather than by counting on tmux to refuse a nested
+        // attach: that refusal depends on `TMUX` reaching the attach client
+        // through the PTY's inherited environment.
+        if self.is_host_tmux_session_selected() {
+            self.add_warning_notification(format!(
+                "'{name}' is the tmux session ainb is running in; attaching it here would nest it"
+            ));
+            return false;
+        }
         // tmux mirrors a session to every attached client, but all clients
         // fight over its size — attaching alongside an existing client is the
         // user's call, so allow it and warn (never block).
