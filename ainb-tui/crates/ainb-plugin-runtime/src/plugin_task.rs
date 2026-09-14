@@ -21,7 +21,7 @@ use ainb_plugin_protocol::params::{
     ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
     EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult, FsDirEntry,
     FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult, HandleEventParams,
-    HandleKeyParams, HandleMouseParams, LogParams, PluginInitParams, PluginInitResult,
+    HandleActionParams, HandleKeyParams, HandleMouseParams, LogParams, PluginInitParams, PluginInitResult,
     PluginShutdownParams, RenderParams, RenderResult, SecretStoreGetParams, SnapshotGetParams,
     SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
     SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
@@ -147,6 +147,9 @@ pub enum Command {
         /// Snapshot bytes.
         payload: Bytes,
     },
+    /// Forward a `plugin/handle_action` notification: run one of the
+    /// plugin's actions by id.
+    HandleAction(HandleActionParams),
     /// Send `plugin/shutdown` and reap the process.
     Shutdown,
     /// Clear quarantine + allow respawn.
@@ -708,6 +711,20 @@ impl PluginTask {
                         let _ = r.send(ActionOutcome::RuntimeError(e.to_string()));
                     }
                 }
+            }
+            Command::HandleAction(params) => {
+                self.last_used = Instant::now();
+                self.redraw_governor.reset();
+                // Unlike a key, an action can name a plugin whose screen is
+                // not showing (a palette command, another renderer's click),
+                // so it spawns the plugin rather than dropping.
+                if let Err(e) = self.ensure_running().await {
+                    debug!(plugin = %self.plugin.id, error = %e, "handle_action dropped (spawn failed)");
+                    return;
+                }
+                let json =
+                    serde_json::to_value(params).expect("HandleActionParams is serializable");
+                let _ = self.send_notification(methods::PLUGIN_HANDLE_ACTION, json).await;
             }
             Command::HandleEvent { topic, payload } => {
                 if self.child.is_none() {
