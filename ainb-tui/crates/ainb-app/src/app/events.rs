@@ -2168,9 +2168,10 @@ impl EventHandler {
             // persists it there. The arm exists for exhaustiveness, not to do
             // nothing quietly.
             AppEvent::ToggleSessionsSidebar => {}
-            // Entering the interactive embed is handled in the main loop (it needs
-            // the terminal size and the embed lives in the event loop) — no-op here.
-            AppEvent::EnterInteractivePane => {}
+            // Only the host knows the pane size, so it performs the attach.
+            AppEvent::EnterInteractivePane => {
+                state.emit(Effect::AttachTerminal(TerminalTarget::InPlace));
+            }
             // Other tmux rename events
             AppEvent::OtherTmuxStartRename => state.start_other_tmux_rename(),
             AppEvent::OtherTmuxRenameChar(c) => state.other_tmux_rename_char(c),
@@ -2533,6 +2534,9 @@ impl EventHandler {
                             .to_string(),
                     );
                 }
+            }
+            AppEvent::DetachSession if state.is_interactive_pane() => {
+                state.emit(Effect::Detach);
             }
             AppEvent::DetachSession => {
                 // Clear attached session and return to home screen

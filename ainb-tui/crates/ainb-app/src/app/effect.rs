@@ -22,6 +22,13 @@ pub enum Effect {
     /// session, tool not installed, nested terminal) the host posts an error
     /// notice naming the target and leaves the screen it was on.
     AttachTerminal(TerminalTarget),
+    /// Leave the live terminal the user is in.
+    ///
+    /// Terminal host: releases the in-place interactive pane back to the
+    /// read-only preview. Desktop host: returns keyboard focus from the
+    /// terminal tab to the app. With no live terminal this is a no-op, not an
+    /// error.
+    Detach,
     /// Open `path` in the user's preferred editor.
     ///
     /// Terminal host: runs the configured `preferred_editor`, else `code`,
@@ -37,6 +44,11 @@ pub enum Effect {
 pub enum TerminalTarget {
     /// An ainb session's own tmux session.
     Session(Uuid),
+    /// The selected row's tmux session, writable in the session list's own
+    /// preview pane instead of full screen. Terminal host: sizes the pane to
+    /// its current layout and hands keyboard input to it; when the row has no
+    /// tmux session or the attach fails, a notice says which.
+    InPlace,
     /// A named tmux session ainb did not create: an "Other tmux" row, an SSH
     /// session's tmux, or a workspace shell that already exists.
     Tmux(String),

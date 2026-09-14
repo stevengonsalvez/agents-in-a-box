@@ -477,7 +477,7 @@ async fn run_tui_loop(
         // the step that queued them finished writing state, and before the
         // frame that shows their result.
         for effect in app.state.take_effects() {
-            ainb::effect_host::execute(effect, app, terminal).await?;
+            ainb::effect_host::execute(effect, app, terminal, &mut ui).await?;
             needs_redraw = true;
         }
 
@@ -625,14 +625,13 @@ async fn run_tui_loop(
                     // the host keymap.
                     let chord = crate::app::terminal_keys::chord_from_key_event(&key_event);
                     let interactive_detach = chord.as_ref().is_some_and(|chord| {
-                        matches!(
-                            keymap.resolve(&[KeyContext::EmbedInteractive], chord),
-                            Some(KeyAction::App(crate::app::events::AppEvent::DetachSession))
-                        )
+                        keymap
+                            .binding_for(&KeyContext::EmbedInteractive, EMBED_DETACH_ROW)
+                            .is_some_and(|row| row.chord.as_ref() == Some(chord))
                     });
                     if interactive_detach {
                         if app.state.is_interactive_pane() {
-                            app.state.release_interactive_pane();
+                            detach_interactive_pane(app, &keymap, &mut ui, terminal).await?;
                         }
                         if app.state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
                         {
@@ -648,7 +647,7 @@ async fn run_tui_loop(
                     // palette.
                     if app.state.is_interactive_pane() {
                         if interactive_detach {
-                            app.state.release_interactive_pane();
+                            detach_interactive_pane(app, &keymap, &mut ui, terminal).await?;
                             continue;
                         }
                         // write_input only errors when the PTY writer thread is
@@ -803,39 +802,6 @@ async fn run_tui_loop(
                                 // so the CTA flips on the very next frame.
                                 ui.invalidate_statusline_status();
                             }
-                            AppEvent::EnterInteractivePane => {
-                                // Size the embed to the EXACT interactive
-                                // layout (the user's current sidebar + chrome)
-                                // so tmux reflows once at attach instead of
-                                // attach-size → layout-size back-to-back. The
-                                // render path still resizes each frame for
-                                // terminal resizes.
-                                let sz = terminal.size().unwrap_or(ratatui::layout::Size {
-                                    width: 80,
-                                    height: 24,
-                                });
-                                let sidebar = ui.sessions_pane.effective_width(sz.width);
-                                let (rows, cols) =
-                                    crate::components::layout::interactive_embed_size(
-                                        sz.width,
-                                        sz.height,
-                                        sidebar,
-                                        app.state
-                                            .config
-                                            .app_config
-                                            .ui_preferences
-                                            .show_session_menu_bar,
-                                    );
-                                // Failure (no tmux session on the row / attach
-                                // error) surfaces as a notification from
-                                // enter_interactive_pane itself, which knows
-                                // which case it hit.
-                                if !app.state.enter_interactive_pane(rows, cols) {
-                                    tracing::debug!(
-                                        "EnterInteractivePane: no tmux session on selection / attach failed"
-                                    );
-                                }
-                            }
                             AppEvent::NewSession
                             | AppEvent::SearchWorkspace
                             | AppEvent::ConfirmationConfirm => {
@@ -850,8 +816,10 @@ async fn run_tui_loop(
                                     Ok(effects) => {
                                         info!(">>> Immediate tick completed successfully");
                                         for effect in effects {
-                                            ainb::effect_host::execute(effect, app, terminal)
-                                                .await?;
+                                            ainb::effect_host::execute(
+                                                effect, app, terminal, &mut ui,
+                                            )
+                                            .await?;
                                         }
                                         last_app_tick = Instant::now();
                                         // Force UI refresh. The tick runs here
@@ -1363,7 +1331,7 @@ async fn run_tui_loop(
             match app.tick().await {
                 Ok(effects) => {
                     for effect in effects {
-                        ainb::effect_host::execute(effect, app, terminal).await?;
+                        ainb::effect_host::execute(effect, app, terminal, &mut ui).await?;
                     }
                     last_app_tick = Instant::now();
                     // Consume the refresh flag; the repaint is handled by the
@@ -1415,6 +1383,30 @@ fn preview_scroll_route(
     } else {
         PreviewScrollRoute::Ignore
     }
+}
+
+/// The keymap row that releases the in-place interactive pane.
+const EMBED_DETACH_ROW: &str = "detach";
+
+/// Ask the reducer to leave the interactive pane and run what it returns.
+///
+/// While the embed owns the keyboard the host routes Ctrl+Q itself, but the
+/// release is still the reducer's decision, returned as `Effect::Detach`.
+async fn detach_interactive_pane(
+    app: &mut App,
+    keymap: &Keymap,
+    ui: &mut crate::app::ui_state::UiState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let command = ainb::CommandId::new(format!(
+        "{}.{EMBED_DETACH_ROW}",
+        KeyContext::EmbedInteractive.name()
+    ));
+    let intent = ainb::Intent::Command(command, serde_json::Value::Null);
+    for effect in ainb::dispatch(&mut app.state, keymap, ui, intent) {
+        ainb::effect_host::execute(effect, app, terminal, ui).await?;
+    }
+    Ok(())
 }
 
 fn setup_logging() {

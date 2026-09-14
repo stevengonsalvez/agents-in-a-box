@@ -45,7 +45,7 @@ fn isolated_home() -> &'static std::path::Path {
 
 #[test]
 fn open_in_editor_returns_open_editor_for_the_selected_worktree() {
-    let _home = isolated_home();
+    isolated_home();
     let keymap = Keymap::defaults();
     let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
     let before = state.versions();
@@ -72,7 +72,7 @@ fn open_in_editor_returns_open_editor_for_the_selected_worktree() {
 
 #[test]
 fn attach_on_a_session_returns_attach_terminal_for_that_session() {
-    let _home = isolated_home();
+    isolated_home();
     let keymap = Keymap::defaults();
     let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
     let session_id = state.sessions.workspaces[0].sessions[0].id;
@@ -98,7 +98,7 @@ fn attach_on_a_session_returns_attach_terminal_for_that_session() {
 
 #[test]
 fn attach_on_an_other_tmux_row_returns_attach_terminal_by_name() {
-    let _home = isolated_home();
+    isolated_home();
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
     state.shell.current_screen = ids::SESSION_LIST.to_string();
@@ -129,7 +129,7 @@ fn attach_on_an_other_tmux_row_returns_attach_terminal_by_name() {
 
 #[test]
 fn witr_returns_attach_terminal_for_the_witr_tool() {
-    let _home = isolated_home();
+    isolated_home();
     let keymap = Keymap::defaults();
     let mut state = session_list_with_selection("/parity/api");
     let before = state.versions();
@@ -152,7 +152,7 @@ fn witr_returns_attach_terminal_for_the_witr_tool() {
 
 #[test]
 fn quick_shell_returns_attach_terminal_for_the_workspace_shell_at_the_worktree() {
-    let _home = isolated_home();
+    isolated_home();
     let keymap = Keymap::defaults();
     let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
     let before = state.versions();
@@ -172,4 +172,82 @@ fn quick_shell_returns_attach_terminal_for_the_workspace_shell_at_the_worktree()
         })]
     );
     assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+}
+
+#[test]
+fn attach_interactive_returns_attach_terminal_in_place() {
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("session_list.attach_interactive"),
+    );
+
+    assert_eq!(
+        effects,
+        vec![Effect::AttachTerminal(TerminalTarget::InPlace)]
+    );
+    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+    assert!(
+        !state.is_interactive_pane(),
+        "the reducer attached nothing itself"
+    );
+}
+
+#[test]
+fn detach_while_interactive_returns_detach_and_leaves_the_pane_to_the_host() {
+    isolated_home();
+    let tmux_available = std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !tmux_available {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = format!("ainb-effects-detach-{}", std::process::id());
+    let created = std::process::Command::new("tmux")
+        .args(["new-session", "-d", "-s", &session, "sh"])
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(created, "failed to create tmux session");
+
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = ids::SESSION_LIST.to_string();
+    state.sessions.selected_workspace_index = None;
+    state.tmux.other_tmux_sessions = vec![ainb_app::models::other_tmux::OtherTmuxSession::new(
+        session.clone(),
+        false,
+        1,
+    )];
+    state.tmux.selected_other_tmux_index = Some(0);
+    let attached = state.enter_interactive_pane(24, 80);
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("embed_interactive.detach"),
+    );
+    let after = state.versions();
+    let still_interactive = state.is_interactive_pane();
+    state.release_interactive_pane();
+    let _ = std::process::Command::new("tmux")
+        .args(["kill-session", "-t", &session])
+        .status();
+
+    assert!(attached, "the host attach under test needs a live pane");
+    assert_eq!(effects, vec![Effect::Detach]);
+    assert_eq!(bumped(&before, &after), Vec::<SectionId>::new());
+    assert!(
+        still_interactive,
+        "the reducer left the release to the host"
+    );
 }

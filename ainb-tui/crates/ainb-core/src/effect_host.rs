@@ -10,6 +10,7 @@ use ratatui::backend::CrosstermBackend;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::app::ui_state::UiState;
 use crate::app::{App, Effect, TerminalTarget, ToolTerminal};
 
 /// Carry out one effect for the terminal host.
@@ -21,9 +22,16 @@ pub async fn execute(
     effect: Effect,
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ui: &mut UiState,
 ) -> Result<()> {
     match effect {
-        Effect::AttachTerminal(target) => attach(app, terminal, target).await,
+        Effect::AttachTerminal(target) => attach(app, terminal, ui, target).await,
+        Effect::Detach => {
+            if app.state.is_interactive_pane() {
+                app.state.release_interactive_pane();
+            }
+            Ok(())
+        }
         Effect::OpenEditor(path) => {
             open_editor(app, &path);
             Ok(())
@@ -34,9 +42,14 @@ pub async fn execute(
 async fn attach(
     app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ui: &UiState,
     target: TerminalTarget,
 ) -> Result<()> {
     match target {
+        TerminalTarget::InPlace => {
+            attach_in_place(app, terminal, ui);
+            Ok(())
+        }
         TerminalTarget::Session(session_id) => attach_session(app, terminal, session_id).await,
         TerminalTarget::Tmux(session_name) => attach_tmux(app, terminal, session_name).await,
         TerminalTarget::Tool(ToolTerminal::Witr) => attach_witr(app, terminal).await,
@@ -48,6 +61,30 @@ async fn attach(
             workspace_index,
             target_dir,
         } => attach_workspace_shell(app, terminal, workspace_index, target_dir).await,
+    }
+}
+
+/// The selected row, writable in the preview pane.
+///
+/// The embed is sized to the exact interactive layout (the user's current
+/// sidebar and chrome) so tmux reflows once at attach instead of twice. The
+/// render path still resizes it each frame for terminal resizes.
+fn attach_in_place(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) {
+    let size = terminal.size().unwrap_or(ratatui::layout::Size {
+        width: 80,
+        height: 24,
+    });
+    let sidebar = ui.sessions_pane.effective_width(size.width);
+    let (rows, cols) = crate::components::layout::interactive_embed_size(
+        size.width,
+        size.height,
+        sidebar,
+        app.state.config.app_config.ui_preferences.show_session_menu_bar,
+    );
+    // A missing tmux session or a failed attach is announced by
+    // enter_interactive_pane, which knows which case it hit.
+    if !app.state.enter_interactive_pane(rows, cols) {
+        debug!("EnterInteractivePane: no tmux session on selection / attach failed");
     }
 }
 
