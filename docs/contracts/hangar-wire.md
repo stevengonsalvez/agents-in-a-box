@@ -12,10 +12,10 @@ amendments 15-21.
 ## One integer, one catalogue
 
 ```
-┌────────┐  auth/hello { token, surface?, protocol{min,max}, capabilities[], device? }  ┌────────┐
-│ client │ ─────────────────────────────────────────────────────────────────────────▶ │ daemon │
-│        │ ◀───────── { protocol{min,max}, selected, capabilities[], daemon_version } ─│        │
-└────────┘                       no overlap ──▶ error -32007                            └────────┘
+┌────────┐  auth/hello { token, surface?, protocol{min,max}, capabilities[], device?, transient? }  ┌────────┐
+│ client │ ─────────────────────────────────────────────────────────────────────────────────────▶ │ daemon │
+│        │ ◀───────────────────── { protocol{min,max}, selected, capabilities[], daemon_version } ─│        │
+└────────┘                       no overlap ──▶ error -32007                                        └────────┘
 ```
 
 | Thing | Answers | Lives in |
@@ -39,6 +39,16 @@ const, then the file) in one change. Removing one is a `PROTOCOL_VERSION` bump.
 defaults, and every reply member defaults. A pre-W0-wire client sending
 `{ token }` negotiates version 1; a pre-W0-wire daemon answering `{}` reads as
 "protocol 1, declares nothing". Both legs are asserted by the skew harness.
+
+**`transient`** (#963, capability `hangar.connections.transient`). A surface
+that holds one long-lived presence connection marks its other, short request
+connections `transient`. The daemon decides whether to honour the request: only
+when a listed row already exists at the same non-zero surface pid. An honoured
+connection is served and stamps provenance as usual, but `connections_list`
+omits it and it raises no `connections_changed`. A request with no presence at
+its pid is listed like any other connection, and a Pal connection is always
+listed. A daemon that does not advertise the capability ignores the member and
+lists every connection.
 
 ### Sockets
 
