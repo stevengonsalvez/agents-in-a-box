@@ -26,7 +26,7 @@ mod chat;
 /// The one long-lived connection a running surface holds (#963).
 mod presence;
 
-pub use presence::{Dialer, PresenceLease, PresenceState};
+pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
 
 use std::path::PathBuf;
 use std::time::Duration;
