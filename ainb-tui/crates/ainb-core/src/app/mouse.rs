@@ -39,6 +39,7 @@ fn save_sessions_pane_layout(ui: &UiState) -> Intent {
 /// to host the top row.
 fn skill_manager_top_rects(
     state: &AppState,
+    ui: &UiState,
 ) -> Option<(ratatui::layout::Rect, ratatui::layout::Rect, u16)> {
     use ratatui::layout::Rect;
     let (term_w, term_h) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -48,15 +49,17 @@ fn skill_manager_top_rects(
     if term_w == 0 || top_h == 0 {
         return None;
     }
-    let sources_w = crate::components::skill_manager_screen::clamp_sources_width(
-        state.skills.skill_manager_state.sources_width,
-        term_w,
-    );
+    let sources_w = ui.skill_sources.width_on(saved_sources_width(state), term_w);
     let sources_rect = Rect::new(0, 0, sources_w, top_h);
     let units_x = sources_w;
     let units_w = term_w.saturating_sub(sources_w);
     let units_rect = Rect::new(units_x, 0, units_w, top_h);
     Some((sources_rect, units_rect, sources_w))
+}
+
+/// The Sources panel width the user saved, which a surface starts from.
+fn saved_sources_width(state: &AppState) -> Option<u16> {
+    state.config.app_config.ui_preferences.skill_manager_sources_width
 }
 
 /// True when `(x, y)` falls inside `rect` (half-open on the far
@@ -112,7 +115,7 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
         if crate::app::skill_manager_overlay_open(state) {
             return None;
         }
-        let (sources_rect, units_rect, sources_w) = skill_manager_top_rects(state)?;
+        let (sources_rect, units_rect, sources_w) = skill_manager_top_rects(state, ui)?;
         // Resize edge = the Sources panel's right border column. Begin a drag
         // (consumed on subsequent drag gestures).
         let edge_x = sources_w.saturating_sub(1);
@@ -120,7 +123,8 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
             && y >= sources_rect.y
             && y < sources_rect.y.saturating_add(sources_rect.height)
         {
-            return Some(pointer::begin_skill_sources_resize());
+            ui.skill_sources.resize_active = true;
+            return None;
         }
 
         // Click inside the Sources panel body → focus + select that source
@@ -250,16 +254,17 @@ pub fn gesture(
                     .last_content_width()
                     .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)).0);
                 ui.sessions_pane.drag_resize(x, width);
-            } else if on_skills && state.skills.skill_manager_state.resize_active {
+            } else if on_skills && ui.skill_sources.resize_active {
                 // SkillManager divider drag: the new Sources width is the
                 // pointer's x + 1 (the panel spans columns 0..=x), clamped
-                // by the same clamp `grow`/`shrink` use.
+                // by the same clamp the `[`/`]` steps use.
                 let term_w = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                state.skills.skill_manager_state.sources_width =
+                ui.skill_sources.set_width(
                     crate::components::skill_manager_screen::clamp_sources_width(
                         x.saturating_add(1),
                         term_w,
-                    );
+                    ),
+                );
             }
             None
         }
@@ -277,9 +282,11 @@ pub fn gesture(
             } else if on_sessions {
                 ui.sessions_pane.update_hover(x, y);
                 ui.sessions_pane.finish_resize().then(|| save_sessions_pane_layout(ui))
-            } else if on_skills && state.skills.skill_manager_state.resize_active {
-                state.skills.skill_manager_state.resize_active = false;
-                Some(pointer::save_skill_sources_width())
+            } else if on_skills && ui.skill_sources.resize_active {
+                ui.skill_sources.resize_active = false;
+                Some(pointer::save_skill_sources_width(
+                    ui.skill_sources.preferred_width(saved_sources_width(state)),
+                ))
             } else {
                 None
             }
