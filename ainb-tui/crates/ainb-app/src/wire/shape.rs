@@ -698,13 +698,6 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
             "plugin:sample".to_string(),
             seed.text("plugins.render_error", Captured),
         );
-        plugins.plugin_ui_states.insert(
-            "sample".to_string(),
-            crate::app::sections::PluginUiState {
-                version: 1,
-                view: serde_json::json!({ "title": "sample" }),
-            },
-        );
     }
 
     // ---- skills ------------------------------------------------------------------------------
