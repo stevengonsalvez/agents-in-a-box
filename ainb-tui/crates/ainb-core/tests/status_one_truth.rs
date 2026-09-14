@@ -138,8 +138,8 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             "the rendered panel must show the daemon's tuple `{daemon_words}`:\n{screen}"
         );
         assert!(
-            screen.contains("ASK · 1 Q") || screen.contains(" INPUT "),
-            "a waiting agent renders as needing input on its card:\n{screen}"
+            screen.contains("─ ASK · 1 Q ") && screen.contains("ASK · 1 QUESTIONS"),
+            "the waiting agent's card and detail name its one open question:\n{screen}"
         );
     }
 
