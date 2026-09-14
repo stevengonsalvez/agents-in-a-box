@@ -64,6 +64,12 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         .find(|row| row.session_key == SESSION_KEY)
         .expect("the fixture session reached the store");
     let expected = daemon_row.identity_tuple();
+    // The addressable tuple (#1015): the same five values plus the host.
+    let expected_host = daemon_row.host_identity_tuple();
+    assert_eq!(
+        expected_host.5, "local",
+        "a single-host daemon stamps its rows local"
+    );
     assert_eq!(expected.1, "waiting", "the hook announced a live question");
     assert_eq!(
         expected.2, "hook",
@@ -86,8 +92,8 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         let pane = panel_from(joined.clone(), expected.4 + 42_000);
         let held = pane.status_for(SESSION_KEY).expect("the panel holds the daemon's row");
         assert_eq!(
-            held.identity_tuple(),
-            expected,
+            held.host_identity_tuple(),
+            expected_host,
             "the TUI fleet panel must hold the daemon's tuple, not its own reading"
         );
 
@@ -161,9 +167,10 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             card["provenance"].as_str().unwrap(),
             u8::try_from(card["tier"].as_u64().unwrap()).unwrap(),
             card["evidenceObservedAt"].as_i64().unwrap(),
+            card["hostId"].as_str().unwrap(),
         ),
-        expected,
-        "GET /api/needs must report the daemon's tuple"
+        expected_host,
+        "GET /api/needs must report the daemon's tuple, host included"
     );
 
     // Surface 3: `ainb fleet needs --format json`, driven through the real
@@ -180,9 +187,10 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             json["source"].as_str().unwrap(),
             u8::try_from(json["tier"].as_u64().unwrap()).unwrap(),
             json["evidence_observed_at"].as_i64().unwrap(),
+            json["host_id"].as_str().unwrap(),
         ),
-        expected,
-        "`ainb fleet needs --format json` must report the daemon's tuple"
+        expected_host,
+        "`ainb fleet needs --format json` must report the daemon's tuple, host included"
     );
 }
 
