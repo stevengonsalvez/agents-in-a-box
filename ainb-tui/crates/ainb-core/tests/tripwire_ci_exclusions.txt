@@ -4,6 +4,7 @@
 # One binary per line: name, issue, reason. `ci_tripwire_exclusions.rs` fails
 # on a line with no issue or reason, a name with no test file, or a duplicate.
 # Remove a line in the PR that makes its tripwire green.
+tripwire_burndown_keys                          #1028  red on v2 and this branch on the lane F box, and in CI
 tripwire_new_session_agent_pills_visible        #1023  red on v2 before and after #1008 on the lane F box
 tripwire_new_session_branch_auto_derive         #1023  red on v2 before and after #1008 on the lane F box
 tripwire_new_session_favorite_toggle            #1023  red on v2 before and after #1008 on the lane F box
