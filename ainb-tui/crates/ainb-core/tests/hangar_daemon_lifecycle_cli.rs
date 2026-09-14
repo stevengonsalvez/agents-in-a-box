@@ -395,52 +395,44 @@ fn tui_pids(connections: &serde_json::Value) -> std::collections::BTreeSet<u32> 
         .unwrap_or_default()
 }
 
-/// Wait for a `tui` connection that was NOT there before the launch key.
-///
-/// The plugin is identified by being new, which is the only thing that
-/// distinguishes it from the `ainb tui` process's own `tui` registration
-/// without reaching into either process. Strictly stronger than the old
-/// "first tui row" lookup: it asserts the launch key CAUSED a connection
-/// rather than that one happens to exist.
-fn wait_for_new_tui_pid(
-    home: &Path,
-    daemon: &Path,
-    before: &std::collections::BTreeSet<u32>,
-    timeout: Duration,
-) -> (u32, serde_json::Value) {
+/// Wait until the daemon lists exactly one `tui` connection, and return its pid.
+fn wait_until_one_tui_pid(home: &Path, daemon: &Path, timeout: Duration) -> u32 {
     let deadline = Instant::now() + timeout;
     let mut last = None;
     while Instant::now() < deadline {
         let connections = connections_json(home, daemon);
-        if let Some(pid) =
-            tui_pids(&connections).difference(before).copied().find(|pid| pid_alive(*pid))
-        {
-            return (pid, connections);
+        let pids = tui_pids(&connections);
+        if pids.len() == 1 {
+            return *pids.iter().next().expect("one pid");
         }
         last = Some(connections);
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!(
-        "the Hangar launch key never produced a new TUI connection; pids before: \
-         {before:?}; last listing: {}",
+        "the TUI never registered exactly one tui connection; last listing: {}",
         last.unwrap_or(serde_json::Value::Null)
     );
 }
 
-fn tui_stays_listed(home: &Path, daemon: &Path, pid: u32, duration: Duration) -> bool {
-    let deadline = Instant::now() + duration;
-    let mut observed = false;
+/// The pid of `parent`'s child process named `name`, through `pgrep`, which
+/// both CI platforms ship.
+fn child_pid_named(parent: u32, name: &str) -> Option<u32> {
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let listing = connections_json(home, daemon);
-        if !tui_pids(&listing).contains(&pid) || !pid_alive(pid) {
-            return false;
+        let output = Command::new("pgrep")
+            .args(["-P", &parent.to_string(), "-x", name])
+            .output()
+            .ok()?;
+        if let Some(pid) = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.trim().parse().ok())
+        {
+            return Some(pid);
         }
-        observed = true;
         std::thread::sleep(Duration::from_millis(100));
     }
-    observed
+    None
 }
-
 #[test]
 fn daemon_start_status_stop_round_trip() {
     reap_orphaned_test_daemons();
@@ -517,9 +509,10 @@ fn daemon_start_status_stop_round_trip() {
     }
 }
 
-/// S-B acceptance: a real Hangar plugin inside the real TUI registers its
-/// authenticated TUI presence with the daemon, keeps that row live, then drops
-/// it when this test shuts down its exact tmux session. Raw daemon-row tests
+/// S-B acceptance: a real Hangar plugin inside the real TUI connects to the
+/// daemon without adding a row of its own (#1040), the TUI stays ONE live
+/// `tui` row while the plugin runs, and both the row and the plugin go when
+/// this test shuts down its exact tmux session. Raw daemon-row tests
 /// and in-process plugin mocks cannot prove this host, subprocess, socket, and
 /// CLI-list path together.
 #[test]
@@ -609,14 +602,11 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
             .all(|connection| connection["surface"]["kind"].as_str() == Some("tui")),
         "only CLI observers and the TUI itself may be connected before the Hangar launch key: {empty_listing}"
     );
-    // Recorded, not forbidden. The `ainb tui` process registers its OWN `tui`
-    // surface when it connects to the daemon, before and independently of the
-    // Hangar plugin, so requiring zero `tui` rows here asserted a race: on
-    // macOS that registration landed before this probe and the test failed
-    // with a listing that was entirely correct (#953). What the launch key
-    // must do is produce a NEW one, which is what this baseline makes
-    // checkable.
-    let tui_before = tui_pids(&empty_listing);
+    // The `ainb tui` process registers its OWN `tui` surface through its
+    // presence lease, before and independently of the Hangar plugin, and on
+    // macOS it can land before the probe above (#953). Wait for it, so the
+    // row the plugin must fold into is known.
+    let tui_pid = wait_until_one_tui_pid(home.path(), &daemon, Duration::from_secs(30));
 
     press_hangar_launch_key(tui.name());
     let hangar_capture = poll_capture(tui.name(), Duration::from_secs(30), |capture| {
@@ -632,24 +622,36 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         !hangar_capture.contains("Stats"),
         "HomeScreen remained visible after Hangar launch key:\n{hangar_capture}"
     );
-    let (plugin_pid, first_listing) =
-        wait_for_new_tui_pid(home.path(), &daemon, &tui_before, Duration::from_secs(30));
-    assert!(
-        tui_pids(&first_listing).contains(&plugin_pid),
-        "connections list must expose the live TUI row with its process pid: {first_listing}"
-    );
-    assert!(
-        !tui_before.contains(&plugin_pid),
-        "the plugin's connection must be the one the launch key created: {first_listing}"
-    );
+    // The chrome reads `online` only once the plugin's own daemon connection
+    // has authenticated and subscribed, so the plugin is connected from here.
+    poll_capture(tui.name(), Duration::from_secs(30), |capture| {
+        capture.contains("online")
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "the Hangar plugin never reached online; last capture:\n{}",
+            capture_pane(tui.name())
+        )
+    });
+    let plugin_pid = child_pid_named(tui_pid, "hangar-tui").unwrap_or_else(|| {
+        panic!("no hangar-tui child of the TUI pid {tui_pid} after the launch key")
+    });
 
-    // Poll through a real hold period so this cannot pass on a transient
-    // registration event. The plugin PID remains alive while its parent TUI
-    // session remains connected.
-    let stable = tui_stays_listed(home.path(), &daemon, plugin_pid, Duration::from_millis(750));
+    // #1040: the plugin's connection folds into the TUI's presence, held
+    // through a real period so a late second row cannot slip past.
+    let deadline = Instant::now() + Duration::from_millis(750);
+    while Instant::now() < deadline {
+        let listing = connections_json(home.path(), &daemon);
+        assert_eq!(
+            tui_pids(&listing),
+            std::collections::BTreeSet::from([tui_pid]),
+            "a running TUI with its Hangar screen open must be one tui row: {listing}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(
-        stable,
-        "TUI pid {plugin_pid} did not remain listed while its tmux session lived"
+        pid_alive(plugin_pid),
+        "the plugin stays up while listed once"
     );
 
     // Exact session only. Drop keeps this same cleanup armed if a later
@@ -658,9 +660,9 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
     assert!(
         wait_until(Duration::from_secs(15), || {
             let listing = connections_json(home.path(), &daemon);
-            !tui_pids(&listing).contains(&plugin_pid)
+            !tui_pids(&listing).contains(&tui_pid)
         }),
-        "TUI row for pid {plugin_pid} remained after exact tmux shutdown"
+        "TUI row for pid {tui_pid} remained after exact tmux shutdown"
     );
     assert!(
         wait_until(Duration::from_secs(5), || !pid_alive(plugin_pid)),
