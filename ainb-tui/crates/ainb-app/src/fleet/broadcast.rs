@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetActionReceipt};
 
 /// Where the broadcast is.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastPhase {
     /// Typing. The composer holds the text.
     #[default]
@@ -38,10 +38,15 @@ enum BroadcastOutcome {
 }
 
 /// The broadcast composer and its in-flight send.
-#[derive(Debug, Default)]
+#[derive(serde::Serialize, Debug, Default)]
 pub struct Broadcast {
+    #[serde(
+        rename = "text_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     text: String,
     phase: BroadcastPhase,
+    #[serde(skip)]
     inbox: Arc<Mutex<Vec<BroadcastOutcome>>>,
 }
 
