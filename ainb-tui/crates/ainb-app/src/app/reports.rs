@@ -126,12 +126,85 @@ pub struct DaemonActionReport {
     pub daemon: String,
     /// The verb, as `ainb daemon` spells it.
     pub verb: String,
+    /// The generation of the request this answers, as the effect carried it.
+    #[serde(default)]
+    pub generation: u64,
     /// Whether the command exited zero.
     pub ok: bool,
     /// One line for the daemon's row.
     pub summary: String,
     /// Everything the command said: argv, exit status and output.
     pub detail: String,
+    /// The real summary and detail when they carry a credential (a pairing
+    /// code): kept in this process and only a handle serialised, while
+    /// `summary` and `detail` say so without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalOutput>,
+}
+
+impl DaemonActionReport {
+    /// This report answering the request of `generation`, ready to leave the
+    /// executor. A `pair` report's output is the Codex pairing code, a
+    /// short-lived credential: it moves into [`LocalOutput`] and the
+    /// serialised `summary` and `detail` say only that a code was minted.
+    #[must_use]
+    pub fn sealed(mut self, generation: u64) -> Self {
+        self.generation = generation;
+        if self.verb == crate::cli::daemon::Action::Pair.id() {
+            let summary = if self.ok {
+                "pairing code ready on this machine's Daemons screen".to_string()
+            } else {
+                "pair failed".to_string()
+            };
+            let detail = format!(
+                "`ainb daemon {} pair` output is kept on the machine that ran it",
+                self.daemon
+            );
+            let kept = LocalOutput::keep(
+                std::mem::replace(&mut self.summary, summary),
+                std::mem::replace(&mut self.detail, detail),
+            );
+            self.local = Some(kept);
+        }
+        self
+    }
+}
+
+/// Command output that never leaves the process that ran the command.
+///
+/// Serialised as an opaque random handle. The reducer of the same process
+/// redeems it once for the text; any other process, or a second redeem, gets
+/// nothing and shows the redacted fields instead.
+///
+/// ponytail: a report that is never dispatched leaves its entry behind; one
+/// per pairing attempt, so no eviction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LocalOutput(String);
+
+type LocalOutputs = std::sync::Mutex<std::collections::HashMap<String, (String, String)>>;
+
+fn local_outputs() -> &'static LocalOutputs {
+    static OUTPUTS: std::sync::OnceLock<LocalOutputs> = std::sync::OnceLock::new();
+    OUTPUTS.get_or_init(LocalOutputs::default)
+}
+
+impl LocalOutput {
+    /// Keep `summary` and `detail` in this process behind a new handle.
+    #[must_use]
+    pub fn keep(summary: String, detail: String) -> Self {
+        let handle = Uuid::new_v4().to_string();
+        if let Ok(mut outputs) = local_outputs().lock() {
+            outputs.insert(handle.clone(), (summary, detail));
+        }
+        Self(handle)
+    }
+
+    /// The kept summary and detail, once, in the process that kept them.
+    #[must_use]
+    pub fn redeem(&self) -> Option<(String, String)> {
+        local_outputs().lock().ok()?.remove(&self.0)
+    }
 }
 
 fn command(id: &str, args: Args) -> Intent {
