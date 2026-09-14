@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Steps in the onboarding wizard
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum OnboardingStep {
     Welcome,
     /// How did you find ainb? (questionnaire)
@@ -88,6 +89,7 @@ impl QuestionnaireKind {
 
 /// Available editor option for selection
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct EditorOption {
     /// Display name (e.g., "VS Code", "Cursor")
     pub name: String,
@@ -282,11 +284,13 @@ impl OnboardingStep {
 
 /// Validation result for a git directory path
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ValidatedPath {
     pub path: PathBuf,
     pub is_valid: bool,
     pub expanded_path: PathBuf,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error: Option<String>,
 }
 
@@ -347,6 +351,7 @@ impl ValidatedPath {
 
 /// Focus areas within steps that have multiple interactive elements
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum OnboardingFocus {
     /// Main content area
     Content,
@@ -358,6 +363,7 @@ pub enum OnboardingFocus {
 
 /// Full onboarding wizard state
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct OnboardingState {
     /// Current step in the wizard
     pub current_step: OnboardingStep,
@@ -383,9 +389,11 @@ pub struct OnboardingState {
     pub show_cursor: bool,
     /// Error message to display
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error_message: Option<String>,
     /// Transient success/status message (e.g. after the `I` tmux-config install)
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub status_message: Option<String>,
     /// After pressing `G`: waiting for the user to pick an agent for the
     /// generated install script (c/x/p), or Esc to cancel.
@@ -406,18 +414,21 @@ pub struct OnboardingState {
     pub otel_skip: bool,
     /// OTEL: Grafana Cloud OTLP endpoint URL (ends in /otlp)
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub otel_otlp_endpoint: String,
     /// OTEL: Grafana Cloud Instance ID (Basic-auth username)
     #[serde(
         rename = "otel_instance_id_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub otel_instance_id: String,
     /// OTEL: Grafana Cloud API token (secret)
     #[serde(
         rename = "otel_api_token_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub otel_api_token: String,
     /// OTEL: focused form field (0=endpoint, 1=instance, 2=token)
     pub otel_field: usize,
@@ -442,6 +453,7 @@ pub struct OnboardingState {
 /// injects nothing) or `ApiKey` (a key ainb stores in the keychain and injects
 /// as the harness's env var when a session starts).
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AuthAgent {
     Claude,
     Codex,
@@ -564,6 +576,7 @@ impl AuthAgent {
 
 /// Auth method a harness is currently using (detected) or being switched to.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AuthMethodKind {
     /// Native / system-wide sign-in; ainb injects nothing.
     Login,
@@ -586,18 +599,21 @@ impl AuthMethodKind {
 /// refreshed on entering the step / after a change — never read from the
 /// keychain during render (which runs every frame).
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AgentAuthStatus {
     pub agent: AuthAgent,
     pub method: AuthMethodKind,
     /// Masked key (e.g. "sk-ant-xxxx••••") when `method == ApiKey` and a key is
     /// actually stored; `None` otherwise.
     #[serde(rename = "has_key", serialize_with = "crate::wire::fields::is_some")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = bool))]
     pub key_masked: Option<String>,
 }
 
 /// Which sub-view of the Authentication step is active. Drives both the render
 /// and the key dispatch so the flat option list becomes a per-agent drill-down.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AuthPane {
     /// Browsing the per-agent list (default).
     AgentList,
@@ -607,19 +623,25 @@ pub enum AuthPane {
     KeyEntry {
         agent: AuthAgent,
         #[serde(rename = "buf_len", serialize_with = "crate::wire::fields::char_count")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
         buf: String,
     },
 }
 
 /// Background-install state for a single dependency on the deps screen.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum DepInstall {
     /// Install command running in the background.
     Installing,
     /// Finished successfully (the next re-detect should flip the checkbox).
     Done,
     /// Failed — carries a short error message to show inline.
-    Error(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
+    Error(
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
+        String,
+    ),
 }
 
 impl OnboardingState {
