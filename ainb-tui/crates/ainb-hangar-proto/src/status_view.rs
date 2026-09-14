@@ -36,17 +36,67 @@ impl AgentCard {
     /// ignored, so a heartbeat that changes no rendered fact is not a change.
     #[must_use]
     pub fn renders_same_as(&self, other: &Self) -> bool {
-        fn without_heartbeat(session: &FleetSession) -> FleetSession {
-            FleetSession {
-                last_observed_at: 0,
-                version: 0,
-                updated_revision: 0,
-                ..session.clone()
-            }
-        }
-        self.status == other.status
-            && without_heartbeat(&self.session) == without_heartbeat(&other.session)
+        self.status == other.status && sessions_render_same(&self.session, &other.session)
     }
+}
+
+/// Field-by-field equality of two roster sessions, skipping heartbeat stamps,
+/// by borrow: runs for every card on every read, so it copies nothing.
+fn sessions_render_same(a: &FleetSession, b: &FleetSession) -> bool {
+    let FleetSession {
+        session_key,
+        provider,
+        provider_session_id,
+        tmux_target,
+        pane_binding,
+        process_start_fingerprint,
+        cwd,
+        display_name,
+        lifecycle,
+        active_work_count,
+        attention,
+        current_request_fingerprint,
+        current_request,
+        management,
+        transport_health,
+        capabilities,
+        provenance,
+        confidence,
+        discovered_at,
+        lifecycle_updated_at,
+        attention_updated_at,
+        model,
+        reasoning_effort,
+        model_updated_at,
+        // Heartbeat stamps: move without any rendered fact changing.
+        last_observed_at: _,
+        version: _,
+        updated_revision: _,
+    } = a;
+    *session_key == b.session_key
+        && *provider == b.provider
+        && *provider_session_id == b.provider_session_id
+        && *tmux_target == b.tmux_target
+        && *pane_binding == b.pane_binding
+        && *process_start_fingerprint == b.process_start_fingerprint
+        && *cwd == b.cwd
+        && *display_name == b.display_name
+        && *lifecycle == b.lifecycle
+        && *active_work_count == b.active_work_count
+        && *attention == b.attention
+        && *current_request_fingerprint == b.current_request_fingerprint
+        && *current_request == b.current_request
+        && *management == b.management
+        && *transport_health == b.transport_health
+        && *capabilities == b.capabilities
+        && *provenance == b.provenance
+        && *confidence == b.confidence
+        && *discovered_at == b.discovered_at
+        && *lifecycle_updated_at == b.lifecycle_updated_at
+        && *attention_updated_at == b.attention_updated_at
+        && *model == b.model
+        && *reasoning_effort == b.reasoning_effort
+        && *model_updated_at == b.model_updated_at
 }
 
 /// How current the view is, which every surface renders instead of guessing.
@@ -84,6 +134,9 @@ pub struct StatusView {
     pub received_at_ms: i64,
     /// How current the rows are.
     pub health: ViewHealth,
+    /// The newest Fleet revision this surface has been told about, retained
+    /// across reads so a read below it can never render as live.
+    pub head_revision: i64,
     /// One card per session, by `session_key`.
     pub cards: BTreeMap<String, AgentCard>,
 }
@@ -97,6 +150,7 @@ impl StatusView {
             read_revision: i64::MIN,
             received_at_ms,
             health: ViewHealth::Live,
+            head_revision: i64::MIN,
             cards: BTreeMap::new(),
         };
         view.apply(result, received_at_ms);
@@ -107,11 +161,20 @@ impl StatusView {
     /// changed (a card, the host, or the health), so a versioned owner bumps
     /// only then and a heartbeat-only read leaves it untouched.
     ///
-    /// A read older than the one already held is refused (returns `false` and
-    /// changes nothing): it describes an earlier instant.
+    /// A read older than the one already held never replaces the cards, but
+    /// it is not dropped silently either: the view goes stale against the
+    /// newest revision it knows (#1019 review). A store rebuilt with a reset
+    /// revision counter therefore renders stale until a read catches up,
+    /// instead of freezing old cards as live.
     pub fn apply(&mut self, result: RosterStatusResult, received_at_ms: i64) -> bool {
         if result.read_revision < self.read_revision {
-            return false;
+            let next = ViewHealth::Stale {
+                read_revision: result.read_revision,
+                head_revision: self.read_revision.max(self.head_revision),
+            };
+            let changed = self.health != next;
+            self.health = next;
+            return changed;
         }
         let cards: BTreeMap<String, AgentCard> = result
             .rows
@@ -134,18 +197,27 @@ impl StatusView {
             || cards.iter().any(|(key, card)| {
                 self.cards.get(key).is_none_or(|held| !held.renders_same_as(card))
             });
-        let changed = cards_changed || host_id != self.host_id || self.health != ViewHealth::Live;
+        let health = if self.head_revision > result.read_revision {
+            ViewHealth::Stale {
+                read_revision: result.read_revision,
+                head_revision: self.head_revision,
+            }
+        } else {
+            ViewHealth::Live
+        };
+        let changed = cards_changed || host_id != self.host_id || self.health != health;
         self.cards = cards;
         self.host_id = host_id;
         self.read_revision = result.read_revision;
         self.received_at_ms = received_at_ms;
-        self.health = ViewHealth::Live;
+        self.health = health;
         changed
     }
 
     /// A newer Fleet revision was observed. The rows go stale until a read at
     /// or past it lands. Returns whether the health changed.
     pub fn observe_head(&mut self, head_revision: i64) -> bool {
+        self.head_revision = self.head_revision.max(head_revision);
         if head_revision <= self.read_revision {
             return false;
         }
@@ -274,6 +346,42 @@ mod tests {
         );
     }
 
+    /// #1019 review: a silent (unverifiable) row's heartbeat is not a change
+    /// either, now that its evidence clock is its discovery.
+    #[test]
+    fn a_heartbeat_on_a_silent_row_is_not_a_change() {
+        let mut silent = session("claude:silent", AttentionState::None);
+        silent.lifecycle = LifecycleState::Unknown;
+        let mut view = StatusView::from_read(read(3, std::slice::from_ref(&silent)), 100);
+        assert_eq!(
+            view.cards().next().unwrap().status.state,
+            AgentState::Unverifiable
+        );
+        silent.last_observed_at += 60_000;
+        silent.version += 1;
+        assert!(
+            !view.apply(read(4, &[silent]), 200),
+            "a silent row's heartbeat bumps nothing"
+        );
+    }
+
+    /// A read below a revision this surface was already told about renders
+    /// stale, not live, even when it is newer than the rows held.
+    #[test]
+    fn a_read_below_the_known_head_renders_stale() {
+        let mut view =
+            StatusView::from_read(read(9, &[session("claude:a", AttentionState::Ask)]), 1);
+        view.observe_head(12);
+        assert!(view.apply(read(10, &[session("claude:a", AttentionState::Ask)]), 2));
+        assert_eq!(
+            view.health,
+            ViewHealth::Stale {
+                read_revision: 10,
+                head_revision: 12
+            }
+        );
+    }
+
     /// Stale and unreachable are rendered facts, not states: rows stay frozen.
     #[test]
     fn stale_and_unreachable_freeze_rows_and_a_fresh_read_goes_live() {
@@ -307,12 +415,24 @@ mod tests {
             "rows are frozen as last read, never turned unverifiable"
         );
 
-        assert!(!view.apply(read(2, &[]), 3_000), "an older read is refused");
+        assert!(
+            view.apply(read(2, &[]), 3_000),
+            "an older read is not silent"
+        );
+        assert_eq!(
+            view.health,
+            ViewHealth::Stale {
+                read_revision: 2,
+                head_revision: 5
+            },
+            "it renders stale against the newest known revision"
+        );
+        assert_eq!(view.cards().count(), 1, "and never replaces the cards");
         assert!(view.apply(read(6, &[session("claude:a", AttentionState::Ask)]), 3_000));
         assert_eq!(
             view.health,
             ViewHealth::Live,
-            "a fresh read goes live again"
+            "a read at or past the head goes live"
         );
     }
 }
