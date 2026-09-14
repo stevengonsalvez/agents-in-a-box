@@ -775,8 +775,9 @@ async fn run_tui_loop(
                     let confirming = app.state.shell.confirmation_dialog.is_some();
                     run_intent(ainb::Intent::Key(chord), app, &keymap, &mut ui, terminal).await?;
                     // Layout work the table resolved never reaches the reducer.
+                    let columns = terminal.size().map_or(80, |size| size.width);
                     for action in ui.take_queued() {
-                        if let Some(save) = ui.apply_host(action, layout, &app.state) {
+                        if let Some(save) = ui.apply_host(action, layout, &app.state, columns) {
                             run_intent(save, app, &keymap, &mut ui, terminal).await?;
                         }
                     }
