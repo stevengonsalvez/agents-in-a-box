@@ -554,3 +554,43 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
         "after release, a preview click must move focus to LiveLogs again"
     );
 }
+
+#[test]
+fn a_read_only_observer_forwards_no_input() {
+    if !tmux_available() || !ainb::tmux::EmbedClient::read_only_observer_supported() {
+        eprintln!("SKIP: tmux with read-only client support not available");
+        return;
+    }
+    // A read-only tmux client drops typed keys itself, but still obeys the
+    // prefix and `d`: had the bytes reached it, the observer would detach.
+    let prefix = Command::new("tmux")
+        .args(["show-options", "-gv", "prefix"])
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default();
+    let Some(letter) = prefix.strip_prefix("C-").and_then(|key| key.bytes().next()) else {
+        eprintln!("SKIP: tmux prefix `{prefix}` is not a control chord");
+        return;
+    };
+    let name = new_session("observer-input");
+    let mut clients = TerminalClients::default();
+    let tmux_session = ainb::app::TmuxSessionName::new(&name).expect("valid name");
+    let _ = clients.open_observer(&tmux_session, 24, 80);
+    assert!(clients.held().is_some(), "the observer opened");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let report = clients.write_input(&[letter.to_ascii_lowercase() - b'a' + 1, b'd']);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let exited = clients.take_exited();
+    kill_session(&name);
+
+    assert!(
+        report.is_none(),
+        "an observer refusing input is not a failure"
+    );
+    assert!(
+        exited.is_none(),
+        "the detach chord never reached the observer"
+    );
+    assert!(clients.held().is_some(), "the observer stays open");
+}
