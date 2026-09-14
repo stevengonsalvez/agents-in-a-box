@@ -366,8 +366,25 @@ pub struct RosterStatusResult {
 /// surface on the pre-section read (`[fleet.status] legacy_panel`) calls it on
 /// its two replies instead of keeping a join of its own. A session the status
 /// read does not name is left out: a row without a state is not a row.
+///
+/// `read_at_ms` is the daemon's clock at the read, the clock the evidence
+/// stamps are on; a caller that has no daemon clock passes `0`, which surfaces
+/// read as "unknown" and age on their own now. It is a parameter, not a field
+/// set afterwards, so no producer can forget it:
+///
+/// ```compile_fail
+/// # use ainb_hangar_proto::agent_status::{join, AgentStatusResult};
+/// # use ainb_hangar_proto::fleet::FleetSnapshot;
+/// fn producer(snapshot: &FleetSnapshot, status: &AgentStatusResult) {
+///     let _ = join(snapshot, status); // no daemon clock: does not compile
+/// }
+/// ```
 #[must_use]
-pub fn join(snapshot: &FleetSnapshot, status: &AgentStatusResult) -> RosterStatusResult {
+pub fn join(
+    snapshot: &FleetSnapshot,
+    status: &AgentStatusResult,
+    read_at_ms: i64,
+) -> RosterStatusResult {
     let states: std::collections::BTreeMap<&str, &AgentStatusRow> =
         status.rows.iter().map(|row| (row.session_key.as_str(), row)).collect();
     let read_revision = snapshot.head_revision.min(status.head_revision);
@@ -387,7 +404,7 @@ pub fn join(snapshot: &FleetSnapshot, status: &AgentStatusResult) -> RosterStatu
         rows,
         read_revision,
         unknown_events: status.unknown_events.clone(),
-        read_at_ms: 0,
+        read_at_ms,
     }
 }
 
@@ -805,7 +822,7 @@ mod tests {
             head_revision: 8,
             unknown_events: Vec::new(),
         };
-        let joined = join(&snapshot, &status);
+        let joined = join(&snapshot, &status, 0);
         assert_eq!(joined.read_revision, 8);
         assert_eq!(joined.rows.len(), 1, "a session with no state is not a row");
         assert_eq!(joined.rows[0].session.session_key, "claude:s-1");
