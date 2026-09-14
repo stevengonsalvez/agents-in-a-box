@@ -85,6 +85,9 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         };
         use ratatui::{Terminal, backend::TestBackend};
 
+        const WIDTH: u16 = 140;
+        const HEIGHT: u16 = 30;
+
         let snapshot =
             ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot");
         let snapshot: ainb_hangar_proto::fleet::FleetSnapshot =
@@ -106,8 +109,6 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             "the TUI fleet panel must hold the daemon's tuple, not its own reading"
         );
 
-        const WIDTH: u16 = 140;
-        const HEIGHT: u16 = 30;
         let mut wire = ainb_plugin_protocol::wire_buffer::WireBuffer::new(WIDTH, HEIGHT);
         render_fleet(&mut wire, WIDTH, 0, HEIGHT, &pane);
         let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
