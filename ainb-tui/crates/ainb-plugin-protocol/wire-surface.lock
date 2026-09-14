@@ -5,7 +5,7 @@
 #
 # The regenerator REFUSES to write while the surface has changed but
 # ainb-plugin-protocol's version has not. Bump the version first.
-protocol_version = "0.1.0"
+protocol_version = "0.1.1"
 
 [lib]
 reexport errors :: { ProtocolError , RpcError }
@@ -118,6 +118,7 @@ const PLUGIN_RENDER: & str = "plugin/render"
 const PLUGIN_HANDLE_EVENT: & str = "plugin/handle_event"
 const PLUGIN_HANDLE_KEY: & str = "plugin/handle_key"
 const PLUGIN_HANDLE_MOUSE: & str = "plugin/handle_mouse"
+const PLUGIN_HANDLE_ACTION: & str = "plugin/handle_action"
 const PLUGIN_CLI_DISPATCH: & str = "plugin/cli_dispatch"
 const HOST_SNAPSHOT_GET: & str = "host/snapshot/get"
 const HOST_SNAPSHOT_PUBLISH: & str = "host/snapshot/publish"
@@ -140,7 +141,7 @@ const HOST_WORKSPACE_SET_ACTIVE: & str = "host/workspace_set_active"
 const HOST_WORKSPACE_SET_DEFAULT: & str = "host/workspace_set_default"
 const HOST_WORKSPACE_CREATE: & str = "host/workspace_create"
 const HOST_WORKSPACE_DELETE: & str = "host/workspace_delete"
-const ALL_METHODS: & [& str] = & [PLUGIN_INIT , PLUGIN_SHUTDOWN , PLUGIN_RENDER , PLUGIN_HANDLE_EVENT , PLUGIN_HANDLE_KEY , PLUGIN_HANDLE_MOUSE , PLUGIN_CLI_DISPATCH , HOST_SNAPSHOT_GET , HOST_SNAPSHOT_PUBLISH , HOST_SNAPSHOT_SUBSCRIBE , HOST_ACTION_INVOKE , HOST_LOG , HOST_FS_READ_DIR , HOST_FS_READ_FILE , HOST_NETWORK_FETCH , HOST_EVENT_STREAM_SUBSCRIBE , HOST_EVENT_STREAM_CANCEL , HOST_SPAWN_MANAGED_SUBPROCESS , HOST_UNIX_SOCKET_DIAL , HOST_UNIX_SOCKET_SEND , HOST_UNIX_SOCKET_CLOSE , HOST_SECRET_STORE_GET , HOST_WORKSPACE_LIST , HOST_WORKSPACE_GET_ACTIVE , HOST_WORKSPACE_SET_ACTIVE , HOST_WORKSPACE_SET_DEFAULT , HOST_WORKSPACE_CREATE , HOST_WORKSPACE_DELETE ,]
+const ALL_METHODS: & [& str] = & [PLUGIN_INIT , PLUGIN_SHUTDOWN , PLUGIN_RENDER , PLUGIN_HANDLE_EVENT , PLUGIN_HANDLE_KEY , PLUGIN_HANDLE_MOUSE , PLUGIN_HANDLE_ACTION , PLUGIN_CLI_DISPATCH , HOST_SNAPSHOT_GET , HOST_SNAPSHOT_PUBLISH , HOST_SNAPSHOT_SUBSCRIBE , HOST_ACTION_INVOKE , HOST_LOG , HOST_FS_READ_DIR , HOST_FS_READ_FILE , HOST_NETWORK_FETCH , HOST_EVENT_STREAM_SUBSCRIBE , HOST_EVENT_STREAM_CANCEL , HOST_SPAWN_MANAGED_SUBPROCESS , HOST_UNIX_SOCKET_DIAL , HOST_UNIX_SOCKET_SEND , HOST_UNIX_SOCKET_CLOSE , HOST_SECRET_STORE_GET , HOST_WORKSPACE_LIST , HOST_WORKSPACE_GET_ACTIVE , HOST_WORKSPACE_SET_ACTIVE , HOST_WORKSPACE_SET_DEFAULT , HOST_WORKSPACE_CREATE , HOST_WORKSPACE_DELETE ,]
 
 [params]
 struct PluginInitParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
@@ -222,6 +223,9 @@ struct HandleMouseParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize 
   field screen_id: String
   field mouse: MouseEvent
   field generation: u64
+struct HandleActionParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field action_id: String
+  field payload: serde_json :: Value [# [serde (default)]]
 struct CliDispatchParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
   field namespace: String
   field argv: Vec < String >
@@ -346,6 +350,7 @@ struct WorkspaceDeleteResult [# [derive (Debug , Clone , Default , PartialEq , E
 
 [topics]
 const UI_CLOSE_REQUEST: & str = "ui.close_request"
+const UI_STATE: & str = "ui.state"
 struct UiCloseRequest [# [derive (Debug , Clone , PartialEq , Eq , serde :: Serialize , serde :: Deserialize)]]
   field screen_id: String
 
