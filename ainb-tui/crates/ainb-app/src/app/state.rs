@@ -3009,6 +3009,15 @@ impl AppState {
         self.effects.take()
     }
 
+    /// Apply the event a background result deferred to the host's next loop
+    /// iteration, if any, and return the effects it queued.
+    pub fn apply_pending_event(&mut self) -> Vec<crate::app::effect::Effect> {
+        if let Some(event) = self.shell.pending_event.take() {
+            crate::app::events::EventHandler::process_event(event, self);
+        }
+        self.take_effects()
+    }
+
     /// Whether the Claude statusline is wired into `~/.claude/settings.json`,
     /// read through a TTL cache. `None` when the settings file could not be
     /// read.
