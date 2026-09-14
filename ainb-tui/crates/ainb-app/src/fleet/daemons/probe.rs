@@ -214,14 +214,22 @@ pub struct DaemonStatus {
     #[serde(default)]
     pub error_count: u64,
     /// The most recent error string, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::wire::fields::scrub_opt_in_frame"
+    )]
     pub last_error: Option<String>,
     /// Epoch ms of the last SUCCESSFUL poll of the attention source by this
     /// daemon's outbound worker (bridge only). `None` = never polled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_attention_poll_at: Option<i64>,
     /// The last attention-source failure, when known (bridge only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::wire::fields::scrub_opt_in_frame"
+    )]
     pub last_attention_error: Option<String>,
     /// How many INBOUND chat channels the daemon started (bridge only). `0` for
     /// a daemon that makes no inbound claim.
@@ -233,7 +241,11 @@ pub struct DaemonStatus {
     #[serde(default)]
     pub inbound_live: u32,
     /// Why the last inbound channel stopped, when known (bridge only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::wire::fields::scrub_opt_in_frame"
+    )]
     pub last_inbound_error: Option<String>,
     /// A short human explanation of the state — the load-bearing field for
     /// telling "clean stop" from "crashed (stale heartbeat)".
