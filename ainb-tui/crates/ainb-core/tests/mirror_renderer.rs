@@ -377,3 +377,34 @@ fn a_card_ages_on_the_daemon_clock_across_a_90_second_skew() {
         "local now minus a remote stamp goes negative"
     );
 }
+
+/// The Fleet section's rows are stamped on the daemon's clock too. A daemon
+/// 90 s ahead: the Fleet frame names that clock, so a row observed 5 s before
+/// the read ages 5 s, where this surface's own now would make it negative.
+#[test]
+fn a_fleet_row_ages_on_the_daemon_clock_across_a_90_second_skew() {
+    const SKEW_MS: i64 = 90_000;
+    isolated_home();
+    let local_now = 1_000_000;
+    let daemon_read_at = local_now + SKEW_MS;
+    let observed = daemon_read_at - 5_000;
+    let mut state = AppState::new();
+    state.apply_agent_status_read(roster_read("h1", daemon_read_at, observed), local_now);
+    let read = roster_read("h1", daemon_read_at, observed);
+    let session = proto::FleetSession {
+        attention_updated_at: observed,
+        ..read.rows[0].session.clone()
+    };
+    *state.fleet.get_mut().fleet_snapshot.lock().unwrap() = vec![session];
+
+    let subscription = Subscription::only(&[SectionId::Fleet]);
+    let batch = Mirror::new(HostId::new("h1"), subscription).batch(&state);
+    let frame = &batch.frames[0];
+    let clock = frame.daemon_read.expect("the Fleet frame names the daemon clock").clock_ms;
+    let stamp = frame.body["fleet_snapshot"][0]["attention_updated_at"].as_i64().unwrap();
+    assert_eq!(clock - stamp, 5_000, "the age a renderer draws");
+    assert!(
+        local_now - stamp < 0,
+        "local now minus a remote stamp goes negative"
+    );
+}
