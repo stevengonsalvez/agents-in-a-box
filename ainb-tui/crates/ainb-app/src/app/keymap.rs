@@ -361,6 +361,28 @@ pub struct HostFlags {
 }
 
 impl KeyContext {
+    /// Whether this context is an overlay drawn over the screen: a dialog,
+    /// popup, menu, rename field or the help sheet. Keys it does not bind still
+    /// fall through to the screen, but a command from outside the overlay does
+    /// not reach past it (see [`command_contexts`]).
+    #[must_use]
+    pub const fn is_overlay(&self) -> bool {
+        matches!(
+            self,
+            Self::ConfirmDialog
+                | Self::McpOverlay
+                | Self::SessionRename
+                | Self::OtherTmuxRename
+                | Self::SshRename
+                | Self::SessionContextMenu
+                | Self::HelpVisible
+                | Self::QuickCommit
+                | Self::SkillManagerOverlay
+                | Self::ConfigPopup
+                | Self::AuthProviderPopup
+        )
+    }
+
     /// Screen context without a sub-state.
     #[must_use]
     pub const fn screen(screen: &'static str) -> Self {
@@ -539,6 +561,22 @@ pub(crate) fn onboarding_sub_context(
         OnboardingStep::Summary => "summary",
         OnboardingStep::Welcome => "welcome",
     }
+}
+
+/// The contexts a named command may run in: [`active_contexts`] up to and
+/// including the topmost overlay, when one is open.
+///
+/// A command is a click or a palette pick resolved against what a renderer
+/// drew. While a dialog or popup covers the screen, a command for the screen
+/// beneath it (a wheel over the diff, a row click) was aimed at something the
+/// user can no longer act on, so it runs only if it belongs to the overlay.
+#[must_use]
+pub fn command_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
+    let mut contexts = active_contexts(state, host);
+    if let Some(top) = contexts.iter().position(KeyContext::is_overlay) {
+        contexts.truncate(top + 1);
+    }
+    contexts
 }
 
 /// Mirror host dispatch precedence without allowing renderer state into `AppState`.
