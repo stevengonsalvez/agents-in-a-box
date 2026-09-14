@@ -12,6 +12,7 @@ pub use crate::cli::deps::Consumer;
 /// mentions (Suggested) a missing dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Tier {
     /// Blocks core functionality if missing — onboarding cannot complete.
     Required,
