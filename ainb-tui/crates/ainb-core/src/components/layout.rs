@@ -268,12 +268,6 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
         }
     }
 
-    if ui.home_sidebar_rect.is_some() {
-        state.shell.set_if_changed(
-            |shell| &mut shell.home_screen_v2_state.last_sidebar_rect,
-            ui.home_sidebar_rect.map(area_of),
-        );
-    }
     state.shell.set_if_changed(
         |shell| &mut shell.home_screen_v2_state.welcome.content_height,
         ui.welcome_viewport.0,
