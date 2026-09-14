@@ -132,6 +132,9 @@ pub struct StatusView {
     /// Local clock, epoch ms, when the last read was received. Stamped here,
     /// never computed from a remote stamp (D14 clock table).
     pub received_at_ms: i64,
+    /// The daemon's clock, epoch ms, when it took the last read. `0` when the
+    /// daemon did not say.
+    pub read_at_ms: i64,
     /// How current the rows are.
     pub health: ViewHealth,
     /// The newest Fleet revision this surface has been told about, retained
@@ -149,6 +152,7 @@ impl StatusView {
             host_id: String::new(),
             read_revision: i64::MIN,
             received_at_ms,
+            read_at_ms: 0,
             health: ViewHealth::Live,
             head_revision: i64::MIN,
             cards: BTreeMap::new(),
@@ -210,6 +214,7 @@ impl StatusView {
         self.host_id = host_id;
         self.read_revision = result.read_revision;
         self.received_at_ms = received_at_ms;
+        self.read_at_ms = result.read_at_ms;
         self.health = health;
         changed
     }
@@ -249,6 +254,22 @@ impl StatusView {
         let changed = self.health != next;
         self.health = next;
         changed
+    }
+
+    /// The daemon's clock now, estimated as the daemon's read clock plus the
+    /// time this surface has held the read on its OWN clock.
+    ///
+    /// A card's age is `daemon_now_ms - evidence_observed_at`: both on the
+    /// daemon's clock. Subtracting a remote evidence stamp from the local clock
+    /// renders a host 90 s ahead as `?` and one behind as 90 s too old. A read
+    /// from a daemon that did not stamp its clock falls back to local now,
+    /// which is right for a daemon on this machine.
+    #[must_use]
+    pub fn daemon_now_ms(&self, local_now_ms: i64) -> i64 {
+        if self.read_at_ms <= 0 {
+            return local_now_ms;
+        }
+        self.read_at_ms + (local_now_ms - self.received_at_ms).max(0)
     }
 
     /// Cards in `session_key` order.
@@ -310,6 +331,7 @@ mod tests {
                 .collect(),
             read_revision: revision,
             unknown_events: Vec::new(),
+            read_at_ms: 0,
         }
     }
 
@@ -433,6 +455,40 @@ mod tests {
             view.health,
             ViewHealth::Live,
             "a read at or past the head goes live"
+        );
+    }
+
+    /// A daemon 90 s ahead of this surface: a card whose evidence the daemon
+    /// saw 5 s before its read is 5 s old here, not `?` (the local clock has not
+    /// reached the stamp yet) and not 95 s. A second later it is 6 s.
+    #[test]
+    fn card_age_is_measured_on_the_daemon_clock_across_a_90_second_skew() {
+        const SKEW_MS: i64 = 90_000;
+        let local_received = 1_000_000;
+        let daemon_read_at = local_received + SKEW_MS;
+        let mut result = read(1, &[session("claude:a", AttentionState::Ask)]);
+        result.read_at_ms = daemon_read_at;
+        let evidence_observed_at = daemon_read_at - 5_000;
+        let view = StatusView::from_read(result, local_received);
+
+        assert_eq!(
+            view.daemon_now_ms(local_received) - evidence_observed_at,
+            5_000
+        );
+        assert_eq!(
+            view.daemon_now_ms(local_received + 1_000) - evidence_observed_at,
+            6_000
+        );
+        assert!(
+            local_received - evidence_observed_at < 0,
+            "local now minus the remote stamp is the bug: it goes negative"
+        );
+
+        // A daemon that did not stamp its clock is on this machine: local now.
+        let unstamped = StatusView::from_read(read(1, &[]), local_received);
+        assert_eq!(
+            unstamped.daemon_now_ms(local_received + 7),
+            local_received + 7
         );
     }
 }
