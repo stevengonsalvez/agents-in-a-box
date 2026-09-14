@@ -5,7 +5,7 @@ use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
 // Premium color palette (TUI Style Guide)
@@ -349,6 +349,46 @@ impl LayoutComponent {
         frame.render_widget(block, area);
     }
 
+    /// The preview pane when the selected row is the tmux session this TUI
+    /// runs in.
+    ///
+    /// Mirroring it would draw the TUI inside its own preview, which redraws
+    /// the preview, without end (#990). The tab strip is painted over the
+    /// border afterwards, like every other preview state.
+    fn render_host_session_placeholder(frame: &mut Frame, area: Rect, session: &str) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(CORNFLOWER_BLUE))
+            .style(Style::default().bg(PANEL_BG));
+        let body = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "🪞 This is the tmux session ainb is running in",
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                session.to_string(),
+                Style::default().fg(SOFT_WHITE),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "A live preview would show this screen inside itself.",
+                Style::default().fg(MUTED_GRAY),
+            )),
+            Line::from(Span::styled(
+                "Select another session to preview it.",
+                Style::default().fg(MUTED_GRAY),
+            )),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+        .block(block);
+        frame.render_widget(Clear, area);
+        frame.render_widget(body, area);
+    }
+
     /// Render one non-preview tab into the right pane.
     fn render_session_tab(
         &mut self,
@@ -671,7 +711,13 @@ impl LayoutComponent {
             // through them, so `ask` could not be opened on the very session
             // whose chip sent the operator looking, and keys routed to a chat
             // surface that was not on screen.
-            if observing_selection {
+            if let Some(session) = state
+                .is_host_tmux_session_selected()
+                .then(|| state.selected_tmux_name())
+                .flatten()
+            {
+                Self::render_host_session_placeholder(frame, content_chunks[1], &session);
+            } else if observing_selection {
                 let area = content_chunks[1];
                 let inner = area.inner(Margin {
                     vertical: 1,
