@@ -88,6 +88,9 @@ pub struct AuthenticatedHello {
     pub capabilities: Vec<String>,
     /// The paired device this connection belongs to (R1, off-box only).
     pub device: Option<DeviceInfo>,
+    /// The client declared this a call connection from a process whose
+    /// presence another connection holds, so the registry does not list it.
+    pub transient: bool,
 }
 
 /// Every method a Pal connection may call, and nothing else.
@@ -326,7 +329,7 @@ pub async fn authenticate_first_frame(
     let Ok(params) = serde_json::from_value::<HelloParams>(req.params.clone()) else {
         return Err(unauthorized(
             req.id,
-            "auth/hello params must be { token, surface?, protocol?, capabilities?, device? }",
+            "auth/hello params must be { token, surface?, protocol?, capabilities?, device?, transient? }",
         ));
     };
     // D17: version before credential. A build this daemon cannot speak is not
@@ -343,6 +346,7 @@ pub async fn authenticate_first_frame(
         protocol: selected,
         capabilities: params.capabilities.clone(),
         device: params.device.clone(),
+        transient: params.transient,
     };
 
     // The Pal credential FIRST, and it is never the daemon token: a scoped
