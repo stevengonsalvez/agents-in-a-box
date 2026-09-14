@@ -398,6 +398,10 @@ pub struct HangarPlugin {
     /// `[fleet.status] legacy_panel`: read `fleet/snapshot` and `fleet/status`
     /// separately and join them with the proto join, as before section 20.
     legacy_panel: bool,
+    /// This connection's daemon answered that it has no `fleet/roster_status`
+    /// (an N-1 daemon): read the two halves instead, negotiated once per
+    /// connection (#1019 review).
+    roster_status_unsupported: bool,
     /// The legacy path's snapshot half, waiting for its status half.
     legacy_snapshot: Option<ainb_hangar_proto::fleet::FleetSnapshot>,
     /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
@@ -717,6 +721,7 @@ impl Default for HangarPlugin {
                 )
             }),
             legacy_snapshot: None,
+            roster_status_unsupported: false,
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
             pending_detail_slug: None,
@@ -1044,8 +1049,10 @@ impl HangarPlugin {
         self.fleet_subscribe_pending = false;
         self.fleet_fetch_pending = false;
         self.fleet_status_pending = false;
-        // A reconnect may reach an upgraded or recovered daemon: ask at once.
+        // A reconnect may reach an upgraded or recovered daemon: ask at once,
+        // and ask for the joined read again.
         self.fleet_status_retry_at = None;
+        self.roster_status_unsupported = false;
         self.fleet_status_failures = 0;
         self.fleet_status_logged = None;
         self.conn.dialing();
@@ -2604,7 +2611,11 @@ impl HangarPlugin {
                 }
                 code => format!("{method} failed ({code}): {}", error.message),
             };
-            self.fail_fleet_read(Some(error.code), reason);
+            if error.code == METHOD_NOT_FOUND && method == daemon_methods::FLEET_ROSTER_STATUS {
+                self.fall_back_to_two_reads();
+            } else {
+                self.fail_fleet_read(Some(error.code), reason);
+            }
             return None;
         }
         let Some(result) = &resp.result else {
@@ -2618,6 +2629,31 @@ impl HangarPlugin {
                 None
             }
         }
+    }
+
+    /// An N-1 daemon without `fleet/roster_status`: read `fleet/snapshot` and
+    /// `fleet/status` on this connection instead and join them with the proto
+    /// join, rather than rendering nothing (#1019 review). The daemon's older
+    /// status rows carry no `wait_kind`, `turn_complete` or `attachment`, so
+    /// the panel lists the agents and their states but offers no answer or
+    /// approval actions until the daemon is upgraded.
+    fn fall_back_to_two_reads(&mut self) {
+        if !self.roster_status_unsupported {
+            self.pending_logs.push(
+                "hangar: daemon has no fleet/roster_status; reading fleet/snapshot and \
+                 fleet/status instead (rows without actions until the daemon is upgraded)"
+                    .to_string(),
+            );
+        }
+        self.roster_status_unsupported = true;
+        self.fleet_status_retry_at = None;
+        self.fleet_fetch_pending = true;
+        self.conn.on_event();
+    }
+
+    /// Whether this connection reads the two halves instead of the joined read.
+    const fn reads_two_halves(&self) -> bool {
+        self.legacy_panel || self.roster_status_unsupported
     }
 
     /// Every Fleet read failure takes this one path (#962, #1015): the panel
@@ -2962,7 +2998,7 @@ impl HangarPlugin {
         };
         // One joined read per refresh (#1015); the legacy panel keeps the two
         // reads, the status half queued right behind the snapshot.
-        let (id, method) = if self.legacy_panel {
+        let (id, method) = if self.reads_two_halves() {
             (FLEET_SNAPSHOT_REQ_ID, daemon_methods::FLEET_SNAPSHOT)
         } else {
             (
@@ -2977,7 +3013,7 @@ impl HangarPlugin {
         match send(stream_id, body) {
             Ok(NotificationEnqueueOutcome::Queued) => {
                 self.fleet_fetch_pending = false;
-                self.fleet_status_pending = self.legacy_panel;
+                self.fleet_status_pending = self.reads_two_halves();
             }
             Ok(NotificationEnqueueOutcome::Full) => {}
             Ok(NotificationEnqueueOutcome::Closed) => {
@@ -9980,38 +10016,73 @@ mod tests {
         );
     }
 
-    /// The joined read is what the panel renders; an older daemon without it
-    /// leaves the view absent and stops asking until its backoff slot.
+    /// #1019 review, N-1 daemon: a daemon without `fleet/roster_status` still
+    /// lists its agents. The panel falls back, once per connection and with no
+    /// backoff, to `fleet/snapshot` plus `fleet/status` joined by the proto
+    /// join. The older status rows carry no `wait_kind`, so the rows render with
+    /// their states and no answer action. Only a daemon that lacks
+    /// `fleet/status` too leaves the view absent.
     #[test]
-    fn a_joined_read_renders_and_an_old_daemon_is_absent_not_derived() {
+    fn a_daemon_without_the_joined_read_falls_back_to_two_reads_and_lists_rows() {
         use ainb_hangar_proto::agent_status::AgentState;
         let mut plugin = connected_plugin_with_issue();
-        plugin.on_daemon_response(&fleet_reply(
-            FLEET_ROSTER_STATUS_REQ_ID,
-            roster_status_json(4, AgentState::Waiting),
-        ));
-        assert_eq!(
-            plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
-            Some(AgentState::Waiting)
-        );
-
         plugin.on_daemon_response(&fleet_error(
             FLEET_ROSTER_STATUS_REQ_ID,
             METHOD_NOT_FOUND,
             "method not found",
         ));
+        assert!(
+            plugin.screens.fleet.view_absent().is_none(),
+            "not absent: it falls back"
+        );
+        assert!(
+            plugin.fleet_status_retry_at.is_none(),
+            "no backoff for a negotiation"
+        );
+        assert_eq!(
+            methods_sent(&mut plugin),
+            vec![daemon_methods::FLEET_SNAPSHOT, daemon_methods::FLEET_STATUS]
+        );
+
+        // The N-1 daemon's replies: its status row predates the refinements.
+        let joined = roster_status_json(6, AgentState::Waiting);
+        let session = joined["rows"][0]["session"].clone();
+        let mut status = joined["rows"][0]["status"].clone();
+        for field in ["host_id", "turn_complete", "wait_kind", "attachment"] {
+            status.as_object_mut().unwrap().remove(field);
+        }
+        plugin.on_daemon_response(&fleet_reply(
+            FLEET_SNAPSHOT_REQ_ID,
+            serde_json::json!({"head_revision": 6, "sessions": [session]}),
+        ));
+        plugin.on_daemon_response(&fleet_reply(
+            FLEET_STATUS_REQ_ID,
+            serde_json::json!({"rows": [status], "head_revision": 6}),
+        ));
+        let row = plugin.screens.fleet.selected_session().expect("the agent is listed");
+        assert_eq!(row.agent_state(), AgentState::Waiting);
+        assert_eq!(
+            row.wait_kind(),
+            None,
+            "no wait kind from an N-1 daemon, so no action"
+        );
+
+        // Still on the two reads for this connection: no re-negotiation.
+        plugin.fleet_fetch_pending = true;
+        assert_eq!(
+            methods_sent(&mut plugin),
+            vec![daemon_methods::FLEET_SNAPSHOT, daemon_methods::FLEET_STATUS]
+        );
+        // A daemon without fleet/status either leaves the view absent.
+        plugin.screens.fleet = crate::screen::fleet::FleetPaneState::default();
+        plugin.on_daemon_response(&fleet_error(
+            FLEET_STATUS_REQ_ID,
+            METHOD_NOT_FOUND,
+            "method not found",
+        ));
         assert_eq!(
             plugin.screens.fleet.health_line().as_deref(),
-            Some("absent: daemon has no fleet/roster_status")
-        );
-        assert!(
-            plugin.screens.fleet.status_for("codex:thread-1").is_none(),
-            "no fallback rows"
-        );
-        plugin.fleet_fetch_pending = true;
-        assert!(
-            methods_sent(&mut plugin).is_empty(),
-            "backing off: no read yet"
+            Some("absent: daemon has no fleet/status")
         );
     }
 
