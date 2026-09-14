@@ -753,13 +753,12 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
             by_session_id, all, ..
         } = &mut *attention;
         for chip in by_session_id.values_mut().flatten().chain(all.values_mut()) {
-            {
-                chip.options = vec![crate::fleet::attention::AttentionOption {
-                    label: "yes".to_string(),
-                    description: seed.text("fleet.attention.option", Captured),
-                }];
-            }
+            chip.options = vec![crate::fleet::attention::AttentionOption {
+                label: "yes".to_string(),
+                description: seed.text("fleet.attention.option", Captured),
+            }];
         }
+        drop(attention);
     }
     {
         let git = state.git_view.get_mut();
