@@ -20,6 +20,7 @@
 # Exit status is 0 only when every node passed. A node whose failure is a
 # filed product defect still fails; its row names the issue.
 
+# shellcheck source-path=SCRIPTDIR
 set -uo pipefail
 
 PROOF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
