@@ -738,9 +738,10 @@ thread_local! {
     static PROJECTION_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
-/// Whole-Fleet projection reads made by the status reads on this thread, for
-/// the read-amplification budget test (#1015). Thread-local so parallel tests
-/// cannot see each other's reads; drive it from a current-thread runtime.
+/// Whole-Fleet projection reads made by the status reads on this thread.
+///
+/// For the read-amplification budget test (#1015). Thread-local so parallel
+/// tests cannot see each other's reads; drive it from a current-thread runtime.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn projection_reads() -> u64 {
