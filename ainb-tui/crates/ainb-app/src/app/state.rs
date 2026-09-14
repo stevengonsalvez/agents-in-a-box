@@ -2967,7 +2967,6 @@ pub enum AsyncAction {
     BulkStopSessions(Vec<Uuid>),           // Soft-stop many sessions (tmux only; keeps worktrees)
     RefreshWorkspaces,                     // Manual refresh of workspace data
     FetchContainerLogs(Uuid),              // Fetch container logs for a session
-    AttachToContainer(Uuid),               // Attach to a container session
     KillContainer(Uuid),                   // Kill container for a session
     AuthSetupOAuth,                        // Run OAuth authentication setup
     AuthSetupApiKey,                       // Save API key authentication
@@ -6951,78 +6950,6 @@ impl AppState {
         self.sessions.workspaces.get(workspace_idx)?.sessions.get(session_idx)
     }
 
-    /// Attach to a container session using docker exec with proper terminal handling
-    pub async fn attach_to_container(
-        &mut self,
-        session_id: Uuid,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::docker::ContainerManager;
-
-        // Find the session to get container ID
-        let container_id = self
-            .sessions
-            .workspaces
-            .iter()
-            .flat_map(|w| &w.sessions)
-            .find(|s| s.id == session_id)
-            .and_then(|s| s.container_id.as_ref())
-            .cloned();
-
-        if let Some(container_id) = container_id {
-            info!(
-                "Attaching to container {} for session {}",
-                container_id, session_id
-            );
-
-            // Check if container is running
-            let container_manager = ContainerManager::new().await?;
-            let status = container_manager.get_container_status(&container_id).await?;
-
-            match status {
-                crate::docker::ContainerStatus::Running => {
-                    // Start an interactive bash shell instead of Claude CLI directly
-                    // This gives users more flexibility to run claude when needed
-                    // Force bash to read .bashrc to load custom session environment
-                    let exec_command = vec![
-                        "/bin/bash".to_string(),
-                        "-l".to_string(), // Login shell to read .bash_profile/.bashrc
-                        "-i".to_string(), // Interactive shell
-                    ];
-
-                    match crate::docker::exec_interactive_blocking(&container_id, exec_command)
-                        .await
-                    {
-                        Ok(_exit_status) => {
-                            info!(
-                                "Successfully detached from container {} for session {}",
-                                container_id, session_id
-                            );
-                            // The container session has ended, stay in current view
-                            Ok(())
-                        }
-                        Err(e) => {
-                            error!("Failed to exec into container {}: {}", container_id, e);
-                            Err(format!("Failed to attach to container: {}", e).into())
-                        }
-                    }
-                }
-                _ => {
-                    warn!(
-                        "Cannot attach to container {} - it is not running (status: {:?})",
-                        container_id, status
-                    );
-                    Err(format!("Container is not running (status: {:?})", status).into())
-                }
-            }
-        } else {
-            warn!(
-                "Cannot attach to session {} - no container ID found",
-                session_id
-            );
-            Err("No container associated with this session".into())
-        }
-    }
-
     /// Kill the container for a session (force stop and cleanup)
     pub async fn kill_container(
         &mut self,
@@ -9740,16 +9667,6 @@ impl AppState {
                     if let Err(e) = self.fetch_container_logs(session_id).await {
                         warn!(
                             "Failed to fetch container logs for session {}: {}",
-                            session_id, e
-                        );
-                    }
-                    self.shell.ui_needs_refresh = true;
-                }
-                AsyncAction::AttachToContainer(session_id) => {
-                    info!("Attaching to container for session {}", session_id);
-                    if let Err(e) = self.attach_to_container(session_id).await {
-                        error!(
-                            "Failed to attach to container for session {}: {}",
                             session_id, e
                         );
                     }

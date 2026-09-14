@@ -106,7 +106,6 @@ pub enum AppEvent {
     ToggleClaudeChat,   // Toggle Claude chat visibility
     NewSession,         // Create session in current directory
     SearchWorkspace,    // Search all workspaces
-    AttachSession,
     DetachSession,
     KillContainer,
     ReauthenticateCredentials,
@@ -2443,12 +2442,6 @@ impl EventHandler {
             AppEvent::DismissNotifications => {
                 let dismissed = state.dismiss_notifications();
                 tracing::debug!("Event: DismissNotifications - cleared={dismissed}");
-            }
-            AppEvent::AttachSession => {
-                if let Some(session_id) = state.get_selected_session_id() {
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::AttachToContainer(session_id));
-                }
             }
             AppEvent::AttachTmuxSession => {
                 tracing::info!("[ACTION] Processing AttachTmuxSession event");
