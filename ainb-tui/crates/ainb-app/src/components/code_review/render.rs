@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 
 /// Transient UI state for the review surface (selection + scroll).
 #[derive(serde::Serialize, Debug, Clone, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct CodeReviewUi {
     /// Index of the sidebar-selected file (mirrors the highlighted tree file).
     pub selected_file: usize,
