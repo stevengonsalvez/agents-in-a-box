@@ -21,6 +21,10 @@ struct HeadlessHost {
     held: Option<String>,
     /// What this host still held when it ran a full-screen attach, per attach.
     held_during_full_screen: Vec<Option<String>>,
+    /// A host with no writable terminal answers in-place with `unsupported`.
+    no_in_place: bool,
+    /// In-place attaches this host was asked for.
+    in_place_requests: usize,
 }
 
 impl HeadlessHost {
@@ -39,8 +43,13 @@ impl HeadlessHost {
             self.reconcile(state);
             let report = match effect {
                 Effect::AttachTerminal(TerminalTarget::InPlace { tmux_session, .. }) => {
-                    self.held = Some(tmux_session.as_str().to_string());
-                    reports::in_place_opened(tmux_session.as_str())
+                    self.in_place_requests += 1;
+                    if self.no_in_place {
+                        reports::in_place_failed(tmux_session.as_str(), "no terminal here", true)
+                    } else {
+                        self.held = Some(tmux_session.as_str().to_string());
+                        reports::in_place_opened(tmux_session.as_str())
+                    }
                 }
                 Effect::AttachTerminal(TerminalTarget::Observe { tmux_session, .. }) => {
                     self.held = Some(tmux_session.as_str().to_string());
@@ -223,6 +232,33 @@ fn a_closed_input_channel_releases_the_pane_closes_the_client_and_says_so() {
             .notifications
             .iter()
             .any(|note| note.message.contains("input channel closed")),
+        "{:?}",
+        state.shell.notifications
+    );
+}
+
+#[test]
+fn a_host_that_cannot_attach_in_place_is_not_asked_again() {
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with(&["ainb-contract-f"]);
+    let mut host = HeadlessHost {
+        no_in_place: true,
+        ..HeadlessHost::default()
+    };
+
+    host.command(&mut state, &keymap, "session_list.attach_interactive");
+    assert_eq!(host.in_place_requests, 1);
+    assert!(!state.is_interactive_pane());
+
+    host.command(&mut state, &keymap, "session_list.attach_interactive");
+    assert_eq!(host.in_place_requests, 1, "the reducer stopped asking");
+    assert!(
+        state
+            .shell
+            .notifications
+            .iter()
+            .any(|note| note.message.contains("full screen")),
         "{:?}",
         state.shell.notifications
     );
