@@ -68,7 +68,7 @@ pub fn execute<'t>(
         }
         Effect::Persist(store) => Work::Done(match crate::config::persist::write(&store) {
             Ok(()) => Vec::new(),
-            Err(error) => vec![reports::persist_failed(store.store(), &error)],
+            Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
         }),
         Effect::RunPluginAction {
             plugin,
