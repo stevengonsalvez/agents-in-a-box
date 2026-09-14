@@ -240,11 +240,20 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
         "nobody wants learnings"
     );
 
+    // A stop names no watcher, so it ends nothing at once; the request
+    // lapses with its lease.
     let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
         plugin_action::watch_screen(screen_ids::HANGAR, false, 0, 0),
+    );
+    assert!(state.plugin_screen_wanted(screen_ids::HANGAR));
+    state.release_plugin_screen_watches(
+        std::time::Instant::now()
+            + AppState::PLUGIN_SCREEN_WATCH_LEASE
+            + std::time::Duration::from_secs(1),
+        |_| false,
     );
     assert!(!state.plugin_screen_wanted(screen_ids::HANGAR));
 
@@ -410,4 +419,76 @@ fn a_watched_screen_renders_at_the_largest_size_a_live_watch_asked_for() {
     let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
     state.release_plugin_screen_watches(wide_at + lease + Duration::from_millis(10), |_| false);
     assert_eq!(state.watched_viewport(screen_ids::HANGAR), Some((90, 60)));
+}
+
+/// Two hosts watch one screen at different sizes. One stopping, or one
+/// renewing far more often than the other, leaves the other's request live.
+#[test]
+fn one_watcher_stopping_or_renewing_fast_leaves_another_watcher_live() {
+    use ainb_app::app::screens::ids as screen_ids;
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut send = |state: &mut AppState, watching, width, height| {
+        let _ = dispatch(
+            state,
+            &keymap,
+            &mut NoRenderer,
+            plugin_action::watch_screen(screen_ids::HANGAR, watching, width, height),
+        );
+    };
+
+    send(&mut state, true, 200, 60);
+    for _ in 0..17 {
+        send(&mut state, true, 90, 30);
+    }
+    assert_eq!(
+        state.plugins_host.watched_plugin_screens[screen_ids::HANGAR].requests.len(),
+        2,
+        "a renewal of one size holds one entry"
+    );
+    assert_eq!(state.watched_viewport(screen_ids::HANGAR), Some((200, 60)));
+
+    send(&mut state, false, 0, 0);
+    assert_eq!(
+        state.watched_viewport(screen_ids::HANGAR),
+        Some((200, 60)),
+        "a stop from one host does not end the other's watch"
+    );
+}
+
+/// A watch cannot ask a plugin to render past the viewport ceiling, and a stop
+/// in the older two-field shape still parses.
+#[test]
+fn a_watch_is_clamped_to_the_viewport_ceiling_and_the_old_stop_shape_parses() {
+    use ainb_app::app::screens::ids as screen_ids;
+    use ainb_app::app::sections::ScreenWatch;
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        plugin_action::watch_screen(screen_ids::HANGAR, true, u16::MAX, u16::MAX),
+    );
+    assert_eq!(
+        state.watched_viewport(screen_ids::HANGAR),
+        Some(ScreenWatch::MAX_VIEWPORT)
+    );
+
+    let old_stop = Intent::Command(
+        CommandId::new(ids::WATCH_SCREEN),
+        serde_json::json!({ "screen": screen_ids::HANGAR, "watching": false }),
+    );
+    let before = state.versions();
+    let effects = dispatch(&mut state, &keymap, &mut NoRenderer, old_stop);
+    assert!(effects.is_empty());
+    assert!(state.plugin_screen_wanted(screen_ids::HANGAR));
+    assert_eq!(state.versions(), before);
 }
