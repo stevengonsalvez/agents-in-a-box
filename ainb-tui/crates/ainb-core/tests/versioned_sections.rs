@@ -349,7 +349,7 @@ fn a_daemon_publish_bumps_fleet_even_though_it_arrives_through_an_arc() {
     );
     assert!(state.changed_since(&seen).is_empty());
 
-    state.fleet.daemon_attention_generation.fetch_add(1, Ordering::Release);
+    state.host.daemon_attention_generation.fetch_add(1, Ordering::Release);
     assert!(
         state.refresh_daemon_attention_generation(),
         "a publish the section had not seen reported no change"
