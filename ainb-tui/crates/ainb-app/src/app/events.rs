@@ -32,10 +32,6 @@ pub trait RendererHost {
     /// Queue renderer-local work the keymap resolved, for the host to apply
     /// against its own layout.
     fn queue(&mut self, action: HostAction);
-    /// Width, in columns, of the surface this host renders into, or `None`
-    /// when it has none. Layout clamps read it per host, so two surfaces at
-    /// different widths never share one value.
-    fn columns(&self) -> Option<u16>;
     /// Hit-test a press at `pos` against the last drawn frame. Returns the
     /// intent the press means, usually a [`crate::app::pointer`] command naming
     /// what was under it, for dispatch to apply. The host reads state but
@@ -50,10 +46,6 @@ pub struct NoRenderer;
 
 impl RendererHost for NoRenderer {
     fn queue(&mut self, _action: HostAction) {}
-
-    fn columns(&self) -> Option<u16> {
-        None
-    }
 
     fn pointer(&mut self, _state: &AppState, _pos: Pos, _btn: Btn) -> Option<Intent> {
         None
@@ -157,8 +149,6 @@ pub enum AppEvent {
         width: u16,
         collapsed: bool,
     },
-    /// Start dragging the Skill Manager's Sources panel edge.
-    SkillManagerBeginResizeSources,
     /// Focus a Skill Manager panel without selecting anything in it.
     SkillManagerFocusPane(crate::components::skill_manager_screen::FocusedSkillPane),
     /// Start dragging the home sidebar's resize edge.
@@ -364,9 +354,11 @@ pub enum AppEvent {
     SkillManagerUnitClick {
         position: usize,
     },
-    /// A Sources/Units divider drag finished — persist the resized
-    /// Sources-panel width to config.
-    SkillManagerPersistSourcesWidth,
+    /// A renderer resized the Sources panel: persist `width` as the
+    /// preference every renderer starts from.
+    SkillManagerSaveSourcesWidth {
+        width: u16,
+    },
     /// `[m]` on the SkillManager screen — re-run the discovery
     /// walkers and force the banner to re-appear (ignores any prior
     /// skip-marker). Fixes the empty-state "press [m] to refresh"
@@ -854,29 +846,6 @@ impl PersistOutcome {
 }
 
 impl EventHandler {
-    /// Apply the persisted SkillManager Sources-panel width to the live
-    /// screen state on screen-open. `None` keeps the in-memory default
-    /// (32). Only the minimum is enforced here: the renderer clamps the width
-    /// against its own surface at draw, and the resize keys clamp against the
-    /// host's width before stepping, so a stale oversized value can never
-    /// starve the Units table.
-    fn apply_skill_manager_sources_width(state: &mut AppState) {
-        if let Some(width) = state.config.app_config.ui_preferences.skill_manager_sources_width {
-            state.skills.skill_manager_state.sources_width =
-                crate::components::skill_manager_screen::clamp_sources_width(width, u16::MAX);
-        }
-    }
-
-    /// Persist the current SkillManager Sources-panel width to config.
-    /// Called on `[`/`]` resize and on divider-drag-end.
-    fn persist_skill_manager_sources_width(state: &mut AppState) {
-        state.config.app_config.ui_preferences.skill_manager_sources_width =
-            Some(state.skills.skill_manager_state.sources_width);
-        if let Err(e) = state.config.app_config.save() {
-            tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
-        }
-    }
-
     /// True when a SkillManager overlay (banner / input prompt / library
     /// / browse / source-preview modal) is open OR the help overlay is
     /// visible — i.e. the underlying Sources/Units panels are NOT the
@@ -1462,16 +1431,14 @@ impl EventHandler {
                 Self::route_pal_dial(|dial| dial.retry(), state)
             }
             PalRetry => None,
+            // The panel width is the renderer's layout: each host steps and
+            // clamps it against its own surface, then saves the preference.
             UiAction::SkillManagerShrinkSources => {
-                let term_w = host.columns().unwrap_or(80);
-                state.skills.skill_manager_state.shrink_sources(2, term_w);
-                Self::persist_skill_manager_sources_width(state);
+                host.queue(HostAction::ShrinkSkillSources);
                 None
             }
             UiAction::SkillManagerGrowSources => {
-                let term_w = host.columns().unwrap_or(80);
-                state.skills.skill_manager_state.grow_sources(2, term_w);
-                Self::persist_skill_manager_sources_width(state);
+                host.queue(HostAction::GrowSkillSources);
                 None
             }
             UiAction::DaemonsCloseOverlay => {
@@ -3489,7 +3456,6 @@ impl EventHandler {
                         HomeTile::SkillManager => {
                             tracing::info!("Navigating to SkillManager view (spec §10.1)");
                             state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
-                            Self::apply_skill_manager_sources_width(state);
                         }
                         HomeTile::Mcp => {
                             tracing::info!("Opening MCP pool overlay");
@@ -3631,7 +3597,6 @@ impl EventHandler {
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
                         state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
-                        Self::apply_skill_manager_sources_width(state);
                         // Mirror the discovery flow from the `m` keybind
                         // handler (AppEvent::GoToSkillManager) — sidebar entry
                         // must trigger the same hdt.9 live-data rehydrate +
@@ -3894,7 +3859,6 @@ impl EventHandler {
             AppEvent::GoToSkillManager => {
                 tracing::info!("Navigating to SkillManager (spec §10.1)");
                 state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
-                Self::apply_skill_manager_sources_width(state);
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 // P8 live-data binding (hdt.9): rehydrate Sources /
                 // Units / Detail panels from $AINB_HOME/manifest.yaml
@@ -4515,11 +4479,11 @@ impl EventHandler {
                     );
                 }
             }
-            AppEvent::SkillManagerPersistSourcesWidth => {
-                Self::persist_skill_manager_sources_width(state);
-            }
-            AppEvent::SkillManagerBeginResizeSources => {
-                state.skills.skill_manager_state.resize_active = true;
+            AppEvent::SkillManagerSaveSourcesWidth { width } => {
+                state.config.app_config.ui_preferences.skill_manager_sources_width = Some(width);
+                if let Err(e) = state.config.app_config.save() {
+                    tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
+                }
             }
             AppEvent::SkillManagerFocusPane(pane) => {
                 state.skills.skill_manager_state.focused_pane = pane;
@@ -7083,9 +7047,6 @@ mod session_list_key_tests {
         impl RendererHost for Recorder {
             fn queue(&mut self, action: HostAction) {
                 self.0.push(action);
-            }
-            fn columns(&self) -> Option<u16> {
-                None
             }
             fn pointer(&mut self, _: &AppState, _: Pos, _: Btn) -> Option<Intent> {
                 None
