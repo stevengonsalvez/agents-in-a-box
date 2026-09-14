@@ -14,7 +14,13 @@ path = "src/lib.rs"
 name = "ainb-notifyd"
 path = "src/bin/ainb-notifyd.rs"
 
+[features]
+# Derives `specta::Type` on the types a mirror frame carries; forwarded from
+# `ainb-app/typescript-bindings`. Off in every normal build.
+typescript-bindings = ["dep:specta"]
+
 [dependencies]
+specta = { workspace = true, optional = true }
 # Wire types + the notify-rule RPC contract the OS-channel resolver dials (tcp T5,
 # agents-in-a-box-fyq). Both are leaf type/wire crates — notifyd stays independent
 # of the hangar STORE; it only speaks the daemon's PUBLIC RPC surface, and honours
