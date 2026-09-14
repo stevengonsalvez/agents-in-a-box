@@ -257,3 +257,117 @@ fn a_watched_plugin_screen_stays_wanted_while_the_terminal_shows_another() {
     );
     assert!(state.plugins_host.watched_plugin_screens.is_empty());
 }
+
+/// Publish `view` on `plugin`'s own `ui.state` topic in a real snapshot store,
+/// the way the runtime does for the plugin's process.
+fn publish_to(store: &ainb_plugin_runtime::snapshot::SnapshotStore, plugin: &str, view: &str) {
+    let topic = ainb_plugin_runtime::types::Topic::from(
+        ainb_plugin_runtime::topics::ui_state_topic(plugin),
+    );
+    let _ = store.publish(
+        topic,
+        bytes::Bytes::from(view.to_string()),
+        PluginId::new(plugin),
+    );
+}
+
+fn read_from(
+    store: &ainb_plugin_runtime::snapshot::SnapshotStore,
+    plugin: &str,
+) -> Option<(bytes::Bytes, u64, PluginId)> {
+    store.get(&ainb_plugin_runtime::types::Topic::from(
+        ainb_plugin_runtime::topics::ui_state_topic(plugin),
+    ))
+}
+
+/// A crash and restart: until the new process publishes, the store may still
+/// hold the dead one's view, and the host must not show it as live.
+#[test]
+fn a_restarted_plugin_does_not_show_the_view_its_last_process_published() {
+    isolated_home();
+    let store = ainb_plugin_runtime::snapshot::SnapshotStore::new();
+    let mut state = AppState::new();
+
+    publish_to(&store, "hangar-tui", r#"{"screen":"before the crash"}"#);
+    state.record_plugin_ui_state("hangar-tui", true, read_from(&store, "hangar-tui"));
+    assert!(state.plugins_host.plugin_ui_states.contains_key("hangar-tui"));
+
+    state.record_plugin_ui_state("hangar-tui", false, read_from(&store, "hangar-tui"));
+    state.record_plugin_ui_state("hangar-tui", true, read_from(&store, "hangar-tui"));
+    assert!(
+        !state.plugins_host.plugin_ui_states.contains_key("hangar-tui"),
+        "the restarted plugin has not published; the old view is not its view"
+    );
+
+    publish_to(&store, "hangar-tui", r#"{"screen":"after the restart"}"#);
+    state.record_plugin_ui_state("hangar-tui", true, read_from(&store, "hangar-tui"));
+    assert_eq!(
+        state.plugins_host.plugin_ui_states["hangar-tui"].view["screen"],
+        "after the restart"
+    );
+}
+
+/// A refused publish stays refused while it is the newest, so the tick does
+/// not re-read and re-log it, and the next good publish is still taken.
+#[test]
+fn a_refused_view_is_not_reconsidered_until_the_plugin_publishes_again() {
+    isolated_home();
+    let store = ainb_plugin_runtime::snapshot::SnapshotStore::new();
+    let mut state = AppState::new();
+
+    publish_to(&store, "hangar-tui", "not json");
+    let before = state.versions();
+    for _ in 0..3 {
+        state.record_plugin_ui_state("hangar-tui", true, read_from(&store, "hangar-tui"));
+    }
+    assert!(state.plugins_host.plugin_ui_states.is_empty());
+    assert!(bumped(&before, &state.versions()).is_empty());
+
+    publish_to(&store, "hangar-tui", r#"{"screen":"kanban"}"#);
+    state.record_plugin_ui_state("hangar-tui", true, read_from(&store, "hangar-tui"));
+    assert_eq!(
+        state.plugins_host.plugin_ui_states["hangar-tui"].view["screen"],
+        "kanban"
+    );
+}
+
+/// A watch is a lease: a host that stops renewing it, or a plugin that is
+/// gone for good, stops the screen being kept live.
+#[test]
+fn a_screen_watch_lapses_unless_renewed_and_goes_with_its_plugin() {
+    use ainb_app::app::screens::ids as screen_ids;
+    use std::time::{Duration, Instant};
+
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let watch = |state: &mut AppState| {
+        let _ = dispatch(
+            state,
+            &keymap,
+            &mut NoRenderer,
+            plugin_action::watch_screen(screen_ids::HANGAR, true),
+        );
+    };
+    let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
+
+    watch(&mut state);
+    state.release_plugin_screen_watches(Instant::now() + lease / 2, |_| false);
+    assert!(
+        state.plugin_screen_wanted(screen_ids::HANGAR),
+        "within its lease"
+    );
+    state.release_plugin_screen_watches(Instant::now() + lease + Duration::from_secs(1), |_| false);
+    assert!(
+        !state.plugin_screen_wanted(screen_ids::HANGAR),
+        "not renewed"
+    );
+
+    watch(&mut state);
+    state.release_plugin_screen_watches(Instant::now(), |plugin| plugin == "hangar-tui");
+    assert!(
+        !state.plugin_screen_wanted(screen_ids::HANGAR),
+        "its plugin is gone"
+    );
+}
