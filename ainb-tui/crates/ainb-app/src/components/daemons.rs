@@ -57,7 +57,9 @@ pub struct Snapshot {
     /// The clock the cached rows' relative-time columns are measured against.
     pub collected_at_ms: i64,
     /// Most-recent hook wiring health. Collected beside daemon state, never in
-    /// the render path.
+    /// the render path. Its event, detail and issue text come from the machine
+    /// and the hook scripts, so a frame carries them scrubbed.
+    #[serde(serialize_with = "scrub_hook_health")]
     pub hook_health: Option<HookHealth>,
     /// Hook evidence freshness, collected beside the wiring health.
     pub evidence_census: Option<EvidenceCensus>,
@@ -278,6 +280,31 @@ impl ActionMenu {
             _ => !self.row.unprovisioned(),
         }
     }
+}
+
+/// `HookHealth` belongs to the notifyd crate, which knows nothing of frames, so
+/// its free text is scrubbed on the way into the Daemons snapshot's frame.
+fn scrub_hook_health<S: serde::Serializer>(
+    health: &Option<HookHealth>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::fleet::bridge::redact::scrub;
+    use serde::Serialize;
+    health
+        .as_ref()
+        .map(|health| {
+            let mut health = health.clone();
+            health.last_event = health.last_event.as_deref().map(scrub);
+            for agent in &mut health.agents {
+                agent.detail = scrub(&agent.detail);
+            }
+            for issue in &mut health.issues {
+                issue.message = scrub(&issue.message);
+                issue.repair = scrub(&issue.repair);
+            }
+            health
+        })
+        .serialize(serializer)
 }
 
 /// What a finished lifecycle action reported.
