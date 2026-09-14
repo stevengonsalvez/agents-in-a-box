@@ -181,14 +181,14 @@ pub struct PluginsHostSection {
     pub watched_plugin_screens: std::collections::BTreeSet<String>,
 }
 
-/// One plugin's `ui.state` view as the snapshot bus last delivered it.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+/// One plugin's `ui.state` view as the snapshot bus last delivered it. Never
+/// in a frame: the view is JSON its plugin wrote, with keys no redaction check
+/// knows in advance.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginUiState {
     /// Snapshot bus version of the publish, increasing per topic.
     pub version: u64,
-    /// The plugin's view, in the shape the plugin documents. Plugin-authored
-    /// text, so a frame carries it with every string scrubbed.
-    #[serde(serialize_with = "crate::wire::fields::scrub_json")]
+    /// The plugin's view, in the shape the plugin documents.
     pub view: serde_json::Value,
 }
 
