@@ -288,6 +288,12 @@ fleet.live_window.seven_day_pct
 fleet.live_window.seven_day_resets_at
 fleet.live_window.source
 fleet.live_window.today_cost_usd
+frame.daemon_read.clock_ms
+frame.daemon_read.revision
+frame.epoch
+frame.host_id
+frame.section
+frame.version
 git_view.git_view_state.active_tab
 git_view.git_view_state.can_push
 git_view.git_view_state.changed_files[].deletions
