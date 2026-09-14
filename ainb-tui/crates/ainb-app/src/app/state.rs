@@ -329,8 +329,10 @@ impl AppState {
     pub fn in_place_target(&mut self) -> Option<crate::app::effect::TmuxSessionName> {
         self.tmux.set_if_changed(|tmux| &mut tmux.observer_pending, None);
         self.tmux.set_if_changed(|tmux| &mut tmux.observer_failed_target, None);
-        if self.tmux.embed.is_some() {
-            if self.selected_tmux_name() == self.tmux.embed_session && self.is_interactive_pane() {
+        if self.tmux.embed_session.is_some() {
+            if self.selected_tmux_name().as_deref() == self.embed_session_name()
+                && self.is_interactive_pane()
+            {
                 return None;
             }
             self.release_interactive_pane();
@@ -358,22 +360,15 @@ impl AppState {
         target
     }
 
-    /// Make `client`, a tmux client on `tmux_session` a host opened, the live
-    /// in-place pane.
-    pub fn adopt_interactive_pane(
-        &mut self,
-        tmux_session: String,
-        client: crate::tmux::EmbedClient,
-    ) {
+    /// Make the writable client the host opened on `tmux_session` the live,
+    /// focused in-place pane.
+    pub fn adopt_interactive_pane(&mut self, tmux_session: crate::app::effect::TmuxSessionName) {
         // tmux mirrors a session to every attached client, but all clients
         // fight over its size: attaching alongside an existing client is the
         // user's call, so allow it and warn (never block).
         let attached_elsewhere = self.selected_session_attached_elsewhere();
-        if self.tmux.embed.is_some() {
-            self.release_interactive_pane();
-        }
-        self.tmux.embed = Some(client);
         self.tmux.embed_session = Some(tmux_session);
+        self.tmux.observer_started_at = None;
         self.shell.focused_pane = FocusedPane::Preview;
         if attached_elsewhere {
             self.add_warning_notification(
@@ -382,22 +377,24 @@ impl AppState {
         }
     }
 
-    /// Keep one read-only tmux client on the selected terminal. The observer
-    /// consumes the same PTY byte stream as interactive attach, but input stays
-    /// host-owned until [`Self::is_interactive_pane`] becomes true.
+    /// The read-only client the host should open now for the selected
+    /// terminal, as an effect, or `None` when there is nothing to open: no
+    /// tmux session on the row, the row is the session ainb runs in, it is
+    /// already mirrored, it has not settled after a selection change, or it
+    /// is backing off after failures. Any other live client is released.
     ///
-    /// Returns true when the observed target changes.
-    pub fn sync_terminal_observer(&mut self, rows: u16, cols: u16) -> bool {
-        let target = self.selected_tmux_name();
-        let Some(name) = target else {
+    /// The host asks each tick while the session list shows and no pane is
+    /// interactive, and runs what comes back like any other effect.
+    pub fn request_terminal_observer(&mut self) -> Option<crate::app::effect::Effect> {
+        let Some(name) = self.selected_tmux_name() else {
             self.tmux.observer_pending = None;
             self.tmux.observer_failed_target = None;
             self.release_interactive_pane();
-            return false;
+            return None;
         };
         if crate::tmux::process_detection::host_tmux_session_name() == Some(name.as_str()) {
             self.release_interactive_pane();
-            return false;
+            return None;
         }
         let now = Instant::now();
         if self
@@ -408,46 +405,66 @@ impl AppState {
         {
             self.tmux.observer_failed_target = None;
         }
-        if self.tmux.embed_session.as_deref() == Some(name.as_str()) && self.tmux.embed.is_some() {
+        if self.embed_session_name() == Some(name.as_str()) {
             self.tmux.observer_pending = None;
-            return false;
-        }
-        if !crate::tmux::EmbedClient::read_only_observer_supported() {
-            self.release_interactive_pane();
-            self.tmux.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
-            self.add_warning_notification(
-                "Live preview requires tmux client ignore-size support".to_string(),
-            );
-            return false;
+            return None;
         }
         if let Some((failed, retry_at, attempts)) = &self.tmux.observer_failed_target {
             if failed == &name && (*attempts >= MAX_OBSERVER_FAILURES || now < *retry_at) {
                 self.release_interactive_pane();
-                return false;
+                return None;
             }
         }
         if !self.observer_target_settled(&name, now) {
             self.release_interactive_pane();
-            return false;
+            return None;
         }
-
         self.release_interactive_pane();
-        match crate::tmux::EmbedClient::observe(&name, rows, cols) {
-            Ok(client) => {
-                self.tmux.embed = Some(client);
-                self.tmux.embed_session = Some(name);
-                // `attach-session` can spawn successfully then immediately
-                // fail (for example, if tmux rejects a client flag). Keep a
-                // prior retry count until this client survives one grace
-                // period so failed spawns cannot reset the retry cap.
-                self.tmux.observer_started_at = Some(now);
-                true
-            }
-            Err(e) => {
-                tracing::debug!("failed to observe terminal {name}: {e}");
-                self.record_observer_failure(name);
-                false
-            }
+        let Some(tmux_session) = crate::app::effect::TmuxSessionName::new(name.as_str()) else {
+            // Nothing a retry could change.
+            self.tmux.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
+            return None;
+        };
+        Some(crate::app::effect::Effect::AttachTerminal(
+            crate::app::effect::TerminalTarget::Observe {
+                tmux_session,
+                show_menu_bar: self.config.app_config.ui_preferences.show_session_menu_bar,
+            },
+        ))
+    }
+
+    /// Show the read-only client the host opened on `tmux_session`, if the
+    /// preview still wants it. One that arrives after the user moved on stays
+    /// unnamed here, so the host closes it.
+    pub fn adopt_terminal_observer(&mut self, tmux_session: &str) {
+        let wanted = self.shell.current_screen == screen_ids::SESSION_LIST
+            && !self.is_interactive_pane()
+            && self.tmux.embed_session.is_none()
+            && self.selected_tmux_name().as_deref() == Some(tmux_session);
+        if let Some(name) =
+            crate::app::effect::TmuxSessionName::new(tmux_session).filter(|_| wanted)
+        {
+            self.tmux.embed_session = Some(name);
+            // `attach-session` can spawn successfully then immediately fail
+            // (for example, if tmux rejects a client flag). Keep a prior retry
+            // count until this client survives one grace period so failed
+            // spawns cannot reset the retry cap.
+            self.tmux.observer_started_at = Some(Instant::now());
+        }
+    }
+
+    /// The read-only client on `tmux_session` would not open. A host that
+    /// cannot mirror at all is not retried; any other failure backs off.
+    pub fn observer_failed(&mut self, tmux_session: String, error: &str, unsupported: bool) {
+        if unsupported {
+            self.tmux.observer_failed_target =
+                Some((tmux_session, Instant::now(), MAX_OBSERVER_FAILURES));
+            self.add_warning_notification(
+                "Live preview requires tmux client ignore-size support".to_string(),
+            );
+        } else {
+            tracing::debug!("failed to observe terminal {tmux_session}: {error}");
+            self.record_observer_failure(tmux_session);
         }
     }
 
@@ -502,11 +519,9 @@ impl AppState {
         }
     }
 
-    /// Release the ephemeral client. Read-only preview reconnects next loop.
+    /// Release the live pane: the host closes its client on the next pass.
+    /// The read-only preview reconnects on a later tick.
     pub fn release_interactive_pane(&mut self) {
-        if let Some(mut client) = self.tmux.embed.take() {
-            client.shutdown();
-        }
         self.tmux.embed_session = None;
         self.tmux.observer_started_at = None;
         if self.shell.focused_pane == FocusedPane::Preview {
@@ -546,7 +561,20 @@ impl AppState {
 
     /// True while an interactive embed is focused.
     pub fn is_interactive_pane(&self) -> bool {
-        self.tmux.embed.is_some() && self.shell.focused_pane == FocusedPane::Preview
+        self.tmux.embed_session.is_some() && self.shell.focused_pane == FocusedPane::Preview
+    }
+
+    /// The tmux session the host's live client is on, if any.
+    pub fn embed_session_name(&self) -> Option<&str> {
+        self.tmux
+            .embed_session
+            .as_ref()
+            .map(crate::app::effect::TmuxSessionName::as_str)
+    }
+
+    /// Whether the host's live client is on `tmux_session`.
+    pub fn embed_session_is(&self, tmux_session: &str) -> bool {
+        self.embed_session_name() == Some(tmux_session)
     }
 
     /// True when the selected terminal has a read-only observer client.
@@ -556,35 +584,38 @@ impl AppState {
     }
 
     fn is_observing_tmux_session(&self, session: &str) -> bool {
-        !self.is_interactive_pane()
-            && self.tmux.embed.is_some()
-            && self.tmux.embed_session.as_deref() == Some(session)
+        !self.is_interactive_pane() && self.embed_session_is(session)
     }
 
-    /// If the observer has ended or become invisible, stop it. Keys can never
-    /// be forwarded to an invisible PTY.
+    /// The host's client on `tmux_session` ended on its own. An interactive
+    /// pane says so; a read-only mirror counts it as a failure and backs off.
+    pub fn terminal_exited(&mut self, tmux_session: &str) {
+        if !self.embed_session_is(tmux_session) {
+            return;
+        }
+        let interactive = self.is_interactive_pane();
+        self.release_interactive_pane();
+        if interactive {
+            self.add_info_notification("Live session ended, released".to_string());
+        } else {
+            self.record_observer_failure(tmux_session.to_string());
+        }
+    }
+
+    /// Release a live pane the session list no longer shows, so keys are
+    /// never forwarded to an invisible pane, and clear the retry count of a
+    /// read-only client that outlived its grace period.
     ///
-    /// Returns true when it released (the layout changed → repaint needed).
-    pub fn poll_embed_exit(&mut self) -> bool {
-        if self.tmux.embed.is_none() {
+    /// Returns true when it released (the layout changed, so repaint).
+    pub fn tick_terminal_pane(&mut self) -> bool {
+        if self.tmux.embed_session.is_none() {
             return false;
         }
-        let exited = self.tmux.embed.as_ref().is_some_and(|e| e.has_exited());
-        let invisible = self.shell.current_screen != screen_ids::SESSION_LIST;
-        let interactive = self.is_interactive_pane();
-        let session = self.tmux.embed_session.clone();
-        if exited || invisible {
+        if self.shell.current_screen != screen_ids::SESSION_LIST {
             self.release_interactive_pane();
-            if exited && interactive {
-                self.add_info_notification("Live session ended, released".to_string());
-            } else if exited {
-                if let Some(session) = session {
-                    self.record_observer_failure(session);
-                }
-            }
             return true;
         }
-        if !interactive
+        if !self.is_interactive_pane()
             && self
                 .tmux
                 .observer_started_at
@@ -594,21 +625,6 @@ impl AppState {
             self.tmux.observer_failed_target = None;
         }
         false
-    }
-
-    /// New embed output since the last call? Clears the embed's dirty flag.
-    /// The render loop polls this as a repaint trigger: live PTY output
-    /// arrives without host input, so the dirty-gate (perf bead `wai`) would
-    /// otherwise hold the pane at the 250ms animation floor.
-    /// Take the embed's dirty flag, bumping the tmux section when it was set.
-    ///
-    /// The embed is the tmux section's own interior-mutability hole: the PTY
-    /// reader thread marks it dirty as bytes stream in, through a handle the
-    /// render path holds by `&`. Taking the flag through `update` means the
-    /// one place that learns "the pane changed" is also the place that says so
-    /// to a subscriber, and a frame with no new bytes still bumps nothing.
-    pub fn embed_take_dirty(&mut self) -> bool {
-        self.tmux.update(|tmux| tmux.embed.as_ref().is_some_and(|e| e.take_dirty()))
     }
 }
 
@@ -12197,7 +12213,7 @@ impl AppState {
             // The selected session renders from the observer's vt100 screen,
             // so a parallel capture would waste work and rebuild terminal
             // text through the lossy legacy path.
-            if is_selected && self.tmux.embed_session.as_deref() != Some(tmux_session.name()) {
+            if is_selected && !self.embed_session_is(tmux_session.name()) {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {
