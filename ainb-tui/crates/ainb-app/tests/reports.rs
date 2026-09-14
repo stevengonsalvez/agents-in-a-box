@@ -39,7 +39,23 @@ fn the_width_report_turns_saved_column_counts_into_fractions_of_the_host() {
         reports::migrate_layout_widths(160),
     );
 
-    assert!(effects.is_empty());
+    // The migrated widths are written by the host, after this step.
+    assert_eq!(
+        effects,
+        vec![ainb_app::Effect::Persist(
+            ainb_app::app::Persist::AppConfig {
+                config: ainb_app::app::Snapshot(state.config.app_config.clone()),
+                keys: [
+                    "ui_preferences.home_sidebar_fraction",
+                    "ui_preferences.home_sidebar_width",
+                    "ui_preferences.skill_manager_sources_fraction",
+                    "ui_preferences.skill_manager_sources_width",
+                ]
+                .map(String::from)
+                .to_vec(),
+            }
+        )]
+    );
     let prefs = &state.config.app_config.ui_preferences;
     assert_eq!(prefs.home_sidebar_fraction, Some(0.25));
     assert_eq!(prefs.skill_manager_sources_fraction, Some(0.2));

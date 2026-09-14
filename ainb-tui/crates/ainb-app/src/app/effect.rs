@@ -18,7 +18,7 @@ use uuid::Uuid;
 /// detached, a login wrote credentials, a tool was missing) comes back as a
 /// report intent from [`crate::app::reports`], which the host dispatches like
 /// any other; the reducer turns it into state and notices.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Give the user a live terminal on `target`.
     ///
@@ -82,7 +82,171 @@ pub enum Effect {
         action_id: String,
         payload: serde_json::Value,
     },
+    /// Write what the step just changed in a store.
+    ///
+    /// The reducer never writes to disk, so `dispatch` never waits on it, and
+    /// it updates its own copy before queuing, so the same step reads back what
+    /// it chose. One step queues at most one write per store: a later write to
+    /// the same store folds into the earlier one ([`Persist::coalesce`]).
+    ///
+    /// Terminal host: writes with [`crate::config::persist::write`] once the
+    /// step that queued it has finished, in queue order, and reports a failure
+    /// with [`crate::app::reports::persist_failed`] carrying
+    /// [`Persist::store_id`]; a write that lands says nothing. Desktop host: the
+    /// same writes to the same files. The files resolve from `HOME` (the user
+    /// config, favourites, labels, onboarding) and `AINB_HOME` (the session
+    /// store), which is the seam a host points at its own config root.
+    ///
+    /// A failed write leaves disk behind memory. Whole-store writes
+    /// (`Favorites`, `SessionLabels`, `Onboarding`) heal on the next change to
+    /// that store, which carries the whole store again. Keyed and field writes
+    /// (`AppConfig`, `ConfigExternalKeys`, `OnboardingGitDirectories`,
+    /// `SessionHeadroom`) carry only what changed, so a failed one is lost
+    /// until that setting changes again; the report says so and the host does
+    /// not retry.
+    Persist(Persist),
 }
+
+/// A store an [`Effect::Persist`] writes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Persist {
+    /// The named dotted keys of the user config, `config.toml`, each with its
+    /// value in `config`. Every other key on disk is kept, so a copy loaded at
+    /// startup cannot put back what another process wrote since.
+    AppConfig {
+        config: Snapshot<crate::config::AppConfig>,
+        keys: Vec<String>,
+    },
+    /// Registry keys `config.toml` holds outside `AppConfig`'s shape, as the
+    /// raw values the settings screen took; the host's write validates them.
+    ConfigExternalKeys(Vec<(String, String)>),
+    /// The repository favourites, whole.
+    Favorites(Snapshot<crate::config::FavoritesStore>),
+    /// The durable session labels, whole.
+    SessionLabels(Snapshot<crate::config::SessionLabelStore>),
+    /// The onboarding record, whole.
+    Onboarding(Snapshot<crate::config::OnboardingConfig>),
+    /// The onboarding record's git directories, set on the record on disk so
+    /// the rest of it is kept.
+    OnboardingGitDirectories(Vec<PathBuf>),
+    /// One session's Headroom switch in the interactive session store, set to
+    /// `enabled` under the store's lock only while it still reads `expected`,
+    /// the value this step decided from.
+    SessionHeadroom {
+        tmux_session: String,
+        expected: bool,
+        enabled: bool,
+    },
+}
+
+impl Persist {
+    /// The store this writes, as a stable id a report carries.
+    #[must_use]
+    pub const fn store_id(&self) -> &'static str {
+        match self {
+            Self::AppConfig { .. } | Self::ConfigExternalKeys(_) => "config",
+            Self::Favorites(_) => "favorites",
+            Self::SessionLabels(_) => "session_labels",
+            Self::Onboarding(_) | Self::OnboardingGitDirectories(_) => "onboarding",
+            Self::SessionHeadroom { .. } => "session_store",
+        }
+    }
+
+    /// What a notice calls the store `store_id` names.
+    #[must_use]
+    pub fn store_label(store_id: &str) -> &'static str {
+        match store_id {
+            "config" => "settings",
+            "favorites" => "favorites",
+            "session_labels" => "session labels",
+            "onboarding" => "onboarding",
+            "session_store" => "the session store",
+            _ => "a store",
+        }
+    }
+
+    /// Fold `later`, queued after `self` in the same step, into `self` when
+    /// both are the same write: keyed writes take the union of their keys and
+    /// the later values, whole-store writes take the later store, and a
+    /// Headroom write keeps the first expected value and the last setting.
+    /// Returns false, changing nothing, when they are different writes.
+    pub fn coalesce(&mut self, later: &Self) -> bool {
+        match (self, later) {
+            (
+                Self::AppConfig { config, keys },
+                Self::AppConfig {
+                    config: later_config,
+                    keys: later_keys,
+                },
+            ) => {
+                config.clone_from(later_config);
+                for key in later_keys {
+                    if !keys.contains(key) {
+                        keys.push(key.clone());
+                    }
+                }
+                true
+            }
+            (Self::ConfigExternalKeys(edits), Self::ConfigExternalKeys(later_edits)) => {
+                for (key, value) in later_edits {
+                    match edits.iter_mut().find(|(queued, _)| queued == key) {
+                        Some(edit) => edit.1.clone_from(value),
+                        None => edits.push((key.clone(), value.clone())),
+                    }
+                }
+                true
+            }
+            (Self::Favorites(store), Self::Favorites(later)) => {
+                store.clone_from(later);
+                true
+            }
+            (Self::SessionLabels(store), Self::SessionLabels(later)) => {
+                store.clone_from(later);
+                true
+            }
+            (Self::Onboarding(record), Self::Onboarding(later)) => {
+                record.clone_from(later);
+                true
+            }
+            (
+                Self::OnboardingGitDirectories(directories),
+                Self::OnboardingGitDirectories(later),
+            ) => {
+                directories.clone_from(later);
+                true
+            }
+            (
+                Self::SessionHeadroom {
+                    tmux_session,
+                    enabled,
+                    ..
+                },
+                Self::SessionHeadroom {
+                    tmux_session: later_session,
+                    enabled: later_enabled,
+                    ..
+                },
+            ) if tmux_session == later_session => {
+                *enabled = *later_enabled;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A store's contents as they stood when an effect was queued. The stores do
+/// not implement equality, so two snapshots compare by their serialised form.
+#[derive(Debug, Clone)]
+pub struct Snapshot<T>(pub T);
+
+impl<T: serde::Serialize> PartialEq for Snapshot<T> {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(&self.0).ok() == serde_json::to_value(&other.0).ok()
+    }
+}
+
+impl<T: serde::Serialize> Eq for Snapshot<T> {}
 
 /// A tmux session name an effect can target.
 ///
@@ -238,6 +402,23 @@ pub struct EffectOutbox(Vec<Effect>);
 impl EffectOutbox {
     pub fn push(&mut self, effect: Effect) {
         self.0.push(effect);
+    }
+
+    /// Queue `store`, folding it into a write to the same store already queued
+    /// ([`Persist::coalesce`]). The folded write moves after anything queued
+    /// since, so the host writes each store once, last value winning.
+    pub fn push_persist(&mut self, store: Persist) {
+        let queued = self.0.iter_mut().position(|effect| match effect {
+            Effect::Persist(earlier) => earlier.coalesce(&store),
+            _ => false,
+        });
+        match queued {
+            Some(index) => {
+                let merged = self.0.remove(index);
+                self.0.push(merged);
+            }
+            None => self.0.push(Effect::Persist(store)),
+        }
     }
 
     /// Everything queued so far, oldest first, leaving the outbox empty.

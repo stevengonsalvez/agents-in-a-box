@@ -88,13 +88,29 @@ fn state_with_two_sessions() -> (tempfile::TempDir, AppState, UiState) {
 /// hit-tests it, exactly as the run loop does.
 fn click(state: &mut AppState, ui: &mut UiState, x: u16, y: u16) -> Vec<Effect> {
     let press = Intent::Mouse(Pos { x, y }, Btn::Left);
-    dispatch(state, &Keymap::defaults(), ui, press)
+    written_by_host(dispatch(state, &Keymap::defaults(), ui, press))
 }
 
-/// A drag, release or hover, then whatever intent it finished.
+/// Write the stores `effects` persist, as the host does after the step, and
+/// hand back the rest.
+fn written_by_host(effects: Vec<Effect>) -> Vec<Effect> {
+    effects
+        .into_iter()
+        .filter(|effect| {
+            let Effect::Persist(store) = effect else {
+                return true;
+            };
+            ainb::config::persist::write(store).expect("the host writes the store");
+            false
+        })
+        .collect()
+}
+
+/// A drag, release or hover, then whatever intent it finished, with the
+/// stores it changed written as the host writes them after the step.
 fn finish_gesture(kind: Gesture, state: &mut AppState, ui: &mut UiState, x: u16, y: u16) {
     if let Some(intent) = gesture(kind, Pos { x, y }, &*state, ui) {
-        let _ = dispatch(state, &Keymap::defaults(), ui, intent);
+        let _ = written_by_host(dispatch(state, &Keymap::defaults(), ui, intent));
     }
 }
 

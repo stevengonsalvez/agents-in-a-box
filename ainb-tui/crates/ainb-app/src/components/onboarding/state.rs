@@ -752,17 +752,17 @@ impl OnboardingState {
     /// Re-detect each agent's current auth from config + keychain and cache it.
     /// Call on entering the Authentication step and after every change; never
     /// from render. Also refreshes the summary string shown on the Summary step.
-    pub fn refresh_auth_statuses(&mut self) {
-        use crate::config::{AppConfig, ClaudeAuthProvider};
+    ///
+    /// `claude_provider` is the reducer's own config value, not a disk read, so
+    /// a choice made in this step shows before the host has written it.
+    pub fn refresh_auth_statuses(&mut self, claude_provider: &crate::config::ClaudeAuthProvider) {
+        use crate::config::ClaudeAuthProvider;
         use crate::credentials;
 
         // Claude's mode is gated by config: a stored Anthropic key with
         // system-wide auth selected must NOT read as API-key mode (the key
         // isn't injected in that case). Every other harness is "key present?".
-        let claude_api = matches!(
-            AppConfig::load().map(|c| c.authentication.claude_provider),
-            Ok(ClaudeAuthProvider::ApiKey)
-        );
+        let claude_api = matches!(claude_provider, ClaudeAuthProvider::ApiKey);
 
         self.auth_statuses = AuthAgent::all()
             .iter()

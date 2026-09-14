@@ -185,6 +185,63 @@ const CALL_SITES: &[(&str, usize, &str)] = &[
     ("tmux/session.rs", 8, "tmux session service, detached"),
 ];
 
+/// Reducer modules that still write to disk themselves, with the number of
+/// lines that do and why. Paths are under `src/`. No line here calls
+/// `.save()`: every store save runs through `Effect::Persist`, so a `.save()`
+/// in a reducer module changes a count and fails. The writes left are the
+/// session defaults and skill manifest the same step reads back, and files
+/// that are not stores.
+const REDUCER_DISK_WRITES: &[(&str, usize, &str)] = &[
+    (
+        "app/events.rs",
+        4,
+        "session defaults on picker back, configure back and launch, read back \
+         in the same step; the skill manifest on adding a source",
+    ),
+    (
+        "app/snapshot.rs",
+        2,
+        "the periodic session snapshot files, written by the snapshot task",
+    ),
+    (
+        "app/state.rs",
+        3,
+        "the abtop setup-dismissed marker, session defaults on advancing to \
+         configure, and the API key env file auth setup writes",
+    ),
+    (
+        "components/new_session/configure.rs",
+        1,
+        "a named preset on Ctrl+S, which the same step adds to the list and selects",
+    ),
+    (
+        "components/new_session/pick_repo.rs",
+        1,
+        "session defaults on Ctrl+R, which the next key reads",
+    ),
+    (
+        "components/session_recovery.rs",
+        2,
+        "archiving an orphaned session's metadata",
+    ),
+    (
+        "components/skill_manager_screen.rs",
+        3,
+        "the skill manifest and the discovery skip marker",
+    ),
+];
+
+/// What a line has to contain to count as a reducer writing to disk.
+const DISK_WRITE_PATTERNS: &[&str] = &[
+    ".save()",
+    ".save_to(",
+    "fs::write(",
+    "save_keys(",
+    "save_external_keys(",
+    "save_tree_expansion(",
+    "save_preset(",
+];
+
 /// What a line has to contain to count as a host side effect.
 const PATTERNS: &[&str] = &[
     "Command::new(",
@@ -420,6 +477,25 @@ fn host_only_state_is_not_serialize() {
     assert!(
         Probe::<String>::SERIALIZE,
         "the probe detects a Serialize type"
+    );
+}
+
+#[test]
+fn no_reducer_module_saves_a_store_outside_the_persistence_effect() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = BTreeMap::new();
+    for module in ["app", "components"] {
+        count_call_sites(&src.join(module), &src, DISK_WRITE_PATTERNS, &mut found);
+    }
+    let allowed: BTreeMap<String, usize> = REDUCER_DISK_WRITES
+        .iter()
+        .map(|(path, count, _)| ((*path).to_string(), *count))
+        .collect();
+    assert_eq!(
+        found, allowed,
+        "disk writes in reducer modules changed. A store save belongs in an \
+         Effect::Persist the host runs after the step; a removed write shrinks \
+         its REDUCER_DISK_WRITES entry"
     );
 }
 

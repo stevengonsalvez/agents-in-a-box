@@ -1501,6 +1501,15 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Show how a daemon lifecycle command ended on its row",
         ),
+        unbound(
+            Context::Global,
+            "persist_failed",
+            AppEvent::PersistFailed {
+                store: String::new(),
+                error: String::new(),
+            },
+            "Say that a store the host was asked to write could not be saved",
+        ),
     ]);
 
     rows

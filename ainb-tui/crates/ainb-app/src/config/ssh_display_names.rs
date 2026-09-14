@@ -26,7 +26,7 @@ pub fn normalize_session_label(raw: &str) -> Result<Option<String>, String> {
 
 /// Store for durable session labels.
 /// Maps tmux session name to a human-provided label, independent from Git.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionLabelStore {
     /// Map of tmux_session_name -> display_name

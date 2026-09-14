@@ -20,6 +20,16 @@ use ainb_app::app::state::ConfigScreenState;
 use ainb_app::config::AppConfig;
 use ainb_app::config::settings_model::ConfigValue;
 
+/// Save the Config screen and write what the step queued, as the host does.
+fn save_all(state: &mut AppState) {
+    EventHandler::process_event(AppEvent::ConfigSaveAll, state);
+    for effect in state.take_effects() {
+        if let ainb_app::Effect::Persist(store) = effect {
+            ainb_app::config::persist::write(&store).expect("the host writes the store");
+        }
+    }
+}
+
 const WORKER_ENV: &str = "AINB_CONFIG_MERGE_SAVE_WORKER";
 const TEST_NAME: &str = "two_config_screens_saving_different_settings_keep_both";
 
@@ -91,12 +101,12 @@ fn run_worker() {
         "workspace_defaults.branch_prefix",
         ConfigValue::Text("g6a/".to_string()),
     );
-    EventHandler::process_event(AppEvent::ConfigSaveAll, &mut a);
+    save_all(&mut a);
 
     b.config
         .config_screen_state
         .set_row_value("workspace_defaults.scan_max_depth", ConfigValue::Number(4));
-    EventHandler::process_event(AppEvent::ConfigSaveAll, &mut b);
+    save_all(&mut b);
 
     // A restart reads both values back.
     let restarted = AppConfig::load().expect("reload config");
@@ -164,7 +174,7 @@ fn run_clear_worker() {
     a.config
         .config_screen_state
         .set_row_value("docker.host", ConfigValue::Text(String::new()));
-    EventHandler::process_event(AppEvent::ConfigSaveAll, &mut a);
+    save_all(&mut a);
 
     // Another writer changes branch_prefix after B loaded its snapshot.
     ainb_app::config::write_keys_into(
@@ -181,5 +191,5 @@ fn run_clear_worker() {
         "workspace_defaults.branch_prefix",
         ConfigValue::Text("agents/".to_string()),
     );
-    EventHandler::process_event(AppEvent::ConfigSaveAll, &mut b);
+    save_all(&mut b);
 }

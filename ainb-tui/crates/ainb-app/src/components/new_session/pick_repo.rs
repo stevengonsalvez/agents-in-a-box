@@ -92,10 +92,16 @@ pub enum PickRepoOutcome {
     /// appended to the filter via `append_filter`, keeping this component
     /// pure and testable.
     PasteFromClipboard,
-    /// Surface a transient message to the user (favorite added/removed, or a
-    /// refusal) and stay on the picker. The dispatcher maps `is_error` to an
-    /// error vs. info notification.
+    /// Surface a transient message to the user (a refusal) and stay on the
+    /// picker. The dispatcher maps `is_error` to an error vs. info notification.
     Notice { message: String, is_error: bool },
+    /// A favorite was added or removed: the dispatcher queues the favorites
+    /// store's write, shows `message` and stays on the picker.
+    FavoritesChanged {
+        message: String,
+        /// The favourites as they stand after the change, for the host to write.
+        favorites: crate::app::effect::Snapshot<crate::config::FavoritesStore>,
+    },
 }
 
 /// Persistent state for the picker. Constructed once per new-session
@@ -465,17 +471,17 @@ pub fn handle_key(state: &mut PickRepoState, key: &Chord) -> PickRepoOutcome {
                         FavoriteToggle::Added(display) => {
                             let local_repos = collect_local_repo_paths(state);
                             state.rebuild_rows(&local_repos);
-                            PickRepoOutcome::Notice {
+                            PickRepoOutcome::FavoritesChanged {
                                 message: format!("⭐ Added '{display}' to favorites"),
-                                is_error: false,
+                                favorites: crate::app::effect::Snapshot(state.favorites.clone()),
                             }
                         }
                         FavoriteToggle::Removed(display) => {
                             let local_repos = collect_local_repo_paths(state);
                             state.rebuild_rows(&local_repos);
-                            PickRepoOutcome::Notice {
+                            PickRepoOutcome::FavoritesChanged {
                                 message: format!("★ Removed '{display}' from favorites"),
-                                is_error: false,
+                                favorites: crate::app::effect::Snapshot(state.favorites.clone()),
                             }
                         }
                     };
@@ -603,7 +609,6 @@ pub fn resolve_outcome(source: RepoSource) -> PickRepoOutcome {
 fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) -> FavoriteToggle {
     if state.favorites.has_alias(&row.id) {
         state.favorites.remove(&row.id);
-        persist_favorites(state);
         return FavoriteToggle::Removed(row.label.clone());
     }
 
@@ -641,15 +646,7 @@ fn toggle_favorite(state: &mut PickRepoState, row: &PickRepoRow) -> FavoriteTogg
 
     let display = fav.source.clone();
     state.favorites.set(fav);
-    persist_favorites(state);
     FavoriteToggle::Added(display)
-}
-
-/// Persist the favorites store to disk, logging (but not failing) on error.
-fn persist_favorites(state: &PickRepoState) {
-    if let Err(err) = state.favorites.save() {
-        tracing::warn!(error = %err, "pick_repo: failed to persist favorites");
-    }
 }
 
 /// Pull current local-only paths out of state so the row list can be
