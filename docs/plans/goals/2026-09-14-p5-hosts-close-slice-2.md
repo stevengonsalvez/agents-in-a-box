@@ -70,3 +70,14 @@ Decisions:
 - New pane output no longer bumps the tmux section. The bytes are the local host's; a mirrored host renders its own client, so a section bump per PTY write told a subscriber nothing it could draw.
 - A failed input write is a report (`terminal_input_closed`), so the host no longer writes state or posts the notice itself.
 - The Pal and session chat hosts and the Pal dial tick every frame as host-only state and ask for a repaint when they moved; they no longer bump the fleet section, because no other host can draw from a chat handle this process holds.
+
+P5a review (#1043, "Review of c1065b26"), applied on `stevengonsalvez/p5-hosts`:
+- The host closes a released client before every effect, not only once per loop, so a full-screen attach or an editor never runs with a stale preview client open.
+- A read-only observer takes no input; `in_place_failed` carries `unsupported`, and the reducer stops asking a host that set it.
+- The routing rule a host owes while the pane is live (every key to the client except the chord `Keymap::releases_in_place_pane` names) and the report order (`in_place_opened` only once a client is held) are in the `InPlace` doc and pinned by the headless host.
+- Terminal host reads of `AppState.host` are fenced (`HOST_STATE_READS`: the session log, the Pal dial and the daemon start offer draw from it until D1), and a probe keeps `HostOnlyState` from ever deriving `Serialize`.
+
+D1 inputs, not P5 work (from the design review of #1043):
+- The reducer shells out: `AppState` asks `tmux::process_detection::host_tmux_session_name()` (a `tmux display-message` subprocess) to apply the own-session rule. A second host has its own answer, so it belongs on the host's report or a host fact, not a reducer call.
+- `AppState::default` loads `AppConfig` from disk. A reducer built for a second host, or a test, reads the user's files; construction should take the config as an argument.
+- The reducer reads the wall clock (`Instant::now()` in the observer settle and retry rules, lease renewal and tick pacing). Replaying a mirrored host's intents needs time to arrive on the intent or a host clock the reducer is given.
