@@ -6,7 +6,7 @@ use crate::setup::SetupStatus;
 use std::path::PathBuf;
 
 /// Steps in the onboarding wizard
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingStep {
     Welcome,
     /// How did you find ainb? (questionnaire)
@@ -87,7 +87,7 @@ impl QuestionnaireKind {
 }
 
 /// Available editor option for selection
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct EditorOption {
     /// Display name (e.g., "VS Code", "Cursor")
     pub name: String,
@@ -281,7 +281,7 @@ impl OnboardingStep {
 }
 
 /// Validation result for a git directory path
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ValidatedPath {
     pub path: PathBuf,
     pub is_valid: bool,
@@ -345,7 +345,7 @@ impl ValidatedPath {
 }
 
 /// Focus areas within steps that have multiple interactive elements
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingFocus {
     /// Main content area
     Content,
@@ -356,7 +356,7 @@ pub enum OnboardingFocus {
 }
 
 /// Full onboarding wizard state
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct OnboardingState {
     /// Current step in the wizard
     pub current_step: OnboardingStep,
@@ -402,10 +402,19 @@ pub struct OnboardingState {
     /// OTEL: user chose to skip the OpenTelemetry step (no setup on finish)
     pub otel_skip: bool,
     /// OTEL: Grafana Cloud OTLP endpoint URL (ends in /otlp)
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub otel_otlp_endpoint: String,
     /// OTEL: Grafana Cloud Instance ID (Basic-auth username)
+    #[serde(
+        rename = "otel_instance_id_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub otel_instance_id: String,
     /// OTEL: Grafana Cloud API token (secret)
+    #[serde(
+        rename = "otel_api_token_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub otel_api_token: String,
     /// OTEL: focused form field (0=endpoint, 1=instance, 2=token)
     pub otel_field: usize,
@@ -429,7 +438,7 @@ pub struct OnboardingState {
 /// Each runs in one of two modes: `Login` (native/system-wide sign-in, ainb
 /// injects nothing) or `ApiKey` (a key ainb stores in the keychain and injects
 /// as the harness's env var when a session starts).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthAgent {
     Claude,
     Codex,
@@ -551,7 +560,7 @@ impl AuthAgent {
 }
 
 /// Auth method a harness is currently using (detected) or being switched to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethodKind {
     /// Native / system-wide sign-in; ainb injects nothing.
     Login,
@@ -573,29 +582,34 @@ impl AuthMethodKind {
 /// Detected current auth for a single agent. Cached in `OnboardingState` and
 /// refreshed on entering the step / after a change — never read from the
 /// keychain during render (which runs every frame).
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct AgentAuthStatus {
     pub agent: AuthAgent,
     pub method: AuthMethodKind,
     /// Masked key (e.g. "sk-ant-xxxx••••") when `method == ApiKey` and a key is
     /// actually stored; `None` otherwise.
+    #[serde(rename = "has_key", serialize_with = "crate::wire::fields::is_some")]
     pub key_masked: Option<String>,
 }
 
 /// Which sub-view of the Authentication step is active. Drives both the render
 /// and the key dispatch so the flat option list becomes a per-agent drill-down.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum AuthPane {
     /// Browsing the per-agent list (default).
     AgentList,
     /// Choosing a method for `agent`. `cursor`: 0 = Login, 1 = API key, 2 = Back.
     MethodPicker { agent: AuthAgent, cursor: usize },
     /// Typing an API key for `agent` into `buf`.
-    KeyEntry { agent: AuthAgent, buf: String },
+    KeyEntry {
+        agent: AuthAgent,
+        #[serde(rename = "buf_len", serialize_with = "crate::wire::fields::char_count")]
+        buf: String,
+    },
 }
 
 /// Background-install state for a single dependency on the deps screen.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum DepInstall {
     /// Install command running in the background.
     Installing,
