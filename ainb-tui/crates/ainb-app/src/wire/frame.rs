@@ -130,18 +130,57 @@ impl Frame {
     }
 }
 
+/// The largest serialised section body a frame carries: 4 MiB. The plugin
+/// framer refuses a 16 MiB body, and a frame may ride base64 or a JSON-RPC
+/// envelope, so the ceiling leaves room around it.
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// A section the host did not send because its body is over the ceiling.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OversizeSection {
+    pub section: String,
+    pub version: u64,
+    pub bytes: u64,
+}
+
 /// Everything one host tick sends down the channel.
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameBatch {
     pub frames: Vec<Frame>,
+    /// Sections that changed but were withheld as over [`MAX_FRAME_BYTES`].
+    /// The renderer is told, so a section it keeps drawing is known stale
+    /// rather than silently so.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oversize: Vec<OversizeSection>,
 }
 
 impl FrameBatch {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.frames.is_empty()
+        self.frames.is_empty() && self.oversize.is_empty()
     }
+}
+
+/// Counts the bytes a value serialises to without keeping them.
+#[derive(Default)]
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialised_len(value: &serde_json::Value) -> usize {
+    let mut count = ByteCount::default();
+    serde_json::to_writer(&mut count, value).map_or(usize::MAX, |()| count.0)
 }
 
 /// The inverse of [`section_name`].
@@ -224,6 +263,7 @@ pub struct Mirror {
     subscription: Subscription,
     sent: [Option<u64>; SectionId::COUNT],
     daemon_read: DaemonReadSource,
+    max_frame_bytes: usize,
 }
 
 impl std::fmt::Debug for Mirror {
@@ -254,7 +294,15 @@ impl Mirror {
             subscription,
             sent: [None; SectionId::COUNT],
             daemon_read: crate::wire::daemon_read,
+            max_frame_bytes: MAX_FRAME_BYTES,
         }
+    }
+
+    /// The same mirror with a lower body ceiling: an oversize section in a test.
+    #[must_use]
+    pub const fn with_max_frame_bytes(mut self, max_frame_bytes: usize) -> Self {
+        self.max_frame_bytes = max_frame_bytes;
+        self
     }
 
     #[must_use]
@@ -274,30 +322,76 @@ impl Mirror {
     }
 
     /// The frames `state` owes this renderer, marking them sent.
+    ///
+    /// A section whose body is over the ceiling is not sent: it is named in
+    /// [`FrameBatch::oversize`] and logged, and marked sent at that version so
+    /// it is tried again when it next changes.
     #[must_use]
     pub fn batch(&mut self, state: &AppState) -> FrameBatch {
         let versions = state.versions();
-        let mut frames = Vec::new();
+        let mut batch = FrameBatch::default();
         for id in SectionId::ALL {
             let version = versions[id.index()];
             if !self.subscription.contains(id) || self.sent[id.index()] == Some(version) {
                 continue;
             }
             self.sent[id.index()] = Some(version);
-            frames.push(Frame {
+            let frame = Frame {
                 epoch: self.epoch,
                 host_id: self.host_id.clone(),
                 daemon_read: (self.daemon_read)(state, id),
                 ..Frame::new(state, id)
-            });
+            };
+            let bytes = serialised_len(frame.body());
+            if bytes > self.max_frame_bytes {
+                tracing::warn!(
+                    section = %frame.section,
+                    version,
+                    bytes,
+                    limit = self.max_frame_bytes,
+                    "mirror frame withheld: section body over the frame ceiling"
+                );
+                batch.oversize.push(OversizeSection {
+                    section: frame.section,
+                    version,
+                    bytes: bytes as u64,
+                });
+                continue;
+            }
+            batch.frames.push(frame);
         }
-        FrameBatch { frames }
+        batch
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_sample_state_section_fits_under_the_frame_ceiling() {
+        for state in crate::wire::shape::sample_states(&mut crate::wire::shape::PlainSeed) {
+            let batch = Mirror::new(HostId::local(), Subscription::all()).batch(&state);
+            assert!(batch.oversize.is_empty(), "{:?}", batch.oversize);
+            assert_eq!(batch.frames.len(), SectionId::COUNT);
+        }
+    }
+
+    #[test]
+    fn a_section_over_the_ceiling_is_reported_not_sent() {
+        let state = crate::wire::shape::sample_state(&mut crate::wire::shape::PlainSeed);
+        let mut mirror = Mirror::new(HostId::local(), Subscription::only(&[SectionId::Shell]))
+            .with_max_frame_bytes(8);
+        let batch = mirror.batch(&state);
+        assert!(batch.frames.is_empty());
+        assert_eq!(batch.oversize.len(), 1);
+        assert_eq!(batch.oversize[0].section, "shell");
+        assert!(batch.oversize[0].bytes > 8);
+        assert!(
+            mirror.batch(&state).is_empty(),
+            "not retried until the section changes"
+        );
+    }
 
     #[test]
     fn a_subscription_travels_as_section_names_and_skips_unknown_ones() {
