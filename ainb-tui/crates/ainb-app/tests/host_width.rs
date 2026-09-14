@@ -2,13 +2,13 @@
 // surfaces at different widths driving one crate never share a value.
 
 use ainb_app::app::RendererHost;
-use ainb_app::app::keymap::ScrollAction;
+use ainb_app::app::keymap::HostAction;
 use ainb_app::{AppState, Btn, CommandId, Intent, Keymap, Pos, dispatch};
 /// A host with a fixed surface width and nothing else.
 struct Surface(u16);
 
 impl RendererHost for Surface {
-    fn queue_scroll(&mut self, _action: ScrollAction) {}
+    fn queue(&mut self, _action: HostAction) {}
 
     fn columns(&self) -> Option<u16> {
         Some(self.0)
