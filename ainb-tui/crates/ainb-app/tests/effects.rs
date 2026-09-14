@@ -75,6 +75,7 @@ fn attach_on_a_session_returns_attach_terminal_for_that_session() {
     isolated_home();
     let keymap = Keymap::defaults();
     let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
+    state.sessions.workspaces[0].sessions[0].tmux_session_name = Some("tmux_api_feat".to_string());
     let session_id = state.sessions.workspaces[0].sessions[0].id;
     let before = state.versions();
 
@@ -89,7 +90,12 @@ fn attach_on_a_session_returns_attach_terminal_for_that_session() {
         effects,
         vec![Effect::AttachTerminal(TerminalTarget::Session(session_id))]
     );
-    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+    assert_eq!(
+        bumped(&before, &state.versions()),
+        vec![SectionId::Sessions],
+        "the reducer marks the session attached before the host attaches"
+    );
+    assert!(state.sessions.workspaces[0].sessions[0].is_attached);
     assert!(
         state.shell.pending_async_action.is_none(),
         "no async work queued for the attach"
@@ -163,15 +169,27 @@ fn quick_shell_returns_attach_terminal_for_the_workspace_shell_at_the_worktree()
         &mut NoRenderer,
         command("session_list.quick_shell"),
     );
+    let shell_name = state.sessions.workspaces[0]
+        .shell_session
+        .as_ref()
+        .expect("the reducer records the shell it asks the host to open")
+        .tmux_session_name
+        .clone();
 
     assert_eq!(
         effects,
         vec![Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
-            workspace_index: 0,
+            workspace_path: "/parity/api".into(),
+            tmux_session: shell_name,
+            new_shell: true,
             target_dir: Some("/parity/api/worktrees/feat-login".into()),
         })]
     );
-    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+    assert_eq!(
+        bumped(&before, &state.versions()),
+        vec![SectionId::Sessions],
+        "the reducer records the workspace shell; the host only creates its tmux session"
+    );
 }
 
 #[test]
