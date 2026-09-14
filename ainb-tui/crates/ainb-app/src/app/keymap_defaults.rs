@@ -863,6 +863,7 @@ pub fn defaults() -> Vec<Binding> {
         right: "right" => AppEvent::ConfigFocusSettings,
         right_l: "l" => AppEvent::ConfigFocusSettings,
         toggle_expand: "space" => AppEvent::ConfigToggleExpand,
+        edit: "enter" => AppEvent::ConfigEditSetting,
         save_all: "s" => AppEvent::ConfigSaveAll,
         save_all_upper: "S" => AppEvent::ConfigSaveAll,
     );
@@ -970,6 +971,12 @@ pub fn defaults() -> Vec<Binding> {
         edit: "enter" => AppEvent::ConfigEditSetting,
         backspace: "backspace" => AppEvent::ConfigSearchBackspace,
         secret: "ctrl+k" => AppEvent::ConfigSecretToKeychain,
+    );
+    append_app_rows!(rows, Context::Screen("config", super::keymap::SubContext::Named("categories")),
+        toggle_expand: "enter" => AppEvent::ConfigToggleExpand,
+    );
+    append_app_rows!(rows, Context::Screen("config", super::keymap::SubContext::Named("claude_auth")),
+        auth_provider: "enter" => AppEvent::AuthProviderPopupOpen,
     );
     append_app_rows!(rows, Context::Screen("auth_provider_popup", super::keymap::SubContext::Named("input")),
         select: "enter" => AppEvent::AuthProviderPopupSelect,
