@@ -116,6 +116,8 @@ fn sessions_mouse_click_selects_session_row_without_async_work() {
 fn sessions_mouse_double_click_attaches_selected_session_row() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state, mut ui) = state_with_two_sessions();
+    // The reducer attaches only a session that has a tmux session.
+    state.sessions.workspaces[0].sessions[1].tmux_session_name = Some("tmux_second".to_string());
 
     let row = session_row_y(&ui, 1);
     let first = click(&mut state, &mut ui, 8, row);
