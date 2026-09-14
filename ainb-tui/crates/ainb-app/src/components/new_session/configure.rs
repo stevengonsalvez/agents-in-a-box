@@ -20,7 +20,7 @@ pub const CUSTOM_PRESET_LABEL: &str = "Custom";
 /// `Named(idx)` indexes into `available_presets`. `Custom` unlocks the
 /// per-row editor rows (Agent / Model / Mode / Yolo). The Custom slot sits
 /// at the end of the cycling ring, after the last named preset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetSelection {
     Named(usize),
     Custom,
@@ -30,7 +30,7 @@ pub enum PresetSelection {
 /// is active. Lazy-populated the first time the user cycles into Custom from
 /// a named preset — the seed values come from whatever preset was selected
 /// just before the switch.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct CustomOverrides {
     pub agent_provider: String,
     pub agent_model: String,
@@ -55,7 +55,7 @@ impl CustomOverrides {
 /// of after Launch as a clone/worktree failure toast (Stevie 2026-07-04:
 /// empty mysocialmedia died at `prepare_remote_worktree` with a cryptic
 /// origin/HEAD error; a typo'd repo died with "Clone failed").
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum RepoCheck {
     /// Local path / SSH session — nothing to validate.
     NotApplicable,
@@ -101,14 +101,14 @@ impl RepoCheck {
 /// the row is focused. ←/→ toggles; Enter acts on the targeted segment —
 /// Source opens the base-branch picker popup, Worktree opens the inline
 /// name edit (2026-06 base-picker feature).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BranchSegment {
     Source,
     Worktree,
 }
 
 /// How a picked base ref is applied at launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseMode {
     /// Cut a fresh `agents/xxx` branch off the picked ref (default).
     BaseOff,
@@ -133,7 +133,7 @@ pub enum BranchProblem {
 
 /// The user's pick from the base-branch popup. Threaded through `LaunchSpec`
 /// into `create_session_from_configure`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct BaseSelection {
     /// Display ref — `origin/feature-x` for remote entries, `feature-x` for
     /// local ones. Doubles as the git start-point (revparse-able).
@@ -148,7 +148,7 @@ pub struct BaseSelection {
 
 /// One row in the base-branch popup: the git entry plus the live-worktree
 /// collision flag (drives the `⚠ in use` marker and blocks Checkout picks).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PickerBranchEntry {
     pub entry: BranchEntry,
     pub in_use: bool,
@@ -157,7 +157,7 @@ pub struct PickerBranchEntry {
 /// State for the base-branch popup. `None` on `ConfigureState.branch_picker`
 /// when closed. Entries are seeded from cached refs at open (instant) and
 /// replaced in place when the background fetch lands (`loading` spinner).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct BranchPickerState {
     pub filter: String,
     pub entries: Vec<PickerBranchEntry>,
@@ -219,7 +219,7 @@ impl BranchPickerState {
 /// Identity of a logical row in the Configure form. The set of *visible*
 /// rows depends on the active variant (SSH vs. local) and on whether
 /// `PresetSelection::Custom` is active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigureRow {
     Preset,
     Agent,
@@ -249,7 +249,7 @@ pub enum ConfigureRow {
 
 /// State for the Configure screen. Constructed once when the user advances
 /// from `PickRepo`. Owned by `NewSessionState.configure_state`.
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct ConfigureState {
     /// What the user selected on screen 1 — drives the layout variant.
     pub repo_source: RepoSource,
@@ -287,6 +287,7 @@ pub struct ConfigureState {
     /// Inline edit buffer for [`Self::session_prefix`].
     pub session_prefix_edit: Option<String>,
     /// Multi-line prompt editor (Boss mode only).
+    #[serde(serialize_with = "crate::wire::fields::scrub_editor")]
     pub prompt: TextEditor,
     /// When `Some`, the save-preset modal is open and the contained string is
     /// the typed name buffer.
@@ -295,6 +296,7 @@ pub struct ConfigureState {
     /// doesn't re-scan `~/.agents-in-a-box/presets/` on every keystroke
     /// (finding #4). Invalidated + reloaded only when `save_preset` writes a
     /// new file.
+    #[serde(skip)]
     pub presets_cache: HashMap<String, RepositoryPreset>,
     /// Branch prefix from `AppConfig.workspace_defaults.branch_prefix`,
     /// threaded through by the dispatcher (finding #5).
