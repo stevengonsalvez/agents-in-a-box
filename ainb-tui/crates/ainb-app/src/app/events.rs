@@ -4909,11 +4909,17 @@ impl EventHandler {
             AppEvent::ConfigEditSetting => {
                 let selected = state.config.config_screen_state.current_setting().cloned();
                 if let Some(setting) = selected {
-                    // A row core cannot persist says so instead of opening an
-                    // editor that would throw the value away.
-                    if let Some(reason) =
+                    // The Claude auth row opens its own popup, from the list
+                    // and from a search match alike: picking "API key" there
+                    // also stores the key in the OS keychain, which the generic
+                    // choice popup cannot do.
+                    if setting.key == crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY {
+                        Self::process_event(AppEvent::AuthProviderPopupOpen, state);
+                    } else if let Some(reason) =
                         crate::config::screen_model::read_only_reason(&setting.key)
                     {
+                        // A row core cannot persist says so instead of opening
+                        // an editor that would throw the value away.
                         state.add_info_notification(format!("{}: {reason}", setting.label));
                     } else {
                         let title = setting.label.clone();
