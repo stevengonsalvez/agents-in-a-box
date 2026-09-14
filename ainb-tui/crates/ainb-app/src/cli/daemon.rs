@@ -20,7 +20,7 @@ use clap::ArgMatches;
 use crate::fleet::daemons::probe::DaemonKind;
 
 /// The three verbs every daemon row offers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Start,
     Stop,

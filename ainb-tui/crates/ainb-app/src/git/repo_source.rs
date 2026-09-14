@@ -7,10 +7,10 @@ use regex::Regex;
 use thiserror::Error;
 
 /// Represents the source of a git repository - either remote (URL) or local (path)
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum RepoSource {
     /// HTTPS URL (https://github.com/user/repo)
-    HttpsUrl(String),
+    HttpsUrl(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
     /// SSH URL for clone (git@github.com:user/repo.git)
     SshUrl(String),
     /// `ssh://user@host[:port]` with no repo segment — opens an interactive SSH
@@ -24,7 +24,7 @@ pub enum RepoSource {
     /// Unparseable input — pass through to the fuzzy filter on the picker list.
     /// New-session screen 1 (smart-parse v2) sink variant; never produced by
     /// the legacy `from_input` parser.
-    Filter(String),
+    Filter(#[serde(serialize_with = "crate::wire::fields::char_count")] String),
 }
 
 /// Parsed repository components for cache path generation

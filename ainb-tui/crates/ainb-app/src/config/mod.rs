@@ -501,7 +501,13 @@ pub struct PluginsConfig {
     ///
     /// `BTreeMap` keeps the serialized order stable so config.toml diffs stay
     /// deterministic across saves.
-    #[serde(default, flatten)]
+    ///
+    /// Plugin-defined tables can hold a URL or a key, so a frame leaves them out.
+    #[serde(
+        default,
+        flatten,
+        skip_serializing_if = "crate::wire::fields::omit_in_frame"
+    )]
     pub values: BTreeMap<String, toml::Value>,
 }
 
@@ -619,7 +625,10 @@ pub struct FleetConfig {
     /// IS modelled, so anything nested under it that has no field here would be
     /// dropped on the next save. That is exactly how the bridge's Telegram,
     /// Slack and Discord tokens used to get wiped by any settings save.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::wire::fields::omit_in_frame_or_none"
+    )]
     pub bridge: Option<toml::Value>,
 }
 
@@ -1086,6 +1095,9 @@ pub struct DockerConfig {
     /// - unix:///var/run/docker.sock
     /// - tcp://localhost:2376
     /// - npipe:////./pipe/docker_engine
+    ///
+    /// A `tcp://user:pass@host` URL carries a credential, so a frame scrubs it.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub host: Option<String>,
 
     /// Connection timeout in seconds

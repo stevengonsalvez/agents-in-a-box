@@ -39,14 +39,16 @@ pub enum InstallOutcome {
 }
 
 /// Status of the user's statusline configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum StatuslineStatus {
     /// `ainb statusline` is wired as the sole statusLine command.
     Configured,
     /// No statusLine block at all.
     NotConfigured,
-    /// Some other command is wired.
-    Other(String),
+    /// Some other command is wired. The command line is verbatim from
+    /// settings.json and can carry an inline `KEY=value`, so a mirror frame
+    /// says only that another command is wired.
+    Other(#[serde(serialize_with = "crate::wire::fields::withheld")] String),
 }
 
 /// Resolve `~/.claude/settings.json`.

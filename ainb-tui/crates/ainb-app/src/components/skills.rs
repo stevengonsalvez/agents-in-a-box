@@ -5,7 +5,7 @@
 use crate::models::skills::{AgentDef, Skill, SkillsData};
 
 /// Which agent provider's skills to show.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SkillsProvider {
     #[default]
     Claude,
@@ -57,7 +57,7 @@ impl SkillsProvider {
 }
 
 /// Which sub-tab is active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SkillsTab {
     #[default]
     Skills,
@@ -100,7 +100,7 @@ impl SkillsTab {
 }
 
 /// View state for the Skills screen.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct SkillsViewState {
     pub provider: SkillsProvider,
     pub active_tab: SkillsTab,
@@ -108,6 +108,10 @@ pub struct SkillsViewState {
     pub loading: bool,
     pub selected_index: usize,
     pub search_active: bool,
+    #[serde(
+        rename = "search_query_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub search_query: String,
 }
 

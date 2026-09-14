@@ -1589,6 +1589,7 @@ mod tests {
                 ok: false,
                 summary: "start failed".to_string(),
                 detail: "cmd: ainb daemon atc start\nexit: exit status: 1\n\nstderr:\nsocket already bound by pid 4412".to_string(),
+                local_only: false,
             },
         );
         let out = render_to_string(&mut state, 120, 24);
@@ -1655,6 +1656,7 @@ mod tests {
                 ok: false,
                 summary: "start failed".to_string(),
                 detail: "boom".to_string(),
+                local_only: false,
             },
         );
         state.open_menu();

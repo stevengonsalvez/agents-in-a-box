@@ -15,10 +15,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrphanedSession {
     pub session: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
     pub task: String,
     pub directory: String,
     pub created: String,
     pub status: String,
+    #[serde(skip_serializing_if = "crate::wire::fields::omit_in_frame")]
     pub transcript_path: Option<String>,
     pub worktree_branch: Option<String>,
     pub can_resume: bool,
@@ -73,8 +75,10 @@ pub struct OrphanedWorktree {
     /// Git branch
     pub branch: Option<String>,
     /// Last commit message/hash
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub last_commit: Option<String>,
     /// Original repository (detected from git remote)
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub source_repo: Option<String>,
     /// Type of orphan
     pub orphan_type: OrphanType,
@@ -139,7 +143,7 @@ impl Default for OrphanedWorktree {
 }
 
 /// View mode for recovery screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RecoveryViewMode {
     /// Show only orphaned sessions (from ~/.claude/agents/)
     #[default]
@@ -177,7 +181,7 @@ pub enum RecoveryRow {
 }
 
 /// State for the session recovery component
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct SessionRecoveryState {
     /// Orphaned sessions from ~/.claude/agents/
     pub orphaned_sessions: Vec<OrphanedSession>,
@@ -192,31 +196,38 @@ pub struct SessionRecoveryState {
     /// Whether data is being loaded
     pub loading: bool,
     /// Last error message
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub last_error: Option<String>,
     /// Last action result message
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub action_result: Option<String>,
     /// Bulk recovery result overlay (shown after multi-resume)
     pub recovery_overlay: Option<RecoveryOverlay>,
     /// Fuzzy filter query. ONE query shared by all three tabs, applied within
     /// whichever tab is showing: switching tabs re-filters the new tab's rows
     /// rather than each tab remembering a filter the operator cannot see.
+    #[serde(
+        rename = "search_query_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub search_query: String,
     /// Whether the inline search bar has keyboard focus.
     pub search_active: bool,
 }
 
 /// Overlay showing results of a bulk recovery operation
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct RecoveryOverlay {
     pub title: String,
     pub results: Vec<RecoveryResultLine>,
     pub scroll_offset: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct RecoveryResultLine {
     pub name: String,
     pub success: bool,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub detail: String,
 }
 

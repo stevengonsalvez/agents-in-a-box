@@ -39,7 +39,7 @@ use uuid::Uuid;
 
 /// Location of an attachable row inside `AppState`, independent of the
 /// row's current visible position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachableRef {
     WorkspaceSession {
         workspace_idx: usize,
@@ -73,7 +73,7 @@ pub enum SessionContextAction {
 ///
 /// Absent fields mean Hangar has never observed them. The UI must omit those
 /// fields, never replace them with a guessed provider default.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionFleetMetadata {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -86,14 +86,14 @@ pub struct SessionFleetMetadata {
 }
 
 /// Ephemeral state for the keyboard-accessible right-click context menu.
-#[derive(Debug, Clone, Copy)]
+#[derive(serde::Serialize, Debug, Clone, Copy)]
 pub struct SessionContextMenu {
     pub target: AttachableRef,
     pub selected: usize,
 }
 
 /// Notification system for TUI messages
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum NotificationType {
     Success,
     Error,
@@ -101,10 +101,12 @@ pub enum NotificationType {
     Warning,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct Notification {
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub message: String,
     pub notification_type: NotificationType,
+    #[serde(skip)]
     pub created_at: Instant,
     pub duration: Duration,
 }
@@ -187,7 +189,7 @@ impl Notification {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum FocusedPane {
     Sessions, // Left pane - workspace/session list
     LiveLogs, // Right pane - live logs
@@ -649,12 +651,14 @@ pub enum SessionListRowId {
 // `crate::app::screens` for the trait + identifier constants.
 pub use crate::app::screens::{ScreenId, ids as screen_ids};
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ConfirmationDialog {
     pub title: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub message: String,
     pub confirm_action: ConfirmAction,
-    pub selected_option: bool,   // true = Yes, false = No (binary mode)
+    pub selected_option: bool, // true = Yes, false = No (binary mode)
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub warning: Option<String>, // Optional warning (e.g., uncommitted files in worktree)
     // Tri-option mode: when `options` is `Some`, the dialog renders one button per
     // entry and Left/Right cycles `selected_index`. The final-option index is
@@ -664,13 +668,13 @@ pub struct ConfirmationDialog {
 }
 
 /// One choice in a tri-option (or n-option) confirmation dialog.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct DialogOption {
     pub label: String,
     pub action: ConfirmAction,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession(Uuid),
     StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
@@ -830,20 +834,24 @@ pub struct McpFetchResult {
 /// Live, lazily-refreshed snapshot of the shared MCP pool. Present only while
 /// the overlay is open; dropping it (on close) stops all refresh activity —
 /// nothing polls the daemon when the overlay isn't showing.
+#[derive(serde::Serialize)]
 pub struct McpOverlayState {
     pub pool_enabled: bool,
     pub daemon_running: bool,
     pub servers: Vec<crate::mcp_pool::proxy::ServerStatus>,
     pub selected: usize,
     pub loading: bool,
+    #[serde(skip)]
     pub last_refreshed: Option<std::time::Instant>,
     /// Auto-refresh cadence while open; 0 = on-open + manual (`r`) only.
     pub refresh_secs: u64,
     /// Receiver for the in-flight fetch (None when no fetch is pending — the
     /// one-outstanding-request guard).
+    #[serde(skip)]
     pub fetch_rx: Option<mpsc::UnboundedReceiver<McpFetchResult>>,
     /// Status line from the last in-overlay action (e.g. `import`). Sticky
     /// across plain refreshes; cleared only when the overlay closes.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub last_action: Option<String>,
 }
 
@@ -980,7 +988,7 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 // Home Screen State
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeTile {
     SkillManager, // Install / sync / doctor (spec §10.1)
     Config,       // Settings & presets
@@ -1041,7 +1049,7 @@ impl HomeTile {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct HomeScreenState {
     pub selected_tile: usize,
     pub tiles: Vec<HomeTile>,
@@ -1453,7 +1461,7 @@ fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
 }
 
 /// Tracks which pane has focus in the config screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConfigPane {
     #[default]
     Categories,
@@ -1491,7 +1499,7 @@ pub struct AppliedEdits {
 /// needed both lists touched to become reachable. Now the registry is the only
 /// list, and a save routes every edit through
 /// [`registry::set_validated`](crate::config::registry::set_validated).
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ConfigScreenState {
     /// Index into [`visible_nodes`](Self::visible_nodes) — the tree row the
     /// left pane has selected.
@@ -1516,6 +1524,10 @@ pub struct ConfigScreenState {
     /// node's subtree, or the `/` filter's matches.
     pub visible_rows: Vec<(ConfigCategory, usize)>,
     /// The active `/` filter. `Some("")` is an open, empty filter box.
+    #[serde(
+        rename = "search_len",
+        serialize_with = "crate::wire::fields::opt_char_count"
+    )]
     pub search: Option<String>,
     /// Keys the user has actually edited this session, and therefore the only
     /// keys a save writes.
@@ -1528,6 +1540,7 @@ pub struct ConfigScreenState {
     pub dirty: BTreeSet<String>,
     /// Each edited row's raw value before its first edit since the last save,
     /// so setting it back clears the row from `dirty`.
+    #[serde(skip)]
     pub values_before_edit: BTreeMap<String, String>,
     /// Whether the tree expansion changed since the screen opened.
     ///
@@ -1541,8 +1554,13 @@ pub struct ConfigScreenState {
     /// Set for exactly one popup round-trip: the popup's confirm writes the
     /// literal to the OS keychain and stores only `keychain:<service>` in the
     /// row, so the plaintext never reaches `config.toml` or the row's value.
+    #[serde(skip)]
     pub keychain_target: Option<String>,
     pub editing: bool,
+    #[serde(
+        rename = "edit_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub edit_buffer: String,
     /// True when entering API key (special handling - saves to keychain)
     pub api_key_input_mode: bool,
@@ -2490,7 +2508,7 @@ pub(crate) fn merge_external_sections(seed: &mut toml::Value, on_disk: &toml::Va
 }
 
 // Auth provider option for the popup
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct AuthProviderOption {
     pub id: String,
     pub name: String,
@@ -2513,11 +2531,15 @@ impl AuthProviderOption {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct AuthProviderPopupState {
     pub providers: Vec<AuthProviderOption>,
     pub selected_index: usize,
     pub is_entering_key: bool,
+    #[serde(
+        rename = "api_key_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub api_key_input: String,
     pub show_popup: bool,
 }
@@ -2694,27 +2716,41 @@ impl AuthProviderPopupState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum AuthMethod {
     OAuth,
     ApiKey,
     Skip,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct AuthSetupState {
     pub selected_method: AuthMethod,
+    #[serde(
+        rename = "api_key_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub api_key_input: String,
     pub is_processing: bool,
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub error_message: Option<String>,
     pub show_cursor: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ClaudeChatState {
+    #[serde(
+        rename = "message_count",
+        serialize_with = "crate::wire::fields::len_of"
+    )]
     pub messages: Vec<ClaudeMessage>,
+    #[serde(
+        rename = "input_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub input_buffer: String,
     pub is_streaming: bool,
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub current_streaming_response: Option<String>,
     pub associated_session_id: Option<Uuid>,
     pub total_tokens_used: u32,
@@ -3006,7 +3042,7 @@ pub enum BranchCheckoutMode {
     CheckoutExisting, // Use the remote branch directly
 }
 
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct NewSessionState {
     /// The current step in the redesigned 2-screen flow (PickRepo →
     /// Configure → Creating).
@@ -3058,7 +3094,7 @@ struct ConfigureLaunchSnapshot {
     rtk_enabled: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum NewSessionStep {
     /// Phase 6 (new-session redesign): the unified repo picker (screen 1).
     /// Owns its own state via `NewSessionState.pick_repo_state`.

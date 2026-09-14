@@ -41,7 +41,9 @@ impl ConfigPopupComponent {
                 (width, height)
             }
             ConfigPopupType::Boolean { .. } => (40, 10),
-            ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. } => (50, 10),
+            ConfigPopupType::TextInput { .. }
+            | ConfigPopupType::SecretInput { .. }
+            | ConfigPopupType::NumberInput { .. } => (50, 10),
         };
 
         let popup_x = area.x + (area.width.saturating_sub(popup_width)) / 2;
@@ -104,7 +106,13 @@ impl ConfigPopupComponent {
             ConfigPopupType::Boolean { value } => {
                 self.render_boolean(frame, layout[1], *value);
             }
+            // The terminal is the operator's own screen, so a credential entry
+            // draws like any text field; only the mirror frame withholds it.
             ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            }
+            | ConfigPopupType::SecretInput {
                 value,
                 cursor_position,
             } => {
@@ -238,7 +246,7 @@ impl ConfigPopupComponent {
             ConfigPopupType::Choice { .. } | ConfigPopupType::Boolean { .. } => {
                 vec![("↑↓", "select"), ("Enter", "confirm"), ("Esc", "cancel")]
             }
-            ConfigPopupType::TextInput { .. } => {
+            ConfigPopupType::TextInput { .. } | ConfigPopupType::SecretInput { .. } => {
                 vec![
                     ("←→", "move"),
                     ("^V", "paste"),

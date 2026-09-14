@@ -13,14 +13,14 @@ pub fn char_to_byte_index(s: &str, char_idx: usize) -> usize {
 }
 
 /// Focus area within the log viewer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogViewerFocus {
     SessionList,
     LogEntries,
 }
 
 /// Filter level for log display
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFilterLevel {
     All,
     Info,
@@ -58,7 +58,7 @@ impl LogFilterLevel {
 }
 
 /// Summary of a log file for display
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct SessionLogSummary {
     /// Filename (e.g., "agents-in-a-box-20260107-001310.jsonl")
     pub filename: String,
@@ -91,7 +91,7 @@ impl From<AppLogInfo> for SessionLogSummary {
 }
 
 /// Text selection state for copy functionality
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct TextSelection {
     /// Start position (line index, char offset)
     pub start: Option<(usize, usize)>,
@@ -100,6 +100,7 @@ pub struct TextSelection {
     /// Whether a drag is in progress
     pub is_selecting: bool,
     /// Cached selected text
+    #[serde(skip)]
     pub selected_text: Option<String>,
 }
 
@@ -131,13 +132,14 @@ impl TextSelection {
 }
 
 /// State for the log history viewer
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct LogHistoryViewerState {
     /// Currently selected log file (filename)
     pub selected_log_file: Option<String>,
     /// List of available log files
     pub sessions: Vec<SessionLogSummary>,
     /// Currently loaded logs for selected file
+    #[serde(skip)]
     pub current_logs: Vec<LogEntry>,
     /// Scroll offset for log entries
     pub scroll_offset: usize,
@@ -146,14 +148,20 @@ pub struct LogHistoryViewerState {
     /// Current filter level
     pub filter_level: LogFilterLevel,
     /// Search query (if any)
+    #[serde(
+        rename = "search_query_len",
+        serialize_with = "crate::wire::fields::opt_char_count"
+    )]
     pub search_query: Option<String>,
     /// Which pane is focused
     pub focus: LogViewerFocus,
     /// Whether the viewer is active/visible
     pub is_visible: bool,
     /// Log directory path
+    #[serde(skip)]
     pub log_dir: Option<PathBuf>,
     /// Error message (if any)
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub error_message: Option<String>,
     /// Text selection state for copy
     pub selection: TextSelection,

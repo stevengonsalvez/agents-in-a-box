@@ -56,7 +56,7 @@ const MASCOT_FRAME_HAPPY: &[&str] = &[
 const MASCOT_MINI: &[&str] = &["╭─◉◉─╮", "│ ── │", "╰────╯"];
 
 /// Animation frame types
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MascotFrame {
     Neutral,
     Blink,
@@ -65,11 +65,13 @@ pub enum MascotFrame {
 }
 
 /// Mascot animation controller
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, Clone, Debug)]
 pub struct MascotAnimation {
     pub current_frame: MascotFrame,
+    #[serde(skip)]
     last_update: Instant,
     frame_duration: Duration,
+    #[serde(skip)]
     blink_timer: Instant,
     blink_interval: Duration,
     pub is_mini: bool,

@@ -161,6 +161,7 @@ mod tests {
             ok,
             summary: summary.to_string(),
             detail: detail.to_string(),
+            local_only: false,
         }
     }
 
