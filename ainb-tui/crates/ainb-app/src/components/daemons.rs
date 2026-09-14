@@ -50,14 +50,16 @@ pub const STATUS_LINGER: Duration = Duration::from_secs(20);
 /// The immutable snapshot the background collector publishes and `render` reads.
 /// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
 /// takes to swap or clone the row vector — never across I/O.
-#[derive(Debug, Default)]
+#[derive(serde::Serialize, Debug, Default)]
 pub struct Snapshot {
     /// Most-recently-collected daemon rows.
     pub rows: Vec<DaemonStatus>,
     /// The clock the cached rows' relative-time columns are measured against.
     pub collected_at_ms: i64,
     /// Most-recent hook wiring health. Collected beside daemon state, never in
-    /// the render path.
+    /// the render path. Its event, detail and issue text come from the machine
+    /// and the hook scripts, so a frame carries them scrubbed.
+    #[serde(serialize_with = "scrub_hook_health")]
     pub hook_health: Option<HookHealth>,
     /// Hook evidence freshness, collected beside the wiring health.
     pub evidence_census: Option<EvidenceCensus>,
@@ -86,7 +88,7 @@ pub struct Snapshot {
 
 /// What the Daemons screen needs to know about the ATC supervisor beyond its
 /// runtime row: which brain its heartbeat would use.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct AtcModeView {
     pub name: String,
     pub provider: String,
@@ -97,6 +99,7 @@ pub struct AtcModeView {
     /// every frame while the ATC row was selected, in the file whose entire
     /// design is about keeping work off the UI thread. It is a pure function of
     /// the provider, so it belongs on the snapshot with everything else.
+    #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
     pub help: Vec<String>,
 }
 
@@ -109,13 +112,15 @@ pub struct AtcModeView {
 /// `render` only ever clones the latest published snapshot under a microsecond
 /// lock. A mid-crash daemon, a stale socket on a slow FS, or a saturated accept
 /// backlog can stall the background thread but can NEVER freeze the UI.
-#[derive(Debug, Default)]
+#[derive(serde::Serialize, Debug, Default)]
 pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
+    #[serde(serialize_with = "crate::wire::fields::locked_shared")]
     pub shared: Option<Arc<Mutex<Snapshot>>>,
     /// Wakes the collector for an immediate re-collect. `None` until the
     /// collector is armed.
+    #[serde(skip)]
     pub wake: Option<std::sync::mpsc::Sender<()>>,
     /// Index of the highlighted row, clamped to the snapshot on every render.
     pub selected: usize,
@@ -143,6 +148,7 @@ pub struct DaemonsState {
     /// The in-flight hook install/repair, if one is running. Same shape and
     /// same one-outstanding guarantee as [`DaemonsState::inflight`]; the Hooks
     /// box is a panel rather than a row, so it needs its own slot.
+    #[serde(skip)]
     pub hooks_inflight: Option<(
         tokio::sync::mpsc::UnboundedReceiver<String>,
         std::time::Instant,
@@ -155,6 +161,7 @@ pub struct DaemonsState {
     /// also has to be READABLE, and the collector republishes every two
     /// seconds, so expiry is a wall clock the reader can keep up with rather
     /// than the next collect.
+    #[serde(serialize_with = "crate::wire::fields::text_of_timed")]
     pub hooks_status: Option<(String, std::time::Instant)>,
     /// A tmux session the screen wants attached. Drained by the key handler,
     /// which owns the app-level pending-action slot; the component itself must
@@ -163,15 +170,16 @@ pub struct DaemonsState {
 }
 
 /// A daemon action the host is running.
-#[derive(Debug, Clone, Copy)]
+#[derive(serde::Serialize, Debug, Clone, Copy)]
 pub struct InFlight {
     pub action: Action,
     pub generation: u64,
+    #[serde(skip)]
     pub started: std::time::Instant,
 }
 
 /// A daemon action asked for and not yet handed to the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonActionRequest {
     pub daemon: DaemonKind,
     pub action: Action,
@@ -179,7 +187,7 @@ pub struct DaemonActionRequest {
 }
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct ActionMenu {
     pub kind: DaemonKind,
     /// Index into [`ActionMenu::entries`].
@@ -191,7 +199,7 @@ pub struct ActionMenu {
 }
 
 /// The parts of a row's status that decide which entries its menu offers.
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 struct RowFacts {
     /// The provisioned ATC instance, when there is one. `None` means every
     /// lifecycle verb would bail. Read from a typed field, never inferred from
@@ -274,6 +282,33 @@ impl ActionMenu {
     }
 }
 
+/// `HookHealth` belongs to the notifyd crate, which knows nothing of frames, so
+/// its free text is scrubbed on the way into the Daemons snapshot's frame.
+// `&Option<T>` is the signature serde's `serialize_with` hands over.
+#[allow(clippy::ref_option)]
+fn scrub_hook_health<S: serde::Serializer>(
+    health: &Option<HookHealth>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use crate::fleet::bridge::redact::scrub;
+    use serde::Serialize;
+    health
+        .as_ref()
+        .map(|health| {
+            let mut health = health.clone();
+            health.last_event = health.last_event.as_deref().map(scrub);
+            for agent in &mut health.agents {
+                agent.detail = scrub(&agent.detail);
+            }
+            for issue in &mut health.issues {
+                issue.message = scrub(&issue.message);
+                issue.repair = scrub(&issue.repair);
+            }
+            health
+        })
+        .serialize(serializer)
+}
+
 /// What a finished lifecycle action reported.
 #[derive(Debug, Clone)]
 pub struct ActionOutcome {
@@ -284,6 +319,37 @@ pub struct ActionOutcome {
     /// Everything the command said: the argv, its exit status, and its output.
     /// This is what the error view shows, verbatim.
     pub detail: String,
+    /// `summary` and `detail` were redeemed from output kept in this process
+    /// (a Codex pairing code). The terminal shows them; a mirror frame never
+    /// carries them, in any form.
+    pub local_only: bool,
+}
+
+/// What a frame says in place of output that stays on this machine.
+pub const LOCAL_ONLY_SUMMARY: &str = "output kept on this machine";
+
+/// A frame carries the row's outcome, never local-only output: a pairing code
+/// is a credential and a scrub cannot recognise it, so the text is replaced
+/// whole. Everything else is scrubbed.
+impl serde::Serialize for ActionOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (summary, detail) = if self.local_only {
+            (LOCAL_ONLY_SUMMARY.to_string(), String::new())
+        } else {
+            (
+                crate::fleet::bridge::redact::scrub(&self.summary),
+                crate::fleet::bridge::redact::scrub(&self.detail),
+            )
+        };
+        let mut outcome = serializer.serialize_struct("ActionOutcome", 5)?;
+        outcome.serialize_field("action", &self.action)?;
+        outcome.serialize_field("ok", &self.ok)?;
+        outcome.serialize_field("summary", &summary)?;
+        outcome.serialize_field("detail", &detail)?;
+        outcome.serialize_field("local_only", &self.local_only)?;
+        outcome.end()
+    }
 }
 
 impl DaemonsState {
@@ -553,6 +619,7 @@ impl DaemonsState {
                              start` from a terminal, where you can watch it.",
                             ACTION_TIMEOUT.as_secs()
                         ),
+                        local_only: false,
                     },
                 ));
             }

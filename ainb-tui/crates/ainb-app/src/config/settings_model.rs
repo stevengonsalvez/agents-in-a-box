@@ -9,7 +9,7 @@
 /// hand-written rows below happen to reach. The screen renders the subset that
 /// actually has rows today; `CONFIG_REGISTRY` is the source of truth for the
 /// rest, and wiring it in is what removes that gap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigCategory {
     Authentication,
     Workspace,
@@ -143,6 +143,49 @@ pub struct ConfigSetting {
     pub description: String,
 }
 
+/// Rows mirror the whole config tree, env maps and imported MCP blobs
+/// included (`container_templates.*.config.environment.*`,
+/// `mcp_servers.*.definition.env.*`, `mcp_servers.*.definition.config`). So the
+/// ROW decides what a frame may carry: a credential-bearing key keeps its name
+/// and loses its value, and every other free-text value goes through
+/// `redact::scrub`. `Secret` rows redact themselves in `SecretValue`.
+impl serde::Serialize for ConfigSetting {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let value = match &self.value {
+            ConfigValue::Text(text) if !text.is_empty() && credential_bearing_key(&self.key) => {
+                ConfigValue::Text(crate::fleet::bridge::redact::REDACTED.to_string())
+            }
+            ConfigValue::Text(text) => ConfigValue::Text(crate::fleet::bridge::redact::scrub(text)),
+            other => other.clone(),
+        };
+        let mut row = serializer.serialize_struct("ConfigSetting", 4)?;
+        row.serialize_field("key", &self.key)?;
+        row.serialize_field("label", &self.label)?;
+        row.serialize_field("value", &value)?;
+        row.serialize_field("description", &self.description)?;
+        row.end()
+    }
+}
+
+/// Whether a config row's value is a credential by where it lives: an entry
+/// of an environment or build-args map, an opaque imported MCP definition, or
+/// any plugin `[[config]]` field (`plugin:<name>:<field>`), whose meaning only
+/// the plugin knows.
+#[must_use]
+pub fn credential_bearing_key(key: &str) -> bool {
+    if key.starts_with("plugin:") {
+        return true;
+    }
+    let segments: Vec<&str> = key.split('.').collect();
+    let map_entry = segments.len() >= 2
+        && matches!(
+            segments[segments.len() - 2],
+            "env" | "environment" | "build_args"
+        );
+    map_entry || key.ends_with(".definition.config")
+}
+
 /// A credential row: the *reference* config.toml stores, plus whether that
 /// reference currently resolves to a non-empty secret.
 ///
@@ -150,10 +193,11 @@ pub struct ConfigSetting {
 /// literal's characters either, only a status and the source it came from. The
 /// resolved value is deliberately not kept: nothing on this screen needs it, and
 /// not holding it is the cheapest way to guarantee it cannot be painted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SecretValue {
     /// Exactly what config.toml holds: empty, a literal, `$ENV_VAR`, or
     /// `keychain:<service>`.
+    #[serde(serialize_with = "crate::wire::fields::secret_source")]
     pub reference: String,
     /// Whether `reference` resolved when the row was built. Resolving a
     /// `keychain:` reference shells out to `/usr/bin/security`, so this is
@@ -189,7 +233,7 @@ impl SecretValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub enum ConfigValue {
     Text(String),
     /// A credential. Rendered as status + source, never as the value.
@@ -266,5 +310,48 @@ impl SessionFilter {
             Self::ActiveOnly => "active",
             Self::StoppedOnly => "stopped",
         }
+    }
+}
+
+#[cfg(test)]
+mod credential_row_tests {
+    use super::*;
+
+    #[test]
+    fn env_build_args_imported_blobs_and_plugin_fields_are_credential_bearing() {
+        for key in [
+            "container_templates.claude.config.environment.ANTHROPIC_API_KEY",
+            "mcp_servers.github.definition.env.GITHUB_TOKEN",
+            "container_templates.custom.config.image_source.build_args.NPM_TOKEN",
+            "mcp_servers.imported.definition.config",
+            "plugin:sample:api_token",
+            "plugin:notifyd:webhook_url",
+        ] {
+            assert!(credential_bearing_key(key), "{key}");
+        }
+        for key in [
+            "web.listen",
+            "plugins.disabled",
+            "plugin-enabled:sample",
+            "fleet.idle_min",
+        ] {
+            assert!(!credential_bearing_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_plugin_field_row_serialises_without_its_value() {
+        let row = ConfigSetting {
+            key: "plugin:sample:api_token".to_string(),
+            label: "API token".to_string(),
+            value: ConfigValue::Text("plugin-secret-marker".to_string()),
+            description: String::new(),
+        };
+        let json = serde_json::to_string(&row).expect("row serialises");
+        assert!(!json.contains("plugin-secret-marker"), "{json}");
+        assert!(
+            json.contains(crate::fleet::bridge::redact::REDACTED),
+            "{json}"
+        );
     }
 }

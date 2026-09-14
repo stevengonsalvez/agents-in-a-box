@@ -52,8 +52,10 @@ pub enum McpInstallation {
 
     /// Git repository
     Git {
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
         url: String,
         branch: Option<String>,
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
         install_command: Option<String>,
     },
 
@@ -61,7 +63,10 @@ pub enum McpInstallation {
     PreInstalled,
 
     /// Custom installation script
-    Custom { script: String },
+    Custom {
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        script: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,13 +75,17 @@ pub enum McpServerDefinition {
     /// Simple command-based server
     Command {
         command: String,
+        #[serde(serialize_with = "crate::wire::fields::scrub_vec_in_frame")]
         args: Vec<String>,
-        #[serde(default)]
+        #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
         env: HashMap<String, String>,
     },
 
     /// JSON-based configuration (for complex servers)
-    Json { config: serde_json::Value },
+    Json {
+        #[serde(skip_serializing_if = "crate::wire::fields::omit_in_frame")]
+        config: serde_json::Value,
+    },
 }
 
 fn default_true() -> bool {

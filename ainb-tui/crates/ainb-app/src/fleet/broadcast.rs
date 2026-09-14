@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetActionReceipt};
 
 /// Where the broadcast is.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, Default)]
 pub enum BroadcastPhase {
     /// Typing. The composer holds the text.
     #[default]
@@ -25,9 +25,9 @@ pub enum BroadcastPhase {
     /// Kept until the operator clears it: a receipt list that vanished on the
     /// next repaint would make a partial failure unreadable, and a partial
     /// failure is the case this pane exists to show.
-    Sent(Vec<FleetActionReceipt>),
+    Sent(#[serde(serialize_with = "crate::wire::fields::scrub_receipts")] Vec<FleetActionReceipt>),
     /// The CALL failed, as opposed to a recipient refusing. Nothing was sent.
-    Failed(String),
+    Failed(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
 }
 
 /// One landed effect.
@@ -38,10 +38,15 @@ enum BroadcastOutcome {
 }
 
 /// The broadcast composer and its in-flight send.
-#[derive(Debug, Default)]
+#[derive(serde::Serialize, Debug, Default)]
 pub struct Broadcast {
+    #[serde(
+        rename = "text_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     text: String,
     phase: BroadcastPhase,
+    #[serde(skip)]
     inbox: Arc<Mutex<Vec<BroadcastOutcome>>>,
 }
 

@@ -36,11 +36,12 @@ pub struct LogEntry {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub level: LogEntryLevel,
     pub source: String, // Container name or source
+    #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
     pub message: String,
     pub session_id: Option<uuid::Uuid>,
     #[serde(skip)]
     pub parsed_data: Option<super::log_parser::ParsedLog>, // Rich parsed metadata (not serialized)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "crate::wire::fields::omit_in_frame")]
     pub metadata: std::collections::HashMap<String, String>, // Additional metadata for agent events
 }
 

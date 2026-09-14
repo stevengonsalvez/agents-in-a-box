@@ -3,7 +3,7 @@
 // `ainb-core::components::config_popup`, which re-exports this module.
 
 /// Type of popup being shown
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum ConfigPopupType {
     /// Selection from a list of choices
     Choice {
@@ -12,6 +12,20 @@ pub enum ConfigPopupType {
     },
     /// Text input field
     TextInput {
+        /// A plain setting's value (secret and credential-bearing rows open
+        /// `SecretInput`), scrubbed in case a credential was pasted into it.
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        value: String,
+        cursor_position: usize,
+    },
+    /// Credential entry: a secret row's reference, or the Ctrl+K literal on its
+    /// way to the keychain. Edits exactly like `TextInput`, but the text never
+    /// serialises: a mirror frame carries its length for the masked run.
+    SecretInput {
+        #[serde(
+            rename = "value_len",
+            serialize_with = "crate::wire::fields::char_count"
+        )]
         value: String,
         cursor_position: usize,
     },
@@ -22,7 +36,7 @@ pub enum ConfigPopupType {
 }
 
 /// State for the config popup
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ConfigPopupState {
     /// Whether the popup is visible
     pub show_popup: bool,
@@ -65,7 +79,9 @@ impl ConfigPopupState {
         self.show_popup
             && matches!(
                 self.popup_type,
-                ConfigPopupType::TextInput { .. } | ConfigPopupType::NumberInput { .. }
+                ConfigPopupType::TextInput { .. }
+                    | ConfigPopupType::SecretInput { .. }
+                    | ConfigPopupType::NumberInput { .. }
             )
     }
 
@@ -98,6 +114,16 @@ impl ConfigPopupState {
         self.popup_type = ConfigPopupType::TextInput {
             value: current_value.to_string(),
             cursor_position: len,
+        };
+    }
+
+    /// Open popup for a credential: same editing as [`Self::open_text`], but
+    /// the value is a [`ConfigPopupType::SecretInput`] and never serialises.
+    pub fn open_secret(&mut self, title: &str, description: &str, key: &str, current_value: &str) {
+        self.open_text(title, description, key, current_value);
+        self.popup_type = ConfigPopupType::SecretInput {
+            value: current_value.to_string(),
+            cursor_position: current_value.len(),
         };
     }
 
@@ -171,6 +197,10 @@ impl ConfigPopupState {
             ConfigPopupType::TextInput {
                 value,
                 cursor_position,
+            }
+            | ConfigPopupType::SecretInput {
+                value,
+                cursor_position,
             } => {
                 value.insert(*cursor_position, c);
                 *cursor_position += c.len_utf8();
@@ -190,6 +220,10 @@ impl ConfigPopupState {
     pub fn insert_str(&mut self, s: &str) {
         match &mut self.popup_type {
             ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            }
+            | ConfigPopupType::SecretInput {
                 value,
                 cursor_position,
             } => {
@@ -212,6 +246,10 @@ impl ConfigPopupState {
     pub fn backspace(&mut self) {
         match &mut self.popup_type {
             ConfigPopupType::TextInput {
+                value,
+                cursor_position,
+            }
+            | ConfigPopupType::SecretInput {
                 value,
                 cursor_position,
             } => {
@@ -238,6 +276,10 @@ impl ConfigPopupState {
         if let ConfigPopupType::TextInput {
             value,
             cursor_position,
+        }
+        | ConfigPopupType::SecretInput {
+            value,
+            cursor_position,
         } = &mut self.popup_type
         {
             if *cursor_position < value.len() {
@@ -249,6 +291,10 @@ impl ConfigPopupState {
     /// Move the cursor one character left (text input only).
     pub fn cursor_left(&mut self) {
         if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        }
+        | ConfigPopupType::SecretInput {
             value,
             cursor_position,
         } = &mut self.popup_type
@@ -268,6 +314,10 @@ impl ConfigPopupState {
         if let ConfigPopupType::TextInput {
             value,
             cursor_position,
+        }
+        | ConfigPopupType::SecretInput {
+            value,
+            cursor_position,
         } = &mut self.popup_type
         {
             if *cursor_position < value.len() {
@@ -284,6 +334,9 @@ impl ConfigPopupState {
     pub fn cursor_home(&mut self) {
         if let ConfigPopupType::TextInput {
             cursor_position, ..
+        }
+        | ConfigPopupType::SecretInput {
+            cursor_position, ..
         } = &mut self.popup_type
         {
             *cursor_position = 0;
@@ -293,6 +346,10 @@ impl ConfigPopupState {
     /// Move the cursor to the end of the field (End).
     pub fn cursor_end(&mut self) {
         if let ConfigPopupType::TextInput {
+            value,
+            cursor_position,
+        }
+        | ConfigPopupType::SecretInput {
             value,
             cursor_position,
         } = &mut self.popup_type
@@ -310,7 +367,10 @@ impl ConfigPopupState {
             } => options
                 .get(*selected_index)
                 .map(|s| ConfigPopupValue::Choice(s.clone(), *selected_index)),
-            ConfigPopupType::TextInput { value, .. } => Some(ConfigPopupValue::Text(value.clone())),
+            ConfigPopupType::TextInput { value, .. }
+            | ConfigPopupType::SecretInput { value, .. } => {
+                Some(ConfigPopupValue::Text(value.clone()))
+            }
             ConfigPopupType::Boolean { value } => Some(ConfigPopupValue::Boolean(*value)),
             ConfigPopupType::NumberInput {
                 input_buffer,
@@ -330,4 +390,29 @@ pub enum ConfigPopupValue {
     Text(String),
     Boolean(bool),
     Number(i64),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_popup_edits_like_text_and_serialises_only_its_length() {
+        let mut popup = ConfigPopupState::new();
+        popup.open_secret("Bot token", "", "fleet.bridge.telegram.token", "abc");
+        assert!(popup.is_text_entry());
+        popup.input_char('d');
+        popup.insert_str("ef\n");
+        popup.cursor_home();
+        popup.delete_forward();
+        popup.cursor_end();
+        popup.backspace();
+        match popup.get_value() {
+            Some(ConfigPopupValue::Text(value)) => assert_eq!(value, "bcde"),
+            other => panic!("expected text, got {other:?}"),
+        }
+        let json = serde_json::to_value(&popup).expect("popup serialises");
+        assert_eq!(json["popup_type"]["SecretInput"]["value_len"], 4);
+        assert!(!json.to_string().contains("bcde"), "{json}");
+    }
 }

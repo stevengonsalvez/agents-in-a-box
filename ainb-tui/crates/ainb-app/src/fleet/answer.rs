@@ -23,7 +23,7 @@ use std::time::Instant;
 use super::attention::{Answerable, SessionAttention};
 
 /// Where the answer is coming from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskFocus {
     /// One of the structured options is selected.
     Options,
@@ -32,17 +32,22 @@ pub enum AskFocus {
 }
 
 /// What the last send did, when one has been fired.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub enum AnswerPhase {
     /// Sent, waiting for the transport to report. The chip reads `SENT`.
     InFlight {
         /// When it was fired, so the pane can show how long it has been going.
+        #[serde(skip)]
         since: Instant,
         /// The text that was sent, kept so a failure can put a TYPED answer
         /// back. `None` when the answer was a picked option: that option is
         /// still highlighted, and writing its label into the composer would
         /// move the operator to a different row carrying an answer they never
-        /// typed.
+        /// typed. Typed text, so a frame carries its length.
+        #[serde(
+            rename = "draft_len",
+            serialize_with = "crate::wire::fields::opt_char_count"
+        )]
         draft: Option<String>,
     },
     /// The transport reported delivery. The chip clears on the next refresh,
@@ -54,6 +59,7 @@ pub enum AnswerPhase {
     /// Nothing was delivered. The chip goes BACK to ASK and this is why.
     Failed {
         /// The reason, verbatim from the transport.
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
         reason: String,
         /// What the operator had TYPED when this went out, so the pane can put
         /// it back. Carried on the outcome rather than restored the moment it
@@ -63,7 +69,11 @@ pub enum AnswerPhase {
         ///
         /// `None` for an answer that was PICKED. The option is still
         /// highlighted where they left it, and its label in the composer would
-        /// read as an answer they wrote.
+        /// read as an answer they wrote. Typed text, so a frame carries its length.
+        #[serde(
+            rename = "draft_len",
+            serialize_with = "crate::wire::fields::opt_char_count"
+        )]
         draft: Option<String>,
     },
 }
@@ -73,13 +83,17 @@ pub enum AnswerPhase {
 /// Reset when the operator moves to a different request: an option cursor left
 /// over from the previous question would pre-select an answer to a question
 /// nobody read.
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct AskState {
     /// The chip this state belongs to, so a stale one is discarded rather than
     /// applied to whatever is selected now.
     request: Option<String>,
     focus: AskFocus,
     cursor: usize,
+    #[serde(
+        rename = "free_text_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     free_text: String,
     /// What each send did, keyed by the request it was answering.
     ///
@@ -99,6 +113,7 @@ pub struct AskState {
     /// outcome into nothing, so a failed send would report as neither sent nor
     /// failed. Each entry names the request it belongs to, so an outcome
     /// cannot be attributed to whatever question is on screen when it lands.
+    #[serde(skip)]
     inbox: Arc<Mutex<Vec<(String, AnswerPhase)>>>,
 }
 
@@ -192,7 +207,7 @@ impl AskState {
     }
 
     /// Record `phase` against `request`, returning what it replaced.
-    fn set_phase(&mut self, request: &str, phase: AnswerPhase) -> Option<AnswerPhase> {
+    pub(crate) fn set_phase(&mut self, request: &str, phase: AnswerPhase) -> Option<AnswerPhase> {
         if let Some(slot) = self.phases.iter_mut().find(|(id, _)| id == request) {
             return Some(std::mem::replace(&mut slot.1, phase));
         }
