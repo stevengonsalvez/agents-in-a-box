@@ -1447,7 +1447,22 @@ impl PluginTask {
                     warn!(plugin = %self.plugin.id, "bad snapshot publish");
                     return;
                 };
-                let topic = Topic::from(p.topic);
+                // `ui.state` is one view per plugin: a bare publish is stored
+                // under the publisher's own `ui.state/<id>`, and a publish to
+                // another plugin's slot is refused, so two plugins can never
+                // overwrite each other's view.
+                let own_ui_state =
+                    ainb_plugin_protocol::topics::ui_state_topic(self.plugin.id.as_str());
+                let topic = if p.topic == ainb_plugin_protocol::topics::UI_STATE {
+                    Topic::from(own_ui_state)
+                } else if p.topic.starts_with(ainb_plugin_protocol::topics::UI_STATE_PREFIX)
+                    && p.topic != own_ui_state
+                {
+                    warn!(plugin = %self.plugin.id, topic = %p.topic, "ui.state publish for another plugin refused");
+                    return;
+                } else {
+                    Topic::from(p.topic)
+                };
                 let payload = p.payload;
                 // Stamp the publisher from the wire connection this task
                 // owns — the plugin can't self-report a different id.
