@@ -716,9 +716,9 @@ impl Screen for GitViewScreen {
     fn id(&self) -> &str {
         ids::GIT_VIEW
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
         if let Some(ref git_state) = state.git_view.git_view_state {
-            GitViewComponent::render(frame, area, git_state);
+            GitViewComponent::render(frame, area, git_state, &mut ui.review_sidebar);
         }
     }
 }
