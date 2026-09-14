@@ -342,7 +342,7 @@ fn an_in_place_client_that_would_not_open_says_why() {
 
     let moved = report(
         &mut state,
-        reports::in_place_failed("tmux_api_feat", "no server running"),
+        reports::in_place_failed("tmux_api_feat", "no server running", false),
     );
 
     let errors = notices(&state, &NotificationType::Error);
