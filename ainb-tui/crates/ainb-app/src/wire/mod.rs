@@ -349,8 +349,9 @@ mod tests {
     /// Build under a scratch `HOME`, holding the crate's env lock and putting
     /// the previous value back, the same way the reducer tests do.
     fn with_scratch_home<T>(body: impl FnOnce() -> T) -> T {
-        let _guard =
-            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::config::tunables::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().expect("scratch home");
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", dir.path());
