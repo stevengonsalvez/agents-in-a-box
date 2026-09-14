@@ -169,9 +169,14 @@ impl serde::Serialize for ConfigSetting {
 }
 
 /// Whether a config row's value is a credential by where it lives: an entry
-/// of an environment or build-args map, or an opaque imported MCP definition.
+/// of an environment or build-args map, an opaque imported MCP definition, or
+/// any plugin `[[config]]` field (`plugin:<name>:<field>`), whose meaning only
+/// the plugin knows.
 #[must_use]
 pub fn credential_bearing_key(key: &str) -> bool {
+    if key.starts_with("plugin:") {
+        return true;
+    }
     let segments: Vec<&str> = key.split('.').collect();
     let map_entry = segments.len() >= 2
         && matches!(
@@ -305,5 +310,48 @@ impl SessionFilter {
             Self::ActiveOnly => "active",
             Self::StoppedOnly => "stopped",
         }
+    }
+}
+
+#[cfg(test)]
+mod credential_row_tests {
+    use super::*;
+
+    #[test]
+    fn env_build_args_imported_blobs_and_plugin_fields_are_credential_bearing() {
+        for key in [
+            "container_templates.claude.config.environment.ANTHROPIC_API_KEY",
+            "mcp_servers.github.definition.env.GITHUB_TOKEN",
+            "container_templates.custom.config.image_source.build_args.NPM_TOKEN",
+            "mcp_servers.imported.definition.config",
+            "plugin:sample:api_token",
+            "plugin:notifyd:webhook_url",
+        ] {
+            assert!(credential_bearing_key(key), "{key}");
+        }
+        for key in [
+            "web.listen",
+            "plugins.disabled",
+            "plugin-enabled:sample",
+            "fleet.idle_min",
+        ] {
+            assert!(!credential_bearing_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_plugin_field_row_serialises_without_its_value() {
+        let row = ConfigSetting {
+            key: "plugin:sample:api_token".to_string(),
+            label: "API token".to_string(),
+            value: ConfigValue::Text("plugin-secret-marker".to_string()),
+            description: String::new(),
+        };
+        let json = serde_json::to_string(&row).expect("row serialises");
+        assert!(!json.contains("plugin-secret-marker"), "{json}");
+        assert!(
+            json.contains(crate::fleet::bridge::redact::REDACTED),
+            "{json}"
+        );
     }
 }
