@@ -34,6 +34,13 @@ pub const PLUGIN_HANDLE_KEY: &str = "plugin/handle_key";
 /// (the host subtracts the screen origin). Mirrors `plugin/handle_key`.
 pub const PLUGIN_HANDLE_MOUSE: &str = "plugin/handle_mouse";
 
+/// Host asks the plugin to run one of its actions by id.
+///
+/// For a click or a palette command a renderer resolved without the plugin's
+/// own key map. Notification, no response expected; what the action changed reaches the
+/// host through the plugin's next render and its `ui.state` topic.
+pub const PLUGIN_HANDLE_ACTION: &str = "plugin/handle_action";
+
 /// Host dispatches a CLI namespace + argv to the plugin; plugin replies with stdout/stderr/exit.
 pub const PLUGIN_CLI_DISPATCH: &str = "plugin/cli_dispatch";
 
@@ -199,6 +206,7 @@ pub const ALL_METHODS: &[&str] = &[
     PLUGIN_HANDLE_EVENT,
     PLUGIN_HANDLE_KEY,
     PLUGIN_HANDLE_MOUSE,
+    PLUGIN_HANDLE_ACTION,
     PLUGIN_CLI_DISPATCH,
     HOST_SNAPSHOT_GET,
     HOST_SNAPSHOT_PUBLISH,
@@ -243,6 +251,7 @@ mod tests {
             PLUGIN_HANDLE_EVENT,
             PLUGIN_HANDLE_KEY,
             PLUGIN_HANDLE_MOUSE,
+            PLUGIN_HANDLE_ACTION,
             PLUGIN_CLI_DISPATCH,
         ] {
             assert!(m.starts_with("plugin/"), "{m} missing plugin/ namespace");
@@ -265,6 +274,15 @@ mod tests {
             "PLUGIN_HANDLE_MOUSE missing from ALL_METHODS registry"
         );
         assert_eq!(PLUGIN_HANDLE_MOUSE, "plugin/handle_mouse");
+    }
+
+    #[test]
+    fn all_methods_contains_plugin_handle_action() {
+        assert!(
+            ALL_METHODS.contains(&PLUGIN_HANDLE_ACTION),
+            "PLUGIN_HANDLE_ACTION missing from ALL_METHODS registry"
+        );
+        assert_eq!(PLUGIN_HANDLE_ACTION, "plugin/handle_action");
     }
 
     #[test]
