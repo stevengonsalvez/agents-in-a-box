@@ -2209,69 +2209,32 @@ export type FleetProvider =
 /**  Provider could not be determined. */
 "unknown";
 
-/**  Canonical Fleet session read-model row. */
-export type FleetSession = FleetSession_Serialize;
-
-/**  Canonical Fleet session read-model row. */
-export type FleetSession_Serialize = {
-	/**  Stable identity, never cwd. */
+/**  One fleet row on the wire; see [`fleet_rows`]. */
+export type FleetRowFrame = {
+	host_id: string,
 	session_key: string,
-	/**  Session provider. */
 	provider: FleetProvider,
-	/**  Provider-owned session identifier. */
 	provider_session_id: string | null,
-	/**  Exact tmux target for attach or fallback. */
 	tmux_target: string | null,
-	/**
-	 *  Whether a pane is bound to this session (D14, issue #916). Defaulted so
-	 *  an older client that never learned the field still deserializes.
-	 */
 	pane_binding: PaneBinding,
-	/**  Process-start fingerprint for legacy identity. */
 	process_start_fingerprint: string | null,
-	/**  Working directory metadata. */
-	cwd: string,
-	/**  Human-readable session label. */
-	display_name: string | null,
-	/**  Independent lifecycle state. */
 	lifecycle: LifecycleState,
-	/**  Number of active provider child tasks, agents, or threads. */
 	active_work_count: number,
-	/**  Independent attention state. */
 	attention: AttentionState,
-	/**  Fingerprint of current structured request or approval. */
 	current_request_fingerprint: string | null,
-	/**  Managed or degraded control state. */
 	management: ManagementState,
-	/**  Preferred transport health. */
 	transport_health: TransportHealth,
-	/**  Available actions. */
 	capabilities: FleetCapabilities,
-	/**  Last accepted state provenance. */
 	provenance: FleetProvenance,
-	/**  Identity and state confidence. */
 	confidence: FleetConfidence,
-	/**  First discovery time in epoch milliseconds. */
 	discovered_at: number,
-	/**  Last accepted observation time in epoch milliseconds. */
 	last_observed_at: number,
-	/**  Last lifecycle observation time in epoch milliseconds. */
 	lifecycle_updated_at: number,
-	/**  Last attention observation time in epoch milliseconds. */
 	attention_updated_at: number,
-	/**
-	 *  Provider-reported model id, verbatim. Absent means never observed, which
-	 *  is NOT the same as a default model: the key is omitted rather than null
-	 *  so a client cannot mistake absence for an explicit value.
-	 */
-	model?: string | null,
-	/**  Provider-reported reasoning effort, verbatim. Absent means never observed. */
-	reasoning_effort?: string | null,
-	/**  Last model observation time in epoch milliseconds. 0 means never observed. */
+	model: string | null,
+	reasoning_effort: string | null,
 	model_updated_at: number,
-	/**  Optimistic concurrency version. */
 	version: number,
-	/**  Global revision that last changed this session. */
 	updated_revision: number,
 };
 
@@ -2317,7 +2280,7 @@ export type FleetView_Serialize = {
 	ask_state: AskState_Serialize,
 	broadcast: Broadcast_Serialize,
 	daemon_attention: DaemonAttention_Serialize,
-	fleet_snapshot: FleetSession_Serialize[],
+	fleet_snapshot: FleetRowFrame[],
 	fleet_metadata: { [key in string]: SessionFleetMetadata },
 	daemon_attention_seen: number,
 	attention_elsewhere: number,
@@ -3988,7 +3951,7 @@ export type Session_Serialize = {
 	 */
 	codex_model: CodexModel_Serialize | null,
 	ssh_target: SshTarget_Serialize | null,
-	display_name: string | null,
+	display_name?: string | null,
 	tmux_session_name: string | null,
 	preview_content: string | null,
 	is_attached: boolean,
