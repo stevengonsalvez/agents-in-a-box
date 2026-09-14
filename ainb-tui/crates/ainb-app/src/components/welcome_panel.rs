@@ -28,7 +28,7 @@ Each session runs in its own git worktree + tmux + agent, fully isolated.
 "#;
 
 /// Welcome panel state with scroll position
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct WelcomePanelState {
     /// Whether the panel is focused
     pub is_focused: bool,
