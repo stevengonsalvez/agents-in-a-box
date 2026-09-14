@@ -35,10 +35,10 @@ impl Host {
     /// work it queued, then dispatch whatever that work saves.
     fn press(&mut self, state: &mut AppState, keymap: &Keymap, key: &str) {
         let chord = Chord::parse(key).expect("valid chord");
-        dispatch(state, keymap, &mut self.ui, Intent::Key(chord));
+        let _ = dispatch(state, keymap, &mut self.ui, Intent::Key(chord));
         for action in self.ui.take_queued() {
             if let Some(save) = self.ui.apply_host(action, &mut self.layout, state, self.columns) {
-                dispatch(state, keymap, &mut self.ui, save);
+                let _ = dispatch(state, keymap, &mut self.ui, save);
             }
         }
     }
