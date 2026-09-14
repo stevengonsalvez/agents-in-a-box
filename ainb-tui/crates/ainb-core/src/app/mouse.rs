@@ -18,9 +18,14 @@ fn keymap_command(id: &str) -> Intent {
     Intent::Command(CommandId::new(id), Args::Null)
 }
 
-/// Save the sessions pane layout the renderer just changed.
+/// Save the sessions pane layout the renderer just changed, as a fraction of
+/// the row it was drawn in.
 fn save_sessions_pane_layout(ui: &UiState) -> Intent {
-    pointer::save_sessions_pane_layout(ui.sessions_pane.preferred_width, ui.sessions_pane.collapsed)
+    let row = ui
+        .sessions_pane
+        .last_content_width()
+        .unwrap_or_else(|| crossterm::terminal::size().unwrap_or((80, 24)).0);
+    ui.sessions_pane.save_layout(row)
 }
 
 /// Recompute the SkillManager top-row rects (Sources panel + Units
