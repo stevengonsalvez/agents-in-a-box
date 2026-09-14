@@ -284,7 +284,7 @@ const NAME_ALLOW: &[(&str, &str)] = &[
     ),
     (
         "ConfigSetting.value",
-        "row value: Text scrubbed, credential-bearing keys redacted, Secret rows emit their source",
+        "row value: Text scrubbed; env, build-args, imported-MCP and plugin:<name>:<field> rows redacted; Secret rows emit their source",
     ),
     (
         "EditorOption.command",
@@ -1246,6 +1246,15 @@ fn saves_outside_a_frame_keep_what_the_frame_withholds() {
     assert!(!frame.contains("sample config.mcp.env"));
     assert!(!frame.contains("sample config.mcp.json"));
     assert!(!frame.contains("sample config.container.env"));
+    assert!(
+        frame.contains("plugin:sample:api_token")
+            && !frame.contains("sample config.plugins.values"),
+        "a plugin config field row keeps its key and loses its value"
+    );
+    assert!(
+        config.contains("sample config.plugins.values"),
+        "plugin table kept on disk"
+    );
     let sessions = section_json(&state, SectionId::Sessions).to_string();
     assert!(
         !sessions.contains("id_ed25519"),
