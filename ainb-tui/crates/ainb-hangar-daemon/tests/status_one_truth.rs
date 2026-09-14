@@ -528,3 +528,63 @@ async fn a_thousand_event_replay_leaves_no_projection_drift() {
         drift.asking_session_without_open
     );
 }
+
+/// #962: an answered question is not a wait, on the very next read. The card
+/// closes at the answer, while the session's attention string still reads
+/// `ASK` until the agent's clearing hook; the one truth must follow the inbox,
+/// not the stale string. With the producer right, the drift assertion stays
+/// strict: the answered session is asking with no open card, and it counts,
+/// until the clearing hook ends it.
+#[tokio::test]
+async fn an_answered_question_is_not_reported_waiting_on_the_next_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    hook(
+        &store,
+        "e-ask",
+        "AskUserQuestion",
+        Some("AskUserQuestion"),
+        BASE_MS,
+        Some(raise(0, BASE_MS)),
+    )
+    .await;
+    assert_eq!(read_state(&store).await.0, AgentState::Waiting);
+
+    let card = format!("att:{SESSION_ID}:0");
+    assert_eq!(
+        AttentionRepo::mark_answered_if_open(
+            store.pool(),
+            &card,
+            "tui@host",
+            "sqlite",
+            BASE_MS + 2_000
+        )
+        .await
+        .expect("answer"),
+        1
+    );
+    let (state, _) = read_state(&store).await;
+    assert_ne!(
+        state,
+        AgentState::Waiting,
+        "the answered question must not read as a wait"
+    );
+
+    let drift = AttentionRepo::drift_against_fleet_session(store.pool()).await.expect("drift");
+    assert_eq!(
+        drift.asking_session_without_open, 1,
+        "the drift assertion stays strict about the not-yet-cleared attention string"
+    );
+
+    hook(
+        &store,
+        "e-stop",
+        "Stop",
+        None,
+        BASE_MS + 3_000,
+        Some(release(BASE_MS + 3_000)),
+    )
+    .await;
+    let cleared = AttentionRepo::drift_against_fleet_session(store.pool()).await.expect("drift");
+    assert!(cleared.is_clean(), "the clearing hook ends it: {cleared:?}");
+}

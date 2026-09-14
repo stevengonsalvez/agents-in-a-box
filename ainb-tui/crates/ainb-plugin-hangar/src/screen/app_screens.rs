@@ -4046,6 +4046,14 @@ mod fleet_routing_tests {
             lifecycle_updated_at: 2,
             attention_updated_at: 2,
             transport_updated_at: 2,
+            status: Some(crate::screen::fleet::test_status(
+                "claude:one",
+                if attention.eq_ignore_ascii_case("NONE") {
+                    ainb_hangar_proto::agent_status::AgentState::Idle
+                } else {
+                    ainb_hangar_proto::agent_status::AgentState::Waiting
+                },
+            )),
         }
     }
 

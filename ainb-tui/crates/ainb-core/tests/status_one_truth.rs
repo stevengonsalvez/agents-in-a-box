@@ -72,23 +72,76 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
     assert_eq!(expected.3, 0, "tier 0 is the hook push");
     assert!(expected.4 > 0, "the evidence clock must be stamped");
 
-    // Surface 1: the TUI fleet panel. It keeps its own flattened row because it
-    // renders strings, so this proves the flattening round-trips through the
-    // shared derivation rather than becoming a second fold.
-    let snapshot = ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot");
-    let wire_session = snapshot
-        .sessions
-        .iter()
-        .find(|session| session.session_key == SESSION_KEY)
-        .expect("the panel sees the session")
-        .clone();
-    let panel_row = ainb_plugin_hangar::screen::fleet::FleetSessionRow::from(wire_session.clone());
-    let panel = panel_row.status_identity();
-    assert_eq!(
-        (panel.0.as_str(), panel.1, panel.2, panel.3, panel.4),
-        expected,
-        "the TUI fleet panel must report the daemon's tuple, not its own reading"
-    );
+    // Surface 1: the TUI fleet panel, as an operator sees it. The panel takes
+    // the snapshot for its rows and `fleet/status` for their state (#962), both
+    // round-tripped through their wire encoding exactly as the plugin receives
+    // them, then renders. What is asserted is the RENDERED screen, painted into
+    // a ratatui `TestBackend` the way the TUI paints the plugin's buffer, so
+    // "one truth" is a fact about pixels and not about a helper the panel never
+    // draws.
+    {
+        use ainb_plugin_hangar::screen::fleet::{
+            FleetEvent, FleetPaneState, FleetSessionRow, reduce_fleet, render_fleet,
+        };
+        use ratatui::{Terminal, backend::TestBackend};
+
+        const WIDTH: u16 = 140;
+        const HEIGHT: u16 = 30;
+
+        let snapshot =
+            ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot");
+        let snapshot: ainb_hangar_proto::fleet::FleetSnapshot =
+            serde_json::from_value(serde_json::to_value(&snapshot).expect("snapshot encodes"))
+                .expect("snapshot decodes");
+        let status_wire: ainb_hangar_proto::agent_status::AgentStatusResult =
+            serde_json::from_value(serde_json::to_value(&status).expect("status encodes"))
+                .expect("status decodes");
+        let rows: Vec<FleetSessionRow> = snapshot.sessions.into_iter().map(Into::into).collect();
+        let mut pane = FleetPaneState::default();
+        pane.apply_snapshot(snapshot.head_revision, rows);
+        pane.apply_status(status_wire);
+        let pane = reduce_fleet(&pane, FleetEvent::Tick(expected.4 + 42_000)).state;
+
+        let held = pane.status_for(SESSION_KEY).expect("the panel holds the daemon's row");
+        assert_eq!(
+            held.identity_tuple(),
+            expected,
+            "the TUI fleet panel must hold the daemon's tuple, not its own reading"
+        );
+
+        let mut wire = ainb_plugin_protocol::wire_buffer::WireBuffer::new(WIDTH, HEIGHT);
+        render_fleet(&mut wire, WIDTH, 0, HEIGHT, &pane);
+        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                ainb::components::session_tabs::blit_wire(frame, area, wire);
+            })
+            .expect("draw the panel");
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..HEIGHT)
+            .map(|y| {
+                (0..WIDTH)
+                    .map(|x| buffer.cell((x, y)).map_or(" ", |cell| cell.symbol()))
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let daemon_words = format!(
+            "{} · {} · tier {} · 42s",
+            expected.1, expected.2, expected.3
+        );
+        assert!(
+            screen.contains(&daemon_words),
+            "the rendered panel must show the daemon's tuple `{daemon_words}`:\n{screen}"
+        );
+        assert!(
+            screen.contains("─ ASK · 1 Q ") && screen.contains("ASK · 1 QUESTIONS"),
+            "the waiting agent's card and detail name its one open question:\n{screen}"
+        );
+    }
 
     // Surface 2: `GET /api/needs`. The dashboard stamps every card from the
     // same status read, so its card carries the same five values.

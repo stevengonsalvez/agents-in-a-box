@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use ainb_hangar_proto::agent_status::{AgentState, AgentStatusResult, AgentStatusRow};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +156,16 @@ pub struct FleetSessionRow {
     pub attention_updated_at: i64,
     #[serde(default)]
     pub transport_updated_at: i64,
+    /// This session's `fleet/status` row, joined in by [`FleetPaneState`]
+    /// (#962).
+    ///
+    /// The panel's state, its lenses, its counts, and its age all come from
+    /// here, which is the daemon's one derivation, never from a reading of the
+    /// snapshot's lifecycle and attention strings. `None` until the first
+    /// `fleet/status` reply names the session, which the panel shows as
+    /// unverifiable rather than guessing.
+    #[serde(skip)]
+    pub status: Option<AgentStatusRow>,
 }
 
 impl FleetSessionRow {
@@ -215,86 +226,6 @@ impl FleetSessionRow {
             .unwrap_or_else(|| "branch unknown".into())
     }
 
-    /// This row's D14 status identity: the tuple every surface must agree on.
-    ///
-    /// Derived by `ainb_hangar_proto::agent_status`, the SAME function
-    /// `ainb fleet needs` and `GET /api/needs` derive theirs from, so the panel
-    /// cannot drift from them by rendering its own reading of the same session.
-    #[must_use]
-    pub fn status_identity(&self) -> (String, &'static str, &'static str, u8, i64) {
-        let session = self.to_wire_session();
-        let row = ainb_hangar_proto::agent_status::status_row(&session, self.is_actionable());
-        let (key, state, provenance, tier, observed) = row.identity_tuple();
-        (key.to_string(), state, provenance, tier, observed)
-    }
-
-    /// Rebuild the wire session this row was rendered from.
-    ///
-    /// The panel keeps its own flattened row (it renders strings, not enums),
-    /// so the shared derivation is fed a reconstruction rather than a second
-    /// implementation of the fold. Only the fields the derivation reads are
-    /// recovered; everything else takes its default.
-    fn to_wire_session(&self) -> ainb_hangar_proto::fleet::FleetSession {
-        use ainb_hangar_proto::fleet as wire;
-        wire::FleetSession {
-            session_key: self.session_key.clone(),
-            provider: match self.provider.as_str() {
-                "claude" => wire::FleetProvider::Claude,
-                "codex" => wire::FleetProvider::Codex,
-                "copilot" => wire::FleetProvider::Copilot,
-                "antigravity" | "agy" => wire::FleetProvider::Antigravity,
-                "acp" => wire::FleetProvider::Acp,
-                _ => wire::FleetProvider::Unknown,
-            },
-            provider_session_id: self.provider_session_id.clone(),
-            tmux_target: self.tmux_target.clone(),
-            pane_binding: match self.pane_binding.as_str() {
-                "bound" => wire::PaneBinding::Bound,
-                "pane_unbound" => wire::PaneBinding::PaneUnbound,
-                _ => wire::PaneBinding::NotApplicable,
-            },
-            process_start_fingerprint: None,
-            cwd: self.cwd.clone(),
-            display_name: self.display_name.clone(),
-            lifecycle: match self.lifecycle_state.to_ascii_uppercase().as_str() {
-                "STARTING" => wire::LifecycleState::Starting,
-                "RUNNING" => wire::LifecycleState::Running,
-                "TURN_COMPLETE" => wire::LifecycleState::TurnComplete,
-                "IDLE" => wire::LifecycleState::Idle,
-                "EXITED" => wire::LifecycleState::Exited,
-                _ => wire::LifecycleState::Unknown,
-            },
-            active_work_count: self.active_work_count,
-            attention: match self.attention_state.to_ascii_uppercase().as_str() {
-                "ASK" => wire::AttentionState::Ask,
-                "APPROVAL" => wire::AttentionState::Approval,
-                "WAITING" => wire::AttentionState::Waiting,
-                "ERROR" => wire::AttentionState::Error,
-                _ => wire::AttentionState::None,
-            },
-            current_request_fingerprint: self.current_request_fingerprint.clone(),
-            current_request: self.current_request.clone(),
-            management: if self.is_managed() {
-                wire::ManagementState::Managed
-            } else {
-                wire::ManagementState::Degraded
-            },
-            transport_health: wire::TransportHealth::default(),
-            capabilities: wire::FleetCapabilities::default(),
-            provenance: wire::FleetProvenance::default(),
-            confidence: wire::FleetConfidence::default(),
-            discovered_at: self.discovered_at,
-            last_observed_at: self.last_observed_at,
-            lifecycle_updated_at: self.lifecycle_updated_at,
-            attention_updated_at: self.attention_updated_at,
-            model: None,
-            reasoning_effort: None,
-            model_updated_at: 0,
-            version: self.version,
-            updated_revision: 0,
-        }
-    }
-
     /// True when the daemon could not bind this session to a tmux pane.
     ///
     /// Distinct from "no transport": the session IS reachable as a row and may
@@ -326,20 +257,33 @@ impl FleetSessionRow {
         }
     }
 
-    fn operator_state(&self) -> &'static str {
-        if self.is_actionable() {
-            "NEEDS INPUT"
-        } else if self.lifecycle_state.eq_ignore_ascii_case("STARTING")
-            || self.lifecycle_state.eq_ignore_ascii_case("RUNNING")
-        {
-            "RUNNING"
-        } else if self.lifecycle_state.eq_ignore_ascii_case("IDLE") {
-            "IDLE"
-        } else if self.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE") {
-            "COMPLETED"
-        } else {
-            "UNKNOWN"
-        }
+    /// The daemon's state for this session, or `Unverifiable` before a
+    /// `fleet/status` reply has named it.
+    #[must_use]
+    pub fn agent_state(&self) -> AgentState {
+        self.status.as_ref().map_or(AgentState::Unverifiable, |status| status.state)
+    }
+
+    /// Blocked on a human, by the daemon's derivation.
+    fn is_waiting(&self) -> bool {
+        self.agent_state() == AgentState::Waiting
+    }
+
+    /// An idle session whose last turn completed: the `done` lens. `AgentState`
+    /// has no completed state (idle means "free", not "the work is done"), so
+    /// this refines the daemon's `Idle` by lifecycle rather than replacing it.
+    fn is_turn_complete(&self) -> bool {
+        self.agent_state() == AgentState::Idle
+            && self.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE")
+    }
+
+    /// When the evidence behind the state was observed, for the card's age:
+    /// the daemon's evidence clock, or the snapshot's last observation before a
+    /// status row has arrived.
+    fn evidence_observed_at(&self) -> i64 {
+        self.status
+            .as_ref()
+            .map_or(self.last_observed_at, |status| status.evidence_observed_at)
     }
 }
 
@@ -441,6 +385,7 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
             lifecycle_updated_at: session.lifecycle_updated_at,
             attention_updated_at: session.attention_updated_at,
             transport_updated_at: session.last_observed_at,
+            status: None,
         }
     }
 }
@@ -457,21 +402,16 @@ pub enum FleetFilter {
 }
 
 impl FleetFilter {
+    /// Lens membership, from the daemon's `fleet/status` state (#962).
     fn matches(self, row: &FleetSessionRow) -> bool {
-        if !row.is_active_session() && !row.is_actionable() {
+        if !row.is_active_session() && !row.is_waiting() {
             return false;
         }
         match self {
-            Self::NeedsInput => row.is_actionable(),
-            Self::Idle => !row.is_actionable() && row.lifecycle_state.eq_ignore_ascii_case("IDLE"),
-            Self::Completed => {
-                !row.is_actionable() && row.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE")
-            }
-            Self::Running => {
-                !row.is_actionable()
-                    && (row.lifecycle_state.eq_ignore_ascii_case("STARTING")
-                        || row.lifecycle_state.eq_ignore_ascii_case("RUNNING"))
-            }
+            Self::NeedsInput => row.is_waiting(),
+            Self::Idle => row.agent_state() == AgentState::Idle && !row.is_turn_complete(),
+            Self::Completed => row.is_turn_complete(),
+            Self::Running => row.agent_state() == AgentState::Working,
             Self::All => true,
         }
     }
@@ -922,6 +862,18 @@ pub struct FleetPaneState {
     feedback: Option<String>,
     now_ms: i64,
     head_revision: i64,
+    /// The last `fleet/status` rows by session key, re-joined onto every
+    /// snapshot so a roster refresh never loses the state (#962).
+    status: BTreeMap<String, AgentStatusRow>,
+    status_revision: i64,
+    /// The revision of the roster the status rows are joined onto, so a status
+    /// reply older than that roster is refused rather than joined (#962).
+    roster_revision: i64,
+    /// Why the panel holds no `fleet/status` rows right now (an older daemon,
+    /// a store fault, an undecodable reply). While set, every session is
+    /// unverifiable, the header and the lens body say why, and the panel never
+    /// falls back to a reading of its own.
+    status_unavailable: Option<String>,
 }
 
 impl Default for FleetPaneState {
@@ -934,6 +886,10 @@ impl Default for FleetPaneState {
             feedback: None,
             now_ms: 0,
             head_revision: 0,
+            status: BTreeMap::new(),
+            status_revision: 0,
+            roster_revision: 0,
+            status_unavailable: None,
         }
     }
 }
@@ -944,11 +900,71 @@ impl FleetPaneState {
             return;
         }
         self.head_revision = head_revision;
+        self.roster_revision = head_revision;
         self.set_sessions(roster);
     }
 
     pub const fn head_revision(&self) -> i64 {
         self.head_revision
+    }
+
+    /// Take one `fleet/status` reply (#962).
+    ///
+    /// Refused, returning `false`, when it is older than the last status
+    /// applied OR older than the roster it would be joined onto: the rows
+    /// describe an earlier instant than the sessions on screen, so the caller
+    /// asks again instead. A session the reply no longer names loses its state
+    /// rather than keeping a stale one.
+    pub fn apply_status(&mut self, result: AgentStatusResult) -> bool {
+        if result.head_revision < self.status_revision
+            || result.head_revision < self.roster_revision
+        {
+            return false;
+        }
+        self.status_revision = result.head_revision;
+        self.status_unavailable = None;
+        self.status = result.rows.into_iter().map(|row| (row.session_key.clone(), row)).collect();
+        for row in &mut self.roster {
+            row.status = self.status.get(&row.session_key).cloned();
+        }
+        self.preserve_or_reset_selection();
+        true
+    }
+
+    /// No `fleet/status` rows can be had, for `reason`: drop every joined state.
+    pub fn mark_status_unavailable(&mut self, reason: impl Into<String>) {
+        self.status_unavailable = Some(reason.into());
+        self.status.clear();
+        for row in &mut self.roster {
+            row.status = None;
+        }
+        self.preserve_or_reset_selection();
+    }
+
+    /// Why the panel holds no `fleet/status` rows, if it does not.
+    #[must_use]
+    pub fn status_unavailable(&self) -> Option<&str> {
+        self.status_unavailable.as_deref()
+    }
+
+    /// True when sessions are on screen and not one of them has a state: the
+    /// panel can make no claim about any of them.
+    fn states_unverifiable(&self) -> bool {
+        !self.roster.is_empty() && self.roster.iter().all(|row| row.status.is_none())
+    }
+
+    /// The `fleet/status` row the panel holds for `session_key`.
+    #[must_use]
+    pub fn status_for(&self, session_key: &str) -> Option<&AgentStatusRow> {
+        self.status.get(session_key)
+    }
+
+    fn join_status(&mut self) {
+        for row in &mut self.roster {
+            if let Some(status) = self.status.get(&row.session_key) {
+                row.status = Some(status.clone());
+            }
+        }
     }
 
     pub fn observe_revision(&mut self, revision: i64) {
@@ -992,6 +1008,7 @@ impl FleetPaneState {
 
     pub fn set_sessions(&mut self, roster: Vec<FleetSessionRow>) {
         self.roster = roster;
+        self.join_status();
         self.discard_stale_answer();
         self.preserve_or_reset_selection();
     }
@@ -1016,11 +1033,6 @@ impl FleetPaneState {
     /// Total active sessions in the operator roster.
     pub fn session_count(&self) -> usize {
         self.roster.iter().filter(|session| session.is_active_session()).count()
-    }
-
-    /// Sessions requiring operator review, independent from active lens.
-    pub fn attention_count(&self) -> usize {
-        self.roster.iter().filter(|session| session.is_actionable()).count()
     }
 
     pub fn feedback(&self) -> Option<&str> {
@@ -1661,7 +1673,11 @@ fn read_only_picker(row: &FleetSessionRow) -> bool {
 }
 
 fn answer_state_from_row(row: &FleetSessionRow) -> Option<AnswerState> {
-    if !row.attention_state.eq_ignore_ascii_case("ASK")
+    // The daemon says whether a human is needed; the snapshot's `ASK` only
+    // says the answer is a structured interview (#962). A scraped ASK the
+    // daemon ranks below newer evidence must not open one.
+    if !row.is_waiting()
+        || !row.attention_state.eq_ignore_ascii_case("ASK")
         || !row.is_managed()
         || !row.capabilities.contains("structured_answer")
     {
@@ -2651,9 +2667,19 @@ pub fn render_fleet(
             || format!("0/{}", visible.len()),
             |index| format!("{}/{}", index + 1, visible.len()),
         );
-        let header = format!(
-            "  ACTION QUEUE  ·  {} sessions  ·  F5 refresh",
-            visible.len()
+        let header = state.status_unavailable.as_deref().map_or_else(
+            || {
+                format!(
+                    "  ACTION QUEUE  ·  {} sessions  ·  F5 refresh",
+                    visible.len()
+                )
+            },
+            |reason| {
+                format!(
+                    "  ACTION QUEUE  ·  {} sessions  ·  states unverifiable: {reason}",
+                    visible.len()
+                )
+            },
         );
         put_str(buffer, 0, header_y, &header, FG, list_width);
         let position_width = position.chars().count() as u16;
@@ -2743,7 +2769,29 @@ fn render_empty_lens(
     // All three branches are one voice (crisp B2 §2.1, lowercase): they are three
     // states of ONE line, and casing that changes with which lens is empty reads
     // as two different screens.
-    if state.roster.is_empty() {
+    if state.states_unverifiable() {
+        // No positive claim: with no `fleet/status` rows the panel cannot say
+        // that nothing needs you, only that it does not know (#962). The reason
+        // gets its own line so a narrow pane truncates it, not the warning.
+        put_str(buffer, left, row, "states unverifiable", ALERT, right);
+        let reason = state.status_unavailable.as_deref().unwrap_or("waiting for fleet/status");
+        put_str(
+            buffer,
+            left,
+            row.saturating_add(1),
+            &truncate_ellipsis(reason, usize::from(right.saturating_sub(left)).max(1)),
+            MUTED,
+            right,
+        );
+        put_str(
+            buffer,
+            left,
+            row.saturating_add(3),
+            "press 5 for all sessions",
+            MUTED,
+            right,
+        );
+    } else if state.roster.is_empty() {
         put_str(buffer, left, row, "no fleet sessions yet", FG, right);
         put_str(
             buffer,
@@ -2843,7 +2891,7 @@ fn render_session_card(
     let inner_right = right.saturating_sub(1);
     let content_width = usize::from(right.saturating_sub(5)).max(8);
     let identity = truncate_ellipsis(&session.repository_label(), content_width);
-    let age = format_age(now_ms, session.last_observed_at);
+    let age = format_age(now_ms, session.evidence_observed_at());
     let marker = if selected { "▶ " } else { "  " };
     let branch = truncate_ellipsis(&session.branch_label(), content_width.saturating_sub(18));
 
@@ -2919,14 +2967,19 @@ fn render_session_card(
     }
 }
 
+/// The card's state word, from the daemon's `fleet/status` state (#962).
+///
+/// The snapshot only refines it: which kind of wait (an `ERROR` reads as such),
+/// and whether an idle session's turn completed.
 fn home_state_label(session: &FleetSessionRow) -> &'static str {
-    if session.attention_state.eq_ignore_ascii_case("ERROR") {
-        return "ERROR";
-    }
-    match session.operator_state() {
-        "NEEDS INPUT" => "INPUT",
-        "COMPLETED" => "DONE",
-        state => state,
+    match session.agent_state() {
+        AgentState::Waiting if session.attention_state.eq_ignore_ascii_case("ERROR") => "ERROR",
+        AgentState::Waiting => "INPUT",
+        AgentState::Working => "RUNNING",
+        AgentState::Idle if session.is_turn_complete() => "DONE",
+        AgentState::Idle => "IDLE",
+        AgentState::Exited => "EXITED",
+        AgentState::Unverifiable => "UNKNOWN",
     }
 }
 
@@ -2955,17 +3008,29 @@ fn provider_label(provider: &str) -> &'static str {
 }
 
 fn operator_state_color(session: &FleetSessionRow) -> Color {
-    if session.attention_state.eq_ignore_ascii_case("ERROR") {
-        return ALERT;
+    match session.agent_state() {
+        AgentState::Waiting => attention_color(&session.attention_state),
+        AgentState::Working => BLUE,
+        AgentState::Idle if session.is_turn_complete() => GREEN,
+        AgentState::Idle => VIOLET,
+        AgentState::Exited | AgentState::Unverifiable => MUTED,
     }
-    match session.operator_state() {
-        "NEEDS INPUT" => attention_color(&session.attention_state),
-        "RUNNING" => BLUE,
-        "IDLE" => VIOLET,
-        "COMPLETED" => GREEN,
-        "UNKNOWN" => MUTED,
-        _ => FG,
-    }
+}
+
+/// `{state} · {provenance} · tier {n} · {age}` from the joined `fleet/status`
+/// row, or `unverifiable · no status yet` before one has arrived (#962).
+#[must_use]
+pub fn status_line(session: &FleetSessionRow, now_ms: i64) -> String {
+    session.status.as_ref().map_or_else(
+        || "unverifiable · no status yet".to_string(),
+        |status| {
+            let (_, state, provenance, tier, observed) = status.identity_tuple();
+            format!(
+                "{state} · {provenance} · tier {tier} · {}",
+                format_age(now_ms, observed)
+            )
+        },
+    )
 }
 
 fn attention_color(attention: &str) -> Color {
@@ -3001,7 +3066,7 @@ fn render_detail(
     y = y.saturating_add(1);
     let card_left = left;
     let card_right = right.saturating_sub(1);
-    let border = if session.is_actionable() {
+    let border = if session.is_waiting() {
         GOLD
     } else {
         CARD_BORDER
@@ -3058,7 +3123,7 @@ fn render_detail(
     );
     y = y.saturating_add(1);
 
-    let age = format_age(state.now_ms, session.last_observed_at);
+    let age = format_age(state.now_ms, session.evidence_observed_at());
     put_str(
         buffer,
         card_content_left,
@@ -3073,12 +3138,29 @@ fn render_detail(
     );
     y = y.saturating_add(2);
 
+    // The daemon's own words for this session, so an operator (and the
+    // cross-surface gate) can read exactly what `fleet/status` said.
+    put_str(
+        buffer,
+        left,
+        y,
+        &truncate_ellipsis(
+            &status_line(session, state.now_ms),
+            usize::from(right.saturating_sub(left)),
+        ),
+        MUTED,
+        right,
+    );
+    y = y.saturating_add(2);
+
     put_str(buffer, left, y, "QUEUE PULSE", MUTED, right);
     y = y.saturating_add(1);
     render_focus_summary(buffer, left, y, right, state);
     y = y.saturating_add(2);
 
-    if session.is_actionable() {
+    // The daemon says whether a human is needed; the snapshot's attention
+    // kind only says what kind of answer to offer (#962).
+    if session.is_waiting() && session.is_actionable() {
         put_str(buffer, left, y, "NEEDS YOU", GOLD, right);
         y = y.saturating_add(1);
         if read_only_picker(session) {
@@ -4137,6 +4219,25 @@ fn put_char(buffer: &mut WireBuffer, x: u16, row: u16, character: char, color: C
     buffer.push(Coord::new(x, row), cell);
 }
 
+/// A `fleet/status` row for a test fixture in another module (#962).
+#[cfg(test)]
+pub(crate) fn test_status(key: &str, state: AgentState) -> AgentStatusRow {
+    use ainb_hangar_proto::agent_status::{Provenance, Tier};
+    AgentStatusRow {
+        session_key: key.into(),
+        provider: ainb_hangar_proto::fleet::FleetProvider::Claude,
+        cwd: format!("/work/{key}"),
+        display_name: Some(key.into()),
+        state,
+        provenance: Provenance::Hook,
+        tier: Tier::Hook,
+        evidence_observed_at: 9_000,
+        has_open_request: state == AgentState::Waiting,
+        pane_unbound: false,
+        pane_unbound_detail: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4196,7 +4297,30 @@ mod tests {
             lifecycle_updated_at: 9_000,
             attention_updated_at: 9_000,
             transport_updated_at: 9_000,
+            status: Some(fixture_status(key, lifecycle, attention)),
         }
+    }
+
+    /// The `fleet/status` row a fixture session stands for, as the daemon
+    /// would report it for that lifecycle and attention. A fixture, not a
+    /// derivation: the panel never computes this itself (#962).
+    fn fixture_status(key: &str, lifecycle: &str, attention: &str) -> AgentStatusRow {
+        let state = if !attention.eq_ignore_ascii_case("NONE") {
+            AgentState::Waiting
+        } else if lifecycle.eq_ignore_ascii_case("STARTING")
+            || lifecycle.eq_ignore_ascii_case("RUNNING")
+        {
+            AgentState::Working
+        } else if lifecycle.eq_ignore_ascii_case("IDLE")
+            || lifecycle.eq_ignore_ascii_case("TURN_COMPLETE")
+        {
+            AgentState::Idle
+        } else if lifecycle.eq_ignore_ascii_case("EXITED") {
+            AgentState::Exited
+        } else {
+            AgentState::Unverifiable
+        };
+        test_status(key, state)
     }
 
     fn roster() -> Vec<FleetSessionRow> {
@@ -4222,6 +4346,175 @@ mod tests {
             state = apply(&state, FleetEvent::Key(FleetKey::Char(character))).state;
         }
         state
+    }
+
+    fn screen_text(buffer: &WireBuffer, width: u16, height: u16) -> String {
+        (0..height)
+            .map(|row| row_text(buffer, row, width))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// #962: the panel's state is the daemon's, not a reading of the
+    /// snapshot. A row whose snapshot still says `ASK` but whose `fleet/status`
+    /// row says `working` (a tier-5 scan the daemon ranks below newer
+    /// evidence) is RUNNING, outside the needs-input lens, and not counted.
+    #[test]
+    fn the_panel_renders_the_daemons_state_not_the_snapshot_strings() {
+        let mut row = session("claude:scan", "claude", "IDLE", "ASK", "managed");
+        row.status = None;
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        assert!(
+            state.visible_sessions().is_empty(),
+            "no status yet is not a wait"
+        );
+
+        let working = AgentStatusRow {
+            evidence_observed_at: 12_000,
+            ..test_status("claude:scan", AgentState::Working)
+        };
+        state.apply_status(AgentStatusResult {
+            rows: vec![working],
+            head_revision: 3,
+            unknown_events: Vec::new(),
+        });
+        assert!(state.visible_sessions().is_empty());
+        state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::Running)).state;
+        state = reduce_fleet(&state, FleetEvent::Tick(54_000)).state;
+        let mut buffer = WireBuffer::new(120, 24);
+        render_fleet(&mut buffer, 120, 0, 20, &state);
+        let text = screen_text(&buffer, 120, 20);
+        assert!(text.contains("╭─ RUNNING"), "{text}");
+        assert!(
+            !text.contains("NEEDS YOU"),
+            "the daemon says no human is needed: {text}"
+        );
+        assert!(text.contains("working · hook · tier 0 · 42s"), "{text}");
+
+        // An older status revision never overwrites a newer one.
+        let _ = state.apply_status(AgentStatusResult {
+            rows: vec![test_status("claude:scan", AgentState::Waiting)],
+            head_revision: 2,
+            unknown_events: Vec::new(),
+        });
+        assert_eq!(
+            state.status_for("claude:scan").map(|s| s.state),
+            Some(AgentState::Working)
+        );
+    }
+
+    /// #962: a daemon without `fleet/status` leaves every state unverifiable
+    /// and the header says why, rather than the panel deriving its own.
+    #[test]
+    fn a_daemon_without_fleet_status_is_named_not_papered_over() {
+        let mut state = state_with_roster();
+        state.mark_status_unavailable("daemon has no fleet/status");
+        assert!(state.visible_sessions().is_empty());
+        state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::All)).state;
+        let mut buffer = WireBuffer::new(140, 24);
+        render_fleet(&mut buffer, 140, 0, 20, &state);
+        let text = screen_text(&buffer, 140, 20);
+        assert!(
+            text.contains("states unverifiable: daemon has no fleet/status"),
+            "{text}"
+        );
+        assert!(text.contains("UNKNOWN"), "{text}");
+        assert!(!text.contains("RUNNING"), "{text}");
+    }
+
+    /// Review of #1014, the green lie: with no status rows the needs-input
+    /// lens is empty because nothing is KNOWN, not because nothing is waiting.
+    /// The body must say so, never "nothing needs you", and the warning must
+    /// survive a narrow pane.
+    #[test]
+    fn an_empty_lens_without_status_says_unverifiable_never_nothing_needs_you() {
+        let mut rows = roster();
+        for row in &mut rows {
+            row.status = None;
+        }
+        let mut state = FleetPaneState::default();
+        state.set_sessions(rows);
+        state.mark_status_unavailable("status store unavailable");
+        for width in [140_u16, 40] {
+            let mut buffer = WireBuffer::new(width, 24);
+            render_fleet(&mut buffer, width, 0, 20, &state);
+            let text = screen_text(&buffer, width, 20);
+            assert!(
+                !text.contains("nothing needs you"),
+                "no positive claim at {width}: {text}"
+            );
+            assert!(
+                text.contains("states unverifiable"),
+                "warning at {width}: {text}"
+            );
+            assert!(
+                text.contains("status store"),
+                "the reason at {width}: {text}"
+            );
+        }
+    }
+
+    /// Review of #1014, one truth for the answer action: a snapshot `ASK`
+    /// the daemon does not call waiting opens no interview.
+    #[test]
+    fn a_scraped_ask_the_daemon_calls_working_opens_no_interview() {
+        let mut row = session("claude:scraped", "claude", "RUNNING", "ASK", "managed");
+        row.current_request_fingerprint = Some("fp".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"question": "Proceed?", "options": [{"label": "Yes"}]}]
+        }));
+        row.status = Some(test_status("claude:scraped", AgentState::Working));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row.clone()]);
+        state.selected_key = Some("claude:scraped".into());
+        begin_structured_answer(&mut state);
+        assert!(matches!(state.mode, FleetMode::Browse), "{:?}", state.mode);
+        assert_eq!(
+            state.feedback(),
+            Some("no actionable structured interviews")
+        );
+
+        row.status = Some(test_status("claude:scraped", AgentState::Waiting));
+        state.set_sessions(vec![row]);
+        state.selected_key = Some("claude:scraped".into());
+        begin_structured_answer(&mut state);
+        assert!(
+            matches!(state.mode, FleetMode::Answer(_)),
+            "a real wait still opens it"
+        );
+    }
+
+    /// Review of #1014: a status reply older than the roster it would join is
+    /// refused, and a session the reply stops naming loses its stale state.
+    #[test]
+    fn status_older_than_the_roster_is_refused_and_absent_rows_are_cleared() {
+        let status = |revision: i64, keys: &[&str]| AgentStatusResult {
+            rows: keys.iter().map(|key| test_status(key, AgentState::Working)).collect(),
+            head_revision: revision,
+            unknown_events: Vec::new(),
+        };
+        let mut rows = roster();
+        for row in &mut rows {
+            row.status = None;
+        }
+        let mut state = FleetPaneState::default();
+        state.apply_snapshot(10, rows);
+        assert!(
+            !state.apply_status(status(9, &["claude:ask"])),
+            "older than the roster"
+        );
+        assert!(state.status_for("claude:ask").is_none());
+
+        assert!(state.apply_status(status(10, &["claude:ask", "codex:run"])));
+        assert!(state.selected_session().is_none() || state.status_for("codex:run").is_some());
+        assert!(state.apply_status(status(11, &["claude:ask"])));
+        let codex = state.roster.iter().find(|row| row.session_key == "codex:run").unwrap();
+        assert!(
+            codex.status.is_none(),
+            "a session the daemon stopped naming has no state"
+        );
+        assert_eq!(state.status_unavailable(), None);
     }
 
     fn row_text(buffer: &WireBuffer, row: u16, width: u16) -> String {
@@ -4360,7 +4653,6 @@ mod tests {
         state.set_sessions(vec![blocked]);
 
         assert_eq!(state.session_count(), 0);
-        assert_eq!(state.attention_count(), 1);
         let keys: Vec<_> =
             state.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
         assert_eq!(keys, ["lost-ask"]);

@@ -253,8 +253,8 @@ pub fn status_row(session: &FleetSession, has_open_request: bool) -> AgentStatus
 /// Separate from `status_row` rather than a new field on [`FleetSession`]:
 /// the wire session is built by 34 struct literals across the workspace, and
 /// the one surface that needs the stored value today is the daemon's own
-/// `fleet/status`, which holds the store row. The panel picks it up when it
-/// moves onto `fleet/status`.
+/// `fleet/status`, which holds the store row. The TUI Fleet panel reads that
+/// method's rows directly (#962), so it never calls this derivation itself.
 #[must_use]
 pub fn status_row_with_tier(
     session: &FleetSession,
@@ -262,7 +262,7 @@ pub fn status_row_with_tier(
     stored: Option<Tier>,
 ) -> AgentStatusRow {
     let tier = stored.unwrap_or_else(|| tier_of(session));
-    let state = state_of(session, tier);
+    let state = state_of(session, tier, has_open_request);
     AgentStatusRow {
         session_key: session.session_key.clone(),
         provider: session.provider,
@@ -349,11 +349,17 @@ pub fn provenance_of(tier: Tier) -> Provenance {
 }
 
 /// Fold a session's two independent state groups into one operator state.
-fn state_of(session: &FleetSession, tier: Tier) -> AgentState {
+fn state_of(session: &FleetSession, tier: Tier, has_open_request: bool) -> AgentState {
     // Only tiers 0 and 1 may assert that a human is needed. A pane scrape that
     // reads like a prompt is a guess, and acting on it would raise a card
     // nobody can answer.
-    if tier.may_assert_needs_input() {
+    //
+    // And only while the inbox still holds an open request for the session
+    // (#962). Answering closes the card at once, but the session's attention
+    // string keeps reading `ASK` until the agent's next hook clears it. Reading
+    // the string alone made the one truth say `waiting` for however long that
+    // took, on every surface, about a question already answered.
+    if tier.may_assert_needs_input() && has_open_request {
         match session.attention {
             AttentionState::Ask
             | AttentionState::Approval
@@ -501,6 +507,21 @@ mod tests {
         assert_eq!(row.tier, Tier::AcpFeed);
         assert_eq!(row.provenance, Provenance::Acp);
         assert_eq!(row.state, AgentState::Waiting, "tier 1 may assert it");
+    }
+
+    /// #962: an answered question is not a wait. The card closed, so the
+    /// session's still-`ASK` attention string (awaiting the agent's clearing
+    /// hook) must fall back to its lifecycle instead of reporting `waiting`.
+    #[test]
+    fn a_hook_ask_with_no_open_request_is_not_waiting() {
+        let answered = status_row(
+            &session(LifecycleState::Running, AttentionState::Ask),
+            false,
+        );
+        assert_eq!(answered.state, AgentState::Working);
+        let idle = status_row(&session(LifecycleState::Idle, AttentionState::Ask), false);
+        assert_eq!(idle.state, AgentState::Idle);
+        assert!(!idle.has_open_request);
     }
 
     #[test]
