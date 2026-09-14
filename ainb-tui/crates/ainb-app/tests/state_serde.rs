@@ -183,6 +183,31 @@ const DENY_WORDS: &[&str] = &[
 /// the text is safe on the wire. Keyed by the traced `Owner.field`.
 const NAME_ALLOW: &[(&str, &str)] = &[
     (
+        "AgentDef.source_path",
+        "agent definition file under ~/.claude/agents",
+    ),
+    (
+        "DockerConfig.host",
+        "Docker endpoint URL, scrubbed in frame so userinfo becomes `<redacted>@`",
+    ),
+    (
+        "HookAgentHealth.detail",
+        "per-agent hook wiring detail, scrubbed",
+    ),
+    (
+        "HookHealth.script_path",
+        "path of the installed hook script",
+    ),
+    (
+        "HookHealthIssue.message",
+        "hook health issue text, scrubbed",
+    ),
+    (
+        "LogHistoryViewerState.selected_log_file",
+        "file name of the log open in the history viewer",
+    ),
+    ("Skill.source_path", "skill file under ~/.claude/skills"),
+    (
         "ConfigPopupType::TextInput",
         "the plain-text popup variant (`Input` in its name); its value is scrubbed",
     ),
@@ -531,6 +556,41 @@ const DENY_TYPES: &[(&str, &str)] = &[
 /// Fields of a denied type that stay on the wire, each with its reason.
 const TYPE_ALLOW: &[(&str, &str)] = &[
     (
+        "AgentDef.source_path",
+        "agent definition file under ~/.claude/agents",
+    ),
+    ("AgentDef.tools", "tool names an agent definition allows"),
+    (
+        "CodeReviewUi.collapsed_dirs",
+        "repo-relative folders collapsed in the review tree",
+    ),
+    (
+        "ConfigScreenState.dirty",
+        "registry keys edited this session; names, not values",
+    ),
+    (
+        "ConfigScreenState.expanded",
+        "ids of expanded settings tree nodes",
+    ),
+    (
+        "HookHealth.hook_binary",
+        "path of the binary the notification hooks launch",
+    ),
+    (
+        "HookHealth.running_binary",
+        "path of the running ainb binary",
+    ),
+    (
+        "HookHealth.script_path",
+        "path of the installed hook script",
+    ),
+    ("Skill.source_path", "skill file under ~/.claude/skills"),
+    ("SkillsData.associations", "agent name to skill names"),
+    (
+        "TmuxView.selected_other_tmux_sessions",
+        "tmux session names checked in the list",
+    ),
+    (
         "AskState.phases",
         "(request id, phase) pairs: the id is a daemon attention id or `kind:since_ms`; the draft is a length and the reason scrubbed",
     ),
@@ -768,6 +828,11 @@ fn no_opaque_or_unbounded_type_reaches_the_wire_unless_allow_listed() {
 /// so each one is named here: a pass-through wrapper cannot slip a field past
 /// the type deny-list without showing up in review.
 const SERIALIZER_REDACTED: &[&str] = &[
+    "AgentDef.description",
+    "DockerConfig.host",
+    "OrphanedWorktree.last_commit",
+    "Skill.description",
+    "Snapshot.hook_health",
     "ConfigPopupType::TextInput.value",
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
@@ -901,6 +966,10 @@ const LEAF_TYPE_PREFIXES: &[&str] = &[
 /// Containers and options left empty in the sample on purpose, with the reason.
 const UNFILLED_WAIVED: &[(&str, &str)] = &[
     (
+        "HookHealth.hook_binary_mode",
+        "a HookBinaryMode unit enum: filled, and a leaf by shape",
+    ),
+    (
         "DaemonsState.action_requests",
         "DaemonKind and Action enums plus a generation number; no text",
     ),
@@ -951,16 +1020,8 @@ const UNFILLED_WAIVED: &[(&str, &str)] = &[
         "the fetched preview itself is skipped; what remains is checkboxes and a cursor",
     ),
     (
-        "SkillsViewState.data",
-        "skill and agent metadata from a disk scan of ~/.claude: names, descriptions, tool names, source paths",
-    ),
-    (
         "Snapshot.evidence_census",
         "probe counts and an EvidenceHealth enum; no text",
-    ),
-    (
-        "Snapshot.hook_health",
-        "notifyd hook install report from the machine: versions, script and binary paths, issue lines",
     ),
     (
         "UsageConfig.plan",
@@ -1041,6 +1102,79 @@ fn the_sample_fills_every_structured_subtree() {
     );
 }
 
+/// Text fields left empty or unset in the sample on purpose, with the reason.
+const EMPTY_STRING_WAIVED: &[(&str, &str)] = &[(
+    "PluginsHostView.plugin_captures_text",
+    "screen id to bool: the text is the map key, a plugin screen id, and there are no text values",
+)];
+
+/// Whether a declared type is text or a plain collection of text, with no
+/// struct of its own inside (those are covered field by field).
+fn text_typed(field: &ainb_app::wire::trace::FieldNode) -> bool {
+    let ty = &field.rust_type;
+    if !(ty.contains("alloc::string::String") || ty.contains("std::path::PathBuf")) {
+        return false;
+    }
+    let mut token = String::new();
+    for ch in ty.chars().chain(std::iter::once(' ')) {
+        if ch.is_alphanumeric() || ch == '_' || ch == ':' {
+            token.push(ch);
+            continue;
+        }
+        if token.contains("::") && !LEAF_TYPE_PREFIXES.iter().any(|p| token.starts_with(p)) {
+            return false;
+        }
+        token.clear();
+    }
+    true
+}
+
+/// An empty string is inert to the name deny-list, the canary and the
+/// tripwire, so a text field the sample leaves empty (or `None`, or an empty
+/// list) is a field none of them has looked at.
+#[test]
+fn the_sample_fills_every_string_field() {
+    isolated_home();
+    let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
+    let under = |field: &str, path: &str| {
+        path == field
+            || (path.len() > field.len()
+                && path.starts_with(field)
+                && matches!(path.as_bytes()[field.len()], b'.' | b'[' | b'{'))
+    };
+    let mut textual: BTreeSet<(String, String)> = BTreeSet::new();
+    for field in &trace.fields {
+        let wrapped_text = field.rust_type.contains("__SerializeWith")
+            && trace.strings.iter().any(|leaf| under(&field.path, &leaf.path));
+        if text_typed(field) || wrapped_text {
+            textual.insert((field.owner_field.clone(), field.path.clone()));
+        }
+    }
+    let filled: BTreeSet<&str> = textual
+        .iter()
+        .filter(|(_, path)| {
+            trace
+                .strings
+                .iter()
+                .any(|leaf| !leaf.value.is_empty() && under(path, &leaf.path))
+        })
+        .map(|(owner, _)| owner.as_str())
+        .collect();
+    let empty: BTreeSet<&str> = textual
+        .iter()
+        .map(|(owner, _)| owner.as_str())
+        .filter(|owner| !filled.contains(owner))
+        .collect();
+    let waived: BTreeMap<_, _> = EMPTY_STRING_WAIVED.iter().copied().collect();
+    let unlisted: Vec<_> = empty.iter().filter(|o| !waived.contains_key(*o)).collect();
+    let stale: Vec<_> = waived.keys().filter(|k| !empty.contains(*k)).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "text fields the sample never fills, so no leak check reads them. Seed them in \
+         wire::shape or waive with a reason:\n{unlisted:#?}\nstale waivers: {stale:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. Canary
 // ---------------------------------------------------------------------------
@@ -1048,6 +1182,18 @@ fn the_sample_fills_every_structured_subtree() {
 /// Typed fields the frame shows on purpose, so their marker MUST appear. Every
 /// other typed label's marker must not.
 const CANARY_SHOWN: &[(&str, &str)] = &[
+    (
+        "new_session.configure.branch_prefix_edit",
+        "a branch prefix being typed; a name the Configure form draws",
+    ),
+    (
+        "new_session.configure.session_prefix_edit",
+        "a session prefix being typed; a name the Configure form draws",
+    ),
+    (
+        "new_session.configure.save_preset_modal",
+        "a preset name being typed; a name the save dialog draws",
+    ),
     (
         "config.text_popup",
         "a plain setting's value in the edit popup, scrubbed; secret rows open SecretInput",
