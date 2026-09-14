@@ -60,18 +60,20 @@ pub struct Trace {
 }
 
 /// Walk `value` as if serialising it, rooted at `root`.
-#[must_use]
-pub fn trace<T: Serialize + ?Sized>(root: &str, value: &T) -> Trace {
+///
+/// # Errors
+///
+/// The error a value's own `Serialize` raised. A partial trace would under-report
+/// the frame, so there is none.
+pub fn trace<T: Serialize + ?Sized>(root: &str, value: &T) -> Result<Trace, TraceError> {
     let mut out = Trace::default();
     let cx = Cx {
         path: root.to_string(),
         owner_field: String::new(),
         keys: Vec::new(),
     };
-    // The tracer's only error is a custom one raised by a value's own
-    // `Serialize`; the partial trace is still the best record available.
-    let _ = value.serialize(Tracer { out: &mut out, cx });
-    out
+    value.serialize(Tracer { out: &mut out, cx })?;
+    Ok(out)
 }
 
 /// Strip the reference and serde wrapper noise from a type name.
@@ -597,7 +599,7 @@ mod tests {
             unit: Kind::Unit,
             none: None,
         };
-        let trace = trace("root", &value);
+        let trace = trace("root", &value).expect("the sample traces");
 
         let path_field = trace
             .fields
