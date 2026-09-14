@@ -39,8 +39,13 @@ unix_socket_dial = ["~/.agents-in-a-box/hangar.sock", "${AINB_HANGAR_HOME}/hanga
 # (host/workspace_set_active, host/workspace_set_default). Bool-true grants
 # the write for any workspace; the read caps (list / get_active) are ungated.
 "workspace:write" = true
-# Snapshot/event bus + plugin-local data dir.
-event_bus = true
+# Snapshot/event bus, narrowed to the topics this plugin uses (#1038 review):
+# the agent-status envelope the TUI host publishes (every agent's cwd and
+# pending tool input, so no plugin gets it by a blanket grant), its own
+# `ui.state` view, and the panel close request. An entry ending in `*` is a
+# prefix; any other entry is one exact topic.
+event_bus = ["fleet.agent_status", "ui.state*", "ui.close_request"]
+# Plugin-local data dir.
 write_plugin_data = true
 
 [provides]
