@@ -93,6 +93,7 @@ pub enum ImageSource {
     /// Build from a Dockerfile
     Dockerfile {
         path: PathBuf,
+        #[serde(serialize_with = "crate::wire::fields::env_values_in_frame")]
         build_args: HashMap<String, String>,
     },
 
@@ -101,6 +102,7 @@ pub enum ImageSource {
         /// Override base image
         base_image: Option<String>,
         /// Additional build args
+        #[serde(serialize_with = "crate::wire::fields::env_values_in_frame")]
         build_args: HashMap<String, String>,
     },
 }
