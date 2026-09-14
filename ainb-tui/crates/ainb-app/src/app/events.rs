@@ -1899,24 +1899,6 @@ impl EventHandler {
         }
     }
 
-    fn prepare_exact_fleet_attach(tmux_target: &str) -> Result<String, String> {
-        let session_name =
-            tmux_target.split_once(':').map_or(tmux_target, |(session, _)| session).trim();
-        if session_name.is_empty() {
-            return Err("tmux target has no session name".to_string());
-        }
-        for command in ["select-window", "select-pane"] {
-            let status = std::process::Command::new("tmux")
-                .args([command, "-t", tmux_target])
-                .status()
-                .map_err(|error| format!("tmux {command}: {error}"))?;
-            if !status.success() {
-                return Err(format!("tmux {command} rejected {tmux_target}"));
-            }
-        }
-        Ok(session_name.to_string())
-    }
-
     /// Write every pending settings-screen edit, returning how many landed.
     ///
     /// One path for both the auto-persist on a popup confirm and the explicit
