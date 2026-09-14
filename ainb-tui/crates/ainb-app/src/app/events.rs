@@ -195,10 +195,30 @@ pub enum AppEvent {
     AbtopSetupFinished {
         ok: bool,
     },
-    /// The host opened a tmux client on `tmux_session` for the in-place pane.
+    /// The host opened, and keeps, a writable client on `tmux_session` for
+    /// the in-place pane.
     InPlaceOpened {
         tmux_session: String,
-        embed: crate::app::reports::LocalEmbed,
+    },
+    /// The host opened, and keeps, a read-only client on `tmux_session` for
+    /// the preview pane.
+    ObserverOpened {
+        tmux_session: String,
+    },
+    /// The read-only client on `tmux_session` would not open; `unsupported`
+    /// when the host cannot mirror a terminal at all.
+    ObserverFailed {
+        tmux_session: String,
+        error: String,
+        unsupported: bool,
+    },
+    /// The host's client on `tmux_session` ended on its own.
+    TerminalExited {
+        tmux_session: String,
+    },
+    /// Input for the host's client on `tmux_session` could not be written.
+    TerminalInputClosed {
+        tmux_session: String,
     },
     /// The in-place client on `tmux_session` would not open.
     InPlaceFailed {
@@ -966,8 +986,7 @@ impl EventHandler {
 
     fn emit_full_screen_attach(state: &mut AppState, target: TerminalTarget) {
         // Read first: releasing writes the tmux section even with nothing held.
-        if state.tmux.embed.is_some()
-            || state.tmux.embed_session.is_some()
+        if state.tmux.embed_session.is_some()
             || state.shell.focused_pane == crate::app::state::FocusedPane::Preview
         {
             state.release_interactive_pane();
@@ -3864,22 +3883,37 @@ impl EventHandler {
                 }
                 state.shell.ui_needs_refresh = true;
             }
-            AppEvent::InPlaceOpened {
+            AppEvent::InPlaceOpened { tmux_session } => {
+                // A client for a row or a screen the user has since left is
+                // not adopted: the session stays unnamed here, so the host
+                // closes it instead of attaching it out of sight.
+                let wanted = state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
+                    && state.selected_tmux_name().as_deref() == Some(tmux_session.as_str());
+                if let Some(tmux_session) =
+                    crate::app::effect::TmuxSessionName::new(tmux_session).filter(|_| wanted)
+                {
+                    state.adopt_interactive_pane(tmux_session);
+                }
+            }
+            AppEvent::ObserverOpened { tmux_session } => {
+                state.adopt_terminal_observer(&tmux_session);
+            }
+            AppEvent::ObserverFailed {
                 tmux_session,
-                embed,
+                error,
+                unsupported,
             } => {
-                // Another process's client cannot be adopted here; a client
-                // for a row or a screen the user has since left is closed, not
-                // attached out of sight.
-                if let Some(client) = embed.adopt() {
-                    if state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
-                        && state.selected_tmux_name().as_deref() == Some(tmux_session.as_str())
-                    {
-                        state.adopt_interactive_pane(tmux_session, client);
-                    } else {
-                        let mut client = client;
-                        client.shutdown();
-                    }
+                state.observer_failed(tmux_session, &error, unsupported);
+            }
+            AppEvent::TerminalExited { tmux_session } => {
+                state.terminal_exited(&tmux_session);
+            }
+            AppEvent::TerminalInputClosed { tmux_session } => {
+                if state.embed_session_is(&tmux_session) {
+                    state.release_interactive_pane();
+                    state.add_error_notification(
+                        "Live session input channel closed, released".to_string(),
+                    );
                 }
             }
             AppEvent::InPlaceFailed {
