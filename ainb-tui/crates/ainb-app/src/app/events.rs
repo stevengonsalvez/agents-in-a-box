@@ -71,6 +71,12 @@ pub enum AppEvent {
         action_id: String,
         payload: serde_json::Value,
     },
+    /// A host wants the plugin behind `screen` kept live (`watching`) while
+    /// the terminal shows something else, or no longer does.
+    WatchPluginScreen {
+        screen: String,
+        watching: bool,
+    },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
     /// existing `GoTo*` variants are kept for now and translate through this
@@ -6986,6 +6992,18 @@ impl EventHandler {
                     state.add_error_notification(format!(
                         "Could not run `{action_id}`: no screen is owned by a plugin named {plugin}"
                     ));
+                }
+            }
+            AppEvent::WatchPluginScreen { screen, watching } => {
+                let plugin_screen =
+                    crate::app::screens::builtin::plugin_id_for_screen(&screen).is_some();
+                let watched = state.plugins_host.watched_plugin_screens.contains(&screen);
+                if !plugin_screen {
+                    tracing::warn!(%screen, "watch request for a screen no plugin owns");
+                } else if watching && !watched {
+                    state.plugins_host.watched_plugin_screens.insert(screen);
+                } else if !watching && watched {
+                    state.plugins_host.watched_plugin_screens.remove(&screen);
                 }
             }
             AppEvent::NavigateTo(screen_id) => {
