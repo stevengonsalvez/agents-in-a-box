@@ -12,7 +12,7 @@
 use crate::app::versioned::SectionId;
 use crate::wire::frame::{DaemonRead, Frame, FrameBatch, HostId, Subscription};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One section as the renderer holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +68,8 @@ type Effect = Box<dyn FnMut(&MirrorStore, &Commit) + Send>;
 pub struct MirrorStore {
     subscription: Subscription,
     sections: BTreeMap<SectionKey, MirroredSection>,
+    /// The boot epoch each host's held versions count in.
+    epochs: BTreeMap<HostId, u64>,
     transactions: u64,
     frames_applied: u64,
     frames_ignored: u64,
@@ -93,6 +95,7 @@ impl MirrorStore {
         Self {
             subscription,
             sections: BTreeMap::new(),
+            epochs: BTreeMap::new(),
             transactions: 0,
             frames_applied: 0,
             frames_ignored: 0,
@@ -146,32 +149,58 @@ impl MirrorStore {
         self.frames_ignored
     }
 
+    /// The boot epoch this store holds a host's sections in.
+    #[must_use]
+    pub fn epoch(&self, host: &HostId) -> Option<u64> {
+        self.epochs.get(host).copied()
+    }
+
     /// Apply everything one channel drain produced, as a single transaction.
     ///
     /// Frames are staged first; later frames for a section replace earlier
     /// ones in the same drain, so a section that moved five times since the
-    /// last drain is written once. The commit swaps every staged section in at
-    /// once, and only then do effects run, each seeing the fully committed
-    /// store. A drain that changes nothing commits nothing and runs no effect.
+    /// last drain is written once. A frame from a larger boot epoch than the
+    /// one held for its host drops everything held from that host and starts
+    /// its versions over; a frame from a smaller epoch is a dead process and is
+    /// ignored. The commit swaps every staged section in at once, and only then
+    /// do effects run, each seeing the fully committed store. A drain that
+    /// changes nothing commits nothing and runs no effect.
     pub fn apply_drain(&mut self, batches: impl IntoIterator<Item = FrameBatch>) -> Commit {
-        let mut staged: BTreeMap<SectionKey, MirroredSection> = BTreeMap::new();
+        let mut drain = Drain::default();
         for frame in batches.into_iter().flat_map(|batch| batch.frames) {
-            match self.accept(&frame, &staged) {
+            match self.accept(&frame, &mut drain) {
                 Some(key) => {
-                    staged.insert(key, into_section(frame));
+                    drain.staged.insert(key, into_section(frame));
                 }
                 None => self.frames_ignored += 1,
             }
         }
-        if staged.is_empty() {
+        let dropped: Vec<SectionKey> = self
+            .sections
+            .keys()
+            .filter(|(host, _)| drain.restarted.contains(host))
+            .cloned()
+            .collect();
+        if drain.staged.is_empty() && dropped.is_empty() {
+            self.epochs.extend(drain.epochs);
             return Commit {
                 changed: Vec::new(),
                 transaction: self.transactions,
             };
         }
-        self.frames_applied += staged.len() as u64;
-        let changed: Vec<SectionKey> = staged.keys().cloned().collect();
-        self.sections.extend(staged);
+        self.frames_applied += drain.staged.len() as u64;
+        let changed: Vec<SectionKey> = dropped
+            .iter()
+            .chain(drain.staged.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for key in &dropped {
+            self.sections.remove(key);
+        }
+        self.sections.extend(drain.staged);
+        self.epochs.extend(drain.epochs);
         self.transactions += 1;
         let commit = Commit {
             changed,
@@ -186,21 +215,30 @@ impl MirrorStore {
         commit
     }
 
-    fn accept(
-        &self,
-        frame: &Frame,
-        staged: &BTreeMap<SectionKey, MirroredSection>,
-    ) -> Option<SectionKey> {
+    fn accept(&self, frame: &Frame, drain: &mut Drain) -> Option<SectionKey> {
         let id = frame.section_id()?;
         if !self.subscription.contains(id) {
             return None;
         }
+        let host = &frame.host_id;
+        match drain.epochs.get(host).or_else(|| self.epochs.get(host)) {
+            Some(held) if frame.epoch < *held => return None,
+            Some(held) if frame.epoch > *held => {
+                // The host restarted: its versions count from zero again.
+                drain.staged.retain(|(staged_host, _), _| staged_host != host);
+                drain.restarted.insert(host.clone());
+                drain.epochs.insert(host.clone(), frame.epoch);
+            }
+            Some(_) => {}
+            None => {
+                drain.epochs.insert(host.clone(), frame.epoch);
+            }
+        }
         // Versions are per host: host B's section 3 is not older than host A's 9.
-        let key = (frame.host_id.clone(), id);
-        let held = staged
-            .get(&key)
-            .or_else(|| self.sections.get(&key))
-            .map(|section| section.version);
+        let key = (host.clone(), id);
+        let committed =
+            (!drain.restarted.contains(host)).then(|| self.sections.get(&key)).flatten();
+        let held = drain.staged.get(&key).or(committed).map(|section| section.version);
         match held {
             Some(version) if frame.version <= version => None,
             _ => Some(key),
@@ -227,6 +265,16 @@ impl MirrorStore {
         let first = bodies.next()?;
         bodies.next().is_none().then_some(first)
     }
+}
+
+/// What one drain has staged so far.
+#[derive(Default)]
+struct Drain {
+    staged: BTreeMap<SectionKey, MirroredSection>,
+    /// Hosts whose frames came from a larger epoch than the store holds.
+    restarted: BTreeSet<HostId>,
+    /// The epoch each host's frames in this drain count in.
+    epochs: BTreeMap<HostId, u64>,
 }
 
 fn into_section(frame: Frame) -> MirroredSection {
@@ -340,3 +388,99 @@ pub const ROOT_SELECTORS: &[RootSelector] =
             },
         },
     ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(
+        host: &str,
+        section: &str,
+        epoch: u64,
+        version: u64,
+        body: serde_json::Value,
+    ) -> Frame {
+        serde_json::from_value(serde_json::json!({
+            "section": section,
+            "version": version,
+            "epoch": epoch,
+            "host_id": host,
+            "body": body,
+        }))
+        .expect("a frame")
+    }
+
+    fn batch(frames: Vec<Frame>) -> FrameBatch {
+        FrameBatch { frames }
+    }
+
+    fn held(store: &MirrorStore, host: &str, id: SectionId) -> Option<u64> {
+        store.section(&HostId::new(host), id).map(|section| section.version)
+    }
+
+    #[test]
+    fn an_older_frame_replayed_in_the_same_epoch_is_ignored() {
+        let mut store = MirrorStore::new(Subscription::all());
+        store.apply_drain([batch(vec![frame(
+            "h",
+            "shell",
+            7,
+            5,
+            serde_json::json!({"n": 5}),
+        )])]);
+        let commit = store.apply_drain([batch(vec![frame(
+            "h",
+            "shell",
+            7,
+            3,
+            serde_json::json!({"n": 3}),
+        )])]);
+        assert!(commit.changed.is_empty());
+        assert_eq!(held(&store, "h", SectionId::Shell), Some(5));
+        assert_eq!(store.frames_ignored(), 1);
+    }
+
+    #[test]
+    fn a_lower_version_after_an_epoch_bump_is_applied_and_drops_the_old_process() {
+        let mut store = MirrorStore::new(Subscription::all());
+        store.apply_drain([batch(vec![
+            frame("h", "shell", 7, 5, serde_json::json!({"n": 5})),
+            frame("h", "config", 7, 9, serde_json::json!({})),
+            frame("other", "shell", 1, 4, serde_json::json!({})),
+        ])]);
+
+        let commit = store.apply_drain([batch(vec![frame(
+            "h",
+            "shell",
+            8,
+            1,
+            serde_json::json!({"n": 1}),
+        )])]);
+
+        assert_eq!(held(&store, "h", SectionId::Shell), Some(1));
+        assert_eq!(
+            held(&store, "h", SectionId::Config),
+            None,
+            "the dead process's section is dropped"
+        );
+        assert_eq!(
+            held(&store, "other", SectionId::Shell),
+            Some(4),
+            "another host is untouched"
+        );
+        assert_eq!(store.epoch(&HostId::new("h")), Some(8));
+        assert!(commit.changed.contains(&(HostId::new("h"), SectionId::Config)));
+
+        let stale = store.apply_drain([batch(vec![frame(
+            "h",
+            "shell",
+            7,
+            6,
+            serde_json::json!({}),
+        )])]);
+        assert!(
+            stale.changed.is_empty(),
+            "a frame from the dead process is ignored"
+        );
+    }
+}
