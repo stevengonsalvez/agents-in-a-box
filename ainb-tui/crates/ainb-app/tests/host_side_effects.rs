@@ -285,7 +285,8 @@ fn count_call_sites(dir: &Path, root: &Path, counts: &mut BTreeMap<String, usize
             continue;
         }
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
-        if !name.ends_with(".rs") || name.ends_with("_tests.rs") || name == "test_support.rs" {
+        let is_rust = path.extension().is_some_and(|extension| extension == "rs");
+        if !is_rust || name.ends_with("_tests.rs") || name == "test_support.rs" {
             continue;
         }
         let source = std::fs::read_to_string(&path).expect("read source file");
