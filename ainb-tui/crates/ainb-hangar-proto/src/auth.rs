@@ -98,6 +98,14 @@ pub struct HelloParams {
     /// ignores the member and lists the connection, the pre-#963 behaviour.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub transient: bool,
+    /// The surface that hosts this connection's process, for a
+    /// [`crate::connections::SurfaceKind::Plugin`] connection (#1040).
+    ///
+    /// A transient plugin connection folds into that host's presence, and only
+    /// when the daemon can verify the host is the connection's peer process or
+    /// the peer's parent. Absent for every other surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<crate::connections::SurfaceHost>,
 }
 
 /// The paired device presenting a per-device token (D13 / R1).
@@ -169,6 +177,7 @@ pub fn hello_request(id: i64, token: &str) -> RpcRequest {
             capabilities: crate::protocol::catalogue_strings(),
             device: None,
             transient: false,
+            host: None,
         }),
     }
 }
