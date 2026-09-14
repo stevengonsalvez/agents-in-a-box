@@ -179,12 +179,22 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
 /// fixture is regenerated after triage; the same comparison gates CI in
 /// `ainb-app/tests/state_serde.rs`.
 fn wire_shape(format: OutputFormat) -> Result<()> {
+    // The sample is built under a scratch HOME, as in the test, so this
+    // machine's config, favorites and presets cannot report drift the CI
+    // comparison would not.
+    let scratch = tempfile::tempdir().context("creating a scratch HOME for the sample state")?;
+    let previous = std::env::var_os("HOME");
+    std::env::set_var("HOME", scratch.path());
     let diff = ainb_app::wire::shape::diff_against_committed();
+    match previous {
+        Some(home) => std::env::set_var("HOME", home),
+        None => std::env::remove_var("HOME"),
+    }
     match format {
         OutputFormat::Json => println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "fixture": ainb_app::wire::shape::COMMITTED_KEY_PATHS_FILE,
+                "fixture": ainb_app::wire::shape::COMMITTED_KEY_PATHS_REPO_PATH,
                 "matches": diff.is_empty(),
                 "added": diff.added,
                 "removed": diff.removed,
@@ -193,7 +203,7 @@ fn wire_shape(format: OutputFormat) -> Result<()> {
         OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
             println!(
                 "WIRE SHAPE ({})",
-                ainb_app::wire::shape::COMMITTED_KEY_PATHS_FILE
+                ainb_app::wire::shape::COMMITTED_KEY_PATHS_REPO_PATH
             );
             print!("{diff}");
         }
