@@ -524,7 +524,7 @@ pub struct TmuxSection {
     // The tmux session name the live embed is attached to. Some iff `embed`
     // is Some. Re-entering on a DIFFERENT row releases the old client and
     // attaches to the new target instead of silently refocusing the stale
-    // one (see `enter_interactive_pane`).
+    // one (see `AppState::in_place_target`).
     pub embed_session: Option<String>,
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
