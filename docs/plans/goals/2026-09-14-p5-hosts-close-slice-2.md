@@ -43,3 +43,27 @@
 
 Begin by outputting your plan. Then execute end-to-end without checking
 in until done or genuinely blocked.
+
+— PROGRESS LOG —
+
+Plan, staged as the constraints allow:
+1. P5a, criterion 1: the host owns the terminal client and the in-place attach is portable.
+2. P5b, criterion 2 part: one persistence effect over every reducer write to disk, a failed-write report, a source guard.
+3. P5c, criterion 2 rest: the runtime handle out of `AppState` (or the named divergence), `watch_screen` with a viewport, `sessions_sidebar_width` as a fraction.
+4. P5d, criterion 3: command gate precedence and the `HostFlags` decision, the per-test tripwire ratchet with a scheduled excluded-set job and a skip-set guard, a verdict per red tripwire, the mirror granularity decision with lane K, the programme row.
+
+Also taken in P5 from the #1021 fix verification: `TmuxSessionName::new` refuses whitespace at either end (e0bc31076).
+
+P5a, done on `stevengonsalvez/p5-hosts`:
+- `TmuxSection` holds `embed_session: Option<TmuxSessionName>` and no client. `LocalEmbed` and its process-global registry are deleted. `enter_interactive_pane` went in P4; `sync_terminal_observer` is replaced by `AppState::request_terminal_observer`, which decides and returns `Effect::AttachTerminal(TerminalTarget::Observe)` without touching a PTY.
+- The terminal host keeps the client in `ainb-core/src/terminal_clients.rs` (`TerminalClients`), threaded through `run_intent`, `run_effects` and `effect_host::execute`. `embed_client.rs` and `pty_wrapper.rs` moved to `ainb-core/src/tmux/`; `ainb-app` no longer depends on `portable-pty` or `vt100`, and `portable-pty` left `REACHABLE_TODAY`.
+- Reports by session name: `in_place_opened`, `observer_opened`, `observer_failed {unsupported}`, `terminal_exited`, `terminal_input_closed`.
+- Evidence: `ainb-app/tests/terminal_host_contract.rs` (a headless host with no PTY attaches in place, releases on detach, on leaving the session list and on a client exit, and mirrors the selection read-only); `tripwire_interactive_pane` (5) through `TerminalClients`; `tripwire_keymap_surface` (real binary, Ctrl+C reaches the embed and Ctrl+Q returns); `state_tests.rs` observer retry rules through reports.
+
+Decisions:
+- In-place is portable, not terminal-host-only. A report names the session and never carries a client, so any host implements it from the effect docs. There is no `in_place_unsupported` report because no host needs one; a host with no terminal widget answers `Observe` with `observer_failed {unsupported: true}` and the reducer stops asking for that row.
+- Release is reconciliation, not an effect. The host closes any client whose session `embed_session` no longer names, checked each loop before the frame. A declined report, a row change, a screen change and a detach all release the same way, and a report the reducer ignores cannot leak a client.
+- The client lives outside `ainb-core/src/app/*` (the constraint), so `TerminalClients` is a module of its own that the run loop owns, not a `UiState` field, and the preview pane is handed its screen before each frame (`TmuxPreviewPane::show_terminal`).
+- The reducer keeps the observer's decisions (settle delay, retry backoff, the own-session rule) and their bookkeeping fields next to `embed_session`. The host keeps what only a client can know: whether tmux supports a read-only client, whether it exited, whether input was written.
+- New pane output no longer bumps the tmux section. The bytes are the local host's; a mirrored host renders its own client, so a section bump per PTY write told a subscriber nothing it could draw.
+- A failed input write is a report (`terminal_input_closed`), so the host no longer writes state or posts the notice itself.
