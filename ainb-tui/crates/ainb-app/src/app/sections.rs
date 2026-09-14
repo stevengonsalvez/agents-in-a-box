@@ -175,10 +175,17 @@ pub struct PluginsHostSection {
     /// `tick_plugin_renders`; the host stores the JSON and never reads into
     /// it.
     pub plugin_ui_states: std::collections::HashMap<String, PluginUiState>,
+    /// The newest `ui.state` version per plugin that must not be shown again:
+    /// the last one seen before the plugin stopped, or one that was refused.
+    /// A restarted plugin's stale view, or one bad publish read again every
+    /// tick, stops here.
+    pub plugin_ui_state_spent: std::collections::HashMap<String, u64>,
     /// Plugin screens a host other than the terminal wants kept live, so
     /// their plugins keep rendering and publishing `ui.state` while the
-    /// terminal shows something else.
-    pub watched_plugin_screens: std::collections::BTreeSet<String>,
+    /// terminal shows something else, each with when its watch was last
+    /// renewed. A watch lapses unless renewed within
+    /// `AppState::PLUGIN_SCREEN_WATCH_LEASE`, and goes when its plugin does.
+    pub watched_plugin_screens: std::collections::BTreeMap<String, std::time::Instant>,
 }
 
 /// One plugin's `ui.state` view as the snapshot bus last delivered it. Never
@@ -200,7 +207,8 @@ impl Default for PluginsHostSection {
             plugin_render_errors: std::collections::HashMap::new(),
             plugin_runtime: None,
             plugin_ui_states: std::collections::HashMap::new(),
-            watched_plugin_screens: std::collections::BTreeSet::new(),
+            plugin_ui_state_spent: std::collections::HashMap::new(),
+            watched_plugin_screens: std::collections::BTreeMap::new(),
         }
     }
 }
