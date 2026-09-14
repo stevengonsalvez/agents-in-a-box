@@ -244,7 +244,11 @@ pub struct Provides {
 }
 
 /// `[subscribes]` — host pushes these to the plugin via `plugin/handle_event`.
+///
+/// Unknown keys are refused: a misspelt `lateststate` would otherwise parse as
+/// nothing and silently keep the plugin from idle reap.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Subscribes {
     /// Snapshot topics whose updates the plugin wants.
     #[serde(default)]
@@ -266,6 +270,21 @@ impl Subscribes {
     #[must_use]
     pub fn blocks_idle_reap(&self) -> bool {
         self.snapshots.iter().any(|topic| !self.latest_state.contains(topic))
+    }
+
+    /// Check that every [`Self::latest_state`] topic is also subscribed: a
+    /// marker on a topic the plugin never subscribes to is a typo that marks
+    /// nothing.
+    ///
+    /// # Errors
+    /// Names the first `latest_state` topic missing from `snapshots`.
+    pub fn validate(&self) -> Result<(), String> {
+        match self.latest_state.iter().find(|topic| !self.snapshots.contains(topic)) {
+            Some(topic) => Err(format!(
+                "[subscribes] latest_state topic `{topic}` is not in snapshots"
+            )),
+            None => Ok(()),
+        }
     }
 }
 
@@ -397,6 +416,35 @@ mod tests {
             .blocks_idle_reap(),
             "one stream topic is enough to keep it"
         );
+    }
+
+    /// #1053 review item 5: a misspelt `[subscribes]` key fails to parse, and
+    /// a `latest_state` topic outside `snapshots` fails validation.
+    #[test]
+    fn subscribes_refuses_unknown_keys_and_an_unsubscribed_latest_state_topic() {
+        let src = |subscribes: &str| {
+            format!(
+                "[plugin]\nname = \"x\"\nversion = \"1.0.0\"\nabi_version = 2\n[subscribes]\n{subscribes}"
+            )
+        };
+        let misspelt = toml::from_str::<Manifest>(&src(
+            "snapshots = [\"fleet.agent_status\"]\nlateststate = [\"fleet.agent_status\"]\n",
+        ));
+        assert!(misspelt.is_err(), "{misspelt:?}");
+
+        let stray: Manifest = toml::from_str(&src(
+            "snapshots = [\"sessions.usage_data\"]\nlatest_state = [\"fleet.agent_status\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            stray.subscribes.validate(),
+            Err("[subscribes] latest_state topic `fleet.agent_status` is not in snapshots".into())
+        );
+        let good: Manifest = toml::from_str(&src(
+            "snapshots = [\"fleet.agent_status\"]\nlatest_state = [\"fleet.agent_status\"]\n",
+        ))
+        .unwrap();
+        assert_eq!(good.subscribes.validate(), Ok(()));
     }
 
     #[test]
