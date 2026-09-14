@@ -35,6 +35,9 @@ git2 = { workspace = true }
 # Persistence
 serde = { workspace = true }
 serde_json = { workspace = true }
+specta = { workspace = true, optional = true }
+specta-serde = { workspace = true, optional = true }
+specta-typescript = { workspace = true, optional = true }
 serde_yaml = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true }
@@ -118,6 +121,17 @@ default = []
 # Exposes shared test fixtures to dependents' integration tests. `ainb`
 # forwards its own `test-support` feature here.
 test-support = []
+# Derives `specta::Type` across the mirror frame's type closure and exposes
+# `wire::bindings`, which renders `AppState.ts`. Off in every normal build; the
+# `TypeScript bindings freshness` CI job builds with it and diffs the output.
+typescript-bindings = [
+    "dep:specta",
+    "dep:specta-serde",
+    "dep:specta-typescript",
+    "ainb-hangar-proto/typescript-bindings",
+    "ainb-plugin-notifyd/typescript-bindings",
+    "ainb-skill-core/typescript-bindings",
+]
 
 [dev-dependencies]
 mockall = { workspace = true }
