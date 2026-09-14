@@ -48,13 +48,31 @@ impl ConnectionRegistry {
         }
     }
 
-    /// Insert one successfully authenticated connection and return its row.
+    /// Insert one successfully authenticated connection and return its row,
+    /// plus whether the row is listed.
     ///
-    /// A `transient` connection still gets a row, because provenance for its
-    /// requests is stamped from it, but it is never listed and never changes
-    /// what [`Self::list`] returns.
-    pub async fn insert(&self, surface: Option<SurfaceInfo>, transient: bool) -> ConnectionRow {
+    /// The DAEMON decides whether a connection is transient (#963): the
+    /// client's `transient` request is honoured only when a listed row already
+    /// exists for the same non-zero surface pid, which is the process's
+    /// presence connection. Otherwise the connection is listed like any other,
+    /// so no client can make itself invisible by asking. A transient connection
+    /// still gets a row, because provenance for its requests is stamped from
+    /// it, but it is never listed and never changes what [`Self::list`]
+    /// returns.
+    pub async fn insert(
+        &self,
+        surface: Option<SurfaceInfo>,
+        requested_transient: bool,
+    ) -> (ConnectionRow, bool) {
         let mut state = self.state.lock().await;
+        let presence_held = surface.as_ref().is_some_and(|surface| {
+            surface.pid != 0
+                && state
+                    .rows
+                    .values()
+                    .any(|entry| entry.listed && entry.row.surface.pid == surface.pid)
+        });
+        let listed = !(requested_transient && presence_held);
         let conn_id = state.next_conn_id;
         state.next_conn_id = state.next_conn_id.saturating_add(1);
         let row = ConnectionRow {
@@ -68,10 +86,10 @@ impl ConnectionRegistry {
             conn_id,
             Entry {
                 row: row.clone(),
-                listed: !transient,
+                listed,
             },
         );
-        row
+        (row, listed)
     }
 
     /// Remove a connection which reached EOF or failed its request loop.
@@ -193,8 +211,10 @@ mod tests {
             pid: 7,
         };
 
-        let presence = registry.insert(Some(tui.clone()), false).await;
-        let call = registry.insert(Some(tui.clone()), true).await;
+        let (presence, listed) = registry.insert(Some(tui.clone()), false).await;
+        assert!(listed);
+        let (call, listed) = registry.insert(Some(tui.clone()), true).await;
+        assert!(!listed, "a call beside its process's presence is transient");
         assert_ne!(presence.conn_id, call.conn_id, "both connections get a row");
         assert_eq!(call.surface, tui, "the call row still carries provenance");
 
@@ -211,7 +231,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_transient_connections_skip_the_tmux_probe() {
+    async fn a_transient_request_without_a_presence_at_its_pid_is_listed() {
+        let registry = ConnectionRegistry::new();
+        let web = SurfaceInfo {
+            kind: SurfaceKind::Web,
+            pid: 9,
+        };
+
+        // No presence yet at pid 9: the request is refused and the row listed.
+        let (early, listed) = registry.insert(Some(web.clone()), true).await;
+        assert!(listed, "no client can hide itself by asking");
+        // A presence at ANOTHER pid does not make pid 9's request honoured.
+        registry
+            .insert(
+                Some(SurfaceInfo {
+                    kind: SurfaceKind::Web,
+                    pid: 10,
+                }),
+                false,
+            )
+            .await;
+        let (_, listed) = registry.insert(Some(web.clone()), true).await;
+        assert!(!listed, "the listed early row now holds pid 9's presence");
+        // No surface, or pid 0, can never match a presence.
+        let (_, listed) = registry.insert(None, true).await;
+        assert!(listed);
+        assert!(registry.remove(early.conn_id).await);
+    }
+
+    #[tokio::test]
+    async fn a_refused_transient_request_is_probed_like_any_listed_row() {
         let registry = ConnectionRegistry::new();
         registry.insert(None, true).await;
         let probe_calls = AtomicUsize::new(0);
@@ -223,7 +272,7 @@ mod tests {
             })
             .await;
 
-        assert!(!changed);
-        assert_eq!(probe_calls.load(Ordering::SeqCst), 0);
+        assert!(changed);
+        assert_eq!(probe_calls.load(Ordering::SeqCst), 1);
     }
 }
