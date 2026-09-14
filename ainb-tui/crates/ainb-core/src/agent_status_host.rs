@@ -28,10 +28,14 @@
 
 use std::time::Duration;
 
+use ainb_app::app::sections::AgentStatusSection;
 use ainb_app::app::state::AppState;
 use ainb_app::fleet::bridge::daemon::{DaemonClient, DaemonError, FleetStreamEvent};
 use ainb_hangar_proto::agent_status::{RosterStatusResult, join};
 use ainb_hangar_proto::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ;
+use ainb_hangar_proto::status_topic::{
+    AGENT_STATUS_ENVELOPE_MAX_BYTES, AGENT_STATUS_TOPIC, AgentStatusEnvelope,
+};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -92,6 +96,10 @@ pub type Dialer = Box<dyn Fn() -> Result<DaemonClient, DaemonError> + Send + Syn
 pub struct AgentStatusHost {
     updates: mpsc::UnboundedReceiver<AgentStatusUpdate>,
     task: JoinHandle<()>,
+    /// The last envelope sequence handed to the plugin runtime.
+    sequence: u64,
+    /// Section 20 moved since the last publish.
+    unpublished: bool,
 }
 
 impl AgentStatusHost {
@@ -107,7 +115,12 @@ impl AgentStatusHost {
     fn spawn_timed(dialer: Dialer, legacy_panel: bool, timing: Timing) -> Self {
         let (tx, updates) = mpsc::unbounded_channel();
         let task = tokio::spawn(run(dialer, tx, legacy_panel, timing));
-        Self { updates, task }
+        Self {
+            updates,
+            task,
+            sequence: 0,
+            unpublished: false,
+        }
     }
 
     /// Fold every update that has arrived into section 20. Returns whether
@@ -117,8 +130,72 @@ impl AgentStatusHost {
         while let Ok(update) = self.updates.try_recv() {
             changed |= apply(state, update);
         }
+        self.unpublished |= changed;
         changed
     }
+
+    /// Publish section 20 to the plugins on [`AGENT_STATUS_TOPIC`] when it
+    /// moved since the last publish (#1031). Every update drained in one loop
+    /// iteration lands as one envelope, and the task pays at most one read per
+    /// revision, so a burst of events yields one publish per revision.
+    ///
+    /// With no plugin runtime yet the change is held and published once one
+    /// exists, so a runtime that starts after the first read still gets it.
+    /// Returns whether an envelope was published.
+    pub fn publish(
+        &mut self,
+        state: &AppState,
+        runtime: Option<&ainb_plugin_runtime::RuntimeHandle>,
+    ) -> bool {
+        let Some(runtime) = runtime.filter(|_| self.unpublished) else {
+            return false;
+        };
+        self.unpublished = false;
+        let Some(payload) = encode(&state.agent_status, self.sequence + 1) else {
+            return false;
+        };
+        self.sequence += 1;
+        runtime.publish_snapshot(AGENT_STATUS_TOPIC, payload.into());
+        true
+    }
+}
+
+/// Section 20 as the envelope the plugins fold, encoded.
+///
+/// `None` while the section holds neither a view nor an absent reason (a reset
+/// with its read still in flight): the plugins keep the last envelope until
+/// the read lands. A roster too large for the plugin framer is published as an
+/// absent view with the reason, never cut short.
+#[must_use]
+pub fn encode(section: &AgentStatusSection, sequence: u64) -> Option<Vec<u8>> {
+    let envelope = match (&section.view, &section.absent) {
+        (Some(view), _) => AgentStatusEnvelope::from_view(sequence, view),
+        (None, Some(reason)) => {
+            AgentStatusEnvelope::absent(sequence, reason.clone(), section.head_revision)
+        }
+        (None, None) => return None,
+    };
+    let bytes = match serde_json::to_vec(&envelope) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "agent status: envelope failed to encode");
+            return None;
+        }
+    };
+    if bytes.len() <= AGENT_STATUS_ENVELOPE_MAX_BYTES {
+        return Some(bytes);
+    }
+    tracing::warn!(
+        bytes = bytes.len(),
+        rows = envelope.rows.len(),
+        "agent status: roster too large to publish to plugins"
+    );
+    serde_json::to_vec(&AgentStatusEnvelope::absent(
+        sequence,
+        "roster too large to publish",
+        section.head_revision,
+    ))
+    .ok()
 }
 
 impl Drop for AgentStatusHost {
@@ -782,6 +859,56 @@ mod tests {
             observed.reads_of("fleet/roster_status"),
             2,
             "revisions 8, 9 and 10 are covered by the read at 10; only 11 costs a read"
+        );
+    }
+
+    /// #1031: the published envelope is section 20 exactly, the absent reason
+    /// when there is no view, and nothing mid-reset.
+    #[test]
+    fn the_envelope_is_section_20_or_its_absent_reason() {
+        let mut state = AppState::default();
+        assert_eq!(
+            encode(&state.agent_status, 1),
+            None,
+            "nothing to publish yet"
+        );
+
+        apply(
+            &mut state,
+            AgentStatusUpdate::Absent("daemon serves no agent status read".into()),
+        );
+        let absent: AgentStatusEnvelope =
+            serde_json::from_slice(&encode(&state.agent_status, 1).unwrap()).unwrap();
+        assert_eq!(
+            absent.into_view(),
+            Err("daemon serves no agent status read".to_string())
+        );
+
+        apply(
+            &mut state,
+            AgentStatusUpdate::Read(
+                RosterStatusResult {
+                    rows: Vec::new(),
+                    read_revision: 4,
+                    unknown_events: Vec::new(),
+                },
+                10,
+            ),
+        );
+        apply(&mut state, AgentStatusUpdate::Head(6));
+        let envelope: AgentStatusEnvelope =
+            serde_json::from_slice(&encode(&state.agent_status, 2).unwrap()).unwrap();
+        assert_eq!(envelope.sequence, 2);
+        assert_eq!(
+            &envelope.into_view().expect("a view"),
+            state.agent_status.view.as_ref().unwrap()
+        );
+
+        apply(&mut state, AgentStatusUpdate::Reset);
+        assert_eq!(
+            encode(&state.agent_status, 3),
+            None,
+            "a reset publishes nothing until its read lands"
         );
     }
 }
