@@ -14,14 +14,14 @@ scenario() {
 
   # A second tui row at the TUI's pid (#1040) can come and go, so sample.
   local sample max_at_pid=0 seen
-  for sample in 1 2 3 4 5 6; do
+  for sample in $(seq 1 15); do
     seen="$(count_kind tui "$pid")"
     printf 't=%ss tui rows at TUI pid: %s\n' "$sample" "$seen" >>"$NODE_DIR/tui-row-samples.txt"
     ((seen > max_at_pid)) && max_at_pid="$seen"
     sleep 1
   done
   CAPTURES+=("tui-row-samples.txt")
-  observe "most tui rows at the TUI's pid across 6 one-second samples: $max_at_pid"
+  observe "most tui rows at the TUI's pid across 15 one-second samples: $max_at_pid"
 
   local json
   json="$(connections_json)"
