@@ -436,6 +436,9 @@ pub struct HangarPlugin {
     /// must name the screen to pop, and the SDK `RenderParams` doesn't carry it —
     /// so we stash it here from the key event that armed `close_request_pending`.
     current_screen_id: String,
+    /// The `ui.state` view last published, so `render` publishes only a view
+    /// that changed. `None` until the first publish lands.
+    ui_view_published: Option<String>,
     /// The message from the last failed `[s]` start attempt (e38.36), surfaced in
     /// the offline empty-state so a start failure is visible rather than silent.
     /// `None` once a start succeeds or while none has been attempted.
@@ -706,6 +709,7 @@ impl Default for HangarPlugin {
             start_daemon_pending: false,
             close_request_pending: false,
             current_screen_id: String::new(),
+            ui_view_published: None,
             daemon_start_error: None,
             daemon_start_redial_until: None,
             daemon_start_last_redial: None,
@@ -5632,6 +5636,24 @@ impl HangarPlugin {
         }
     }
 
+    /// The `ui.state` view of the screen as it stands.
+    fn ui_view(&mut self) -> serde_json::Value {
+        self.app_state();
+        let app = self.app.as_ref().expect("app_state initialised the routing state");
+        crate::ui_view::view(app, &self.screens)
+    }
+
+    /// Run a `plugin/handle_action` action: the navigation it names, or nothing
+    /// for an action id this plugin does not know.
+    fn on_action(&mut self, action_id: &str, payload: &serde_json::Value) {
+        let Some(nav) = crate::ui_view::nav_for(action_id, payload) else {
+            tracing::debug!(action = %action_id, "hangar: unknown action ignored");
+            return;
+        };
+        let app = self.app_state().clone();
+        self.apply_nav(&app, nav);
+    }
+
     /// Act on a cross-screen [`NavIntent`] surfaced by a screen reducer: open the
     /// modal/screen on the routing state and build its cache.
     fn apply_nav(&mut self, app: &AppState, nav: NavIntent) {
@@ -5922,6 +5944,17 @@ impl Plugin for HangarPlugin {
         // SDK reader loop, so awaiting a host request whose response arrives on
         // that same loop would deadlock. The deferred action is drained in
         // `render` instead (a spawned handler where the reader is free).
+        Ok(())
+    }
+
+    async fn handle_action(
+        &mut self,
+        _host: &HostClient,
+        params: ainb_plugin_sdk::HandleActionParams,
+    ) -> Result<()> {
+        // Runs inline on the SDK reader loop like `handle_key`, so it only
+        // applies the navigation; any host IO it arms drains in `render`.
+        self.on_action(&params.action_id, &params.payload);
         Ok(())
     }
 
@@ -6261,6 +6294,17 @@ impl Plugin for HangarPlugin {
             };
             let payload = serde_json::to_vec(&req).unwrap_or_default();
             let _ = host.snapshot_publish(ainb_plugin_sdk::topics::UI_CLOSE_REQUEST, payload).await;
+        }
+        // Publish the `ui.state` view when it changed, for a renderer that
+        // draws this screen from it rather than from the frame.
+        let view = self.ui_view().to_string();
+        if self.ui_view_published.as_deref() != Some(view.as_str())
+            && host
+                .snapshot_publish(ainb_plugin_sdk::topics::UI_STATE, view.clone().into_bytes())
+                .await
+                .is_ok()
+        {
+            self.ui_view_published = Some(view);
         }
         // Keep re-dialing after a `[s]` start until the daemon binds or the
         // window expires (`wants_redraw` keeps frames coming meanwhile).
@@ -7112,6 +7156,22 @@ mod tests {
     /// host pops the hangar panel back. Regression guard — the router computed
     /// `Intent::Quit` but the routing branch dropped it, so `q` was dead on every
     /// hangar screen (e.g. Daemon-health) and only `Ctrl+C` escaped.
+    /// A renderer drawing hangar from `ui.state` switches screens by action,
+    /// and the next view names the screen it switched to.
+    #[test]
+    fn a_screen_action_switches_the_screen_the_ui_state_view_names() {
+        let mut p = HangarPlugin::new();
+        let before = p.ui_view();
+        assert_eq!(before["screen"], "issue_list");
+
+        p.on_action("screen.go", &serde_json::json!({ "screen": "kanban" }));
+        let after = p.ui_view();
+        assert_eq!(after["screen"], "kanban");
+
+        p.on_action("board.explode", &serde_json::Value::Null);
+        assert_eq!(p.ui_view(), after);
+    }
+
     #[test]
     fn q_key_arms_close_request() {
         let mut p = HangarPlugin::new();

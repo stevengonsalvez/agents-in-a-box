@@ -15,7 +15,9 @@ use serde_json::Value;
 
 use crate::{HostClient, Result};
 use ainb_plugin_protocol::{
-    params::{HandleEventParams, HandleKeyParams, HandleMouseParams, RenderParams},
+    params::{
+        HandleActionParams, HandleEventParams, HandleKeyParams, HandleMouseParams, RenderParams,
+    },
     wire_buffer::WireBuffer,
 };
 
@@ -140,6 +142,22 @@ pub trait Plugin: Send + 'static {
     /// Ordering: dispatched inline on the reader-loop task, same as
     /// `handle_key`. Plugins MUST NOT spawn the handler body.
     async fn handle_mouse(&mut self, host: &HostClient, params: HandleMouseParams) -> Result<()> {
+        let _ = (host, params);
+        Ok(())
+    }
+
+    /// Run one of the plugin's own actions, named by `params.action_id`, for
+    /// a click or palette command a renderer resolved without the plugin's
+    /// key map.
+    ///
+    /// Notification: the host does not wait on a response and ignores
+    /// errors. Default is a no-op; a plugin ignores an action id it does not
+    /// know. What the action changed reaches renderers through the next
+    /// [`render`](Self::render) and the plugin's `ui.state` topic.
+    ///
+    /// Ordering: dispatched inline on the reader-loop task, same as
+    /// `handle_key`, so an action and the keys around it stay in send order.
+    async fn handle_action(&mut self, host: &HostClient, params: HandleActionParams) -> Result<()> {
         let _ = (host, params);
         Ok(())
     }

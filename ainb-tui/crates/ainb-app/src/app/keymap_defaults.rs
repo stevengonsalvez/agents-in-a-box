@@ -35,6 +35,19 @@ fn action(
     }
 }
 
+/// A command with no key: a pointer row whose payload only a renderer's
+/// hit-test supplies. The event here is a placeholder the row's `Args`
+/// replace; a payload row refuses to run without them.
+fn unbound(ctx: KeyContext, id: &'static str, event: AppEvent, doc: &'static str) -> Binding {
+    Binding {
+        id,
+        ctx,
+        chord: None,
+        action: KeyAction::App(event),
+        doc,
+    }
+}
+
 macro_rules! append_app_rows {
     ($rows:expr, $ctx:expr, $( $id:ident : $chord:literal => $event:expr ),+ $(,)?) => {
         $(
@@ -1224,6 +1237,186 @@ pub fn defaults() -> Vec<Binding> {
     append_app_rows!(rows, Context::Screen("session_recovery", super::keymap::SubContext::Named("filtered")),
         clear: "esc" => AppEvent::SessionRecoverySearchCancel,
     );
+
+    // Pointer commands (`crate::app::pointer::ids`): unbound, so the generated
+    // shortcut docs skip them, but listed by `Keymap::commands` with every
+    // other command.
+    use crate::app::state::{FocusedPane, SessionListRowId};
+    use crate::components::skill_manager_screen::FocusedSkillPane;
+    rows.extend([
+        unbound(
+            Context::screen("session_list"),
+            "select_row",
+            AppEvent::SessionListSelectRow {
+                target: SessionListRowId::SshHeader,
+                open: false,
+            },
+            "Select the row a click names; open attaches it",
+        ),
+        unbound(
+            Context::screen("session_list"),
+            "open_row_menu",
+            AppEvent::SessionListOpenRowMenu {
+                target: SessionListRowId::SshHeader,
+            },
+            "Open the context menu of the session a click names",
+        ),
+        unbound(
+            Context::screen("session_list"),
+            "focus_pane",
+            AppEvent::SessionListFocusPane(FocusedPane::Sessions),
+            "Focus the pane a click lands in",
+        ),
+        unbound(
+            Context::screen("session_list"),
+            "save_pane_layout",
+            AppEvent::SaveSessionsPaneLayout {
+                width: 0,
+                collapsed: false,
+            },
+            "Save the sessions pane width and collapsed flag a renderer set",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "all_sources",
+            AppEvent::SkillManagerClearSourceFilter,
+            "Show units from all sources",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "select_source",
+            AppEvent::SkillManagerSourceClick { uri: String::new() },
+            "Filter by the source a click names",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "select_unit",
+            AppEvent::SkillManagerUnitClick { uri: String::new() },
+            "Select the unit a click names",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "focus_pane",
+            AppEvent::SkillManagerFocusPane(FocusedSkillPane::Units),
+            "Focus the panel a click lands in",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "save_sources_width",
+            AppEvent::SkillManagerSaveSourcesWidth { fraction: 0.0 },
+            "Save the Sources panel width a renderer set",
+        ),
+        unbound(
+            Context::screen("home"),
+            "save_sidebar_width",
+            AppEvent::HomeSidebarSaveWidth { fraction: 0.0 },
+            "Save the sidebar width a renderer set",
+        ),
+        unbound(
+            Context::screen("home"),
+            "click_sidebar_item",
+            AppEvent::HomeSidebarClickItem {
+                item: crate::components::sidebar::SidebarItem::Sessions,
+            },
+            "Select the sidebar item a click names; a second click opens it",
+        ),
+        // Host reports (`crate::app::reports::ids`), unbound for the same reason.
+        unbound(
+            Context::Global,
+            "migrate_layout_widths",
+            AppEvent::MigrateLayoutWidths { columns: 0 },
+            "Convert saved column widths into fractions of the host's screen",
+        ),
+        // Plugin actions (`crate::app::plugin_action::ids`), named by a
+        // renderer from the plugin's `ui.state` view.
+        unbound(
+            Context::Screen("plugin", super::keymap::SubContext::Named("owned")),
+            "action",
+            AppEvent::PluginAction {
+                plugin: String::new(),
+                action_id: String::new(),
+                payload: serde_json::Value::Null,
+            },
+            "Run a plugin's own action by id",
+        ),
+        unbound(
+            Context::Global,
+            "attach_finished",
+            AppEvent::AttachFinished {
+                target: crate::app::reports::AttachedTo::Witr,
+                outcome: crate::app::reports::AttachOutcome::Detached,
+            },
+            "Apply how a full-screen terminal attach ended",
+        ),
+        unbound(
+            Context::Global,
+            "shell_prepared",
+            AppEvent::ShellPrepared {
+                workspace: std::path::PathBuf::new(),
+                outcome: crate::app::reports::ShellOutcome::Failed(String::new()),
+            },
+            "Apply how preparing a workspace shell went",
+        ),
+        unbound(
+            Context::Global,
+            "abtop_setup_finished",
+            AppEvent::AbtopSetupFinished { ok: false },
+            "Announce whether abtop --setup started",
+        ),
+        unbound(
+            Context::Global,
+            "in_place_sized",
+            AppEvent::InPlaceSized { rows: 0, cols: 0 },
+            "Attach the selected row in place at the size the host measured",
+        ),
+        unbound(
+            Context::Global,
+            "detached",
+            AppEvent::Detached,
+            "Release the in-place terminal the user left",
+        ),
+        unbound(
+            Context::Global,
+            "editor_finished",
+            AppEvent::EditorFinished {
+                outcome: crate::app::reports::EditorOutcome::NoneFound,
+            },
+            "Announce how opening an editor went",
+        ),
+        unbound(
+            Context::Global,
+            "clipboard_failed",
+            AppEvent::ClipboardFailed {
+                error: String::new(),
+            },
+            "Announce that the clipboard could not be read",
+        ),
+        unbound(
+            Context::Global,
+            "login_finished",
+            AppEvent::LoginFinished {
+                auth_dir: std::path::PathBuf::new(),
+                exited_ok: false,
+            },
+            "Finish the OAuth login from the credentials it wrote",
+        ),
+        unbound(
+            Context::Global,
+            "daemon_action_finished",
+            AppEvent::DaemonActionFinished {
+                report: crate::app::reports::DaemonActionReport {
+                    daemon: String::new(),
+                    verb: String::new(),
+                    generation: 0,
+                    ok: false,
+                    summary: String::new(),
+                    detail: String::new(),
+                    local: None,
+                },
+            },
+            "Show how a daemon lifecycle command ended on its row",
+        ),
+    ]);
 
     rows
 }

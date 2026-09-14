@@ -55,10 +55,11 @@ fn update_golden_when_asked() {
     let keymap = Keymap::defaults();
     let rows: Vec<serde_json::Value> = keymap
         .bindings()
-        .map(|binding| {
+        .filter_map(|binding| Some((binding, binding.chord.as_ref()?)))
+        .map(|(binding, chord)| {
             serde_json::json!({
                 "context": binding.ctx.name(),
-                "chord": binding.chord.as_ref().expect("built-in rows are bound").as_str(),
+                "chord": chord.as_str(),
                 "action": format!("{:?}", binding.action),
             })
         })
@@ -89,16 +90,16 @@ fn defaults_are_unique_documented_and_parseable() {
     let keymap = Keymap::defaults();
     let mut keys = std::collections::HashSet::new();
 
-    for binding in keymap.bindings() {
-        // Unbound rows are for commands a palette adds; every built-in has a key.
-        let chord = binding.chord.as_ref().expect("built-in rows are bound");
+    // The key table: unbound rows are pointer commands, with no key to check.
+    for binding in keymap.bindings().filter(|binding| binding.chord.is_some()) {
+        let chord = binding.chord.as_ref().expect("filtered to bound rows");
         assert!(keys.insert((binding.ctx.clone(), chord.clone())));
         assert!(!binding.doc.trim().is_empty());
         assert_eq!(&Chord::parse(chord.as_str()).unwrap(), chord);
     }
 
     assert_eq!(
-        keymap.bindings().count(),
+        keymap.bindings().filter(|binding| binding.chord.is_some()).count(),
         527,
         "default table must be complete"
     );
@@ -150,9 +151,9 @@ fn default_rows_resolve_to_their_independent_golden_actions() {
     }
 
     assert_eq!(
-        keymap.bindings().count(),
+        keymap.bindings().filter(|binding| binding.chord.is_some()).count(),
         golden.bindings.len(),
-        "default table must contain no rows absent from golden fixture"
+        "default table must contain no bound rows absent from golden fixture"
     );
 }
 

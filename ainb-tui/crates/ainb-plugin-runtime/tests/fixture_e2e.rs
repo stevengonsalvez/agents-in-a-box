@@ -32,7 +32,11 @@ fn fixture_manifest() -> Manifest {
             abi_version: 2,
             description: "e2e fixture".into(),
         },
-        capabilities: Capabilities::default(),
+        // The fixture publishes snapshots, which the bus refuses without it.
+        capabilities: Capabilities {
+            event_bus: ainb_plugin_protocol::manifest::CapabilityGrant::Bool(true),
+            ..Capabilities::default()
+        },
         provides: Provides {
             screens: vec![],
             commands: vec![],

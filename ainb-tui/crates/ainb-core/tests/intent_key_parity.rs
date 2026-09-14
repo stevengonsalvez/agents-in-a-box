@@ -112,8 +112,11 @@ fn state_for(context: &KeyContext) -> AppState {
 
 #[test]
 fn every_default_row_converts_to_the_chord_the_legacy_path_produced() {
-    for binding in Keymap::defaults().bindings() {
-        let bound = binding.chord.as_ref().expect("built-in rows are bound");
+    // Rows with a key; the unbound pointer commands have no key path.
+    for (binding, bound) in Keymap::defaults()
+        .bindings()
+        .filter_map(|binding| Some((binding, binding.chord.as_ref()?)))
+    {
         let event = terminal_event_for(bound);
         let converted = chord_from_key_event(&event)
             .unwrap_or_else(|| panic!("{} [{}] has no chord", binding.id, binding.ctx.name()));
@@ -135,8 +138,9 @@ fn key_intent_resolves_to_the_event_the_key_event_path_produced_for_every_row() 
     std::env::set_var("HOME", home.path());
     let keymap = Keymap::defaults();
     let mut reached = 0;
-    for binding in keymap.bindings() {
-        let bound = binding.chord.as_ref().expect("built-in rows are bound");
+    for (binding, bound) in
+        keymap.bindings().filter_map(|binding| Some((binding, binding.chord.as_ref()?)))
+    {
         let event = terminal_event_for(bound);
         let label = format!(
             "{} [{}] `{}`",

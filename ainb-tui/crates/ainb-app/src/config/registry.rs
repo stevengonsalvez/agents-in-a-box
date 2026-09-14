@@ -588,7 +588,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         why: "the live Sessions status filter, cycled with a keypress and persisted so it survives a restart",
     },
     Entry::Hidden {
-        key: "ui_preferences.home_sidebar_width",
+        key: "ui_preferences.home_sidebar_fraction",
         why: "written by the divider drag on the Home screen; a layout artefact, not a preference to type",
     },
     Entry::Hidden {
@@ -600,7 +600,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         why: "written when the Sessions sidebar is collapsed with a keypress",
     },
     Entry::Hidden {
-        key: "ui_preferences.skill_manager_sources_width",
+        key: "ui_preferences.skill_manager_sources_fraction",
         why: "written by the divider drag on the Skill Manager screen",
     },
     Entry::Hidden {
@@ -1897,10 +1897,12 @@ mod tests {
                 show_session_menu_bar: true,
                 session_filter: SessionFilter::ActiveOnly,
                 preferred_editor: Some("nvim".to_string()),
-                home_sidebar_width: Some(30),
+                home_sidebar_fraction: Some(0.25),
+                home_sidebar_width: None,
                 sessions_sidebar_width: Some(28),
                 sessions_sidebar_collapsed: Some(true),
-                skill_manager_sources_width: Some(32),
+                skill_manager_sources_fraction: Some(0.3),
+                skill_manager_sources_width: None,
                 statusline_decision: StatuslineDecision::Installed,
                 tmux_decision: TmuxDecision::Declined,
                 config_tree_expanded: vec!["Fleet|fleet".to_string()],
@@ -2637,8 +2639,8 @@ mod tests {
         // Internal state is still a real key; refusing it would remove the
         // only escape hatch for a wizard-owned value.
         assert_eq!(
-            validate("ui_preferences.home_sidebar_width", "40").unwrap(),
-            toml::Value::Integer(40)
+            validate("ui_preferences.home_sidebar_fraction", "0.4").unwrap(),
+            toml::Value::Float(0.4)
         );
     }
 

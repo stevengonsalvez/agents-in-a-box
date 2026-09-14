@@ -63,6 +63,14 @@ pub enum AppEvent {
         plugin_id: String,
         payload: Vec<u8>,
     },
+    /// Ask `plugin` to run its own action `action_id` with `payload`, over
+    /// `plugin/handle_action`. What the action changed comes back through the
+    /// plugin's render and its `ui.state` topic.
+    PluginAction {
+        plugin: String,
+        action_id: String,
+        payload: serde_json::Value,
+    },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
     /// existing `GoTo*` variants are kept for now and translate through this
@@ -129,18 +137,18 @@ pub enum AppEvent {
     /// `Enter` on the `pal` tab while it is offering to start the hangar
     /// daemon it needs.
     SessionStartHangarDaemon,
-    /// Toggle the sessions sidebar between full width and the thin rail —
-    /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
     // Pointer commands: a press a renderer has hit-tested, naming what was
-    // under the pointer by its place in state. See `crate::app::pointer`.
-    /// Select session-list row `row`; `open` attaches it, as a double-click does.
+    // under the pointer by identity, never by position. See
+    // `crate::app::pointer`.
+    /// Select the session-list row `target` names; `open` attaches it, as a
+    /// double-click does. Nothing happens when that row is gone.
     SessionListSelectRow {
-        row: usize,
+        target: crate::app::state::SessionListRowId,
         open: bool,
     },
-    /// Open the context menu of session-list row `row`, when it is a session.
+    /// Open the context menu of the row `target` names, when it is a session.
     SessionListOpenRowMenu {
-        row: usize,
+        target: crate::app::state::SessionListRowId,
     },
     /// Focus a pane of the session list.
     SessionListFocusPane(crate::app::state::FocusedPane),
@@ -151,11 +159,59 @@ pub enum AppEvent {
     },
     /// Focus a Skill Manager panel without selecting anything in it.
     SkillManagerFocusPane(crate::components::skill_manager_screen::FocusedSkillPane),
-    /// Start dragging the home sidebar's resize edge.
-    HomeSidebarBeginResize,
-    /// Click home sidebar item `index`; a second click on it opens it.
+    /// A renderer resized the home sidebar: persist `fraction` of the screen
+    /// width as the preference every renderer starts from.
+    HomeSidebarSaveWidth {
+        fraction: f64,
+    },
+    /// Convert layout widths saved as column counts into fractions of a
+    /// `columns`-wide screen. The host reports its width once at startup.
+    MigrateLayoutWidths {
+        columns: u16,
+    },
+    // Host reports: how host work an `Effect` asked for went. The reducer,
+    // not the host, applies the state change. See `crate::app::reports`.
+    /// A full-screen attach ended.
+    AttachFinished {
+        target: crate::app::reports::AttachedTo,
+        outcome: crate::app::reports::AttachOutcome,
+    },
+    /// A workspace shell's tmux session was prepared for an attach.
+    ShellPrepared {
+        workspace: std::path::PathBuf,
+        outcome: crate::app::reports::ShellOutcome,
+    },
+    /// `abtop --setup` started, or would not.
+    AbtopSetupFinished {
+        ok: bool,
+    },
+    /// The host sized the in-place terminal for its layout.
+    InPlaceSized {
+        rows: u16,
+        cols: u16,
+    },
+    /// The user left the live terminal.
+    Detached,
+    /// Opening an editor went this way.
+    EditorFinished {
+        outcome: crate::app::reports::EditorOutcome,
+    },
+    /// The clipboard could not be read for a paste.
+    ClipboardFailed {
+        error: String,
+    },
+    /// The interactive OAuth login ended.
+    LoginFinished {
+        auth_dir: std::path::PathBuf,
+        exited_ok: bool,
+    },
+    /// A daemon lifecycle command exited.
+    DaemonActionFinished {
+        report: crate::app::reports::DaemonActionReport,
+    },
+    /// Click home sidebar `item`; a second click on it opens it.
     HomeSidebarClickItem {
-        index: usize,
+        item: crate::components::sidebar::SidebarItem,
     },
     // New session creation events. Phase 6 (new-session redesign) retired
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
@@ -344,20 +400,20 @@ pub enum AppEvent {
     /// `Esc` — clear the active source filter (if any). Falls through to
     /// [`Self::SkillManagerBack`] when no filter is set.
     SkillManagerClearSourceFilter,
-    /// A Source row was clicked: focus the Sources panel, move its
-    /// cursor to row `index`, and apply that source as the filter.
+    /// A Source row was clicked: move the Sources cursor to the source
+    /// with `uri` and apply it as the filter. Nothing happens when it is gone.
     SkillManagerSourceClick {
-        index: usize,
+        uri: String,
     },
     /// A Unit row was clicked: focus the Units panel and move the unit
-    /// cursor to the visible-row `position`.
+    /// cursor to the visible unit declared as `uri`, if it is still listed.
     SkillManagerUnitClick {
-        position: usize,
+        uri: String,
     },
-    /// A renderer resized the Sources panel: persist `width` as the
-    /// preference every renderer starts from.
+    /// A renderer resized the Sources panel: persist `fraction` of the screen
+    /// width as the preference every renderer starts from.
     SkillManagerSaveSourcesWidth {
-        width: u16,
+        fraction: f64,
     },
     /// `[m]` on the SkillManager screen — re-run the discovery
     /// walkers and force the banner to re-appear (ignores any prior
@@ -846,6 +902,133 @@ impl PersistOutcome {
 }
 
 impl EventHandler {
+    /// Queue a full-screen attach. The attach owns terminal size and input, so
+    /// the in-place pane's tmux client is released first and tmux has one
+    /// authority; the preview reconnects after the user comes back.
+    fn emit_full_screen_attach(state: &mut AppState, target: TerminalTarget) {
+        // Read first: releasing writes the tmux section even with nothing held.
+        if state.tmux.embed.is_some()
+            || state.tmux.embed_session.is_some()
+            || state.shell.focused_pane == crate::app::state::FocusedPane::Preview
+        {
+            state.release_interactive_pane();
+        }
+        state.emit(Effect::AttachTerminal(target));
+    }
+
+    /// Apply how a full-screen attach ended.
+    fn apply_attach_finished(
+        state: &mut AppState,
+        target: crate::app::reports::AttachedTo,
+        outcome: crate::app::reports::AttachOutcome,
+    ) {
+        use crate::app::reports::{AttachOutcome, AttachedTo, attach_failure_notice};
+        match target {
+            AttachedTo::Session(session_id) => {
+                let tmux_name = state
+                    .sessions
+                    .workspaces
+                    .iter_mut()
+                    .flat_map(|workspace| workspace.sessions.iter_mut())
+                    .find(|session| session.id == session_id)
+                    .and_then(|session| {
+                        session.mark_detached();
+                        session.tmux_session_name.clone()
+                    });
+                let name = tmux_name.unwrap_or_else(|| session_id.to_string());
+                match outcome {
+                    AttachOutcome::Detached | AttachOutcome::NotInstalled => {}
+                    AttachOutcome::Failed(error) => {
+                        state.add_error_notification(attach_failure_notice(&name, &error));
+                    }
+                    AttachOutcome::TargetMissing(error) => {
+                        state.add_error_notification(attach_failure_notice(&name, &error));
+                        // Only a terminally missing tmux session becomes a
+                        // resumable Stopped, and the rows reload from the
+                        // persisted record so a restart agrees.
+                        if state.mark_session_stopped_for_missing_tmux(session_id, &name) {
+                            state.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
+                        }
+                    }
+                }
+            }
+            AttachedTo::Tmux(name) => {
+                if let AttachOutcome::Failed(error) | AttachOutcome::TargetMissing(error) = outcome
+                {
+                    state.add_error_notification(attach_failure_notice(&name, &error));
+                }
+                state.shell.pending_async_action = Some(AsyncAction::ReloadOtherTmuxSessions);
+            }
+            AttachedTo::Witr => match outcome {
+                AttachOutcome::Detached => {}
+                AttachOutcome::NotInstalled => state.add_error_notification(
+                    "Could not start the witr browser: is `witr` installed and on PATH?".to_string(),
+                ),
+                AttachOutcome::Failed(error) | AttachOutcome::TargetMissing(error) => {
+                    state.add_error_notification(format!("Failed to open the witr browser: {error}"));
+                }
+            },
+            AttachedTo::Abtop => match outcome {
+                AttachOutcome::Detached => {}
+                AttachOutcome::NotInstalled => state.add_error_notification(
+                    "Could not start abtop: is `abtop` installed and on PATH? Install: brew install \
+                     graykode/tap/abtop · cargo install abtop"
+                        .to_string(),
+                ),
+                AttachOutcome::Failed(error) | AttachOutcome::TargetMissing(error) => {
+                    state.add_error_notification(format!("Failed to open abtop: {error}"));
+                }
+            },
+            AttachedTo::WorkspaceShell(_) => {
+                if let AttachOutcome::Failed(error) | AttachOutcome::TargetMissing(error) = outcome
+                {
+                    state.add_error_notification(format!("Failed to attach: {error}"));
+                }
+            }
+        }
+    }
+
+    /// Apply how preparing a workspace shell went.
+    fn apply_shell_prepared(
+        state: &mut AppState,
+        workspace_path: &std::path::Path,
+        outcome: crate::app::reports::ShellOutcome,
+    ) {
+        use crate::app::reports::{ShellCd, ShellOutcome};
+        match outcome {
+            ShellOutcome::Failed(error) => {
+                state.add_error_notification(format!("Failed to create shell: {error}"));
+            }
+            ShellOutcome::Ready { created, cd } => {
+                let Some(workspace) =
+                    state.sessions.workspaces.iter_mut().find(|w| w.path == workspace_path)
+                else {
+                    return;
+                };
+                let name = workspace.name.clone();
+                if let Some(shell) = workspace.get_shell_session_mut() {
+                    if let ShellCd::Moved(dir) = &cd {
+                        shell.set_working_dir(dir.clone());
+                    }
+                    shell.touch();
+                }
+                if created {
+                    state.add_success_notification(format!("$ Created workspace shell: {name}"));
+                }
+                match cd {
+                    ShellCd::Stayed | ShellCd::Moved(_) => {}
+                    ShellCd::MaybeFailed(dir) => state.add_warning_notification(format!(
+                        "May have failed to cd to: {}",
+                        dir.display()
+                    )),
+                    ShellCd::Failed(error) => {
+                        state.add_error_notification(format!("Shell command error: {error}"));
+                    }
+                }
+            }
+        }
+    }
+
     /// True when a SkillManager overlay (banner / input prompt / library
     /// / browse / source-preview modal) is open OR the help overlay is
     /// visible — i.e. the underlying Sources/Units panels are NOT the
@@ -1223,13 +1406,15 @@ impl EventHandler {
             Intent::Key(chord) => Self::handle_key_event_with_keymap(chord, state, keymap, host),
             Intent::Command(id, args) => {
                 let Some(binding) = keymap.command(&id) else {
-                    return crate::app::pointer::event_for(&id, &args).or_else(|| {
-                        tracing::warn!("command `{id}` is unknown or rejected arguments {args}");
-                        None
-                    });
+                    tracing::warn!("command `{id}` is unknown");
+                    return None;
                 };
                 let Some(action) = binding.action.with_args(&args) else {
-                    tracing::warn!("command `{id}` rejected arguments {args}");
+                    // Field names only: a payload can carry a pairing code, a
+                    // path or typed text, none of which belongs in a log.
+                    let fields: Vec<&String> =
+                        args.as_object().map(|object| object.keys().collect()).unwrap_or_default();
+                    tracing::warn!("command `{id}` rejected arguments with fields {fields:?}");
                     return None;
                 };
                 Self::apply_key_action(action, state, host)
@@ -1446,7 +1631,14 @@ impl EventHandler {
             UiAction::DaemonsConfirmMenu => {
                 state.hangar.daemons_state.confirm_menu();
                 if let Some(session) = state.hangar.daemons_state.take_attach_request() {
-                    state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session)));
+                    Self::emit_full_screen_attach(state, TerminalTarget::Tmux(session));
+                }
+                for request in state.hangar.daemons_state.take_action_requests() {
+                    state.emit(Effect::RunDaemonAction {
+                        daemon: request.daemon,
+                        action: request.action,
+                        generation: request.generation,
+                    });
                 }
                 None
             }
@@ -2410,20 +2602,20 @@ impl EventHandler {
                 let dismissed = state.dismiss_notifications();
                 tracing::debug!("Event: DismissNotifications - cleared={dismissed}");
             }
-            AppEvent::SessionListSelectRow { row, open } => {
-                if let Some(target) = state.session_list_row_target(row) {
+            AppEvent::SessionListSelectRow { target, open } => {
+                if let Some(target) = state.session_list_row_target_for(&target) {
                     state.select_session_list_row(target);
                     if open {
                         Self::process_event(AppEvent::AttachTmuxSession, state);
                     }
                 }
             }
-            AppEvent::SessionListOpenRowMenu { row } => {
+            AppEvent::SessionListOpenRowMenu { target } => {
                 use crate::app::state::{AttachableRef, SessionListRowTarget};
                 if let Some(SessionListRowTarget::Attachable(
                     target @ (AttachableRef::WorkspaceSession { .. }
                     | AttachableRef::SshSession { .. }),
-                )) = state.session_list_row_target(row)
+                )) = state.session_list_row_target_for(&target)
                 {
                     state.open_session_context_menu(target);
                 }
@@ -2458,7 +2650,10 @@ impl EventHandler {
                         if let Some(tmux_name) = &ssh_session.tmux_session_name {
                             let session_name = tmux_name.clone();
                             tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
-                            state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session_name)));
+                            Self::emit_full_screen_attach(
+                                state,
+                                TerminalTarget::Tmux(session_name),
+                            );
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux session name");
                             state.add_error_notification(
@@ -2476,7 +2671,7 @@ impl EventHandler {
                             "[ACTION] Attaching to other tmux session: {}",
                             session_name
                         );
-                        state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session_name)));
+                        Self::emit_full_screen_attach(state, TerminalTarget::Tmux(session_name));
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
                     }
@@ -2490,9 +2685,10 @@ impl EventHandler {
                                     "[ACTION] Attaching to workspace shell: {}",
                                     session_name
                                 );
-                                state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(
-                                    session_name,
-                                )));
+                                Self::emit_full_screen_attach(
+                                    state,
+                                    TerminalTarget::Tmux(session_name),
+                                );
                             } else {
                                 tracing::warn!(
                                     "[ACTION] Shell selected but no shell session found in workspace"
@@ -2512,7 +2708,43 @@ impl EventHandler {
                             session.status
                         );
                     }
-                    state.emit(Effect::AttachTerminal(TerminalTarget::Session(session_id)));
+                    let tmux_name = state
+                        .sessions
+                        .workspaces
+                        .iter()
+                        .flat_map(|workspace| &workspace.sessions)
+                        .find(|session| session.id == session_id)
+                        .map(|session| (session.name.clone(), session.tmux_session_name.is_some()));
+                    match tmux_name {
+                        Some((_, true)) => {
+                            if let Some(session) = state
+                                .sessions
+                                .workspaces
+                                .iter_mut()
+                                .flat_map(|workspace| workspace.sessions.iter_mut())
+                                .find(|session| session.id == session_id)
+                            {
+                                session.mark_attached();
+                            }
+                            Self::emit_full_screen_attach(
+                                state,
+                                TerminalTarget::Session(session_id),
+                            );
+                        }
+                        Some((name, false)) => {
+                            tracing::error!(
+                                "[ACTION] No tmux session name for session {session_id}"
+                            );
+                            state.add_error_notification(format!(
+                                "Session '{name}' has no tmux session"
+                            ));
+                            state.shell.ui_needs_refresh = true;
+                        }
+                        None => {
+                            state.add_error_notification("Session not found".to_string());
+                            state.shell.ui_needs_refresh = true;
+                        }
+                    }
                 } else {
                     tracing::warn!(
                         "[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
@@ -2764,10 +2996,32 @@ impl EventHandler {
                     };
 
                     tracing::info!("Opening workspace shell, target_dir: {:?}", target_dir);
-                    state.emit(Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
-                        workspace_index: workspace_idx,
-                        target_dir,
-                    }));
+                    if let Some(workspace) = state.sessions.workspaces.get_mut(workspace_idx) {
+                        // The shell record exists from the first open on; the
+                        // host creates or reuses its tmux session.
+                        let new_shell = workspace.shell_session.is_none();
+                        if new_shell {
+                            let shell = crate::models::ShellSession::new_workspace_shell(
+                                workspace.path.clone(),
+                                &workspace.name,
+                            );
+                            workspace.set_shell_session(shell);
+                        }
+                        let workspace_path = workspace.path.clone();
+                        let tmux_session = workspace
+                            .shell_session
+                            .as_ref()
+                            .map(|shell| shell.tmux_session_name.clone())
+                            .unwrap_or_default();
+                        state.emit(Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
+                            workspace_path,
+                            tmux_session,
+                            new_shell,
+                            target_dir,
+                        }));
+                    } else {
+                        state.add_error_notification("Workspace not found".to_string());
+                    }
                 } else {
                     state.add_warning_notification("No workspace selected".to_string());
                 }
@@ -2838,7 +3092,14 @@ impl EventHandler {
             // cannot open was to already know it was the hangar daemon, and to
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
-                state.fleet.daemon_start_cta.start();
+                let generation = state.hangar.daemons_state.next_generation();
+                if state.fleet.daemon_start_cta.start(generation) {
+                    state.emit(Effect::RunDaemonAction {
+                        daemon: crate::fleet::daemons::probe::DaemonKind::HangarDaemon,
+                        action: crate::cli::daemon::Action::Start,
+                        generation,
+                    });
+                }
                 state.shell.ui_needs_refresh = true;
             }
             AppEvent::SwitchPaneFocus => {
@@ -3455,16 +3716,128 @@ impl EventHandler {
                 state.shell.home_screen_state.select_right();
             }
             // AINB 2.0: Home screen V2 events
-            AppEvent::HomeSidebarBeginResize => {
-                state.shell.home_screen_v2_state.start_sidebar_resize();
+            AppEvent::HomeSidebarSaveWidth { fraction } => {
+                state.config.app_config.ui_preferences.home_sidebar_fraction =
+                    Some(fraction.clamp(0.0, 1.0));
+                if let Err(e) = state.config.app_config.save() {
+                    tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
+                }
             }
-            AppEvent::HomeSidebarClickItem { index } => {
-                let outcome = state
-                    .shell
-                    .home_screen_v2_state
-                    .click_sidebar_item(index, std::time::Instant::now());
-                if outcome.double_click {
-                    Self::process_event(AppEvent::HomeScreenSidebarSelect, state);
+            AppEvent::AttachFinished { target, outcome } => {
+                Self::apply_attach_finished(state, target, outcome);
+                state.shell.ui_needs_refresh = true;
+            }
+            AppEvent::ShellPrepared { workspace, outcome } => {
+                Self::apply_shell_prepared(state, &workspace, outcome);
+                state.shell.ui_needs_refresh = true;
+            }
+            AppEvent::AbtopSetupFinished { ok } => {
+                if ok {
+                    state.add_info_notification(
+                        "Enabling abtop rate-limit tracking (abtop --setup)…".to_string(),
+                    );
+                } else {
+                    state.add_error_notification(
+                        "Could not run `abtop --setup`: is `abtop` on PATH? You can run it manually."
+                            .to_string(),
+                    );
+                }
+                state.shell.ui_needs_refresh = true;
+            }
+            AppEvent::InPlaceSized { rows, cols } => {
+                // A missing tmux session or a failed attach is announced by
+                // enter_interactive_pane, which knows which case it hit.
+                if !state.enter_interactive_pane(rows, cols) {
+                    tracing::debug!(
+                        "in-place attach: no tmux session on selection or attach failed"
+                    );
+                }
+            }
+            AppEvent::Detached => {
+                if state.is_interactive_pane() {
+                    state.release_interactive_pane();
+                }
+            }
+            AppEvent::EditorFinished { outcome } => {
+                use crate::app::reports::EditorOutcome;
+                match outcome {
+                    EditorOutcome::Opened(editor) => {
+                        state.add_success_notification(format!("📝 Opened in {editor}"));
+                    }
+                    EditorOutcome::NoneFound => state.add_error_notification(
+                        "❌ No editor found. Set preferred editor in settings or install VS Code."
+                            .to_string(),
+                    ),
+                    EditorOutcome::Failed(error) => {
+                        state.add_error_notification(format!("❌ Failed to open editor: {error}"));
+                    }
+                }
+            }
+            AppEvent::ClipboardFailed { error } => {
+                state.add_error_notification(format!("Could not read clipboard: {error}"));
+            }
+            AppEvent::LoginFinished {
+                auth_dir,
+                exited_ok,
+            } => {
+                state.finish_oauth_login(&auth_dir, exited_ok);
+            }
+            AppEvent::DaemonActionFinished { report } => {
+                let Some(action) = crate::cli::daemon::Action::from_id(&report.verb) else {
+                    tracing::warn!(verb = %report.verb, "daemon report names no known verb");
+                    return;
+                };
+                // Output kept local to this process (a pairing code) is shown
+                // here; a report from elsewhere shows the redacted fields.
+                let (summary, detail) = report
+                    .local
+                    .as_ref()
+                    .and_then(crate::app::reports::LocalOutput::redeem)
+                    .unwrap_or((report.summary, report.detail));
+                let outcome = crate::components::daemons::ActionOutcome {
+                    action,
+                    ok: report.ok,
+                    summary,
+                    detail,
+                };
+                // The Pal pane's offer starts the same daemon the Daemons
+                // screen does, so one report can answer both.
+                if report.daemon == crate::fleet::daemons::probe::DaemonKind::HangarDaemon.id()
+                    && action == crate::cli::daemon::Action::Start
+                {
+                    state.fleet.daemon_start_cta.finish(report.generation, &outcome);
+                }
+                state.hangar.daemons_state.finish_action(
+                    &report.daemon,
+                    report.generation,
+                    outcome,
+                );
+                state.shell.ui_needs_refresh = true;
+            }
+            AppEvent::MigrateLayoutWidths { columns } => {
+                // Read first: a config with nothing to migrate is not written,
+                // and its section version does not move.
+                let prefs = &state.config.app_config.ui_preferences;
+                let legacy = prefs.home_sidebar_width.is_some()
+                    || prefs.skill_manager_sources_width.is_some();
+                if legacy && state.config.app_config.migrate_layout_widths(columns) {
+                    if let Err(e) = state.config.app_config.save() {
+                        tracing::warn!("Failed to persist migrated layout widths: {}", e);
+                    }
+                }
+            }
+            AppEvent::HomeSidebarClickItem { item } => {
+                let index = crate::components::sidebar::SidebarItem::all()
+                    .iter()
+                    .position(|candidate| *candidate == item);
+                if let Some(index) = index {
+                    let outcome = state
+                        .shell
+                        .home_screen_v2_state
+                        .click_sidebar_item(index, std::time::Instant::now());
+                    if outcome.double_click {
+                        Self::process_event(AppEvent::HomeScreenSidebarSelect, state);
+                    }
                 }
             }
             AppEvent::HomeScreenSidebarUp => {
@@ -4420,7 +4793,16 @@ impl EventHandler {
                     &ainb_home,
                 );
             }
-            AppEvent::SkillManagerSourceClick { index } => {
+            AppEvent::SkillManagerSourceClick { uri } => {
+                let Some(index) = state
+                    .skills
+                    .skill_manager_state
+                    .sources
+                    .iter()
+                    .position(|source| source.uri == uri)
+                else {
+                    return;
+                };
                 state.skills.skill_manager_state.source_selected = index;
                 state.skills.skill_manager_state.apply_selected_source_filter();
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -4429,11 +4811,14 @@ impl EventHandler {
                     &ainb_home,
                 );
             }
-            AppEvent::SkillManagerUnitClick { position } => {
+            AppEvent::SkillManagerUnitClick { uri } => {
                 use crate::components::skill_manager_screen::FocusedSkillPane;
                 state.skills.skill_manager_state.focused_pane = FocusedSkillPane::Units;
-                let visible = state.skills.skill_manager_state.visible_indices();
-                if let Some(&abs) = visible.get(position) {
+                let listed =
+                    state.skills.skill_manager_state.visible_indices().into_iter().find(|&index| {
+                        state.skills.skill_manager_state.units[index].declared_uri == uri
+                    });
+                if let Some(abs) = listed {
                     state.skills.skill_manager_state.selected = abs;
                     let ainb_home = ainb_skill_core::default_ainb_home();
                     crate::components::skill_manager_screen::recompute_detail(
@@ -4442,8 +4827,9 @@ impl EventHandler {
                     );
                 }
             }
-            AppEvent::SkillManagerSaveSourcesWidth { width } => {
-                state.config.app_config.ui_preferences.skill_manager_sources_width = Some(width);
+            AppEvent::SkillManagerSaveSourcesWidth { fraction } => {
+                state.config.app_config.ui_preferences.skill_manager_sources_fraction =
+                    Some(fraction.clamp(0.0, 1.0));
                 if let Err(e) = state.config.app_config.save() {
                     tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
                 }
@@ -5588,9 +5974,11 @@ impl EventHandler {
                     None => return,
                 }
                 let outcome = install_statusline();
-                // settings.json may just have changed; drop the cache so every
-                // host's CTA flips on its very next frame.
+                // settings.json may just have changed; drop the cache and copy
+                // the fresh answer into its section so every host's CTA flips
+                // on its very next frame.
                 state.invalidate_statusline_status();
+                state.refresh_statusline();
                 match outcome {
                     Ok(InstallOutcome::Installed) => {
                         state.config.app_config.ui_preferences.statusline_decision =
@@ -6479,6 +6867,29 @@ impl EventHandler {
                     payload_len = payload.len(),
                     "received AppEvent::Plugin (Phase 2c stub — bridge dispatch lands in Phase 3)",
                 );
+            }
+            AppEvent::PluginAction {
+                plugin,
+                action_id,
+                payload,
+            } => {
+                let known = crate::app::screens::builtin::PLUGIN_SCREENS
+                    .iter()
+                    .any(|(_, owner)| *owner == plugin);
+                let sent = known
+                    && state.plugins_host.plugin_runtime.as_ref().is_some_and(|runtime| {
+                        runtime.send_action(
+                            &ainb_plugin_runtime::types::PluginId::new(plugin.as_str()),
+                            action_id.as_str(),
+                            payload,
+                        )
+                    });
+                if !sent {
+                    tracing::warn!(%plugin, %action_id, "plugin action not delivered");
+                    state.add_error_notification(format!(
+                        "Could not run `{action_id}`: the {plugin} plugin is not running"
+                    ));
+                }
             }
             AppEvent::NavigateTo(screen_id) => {
                 // Phase 2c integration step: route through the screen-id table

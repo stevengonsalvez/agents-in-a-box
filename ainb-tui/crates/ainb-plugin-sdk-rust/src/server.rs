@@ -34,9 +34,9 @@ use tokio::task::JoinHandle;
 use ainb_plugin_protocol::{
     Manifest, RpcError, framing, methods,
     params::{
-        CliDispatchParams, CliDispatchResult, HandleEventParams, HandleKeyParams,
-        HandleMouseParams, PluginInitParams, PluginInitResult, PluginShutdownParams,
-        PluginShutdownResult, RenderParams, RenderResult,
+        CliDispatchParams, CliDispatchResult, HandleActionParams, HandleEventParams,
+        HandleKeyParams, HandleMouseParams, PluginInitParams, PluginInitResult,
+        PluginShutdownParams, PluginShutdownResult, RenderParams, RenderResult,
     },
 };
 
@@ -168,8 +168,9 @@ where
         if let Some(method) = value.get("method").and_then(Value::as_str) {
             // host -> plugin request or notification.
             //
-            // `plugin/handle_event`, `plugin/handle_key`, and
-            // `plugin/handle_mouse` MUST run in receive order — chunked
+            // `plugin/handle_event`, `plugin/handle_key`,
+            // `plugin/handle_mouse` and `plugin/handle_action` MUST run in
+            // receive order. Chunked
             // publishes (e.g. `sessions.usage_data`) rely on the consumer
             // seeing `chunk_index = 0` before any follow-on chunk, key
             // sequences (`1`, `2`, `Tab`, `Esc`) would lose their semantics
@@ -180,6 +181,7 @@ where
             if method == methods::PLUGIN_HANDLE_EVENT
                 || method == methods::PLUGIN_HANDLE_KEY
                 || method == methods::PLUGIN_HANDLE_MOUSE
+                || method == methods::PLUGIN_HANDLE_ACTION
             {
                 dispatch_incoming(
                     plugin.clone(),
@@ -450,6 +452,11 @@ async fn handle_method<P: Plugin>(
         methods::PLUGIN_HANDLE_MOUSE => {
             let p: HandleMouseParams = decode_params(params)?;
             plugin.lock().await.handle_mouse(host, p).await?;
+            Ok(Value::Null)
+        }
+        methods::PLUGIN_HANDLE_ACTION => {
+            let p: HandleActionParams = decode_params(params)?;
+            plugin.lock().await.handle_action(host, p).await?;
             Ok(Value::Null)
         }
         methods::PLUGIN_CLI_DISPATCH => {

@@ -2,8 +2,6 @@
 // state types and the logic that does not draw. The renderer lives in
 // `ainb-core::components::sidebar`, which re-exports this module.
 
-use crate::geometry::Area;
-
 pub const DEFAULT_SIDEBAR_WIDTH: u16 = 26;
 
 pub const MIN_SIDEBAR_WIDTH: u16 = 16;
@@ -32,6 +30,53 @@ pub enum SidebarItem {
 }
 
 impl SidebarItem {
+    /// The item's stable name in pointer and palette payloads.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Sessions => "sessions",
+            Self::Daemons => "daemons",
+            Self::Recovery => "recovery",
+            Self::Mcp => "mcp",
+            Self::Logs => "logs",
+            Self::Stats => "stats",
+            Self::Witr => "witr",
+            Self::Abtop => "abtop",
+            Self::Skills => "skills",
+            Self::SkillManager => "skill_manager",
+            Self::Hangar => "hangar",
+            Self::Memory => "memory",
+            Self::Changelog => "changelog",
+            Self::Setup => "setup",
+            Self::Help => "help",
+        }
+    }
+
+    /// The item [`Self::id`] names.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "config" => Self::Config,
+            "sessions" => Self::Sessions,
+            "daemons" => Self::Daemons,
+            "recovery" => Self::Recovery,
+            "mcp" => Self::Mcp,
+            "logs" => Self::Logs,
+            "stats" => Self::Stats,
+            "witr" => Self::Witr,
+            "abtop" => Self::Abtop,
+            "skills" => Self::Skills,
+            "skill_manager" => Self::SkillManager,
+            "hangar" => Self::Hangar,
+            "memory" => Self::Memory,
+            "changelog" => Self::Changelog,
+            "setup" => Self::Setup,
+            "help" => Self::Help,
+            _ => return None,
+        })
+    }
+
     /// Get the display icon for this item (emoji)
     pub fn icon(&self) -> &'static str {
         match self {
@@ -158,8 +203,6 @@ pub struct SidebarState {
     pub show_labels: bool,
     /// Active sessions count (for badge display)
     pub active_sessions_count: usize,
-    /// Preferred sidebar width, clamped against the current terminal width at render time.
-    pub preferred_width: u16,
 }
 
 impl SidebarState {
@@ -169,7 +212,6 @@ impl SidebarState {
             is_focused: true,
             show_labels: true,
             active_sessions_count: 0,
-            preferred_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 
@@ -206,14 +248,6 @@ impl SidebarState {
         }
     }
 
-    pub fn set_preferred_width(&mut self, width: u16, terminal_width: u16) {
-        self.preferred_width = Self::clamp_width(width, terminal_width);
-    }
-
-    pub fn effective_width(&self, terminal_width: u16) -> u16 {
-        Self::clamp_width(self.preferred_width, terminal_width)
-    }
-
     pub fn clamp_width(width: u16, terminal_width: u16) -> u16 {
         if terminal_width == 0 {
             return 0;
@@ -234,23 +268,15 @@ impl Default for SidebarState {
     }
 }
 
-/// Map a click row to a sidebar item. Row heights are variable (the
-/// selected item is 2 rows, the rest 1), so the selected index is needed
-/// to walk the rows correctly. `area` is where the renderer last drew the
-/// sidebar; the row layout here mirrors its title, spacer and item rows.
-pub fn item_index_at(area: Area, y: u16, selected_index: usize) -> Option<usize> {
-    let first_item_y = area.y.saturating_add(3); // title(2) + spacer(1)
-    if y < first_item_y {
-        return None;
-    }
+#[cfg(test)]
+mod id_tests {
+    use super::SidebarItem;
 
-    let mut row = first_item_y;
-    for idx in 0..SidebarItem::all().len() {
-        let height = if idx == selected_index { 2 } else { 1 };
-        if y >= row && y < row.saturating_add(height) {
-            return Some(idx);
+    #[test]
+    fn every_sidebar_item_round_trips_through_its_id() {
+        for item in SidebarItem::all() {
+            assert_eq!(SidebarItem::from_id(item.id()), Some(*item));
         }
-        row = row.saturating_add(height);
+        assert_eq!(SidebarItem::from_id("nope"), None);
     }
-    None
 }

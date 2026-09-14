@@ -68,6 +68,16 @@ impl TmuxSession {
         assert!(status.success(), "tmux send-keys failed");
     }
 
+    /// The pane's width in columns, which tmux can hold wider than `-x`
+    /// asked for when a client of the same server is larger.
+    fn width(&self) -> u16 {
+        let out = Command::new("tmux")
+            .args(["display-message", "-p", "-t", &self.name, "#{pane_width}"])
+            .output()
+            .expect("tmux display-message");
+        String::from_utf8_lossy(&out.stdout).trim().parse().expect("pane width")
+    }
+
     fn capture(&self) -> String {
         let out = Command::new("tmux")
             .args(["capture-pane", "-t", &self.name, "-p"])
@@ -107,6 +117,14 @@ fn config_text(home: &Path) -> String {
     fs::read_to_string(home.join(".agents-in-a-box/config/config.toml")).unwrap_or_default()
 }
 
+/// The saved home sidebar fraction, if the config has one.
+fn saved_fraction(home: &Path) -> Option<f64> {
+    config_text(home)
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("home_sidebar_fraction = "))
+        .and_then(|value| value.parse().ok())
+}
+
 #[test]
 fn tui_home_sidebar_mouse_resize_persists_and_restores() {
     if !tmux_available() {
@@ -118,6 +136,7 @@ fn tui_home_sidebar_mouse_resize_persists_and_restores() {
     seed_isolated_home(home_tmp.path());
     let ainb = ainb_bin();
     let session_name = format!("tripwire-home-sidebar-mouse-{}", std::process::id());
+    let saved;
 
     {
         let session = TmuxSession::new(session_name.clone());
@@ -138,19 +157,21 @@ fn tui_home_sidebar_mouse_resize_persists_and_restores() {
             );
         };
         assert!(
-            !pre_cap.contains("home_sidebar_width"),
+            !pre_cap.contains("home_sidebar_fraction"),
             "pre-capture unexpectedly contains config text:\n{pre_cap}"
         );
 
         // Home full layout starts sidebar content below the 7-row header.
         // Edge x=25 is the default 26-column sidebar border; drag to x=39
-        // requests a 40-column sidebar on this 120-column tmux pane.
+        // requests a 40-column sidebar, saved as its fraction of the pane.
         send_sgr_mouse(&session, 0, 25, 10, true);
         send_sgr_mouse(&session, 32, 39, 10, true);
         send_sgr_mouse(&session, 0, 39, 10, false);
 
+        let expected = 40.0 / f64::from(session.width());
+        saved = expected;
         let persisted = session.poll(Instant::now() + Duration::from_secs(10), |_| {
-            config_text(home_tmp.path()).contains("home_sidebar_width = 40")
+            saved_fraction(home_tmp.path()).is_some_and(|saved| (saved - expected).abs() < 1e-9)
         });
         assert!(
             persisted.is_some(),
@@ -178,7 +199,7 @@ fn tui_home_sidebar_mouse_resize_persists_and_restores() {
             session.capture()
         );
         assert!(
-            config_text(home_tmp.path()).contains("home_sidebar_width = 40"),
+            saved_fraction(home_tmp.path()) == Some(saved),
             "relaunch lost persisted sidebar width:\n{}",
             config_text(home_tmp.path())
         );

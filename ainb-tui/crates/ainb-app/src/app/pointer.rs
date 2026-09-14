@@ -1,22 +1,24 @@
 // ABOUTME: Commands a pointer press resolves to. A renderer hit-tests the press
-// against what it drew and names the thing under the pointer by its place in
-// state (a session row, a source, a unit), never by where it was drawn.
+// against what it drew and names the thing under the pointer by identity (a
+// session id, a source URI, a sidebar item), never by where it was drawn.
+// They are unbound keymap rows, so one registry lists every command.
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app::events::AppEvent;
 use crate::app::intent::{Args, Intent};
 use crate::app::keymap::CommandId;
-use crate::app::state::FocusedPane;
+use crate::app::state::{FocusedPane, SessionListRowId};
+use crate::components::sidebar::SidebarItem;
 use crate::components::skill_manager_screen::FocusedSkillPane;
 
-/// Ids of the pointer commands. They sit beside the keymap's commands in the
-/// same `<context>.<name>` namespace but have no key: each takes a payload
-/// only a hit-test can supply.
+/// Command ids of the pointer rows, `<context>.<row id>` like every keymap
+/// command. Each row is unbound: its payload only a hit-test can supply.
 pub mod ids {
-    /// `{"row": usize, "open": bool}`
+    /// `{"target": SessionListRowId, "open": bool}`
     pub const SESSION_LIST_SELECT_ROW: &str = "session_list.select_row";
-    /// `{"row": usize}`
+    /// `{"target": SessionListRowId}`
     pub const SESSION_LIST_OPEN_ROW_MENU: &str = "session_list.open_row_menu";
     /// `{"pane": "sessions" | "live_logs" | "preview"}`
     pub const SESSION_LIST_FOCUS_PANE: &str = "session_list.focus_pane";
@@ -24,37 +26,53 @@ pub mod ids {
     pub const SESSION_LIST_SAVE_PANE_LAYOUT: &str = "session_list.save_pane_layout";
     /// No arguments.
     pub const SKILL_MANAGER_ALL_SOURCES: &str = "skill_manager.all_sources";
-    /// `{"index": usize}`
+    /// `{"uri": String}`
     pub const SKILL_MANAGER_SELECT_SOURCE: &str = "skill_manager.select_source";
-    /// `{"position": usize}`, a position among the visible units.
+    /// `{"uri": String}`, a unit's declared URI.
     pub const SKILL_MANAGER_SELECT_UNIT: &str = "skill_manager.select_unit";
     /// `{"pane": "sources" | "units"}`
     pub const SKILL_MANAGER_FOCUS_PANE: &str = "skill_manager.focus_pane";
-    /// `{"width": u16}`
+    /// `{"fraction": f64}`, of the screen width.
     pub const SKILL_MANAGER_SAVE_SOURCES_WIDTH: &str = "skill_manager.save_sources_width";
-    /// No arguments.
-    pub const HOME_BEGIN_SIDEBAR_RESIZE: &str = "home.begin_sidebar_resize";
-    /// `{"index": usize}`
+    /// `{"fraction": f64}`, of the screen width.
+    pub const HOME_SAVE_SIDEBAR_WIDTH: &str = "home.save_sidebar_width";
+    /// `{"item": SidebarItem id}`
     pub const HOME_CLICK_SIDEBAR_ITEM: &str = "home.click_sidebar_item";
+
+    /// Every pointer command id.
+    pub const ALL: &[&str] = &[
+        SESSION_LIST_SELECT_ROW,
+        SESSION_LIST_OPEN_ROW_MENU,
+        SESSION_LIST_FOCUS_PANE,
+        SESSION_LIST_SAVE_PANE_LAYOUT,
+        SKILL_MANAGER_ALL_SOURCES,
+        SKILL_MANAGER_SELECT_SOURCE,
+        SKILL_MANAGER_SELECT_UNIT,
+        SKILL_MANAGER_FOCUS_PANE,
+        SKILL_MANAGER_SAVE_SOURCES_WIDTH,
+        HOME_SAVE_SIDEBAR_WIDTH,
+        HOME_CLICK_SIDEBAR_ITEM,
+    ];
 }
 
 fn command(id: &str, args: Args) -> Intent {
     Intent::Command(CommandId::new(id), args)
 }
 
-/// Select session-list row `row`, attaching it when `open` (a double-click).
+/// Select the session-list row `target`, attaching it when `open` (a
+/// double-click).
 #[must_use]
-pub fn select_session_row(row: usize, open: bool) -> Intent {
+pub fn select_session_row(target: &SessionListRowId, open: bool) -> Intent {
     command(
         ids::SESSION_LIST_SELECT_ROW,
-        json!({ "row": row, "open": open }),
+        json!({ "target": target, "open": open }),
     )
 }
 
-/// Open the context menu of session-list row `row`.
+/// Open the context menu of the session-list row `target`.
 #[must_use]
-pub fn open_session_row_menu(row: usize) -> Intent {
-    command(ids::SESSION_LIST_OPEN_ROW_MENU, json!({ "row": row }))
+pub fn open_session_row_menu(target: &SessionListRowId) -> Intent {
+    command(ids::SESSION_LIST_OPEN_ROW_MENU, json!({ "target": target }))
 }
 
 /// Focus the sessions list, or a pane beside it.
@@ -83,19 +101,16 @@ pub fn all_skill_sources() -> Intent {
     command(ids::SKILL_MANAGER_ALL_SOURCES, Value::Null)
 }
 
-/// Select Skill Manager source `index`.
+/// Select the Skill Manager source with `uri`.
 #[must_use]
-pub fn select_skill_source(index: usize) -> Intent {
-    command(ids::SKILL_MANAGER_SELECT_SOURCE, json!({ "index": index }))
+pub fn select_skill_source(uri: &str) -> Intent {
+    command(ids::SKILL_MANAGER_SELECT_SOURCE, json!({ "uri": uri }))
 }
 
-/// Select the unit at `position` among the visible units.
+/// Select the unit declared as `uri`.
 #[must_use]
-pub fn select_skill_unit(position: usize) -> Intent {
-    command(
-        ids::SKILL_MANAGER_SELECT_UNIT,
-        json!({ "position": position }),
-    )
+pub fn select_skill_unit(uri: &str) -> Intent {
+    command(ids::SKILL_MANAGER_SELECT_UNIT, json!({ "uri": uri }))
 }
 
 /// Focus a Skill Manager panel.
@@ -108,120 +123,149 @@ pub fn focus_skill_pane(pane: FocusedSkillPane) -> Intent {
     command(ids::SKILL_MANAGER_FOCUS_PANE, json!({ "pane": pane }))
 }
 
-/// Persist the Sources panel width a renderer just set.
+/// The fraction `width` columns make of a `columns`-wide screen.
+fn fraction_of(width: u16, columns: u16) -> f64 {
+    if columns == 0 {
+        return 0.0;
+    }
+    (f64::from(width) / f64::from(columns)).clamp(0.0, 1.0)
+}
+
+/// Persist the Sources panel width a renderer just set, `width` columns of a
+/// `columns`-wide screen.
 #[must_use]
-pub fn save_skill_sources_width(width: u16) -> Intent {
+pub fn save_skill_sources_width(width: u16, columns: u16) -> Intent {
     command(
         ids::SKILL_MANAGER_SAVE_SOURCES_WIDTH,
-        json!({ "width": width }),
+        json!({ "fraction": fraction_of(width, columns) }),
     )
 }
 
-/// Start dragging the home sidebar's resize edge.
+/// Persist the home sidebar width a renderer just set, `width` columns of a
+/// `columns`-wide screen.
 #[must_use]
-pub fn begin_home_sidebar_resize() -> Intent {
-    command(ids::HOME_BEGIN_SIDEBAR_RESIZE, Value::Null)
+pub fn save_home_sidebar_width(width: u16, columns: u16) -> Intent {
+    command(
+        ids::HOME_SAVE_SIDEBAR_WIDTH,
+        json!({ "fraction": fraction_of(width, columns) }),
+    )
 }
 
-/// Click home sidebar item `index`.
+/// Click home sidebar `item`.
 #[must_use]
-pub fn click_home_sidebar_item(index: usize) -> Intent {
-    command(ids::HOME_CLICK_SIDEBAR_ITEM, json!({ "index": index }))
+pub fn click_home_sidebar_item(item: SidebarItem) -> Intent {
+    command(ids::HOME_CLICK_SIDEBAR_ITEM, json!({ "item": item.id() }))
 }
 
-/// The event a pointer command applies, or `None` when `id` is not a pointer
-/// command or `args` do not fit it.
-pub(crate) fn event_for(id: &CommandId, args: &Args) -> Option<AppEvent> {
-    let index = |key: &str| args.get(key)?.as_u64().and_then(|n| usize::try_from(n).ok());
-    let flag = |key: &str| args.get(key)?.as_bool();
-    let width = || index("width").and_then(|n| u16::try_from(n).ok());
-    let pane = || args.get("pane")?.as_str();
-    let bare = |event: AppEvent| args.is_null().then_some(event);
-    Some(match id.as_str() {
-        ids::SESSION_LIST_SELECT_ROW => AppEvent::SessionListSelectRow {
-            row: index("row")?,
-            open: flag("open")?,
-        },
-        ids::SESSION_LIST_OPEN_ROW_MENU => AppEvent::SessionListOpenRowMenu { row: index("row")? },
-        ids::SESSION_LIST_FOCUS_PANE => AppEvent::SessionListFocusPane(match pane()? {
-            "sessions" => FocusedPane::Sessions,
-            "live_logs" => FocusedPane::LiveLogs,
-            "preview" => FocusedPane::Preview,
-            _ => return None,
-        }),
-        ids::SESSION_LIST_SAVE_PANE_LAYOUT => AppEvent::SaveSessionsPaneLayout {
-            width: width()?,
-            collapsed: flag("collapsed")?,
-        },
-        ids::SKILL_MANAGER_ALL_SOURCES => bare(AppEvent::SkillManagerClearSourceFilter)?,
-        ids::SKILL_MANAGER_SELECT_SOURCE => AppEvent::SkillManagerSourceClick {
-            index: index("index")?,
-        },
-        ids::SKILL_MANAGER_SELECT_UNIT => AppEvent::SkillManagerUnitClick {
-            position: index("position")?,
-        },
-        ids::SKILL_MANAGER_FOCUS_PANE => AppEvent::SkillManagerFocusPane(match pane()? {
-            "sources" => FocusedSkillPane::Sources,
-            "units" => FocusedSkillPane::Units,
-            _ => return None,
-        }),
-        ids::SKILL_MANAGER_SAVE_SOURCES_WIDTH => {
-            AppEvent::SkillManagerSaveSourcesWidth { width: width()? }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RowArgs {
+    target: SessionListRowId,
+    #[serde(default)]
+    open: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MenuArgs {
+    target: SessionListRowId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UriArgs {
+    uri: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaneArgs {
+    pane: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayoutArgs {
+    width: u16,
+    collapsed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FractionArgs {
+    fraction: f64,
+}
+
+impl FractionArgs {
+    fn in_range(self) -> Option<f64> {
+        (0.0..=1.0).contains(&self.fraction).then_some(self.fraction)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ItemArgs {
+    item: String,
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(args: &Args) -> Option<T> {
+    serde_json::from_value(args.clone()).ok()
+}
+
+/// The event a pointer row runs with `args` as its payload.
+///
+/// `None` when `event` is not a pointer row's event; `Some(None)` when it is
+/// but `args` do not fit. Every pointer row that carries a payload refuses
+/// `Null`, so running one by name without a hit-test changes nothing.
+pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent>> {
+    Some(match event {
+        AppEvent::SessionListSelectRow { .. } => {
+            parse::<RowArgs>(args).map(|args| AppEvent::SessionListSelectRow {
+                target: args.target,
+                open: args.open,
+            })
         }
-        ids::HOME_BEGIN_SIDEBAR_RESIZE => bare(AppEvent::HomeSidebarBeginResize)?,
-        ids::HOME_CLICK_SIDEBAR_ITEM => AppEvent::HomeSidebarClickItem {
-            index: index("index")?,
-        },
+        AppEvent::SessionListOpenRowMenu { .. } => {
+            parse::<MenuArgs>(args).map(|args| AppEvent::SessionListOpenRowMenu {
+                target: args.target,
+            })
+        }
+        AppEvent::SessionListFocusPane(_) => {
+            parse::<PaneArgs>(args).and_then(|args| match args.pane.as_str() {
+                "sessions" => Some(AppEvent::SessionListFocusPane(FocusedPane::Sessions)),
+                "live_logs" => Some(AppEvent::SessionListFocusPane(FocusedPane::LiveLogs)),
+                "preview" => Some(AppEvent::SessionListFocusPane(FocusedPane::Preview)),
+                _ => None,
+            })
+        }
+        AppEvent::SaveSessionsPaneLayout { .. } => {
+            parse::<LayoutArgs>(args).map(|args| AppEvent::SaveSessionsPaneLayout {
+                width: args.width,
+                collapsed: args.collapsed,
+            })
+        }
+        AppEvent::SkillManagerSourceClick { .. } => {
+            parse::<UriArgs>(args).map(|args| AppEvent::SkillManagerSourceClick { uri: args.uri })
+        }
+        AppEvent::SkillManagerUnitClick { .. } => {
+            parse::<UriArgs>(args).map(|args| AppEvent::SkillManagerUnitClick { uri: args.uri })
+        }
+        AppEvent::SkillManagerFocusPane(_) => {
+            parse::<PaneArgs>(args).and_then(|args| match args.pane.as_str() {
+                "sources" => Some(AppEvent::SkillManagerFocusPane(FocusedSkillPane::Sources)),
+                "units" => Some(AppEvent::SkillManagerFocusPane(FocusedSkillPane::Units)),
+                _ => None,
+            })
+        }
+        AppEvent::SkillManagerSaveSourcesWidth { .. } => parse::<FractionArgs>(args)
+            .and_then(FractionArgs::in_range)
+            .map(|fraction| AppEvent::SkillManagerSaveSourcesWidth { fraction }),
+        AppEvent::HomeSidebarSaveWidth { .. } => parse::<FractionArgs>(args)
+            .and_then(FractionArgs::in_range)
+            .map(|fraction| AppEvent::HomeSidebarSaveWidth { fraction }),
+        AppEvent::HomeSidebarClickItem { .. } => parse::<ItemArgs>(args)
+            .and_then(|args| SidebarItem::from_id(&args.item))
+            .map(|item| AppEvent::HomeSidebarClickItem { item }),
         _ => return None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every constructor produces a command `event_for` accepts, so a renderer
-    /// using them can never send a misshapen payload.
-    #[test]
-    fn every_constructor_resolves_to_an_event() {
-        let intents = [
-            select_session_row(2, true),
-            open_session_row_menu(2),
-            focus_session_pane(&FocusedPane::LiveLogs),
-            save_sessions_pane_layout(40, false),
-            all_skill_sources(),
-            select_skill_source(1),
-            select_skill_unit(3),
-            focus_skill_pane(FocusedSkillPane::Units),
-            save_skill_sources_width(48),
-            begin_home_sidebar_resize(),
-            click_home_sidebar_item(0),
-        ];
-        for intent in intents {
-            let Intent::Command(id, args) = intent else {
-                panic!("pointer constructors build commands");
-            };
-            assert!(event_for(&id, &args).is_some(), "{id} {args}");
-        }
-    }
-
-    #[test]
-    fn misshapen_arguments_resolve_to_nothing() {
-        let rejected = [
-            (ids::SESSION_LIST_SELECT_ROW, json!({ "row": 1 })),
-            (ids::SESSION_LIST_FOCUS_PANE, json!({ "pane": "sidebar" })),
-            (
-                ids::SESSION_LIST_SAVE_PANE_LAYOUT,
-                json!({ "width": 70_000, "collapsed": false }),
-            ),
-            (ids::SKILL_MANAGER_ALL_SOURCES, json!({ "index": 0 })),
-            ("session_list.no_such_pointer_command", Value::Null),
-        ];
-        for (id, args) in rejected {
-            assert!(
-                event_for(&CommandId::new(id), &args).is_none(),
-                "{id} {args}"
-            );
-        }
-    }
 }

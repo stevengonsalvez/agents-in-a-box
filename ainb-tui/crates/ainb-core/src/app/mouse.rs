@@ -49,7 +49,14 @@ fn skill_manager_top_rects(
     if term_w == 0 || top_h == 0 {
         return None;
     }
-    let sources_w = ui.skill_sources.width_on(saved_sources_width(state), term_w);
+    let sources_w = crate::components::skill_manager_screen::clamp_sources_width(
+        ui.skill_sources.preferred_width(
+            saved_sources_fraction(state),
+            term_w,
+            crate::components::skill_manager_screen::DEFAULT_SOURCES_WIDTH,
+        ),
+        term_w,
+    );
     let sources_rect = Rect::new(0, 0, sources_w, top_h);
     let units_x = sources_w;
     let units_w = term_w.saturating_sub(sources_w);
@@ -57,9 +64,22 @@ fn skill_manager_top_rects(
     Some((sources_rect, units_rect, sources_w))
 }
 
-/// The Sources panel width the user saved, which a surface starts from.
-fn saved_sources_width(state: &AppState) -> Option<u16> {
-    state.config.app_config.ui_preferences.skill_manager_sources_width
+/// The Sources panel width the user saved, a fraction of the screen, which a
+/// surface starts from.
+fn saved_sources_fraction(state: &AppState) -> Option<f64> {
+    state.config.app_config.ui_preferences.skill_manager_sources_fraction
+}
+
+/// Columns either side of the home sidebar's right border that grab it.
+const HOME_SIDEBAR_EDGE_SLOP: u16 = 1;
+
+/// Whether (`x`, `y`) grabs the right border of a sidebar drawn at `rect`.
+fn on_home_sidebar_edge(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
+    if y < rect.y || y >= rect.y.saturating_add(rect.height) || rect.width == 0 {
+        return false;
+    }
+    let edge_x = rect.x.saturating_add(rect.width.saturating_sub(1));
+    x.abs_diff(edge_x) <= HOME_SIDEBAR_EDGE_SLOP
 }
 
 /// True when `(x, y)` falls inside `rect` (half-open on the far
@@ -92,7 +112,9 @@ pub fn press(state: &AppState, ui: &mut UiState, pos: Pos, btn: Btn) -> Option<I
             if state.shell.current_screen != screen_ids::SESSION_LIST || state.shell.help_visible {
                 return None;
             }
-            ui.sessions_pane.row_index_at(x, y).map(pointer::open_session_row_menu)
+            let target = state.session_list_row_target(ui.sessions_pane.row_index_at(x, y)?)?;
+            let id = state.session_list_row_id(target)?;
+            Some(pointer::open_session_row_menu(&id))
         }
         Btn::Middle => None,
     }
@@ -100,11 +122,17 @@ pub fn press(state: &AppState, ui: &mut UiState, pos: Pos, btn: Btn) -> Option<I
 
 fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Intent> {
     if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
-        let home = &state.shell.home_screen_v2_state;
-        if home.is_on_sidebar_edge(x, y) {
-            return Some(pointer::begin_home_sidebar_resize());
+        let rect = ui.home_sidebar_rect?;
+        let on_edge = on_home_sidebar_edge(rect, x, y);
+        ui.home_sidebar.resize_active = on_edge;
+        ui.home_sidebar.edge_hovered = on_edge;
+        if on_edge || !point_in_rect(x, y, rect) {
+            return None;
         }
-        return home.sidebar_item_index_at(x, y).map(pointer::click_home_sidebar_item);
+        let selected = state.shell.home_screen_v2_state.sidebar.selected_index;
+        return crate::components::sidebar::item_index_at(rect, y, selected)
+            .and_then(|index| crate::components::sidebar::SidebarItem::all().get(index).copied())
+            .map(pointer::click_home_sidebar_item);
     }
 
     // SkillManager: divider-drag-resize + click-to-select on
@@ -137,8 +165,8 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
                 return Some(pointer::all_skill_sources());
             }
             let index = usize::from(row.saturating_sub(1));
-            if index < state.skills.skill_manager_state.sources.len() {
-                return Some(pointer::select_skill_source(index));
+            if let Some(source) = state.skills.skill_manager_state.sources.get(index) {
+                return Some(pointer::select_skill_source(&source.uri));
             }
             // Empty area inside the panel → just focus it.
             return Some(pointer::focus_skill_pane(
@@ -152,9 +180,12 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
         if point_in_rect(x, y, units_rect) {
             let data_y = sources_rect.y.saturating_add(2);
             if y >= data_y {
+                let skills = &state.skills.skill_manager_state;
                 let position = usize::from(y - data_y);
-                if position < state.skills.skill_manager_state.visible_indices().len() {
-                    return Some(pointer::select_skill_unit(position));
+                if let Some(&index) = skills.visible_indices().get(position) {
+                    return Some(pointer::select_skill_unit(
+                        &skills.units[index].declared_uri,
+                    ));
                 }
             }
             return Some(pointer::focus_skill_pane(
@@ -188,11 +219,12 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
     }
 
     let row = ui.sessions_pane.row_index_at(x, y);
-    if let Some((row, target)) =
-        row.and_then(|row| Some((row, state.session_list_row_target(row)?)))
-    {
+    let hit = row
+        .and_then(|row| state.session_list_row_target(row))
+        .and_then(|target| Some((target, state.session_list_row_id(target)?)));
+    if let Some((target, id)) = hit {
         let open = ui.sessions_pane.record_row_click(target, Instant::now());
-        return Some(pointer::select_session_row(row, open));
+        return Some(pointer::select_session_row(&id, open));
     }
 
     let pane = if ui.sessions_pane.contains_sessions_point(x, y) {
@@ -229,12 +261,7 @@ pub enum Gesture {
 /// Resize drags and edge hovers are layout the renderer is in the middle of
 /// changing, so they are applied here and never reach the reducer. When one
 /// finishes, the returned intent persists the new width.
-pub fn gesture(
-    gesture: Gesture,
-    pos: Pos,
-    state: &mut AppState,
-    ui: &mut UiState,
-) -> Option<Intent> {
+pub fn gesture(gesture: Gesture, pos: Pos, state: &AppState, ui: &mut UiState) -> Option<Intent> {
     if state.is_interactive_pane() {
         return None;
     }
@@ -245,9 +272,17 @@ pub fn gesture(
     let on_skills = state.shell.current_screen == screen_ids::SKILL_MANAGER;
     match gesture {
         Gesture::Drag => {
-            if on_home {
-                let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
-                state.shell.home_screen_v2_state.drag_sidebar_resize(x, term_width);
+            if on_home && ui.home_sidebar.resize_active {
+                if let Some(rect) = ui.home_sidebar_rect {
+                    let term_width = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                    let requested = x.saturating_sub(rect.x).saturating_add(1);
+                    ui.home_sidebar.set_width(
+                        crate::components::sidebar::SidebarState::clamp_width(
+                            requested, term_width,
+                        ),
+                    );
+                    ui.needs_redraw = true;
+                }
             } else if on_sessions {
                 let width = ui
                     .sessions_pane
@@ -270,30 +305,45 @@ pub fn gesture(
         }
         Gesture::Release => {
             if on_home {
-                state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
-                if state.shell.home_screen_v2_state.finish_sidebar_resize() {
-                    let width = state.shell.home_screen_v2_state.sidebar.preferred_width;
-                    state.config.app_config.ui_preferences.home_sidebar_width = Some(width);
-                    if let Err(e) = state.config.app_config.save() {
-                        tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
-                    }
+                ui.home_sidebar.edge_hovered =
+                    ui.home_sidebar_rect.is_some_and(|rect| on_home_sidebar_edge(rect, x, y));
+                if !std::mem::take(&mut ui.home_sidebar.resize_active) {
+                    return None;
                 }
-                None
+                let columns = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                let width = ui.home_sidebar.preferred_width(
+                    state.config.app_config.ui_preferences.home_sidebar_fraction,
+                    columns,
+                    crate::components::sidebar::DEFAULT_SIDEBAR_WIDTH,
+                );
+                Some(pointer::save_home_sidebar_width(
+                    crate::components::sidebar::SidebarState::clamp_width(width, columns),
+                    columns,
+                ))
             } else if on_sessions {
                 ui.sessions_pane.update_hover(x, y);
                 ui.sessions_pane.finish_resize().then(|| save_sessions_pane_layout(ui))
             } else if on_skills && ui.skill_sources.resize_active {
                 ui.skill_sources.resize_active = false;
-                Some(pointer::save_skill_sources_width(
-                    ui.skill_sources.preferred_width(saved_sources_width(state)),
-                ))
+                let columns = crossterm::terminal::size().unwrap_or((80, 24)).0;
+                let width = ui.skill_sources.preferred_width(
+                    saved_sources_fraction(state),
+                    columns,
+                    crate::components::skill_manager_screen::DEFAULT_SOURCES_WIDTH,
+                );
+                Some(pointer::save_skill_sources_width(width, columns))
             } else {
                 None
             }
         }
         Gesture::Move => {
             if on_home {
-                state.shell.home_screen_v2_state.update_sidebar_edge_hover(x, y);
+                let hovered =
+                    ui.home_sidebar_rect.is_some_and(|rect| on_home_sidebar_edge(rect, x, y));
+                if hovered != ui.home_sidebar.edge_hovered {
+                    ui.home_sidebar.edge_hovered = hovered;
+                    ui.needs_redraw = true;
+                }
             }
             if on_sessions {
                 ui.sessions_pane.update_hover(x, y);

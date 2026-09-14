@@ -266,42 +266,42 @@ impl SessionsPaneState {
         self.edge_hovered = false;
     }
 }
-/// The Skill Manager's Sources panel as this renderer lays it out.
+/// A panel whose width the user drags or steps: the home sidebar, the Skill
+/// Manager's Sources panel.
 ///
 /// Renderer-local because a width only means something against one surface:
 /// a step taken on a narrow terminal must not shrink the panel another
-/// surface draws from the same state.
+/// surface draws from the same state. The saved preference is a fraction of
+/// the screen, so every surface starts from the same proportion.
 #[derive(Debug, Default, Clone)]
-pub struct SkillSourcesPane {
-    /// The width the user set on this surface, before clamping. `None` until
-    /// they resize here, so the saved preference applies.
+pub struct ResizablePane {
+    /// The width in columns the user set on this surface, before clamping.
+    /// `None` until they resize here, so the saved preference applies.
     width: Option<u16>,
     /// A divider drag is in flight: the edge draws bright and drags move it.
     pub resize_active: bool,
+    /// The pointer is over the resize edge.
+    pub edge_hovered: bool,
 }
 
-impl SkillSourcesPane {
-    /// The width before clamping: this surface's, else `saved` (the
-    /// `ui_preferences.skill_manager_sources_width` preference), else the
-    /// default.
+impl ResizablePane {
+    /// The width in columns before clamping, on a `columns`-wide screen: this
+    /// surface's, else the `saved` fraction of the screen, else `default`.
     #[must_use]
-    pub fn preferred_width(&self, saved: Option<u16>) -> u16 {
+    pub fn preferred_width(&self, saved: Option<f64>, columns: u16, default: u16) -> u16 {
         self.width
-            .or(saved)
-            .unwrap_or(crate::components::skill_manager_screen::DEFAULT_SOURCES_WIDTH)
-    }
-
-    /// The width drawn on a `term_w` surface.
-    #[must_use]
-    pub fn width_on(&self, saved: Option<u16>, term_w: u16) -> u16 {
-        crate::components::skill_manager_screen::clamp_sources_width(
-            self.preferred_width(saved),
-            term_w,
-        )
+            .or_else(|| saved.map(|fraction| (fraction * f64::from(columns)).round() as u16))
+            .unwrap_or(default)
     }
 
     pub const fn set_width(&mut self, width: u16) {
         self.width = Some(width);
+    }
+
+    /// Whether the edge draws highlighted.
+    #[must_use]
+    pub const fn edge_highlighted(&self) -> bool {
+        self.edge_hovered || self.resize_active
     }
 }
 
@@ -316,7 +316,9 @@ pub struct UiState {
     pub sessions_pane: SessionsPaneState,
     /// The Skill Manager's Sources panel width and divider drag on this
     /// surface.
-    pub skill_sources: SkillSourcesPane,
+    pub skill_sources: ResizablePane,
+    /// The home sidebar's width, divider drag and edge hover on this surface.
+    pub home_sidebar: ResizablePane,
     /// Interior of the live-session embed pane, as last painted. The embed
     /// client is sized from it and mouse input inside it is forwarded to the
     /// PTY, so a stale value sends clicks to the wrong cells.
@@ -413,15 +415,20 @@ impl UiState {
                 ))
             }
             HostAction::GrowSkillSources | HostAction::ShrinkSkillSources => {
-                let saved = state.config.app_config.ui_preferences.skill_manager_sources_width;
-                let width = crate::components::skill_manager_screen::step_sources_width(
-                    self.skill_sources.preferred_width(saved),
+                use crate::components::skill_manager_screen::{
+                    DEFAULT_SOURCES_WIDTH, step_sources_width,
+                };
+                let saved = state.config.app_config.ui_preferences.skill_manager_sources_fraction;
+                let width = step_sources_width(
+                    self.skill_sources.preferred_width(saved, columns, DEFAULT_SOURCES_WIDTH),
                     action == HostAction::GrowSkillSources,
                     columns,
                 );
                 self.skill_sources.set_width(width);
                 self.needs_redraw = true;
-                Some(crate::app::pointer::save_skill_sources_width(width))
+                Some(crate::app::pointer::save_skill_sources_width(
+                    width, columns,
+                ))
             }
         }
     }

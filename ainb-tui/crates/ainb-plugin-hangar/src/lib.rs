@@ -19,6 +19,7 @@ pub mod shell;
 pub mod stream;
 #[cfg(test)]
 mod test_support;
+pub mod ui_view;
 pub mod vocab;
 pub mod widgets;
 

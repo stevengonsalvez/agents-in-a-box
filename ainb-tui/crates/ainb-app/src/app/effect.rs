@@ -12,6 +12,11 @@ use uuid::Uuid;
 /// [`crate::app::dispatch`] and [`crate::app::App::tick`] once that step has
 /// finished writing state, so a host always acts on committed state. Each
 /// variant says which host executes it and what that host does when it cannot.
+///
+/// A host never writes state. Whatever the work changed (a session detached,
+/// a login wrote credentials, a tool was missing) comes back as a report
+/// intent from [`crate::app::reports`], which the host dispatches like any
+/// other; the reducer turns it into state and notices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Give the user a live terminal on `target`.
@@ -20,21 +25,21 @@ pub enum Effect {
     /// tmux and attaches), and resumes when the user detaches. Desktop host:
     /// opens or focuses a terminal tab on the target. On failure (no tmux
     /// session, tool not installed, nested terminal) the host posts an error
-    /// notice naming the target and leaves the screen it was on.
+    /// report naming the target and the outcome, and the reducer posts the notice.
     AttachTerminal(TerminalTarget),
     /// Leave the live terminal the user is in.
     ///
     /// Terminal host: releases the in-place interactive pane back to the
-    /// read-only preview. Desktop host: returns keyboard focus from the
-    /// terminal tab to the app. With no live terminal this is a no-op, not an
-    /// error.
+    /// read-only preview by reporting [`crate::app::reports::detached`].
+    /// Desktop host: returns keyboard focus from the terminal tab to the app.
+    /// With no live terminal this is a no-op, not an error.
     Detach,
     /// Open `path` in the user's preferred editor.
     ///
     /// Terminal host: runs the configured `preferred_editor`, else `code`,
-    /// else `$EDITOR`, whichever is on `PATH` first, detached, and posts a
-    /// success notice. When none resolves or the editor fails to start, it
-    /// posts an error notice saying how to set one. Desktop host: the same
+    /// else `$EDITOR`, whichever is on `PATH` first, detached, and reports
+    /// which with [`crate::app::reports::editor_finished`], or that none
+    /// resolved or the editor failed to start. Desktop host: the same
     /// resolution, or the platform's default handler for the path.
     OpenEditor(PathBuf),
     /// Paste the clipboard's text into the field that has focus, for a paste
@@ -43,9 +48,23 @@ pub enum Effect {
     /// Terminal host: reads the system clipboard and dispatches the text as
     /// [`crate::app::Intent::Text`], the route a bracketed paste takes. When
     /// the clipboard cannot be read (a headless host with no display server,
-    /// or no text on it) it posts an error notice saying so and dispatches
-    /// nothing. Desktop host: reads its platform clipboard, same dispatch.
+    /// or no text on it) it reports [`crate::app::reports::clipboard_failed`]
+    /// instead. Desktop host: reads its platform clipboard, same dispatch.
     PasteClipboard,
+    /// Run `ainb daemon <daemon> <action>`, a daemon lifecycle verb.
+    ///
+    /// Terminal host: runs the command off the UI thread and, once it exits,
+    /// reports its exit status and output with
+    /// [`crate::app::reports::daemon_action_finished`]. A command that cannot
+    /// start is reported as a failure naming why. Desktop host: the same
+    /// command against the host it drives, reported the same way.
+    RunDaemonAction {
+        daemon: crate::fleet::daemons::probe::DaemonKind,
+        action: crate::cli::daemon::Action,
+        /// Echoed in the report, so a report for an earlier request (one the
+        /// row gave up on) is not taken for this one.
+        generation: u64,
+    },
 }
 
 /// What an [`Effect::AttachTerminal`] attaches to.
@@ -54,19 +73,27 @@ pub enum TerminalTarget {
     /// An ainb session's own tmux session.
     Session(Uuid),
     /// The selected row's tmux session, writable in the session list's own
-    /// preview pane instead of full screen. Terminal host: sizes the pane to
-    /// its current layout and hands keyboard input to it; when the row has no
-    /// tmux session or the attach fails, a notice says which.
+    /// preview pane instead of full screen. Terminal host: measures the pane
+    /// for its current layout and reports it with
+    /// [`crate::app::reports::in_place_sized`]; the reducer attaches, and when
+    /// the row has no tmux session or the attach fails, a notice says which.
     InPlace,
     /// A named tmux session ainb did not create: an "Other tmux" row, an SSH
     /// session's tmux, or a workspace shell that already exists.
     Tmux(String),
     /// A companion tool run in its own tmux session.
     Tool(ToolTerminal),
-    /// The shell for a workspace, created on first use, optionally `cd`'d to
-    /// `target_dir` before attaching.
+    /// The shell of the workspace at `workspace_path`: tmux session
+    /// `tmux_session`, created on first use (`new_shell` when the reducer just
+    /// added its record), optionally `cd`'d to `target_dir` before attaching.
+    ///
+    /// Terminal host: creates or reuses the tmux session and reports how with
+    /// [`crate::app::reports::shell_prepared`], then attaches and reports the
+    /// end with [`crate::app::reports::attach_finished`].
     WorkspaceShell {
-        workspace_index: usize,
+        workspace_path: PathBuf,
+        tmux_session: String,
+        new_shell: bool,
         target_dir: Option<PathBuf>,
     },
     /// The Claude OAuth login, run interactively in `image` with `auth_dir`
@@ -74,8 +101,8 @@ pub enum TerminalTarget {
     ///
     /// Terminal host: leaves its screen for a plain tty, runs the image's
     /// auth script, waits for Enter after it exits, restores its screen and
-    /// reports how the child exited to [`crate::app::AppState::finish_oauth_login`],
-    /// which decides success from the credentials the login wrote. When the
+    /// reports how the child exited with [`crate::app::reports::login_finished`];
+    /// the reducer decides success from the credentials the login wrote. When the
     /// child cannot start, the host reports it as a failed exit. Desktop host:
     /// the same command in a terminal window it opens, reported the same way.
     ClaudeLogin { auth_dir: PathBuf, image: String },

@@ -174,12 +174,24 @@ test = false
 doc = false
 
 [[bin]]
+name = "cts-action-forward"
+path = "tests/canaries/action_forward/main.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "cts-event-bus-denied"
+path = "tests/canaries/event_bus_denied/main.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "cts-redraw-hint"
 path = "tests/canaries/redraw_hint/main.rs"
 test = false
 doc = false
 
-# --- Host-side test harness (all 18 axes + read_paths/[config] + mouse + redraw hint) ---
+# --- Host-side test harness (all 18 axes + read_paths/[config] + mouse + action + redraw hint) ---
 
 [[test]]
 name = "axes"

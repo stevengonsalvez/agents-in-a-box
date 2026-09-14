@@ -237,15 +237,27 @@ impl SidebarComponent {
             frame.render_widget(empty, item_layout[1]);
         }
     }
+}
 
-    /// Get the recommended width for the sidebar
-    pub fn recommended_width(state: &SidebarState) -> u16 {
-        if state.show_labels {
-            state.preferred_width // With labels + shortcuts
-        } else {
-            4 // Icons only
-        }
+/// Map a click row to a sidebar item. Row heights are variable (the selected
+/// item is 2 rows, the rest 1), so the selected index is needed to walk the
+/// rows correctly. `area` is where this renderer last drew the sidebar; the
+/// row layout here mirrors its title, spacer and item rows.
+pub fn item_index_at(area: Rect, y: u16, selected_index: usize) -> Option<usize> {
+    let first_item_y = area.y.saturating_add(3); // title(2) + spacer(1)
+    if y < first_item_y {
+        return None;
     }
+
+    let mut row = first_item_y;
+    for idx in 0..SidebarItem::all().len() {
+        let height = if idx == selected_index { 2 } else { 1 };
+        if y >= row && y < row.saturating_add(height) {
+            return Some(idx);
+        }
+        row = row.saturating_add(height);
+    }
+    None
 }
 
 impl Default for SidebarComponent {
@@ -519,7 +531,7 @@ mod tests {
 
     #[test]
     fn maps_sidebar_item_rows_from_render_layout() {
-        let area = crate::geometry::Area::new(0, 5, 26, 30);
+        let area = Rect::new(0, 5, 26, 30);
         // Item 0 selected: it occupies 2 rows (main + description), every other
         // item is a single row. First item row = area.y + 3 = 8.
         assert_eq!(item_index_at(area, 7, 0), None);

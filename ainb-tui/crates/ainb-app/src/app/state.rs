@@ -582,6 +582,31 @@ pub enum SessionListRowTarget {
     Attachable(AttachableRef),
 }
 
+/// A session-list row by what it shows rather than where it sits.
+///
+/// Pointer commands carry this instead of a row index, so a click resolved
+/// against a frame drawn before the list changed selects the row the user saw
+/// or nothing, never whatever slid into its position. It is an intent
+/// payload, not state, so it crosses the wire.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionListRowId {
+    /// A workspace header, by the workspace's path.
+    Workspace(std::path::PathBuf),
+    /// An ainb session, by its id.
+    Session(Uuid),
+    /// A workspace's shell, by the workspace's path.
+    WorkspaceShell(std::path::PathBuf),
+    /// The "SSH Sessions" header.
+    SshHeader,
+    /// An SSH session, by its id.
+    SshSession(Uuid),
+    /// The "Other tmux" header.
+    OtherTmuxHeader,
+    /// A tmux session ainb did not create, by name.
+    OtherTmux(String),
+}
+
 // View enum was replaced in Phase 2a by ScreenId (String) + the screens::ids
 // constants module. Layout dispatch now goes through app::ScreenRegistry; see
 // `crate::app::screens` for the trait + identifier constants.
@@ -3041,7 +3066,9 @@ pub enum AsyncAction {
     /// process is replaced. Claude gets `--continue` to preserve the
     /// conversation; Codex restarts fresh (no continue flag exists).
     DowngradeHeadroom(Uuid),
-    CleanupOrphaned,       // Clean up orphaned containers without worktrees
+    CleanupOrphaned, // Clean up orphaned containers without worktrees
+    /// Reload the "Other tmux" rows, after the user comes back from one.
+    ReloadOtherTmuxSessions,
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
@@ -3089,6 +3116,17 @@ impl AppState {
     pub fn invalidate_statusline_status(&self) {
         self.statusline.invalidate();
     }
+
+    /// Copy the statusline probe's answer and the live-window snapshot into
+    /// their sections, bumping each only when its value changed. Renderers
+    /// read the sections, so every host, local or mirrored, draws the same
+    /// status bar.
+    pub fn refresh_statusline(&mut self) {
+        let live = self.fleet.live_window_watcher.snapshot();
+        self.fleet.set_if_changed(|fleet| &mut fleet.live_window, live);
+        let status = self.statusline_status();
+        self.config.set_if_changed(|config| &mut config.statusline_status, status);
+    }
 }
 
 impl Default for AppState {
@@ -3098,8 +3136,7 @@ impl Default for AppState {
             warn!("Failed to load config, using defaults: {}", e);
             AppConfig::default()
         });
-        let mut home_screen_v2_state = HomeScreenV2State::default();
-        home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
+        let home_screen_v2_state = HomeScreenV2State::default();
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
@@ -5636,6 +5673,98 @@ impl AppState {
         }
         self.workspace_load.last_preview_update = None;
         true
+    }
+
+    /// The identity of what `target` shows, or `None` when its indices no
+    /// longer point at anything.
+    #[must_use]
+    pub fn session_list_row_id(&self, target: SessionListRowTarget) -> Option<SessionListRowId> {
+        let workspace = |index: usize| self.sessions.workspaces.get(index);
+        Some(match target {
+            SessionListRowTarget::WorkspaceHeader { workspace_idx } => {
+                SessionListRowId::Workspace(workspace(workspace_idx)?.path.clone())
+            }
+            SessionListRowTarget::SshHeader => SessionListRowId::SshHeader,
+            SessionListRowTarget::OtherTmuxHeader => SessionListRowId::OtherTmuxHeader,
+            SessionListRowTarget::Attachable(AttachableRef::WorkspaceSession {
+                workspace_idx,
+                session_idx,
+            }) => {
+                SessionListRowId::Session(workspace(workspace_idx)?.sessions.get(session_idx)?.id)
+            }
+            SessionListRowTarget::Attachable(AttachableRef::WorkspaceShell { workspace_idx }) => {
+                let workspace = workspace(workspace_idx)?;
+                workspace.shell_session.as_ref()?;
+                SessionListRowId::WorkspaceShell(workspace.path.clone())
+            }
+            SessionListRowTarget::Attachable(AttachableRef::SshSession { ssh_idx }) => {
+                SessionListRowId::SshSession(self.ssh.ssh_sessions.get(ssh_idx)?.id)
+            }
+            SessionListRowTarget::Attachable(AttachableRef::OtherTmux { other_idx }) => {
+                SessionListRowId::OtherTmux(
+                    self.tmux.other_tmux_sessions.get(other_idx)?.name.clone(),
+                )
+            }
+        })
+    }
+
+    /// Where the row `id` names sits in the current list, or `None` when it is
+    /// gone.
+    #[must_use]
+    pub fn session_list_row_target_for(
+        &self,
+        id: &SessionListRowId,
+    ) -> Option<SessionListRowTarget> {
+        let workspace_index = |path: &std::path::Path| {
+            self.sessions.workspaces.iter().position(|workspace| workspace.path == path)
+        };
+        Some(match id {
+            SessionListRowId::Workspace(path) => SessionListRowTarget::WorkspaceHeader {
+                workspace_idx: workspace_index(path)?,
+            },
+            SessionListRowId::Session(session_id) => {
+                let (workspace_idx, session_idx) =
+                    self.sessions.workspaces.iter().enumerate().find_map(|(w, workspace)| {
+                        let s = workspace.sessions.iter().position(|s| s.id == *session_id)?;
+                        Some((w, s))
+                    })?;
+                SessionListRowTarget::Attachable(AttachableRef::WorkspaceSession {
+                    workspace_idx,
+                    session_idx,
+                })
+            }
+            SessionListRowId::WorkspaceShell(path) => {
+                let workspace_idx = workspace_index(path)?;
+                self.sessions.workspaces[workspace_idx].shell_session.as_ref()?;
+                SessionListRowTarget::Attachable(AttachableRef::WorkspaceShell { workspace_idx })
+            }
+            SessionListRowId::SshHeader => {
+                if self.ssh.ssh_sessions.is_empty() {
+                    return None;
+                }
+                SessionListRowTarget::SshHeader
+            }
+            SessionListRowId::SshSession(session_id) => {
+                SessionListRowTarget::Attachable(AttachableRef::SshSession {
+                    ssh_idx: self.ssh.ssh_sessions.iter().position(|s| s.id == *session_id)?,
+                })
+            }
+            SessionListRowId::OtherTmuxHeader => {
+                if self.tmux.other_tmux_sessions.is_empty() {
+                    return None;
+                }
+                SessionListRowTarget::OtherTmuxHeader
+            }
+            SessionListRowId::OtherTmux(name) => {
+                SessionListRowTarget::Attachable(AttachableRef::OtherTmux {
+                    other_idx: self
+                        .tmux
+                        .other_tmux_sessions
+                        .iter()
+                        .position(|session| session.name == *name)?,
+                })
+            }
+        })
     }
 
     pub fn session_list_row_target(&self, row_index: usize) -> Option<SessionListRowTarget> {
@@ -9780,6 +9909,10 @@ impl AppState {
                     self.load_real_workspaces().await;
                     self.shell.ui_needs_refresh = true;
                 }
+                AsyncAction::ReloadOtherTmuxSessions => {
+                    self.load_other_tmux_sessions().await;
+                    self.shell.ui_needs_refresh = true;
+                }
                 AsyncAction::FetchContainerLogs(session_id) => {
                     info!("Fetching container logs for session {}", session_id);
                     if let Err(e) = self.fetch_container_logs(session_id).await {
@@ -12464,6 +12597,45 @@ impl AppState {
     /// Called from `App::tick_plugin_renders`, which already holds a
     /// cloned runtime `handle`, so it's passed in rather than re-cloned
     /// per render tick.
+    /// Keep a plugin's `ui.state` publish, as `snapshot_get_versioned`
+    /// returns it, under the plugin that published it.
+    ///
+    /// Bumps the plugins-host section only for a newer version from a plugin.
+    /// ponytail: the bus keeps one `ui.state` value, not one per plugin, so
+    /// two plugins publishing within one tick keep only the later; key the
+    /// topic by plugin when a second plugin publishes it.
+    pub fn record_plugin_ui_state(
+        &mut self,
+        snapshot: Option<(bytes::Bytes, u64, ainb_plugin_runtime::types::PluginId)>,
+    ) {
+        let Some((payload, version, publisher)) = snapshot else {
+            return;
+        };
+        let plugin = publisher.as_str();
+        if plugin == ainb_plugin_runtime::snapshot::HOST_PUBLISHER {
+            return;
+        }
+        if self
+            .plugins_host
+            .plugin_ui_states
+            .get(plugin)
+            .is_some_and(|known| known.version >= version)
+        {
+            return;
+        }
+        match serde_json::from_slice(&payload) {
+            Ok(view) => {
+                self.plugins_host.plugin_ui_states.insert(
+                    plugin.to_string(),
+                    crate::app::sections::PluginUiState { version, view },
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%plugin, version, %error, "ui.state publish is not JSON");
+            }
+        }
+    }
+
     pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
         let Some((payload, version, publisher)) =
             handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
@@ -12803,8 +12975,11 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let mut state = AppState::new();
+        // So the first frame, drawn before the first tick, has the status bar.
+        state.refresh_statusline();
         Self {
-            state: AppState::new(),
+            state,
             plugin_runtime_owner: None,
             usage_dir_watcher: None,
             plugin_render_outcomes: std::collections::HashMap::new(),
@@ -12853,6 +13028,9 @@ impl App {
         // Honour any pending plugin close request (root-view Esc) before
         // kicking renders — a closed screen shouldn't get another paint.
         self.state.tick_panel_close_requests(&handle);
+        self.state.record_plugin_ui_state(
+            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_STATE),
+        );
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
@@ -13267,6 +13445,8 @@ impl App {
     async fn tick_inner(&mut self) -> anyhow::Result<()> {
         // Clean up expired notifications
         self.state.cleanup_expired_notifications();
+
+        self.state.refresh_statusline();
 
         // Check for completed background workspace loading
         if self.state.check_workspace_loading_complete() {

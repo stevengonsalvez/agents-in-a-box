@@ -1,95 +1,212 @@
 // ABOUTME: The terminal host's effect executor. The reducer in `ainb-app`
-// queues `Effect`s; the run loop drains them once per iteration, after the
-// step that queued them has finished writing state, and runs each one here.
+// queues `Effect`s; the run loop runs each one here once the step that queued
+// it has finished writing state. The executor reads state and never writes it:
+// what the work changed comes back as report intents the run loop dispatches.
 
 use std::io::Stdout;
 
 use anyhow::Result;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::app::reports::{self, AttachOutcome, AttachedTo, EditorOutcome, ShellCd, ShellOutcome};
+use crate::app::state::AppState;
 use crate::app::ui_state::UiState;
-use crate::app::{App, Effect, TerminalTarget, ToolTerminal};
+use crate::app::{Effect, Intent, TerminalTarget, ToolTerminal};
 
-/// Carry out one effect for the terminal host.
+/// Carry out one effect for the terminal host and return the reports to
+/// dispatch, in order.
+///
+/// State is read before the returned future starts, never across an await, so
+/// the run loop is free to dispatch into it the moment the work ends.
 ///
 /// `Err` means the terminal itself could not be suspended or restored, which
-/// the run loop treats as fatal; every failure the user can act on becomes a
-/// notice instead.
-pub async fn execute(
+/// the run loop treats as fatal; every failure the user can act on is a report
+/// the reducer turns into a notice.
+pub fn execute<'t>(
     effect: Effect,
-    app: &mut App,
-    keymap: &crate::app::Keymap,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ui: &mut UiState,
-) -> Result<()> {
-    match effect {
-        Effect::AttachTerminal(target) => attach(app, terminal, ui, target).await,
-        Effect::Detach => {
-            if app.state.is_interactive_pane() {
-                app.state.release_interactive_pane();
-            }
-            Ok(())
+    state: &AppState,
+    terminal: &'t mut Terminal<CrosstermBackend<Stdout>>,
+    ui: &UiState,
+) -> impl std::future::Future<Output = Result<Vec<Intent>>> + 't {
+    let work = match effect {
+        Effect::AttachTerminal(TerminalTarget::InPlace) => {
+            Work::Done(vec![size_in_place(state, terminal, ui)])
         }
-        Effect::OpenEditor(path) => {
-            open_editor(app, &path);
-            Ok(())
+        Effect::AttachTerminal(TerminalTarget::Session(session_id)) => {
+            let tmux_session_name = state
+                .sessions
+                .workspaces
+                .iter()
+                .flat_map(|w| &w.sessions)
+                .find(|s| s.id == session_id)
+                .and_then(|s| s.tmux_session_name.clone());
+            Work::Session(session_id, tmux_session_name)
         }
-        Effect::PasteClipboard => {
-            paste_clipboard(app, keymap, ui);
-            Ok(())
+        Effect::AttachTerminal(target) => Work::Attach(target),
+        Effect::Detach => Work::Done(vec![reports::detached()]),
+        Effect::OpenEditor(path) => Work::Done(vec![open_editor(state, &path)]),
+        Effect::PasteClipboard => Work::Done(vec![paste_clipboard()]),
+        Effect::RunDaemonAction {
+            daemon,
+            action,
+            generation,
+        } => {
+            spawn_daemon_action(daemon, action, generation);
+            Work::Done(Vec::new())
+        }
+    };
+    async move {
+        match work {
+            Work::Done(reports) => Ok(reports),
+            Work::Session(session_id, tmux_session_name) => Ok(vec![
+                attach_session(terminal, session_id, tmux_session_name).await?,
+            ]),
+            Work::Attach(target) => attach(terminal, target).await,
         }
     }
 }
 
-/// Read the system clipboard and paste its text as a bracketed paste would.
+/// An effect with everything it reads from state already read.
+enum Work {
+    Done(Vec<Intent>),
+    Session(Uuid, Option<String>),
+    Attach(TerminalTarget),
+}
+
+/// Reports from work that outlives the effect that started it, waiting for the
+/// run loop to dispatch them.
 ///
-/// Effects the paste itself queues go back on the outbox for the run loop's
-/// next drain, so executing one effect never recurses into another.
-fn paste_clipboard(app: &mut App, keymap: &crate::app::Keymap, ui: &mut UiState) {
-    let text = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
-    match text {
-        Ok(text) => {
-            let intent = crate::app::Intent::Text(text);
-            for effect in crate::app::dispatch(&mut app.state, keymap, ui, intent) {
-                app.state.emit(effect);
-            }
+/// ponytail: one process-wide queue, because this process runs one terminal
+/// host; a host that ran two would give each its own.
+fn deferred() -> &'static (
+    std::sync::mpsc::Sender<Intent>,
+    std::sync::Mutex<std::sync::mpsc::Receiver<Intent>>,
+) {
+    static DEFERRED: std::sync::OnceLock<(
+        std::sync::mpsc::Sender<Intent>,
+        std::sync::Mutex<std::sync::mpsc::Receiver<Intent>>,
+    )> = std::sync::OnceLock::new();
+    DEFERRED.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (tx, std::sync::Mutex::new(rx))
+    })
+}
+
+/// Reports that background work finished since the last call, oldest first.
+/// The run loop dispatches them like any other intent.
+#[must_use]
+pub fn take_deferred_reports() -> Vec<Intent> {
+    deferred().1.lock().map_or_else(|_| Vec::new(), |rx| rx.try_iter().collect())
+}
+
+/// Run a daemon lifecycle verb on a worker and report it when it exits. A
+/// worker that cannot start is reported as the failure, so the row never
+/// stays on `working` waiting for a report that is not coming.
+fn spawn_daemon_action(
+    daemon: crate::fleet::daemons::probe::DaemonKind,
+    action: crate::cli::daemon::Action,
+    generation: u64,
+) {
+    let tx = deferred().0.clone();
+    let spawned = std::thread::Builder::new().name("ainb-daemon-action".into()).spawn({
+        let tx = tx.clone();
+        move || {
+            let report = run_daemon_action(daemon.id(), action.id()).sealed(generation);
+            let _ = tx.send(reports::daemon_action_finished(&report));
         }
+    });
+    if let Err(error) = spawned {
+        let report = reports::DaemonActionReport {
+            daemon: daemon.id().to_string(),
+            verb: action.id().to_string(),
+            generation,
+            ok: false,
+            summary: format!("{} failed", action.id()),
+            detail: format!("the worker that runs `ainb daemon` did not start: {error}"),
+            local: None,
+        };
+        let _ = tx.send(reports::daemon_action_finished(&report));
+    }
+}
+
+/// The system clipboard's text as a bracketed paste would deliver it.
+fn paste_clipboard() -> Intent {
+    match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+        Ok(text) => Intent::Text(text),
         Err(e) => {
             warn!("Clipboard paste failed: {}", e);
-            app.state.add_error_notification(format!("Could not read clipboard: {}", e));
+            reports::clipboard_failed(&e.to_string())
         }
     }
 }
 
+/// Attach to a target that needs nothing from state.
 async fn attach(
-    app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ui: &UiState,
     target: TerminalTarget,
-) -> Result<()> {
-    match target {
-        TerminalTarget::InPlace => {
-            attach_in_place(app, terminal, ui);
-            Ok(())
+) -> Result<Vec<Intent>> {
+    Ok(match target {
+        TerminalTarget::InPlace | TerminalTarget::Session(_) => {
+            unreachable!("resolved against state in execute")
         }
-        TerminalTarget::Session(session_id) => attach_session(app, terminal, session_id).await,
-        TerminalTarget::Tmux(session_name) => attach_tmux(app, terminal, session_name).await,
-        TerminalTarget::Tool(ToolTerminal::Witr) => attach_witr(app, terminal).await,
-        TerminalTarget::Tool(ToolTerminal::Abtop) => attach_abtop(app, terminal).await,
+        TerminalTarget::Tmux(session_name) => {
+            let outcome = attach_named(terminal, &session_name).await?;
+            vec![reports::attach_finished(
+                &AttachedTo::Tmux(session_name),
+                &outcome,
+            )]
+        }
+        TerminalTarget::Tool(ToolTerminal::Witr) => vec![attach_witr(terminal).await?],
+        TerminalTarget::Tool(ToolTerminal::Abtop) => vec![attach_abtop(terminal).await?],
         TerminalTarget::Tool(ToolTerminal::AbtopWithSetup) => {
-            attach_abtop_with_setup(app, terminal).await
+            vec![run_abtop_setup().await, attach_abtop(terminal).await?]
         }
         TerminalTarget::WorkspaceShell {
-            workspace_index,
+            workspace_path,
+            tmux_session,
+            new_shell,
             target_dir,
-        } => attach_workspace_shell(app, terminal, workspace_index, target_dir).await,
-        TerminalTarget::ClaudeLogin { auth_dir, image } => {
-            claude_login(app, terminal, &auth_dir, &image)
+        } => {
+            attach_workspace_shell(
+                terminal,
+                workspace_path,
+                &tmux_session,
+                new_shell,
+                target_dir,
+            )
+            .await?
         }
-    }
+        TerminalTarget::ClaudeLogin { auth_dir, image } => {
+            vec![claude_login(terminal, &auth_dir, &image)?]
+        }
+    })
+}
+
+/// Attach to `session_name` full screen until the user detaches.
+async fn attach_named(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    session_name: &str,
+) -> Result<AttachOutcome> {
+    let mut attach_handler = crate::app::AttachHandler::new_from_terminal(terminal)?;
+    Ok(match attach_handler.attach_to_session(session_name).await {
+        Ok(()) => {
+            info!(
+                "[ACTION] Attached and detached from tmux session '{}'",
+                session_name
+            );
+            AttachOutcome::Detached
+        }
+        Err(e) => {
+            error!(
+                "[ACTION] Failed to attach to tmux session '{}': {}",
+                session_name, e
+            );
+            AttachOutcome::Failed(e.to_string())
+        }
+    })
 }
 
 /// Leave every input mode the TUI set up at startup (raw mode, the alternate
@@ -122,11 +239,10 @@ fn reclaim_terminal() -> std::io::Result<()> {
 
 /// The Claude OAuth login in `image`, on the plain tty.
 fn claude_login(
-    app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     auth_dir: &std::path::Path,
     image: &str,
-) -> Result<()> {
+) -> Result<Intent> {
     info!("Exiting TUI to run interactive authentication");
     release_terminal()?;
 
@@ -165,7 +281,7 @@ fn claude_login(
         .map_err(|e| error!("Failed to start the authentication container: {}", e))
         .is_ok_and(|status| status.success());
 
-    if app.state.finish_oauth_login(auth_dir, exited_ok) {
+    if reports::oauth_credentials_written(auth_dir, exited_ok) {
         println!("\n✅ Authentication successful!");
         println!("Press Enter to continue...");
     } else {
@@ -185,15 +301,19 @@ fn claude_login(
     }
     reclaim_terminal()?;
     terminal.clear()?;
-    Ok(())
+    Ok(reports::login_finished(auth_dir, exited_ok))
 }
 
-/// The selected row, writable in the preview pane.
+/// The size of the selected row's writable preview pane.
 ///
 /// The embed is sized to the exact interactive layout (the user's current
 /// sidebar and chrome) so tmux reflows once at attach instead of twice. The
 /// render path still resizes it each frame for terminal resizes.
-fn attach_in_place(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) {
+fn size_in_place(
+    state: &AppState,
+    terminal: &Terminal<CrosstermBackend<Stdout>>,
+    ui: &UiState,
+) -> Intent {
     let size = terminal.size().unwrap_or(ratatui::layout::Size {
         width: 80,
         height: 24,
@@ -203,311 +323,107 @@ fn attach_in_place(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stdou
         size.width,
         size.height,
         sidebar,
-        app.state.config.app_config.ui_preferences.show_session_menu_bar,
+        state.config.app_config.ui_preferences.show_session_menu_bar,
     );
-    // A missing tmux session or a failed attach is announced by
-    // enter_interactive_pane, which knows which case it hit.
-    if !app.state.enter_interactive_pane(rows, cols) {
-        debug!("EnterInteractivePane: no tmux session on selection / attach failed");
-    }
+    reports::in_place_sized(rows, cols)
 }
 
-/// An ainb session's own tmux session.
+/// An ainb session's own tmux session, `tmux_session_name` as state named it
+/// when the attach was queued.
 async fn attach_session(
-    app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     session_id: Uuid,
-) -> Result<()> {
-    use crate::app::AttachHandler;
-
-    info!(
-        "[ACTION] Handling AttachToTmuxSession for session {}",
-        session_id
-    );
-    debug!(
-        "[ACTION] Looking for session in {} workspaces",
-        app.state.sessions.workspaces.len()
-    );
-
-    // Get session to find tmux session name
-    let tmux_session_name = if let Some(session) = app
-        .state
-        .sessions
-        .workspaces
-        .iter()
-        .flat_map(|w| &w.sessions)
-        .find(|s| s.id == session_id)
-    {
-        debug!(
-            "[ACTION] Found session: name='{}', status={:?}, tmux_name={:?}",
-            session.name, session.status, session.tmux_session_name
+    tmux_session_name: Option<String>,
+) -> Result<Intent> {
+    let target = AttachedTo::Session(session_id);
+    // The reducer checked the session has one before it queued the attach; a
+    // tick between the two can still remove the session.
+    let Some(tmux_session_name) = tmux_session_name else {
+        error!(
+            "[ACTION] Session {} has no tmux session to attach",
+            session_id
         );
-        if let Some(ref name) = session.tmux_session_name {
-            info!("[ACTION] Using tmux session name: {}", name);
-            Some(name.clone())
-        } else {
-            error!(
-                "[ACTION] No tmux session name found for session {} (name={})",
-                session_id, session.name
-            );
-            app.state
-                .add_error_notification(format!("Session '{}' has no tmux session", session.name));
-            app.state.shell.ui_needs_refresh = true;
-            None
-        }
-    } else {
-        error!("[ACTION] Session {} not found in workspaces", session_id);
-        app.state.add_error_notification("Session not found".to_string());
-        app.state.shell.ui_needs_refresh = true;
-        None
+        return Ok(reports::attach_finished(
+            &target,
+            &AttachOutcome::Failed("the session has no tmux session".to_string()),
+        ));
     };
-
-    if let Some(tmux_session_name) = tmux_session_name {
-        // Fullscreen attach owns terminal size and input.
-        // Preview reconnects after detach.
-        app.state.release_interactive_pane();
-
-        // Mark session as attached
-        for workspace in &mut app.state.sessions.workspaces {
-            for session in &mut workspace.sessions {
-                if session.id == session_id {
-                    session.mark_attached();
-                    break;
-                }
-            }
-        }
-
-        // Create attach handler and attach directly
-        info!(
-            "[ACTION] Creating attach handler for tmux session '{}'",
-            tmux_session_name
-        );
-        let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
-        info!("[ACTION] Attach handler created, calling attach_to_session...");
-        let mut target_missing = false;
-        match attach_handler.attach_to_session(&tmux_session_name).await {
-            Ok(()) => {
-                info!(
-                    "[ACTION] Successfully attached and detached from tmux session '{}'",
-                    tmux_session_name
-                );
-            }
-            Err(e) => {
-                error!(
-                    "[ACTION] Failed to attach to tmux session '{}': {}",
-                    tmux_session_name, e
-                );
-                app.state.add_error_notification(attach_failure_notice(&tmux_session_name, &e));
-                // An attach can fail because the terminal is nested even
-                // though the target is alive. Probe the exact target before
-                // changing lifecycle state, so only a terminally missing
-                // tmux session becomes resumable Stopped.
-                target_missing = matches!(
-                    tmux_session_presence(&tmux_session_name).await,
-                    TmuxSessionPresence::Missing
-                );
-            }
-        }
-
-        // Mark session as detached
-        for workspace in &mut app.state.sessions.workspaces {
-            for session in &mut workspace.sessions {
-                if session.id == session_id {
-                    session.mark_detached();
-                    break;
-                }
-            }
-        }
-
-        if target_missing
-            && app.state.mark_session_stopped_for_missing_tmux(session_id, &tmux_session_name)
+    info!(
+        "[ACTION] Attaching session {} to tmux session '{}'",
+        session_id, tmux_session_name
+    );
+    let outcome = match attach_named(terminal, &tmux_session_name).await? {
+        // An attach can fail because the terminal is nested even though the
+        // target is alive. Probe the exact target, so only a terminally
+        // missing tmux session is reported as gone.
+        AttachOutcome::Failed(error)
+            if tmux_session_presence(&tmux_session_name).await == TmuxSessionPresence::Missing =>
         {
-            // Rebuild from the persisted record too. This keeps the row
-            // correctly filtered after an immediate refresh or TUI restart.
-            app.state.load_real_workspaces().await;
+            AttachOutcome::TargetMissing(error)
         }
-
-        app.state.shell.ui_needs_refresh = true;
-    }
-    Ok(())
+        outcome => outcome,
+    };
+    Ok(reports::attach_finished(&target, &outcome))
 }
 
-/// A tmux session ainb did not create, by name.
-async fn attach_tmux(
-    app: &mut App,
+/// Create-or-reuse `session` running `command` in its own tmux session, then
+/// attach to it. `-A` attaches if the session exists and creates it
+/// otherwise; `-d` keeps it detached so the attach below suspends and
+/// resumes the TUI. tmux runs the command in its own pty, so the tool gets a
+/// real TTY even though ainb owns the alternate screen. The command is one
+/// string so tmux does not parse its flags as tmux's own.
+async fn attach_tool(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    session_name: String,
-) -> Result<()> {
-    use crate::app::AttachHandler;
-
-    // Fullscreen attach owns terminal size and input. Drop
-    // preview client first so tmux has only one authority.
-    app.state.release_interactive_pane();
-
+    session: &str,
+    command: &str,
+) -> Result<AttachOutcome> {
     info!(
-        "[ACTION] Handling AttachToOtherTmux for session '{}'",
-        session_name
+        "[ACTION] Launching `{}` in tmux session '{}'",
+        command, session
     );
-
-    // Create attach handler and attach directly using the session name
-    info!(
-        "[ACTION] Creating attach handler for other tmux session '{}'",
-        session_name
-    );
-    let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
-    info!("[ACTION] Attach handler created, calling attach_to_session...");
-    match attach_handler.attach_to_session(&session_name).await {
-        Ok(()) => {
-            info!(
-                "[ACTION] Successfully attached and detached from other tmux session '{}'",
-                session_name
-            );
-        }
-        Err(e) => {
-            error!(
-                "[ACTION] Failed to attach to other tmux session '{}': {}",
-                session_name, e
-            );
-            app.state.add_error_notification(attach_failure_notice(&session_name, &e));
-        }
-    }
-
-    // Refresh other tmux sessions list after detach
-    app.state.load_other_tmux_sessions().await;
-    app.state.shell.ui_needs_refresh = true;
-    Ok(())
-}
-
-/// `witr -i` in its own tmux session.
-async fn attach_witr(
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<()> {
-    use crate::app::AttachHandler;
-    use tokio::process::Command;
-
-    const WITR_SESSION: &str = "ainb-witr";
-    info!(
-        "[ACTION] Launching witr -i in tmux session '{}'",
-        WITR_SESSION
-    );
-
-    // Atomic create-or-reuse: `-A` attaches if the session exists,
-    // creates it otherwise; `-d` keeps it detached so we drive the
-    // attach (with TUI suspend/resume) ourselves below. tmux runs
-    // the command in its OWN pty, so `witr -i` gets a real TTY even
-    // though ainb owns the alternate screen. The command is passed as
-    // a single string so tmux doesn't parse `-i` as one of its flags.
-    let created = Command::new("tmux")
-        .args(["new-session", "-A", "-d", "-s", WITR_SESSION, "witr -i"])
+    let created = tokio::process::Command::new("tmux")
+        .args(["new-session", "-A", "-d", "-s", session, command])
         .status()
         .await;
     match created {
-        Ok(s) if s.success() => {
-            let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
-            if let Err(e) = attach_handler.attach_to_session(WITR_SESSION).await {
-                error!("[ACTION] witr attach failed: {}", e);
-                app.state
-                    .add_error_notification(format!("Failed to open the witr browser: {}", e));
-            }
-        }
+        Ok(s) if s.success() => attach_named(terminal, session).await,
         Ok(s) => {
             error!(
-                "[ACTION] failed to create witr tmux session (exit {:?})",
+                "[ACTION] failed to create tmux session '{}' (exit {:?})",
+                session,
                 s.code()
             );
-            app.state.add_error_notification(
-                "Could not start the witr browser — is `witr` installed and on PATH?".to_string(),
-            );
+            Ok(AttachOutcome::NotInstalled)
         }
         Err(e) => {
-            error!("[ACTION] tmux new-session for witr errored: {}", e);
-            app.state
-                .add_error_notification(format!("Failed to open the witr browser: {}", e));
+            error!("[ACTION] tmux new-session for '{}' errored: {}", session, e);
+            Ok(AttachOutcome::Failed(e.to_string()))
         }
     }
-    app.state.shell.ui_needs_refresh = true;
-    Ok(())
 }
 
-/// `abtop --exit-on-jump` in its own tmux session.
-async fn attach_abtop(
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<()> {
-    use crate::app::AttachHandler;
-    use tokio::process::Command;
-
-    const ABTOP_SESSION: &str = "ainb-abtop";
-    info!(
-        "[ACTION] Launching abtop in tmux session '{}'",
-        ABTOP_SESSION
-    );
-
-    // Atomic create-or-reuse: `-A` attaches if the session exists,
-    // creates it otherwise; `-d` keeps it detached so we drive the
-    // attach (with TUI suspend/resume) ourselves below. tmux runs
-    // the command in its OWN pty, so abtop gets a real TTY even
-    // though ainb owns the alternate screen. `--exit-on-jump` makes
-    // abtop quit (returning the terminal to ainb) after the user
-    // jumps to an agent's pane with Enter. The command is passed as a
-    // single string so tmux doesn't parse `--exit-on-jump` as a flag.
-    let created = Command::new("tmux")
-        .args([
-            "new-session",
-            "-A",
-            "-d",
-            "-s",
-            ABTOP_SESSION,
-            "abtop --exit-on-jump",
-        ])
-        .status()
-        .await;
-    match created {
-        Ok(s) if s.success() => {
-            let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
-            if let Err(e) = attach_handler.attach_to_session(ABTOP_SESSION).await {
-                error!("[ACTION] abtop attach failed: {}", e);
-                app.state.add_error_notification(format!("Failed to open abtop: {}", e));
-            }
-        }
-        Ok(s) => {
-            error!(
-                "[ACTION] failed to create abtop tmux session (exit {:?})",
-                s.code()
-            );
-            app.state.add_error_notification(
-                "Could not start abtop — is `abtop` installed and on PATH? Install: brew install graykode/tap/abtop · cargo install abtop"
-                    .to_string(),
-            );
-        }
-        Err(e) => {
-            error!("[ACTION] tmux new-session for abtop errored: {}", e);
-            app.state.add_error_notification(format!("Failed to open abtop: {}", e));
-        }
-    }
-    app.state.shell.ui_needs_refresh = true;
-    Ok(())
+/// `witr -i`, the process-causality browser.
+async fn attach_witr(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Intent> {
+    let outcome = attach_tool(terminal, "ainb-witr", "witr -i").await?;
+    Ok(reports::attach_finished(&AttachedTo::Witr, &outcome))
 }
 
-/// `abtop --setup` in a detached pane, then abtop itself.
-async fn attach_abtop_with_setup(
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-) -> Result<()> {
-    use tokio::process::Command;
+/// `abtop --exit-on-jump`: abtop quits, returning the terminal to ainb, after
+/// the user jumps to an agent's pane with Enter.
+async fn attach_abtop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<Intent> {
+    let outcome = attach_tool(terminal, "ainb-abtop", "abtop --exit-on-jump").await?;
+    Ok(reports::attach_finished(&AttachedTo::Abtop, &outcome))
+}
 
+/// `abtop --setup`, which writes a `StatusLine` hook into
+/// `~/.claude/settings.json`, in its own detached tmux pane so it gets the
+/// real TTY abtop's CLI paths expect. Not attached: it completes on its own.
+async fn run_abtop_setup() -> Intent {
     info!("[ACTION] Running abtop --setup (rate-limit StatusLine hook)");
-    // `abtop --setup` writes a StatusLine hook into
-    // ~/.claude/settings.json. Run it in its OWN detached
-    // tmux pane so it gets a real TTY (abtop's CLI paths
-    // expect one) without disturbing ainb's alternate
-    // screen. We don't attach — it completes on its own.
-    let setup = Command::new("tmux")
+    // `-A`: attach-or-create, so a stale or slow setup pane does not fail a
+    // retry with a misleading "is abtop installed?" error.
+    let setup = tokio::process::Command::new("tmux")
         .args([
-            // `-A`: attach-or-create so a stale/slow
-            // setup pane doesn't fail a retry with a
-            // misleading "is abtop installed?" error.
             "new-session",
             "-A",
             "-d",
@@ -517,198 +433,213 @@ async fn attach_abtop_with_setup(
         ])
         .status()
         .await;
-    match setup {
-        Ok(s) if s.success() => {
-            app.state.add_info_notification(
-                "Enabling abtop rate-limit tracking (abtop --setup)…".to_string(),
-            );
-        }
-        _ => {
-            app.state.add_error_notification(
-                "Could not run `abtop --setup` — is `abtop` on PATH? You can run it manually."
-                    .to_string(),
-            );
-        }
-    }
-    app.state.shell.ui_needs_refresh = true;
-    // Open abtop regardless of the setup outcome.
-    attach_abtop(app, terminal).await
+    reports::abtop_setup_finished(setup.is_ok_and(|status| status.success()))
 }
 
 /// The workspace's shell, created on first use and `cd`'d to `target_dir`.
 async fn attach_workspace_shell(
-    app: &mut App,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    workspace_index: usize,
+    workspace_path: std::path::PathBuf,
+    tmux_name: &str,
+    new_shell: bool,
     target_dir: Option<std::path::PathBuf>,
-) -> Result<()> {
-    use crate::app::AttachHandler;
-    use crate::models::ShellSession;
+) -> Result<Vec<Intent>> {
     use shell_escape::escape;
     use std::borrow::Cow;
     use tokio::process::Command;
 
     info!(
-        "[ACTION] Opening workspace shell, index: {}, target_dir: {:?}",
-        workspace_index, target_dir
+        "[ACTION] Opening workspace shell '{}', target_dir: {:?}",
+        tmux_name, target_dir
     );
 
-    // Get workspace info
-    let (workspace_path, workspace_name, existing_shell) = {
-        if let Some(workspace) = app.state.sessions.workspaces.get(workspace_index) {
-            (
-                workspace.path.clone(),
-                workspace.name.clone(),
-                workspace.shell_session.as_ref().map(|s| s.tmux_session_name.clone()),
-            )
-        } else {
-            app.state.add_error_notification("Workspace not found".to_string());
-            app.state.shell.ui_needs_refresh = true;
-            return Ok(());
-        }
-    };
-
-    // Determine tmux session name - use existing or create new
-    let (tmux_name, is_new_shell) = if let Some(existing) = existing_shell {
-        (existing, false)
-    } else {
-        let shell = ShellSession::new_workspace_shell(workspace_path.clone(), &workspace_name);
-        let name = shell.tmux_session_name.clone();
-        // Store the new shell in workspace
-        if let Some(workspace) = app.state.sessions.workspaces.get_mut(workspace_index) {
-            workspace.set_shell_session(shell);
-        }
-        (name, true)
-    };
-
-    // Use atomic session creation: -A flag attaches if exists, creates if not
-    // This eliminates the TOCTOU race condition
-    let workspace_path_str = workspace_path.to_str().unwrap_or(".");
+    // Atomic create-or-reuse: -A attaches if the session exists, creates it
+    // otherwise, so there is no check-then-create race.
     let create_result = Command::new("tmux")
         .arg("new-session")
-        .arg("-A") // Atomic: attach if exists, create if not
-        .arg("-d") // Detached (we'll attach separately for TUI handling)
+        .arg("-A")
+        .arg("-d") // Detached; the attach below handles the TUI.
         .arg("-s")
-        .arg(&tmux_name)
+        .arg(tmux_name)
         .arg("-c")
-        .arg(workspace_path_str)
+        .arg(workspace_path.to_str().unwrap_or("."))
         .output()
         .await;
 
-    match create_result {
-        Ok(output) if output.status.success() => {
-            // Configure clipboard for the tmux session
-            if let Err(e) = crate::tmux::configure_clipboard(&tmux_name).await {
-                warn!("[ACTION] Failed to configure clipboard: {}", e);
-            }
-
-            if is_new_shell {
-                info!("[ACTION] Created new workspace shell: {}", tmux_name);
-                app.state.add_success_notification(format!(
-                    "$ Created workspace shell: {}",
-                    workspace_name
-                ));
-            } else {
-                info!("[ACTION] Reusing workspace shell: {}", tmux_name);
-            }
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("[ACTION] Failed to create/attach tmux session: {}", stderr);
-            app.state.add_error_notification(format!("Failed to create shell: {}", stderr));
-            app.state.shell.ui_needs_refresh = true;
-            return Ok(());
-        }
-        Err(e) => {
-            error!("[ACTION] Failed to create tmux session: {}", e);
-            app.state.add_error_notification(format!("Failed to create shell: {}", e));
-            app.state.shell.ui_needs_refresh = true;
-            return Ok(());
-        }
+    let failed = match create_result {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(error) = failed {
+        error!("[ACTION] Failed to create/attach tmux session: {}", error);
+        return Ok(vec![reports::shell_prepared(
+            &workspace_path,
+            &ShellOutcome::Failed(error),
+        )]);
+    }
+    if let Err(e) = crate::tmux::configure_clipboard(tmux_name).await {
+        warn!("[ACTION] Failed to configure clipboard: {}", e);
     }
 
-    // If target_dir specified, cd to it before attaching
-    if let Some(ref dir) = target_dir {
-        let dir_str = dir.to_str().unwrap_or(".");
-        info!("[ACTION] Sending cd command to shell: {}", dir_str);
-
-        // Use proper shell escaping to prevent command injection
-        // This handles paths with spaces, quotes, and special characters
-        let escaped_path = escape(Cow::Borrowed(dir_str));
-        let cd_cmd = format!("cd {} && clear", escaped_path);
-
-        // `=` makes tmux match the session name exactly, never a prefix of
-        // another session's name.
-        let exact_target = format!("={tmux_name}:");
-        let cd_result = Command::new("tmux")
-            .args(["send-keys", "-t", &exact_target, &cd_cmd, "Enter"])
-            .output()
-            .await;
-
-        match cd_result {
-            Ok(output) if output.status.success() => {
-                // Update stored working_dir for state consistency
-                if let Some(workspace) = app.state.sessions.workspaces.get_mut(workspace_index) {
-                    if let Some(shell) = workspace.get_shell_session_mut() {
-                        shell.set_working_dir(dir.clone());
-                    }
+    let cd = match target_dir {
+        None => ShellCd::Stayed,
+        Some(dir) => {
+            let dir_str = dir.to_str().unwrap_or(".");
+            info!("[ACTION] Sending cd command to shell: {}", dir_str);
+            // Escaped, so a path with spaces, quotes or shell syntax is one
+            // argument to cd and never a second command.
+            let cd_cmd = format!("cd {} && clear", escape(Cow::Borrowed(dir_str)));
+            // `=` makes tmux match the session name exactly, never a prefix
+            // of another session's name.
+            let exact_target = format!("={tmux_name}:");
+            match Command::new("tmux")
+                .args(["send-keys", "-t", &exact_target, &cd_cmd, "Enter"])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() => ShellCd::Moved(dir),
+                Ok(output) => {
+                    warn!(
+                        "[ACTION] tmux send-keys may have failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    ShellCd::MaybeFailed(dir)
+                }
+                Err(e) => {
+                    error!("[ACTION] tmux send-keys error: {}", e);
+                    ShellCd::Failed(e.to_string())
                 }
             }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("[ACTION] tmux send-keys may have failed: {}", stderr);
-                app.state
-                    .add_warning_notification(format!("May have failed to cd to: {}", dir_str));
-            }
-            Err(e) => {
-                error!("[ACTION] tmux send-keys error: {}", e);
-                app.state.add_error_notification(format!("Shell command error: {}", e));
-            }
         }
-    }
+    };
+    let prepared = reports::shell_prepared(
+        &workspace_path,
+        &ShellOutcome::Ready {
+            created: new_shell,
+            cd,
+        },
+    );
 
-    // Update shell's last accessed time
-    if let Some(workspace) = app.state.sessions.workspaces.get_mut(workspace_index) {
-        if let Some(shell) = workspace.get_shell_session_mut() {
-            shell.touch();
-        }
-    }
-
-    // Attach to the shell
-    let mut attach_handler = AttachHandler::new_from_terminal(terminal)?;
-    match attach_handler.attach_to_session(&tmux_name).await {
-        Ok(()) => {
-            info!("[ACTION] Successfully attached to workspace shell");
-        }
-        Err(e) => {
-            error!("[ACTION] Failed to attach to shell: {}", e);
-            app.state.add_error_notification(format!("Failed to attach: {}", e));
-        }
-    }
-
-    app.state.shell.ui_needs_refresh = true;
-    Ok(())
+    let outcome = attach_named(terminal, tmux_name).await?;
+    Ok(vec![
+        prepared,
+        reports::attach_finished(&AttachedTo::WorkspaceShell(workspace_path), &outcome),
+    ])
 }
 
-fn open_editor(app: &mut App, path: &std::path::Path) {
+/// Shell one `ainb daemon <kind> <action>` and capture everything it said.
+///
+/// Runs on a worker thread. The captured argv, exit status, and output are
+/// what the row's error view shows verbatim: the operator sees the actual
+/// failure, not our summary of it.
+fn run_daemon_action(kind_id: &str, verb: &str) -> reports::DaemonActionReport {
+    let argv = format!("ainb daemon {kind_id} {verb}");
+    // Never self-exec a test harness: under `cargo test` current_exe() is the
+    // test binary, and libtest treats the trailing argv as name filters, so
+    // this would re-run the suite instead of running a subcommand. See
+    // `crate::self_exec_guard` and issue #715.
+    if crate::self_exec_guard::running_under_cargo_test() {
+        return reports::DaemonActionReport {
+            daemon: kind_id.to_string(),
+            verb: verb.to_string(),
+            generation: 0,
+            ok: false,
+            summary: format!("{verb} unavailable"),
+            detail: format!(
+                "cmd: {argv}\nrefusing to self-exec a cargo test binary \
+                 (current_exe is a test harness, not `ainb`)"
+            ),
+            local: None,
+        };
+    }
+    let bin = match std::env::current_exe() {
+        Ok(bin) => bin,
+        Err(e) => {
+            return reports::DaemonActionReport {
+                daemon: kind_id.to_string(),
+                verb: verb.to_string(),
+                generation: 0,
+                ok: false,
+                summary: format!("{verb} failed"),
+                detail: format!("cmd: {argv}\ncould not resolve the running ainb binary: {e}"),
+                local: None,
+            };
+        }
+    };
+    match std::process::Command::new(bin).args(["daemon", kind_id, verb]).output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let ok = out.status.success();
+            // The LAST non-empty line, not the first: it was named `first_line`
+            // for long enough that a CLI ending its output with a help block
+            // badged the row with the help's closing line. Every verb reachable
+            // from this menu therefore has to end its stdout with the sentence
+            // worth badging; `fleet atc mode --set` prints its notes first for
+            // exactly this reason.
+            let badge_line = |s: &str| {
+                s.lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let summary = if ok {
+                let line = badge_line(&stdout);
+                if line.is_empty() {
+                    format!("{verb} ok")
+                } else {
+                    line
+                }
+            } else {
+                format!("{verb} failed")
+            };
+            reports::DaemonActionReport {
+                daemon: kind_id.to_string(),
+                verb: verb.to_string(),
+                generation: 0,
+                ok,
+                summary,
+                detail: format!(
+                    "cmd: {argv}\nexit: {}\n\nstdout:\n{}\n\nstderr:\n{}",
+                    out.status,
+                    if stdout.is_empty() { "(none)" } else { &stdout },
+                    if stderr.is_empty() { "(none)" } else { &stderr },
+                ),
+                local: None,
+            }
+        }
+        Err(e) => reports::DaemonActionReport {
+            daemon: kind_id.to_string(),
+            verb: verb.to_string(),
+            generation: 0,
+            ok: false,
+            summary: format!("{verb} failed"),
+            detail: format!("cmd: {argv}\ncould not run it: {e}"),
+            local: None,
+        },
+    }
+}
+
+fn open_editor(state: &AppState, path: &std::path::Path) -> Intent {
     info!("[EFFECT] Opening in editor: {:?}", path);
-    let Some(editor) = resolve_editor(&app.state.config.app_config) else {
+    let Some(editor) = resolve_editor(&state.config.app_config) else {
         warn!("No editor found in fallback chain");
-        app.state.add_error_notification(
-            "❌ No editor found. Set preferred editor in settings or install VS Code.".to_string(),
-        );
-        return;
+        return reports::editor_finished(&EditorOutcome::NoneFound);
     };
     info!("Opening {} in {}", path.display(), editor);
     // `--` ends option parsing, so a path that starts with `-` is opened, not
     // read as an editor flag.
-    match std::process::Command::new(&editor).arg("--").arg(path).spawn() {
-        Ok(_) => app.state.add_success_notification(format!("📝 Opened in {}", editor)),
+    let outcome = match std::process::Command::new(&editor).arg("--").arg(path).spawn() {
+        Ok(_) => EditorOutcome::Opened(editor),
         Err(e) => {
             error!("Failed to open editor: {}", e);
-            app.state.add_error_notification(format!("❌ Failed to open editor: {}", e));
+            EditorOutcome::Failed(e.to_string())
         }
-    }
+    };
+    reports::editor_finished(&outcome)
 }
 
 /// The editor to run: the configured preference, then `code`, then `$EDITOR`,
@@ -736,26 +667,6 @@ fn command_exists(cmd: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-/// A tmux attach failure, naming the target and the two causes that produce it.
-///
-/// `Failed to attach: tmux attach-session failed with exit code: Some(1)` named
-/// neither the session nor anything the operator could act on. It is not
-/// laziness on the error's part: tmux prints its real reason to the terminal
-/// the TUI is about to repaint over, so an exit code is genuinely all that
-/// survives the round trip. What the caller knows and never said is the target
-/// and the two things that actually produce a bare exit 1 here.
-///
-/// Room for this is what `[ui] notice_error_secs` and `Ctrl+X` bought: at five
-/// seconds and one clipped line, a sentence like this would have been worse
-/// than the stub.
-fn attach_failure_notice(session_name: &str, error: &impl std::fmt::Display) -> String {
-    format!(
-        "Failed to attach to '{session_name}': {error}. Either the session ended after \
-         the list was drawn — press f to refresh — or it is the tmux session ainb is \
-         itself running in, which tmux refuses to nest."
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -800,24 +711,50 @@ fn is_explicitly_missing_tmux_target(stderr: &str) -> bool {
 }
 
 #[cfg(test)]
-mod attach_failure_notice_tests {
-    use super::{attach_failure_notice, is_explicitly_missing_tmux_target};
+mod daemon_action_tests {
+    use super::{spawn_daemon_action, take_deferred_reports};
+    use crate::app::{CommandId, Intent};
 
-    /// The three things the old one-liner never said.
+    /// The verb runs on a worker, and its report reaches the run loop's queue
+    /// once it exits. Under `cargo test` the runner refuses to self-exec, which
+    /// is itself the reported failure.
     #[test]
-    fn the_notice_names_the_target_the_error_and_what_to_do() {
-        let notice = attach_failure_notice(
-            "tmux_myrepo_main",
-            &"tmux attach-session failed with exit code: Some(1)",
+    fn a_daemon_verb_reports_through_the_deferred_queue() {
+        spawn_daemon_action(
+            crate::fleet::daemons::probe::DaemonKind::McpPool,
+            crate::cli::daemon::Action::Stop,
+            7,
         );
-        assert!(notice.contains("tmux_myrepo_main"), "the target: {notice}");
-        assert!(notice.contains("exit code: Some(1)"), "the error: {notice}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut reports = Vec::new();
+        while reports.is_empty() && std::time::Instant::now() < deadline {
+            reports = take_deferred_reports();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let [Intent::Command(id, args)] = reports.as_slice() else {
+            panic!("expected one report, got {reports:?}");
+        };
+        assert_eq!(
+            id,
+            &CommandId::new(crate::app::reports::ids::DAEMON_ACTION_FINISHED)
+        );
+        assert_eq!(args["report"]["daemon"], "mcp-pool");
+        assert_eq!(args["report"]["verb"], "stop");
+        assert_eq!(
+            args["report"]["generation"], 7,
+            "the report answers its request"
+        );
+        assert_eq!(args["report"]["ok"], false);
         assert!(
-            notice.contains("press f to refresh"),
-            "the remedy: {notice}"
+            take_deferred_reports().is_empty(),
+            "a report is handed over once"
         );
-        assert!(notice.contains("nest"), "the other cause: {notice}");
     }
+}
+
+#[cfg(test)]
+mod tmux_presence_tests {
+    use super::is_explicitly_missing_tmux_target;
 
     #[test]
     fn only_definitive_tmux_diagnostics_mean_target_missing() {

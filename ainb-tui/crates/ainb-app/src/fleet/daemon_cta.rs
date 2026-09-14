@@ -7,14 +7,12 @@
 // a key that starts a second daemon while the first is merely slow is a worse
 // surface than the error it replaced.
 //
-// It owns no lifecycle of its own. The start is the SAME `ainb daemon
-// hangar-daemon start` the Daemons screen shells, through the same function, so
-// the two cannot drift in what they run or in what they report having run.
+// It owns no lifecycle of its own. The start is the SAME
+// `Effect::RunDaemonAction` the Daemons screen queues, run and reported by the
+// same host code, so the two cannot drift in what they run or in what they
+// report having run.
 
-use std::sync::{Arc, Mutex};
-
-use crate::cli::daemon::Action;
-use crate::components::daemons::{ActionOutcome, run_daemon_action};
+use crate::components::daemons::ActionOutcome;
 
 /// The stable id of the daemon this offer starts, as `ainb daemon <id>` spells
 /// it.
@@ -22,6 +20,7 @@ use crate::components::daemons::{ActionOutcome, run_daemon_action};
 /// Read off [`crate::fleet::daemons::probe::DaemonKind`] rather than written
 /// out, so a rename of the CLI verb cannot leave this offer shelling a name
 /// that no longer resolves.
+#[cfg(test)]
 fn hangar_daemon_id() -> &'static str {
     crate::fleet::daemons::probe::DaemonKind::HangarDaemon.id()
 }
@@ -47,7 +46,7 @@ pub enum CtaStatus {
     },
 }
 
-/// The offer's state and its in-flight start.
+/// The offer's state.
 #[derive(Debug, Default)]
 pub struct DaemonStartCta {
     status: CtaStatus,
@@ -58,7 +57,8 @@ pub struct DaemonStartCta {
     /// the pane reopens on the next outage still showing the tick from the
     /// last one.
     last_seen_down: Option<bool>,
-    inbox: Arc<Mutex<Option<ActionOutcome>>>,
+    /// The generation of the start that is out, so only its report ends it.
+    generation: Option<u64>,
 }
 
 impl DaemonStartCta {
@@ -68,24 +68,22 @@ impl DaemonStartCta {
         &self.status
     }
 
-    /// Fold a finished start in.
+    /// Fold in the host's report of a finished start.
     ///
     /// Returns `true` when anything changed, so the caller marks the frame
-    /// dirty without diffing the pane.
-    pub fn tick(&mut self) -> bool {
-        let landed = self.inbox.lock().map_or_else(
-            |poisoned| poisoned.into_inner().take(),
-            |mut inbox| inbox.take(),
-        );
-        let Some(outcome) = landed else {
+    /// dirty without diffing the pane. A report with no start out (the
+    /// Daemons screen's own start of the same daemon) changes nothing.
+    pub fn finish(&mut self, generation: u64, outcome: &ActionOutcome) -> bool {
+        if self.status != CtaStatus::Starting || self.generation != Some(generation) {
             return false;
-        };
+        }
+        self.generation = None;
         // The LAST non-empty line of everything the command said, which is the
         // same line the Daemons screen badges a row with. The full transcript
         // is in that screen's error view; repeating it inside a chat pane would
         // bury the conversation under a daemon log.
         let detail = if outcome.ok {
-            outcome.summary
+            outcome.summary.clone()
         } else {
             outcome
                 .detail
@@ -135,40 +133,27 @@ impl DaemonStartCta {
         false
     }
 
-    /// Start the hangar daemon on a detached worker.
+    /// Ask for the hangar daemon's start.
     ///
-    /// A no-op while one is already out, so key-repeat cannot spawn a second
-    /// start into a home the first one is mid-way through taking.
-    ///
-    /// Every exit path publishes SOMETHING, including a worker that could not
-    /// be spawned: an offer that swallowed its own failure would leave the pane
-    /// on `starting…` forever, which is the never-resolving spinner this whole
-    /// surface exists to remove.
-    pub fn start(&mut self) {
+    /// Returns `true` when the caller should queue it: `false` while one is
+    /// already out, so key-repeat cannot spawn a second start into a home the
+    /// first one is mid-way through taking. The host reports every start it
+    /// runs, including one that could not be spawned, so the pane never stays
+    /// on `starting…`.
+    pub fn start(&mut self, generation: u64) -> bool {
         if self.status == CtaStatus::Starting {
-            return;
+            return false;
         }
         self.status = CtaStatus::Starting;
-        let inbox = Arc::clone(&self.inbox);
-        let publish_inbox = Arc::clone(&inbox);
-        let spawned = std::thread::Builder::new().name("ainb-daemon-cta".into()).spawn(move || {
-            let outcome = run_daemon_action(hangar_daemon_id(), Action::Start.id(), Action::Start);
-            if let Ok(mut cell) = publish_inbox.lock() {
-                *cell = Some(outcome);
-            }
-        });
-        if let Err(error) = spawned {
-            self.status = CtaStatus::Reported {
-                ok: false,
-                detail: format!("the start worker did not start: {error}"),
-            };
-        }
+        self.generation = Some(generation);
+        true
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::daemon::Action;
 
     fn outcome(ok: bool, summary: &str, detail: &str) -> ActionOutcome {
         ActionOutcome {
@@ -179,13 +164,23 @@ mod tests {
         }
     }
 
-    /// An offer with nothing landed advertises the key and says nothing else.
+    /// An offer with no start out advertises the key, and a report of a start
+    /// it did not ask for changes nothing.
     #[test]
-    fn a_fresh_offer_is_offered_and_a_tick_over_an_empty_inbox_changes_nothing() {
+    fn a_fresh_offer_is_offered_and_ignores_a_start_it_did_not_ask_for() {
         let mut cta = DaemonStartCta::default();
         assert_eq!(cta.status(), &CtaStatus::Offered);
-        assert!(!cta.tick(), "an empty inbox must not dirty the frame");
+        assert!(
+            !cta.finish(1, &outcome(true, "started", "cmd: …")),
+            "a report nobody here asked for must not dirty the frame"
+        );
         assert_eq!(cta.status(), &CtaStatus::Offered);
+        assert!(cta.start(1), "the first press queues the start");
+        assert!(!cta.start(2), "a second press while it is out does not");
+        assert!(
+            !cta.finish(2, &outcome(true, "started", "cmd: …")),
+            "a report for a start it did not queue does not end the one that is out"
+        );
     }
 
     /// A start that failed reports the command's OWN closing line. A start that
@@ -194,13 +189,13 @@ mod tests {
     #[test]
     fn a_landed_start_reports_what_the_command_said() {
         let mut cta = DaemonStartCta::default();
-        *cta.inbox.lock().unwrap() = Some(outcome(
+        cta.start(1);
+        assert!(cta.finish(1, &outcome(
             false,
             "start failed",
             "cmd: ainb daemon hangar-daemon start\nexit: exit status: 1\n\nstderr:\nrefusing to \
              self-exec a cargo test binary",
-        ));
-        assert!(cta.tick());
+        )));
         assert_eq!(
             cta.status(),
             &CtaStatus::Reported {
@@ -211,8 +206,8 @@ mod tests {
         );
 
         let mut cta = DaemonStartCta::default();
-        *cta.inbox.lock().unwrap() = Some(outcome(true, "already running (pid 4242)", "cmd: …"));
-        assert!(cta.tick());
+        cta.start(1);
+        assert!(cta.finish(1, &outcome(true, "already running (pid 4242)", "cmd: …")));
         assert_eq!(
             cta.status(),
             &CtaStatus::Reported {
@@ -236,8 +231,8 @@ mod tests {
             !cta.observe_daemon(true),
             "the first look reports no change"
         );
-        *cta.inbox.lock().unwrap() = Some(outcome(true, "already running (pid 4242)", "cmd: …"));
-        cta.tick();
+        cta.start(1);
+        cta.finish(1, &outcome(true, "already running (pid 4242)", "cmd: …"));
         assert!(matches!(cta.status(), CtaStatus::Reported { ok: true, .. }));
 
         // The daemon comes up, then goes down again: the pane reopens on a

@@ -178,7 +178,7 @@ Decisions:
 - **Pointer intents.** `Mouse(Pos, Btn)` goes to `RendererHost::pointer`, because only the renderer knows what it drew where. The wheel is not an intent: scroll position belongs to the renderer. Drags, hovers and the log-history and code-review click paths stay in the TUI's mouse loop.
 - **Surface width.** The only width reads left in `ainb-app` were the Skill Manager `[`/`]` clamps. They are now `UiAction` rows resolved on the host path, and the generated shortcut docs are unchanged. On screen open, only the minimum width is applied; the renderer already clamps the maximum at draw, and a step clamps the current width before moving. The log separator is baked into log entries that every attached surface shares, so it is laid out to a fixed 80 columns, the fallback it used before a host published a width.
 - **No `Serialize` on state in P1c.** A first cut derived `Serialize` on `AppState` and its sections, with `typescript-bindings` on the contract types. A security review found 47 credential-bearing or private fields reachable from that derive. Examples: bot tokens in `FleetConfig.bridge`, `env` maps, tmux scrollback in `Session.preview_content`, and typed key buffers. Both commits were dropped. The mirror phase adds serialisation behind a redaction layer, tracked in #983. Only the intent wire types (`Intent`, `Chord`, `CommandId`, `Pos`, `Btn`) derive serde.
-- **Unbound commands.** A palette must list commands that have no key. `Binding.chord` is `Option<Chord>`, and `Keymap::new` indexes only bound rows. Every built-in row stays bound, so `keyboard-shortcuts.md` does not change. `ainb keymap list` prints `unbound` in Markdown and `null` in JSON.
+- **Unbound commands.** A palette must list commands that have no key. `Binding.chord` is `Option<Chord>`, and `Keymap::new` indexes only bound rows. Every built-in row stays bound, so `keyboard-shortcuts.md` does not change. `ainb keymap list` prints `null` for an unbound chord in JSON; since P3 the Markdown lists bound rows only, because the pointer, report and plugin action rows are unbound.
 
 ### Left for P2 to P5
 
@@ -278,9 +278,56 @@ Additions to the spec's enum, each proven by the call site it replaced: the `Ter
 |------|-------|------|
 | OSC 52 copy of the installer command | `app/events.rs`, `clipboard.rs` | P5 `Effect::Clipboard` |
 | `arboard` copies | `components/welcome_panel.rs`, `components/log_history_viewer.rs` | P5 `Effect::Clipboard` |
-| Daemon start and stop verbs, a daemons URL | `components/daemons.rs` | P3 |
+| Daemon start and stop verbs | `components/daemons.rs` | done in P3 (`Effect::RunDaemonAction`); there is no daemons URL on v2, so `OpenUrl` has no producer yet |
 | Detached tmux recreation in recovery | `components/session_recovery.rs` | P5 |
 | Home sidebar geometry, hover and resize drag in `AppState` | `components/home_screen_v2.rs`, `ainb-core/src/app/mouse.rs` gestures | P5, the same move the Sources pane made |
 | Log-history and code-review click paths, wheel scrolling of home, git view and log history | `ainb-core/src/main.rs` mouse loop | P4 (code review), P5 |
 | `Pos` is a terminal cell | `ainb_app::app::intent` | the desktop host names what it hit through pointer commands instead |
+
+## P3: hangar host, daemons, and the P2 design review
+
+Goal criteria 2 and 3a (#1002). `Notify`, `Clipboard` and `OpenUrl` still have no producer; the spec's `Effect` row now says each ships only with one and a test.
+
+### Report path
+
+A host never writes state. What its work changed comes back as a report command it dispatches like any other intent (`ainb_app::app::reports`, unbound `global.*` rows). The TUI executor takes `&AppState` and returns the reports; `main.rs::run_effects` dispatches each effect's reports before the next effect runs. Work that outlives the effect (a daemon verb) queues its report for the top of the run loop.
+
+| Effect | Report | Reducer applies |
+|--------|--------|-----------------|
+| `AttachTerminal(Session)` | `attach_finished {session, detached / failed / target_missing}` | detached mark; failure notice; a missing target stops the session and reloads rows |
+| `AttachTerminal(Tmux)` | `attach_finished {tmux, ..}` | failure notice; reloads the other tmux rows |
+| `AttachTerminal(Tool)` | `abtop_setup_finished {ok}`, `attach_finished {witr / abtop, not_installed / ..}` | install or failure notices |
+| `AttachTerminal(WorkspaceShell)` | `shell_prepared {workspace, ready {created, cd} / failed}`, `attach_finished` | working dir, created notice, cd warning or error |
+| `AttachTerminal(InPlace)` | `in_place_sized {rows, cols}` | enters the interactive pane |
+| `AttachTerminal(ClaudeLogin)` | `login_finished {auth_dir, exited_ok}` | `finish_oauth_login` |
+| `Detach` | `detached` | releases the pane |
+| `OpenEditor` | `editor_finished {opened / none_found / failed}` | notice |
+| `PasteClipboard` | `Intent::Text`, or `clipboard_failed {error}` | paste, or notice |
+| `RunDaemonAction {daemon, action}` | `daemon_action_finished {report}` | the row's outcome and the Pal start offer |
+
+Writes that preceded an attach (mark attached, release the in-place pane, create the shell record) moved into the producer. Tests: `ainb-app/tests/reports.rs` (one per outcome, with section versions), `ainb-core/tests/effect_host_reports.rs` (the executor source takes `&AppState` and posts no notice).
+
+### Plugin actions and `ui.state`
+
+| Layer | Added |
+|-------|-------|
+| protocol 0.1.1 | `plugin/handle_action {action_id, payload}`, topic `ui.state`; `wire-surface.lock` regenerated once |
+| runtime | `RuntimeHandle::send_action`, on the plugin's inbox; spawns an idle plugin |
+| SDK | `Plugin::handle_action`, dispatched inline in receive order |
+| CTS | `axis_handle_action_forwarded_and_ui_state_read_back` with the `cts-action-forward` canary |
+| host | unbound `plugin.owned.action {plugin, action_id, payload}` row through `dispatch`; `PluginsHostSection.plugin_ui_states` keeps each plugin's newest view by version |
+| hangar | `ui_view::view` (screen, issues, selection, focused card) published on change; actions `screen.go`, `issue.open`, `issue.mark_done`, `modal.close` |
+
+The bus keeps one `ui.state` value, so two plugins publishing in one tick keep the later; only hangar publishes it today.
+
+### #1002
+
+| Item | Where | Test |
+|------|-------|------|
+| 1 report path | above | `reports.rs`, `effect_host_reports.rs` |
+| 2 identity pointer intents | `SessionListRowId`, source URIs, `SidebarItem` ids | `pointer_commands.rs::a_click_captured_before_its_workspace_is_removed_selects_nothing` |
+| 3 one registry | pointer ids are unbound rows; `event_for` and the resolve fallback deleted; Markdown skips unbound rows | `pointer_commands.rs`, keymap golden |
+| 4 no drawn geometry in a section | home sidebar rect, hover and resize in `UiState`; hit-test in core; width saved by intent | `host_width.rs` home case, `home_sidebar_mouse.rs` move bumps nothing |
+| 5 statusline for a remote host | probe answer and live window copied into the Config and Fleet sections on the tick, bumped only on change | `statusline_from_sections.rs` |
+| 6 unit-free widths | `home_sidebar_fraction`, `skill_manager_sources_fraction`; one-time migration by the startup width report | `host_width.rs` 80 and 200, `reports.rs` migration |
 

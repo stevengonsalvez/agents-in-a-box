@@ -344,6 +344,20 @@ pub struct HandleMouseParams {
     pub generation: u64,
 }
 
+/// `plugin/handle_action` params (notification).
+///
+/// Host asks the plugin to run one of its own actions, named by `action_id`,
+/// with `payload` as the action's arguments. A plugin ignores an `action_id`
+/// it does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandleActionParams {
+    /// Plugin-defined action id (e.g. `board.open_card`).
+    pub action_id: String,
+    /// The action's arguments; `null` for an action that takes none.
+    #[serde(default)]
+    pub payload: serde_json::Value,
+}
+
 // =====================================================================
 // plugin/cli_dispatch
 // =====================================================================
@@ -1063,6 +1077,11 @@ mod tests {
                 mods: KEY_MOD_CTRL,
             },
             generation: 9,
+        });
+
+        rt(&HandleActionParams {
+            action_id: "board.open_card".into(),
+            payload: serde_json::json!({ "id": "card-7" }),
         });
 
         rt(&CliDispatchParams {
