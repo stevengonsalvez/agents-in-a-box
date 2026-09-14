@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::TerminalTarget;
-use ainb_app::app::reports;
+use ainb_app::app::reports::{self, AttachOutcome, AttachedTo};
 use ainb_app::app::screens::ids;
 use ainb_app::models::other_tmux::OtherTmuxSession;
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, dispatch};
@@ -19,14 +19,24 @@ use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, dispatch};
 #[derive(Default)]
 struct HeadlessHost {
     held: Option<String>,
+    /// What this host still held when it ran a full-screen attach, per attach.
+    held_during_full_screen: Vec<Option<String>>,
 }
 
 impl HeadlessHost {
-    /// Run `effects` and dispatch their reports, then close the client the
-    /// state no longer names, as the contract says a host does.
+    /// Close the client the state no longer names, as the contract says a
+    /// host does before each effect and after the last.
+    fn reconcile(&mut self, state: &AppState) {
+        if self.held.as_deref() != state.embed_session_name() {
+            self.held = None;
+        }
+    }
+
+    /// Run `effects` and dispatch their reports.
     fn run(&mut self, state: &mut AppState, keymap: &Keymap, effects: Vec<Effect>) {
         let mut queue = VecDeque::from(effects);
         while let Some(effect) = queue.pop_front() {
+            self.reconcile(state);
             let report = match effect {
                 Effect::AttachTerminal(TerminalTarget::InPlace { tmux_session, .. }) => {
                     self.held = Some(tmux_session.as_str().to_string());
@@ -36,14 +46,19 @@ impl HeadlessHost {
                     self.held = Some(tmux_session.as_str().to_string());
                     reports::observer_opened(tmux_session.as_str())
                 }
+                Effect::AttachTerminal(TerminalTarget::Tmux(tmux_session)) => {
+                    self.held_during_full_screen.push(self.held.clone());
+                    reports::attach_finished(
+                        &AttachedTo::Tmux(tmux_session.as_str().to_string()),
+                        &AttachOutcome::Detached,
+                    )
+                }
                 Effect::Detach => reports::detached(),
                 other => panic!("the preview contract does not use {other:?}"),
             };
             queue.extend(dispatch(state, keymap, &mut NoRenderer, report));
         }
-        if self.held.as_deref() != state.embed_session_name() {
-            self.held = None;
-        }
+        self.reconcile(state);
     }
 
     fn command(&mut self, state: &mut AppState, keymap: &Keymap, id: &str) {
@@ -162,4 +177,23 @@ fn the_read_only_preview_follows_the_selection_through_the_host() {
     std::thread::sleep(Duration::from_millis(300));
     tick(&mut state, &mut host);
     assert_eq!(host.held.as_deref(), Some("ainb-contract-second"));
+}
+
+#[test]
+fn a_full_screen_attach_runs_with_the_released_preview_client_closed() {
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with(&["ainb-contract-d"]);
+    let mut host = HeadlessHost::default();
+    host.command(&mut state, &keymap, "session_list.attach_interactive");
+    assert_eq!(host.held.as_deref(), Some("ainb-contract-d"));
+
+    host.command(&mut state, &keymap, "session_list.attach_tmux");
+
+    assert_eq!(
+        host.held_during_full_screen,
+        vec![None],
+        "the full-screen attach ran with the preview client already closed"
+    );
+    assert!(!state.is_interactive_pane());
 }
