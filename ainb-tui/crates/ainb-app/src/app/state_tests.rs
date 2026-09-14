@@ -114,17 +114,11 @@ mod tests {
         state.request_terminal_observer()
     }
 
-    fn observe(name: &str) -> Option<crate::app::effect::Effect> {
-        Some(crate::app::effect::Effect::AttachTerminal(
-            crate::app::effect::TerminalTarget::Observe {
-                tmux_session: crate::app::effect::TmuxSessionName::new(name).expect("valid name"),
-                show_menu_bar: AppState::new()
-                    .config
-                    .app_config
-                    .ui_preferences
-                    .show_session_menu_bar,
-            },
-        ))
+    fn observe(name: &str) -> crate::app::effect::Effect {
+        crate::app::effect::Effect::AttachTerminal(crate::app::effect::TerminalTarget::Observe {
+            tmux_session: crate::app::effect::TmuxSessionName::new(name).expect("valid name"),
+            show_menu_bar: AppState::new().config.app_config.ui_preferences.show_session_menu_bar,
+        })
     }
 
     #[test]
@@ -133,7 +127,7 @@ mod tests {
         let mut state = state_with_other_tmux_sessions(&[missing]);
         state.shell.current_screen = "session_list".to_string();
 
-        assert_eq!(settled_observer_request(&mut state), observe(missing));
+        assert_eq!(settled_observer_request(&mut state), Some(observe(missing)));
         state.adopt_terminal_observer(missing);
         state.terminal_exited(missing);
 
@@ -179,7 +173,7 @@ mod tests {
         state.tmux.observer_failed_target =
             Some((session.to_string(), std::time::Instant::now(), 2));
 
-        assert_eq!(settled_observer_request(&mut state), observe(session));
+        assert_eq!(settled_observer_request(&mut state), Some(observe(session)));
         state.adopt_terminal_observer(session);
         assert_eq!(
             state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
@@ -204,7 +198,7 @@ mod tests {
         state.tmux.observer_failed_target =
             Some((session.to_string(), std::time::Instant::now(), 2));
 
-        assert_eq!(settled_observer_request(&mut state), observe(session));
+        assert_eq!(settled_observer_request(&mut state), Some(observe(session)));
         state.adopt_terminal_observer(session);
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!state.tick_terminal_pane());
@@ -217,7 +211,7 @@ mod tests {
         let blocked = "ainb-observer-blocked";
         let mut state = state_with_other_tmux_sessions(&[active, blocked]);
         state.shell.current_screen = "session_list".to_string();
-        assert_eq!(settled_observer_request(&mut state), observe(active));
+        assert_eq!(settled_observer_request(&mut state), Some(observe(active)));
         state.adopt_terminal_observer(active);
 
         state.tmux.selected_other_tmux_index = Some(1);
