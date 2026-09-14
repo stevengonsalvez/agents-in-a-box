@@ -659,4 +659,54 @@ mod tests {
             );
         }
     }
+
+    /// No terminal geometry can panic the screen model: every size from 0x0 to
+    /// 12x12 gets a deterministic stream of wraps, scroll regions, cursor
+    /// jumps, insert/delete and wide glyphs. With a floor of 1 instead of 2,
+    /// this sweep panics inside vt100 (screen.rs:730 on vt100 0.16.2).
+    #[test]
+    fn screen_parser_never_panics_at_any_small_geometry() {
+        let pieces: [&[u8]; 24] = [
+            b"a",
+            b"wrap wrap wrap ",
+            "\u{1F98A}".as_bytes(),
+            "\u{4F60}".as_bytes(),
+            b"\r",
+            b"\n",
+            b"\t",
+            b"\x1b[1;1r",
+            b"\x1b[2;1r",
+            b"\x1b[r",
+            b"\x1b[9B",
+            b"\x1b[99;99H",
+            b"\x1bM",
+            b"\x1bD",
+            b"\x1b[2L",
+            b"\x1b[2M",
+            b"\x1b[3@",
+            b"\x1b[3P",
+            b"\x1b[?6h",
+            b"\x1b[?7l",
+            b"\x1b[S",
+            b"\x1b[T",
+            b"\x1b[?1049h",
+            b"\x1b7\x1b8",
+        ];
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for rows in 0..=12 {
+            for cols in 0..=12 {
+                let mut parser = screen_parser(rows, cols);
+                for _ in 0..200 {
+                    let index = usize::try_from(next() % pieces.len() as u64).unwrap_or(0);
+                    parser.process(pieces[index]);
+                }
+            }
+        }
+    }
 }
