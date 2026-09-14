@@ -602,8 +602,12 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 ..crate::components::daemons::Snapshot::default()
             },
         )));
-        hangar.pending_daemon_config_edits =
-            vec![("attention.poll_ms".to_string(), "500".to_string())];
+        // Not in the frame; seeded with captured text so a view that starts
+        // carrying the queue again trips the credential-shape check.
+        hangar.pending_daemon_config_edits = vec![(
+            "attention.poll_ms".to_string(),
+            seed.text("hangar.pending_daemon_config_edit", Captured),
+        )];
         state.mcp_pool.get_mut().mcp_overlay = Some(crate::app::state::McpOverlayState {
             pool_enabled: true,
             daemon_running: true,
