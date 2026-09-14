@@ -256,6 +256,10 @@ fn two_agents_in_one_directory_keep_their_own_identity() {
         has_open_request: state == AgentState::Waiting,
         pane_unbound: false,
         pane_unbound_detail: None,
+        host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID.to_string(),
+        turn_complete: false,
+        wait_kind: None,
+        attachment: ainb_hangar_proto::agent_status::Attachment::None,
     };
 
     let mut rows = vec![local_row("agent-a", CWD), local_row("agent-b", CWD)];
@@ -318,6 +322,10 @@ fn an_ambiguous_directory_leaves_the_row_unstamped() {
         has_open_request: false,
         pane_unbound: false,
         pane_unbound_detail: None,
+        host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID.to_string(),
+        turn_complete: false,
+        wait_kind: None,
+        attachment: ainb_hangar_proto::agent_status::Attachment::None,
     };
     let mut rows = vec![local_row("something-else", CWD)];
     ainb::cli::fleet::needs::stamp_rows(&mut rows, &[row("x"), row("y")]);
