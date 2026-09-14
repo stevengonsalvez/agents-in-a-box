@@ -64,6 +64,11 @@ impl std::fmt::Debug for RootSelector {
 
 type Effect = Box<dyn FnMut(&MirrorStore, &Commit) + Send>;
 
+/// The most distinct hosts one store holds. A frame from a host beyond it is
+/// ignored until [`MirrorStore::evict_host`] makes room, so a misbehaving
+/// peer set cannot grow the store without bound.
+pub const MAX_HOSTS: usize = 64;
+
 /// The renderer's copy of the subscribed sections.
 pub struct MirrorStore {
     subscription: Subscription,
@@ -165,10 +170,18 @@ impl MirrorStore {
     /// ignored. The commit swaps every staged section in at once, and only then
     /// do effects run, each seeing the fully committed store. A drain that
     /// changes nothing commits nothing and runs no effect.
-    pub fn apply_drain(&mut self, batches: impl IntoIterator<Item = FrameBatch>) -> Commit {
+    ///
+    /// `peer` is the host at the other end of the channel the batches came
+    /// over, as the transport identified it. A frame naming any other host is
+    /// ignored: a frame's own `host_id` is never trusted to pick the key.
+    pub fn apply_drain(
+        &mut self,
+        peer: &HostId,
+        batches: impl IntoIterator<Item = FrameBatch>,
+    ) -> Commit {
         let mut drain = Drain::default();
         for frame in batches.into_iter().flat_map(|batch| batch.frames) {
-            match self.accept(&frame, &mut drain) {
+            match self.accept(peer, &frame, &mut drain) {
                 Some(key) => {
                     drain.staged.insert(key, into_section(frame));
                 }
@@ -181,29 +194,64 @@ impl MirrorStore {
             .filter(|(host, _)| drain.restarted.contains(host))
             .cloned()
             .collect();
+        self.epochs.extend(drain.epochs);
         if drain.staged.is_empty() && dropped.is_empty() {
-            self.epochs.extend(drain.epochs);
-            return Commit {
-                changed: Vec::new(),
-                transaction: self.transactions,
-            };
+            return self.unchanged();
         }
         self.frames_applied += drain.staged.len() as u64;
-        let changed: Vec<SectionKey> = dropped
-            .iter()
-            .chain(drain.staged.keys())
-            .cloned()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let changed: BTreeSet<SectionKey> =
+            dropped.iter().chain(drain.staged.keys()).cloned().collect();
         for key in &dropped {
             self.sections.remove(key);
         }
         self.sections.extend(drain.staged);
-        self.epochs.extend(drain.epochs);
+        self.commit(changed)
+    }
+
+    /// Drop everything held from a host that went away: its channel closed or
+    /// its daemon stopped answering. Counts over hosts fall at once. A later
+    /// frame from the host starts it over.
+    pub fn evict_host(&mut self, host: &HostId) -> Commit {
+        self.epochs.remove(host);
+        let dropped: BTreeSet<SectionKey> =
+            self.sections.keys().filter(|(held, _)| held == host).cloned().collect();
+        if dropped.is_empty() {
+            return self.unchanged();
+        }
+        self.sections.retain(|(held, _), _| held != host);
+        self.commit(dropped)
+    }
+
+    /// Change what this store holds. Sections no longer subscribed are dropped
+    /// in the same transaction, from every host, so no selector keeps reading a
+    /// section the renderer stopped receiving.
+    pub fn resubscribe(&mut self, subscription: Subscription) -> Commit {
+        self.subscription = subscription;
+        let dropped: BTreeSet<SectionKey> = self
+            .sections
+            .keys()
+            .filter(|(_, id)| !subscription.contains(*id))
+            .cloned()
+            .collect();
+        if dropped.is_empty() {
+            return self.unchanged();
+        }
+        self.sections.retain(|(_, id), _| subscription.contains(*id));
+        self.commit(dropped)
+    }
+
+    const fn unchanged(&self) -> Commit {
+        Commit {
+            changed: Vec::new(),
+            transaction: self.transactions,
+        }
+    }
+
+    /// Count one transaction and run every effect on the committed store.
+    fn commit(&mut self, changed: BTreeSet<SectionKey>) -> Commit {
         self.transactions += 1;
         let commit = Commit {
-            changed,
+            changed: changed.into_iter().collect(),
             transaction: self.transactions,
         };
         let mut effects = std::mem::take(&mut self.effects);
@@ -215,12 +263,19 @@ impl MirrorStore {
         commit
     }
 
-    fn accept(&self, frame: &Frame, drain: &mut Drain) -> Option<SectionKey> {
+    fn accept(&self, peer: &HostId, frame: &Frame, drain: &mut Drain) -> Option<SectionKey> {
         let id = frame.section_id()?;
-        if !self.subscription.contains(id) {
+        if !self.subscription.contains(id) || frame.host_id != *peer {
             return None;
         }
-        let host = &frame.host_id;
+        let host = peer;
+        let known = self.epochs.contains_key(host) || drain.epochs.contains_key(host);
+        if !known {
+            let hosts: BTreeSet<&HostId> = self.epochs.keys().chain(drain.epochs.keys()).collect();
+            if hosts.len() >= MAX_HOSTS {
+                return None;
+            }
+        }
         match drain.epochs.get(host).or_else(|| self.epochs.get(host)) {
             Some(held) if frame.epoch < *held => return None,
             Some(held) if frame.epoch > *held => {
@@ -392,49 +447,40 @@ pub const ROOT_SELECTORS: &[RootSelector] =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    fn frame(
-        host: &str,
-        section: &str,
-        epoch: u64,
-        version: u64,
-        body: serde_json::Value,
-    ) -> Frame {
-        serde_json::from_value(serde_json::json!({
+    fn frame(host: &str, section: &str, epoch: u64, version: u64) -> Frame {
+        serde_json::from_value(json!({
             "section": section,
             "version": version,
             "epoch": epoch,
             "host_id": host,
-            "body": body,
+            "body": {"version": version},
         }))
         .expect("a frame")
     }
 
-    fn batch(frames: Vec<Frame>) -> FrameBatch {
-        FrameBatch { frames }
+    fn drain(store: &mut MirrorStore, peer: &str, frames: Vec<Frame>) -> Commit {
+        store.apply_drain(&HostId::new(peer), [FrameBatch { frames }])
     }
 
     fn held(store: &MirrorStore, host: &str, id: SectionId) -> Option<u64> {
         store.section(&HostId::new(host), id).map(|section| section.version)
     }
 
+    fn host_count(store: &MirrorStore) -> Scalar {
+        store
+            .read_selectors()
+            .into_iter()
+            .find_map(|(name, value)| (name == "host_count").then_some(value))
+            .expect("host_count selector")
+    }
+
     #[test]
     fn an_older_frame_replayed_in_the_same_epoch_is_ignored() {
         let mut store = MirrorStore::new(Subscription::all());
-        store.apply_drain([batch(vec![frame(
-            "h",
-            "shell",
-            7,
-            5,
-            serde_json::json!({"n": 5}),
-        )])]);
-        let commit = store.apply_drain([batch(vec![frame(
-            "h",
-            "shell",
-            7,
-            3,
-            serde_json::json!({"n": 3}),
-        )])]);
+        drain(&mut store, "h", vec![frame("h", "shell", 7, 5)]);
+        let commit = drain(&mut store, "h", vec![frame("h", "shell", 7, 3)]);
         assert!(commit.changed.is_empty());
         assert_eq!(held(&store, "h", SectionId::Shell), Some(5));
         assert_eq!(store.frames_ignored(), 1);
@@ -443,19 +489,14 @@ mod tests {
     #[test]
     fn a_lower_version_after_an_epoch_bump_is_applied_and_drops_the_old_process() {
         let mut store = MirrorStore::new(Subscription::all());
-        store.apply_drain([batch(vec![
-            frame("h", "shell", 7, 5, serde_json::json!({"n": 5})),
-            frame("h", "config", 7, 9, serde_json::json!({})),
-            frame("other", "shell", 1, 4, serde_json::json!({})),
-        ])]);
-
-        let commit = store.apply_drain([batch(vec![frame(
+        drain(
+            &mut store,
             "h",
-            "shell",
-            8,
-            1,
-            serde_json::json!({"n": 1}),
-        )])]);
+            vec![frame("h", "shell", 7, 5), frame("h", "config", 7, 9)],
+        );
+        drain(&mut store, "other", vec![frame("other", "shell", 1, 4)]);
+
+        let commit = drain(&mut store, "h", vec![frame("h", "shell", 8, 1)]);
 
         assert_eq!(held(&store, "h", SectionId::Shell), Some(1));
         assert_eq!(
@@ -471,16 +512,82 @@ mod tests {
         assert_eq!(store.epoch(&HostId::new("h")), Some(8));
         assert!(commit.changed.contains(&(HostId::new("h"), SectionId::Config)));
 
-        let stale = store.apply_drain([batch(vec![frame(
-            "h",
-            "shell",
-            7,
-            6,
-            serde_json::json!({}),
-        )])]);
+        let stale = drain(&mut store, "h", vec![frame("h", "shell", 7, 6)]);
         assert!(
             stale.changed.is_empty(),
             "a frame from the dead process is ignored"
+        );
+    }
+
+    #[test]
+    fn a_frame_naming_a_host_other_than_the_channel_peer_is_ignored() {
+        let mut store = MirrorStore::new(Subscription::all());
+        let commit = drain(&mut store, "h", vec![frame("impostor", "shell", 1, 1)]);
+        assert!(commit.changed.is_empty());
+        assert!(store.section(&HostId::new("impostor"), SectionId::Shell).is_none());
+        assert_eq!(store.frames_ignored(), 1);
+    }
+
+    #[test]
+    fn evicting_a_vanished_host_drops_its_sections_and_its_count() {
+        let mut store = MirrorStore::new(Subscription::all());
+        drain(&mut store, "a", vec![frame("a", "shell", 1, 1)]);
+        drain(
+            &mut store,
+            "b",
+            vec![frame("b", "shell", 1, 1), frame("b", "config", 1, 1)],
+        );
+        assert_eq!(host_count(&store), Scalar::Count(2));
+
+        let commit = store.evict_host(&HostId::new("b"));
+
+        assert_eq!(commit.changed.len(), 2);
+        assert_eq!(host_count(&store), Scalar::Count(1));
+        assert!(store.section(&HostId::new("b"), SectionId::Shell).is_none());
+        assert_eq!(store.epoch(&HostId::new("b")), None);
+        assert!(
+            store.evict_host(&HostId::new("b")).changed.is_empty(),
+            "nothing left to drop"
+        );
+    }
+
+    #[test]
+    fn resubscribing_drops_the_sections_no_longer_subscribed() {
+        let mut store = MirrorStore::new(Subscription::all());
+        drain(
+            &mut store,
+            "h",
+            vec![frame("h", "shell", 1, 1), frame("h", "config", 1, 1)],
+        );
+
+        let commit = store.resubscribe(Subscription::only(&[SectionId::Shell]));
+
+        assert_eq!(commit.changed, vec![(HostId::new("h"), SectionId::Config)]);
+        assert!(store.section(&HostId::new("h"), SectionId::Config).is_none());
+        assert_eq!(held(&store, "h", SectionId::Shell), Some(1));
+        let later = drain(&mut store, "h", vec![frame("h", "config", 1, 2)]);
+        assert!(
+            later.changed.is_empty(),
+            "an unsubscribed section stays out"
+        );
+    }
+
+    #[test]
+    fn a_host_beyond_the_cap_is_ignored_until_one_is_evicted() {
+        let mut store = MirrorStore::new(Subscription::all());
+        for index in 0..MAX_HOSTS {
+            let host = format!("h{index}");
+            drain(&mut store, &host, vec![frame(&host, "shell", 1, 1)]);
+        }
+        let refused = drain(&mut store, "late", vec![frame("late", "shell", 1, 1)]);
+        assert!(refused.changed.is_empty());
+        assert_eq!(host_count(&store), Scalar::Count(MAX_HOSTS as u64));
+
+        store.evict_host(&HostId::new("h0"));
+        let admitted = drain(&mut store, "late", vec![frame("late", "shell", 1, 1)]);
+        assert_eq!(
+            admitted.changed,
+            vec![(HostId::new("late"), SectionId::Shell)]
         );
     }
 }
