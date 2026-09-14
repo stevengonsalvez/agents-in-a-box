@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// What kind of row this is in the unified picker. Drives the leading marker
 /// (`★` favorite, `⌚` recent, `📁` local) and the sort precedence
 /// (favorites → recents → locals).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// User-pinned favorite, sourced from `favorites.yaml`.
     Favorite,
@@ -34,7 +34,7 @@ impl RowKind {
 /// A single row in the picker list. `id` is the stable identity used by
 /// persistence (`SessionDefaults.last_repo`) — for favorites it's the alias,
 /// for locals it's the filesystem path stringified.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct PickRepoRow {
     pub id: String,
     pub label: String,
@@ -45,7 +45,7 @@ pub struct PickRepoRow {
 /// Inline clone progress shown on the highlighted row when a remote clone is
 /// in flight. Phase 4 wires the spinner; the bytes/total fields are populated
 /// by the async clone driver in Phase 5+.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct CloneProgress {
     pub url: String,
     pub bytes_done: u64,
@@ -56,7 +56,7 @@ pub struct CloneProgress {
 /// GitHub auth pre-check status shown inline on the picker when a remote
 /// URL requires authentication. The dispatcher runs `gh auth status` before
 /// advancing to Configure for HTTPS/GitHub sources.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum GitAuthStatus {
     /// Async check in flight.
     Checking,
@@ -92,10 +92,14 @@ pub enum PickRepoOutcome {
 
 /// Persistent state for the picker. Constructed once per new-session
 /// invocation. Owned by `NewSessionState.pick_repo_state`.
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct PickRepoState {
     /// Current filter text (also doubles as smart-parse input on Enter when
     /// no row matches).
+    #[serde(
+        rename = "filter_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub filter: String,
     /// All rows in display order (favorites → recents → locals).
     pub rows: Vec<PickRepoRow>,
@@ -113,10 +117,13 @@ pub struct PickRepoState {
     /// Exact, verbatim output of the failed `gh auth status` probe (stderr +
     /// stdout). Shown in the `NotAuthenticated` modal so the user sees the real
     /// reason instead of a generic "auth failed". `None` until a probe fails.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub git_auth_error: Option<String>,
     /// Snapshot of session-defaults — read on open, updated on `^R`.
+    #[serde(skip)]
     pub defaults: SessionDefaults,
     /// Snapshot of favorites — read on open, updated on `^F`.
+    #[serde(skip)]
     pub favorites: FavoritesStore,
 }
 
