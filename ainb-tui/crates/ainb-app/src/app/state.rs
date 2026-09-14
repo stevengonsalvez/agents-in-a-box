@@ -12809,33 +12809,20 @@ impl AppState {
         gone: impl Fn(&str) -> bool,
     ) {
         let lease = Self::PLUGIN_SCREEN_WATCH_LEASE;
-        let lapsed: Vec<String> = self
-            .plugins_host
-            .watched_plugin_screens
-            .iter()
-            .filter(|(screen, watch)| {
-                watch
-                    .requests
-                    .iter()
-                    .all(|(at, _, _)| now.saturating_duration_since(*at) > lease)
-                    || crate::app::screens::builtin::plugin_id_for_screen(screen).is_none_or(&gone)
-            })
-            .map(|(screen, _)| screen.clone())
-            .collect();
-        // Older requests inside a live watch only change the size it renders
-        // at, which no frame carries.
+        // One predicate: a watch goes when its last request has lapsed or its
+        // plugin is gone. The section moves only when something went.
         self.plugins_host.update(|host| {
-            for watch in host.watched_plugin_screens.values_mut() {
-                watch.lapse(now, lease);
-            }
-            false
+            let mut changed = false;
+            host.watched_plugin_screens.retain(|screen, watch| {
+                changed |= watch.lapse(now, lease);
+                let keep = !watch.requests.is_empty()
+                    && !crate::app::screens::builtin::plugin_id_for_screen(screen)
+                        .is_none_or(&gone);
+                changed |= !keep;
+                keep
+            });
+            changed
         });
-        if !lapsed.is_empty() {
-            let host = self.plugins_host.get_mut();
-            for screen in lapsed {
-                host.watched_plugin_screens.remove(&screen);
-            }
-        }
     }
 
     /// The size a screen another host watches renders at, when one does.
