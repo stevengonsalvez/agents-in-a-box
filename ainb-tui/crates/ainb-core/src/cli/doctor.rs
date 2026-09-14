@@ -54,6 +54,7 @@ struct PaneUnboundRow {
 // reasoning is for whoever edits this file, not for the operator running it.
 /// Health-check skills, dependencies, hooks, and daemons
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)] // independent clap switches, not a state machine
 pub struct DoctorArgs {
     /// Skip skill-source reachability checks. Runtime checks stay local.
     #[arg(long)]
@@ -67,10 +68,17 @@ pub struct DoctorArgs {
     /// Ainb release. Unknown or externally-owned processes are only reported.
     #[arg(long)]
     pub fix_daemons: bool,
+    /// Compare the mirror frame shape with the committed key-path fixture
+    /// (issue #983). Prints added and removed leaf paths; exits non-zero on drift.
+    #[arg(long)]
+    pub wire_shape: bool,
 }
 
 /// Entry point for `ainb doctor`.
 pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
+    if args.wire_shape {
+        return wire_shape(format);
+    }
     let dependencies = deps::detect(&RealEnv);
     let (hooks, hooks_error) = match ainb_plugin_notifyd::Paths::from_home() {
         Ok(paths) => {
@@ -161,6 +169,44 @@ pub async fn execute(args: DoctorArgs, format: OutputFormat) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `ainb doctor --wire-shape`: the section frames this build would send a
+/// mirror host, traced from the fully populated sample state, against the leaf
+/// key paths committed in `ainb-app/tests/fixtures/section_key_paths.txt`.
+///
+/// A new path is a new field on the wire, so it is reported as drift until the
+/// fixture is regenerated after triage; the same comparison gates CI in
+/// `ainb-app/tests/state_serde.rs`.
+fn wire_shape(format: OutputFormat) -> Result<()> {
+    let diff = ainb_app::wire::shape::diff_against_committed();
+    match format {
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "fixture": ainb_app::wire::shape::COMMITTED_KEY_PATHS_FILE,
+                "matches": diff.is_empty(),
+                "added": diff.added,
+                "removed": diff.removed,
+            }))?
+        ),
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            println!(
+                "WIRE SHAPE ({})",
+                ainb_app::wire::shape::COMMITTED_KEY_PATHS_FILE
+            );
+            print!("{diff}");
+        }
+    }
+    if diff.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "section frame shape drifted: {} added, {} removed",
+            diff.added.len(),
+            diff.removed.len()
+        ))
+    }
 }
 
 /// Read the daemon's one status read and pull out the two health facts it
