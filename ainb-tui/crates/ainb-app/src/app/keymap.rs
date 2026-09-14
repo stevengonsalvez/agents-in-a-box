@@ -922,11 +922,21 @@ pub enum KeyAction {
 }
 
 impl KeyAction {
+    /// A pointer or report row's payload parse; see
+    /// [`crate::app::pointer::with_args`].
+    fn host_command_args(
+        event: &AppEvent,
+        args: &crate::app::intent::Args,
+    ) -> Option<Option<AppEvent>> {
+        crate::app::pointer::with_args(event, args)
+            .or_else(|| crate::app::reports::with_args(event, args))
+    }
+
     fn carries_payload(&self) -> bool {
         // A pointer row carries a payload exactly when it refuses to run bare.
         if let Self::App(event) = self {
             if matches!(
-                crate::app::pointer::with_args(event, &serde_json::Value::Null),
+                Self::host_command_args(event, &serde_json::Value::Null),
                 Some(None)
             ) {
                 return true;
@@ -961,7 +971,7 @@ impl KeyAction {
         // Pointer rows parse their own structured payloads, and those that
         // carry one refuse Null.
         if let Self::App(event) = self {
-            if let Some(event) = crate::app::pointer::with_args(event, args) {
+            if let Some(event) = Self::host_command_args(event, args) {
                 return event.map(Self::App);
             }
         }
