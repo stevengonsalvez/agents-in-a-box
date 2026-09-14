@@ -1,0 +1,846 @@
+// ABOUTME: Issue #983's leak checks over the per-section mirror frames. Nothing
+// sensitive may reach `wire::section_json`, and the frame shape is locked.
+//
+// Four independent checks, each over what `section_json` actually emits:
+//   1. name deny-list   JSON keys at any depth, case-insensitive, word-aware
+//   2. type deny-list   declared Rust type of every field on the wire
+//   3. canary           a unique marker in every typed text field of the state
+//   4. tripwire         credential-shaped values anywhere in the frames
+// plus a fixture of every leaf key path, so a new field fails until triaged.
+//
+// Each allow-list entry is a field that stays on the wire on purpose, with the
+// one-line reason a security reviewer re-checks. An entry that no longer
+// matches anything fails too, so the lists cannot go stale.
+
+use ainb_app::app::SectionId;
+use ainb_app::fleet::bridge::redact::{REDACTED, find_secret};
+use ainb_app::wire::shape::{self, Seed, TextKind};
+use ainb_app::wire::{section_json, section_name};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// One scratch `HOME` for the whole binary, set once before any `AppState` is
+/// built, so neither the developer's config nor a parallel test changes a frame.
+fn isolated_home() {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let home = tempfile::tempdir().expect("scratch home");
+        std::env::set_var("HOME", home.path());
+        home
+    });
+}
+
+fn all_frames(state: &ainb_app::AppState) -> Vec<(SectionId, serde_json::Value)> {
+    SectionId::ALL.into_iter().map(|id| (id, section_json(state, id))).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Shape
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_section_has_one_object_frame() {
+    isolated_home();
+    let state = shape::sample_state(&mut shape::PlainSeed);
+    let frames = all_frames(&state);
+    assert_eq!(frames.len(), SectionId::COUNT);
+    let names: BTreeSet<_> = SectionId::ALL.into_iter().map(section_name).collect();
+    assert_eq!(names.len(), SectionId::COUNT, "section wire names collide");
+    for (id, frame) in frames {
+        assert!(frame.is_object(), "{} is not an object", section_name(id));
+    }
+}
+
+#[test]
+fn leaf_key_paths_match_the_committed_fixture() {
+    isolated_home();
+    let current = shape::key_paths(&shape::sample_state(&mut shape::PlainSeed));
+    if std::env::var_os("UPDATE_SECTION_KEY_PATHS").is_some() {
+        std::fs::write(
+            shape::COMMITTED_KEY_PATHS_FILE,
+            shape::render_key_paths(&current),
+        )
+        .expect("write key-path fixture");
+        return;
+    }
+    let diff = shape::diff(&current, &shape::committed_key_paths());
+    assert!(
+        diff.is_empty(),
+        "section frame shape changed. Triage every added path against the leak \
+         checks, then regenerate with UPDATE_SECTION_KEY_PATHS=1 \
+         (or inspect with `ainb doctor --wire-shape`):\n{diff}"
+    );
+}
+
+#[test]
+fn the_sample_shape_does_not_depend_on_what_it_is_seeded_with() {
+    isolated_home();
+    let plain = shape::key_paths(&shape::sample_state(&mut shape::PlainSeed));
+    let canary = shape::key_paths(&shape::sample_state(&mut CanarySeed::default()));
+    assert_eq!(plain, canary);
+}
+
+// ---------------------------------------------------------------------------
+// 1. Name deny-list
+// ---------------------------------------------------------------------------
+
+/// #983 section 1, plus the classic `key secret token password`.
+const DENY_WORDS: &[&str] = &[
+    "key",
+    "secret",
+    "token",
+    "password",
+    "credential",
+    "cred",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "api_key",
+    "apikey",
+    "bearer",
+    "jwt",
+    "oauth",
+    "refresh_token",
+    "access_token",
+    "id_token",
+    "client_secret",
+    "client_id",
+    "cookie",
+    "session_key",
+    "sid",
+    "private_key",
+    "privkey",
+    "pem",
+    "p12",
+    "pfx",
+    "keystore",
+    "identity_file",
+    "ssh_key",
+    "signature",
+    "hmac",
+    "salt",
+    "nonce",
+    "otp",
+    "totp",
+    "mfa",
+    "env",
+    "environment",
+    "environ",
+    "dsn",
+    "connection_string",
+    "buf",
+    "buffer",
+    "input",
+    "edit_buffer",
+    "free_text",
+    "filter",
+    "query",
+    "prompt",
+    "literal",
+    "reference",
+    "raw",
+    "value",
+    "message",
+    "messages",
+    "transcript",
+    "log",
+    "logs",
+    "output",
+    "stdout",
+    "stderr",
+    "detail",
+    "preview",
+    "preview_content",
+    "recent_logs",
+    "scrollback",
+    "capture",
+    "new_lines",
+    "diff",
+    "diff_content",
+    "markdown_content",
+    "selected_text",
+    "url",
+    "uri",
+    "endpoint",
+    "webhook",
+    "remote",
+    "host",
+    "path",
+    "dir",
+    "home",
+    "file",
+    "socket",
+    "log_dir",
+    "transcript_path",
+    "command",
+    "cmd",
+    "args",
+    "argv",
+    "clipboard",
+    "paste",
+];
+
+/// Fields whose key matches a deny word and still carry text, each with why
+/// the text is safe on the wire. Keyed by the traced `Owner.field`.
+const NAME_ALLOW: &[(&str, &str)] = &[
+    (
+        "AuthSetupState.error_message",
+        "auth error prose, scrubbed through redact::scrub",
+    ),
+    (
+        "ConfigPopupState.setting_key",
+        "the registry key being edited, e.g. `fleet.bridge.telegram.token`, a name not a value",
+    ),
+    (
+        "ConfigSetting.key",
+        "registry key of a settings row; names only",
+    ),
+    (
+        "ConfigSetting.value",
+        "row value: Text scrubbed, credential-bearing keys redacted, Secret rows emit their source",
+    ),
+    (
+        "EditorOption.command",
+        "editor CLI name from the detected list, e.g. `code`",
+    ),
+    (
+        "RepoSource::LocalPath.0",
+        "local repository path of a picker row",
+    ),
+    (
+        "ConfigTreeNode.path",
+        "settings tree node id, a dotted config path, not a filesystem path",
+    ),
+    (
+        "ConfigValue::Secret.0",
+        "carries only the source (`$VAR`, `keychain:svc`, `<literal>`) via SecretValue",
+    ),
+    (
+        "SecretValue.reference",
+        "serialised by fields::secret_source: the source kind, never a literal",
+    ),
+    (
+        "ConfigureState.prompt",
+        "Boss prompt lines, scrubbed through redact::scrub (the surface edits the prompt)",
+    ),
+    (
+        "ContainerTemplate.required_env",
+        "names of env vars a template needs, never their values",
+    ),
+    (
+        "McpServerConfig.required_env",
+        "names of env vars a server needs, never their values",
+    ),
+    (
+        "ContainerTemplateConfig.command",
+        "container command from config, e.g. `claude`; values live in the redacted env map",
+    ),
+    (
+        "ContainerTemplateConfig.working_dir",
+        "in-container working directory, e.g. `/workspace`",
+    ),
+    (
+        "McpServerDefinition.command",
+        "MCP server binary name; credentials live in the redacted env map",
+    ),
+    (
+        "McpServerDefinition.args",
+        "MCP server arguments, each scrubbed of credential shapes in frame",
+    ),
+    (
+        "DiffRow.raw",
+        "diff hunk line the review pane paints, scrubbed through redact::scrub",
+    ),
+    (
+        "GitViewState.diff_content",
+        "diff lines the git pane paints, scrubbed through redact::scrub",
+    ),
+    (
+        "GitViewState.markdown_content",
+        "rendered markdown lines, each scrubbed through redact::scrub",
+    ),
+    (
+        "GitViewState.worktree_path",
+        "the worktree the git view is open on, drawn in its title",
+    ),
+    (
+        "ReviewFile.path",
+        "repo-relative path of a changed file, the review list row",
+    ),
+    (
+        "FleetSession.session_key",
+        "stable `provider:session-id` identity, not a credential",
+    ),
+    (
+        "LogEntry.message",
+        "live log line, scrubbed in frame; metadata is omitted",
+    ),
+    (
+        "LogsView.live_logs",
+        "map of per-session live log entries whose text is scrubbed",
+    ),
+    (
+        "Notification.message",
+        "toast text, scrubbed through redact::scrub",
+    ),
+    (
+        "OnboardingState.git_directories_input",
+        "repo directories the operator lists, shown as typed; paths, not secrets",
+    ),
+    (
+        "OnboardingState.otel_otlp_endpoint",
+        "OTLP endpoint URL, scrubbed; the instance id and token are lengths only",
+    ),
+    (
+        "OrphanedWorktree.path",
+        "worktree directory the recovery screen offers to clean up",
+    ),
+    (
+        "PresetsConfig.file",
+        "path of presets.toml; its contents are not in config",
+    ),
+    (
+        "RepoSource::HttpsUrl.0",
+        "clone URL, scrubbed so userinfo becomes `<redacted>@`",
+    ),
+    (
+        "ServerStatus.socket",
+        "MCP pool socket path under ~/.agents-in-a-box/mcp/sockets, drawn in the overlay",
+    ),
+    ("Session.boss_prompt", "launched prompt, scrubbed in frame"),
+    (
+        "Session.preview_content",
+        "tmux scrollback, scrubbed in frame; the preview pane is the feature",
+    ),
+    ("Session.recent_logs", "container output, scrubbed in frame"),
+    (
+        "Session.workspace_path",
+        "session working directory, drawn in the session list",
+    ),
+    (
+        "SessionAttention.detail",
+        "agent question text, scrubbed through redact::scrub",
+    ),
+    (
+        "SessionLabelsView.session_label_rename_buffer",
+        "session label being typed; a display name, shown so the surface can edit it",
+    ),
+    (
+        "SshView.ssh_session_rename_buffer",
+        "SSH session display name being typed, shown so the surface can edit it",
+    ),
+    (
+        "TmuxView.other_tmux_rename_buffer",
+        "tmux session name being typed, shown so the surface can edit it",
+    ),
+    (
+        "ShellView.home_screen_v2_state",
+        "home screen copy (`home` in the section name), static text",
+    ),
+    (
+        "SourceRow.uri",
+        "skills source URI, scrubbed so userinfo becomes `<redacted>@`",
+    ),
+    (
+        "SshTarget.host",
+        "SSH host the session row names; identity_file is omitted",
+    ),
+    (
+        "Workspace.path",
+        "repository root the session list groups under",
+    ),
+];
+
+fn key_tokens(key: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower = false;
+    for ch in key.chars() {
+        if ch == '_' || ch == '-' || ch == '.' || ch == ' ' || ch == ':' || ch == '/' {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_lower && !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+        prev_lower = ch.is_lowercase() || ch.is_ascii_digit();
+        current.extend(ch.to_lowercase());
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
+
+fn deny_word_in(key: &str) -> Option<&'static str> {
+    let tokens = key_tokens(key);
+    let squashed: String = tokens.concat();
+    DENY_WORDS.iter().copied().find(|word| {
+        let word_tokens: Vec<&str> = word.split('_').collect();
+        squashed == word.replace('_', "")
+            || tokens
+                .windows(word_tokens.len())
+                .any(|w| w.iter().map(String::as_str).eq(word_tokens.iter().copied()))
+    })
+}
+
+/// A string that cannot carry a secret: empty, or the redaction marker.
+fn inert(value: &str) -> bool {
+    value.is_empty() || value == REDACTED
+}
+
+#[test]
+fn no_deny_listed_key_carries_text_unless_allow_listed() {
+    isolated_home();
+    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let allow: BTreeMap<_, _> = NAME_ALLOW.iter().copied().collect();
+    let mut hits: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
+    for leaf in trace.strings.iter().filter(|l| !inert(&l.value)) {
+        for segment in &leaf.keys {
+            if let Some(word) = deny_word_in(&segment.key) {
+                hits.entry(segment.owner_field.clone())
+                    .or_insert_with(|| (leaf.path.clone(), word));
+            }
+        }
+    }
+    let unlisted: Vec<String> = hits
+        .iter()
+        .filter(|(owner, _)| !allow.contains_key(owner.as_str()))
+        .map(|(owner, (path, word))| format!("{owner}  ({path}, matches `{word}`)"))
+        .collect();
+    let stale: Vec<&str> =
+        allow.keys().copied().filter(|owner| !hits.contains_key(*owner)).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "name deny-list: {} field(s) carry text under a sensitive key and are not \
+         allow-listed:\n  {}\nstale allow-list entries: {stale:?}",
+        unlisted.len(),
+        unlisted.join("\n  ")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 2. Type deny-list
+// ---------------------------------------------------------------------------
+
+/// Opaque or unbounded types (#983 section 2). Matched against the declared
+/// field type, so `Option<PathBuf>` and `HashMap<Uuid, Vec<String>>` count.
+const DENY_TYPES: &[(&str, &str)] = &[
+    ("toml::Value", "toml::value::Value"),
+    ("serde_json::Value", "serde_json::value::Value"),
+    (
+        "HashMap<String, String>",
+        "HashMap<alloc::string::String, alloc::string::String>",
+    ),
+    ("Vec<String>", "Vec<alloc::string::String>"),
+    ("Vec<LogEntry>", "live_logs_stream::LogEntry>"),
+    ("PathBuf", "std::path::PathBuf"),
+];
+
+/// Fields of a denied type that stay on the wire, each with its reason.
+const TYPE_ALLOW: &[(&str, &str)] = &[
+    (
+        "ConfigValue::Choice.0",
+        "a Choice row's fixed option labels from the registry",
+    ),
+    (
+        "ConfigureState.available_presets",
+        "preset NAMES for the picker; preset bodies stay host-side",
+    ),
+    (
+        "ConfigureState.existing_branches",
+        "local branch names for the branch picker",
+    ),
+    (
+        "ConfigureState.repo_branch_names",
+        "remote branch names for the base-branch picker",
+    ),
+    (
+        "ContainerTemplate.default_mcp_servers",
+        "MCP server names a template enables",
+    ),
+    (
+        "ContainerTemplate.required_env",
+        "env var NAMES a template needs; values are in the redacted map",
+    ),
+    (
+        "McpServerConfig.required_env",
+        "env var NAMES a server needs; values are in the redacted map",
+    ),
+    (
+        "ContainerTemplateConfig.command",
+        "container command from the operator's config",
+    ),
+    (
+        "ContainerTemplateConfig.entrypoint",
+        "container entrypoint from the operator's config",
+    ),
+    (
+        "ContainerTemplateConfig.npm_packages",
+        "package names installed in the container",
+    ),
+    (
+        "ContainerTemplateConfig.python_packages",
+        "package names installed in the container",
+    ),
+    (
+        "ContainerTemplateConfig.system_packages",
+        "package names installed in the container",
+    ),
+    (
+        "GitViewState.worktree_path",
+        "the worktree the git view is open on, drawn in its title",
+    ),
+    (
+        "LogsView.live_logs",
+        "live log entries; message scrubbed and metadata omitted in frame",
+    ),
+    (
+        "OnboardingState.skipped_dependencies",
+        "dependency names the operator skipped",
+    ),
+    (
+        "OrphanedWorktree.path",
+        "worktree directory the recovery screen offers to clean up",
+    ),
+    (
+        "PluginUiState.view",
+        "the plugin's published `ui.state` view: a documented plugin contract the host never reads into",
+    ),
+    (
+        "RepoSource::LocalPath.0",
+        "local repository path of a picker row",
+    ),
+    ("RepositoryPreset.plugins", "plugin names a preset enables"),
+    ("RepositoryPreset.skills", "skill names a preset enables"),
+    (
+        "ServerStatus.sessions",
+        "tmux session names attached to a pooled MCP server",
+    ),
+    (
+        "SessionsView.favorite_workspace_paths",
+        "starred repository roots, drawn as stars in the session list",
+    ),
+    (
+        "UiPreferences.config_tree_expanded",
+        "ids of expanded settings tree nodes",
+    ),
+    (
+        "UsageConfig.model_aliases",
+        "model-name aliases for cost rollups, e.g. `sonnet -> claude-sonnet-4-5`",
+    ),
+    (
+        "Workspace.path",
+        "repository root the session list groups under",
+    ),
+    (
+        "WorkspaceDefaults.exclude_paths",
+        "glob patterns excluded from repo scanning",
+    ),
+    (
+        "WorkspaceDefaults.workspace_scan_paths",
+        "directories scanned for repositories",
+    ),
+];
+
+#[test]
+fn no_opaque_or_unbounded_type_reaches_the_wire_unless_allow_listed() {
+    isolated_home();
+    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let allow: BTreeMap<_, _> = TYPE_ALLOW.iter().copied().collect();
+    let mut hits: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
+    for field in &trace.fields {
+        // A field under `serialize_with` is traced as serde's private wrapper,
+        // whose name embeds the OWNER type. It is not the declared type, and
+        // the field is already redacted by construction; the canary and the
+        // tripwire cover what the wrapper emits.
+        if field.rust_type.contains("__SerializeWith") {
+            continue;
+        }
+        if let Some((label, _)) =
+            DENY_TYPES.iter().find(|(_, needle)| field.rust_type.contains(needle))
+        {
+            hits.entry(field.owner_field.clone())
+                .or_insert_with(|| (field.path.clone(), label));
+        }
+    }
+    let unlisted: Vec<String> = hits
+        .iter()
+        .filter(|(owner, _)| !allow.contains_key(owner.as_str()))
+        .map(|(owner, (path, label))| format!("{owner}: {label}  ({path})"))
+        .collect();
+    let stale: Vec<&str> =
+        allow.keys().copied().filter(|owner| !hits.contains_key(*owner)).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "type deny-list: {} field(s) of an opaque or unbounded type are on the wire \
+         and not allow-listed:\n  {}\nstale allow-list entries: {stale:?}",
+        unlisted.len(),
+        unlisted.join("\n  ")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 3. Canary
+// ---------------------------------------------------------------------------
+
+/// Typed fields the frame shows on purpose, so their marker MUST appear. Every
+/// other typed label's marker must not.
+const CANARY_SHOWN: &[(&str, &str)] = &[
+    (
+        "new_session.configure.branch_edit",
+        "a branch name being typed; the surface draws the field it edits",
+    ),
+    (
+        "new_session.configure.prompt",
+        "the Boss prompt editor, scrubbed of credential shapes, not withheld",
+    ),
+    (
+        "onboarding.git_directories_input",
+        "repository directories, shown as typed",
+    ),
+    (
+        "onboarding.otel_otlp_endpoint",
+        "the OTLP endpoint URL, scrubbed; instance id and token are lengths",
+    ),
+    (
+        "session_labels.rename_buffer",
+        "a session display name being typed",
+    ),
+    (
+        "ssh.rename_buffer",
+        "an SSH session display name being typed",
+    ),
+    ("tmux.rename_buffer", "a tmux session name being typed"),
+];
+
+#[derive(Default)]
+struct CanarySeed {
+    typed: Vec<&'static str>,
+}
+
+impl CanarySeed {
+    fn marker(label: &str) -> String {
+        let id: String = label
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    'X'
+                }
+            })
+            .collect();
+        format!("CNRY{id}Q")
+    }
+}
+
+impl Seed for CanarySeed {
+    fn text(&mut self, label: &'static str, kind: TextKind) -> String {
+        match kind {
+            TextKind::Typed => {
+                self.typed.push(label);
+                Self::marker(label)
+            }
+            TextKind::Captured => format!("captured {label}"),
+        }
+    }
+}
+
+#[test]
+fn no_typed_text_reaches_the_wire() {
+    isolated_home();
+    let mut seed = CanarySeed::default();
+    let state = shape::sample_state(&mut seed);
+    let seeded: BTreeSet<_> = seed.typed.iter().copied().collect();
+    let declared: BTreeSet<_> = shape::TYPED_LABELS.iter().copied().collect();
+    assert_eq!(
+        seeded, declared,
+        "TYPED_LABELS and the sample builder disagree"
+    );
+
+    let blob: String = all_frames(&state).iter().map(|(_, frame)| frame.to_string()).collect();
+    let shown: BTreeMap<_, _> = CANARY_SHOWN.iter().copied().collect();
+    let mut leaked = Vec::new();
+    let mut missing = Vec::new();
+    for label in &declared {
+        let present = blob.contains(&CanarySeed::marker(label));
+        match (shown.contains_key(label), present) {
+            (false, true) => leaked.push(*label),
+            (true, false) => missing.push(*label),
+            _ => {}
+        }
+    }
+    let unknown: Vec<_> = shown.keys().filter(|l| !declared.contains(*l)).collect();
+    assert!(
+        leaked.is_empty() && missing.is_empty() && unknown.is_empty(),
+        "canary: typed text leaked into a frame: {leaked:?}\n\
+         shown-on-purpose fields missing from the frame (seed never reached it): {missing:?}\n\
+         CANARY_SHOWN names unknown labels: {unknown:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. Value-shaped tripwire
+// ---------------------------------------------------------------------------
+
+/// Credential-shaped samples, assembled at runtime so no literal in this file
+/// trips a secret scanner. Each captured field gets the next one.
+fn credential_samples() -> Vec<String> {
+    let run = |c: char, n: usize| c.to_string().repeat(n);
+    vec![
+        format!("sk-ant-api03-{}", run('A', 40)),
+        format!("sk-{}", run('b', 48)),
+        format!("ghp_{}", run('C', 36)),
+        format!("github_pat_{}", run('d', 82)),
+        format!("glpat-{}", run('e', 20)),
+        format!("AKIA{}", run('F', 16)),
+        format!("AIza{}", run('g', 35)),
+        format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----",
+            run('h', 64)
+        ),
+        format!("eyJ{}.eyJ{}.{}", run('i', 20), run('j', 20), run('k', 20)),
+        format!("https://x-access-token:{}@github.com/o/r.git", run('l', 16)),
+        format!("bot123456789:{}", run('m', 35)),
+        format!("xoxb-1111-2222-{}", run('n', 24)),
+    ]
+}
+
+struct TripwireSeed {
+    samples: Vec<String>,
+    next: usize,
+    captured: Vec<&'static str>,
+}
+
+impl Seed for TripwireSeed {
+    fn text(&mut self, label: &'static str, kind: TextKind) -> String {
+        match kind {
+            TextKind::Typed => format!("typed {label}"),
+            TextKind::Captured => {
+                self.captured.push(label);
+                let sample = &self.samples[self.next % self.samples.len()];
+                self.next += 1;
+                format!("{label}: export VALUE={sample} done")
+            }
+        }
+    }
+}
+
+fn find_in_frame(path: &str, value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some((shape, _)) = find_secret(s) {
+                out.push(format!("{path}: {shape}"));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                find_in_frame(&format!("{path}[]"), item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                if let Some((shape, _)) = find_secret(key) {
+                    out.push(format!("{path} key: {shape}"));
+                }
+                find_in_frame(&format!("{path}.{key}"), item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn no_credential_shaped_value_reaches_the_wire() {
+    isolated_home();
+    let mut seed = TripwireSeed {
+        samples: credential_samples(),
+        next: 0,
+        captured: Vec::new(),
+    };
+    // Every sample must be one `find_secret` recognises, or the tripwire is blind.
+    for sample in &seed.samples {
+        assert!(
+            find_secret(sample).is_some(),
+            "tripwire cannot see {sample}"
+        );
+    }
+    let state = shape::sample_state(&mut seed);
+    assert!(
+        seed.captured.len() >= seed.samples.len(),
+        "every credential shape is seeded at least once"
+    );
+    let mut found = Vec::new();
+    for (id, frame) in all_frames(&state) {
+        find_in_frame(section_name(id), &frame, &mut found);
+    }
+    assert!(
+        found.is_empty(),
+        "tripwire: {} credential-shaped value(s) in the frames:\n  {}",
+        found.len(),
+        found.join("\n  ")
+    );
+}
+
+#[test]
+fn deny_word_matching_is_word_aware() {
+    assert_eq!(deny_word_in("edit_buffer"), Some("buffer"));
+    assert_eq!(deny_word_in("apiKey"), Some("key"));
+    assert_eq!(deny_word_in("GITHUB_TOKEN"), Some("token"));
+    assert_eq!(deny_word_in("otel_otlp_endpoint"), Some("endpoint"));
+    assert_eq!(
+        deny_word_in("temperature"),
+        None,
+        "`pem` is a word, not a substring"
+    );
+    assert_eq!(
+        deny_word_in("considered"),
+        None,
+        "`sid` is a word, not a substring"
+    );
+    assert_eq!(deny_word_in("selected_index"), None);
+}
+
+// ---------------------------------------------------------------------------
+// Disk output is unchanged
+// ---------------------------------------------------------------------------
+
+/// The frame-only redaction must not reach config.toml, presets.toml or the
+/// session store: those writes go through the same `Serialize` impls, outside
+/// a frame, and have to keep the real values or a save wipes the bot tokens.
+#[test]
+fn saves_outside_a_frame_keep_what_the_frame_withholds() {
+    isolated_home();
+    let state = shape::sample_state(&mut shape::PlainSeed);
+
+    let config = toml::to_string(&state.config.app_config).expect("config serialises to TOML");
+    assert!(
+        config.contains("sample config.fleet.bridge.telegram.token"),
+        "bridge table kept"
+    );
+    assert!(
+        config.contains("sample config.mcp.env"),
+        "MCP env value kept"
+    );
+    assert!(
+        config.contains("sample config.container.env"),
+        "container env value kept"
+    );
+    assert!(
+        config.contains("sample config.mcp.json"),
+        "imported MCP blob kept"
+    );
+
+    let session = serde_json::to_string(&state.sessions.workspaces[0].sessions[0])
+        .expect("session serialises");
+    assert!(session.contains("sample session.preview_content"));
+    assert!(session.contains("id_ed25519"), "identity file kept on disk");
+
+    let frame = section_json(&state, SectionId::Config).to_string();
+    assert!(!frame.contains("sample config.fleet.bridge.telegram.token"));
+    assert!(!frame.contains("sample config.mcp.env"));
+    assert!(!frame.contains("sample config.mcp.json"));
+}
