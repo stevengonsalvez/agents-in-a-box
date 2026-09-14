@@ -8238,7 +8238,7 @@ mod slash_command_dispatch_tests {
             .unwrap_or_else(|| panic!("/{cmd} must map to a command"));
         let mut state = AppState::default();
         state.shell.current_screen = screen_ids::HOME.to_string();
-        crate::app::dispatch(&mut state, &Keymap::defaults(), &mut NoRenderer, intent);
+        let _ = crate::app::dispatch(&mut state, &Keymap::defaults(), &mut NoRenderer, intent);
         state.shell.current_screen.clone()
     }
 
