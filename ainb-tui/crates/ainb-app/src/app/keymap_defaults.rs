@@ -1339,6 +1339,15 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Run a plugin's own action by id",
         ),
+        unbound(
+            Context::Screen("plugin", super::keymap::SubContext::Named("owned")),
+            "watch_screen",
+            AppEvent::WatchPluginScreen {
+                screen: String::new(),
+                watching: false,
+            },
+            "Keep a plugin screen rendering for a host that is not showing it here",
+        ),
         // Slash-palette commands that run from any screen.
         unbound(
             Context::Global,
