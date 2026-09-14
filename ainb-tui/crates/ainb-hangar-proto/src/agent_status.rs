@@ -44,6 +44,7 @@ use crate::fleet::{
 /// [`Tier::AcpFeed`] may assert that a human is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Tier {
     /// 0: a provider lifecycle hook pushed this.
     Hook,
@@ -88,6 +89,7 @@ impl Tier {
 /// Who produced the state, in the vocabulary every surface prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Provenance {
     /// A provider lifecycle hook.
     Hook,
@@ -104,6 +106,7 @@ pub enum Provenance {
 /// cannot be explained to an operator in one word does not belong here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AgentState {
     /// The agent is running a turn.
     Working,
@@ -238,6 +241,7 @@ pub const LOCAL_HOST_ID: &str = "local";
 /// The kind of human input a waiting agent needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum WaitKind {
     /// A structured question.
     Ask,
@@ -265,6 +269,7 @@ impl WaitKind {
 /// How an operator can reach a session's terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Attachment {
     /// An exact tmux pane can be attached.
     Tmux,
