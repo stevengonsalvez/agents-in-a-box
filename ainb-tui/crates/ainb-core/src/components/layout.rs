@@ -259,7 +259,7 @@ pub fn resize_terminal_client(
 
 /// Apply the effects of a frame that only the frame could measure.
 ///
-/// The HomeScreen sidebar rect, the welcome panel's viewport
+/// The `HomeScreen` sidebar rect, the welcome panel's viewport
 /// and the log-history entry pane all come out of the layout arithmetic, so
 /// they cannot be known before the draw. Applying them is a mutation and the
 /// draw takes `&AppState`, so the draw records what it measured in [`UiState`]
