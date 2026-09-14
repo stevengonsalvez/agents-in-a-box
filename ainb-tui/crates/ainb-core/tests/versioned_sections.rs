@@ -306,6 +306,13 @@ fn every_section_moves_its_own_slot_and_only_its_own() {
             SectionId::Shell,
             Box::new(|s: &mut AppState| s.shell.should_quit = true),
         ),
+        // Section 20 moves through its reducer, the only writer it has.
+        (
+            SectionId::AgentStatus,
+            Box::new(|s: &mut AppState| {
+                s.agent_status_absent("daemon has no fleet/roster_status");
+            }),
+        ),
     ];
 
     assert_eq!(
