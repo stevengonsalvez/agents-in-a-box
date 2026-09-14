@@ -15,7 +15,7 @@
 //   buffer serialises as its length and captured text through `redact::scrub`
 //   unconditionally.
 
-use crate::fleet::bridge::redact::{REDACTED, scrub};
+use crate::fleet::bridge::redact::{REDACTED, scrub, scrub_lines as scrub_text_lines};
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 use std::cell::Cell;
@@ -91,7 +91,7 @@ pub fn scrub_vec_in_frame<S: Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     if in_frame() {
-        serializer.collect_seq(value.iter().map(|line| scrub(line)))
+        serializer.collect_seq(scrub_text_lines(value))
     } else {
         serializer.collect_seq(value)
     }
@@ -159,9 +159,31 @@ pub fn scrub_opt<S: Serializer>(value: &Option<String>, serializer: S) -> Result
     value.as_deref().map(scrub).serialize(serializer)
 }
 
-/// Captured lines in renderer-only state, each scrubbed.
+/// Captured lines in renderer-only state, scrubbed as one text so a key block
+/// spanning lines is redacted whole.
 pub fn scrub_lines<S: Serializer>(value: &[String], serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.collect_seq(value.iter().map(|line| scrub(line)))
+    serializer.collect_seq(scrub_text_lines(value))
+}
+
+/// Arbitrary JSON a plugin or daemon published: every string (keys included)
+/// scrubbed, the structure kept.
+pub fn scrub_json<S: Serializer>(
+    value: &serde_json::Value,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    fn walk(value: &serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::String(text) => serde_json::Value::String(scrub(text)),
+            serde_json::Value::Array(items) => {
+                serde_json::Value::Array(items.iter().map(walk).collect())
+            }
+            serde_json::Value::Object(map) => serde_json::Value::Object(
+                map.iter().map(|(key, item)| (scrub(key), walk(item))).collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    walk(value).serialize(serializer)
 }
 
 /// A multi-line editor's text, scrubbed line by line; the cursor stays private.
@@ -184,6 +206,20 @@ pub fn secret_source<S: Serializer>(reference: &str, serializer: S) -> Result<S:
         "<literal>"
     };
     serializer.serialize_str(shown)
+}
+
+/// Broadcast receipts with each leg's `detail` scrubbed: the daemon echoes
+/// transport errors there.
+pub fn scrub_receipts<S: Serializer>(
+    receipts: &[ainb_hangar_proto::fleet::FleetActionReceipt],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(receipts.iter().map(|receipt| {
+        ainb_hangar_proto::fleet::FleetActionReceipt {
+            detail: receipt.detail.as_deref().map(scrub),
+            ..receipt.clone()
+        }
+    }))
 }
 
 /// A poller-published cell: serialise the value it holds right now. A poisoned
