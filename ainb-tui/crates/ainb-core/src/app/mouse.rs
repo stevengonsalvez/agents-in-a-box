@@ -20,7 +20,7 @@ fn keymap_command(id: &str) -> Intent {
 
 /// Save the sessions pane layout the renderer just changed, as a fraction of
 /// the row it was drawn in.
-fn save_sessions_pane_layout(ui: &UiState) -> Intent {
+fn save_sessions_pane_layout(ui: &UiState) -> Option<Intent> {
     let row = ui
         .sessions_pane
         .last_content_width()
@@ -226,7 +226,7 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
 
     if ui.sessions_pane.is_on_toggle(x, y) {
         ui.sessions_pane.toggle_collapsed();
-        return Some(save_sessions_pane_layout(ui));
+        return save_sessions_pane_layout(ui);
     }
 
     if ui.sessions_pane.begin_resize(x, y) {
@@ -337,7 +337,10 @@ pub fn gesture(gesture: Gesture, pos: Pos, state: &AppState, ui: &mut UiState) -
                 ))
             } else if on_sessions {
                 ui.sessions_pane.update_hover(x, y);
-                ui.sessions_pane.finish_resize().then(|| save_sessions_pane_layout(ui))
+                ui.sessions_pane
+                    .finish_resize()
+                    .then(|| save_sessions_pane_layout(ui))
+                    .flatten()
             } else if on_skills && ui.skill_sources.resize_active {
                 ui.skill_sources.resize_active = false;
                 let columns = crossterm::terminal::size().unwrap_or((80, 24)).0;
