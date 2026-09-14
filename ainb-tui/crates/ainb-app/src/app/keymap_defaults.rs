@@ -1303,14 +1303,14 @@ pub fn defaults() -> Vec<Binding> {
         unbound(
             Context::screen("skill_manager"),
             "save_sources_width",
-            AppEvent::SkillManagerSaveSourcesWidth { width: 0 },
+            AppEvent::SkillManagerSaveSourcesWidth { fraction: 0.0 },
             "Save the Sources panel width a renderer set",
         ),
         unbound(
             Context::screen("home"),
-            "begin_sidebar_resize",
-            AppEvent::HomeSidebarBeginResize,
-            "Start dragging the sidebar edge",
+            "save_sidebar_width",
+            AppEvent::HomeSidebarSaveWidth { fraction: 0.0 },
+            "Save the sidebar width a renderer set",
         ),
         unbound(
             Context::screen("home"),
@@ -1319,6 +1319,13 @@ pub fn defaults() -> Vec<Binding> {
                 item: crate::components::sidebar::SidebarItem::Sessions,
             },
             "Select the sidebar item a click names; a second click opens it",
+        ),
+        // Host reports (`crate::app::reports::ids`), unbound for the same reason.
+        unbound(
+            Context::Global,
+            "migrate_layout_widths",
+            AppEvent::MigrateLayoutWidths { columns: 0 },
+            "Convert saved column widths into fractions of the host's screen",
         ),
     ]);
 
