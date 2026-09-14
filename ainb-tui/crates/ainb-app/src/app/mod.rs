@@ -10,6 +10,7 @@ pub mod intent;
 pub mod keymap;
 pub mod keymap_defaults;
 pub mod keymap_toml;
+pub mod pointer;
 pub mod screens;
 pub mod sections;
 pub mod session_loader;
