@@ -911,6 +911,59 @@ impl KeyAction {
             ) | Self::Text(_)
         )
     }
+
+    /// This row's action with its payload replaced by `args`.
+    ///
+    /// `Args::Null` runs the row as the table wrote it. Any other value must
+    /// be the payload of a row that carries one, as a JSON value of that
+    /// payload's type: a number for a position or a step, an agent name for
+    /// the onboarding script, one character for a text row. Anything else,
+    /// a payload for a row that takes none or a value of the wrong type, is
+    /// `None`, and the command does not run.
+    #[must_use]
+    pub fn with_args(&self, args: &crate::app::intent::Args) -> Option<Self> {
+        use serde_json::Value;
+        if args.is_null() {
+            return Some(self.clone());
+        }
+        let step = || args.as_i64().and_then(|n| isize::try_from(n).ok());
+        let index = || args.as_u64().and_then(|n| usize::try_from(n).ok());
+        Some(match self {
+            Self::App(AppEvent::OnboardingGenerateScript(_)) => Self::App(
+                AppEvent::OnboardingGenerateScript(crate::setup::Agent::parse(args.as_str()?)?),
+            ),
+            Self::App(AppEvent::SkillManagerSyncScroll(_)) => {
+                Self::App(AppEvent::SkillManagerSyncScroll(step()?))
+            }
+            Self::App(AppEvent::SkillManagerPreviewTool(_)) => {
+                Self::App(AppEvent::SkillManagerPreviewTool(index()?))
+            }
+            Self::App(AppEvent::SkillManagerSourceRemoveMove(_)) => {
+                Self::App(AppEvent::SkillManagerSourceRemoveMove(step()?))
+            }
+            // Positions count from 1, as the number keys do.
+            Self::Ui(UiAction::AttachSessionByPosition(_)) => Self::Ui(
+                UiAction::AttachSessionByPosition(index().filter(|&n| n >= 1)?),
+            ),
+            Self::Ui(UiAction::DaemonsMoveOverlay(_)) => {
+                Self::Ui(UiAction::DaemonsMoveOverlay(step()?))
+            }
+            Self::Ui(UiAction::DaemonsMoveSelection(_)) => {
+                Self::Ui(UiAction::DaemonsMoveSelection(step()?))
+            }
+            Self::Text(_) => {
+                let Value::String(text) = args else {
+                    return None;
+                };
+                let mut chars = text.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(character), None) => Self::Text(character),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// One discoverable, overrideable row in the keymap.
