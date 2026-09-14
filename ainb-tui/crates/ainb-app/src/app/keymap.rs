@@ -841,10 +841,11 @@ pub enum ScrollAction {
     PreviewExitScroll,
 }
 
-/// Work a keymap row hands to the renderer that dispatched it, through
-/// [`crate::app::events::RendererHost::queue`]. It changes how that renderer
-/// lays things out, never app state, so another renderer on the same state is
-/// unaffected.
+/// Work a keymap row hands to the renderer that dispatched it.
+///
+/// Delivered through [`crate::app::events::RendererHost::queue`]. It changes
+/// how that renderer lays things out, never app state, so another renderer on
+/// the same state is unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostAction {
     /// Scroll a pane.
