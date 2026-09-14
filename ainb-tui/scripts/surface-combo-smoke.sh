@@ -251,7 +251,8 @@ run_combo() {
   # kernel closing a killed process's socket.
   local name
   for name in "${SESSIONS[@]:-}"; do
-    if [[ -n "$name" ]]; then tmux send-keys -t "=$name" C-c 2>/dev/null || true; fi
+    # Plain name: `=name` is a session target, and send-keys needs a pane.
+    if [[ -n "$name" ]]; then tmux send-keys -t "$name" C-c 2>/dev/null || true; fi
   done
 
   # A quit surface leaves the registry. Only a listing that actually answered
