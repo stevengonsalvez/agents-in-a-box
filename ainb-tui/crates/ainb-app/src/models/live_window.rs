@@ -53,7 +53,7 @@ pub enum Source {
 }
 
 /// Snapshot of the user's live OAuth-window state at one point in time.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LiveWindow {
     pub five_hour_pct: Option<u8>,
     pub seven_day_pct: Option<u8>,
