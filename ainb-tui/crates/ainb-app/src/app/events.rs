@@ -1078,10 +1078,12 @@ impl EventHandler {
         // opened via `ConfigEditSetting` is included only for its
         // `TextInput` / `NumberInput` variants (via
         // `ConfigPopupState::is_text_entry`); `Choice` and `Boolean`
-        // popups are navigation-only, so `H` is still allowed there.
+        // popups are navigation-only, so `H` is still allowed there. The `/`
+        // filter box is free-form too: every printable key belongs in the query.
         let config_text_active = state.shell.current_screen == screen_ids::CONFIG
             && (state.config.config_screen_state.editing
                 || state.config.config_screen_state.api_key_input_mode
+                || state.config.config_screen_state.is_searching()
                 || state.config.config_popup_state.is_text_entry());
 
         // Onboarding wizard text-entry steps: git-directories path input,
