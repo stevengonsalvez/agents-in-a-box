@@ -552,14 +552,13 @@ async fn run_tui_loop(
 
     loop {
         // Effects still on the outbox. dispatch, tick and apply_pending_event
-        // hand over what they queue, so two paths leave effects here: the
-        // clipboard paste re-queues the effects of the text it dispatched
-        // (one effect never runs inside another), and a tick that fails part
-        // way returns its error before handing over what it already queued.
-        // They run after the step that queued them finished writing state,
-        // and before the frame that shows their result.
-        for effect in app.state.take_effects() {
-            ainb::effect_host::execute(effect, app, &keymap, terminal, &mut ui).await?;
+        // hand over what they queue, so one path leaves effects here: a tick
+        // that fails part way returns its error before handing over what it
+        // already queued. They run after the step that queued them finished
+        // writing state, and before the frame that shows their result.
+        let leftover = app.state.take_effects();
+        if !leftover.is_empty() {
+            run_effects(leftover, app, &keymap, &mut ui, terminal).await?;
             needs_redraw = true;
         }
 
@@ -873,12 +872,7 @@ async fn run_tui_loop(
                         match app.tick().await {
                             Ok(effects) => {
                                 info!(">>> Immediate tick completed successfully");
-                                for effect in effects {
-                                    ainb::effect_host::execute(
-                                        effect, app, &keymap, terminal, &mut ui,
-                                    )
-                                    .await?;
-                                }
+                                run_effects(effects, app, &keymap, &mut ui, terminal).await?;
                                 last_app_tick = Instant::now();
                                 // Force UI refresh. The tick runs here
                                 // for the same reason it runs before the
@@ -1187,9 +1181,8 @@ async fn run_tui_loop(
         }
 
         // Apply the event a background result deferred to this iteration.
-        for effect in app.state.apply_pending_event() {
-            ainb::effect_host::execute(effect, app, &keymap, terminal, &mut ui).await?;
-        }
+        let pending = app.state.apply_pending_event();
+        run_effects(pending, app, &keymap, &mut ui, terminal).await?;
 
         // Update last_tick on every iteration so the event-poll timeout
         // stays accurate. The heavy work below is gated on a SEPARATE
@@ -1372,9 +1365,7 @@ async fn run_tui_loop(
 
             match app.tick().await {
                 Ok(effects) => {
-                    for effect in effects {
-                        ainb::effect_host::execute(effect, app, &keymap, terminal, &mut ui).await?;
-                    }
+                    run_effects(effects, app, &keymap, &mut ui, terminal).await?;
                     last_app_tick = Instant::now();
                     // Consume the refresh flag; the repaint is handled by the
                     // app-tick redraw below (perf: bead `wai`).
@@ -1457,8 +1448,25 @@ async fn run_intent(
     ui: &mut crate::app::ui_state::UiState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    for effect in ainb::dispatch(&mut app.state, keymap, ui, intent) {
-        ainb::effect_host::execute(effect, app, keymap, terminal, ui).await?;
+    let effects = ainb::dispatch(&mut app.state, keymap, ui, intent);
+    run_effects(effects, app, keymap, ui, terminal).await
+}
+
+/// Run `effects` in order. Each one's reports are dispatched as soon as it
+/// finishes, and whatever those queue runs after the effects already waiting,
+/// so one effect never runs inside another.
+async fn run_effects(
+    effects: Vec<ainb::Effect>,
+    app: &mut App,
+    keymap: &Keymap,
+    ui: &mut crate::app::ui_state::UiState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    let mut queue = std::collections::VecDeque::from(effects);
+    while let Some(effect) = queue.pop_front() {
+        for report in ainb::effect_host::execute(effect, &app.state, terminal, ui).await? {
+            queue.extend(ainb::dispatch(&mut app.state, keymap, ui, report));
+        }
     }
     Ok(())
 }
