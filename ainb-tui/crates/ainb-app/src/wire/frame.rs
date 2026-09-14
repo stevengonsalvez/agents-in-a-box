@@ -3,8 +3,8 @@
 //
 //   AppState ──versions()──▶ Mirror ──changed ∩ subscribed──▶ FrameBatch ──▶ channel
 //
-// A frame names its section, carries the section's version and the host it
-// came from, and its body is `section_json`, so the redaction and the four leak
+// A frame names its section, carries the section's version, the boot epoch that
+// version counts in and the host it came from, and its body is `section_json`, so the redaction and the four leak
 // checks from #983 apply to every byte a renderer receives. Nothing else in the
 // crate builds a frame body.
 
@@ -52,6 +52,24 @@ pub struct DaemonRead {
     pub clock_ms: i64,
 }
 
+/// The boot epoch of this host process: minted once, on first use, from the
+/// wall clock in nanoseconds, so a restarted host sends a larger epoch.
+///
+/// Section versions restart at zero with the process. A renderer that kept a
+/// host's old versions would drop every frame of the new process as a replay
+/// and stay silently stale; the epoch tells it the versions started over.
+#[must_use]
+pub fn host_epoch() -> u64 {
+    static EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |since| {
+                u64::try_from(since.as_nanos()).unwrap_or(u64::MAX).max(1)
+            })
+    })
+}
+
 /// One section's state as a renderer receives it.
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,7 +77,11 @@ pub struct Frame {
     /// Stable wire name, [`section_name`].
     pub section: String,
     /// The section's [`Versioned`](crate::app::versioned::Versioned) version.
+    /// Ordered only within one [`Self::epoch`].
     pub version: u64,
+    /// The sending host process's [`host_epoch`]. A renderer that sees a larger
+    /// epoch from a host drops everything it held from that host first.
+    pub epoch: u64,
     pub host_id: HostId,
     /// Present on sections whose content comes from a daemon read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -147,6 +169,7 @@ pub type DaemonReadSource = fn(&AppState, SectionId) -> Option<DaemonRead>;
 /// do.
 pub struct Mirror {
     host_id: HostId,
+    epoch: u64,
     subscription: Subscription,
     sent: [Option<u64>; SectionId::COUNT],
     daemon_read: DaemonReadSource,
@@ -156,6 +179,7 @@ impl std::fmt::Debug for Mirror {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Mirror")
             .field("host_id", &self.host_id)
+            .field("epoch", &self.epoch)
             .field("subscription", &self.subscription)
             .field("sent", &self.sent)
             .finish_non_exhaustive()
@@ -163,11 +187,19 @@ impl std::fmt::Debug for Mirror {
 }
 
 impl Mirror {
-    /// A mirror for a renderer that has seen nothing yet.
+    /// A mirror for a renderer that has seen nothing yet, stamped with this
+    /// process's [`host_epoch`].
     #[must_use]
     pub fn new(host_id: HostId, subscription: Subscription) -> Self {
+        Self::with_epoch(host_id, subscription, host_epoch())
+    }
+
+    /// A mirror stamped with an explicit epoch: a host restart in a test.
+    #[must_use]
+    pub fn with_epoch(host_id: HostId, subscription: Subscription, epoch: u64) -> Self {
         Self {
             host_id,
+            epoch,
             subscription,
             sent: [None; SectionId::COUNT],
             daemon_read: crate::wire::daemon_read,
@@ -204,6 +236,7 @@ impl Mirror {
             frames.push(Frame {
                 section: section_name(id).to_string(),
                 version,
+                epoch: self.epoch,
                 host_id: self.host_id.clone(),
                 daemon_read: (self.daemon_read)(state, id),
                 body: section_json(state, id),
