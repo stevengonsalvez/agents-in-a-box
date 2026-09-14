@@ -51,7 +51,7 @@ The numbers this section rests on:
 | uniffi as the M1 wire shape? | **Go.** The same crate, unchanged, ran the full handshake and both framed requests inside a release Expo app on the iOS simulator and on two Android emulator images. The iOS device slice (`aarch64-apple-ios`) compiled and linked into a release `iphoneos` build. The crate's share of cold start is milliseconds on every target. What no run has shown yet is the device slice executing on a phone. The only phone-specific risks left are signing, the local network permission prompt and ATS `[inference]`, none of which touch the crate. So the go stays, with a real-device run as M1's first gate. | `[simulator]`, `[emulator A15]`, `[emulator A14]`, `[release build]` |
 | Does D13 need a JS Noise implementation review? | **No.** The whole Noise handshake, key schedule, nonces and AEAD framing ran inside the crate on every target, and no Noise or AEAD code runs in JavaScript. The TypeScript side never sees a key schedule, nonce or frame header (section 2). It does handle one secret: the device's static private key crosses the JS heap once as base64 on its way to and from secure storage (`app/custody.ts`, section 3.5). That is a custody issue for M1 to remove (item 4 below), not a reason to review a JS Noise implementation, because none exists. A JS Noise review becomes relevant only if the first-gate iPhone run fails in the crate itself, which the simulator run gives no reason to expect. | `[simulator]`, `[emulator A15]`, `[emulator A14]` |
 | Does the push reopen row move to M1+1? (threshold: grace under 60 s) | **Yes, carried by Android 15.** The spec's threshold measures socket survival, and the two platforms answer it differently. **Android 15**: the socket was destroyed 6.0 to 6.4 s after the transition in 9 of 10 runs, and the tenth lost every beat. That is under 60 s. **iOS simulator, socket survival**: the socket stayed open for the whole 600 s window in 6 of 11 runs, and reset at 264 to 424 s in the other 5. That is over 60 s. **iOS simulator, a live session**: no heartbeat left the app later than 1.5 s after Home or lock in any run, and the first missed beat came 3.6 to 16.5 s after the transition. JS ran for up to 4.2 s, then the app was suspended `[inference: read from the stopped heartbeat and marks, not an OS log]`. So on iOS the socket survives as a suspended, silent connection that can deliver nothing to the user until the app is foregrounded. It does not keep a session live in the background. Android 15 alone crosses the threshold, and on iOS a suspended socket cannot raise a banner, which is push's job. Android 14 on AC power kept the socket for 600 s, but M1 cannot rely on an OS version older than the phones it targets. | `[simulator]`, `[emulator A15]`, `[emulator A14]` |
-| Can M1 promise a timely local banner from a backgrounded app? | **Only on iOS, and only for banners scheduled while the app was in front.** The iOS simulator delivered all three within 7 s. Both Android images coalesced them into inexact windows, 47 s to 6 min late. Banners for events that happen while the app is suspended need push, which is the M1+1 row. | `[simulator]`, `[emulator A15]`, `[emulator A14]` |
+| Can M1 promise a timely local banner from a backgrounded app? | **Only on iOS, and only for banners scheduled while the app was in front.** The iOS simulator delivered all three within 7 s. Both Android images, with `SCHEDULE_EXACT_ALARM` not granted, coalesced them into inexact windows, 47 s to 6 min late. The granted path was not measured. Banners for events that happen while the app is suspended need push, which is the M1+1 row. | `[simulator]`, `[emulator A15]`, `[emulator A14]` |
 
 ### Real-device gap, and what a USB run adds
 
@@ -100,11 +100,16 @@ the iPhone over USB, with the same harness and scripts, would add:
    On iOS the static library links into the app binary and dead-strips by
    default: +2.45 MiB `.app`, +0.82 MiB zipped (section 5.3).
 3. **Suspended-app banners are the push row's job.** Local notifications
-   scheduled from the app are not a substitute. Android coalesces them into
-   windows of up to 75 percent of the delay unless the app holds
-   `SCHEDULE_EXACT_ALARM`, which is not granted by default on Android 14 and
-   later (appop `default` on both images). iOS delivered them within 7 s, but
-   only for events known before the app left the foreground.
+   scheduled from the app are not a substitute. On both Android images the
+   `SCHEDULE_EXACT_ALARM` appop read `default` (not granted), even though
+   `app.json` declares the permission. In that state the OS coalesced the
+   banners into windows of 75 percent of the delay. **The granted path was not
+   measured**: no run granted the appop, so this report does not show whether
+   `expo-notifications` would schedule exact alarms with it granted. Since the
+   permission is not granted by default on Android 14 and later, the ungranted
+   path is what an M1 user gets unless M1 asks for it. iOS delivered the
+   banners within 7 s, but only for events known before the app left the
+   foreground.
 4. **Do not route the private key through JS, and do not trust the simulator on
    custody.** The key crosses the JS heap once as base64. The simulator kept it
    across uninstall and did not enforce a biometric gate. Both custody answers
@@ -573,7 +578,7 @@ reading that the 6 s teardown is an Android 15 policy rather than a crate
 artefact, but OS version, architecture, host and power all differ between the
 two images, so it does not isolate the cause `[inference]`.
 
-Local banners, backgrounded and screen off, `SCHEDULE_EXACT_ALARM` appop `default`:
+Local banners, backgrounded and screen off, `SCHEDULE_EXACT_ALARM` appop `default` (not granted; the granted path was not measured on either Android image):
 
 | scheduled ahead | posted after | lateness | alarm window the OS assigned |
 |---|---|---|---|
