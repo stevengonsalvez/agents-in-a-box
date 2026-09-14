@@ -36,6 +36,7 @@ pub struct UnitRow {
     pub idx: usize,
     pub name: String,
     pub kind: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub source: String,
     pub git_ref: String,
     pub targets: Vec<String>,
@@ -44,6 +45,7 @@ pub struct UnitRow {
     /// rendered status column can find the right glyph. Reconstructed from
     /// the underlying `UnitEntry.uri` when the row is built; matches the
     /// `LockedUnit.declared_uri` recorded in the lockfile.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub declared_uri: String,
 }
 
@@ -256,6 +258,7 @@ pub struct BrowseRow {
     pub stars: u64,
     /// For a `skill` kind: the unit URI fed to the install flow. For
     /// npx/plugin/mcp kinds: the shell command that installs it.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub install_uri: String,
     pub description: String,
     /// How this entry installs — drives the shelf badge and the install
@@ -319,11 +322,16 @@ pub struct BrowseViewState {
     pub catalog: CatalogKind,
     /// The query being typed (Query mode) or the query that produced the
     /// current results (Results mode).
+    #[serde(
+        rename = "query_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub query: String,
     pub results: Vec<BrowseRow>,
     pub selected: usize,
     /// Optional status line (e.g. an error or "no results") shown beneath
     /// the input. `None` in the happy path.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub status: Option<String>,
     /// True after the first Enter on a command-kind (npx/plugin/mcp) row —
     /// the entry installs by RUNNING a shell command, so we require a second
@@ -539,6 +547,7 @@ impl SourceRemoveChoice {
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct SourceRemoveConfirm {
     pub source_name: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub source_uri: String,
     /// Installed units belonging to this source (for the count shown).
     pub unit_count: usize,
@@ -569,6 +578,7 @@ pub struct SyncConfirmState {
     /// Human label for the dialog title (e.g. `unit foo` / `source bar`).
     pub label: String,
     /// The dry-run plan, one line per emitted output row.
+    #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
     pub plan: Vec<String>,
     /// Vertical scroll offset into [`Self::plan`].
     pub scroll: usize,
