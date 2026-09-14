@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
 /// A single skill parsed from `SKILL.md`.
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct Skill {
     pub name: String,
     pub description: String,
@@ -16,7 +16,7 @@ pub struct Skill {
 }
 
 /// An agent definition parsed from an `.md` file under `~/.claude/agents/`.
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct AgentDef {
     pub name: String,
     pub description: String,
@@ -35,7 +35,7 @@ struct ScannedAgent {
 }
 
 /// Complete parsed skills + agents snapshot.
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct SkillsData {
     pub skills: Vec<Skill>,
     pub agents: Vec<AgentDef>,
