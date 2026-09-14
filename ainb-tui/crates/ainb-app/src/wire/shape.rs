@@ -1011,10 +1011,49 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
         }))
         .expect("sample git mcp server parses");
         config.app_config.mcp_servers.insert("from-git".to_string(), git_mcp);
-        config.app_config.plugins.values.insert(
-            "sample".to_string(),
+        let mut plugin_table = toml::map::Map::new();
+        plugin_table.insert(
+            "api_token".to_string(),
             toml::Value::String(seed.text("config.plugins.values", Captured)),
         );
+        config
+            .app_config
+            .plugins
+            .values
+            .insert("sample".to_string(), toml::Value::Table(plugin_table));
+        // The plugin's `[[config]]` field becomes a `plugin:sample:api_token`
+        // settings row carrying the saved value, as discovery builds it.
+        let manifest = ainb_plugin_protocol::manifest::Manifest {
+            plugin: ainb_plugin_protocol::manifest::PluginMeta {
+                name: "sample".into(),
+                version: "0.1.0".into(),
+                abi_version: 2,
+                description: "sample plugin".into(),
+            },
+            capabilities: ainb_plugin_protocol::manifest::Capabilities::default(),
+            provides: ainb_plugin_protocol::manifest::Provides::default(),
+            subscribes: ainb_plugin_protocol::manifest::Subscribes::default(),
+            lifecycle: ainb_plugin_protocol::manifest::Lifecycle {
+                spawn: ainb_plugin_protocol::manifest::SpawnMode::Lazy,
+                idle_reap_secs: 600,
+            },
+            config: vec![ainb_plugin_protocol::manifest::ConfigField {
+                key: "api_token".to_string(),
+                kind: ainb_plugin_protocol::manifest::ConfigKind::String,
+                label: "API token".to_string(),
+                default: String::new(),
+                choices: Vec::new(),
+            }],
+        };
+        let plugins = config.app_config.plugins.clone();
+        let screen = &mut config.config_screen_state;
+        let (visible_rows, selected_setting) =
+            (screen.visible_rows.clone(), screen.selected_setting);
+        screen.apply_plugin_manifests(&[manifest], &plugins);
+        // Rebuilding the tree refreshes the right pane; keep the secret row the
+        // sample selected so the popup and the pane still agree.
+        screen.visible_rows = visible_rows;
+        screen.selected_setting = selected_setting;
     }
     {
         let skills = &mut state.skills.get_mut().skill_manager_state;
