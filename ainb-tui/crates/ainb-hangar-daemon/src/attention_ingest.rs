@@ -867,10 +867,8 @@ impl AttentionIngest {
     /// closing rows would hide exactly the signal that says so.
     ///
     /// Best-effort: a store fault is logged and retried next interval.
-    async fn sweep_once(&self, now_ms: i64) {
-        // Measured at the sweep's clock, so an answer still waiting for the
-        // agent's clearing hook is not reported as a lost raise (#962).
-        match AttentionRepo::drift_against_fleet_session_at(&self.pool, now_ms).await {
+    async fn sweep_once(&self, _now_ms: i64) {
+        match AttentionRepo::drift_against_fleet_session(&self.pool).await {
             Ok(drift) if drift.is_clean() => {}
             Ok(drift) => tracing::warn!(
                 open_without_asking_session = drift.open_without_asking_session,
