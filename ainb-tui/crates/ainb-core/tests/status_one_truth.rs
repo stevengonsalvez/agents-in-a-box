@@ -93,7 +93,10 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         // runs on a synthetic one: the read lands 42 s after the evidence, on
         // the daemon's clock, at the same instant the panel receives it. Cards
         // age on the daemon clock, so the read must carry that instant.
-        assert!(joined.read_at_ms > 0, "the joined read carries the daemon clock");
+        assert!(
+            joined.read_at_ms > 0,
+            "the joined read carries the daemon clock"
+        );
         joined.read_at_ms = expected.4 + 42_000;
         let pane = panel_from(joined.clone(), expected.4 + 42_000);
         let held = pane.status_for(SESSION_KEY).expect("the panel holds the daemon's row");
