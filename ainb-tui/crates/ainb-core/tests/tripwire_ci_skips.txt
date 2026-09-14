@@ -1,0 +1,10 @@
+# ainb-core tripwire tests that SKIP in the `core-tripwires` CI job.
+#
+# `scripts/tripwire-ci-guard.sh` fails the job when the tests that printed
+# `SKIP:` differ from this list, either way. One test per line: binary::test,
+# then the reason. `ci_tripwire_exclusions.rs` fails on a line with no reason,
+# a test that does not exist, or a duplicate.
+tripwire_abtop::abtop_opened_from_session_list_resumes_on_session_list  the real abtop binary is not on the runner
+tripwire_abtop::pressing_t_offers_setup_then_embeds_abtop               the real abtop binary is not on the runner
+tripwire_witr::pressing_w_embeds_witr_interactive_browser               the real witr binary is not on the runner
+tripwire_witr::witr_opened_from_session_list_resumes_on_session_list    the real witr binary is not on the runner
