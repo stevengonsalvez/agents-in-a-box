@@ -200,6 +200,20 @@ pub const DEFAULT_SESSIONS_SIDEBAR_WIDTH: u16 = 40;
 pub const MIN_SESSIONS_SIDEBAR_WIDTH: u16 = 24;
 pub const SESSIONS_PREVIEW_RESERVE: u16 = 50;
 pub const COLLAPSED_SESSIONS_SIDEBAR_WIDTH: u16 = 5;
+
+/// The Sessions sidebar width a `row`-wide screen can draw for a requested
+/// `width`: at least the minimum, leaving the preview its reserve.
+#[must_use]
+pub fn clamp_sessions_sidebar_width(width: u16, row: u16) -> u16 {
+    if row <= COLLAPSED_SESSIONS_SIDEBAR_WIDTH {
+        return row;
+    }
+    let max_width = row.saturating_sub(SESSIONS_PREVIEW_RESERVE);
+    if max_width < MIN_SESSIONS_SIDEBAR_WIDTH {
+        return row.saturating_sub(1).max(1);
+    }
+    width.clamp(MIN_SESSIONS_SIDEBAR_WIDTH, max_width)
+}
 pub const SESSIONS_ROW_DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(300);
 const OBSERVER_SETTLE_DELAY: Duration = Duration::from_millis(250);
 const OBSERVER_RETRY_DELAY: Duration = Duration::from_secs(2);
