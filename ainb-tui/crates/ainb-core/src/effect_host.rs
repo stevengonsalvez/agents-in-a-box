@@ -637,8 +637,11 @@ async fn attach_workspace_shell(
         let escaped_path = escape(Cow::Borrowed(dir_str));
         let cd_cmd = format!("cd {} && clear", escaped_path);
 
+        // `=` makes tmux match the session name exactly, never a prefix of
+        // another session's name.
+        let exact_target = format!("={tmux_name}:");
         let cd_result = Command::new("tmux")
-            .args(["send-keys", "-t", &tmux_name, &cd_cmd, "Enter"])
+            .args(["send-keys", "-t", &exact_target, &cd_cmd, "Enter"])
             .output()
             .await;
 
