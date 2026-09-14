@@ -863,6 +863,11 @@ impl PluginTask {
             // Host-resolved `[plugins.<name>]` table (JSON), stamped onto the
             // RegisteredPlugin at discovery; JSON null when unconfigured.
             config: self.plugin.config.clone(),
+            // The plugin is this process's direct child (#1040).
+            host: Some(ainb_plugin_protocol::params::PluginHost {
+                kind: self.config.host_kind.to_string(),
+                pid: std::process::id(),
+            }),
         })
         .expect("PluginInitParams serializable");
         let id = self.ids.allocate();
