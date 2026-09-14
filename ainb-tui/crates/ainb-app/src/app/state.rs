@@ -12636,22 +12636,33 @@ impl AppState {
     /// Called from `App::tick_plugin_renders`, which already holds a
     /// cloned runtime `handle`, so it's passed in rather than re-cloned
     /// per render tick.
-    /// Keep a plugin's `ui.state` publish, as `snapshot_get_versioned`
-    /// returns it, under the plugin that published it.
+    /// Keep `plugin`'s `ui.state` view, as `snapshot_get_versioned` returns
+    /// it from the plugin's own `ui.state/<plugin>` topic.
     ///
-    /// Bumps the plugins-host section only for a newer version from a plugin.
-    /// ponytail: the bus keeps one `ui.state` value, not one per plugin, so
-    /// two plugins publishing within one tick keep only the later; key the
-    /// topic by plugin when a second plugin publishes it.
+    /// A plugin that is not `running` loses its view, so a renderer never
+    /// draws a stopped plugin's last screen as live. A view over
+    /// [`MAX_PLUGIN_UI_STATE_BYTES`] is refused and the old one dropped. Bumps
+    /// the plugins-host section only when a view is kept or dropped.
     pub fn record_plugin_ui_state(
         &mut self,
+        plugin: &str,
+        running: bool,
         snapshot: Option<(bytes::Bytes, u64, ainb_plugin_runtime::types::PluginId)>,
     ) {
+        let evict = |state: &mut Self| {
+            if state.plugins_host.plugin_ui_states.contains_key(plugin) {
+                state.plugins_host.plugin_ui_states.remove(plugin);
+            }
+        };
+        if !running {
+            evict(self);
+            return;
+        }
         let Some((payload, version, publisher)) = snapshot else {
             return;
         };
-        let plugin = publisher.as_str();
-        if plugin == ainb_plugin_runtime::snapshot::HOST_PUBLISHER {
+        if publisher.as_str() != plugin {
+            tracing::warn!(%plugin, publisher = %publisher, "ui.state view from another publisher ignored");
             return;
         }
         if self
@@ -12660,6 +12671,11 @@ impl AppState {
             .get(plugin)
             .is_some_and(|known| known.version >= version)
         {
+            return;
+        }
+        if payload.len() > MAX_PLUGIN_UI_STATE_BYTES {
+            tracing::warn!(%plugin, version, bytes = payload.len(), "ui.state view over the size cap refused");
+            evict(self);
             return;
         }
         match serde_json::from_slice(&payload) {
@@ -12673,6 +12689,14 @@ impl AppState {
                 tracing::warn!(%plugin, version, %error, "ui.state publish is not JSON");
             }
         }
+    }
+
+    /// Whether some host wants `screen_id`'s plugin rendering: the terminal
+    /// host is showing it, or another host asked to keep it live.
+    #[must_use]
+    pub fn plugin_screen_wanted(&self, screen_id: &str) -> bool {
+        self.shell.current_screen == screen_id
+            || self.plugins_host.watched_plugin_screens.contains(screen_id)
     }
 
     pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
@@ -12702,6 +12726,12 @@ impl AppState {
         self.shell.ui_needs_refresh = true;
     }
 }
+
+/// The largest `ui.state` view a plugin may publish, in bytes.
+///
+/// A view is a renderer's model of one screen; anything bigger is a plugin shipping data
+/// the host would hold in memory and mirror on every change.
+pub const MAX_PLUGIN_UI_STATE_BYTES: usize = 256 * 1024;
 
 /// How long a Docker answer is reused. Long enough that a wedged Docker costs
 /// one 3s probe per window across every call site, short enough that starting
@@ -13067,9 +13097,19 @@ impl App {
         // Honour any pending plugin close request (root-view Esc) before
         // kicking renders — a closed screen shouldn't get another paint.
         self.state.tick_panel_close_requests(&handle);
-        self.state.record_plugin_ui_state(
-            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_STATE),
-        );
+        for (_, plugin_id) in crate::app::screens::builtin::PLUGIN_SCREENS {
+            let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
+            let running = handle.lifecycle_state(&pid)
+                == Some(ainb_plugin_runtime::types::LifecycleState::Running);
+            let snapshot = running
+                .then(|| {
+                    handle.snapshot_get_versioned(&ainb_plugin_runtime::topics::ui_state_topic(
+                        plugin_id,
+                    ))
+                })
+                .flatten();
+            self.state.record_plugin_ui_state(plugin_id, running, snapshot);
+        }
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
@@ -13137,14 +13177,21 @@ impl App {
             // consume, so a hidden plugin's dirty flag survives until the
             // user opens the screen and the first tick after the switch
             // kicks the deferred paint.
-            if self.state.shell.current_screen != *screen_id {
+            if !self.state.plugin_screen_wanted(screen_id) {
                 continue;
             }
 
             // Viewport comes from the previous frame's allocated area
             // (stashed by `PluginScreen::render`); (0, 0) means that render
-            // hasn't happened yet.
-            let (width, height) = viewports.render_areas.get(*screen_id).copied().unwrap_or((0, 0));
+            // hasn't happened yet. A screen another host keeps live but this
+            // one never drew renders at the plugin's fallback size: the frame
+            // is not painted here, only its `ui.state` view is read.
+            let shown_here = self.state.shell.current_screen == *screen_id;
+            let (width, height) = viewports
+                .render_areas
+                .get(*screen_id)
+                .copied()
+                .unwrap_or(if shown_here { (0, 0) } else { (80, 24) });
 
             // No allocated area stashed yet — the very first entry to this
             // screen, before `PluginScreen::render` has run once. Kicking now
