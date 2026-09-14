@@ -211,6 +211,44 @@ jobs:
           fi
 
   # ────────────────────────────────────────────────────────────────────────────
+  # Mirror fan-out bench (W0-mirror, D15). A SolidJS store at 100 sessions takes
+  # a seeded 2,000-frame burst over 2 s. Per-drain apply must hold the spike 4
+  # ceilings (12,800 computation runs, 32.5 ms apply per 1,000 frames, 2.4 ms
+  # longest unit, exactly 125 apply units) and per-send mode must fail both
+  # numeric gates, so a regression to one write per frame cannot pass. No Rust
+  # build: the bench is the renderer half of the contract.
+  # ────────────────────────────────────────────────────────────────────────────
+  mirror-fanout:
+    name: Mirror fan-out bench
+    needs: changes
+    if: >-
+      !cancelled() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ainb-tui/bench/mirror-fanout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ainb-tui/bench/mirror-fanout/package-lock.json
+      - name: Install the bench's pinned SolidJS
+        run: npm ci --no-audit --no-fund
+      - name: Run the bench and assert the ceilings
+        run: npm run bench
+      - name: Keep the numbers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mirror-fanout-results
+          path: ainb-tui/bench/mirror-fanout/results.json
+          if-no-files-found: warn
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Tests — cross-platform with nextest
   # ────────────────────────────────────────────────────────────────────────────
   test:
