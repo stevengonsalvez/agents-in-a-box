@@ -95,6 +95,10 @@ fi
 
 if ((${#ONLY[@]} == 0)); then printf '%s\n' "${NODES[@]}" >"$PROOF_OUT/order.txt"; fi
 
+# Every world of this run lives under one temp root of its own.
+PROOF_TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/ainb-proof-run.XXXXXX")" || exit 2
+export PROOF_TMP_ROOT
+
 echo "proof: $BINARY_LINE" >&2
 echo "proof: ${#NODES[@]} node(s), results in $PROOF_OUT" >&2
 
@@ -131,9 +135,19 @@ done
 python3 "$PROOF_DIR/summarize.py" "$PROOF_OUT" "$BINARY_LINE"
 status=$?
 
-leftover="$(pgrep -u "$(id -u)" -f 'ainb-proof-' || true)"
+# Only this run's worlds: a process belongs to it when its environment names a
+# path under this run's own temp root, so a concurrent run is never counted.
+leftover=""
+for pid in $(pgrep -u "$(id -u)"); do
+  [[ "$pid" == "$$" ]] && continue
+  if { tr '\0' '\n' <"/proc/$pid/environ"; } 2>/dev/null | grep -F "=$PROOF_TMP_ROOT/" >/dev/null; then
+    leftover+="$pid "
+  fi
+done
 if [[ -n "$leftover" ]]; then
-  echo "proof: processes from a proof world are still running: $leftover" >&2
+  echo "proof: processes from this run's worlds are still running: $leftover" >&2
   status=1
+else
+  rm -rf "$PROOF_TMP_ROOT"
 fi
 exit "$status"
