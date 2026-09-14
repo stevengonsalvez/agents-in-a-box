@@ -21,6 +21,7 @@ use crate::fleet::daemons::probe::DaemonKind;
 
 /// The three verbs every daemon row offers.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum Action {
     Start,
     Stop,
