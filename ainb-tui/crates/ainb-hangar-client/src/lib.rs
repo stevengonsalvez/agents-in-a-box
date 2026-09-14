@@ -729,17 +729,45 @@ impl DaemonClient {
         self.dial_with(self.hello_params_with(false)).await
     }
 
-    async fn dial_with(
-        &self,
-        hello_params: Value,
-    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
+    /// Complete `auth/hello` on a fresh connection and return what the daemon
+    /// answered: its protocol range and capability catalogue (D17).
+    ///
+    /// A daemon that predates the negotiation answers `{}`, which decodes as
+    /// an empty catalogue, so a caller branching on
+    /// [`auth::HelloResult::advertises`] takes its older path for it.
+    ///
+    /// # Errors
+    /// Returns [`DaemonError`] when the daemon is unreachable, refuses the
+    /// hello, or the reply cannot be decoded.
+    pub async fn hello(&self) -> Result<auth::HelloResult, DaemonError> {
+        let (mut reader, mut writer) = self.connect_raw().await?;
+        write_frame(&mut writer, methods::AUTH_HELLO, self.hello_params(), 1).await?;
+        let hello = read_response(&mut reader).await?;
+        if let Some(error) = hello.error {
+            return Err(DaemonError::Rpc {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        serde_json::from_value(hello.result.unwrap_or_else(|| Value::Object(Default::default())))
+            .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))
+    }
+
+    async fn connect_raw(&self) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
         let stream =
             UnixStream::connect(&self.socket).await.map_err(|source| DaemonError::Connect {
                 path: self.socket.display().to_string(),
                 source,
             })?;
-        let (read_half, mut writer) = stream.into_split();
-        let mut reader = BufReader::new(read_half);
+        let (read_half, writer) = stream.into_split();
+        Ok((BufReader::new(read_half), writer))
+    }
+
+    async fn dial_with(
+        &self,
+        hello_params: Value,
+    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
+        let (mut reader, mut writer) = self.connect_raw().await?;
         write_frame(&mut writer, methods::AUTH_HELLO, hello_params, 1).await?;
         let hello = read_response(&mut reader).await?;
         if let Some(error) = hello.error {
