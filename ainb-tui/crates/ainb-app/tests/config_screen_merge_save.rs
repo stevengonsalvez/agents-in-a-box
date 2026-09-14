@@ -103,3 +103,83 @@ fn run_worker() {
     assert_eq!(restarted.workspace_defaults.branch_prefix, "g6a/");
     assert_eq!(restarted.workspace_defaults.scan_max_depth, 4);
 }
+
+const CLEAR_WORKER_ENV: &str = "AINB_CONFIG_CLEAR_SAVE_WORKER";
+const CLEAR_TEST_NAME: &str = "clearing_an_optional_setting_removes_only_that_key";
+
+/// Clearing an optional row (`docker.host`) removes that key from disk, and
+/// a second TUI confirming a row without changing it writes nothing, so a
+/// value another writer saved in between survives.
+#[test]
+fn clearing_an_optional_setting_removes_only_that_key() {
+    if env::var_os(CLEAR_WORKER_ENV).is_some() {
+        run_clear_worker();
+        return;
+    }
+
+    let home = tempfile::tempdir().expect("temporary home");
+    let config_path = home.path().join(".agents-in-a-box/config/config.toml");
+    fs::create_dir_all(config_path.parent().unwrap()).expect("config dir");
+    fs::write(
+        &config_path,
+        format!("{INITIAL}\n[docker]\nhost = \"unix:///var/run/other.sock\"\n"),
+    )
+    .expect("seed config.toml");
+
+    let output = Command::new(env::current_exe().expect("test binary path"))
+        .args([
+            "--exact",
+            CLEAR_TEST_NAME,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("HOME", home.path())
+        .env(CLEAR_WORKER_ENV, "1")
+        .output()
+        .expect("run worker");
+    assert!(
+        output.status.success(),
+        "worker failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let saved = fs::read_to_string(&config_path).expect("read saved config");
+    let config: toml::Value = saved.parse().expect("saved config parses");
+    assert!(
+        config.get("docker").and_then(|docker| docker.get("host")).is_none(),
+        "the cleared optional key must be removed:\n{saved}"
+    );
+    assert_eq!(
+        config["workspace_defaults"]["branch_prefix"].as_str(),
+        Some("from-another-writer/"),
+        "confirming an unchanged row must not write the startup value back:\n{saved}"
+    );
+}
+
+fn run_clear_worker() {
+    let mut a = tui_from_disk();
+    let mut b = tui_from_disk();
+
+    a.config
+        .config_screen_state
+        .set_row_value("docker.host", ConfigValue::Text(String::new()));
+    EventHandler::process_event(AppEvent::ConfigSaveAll, &mut a);
+
+    // Another writer changes branch_prefix after B loaded its snapshot.
+    ainb_app::config::write_keys_into(
+        &AppConfig::get_user_config_dir().unwrap().join("config.toml"),
+        &[(
+            "workspace_defaults.branch_prefix".to_string(),
+            toml::Value::String("from-another-writer/".to_string()),
+        )],
+    )
+    .expect("another writer");
+
+    // B opens the Branch Prefix editor and presses enter on the value it shows.
+    b.config.config_screen_state.set_row_value(
+        "workspace_defaults.branch_prefix",
+        ConfigValue::Text("agents/".to_string()),
+    );
+    EventHandler::process_event(AppEvent::ConfigSaveAll, &mut b);
+}
