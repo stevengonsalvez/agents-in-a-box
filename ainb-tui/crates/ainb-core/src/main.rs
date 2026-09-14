@@ -186,6 +186,15 @@ async fn tokio_main() -> Result<()> {
         Some(("tui", _)) | None => {
             entered_tui = true;
 
+            // #963: the TUI's one presence connection, held from here until
+            // quit on every screen, plugins or not. It is how
+            // `hangar connections list` knows a TUI is running; it dials once
+            // the daemon is reachable and reconnects after a daemon restart.
+            // Spawned before the first daemon call below, and the process is
+            // marked a surface for good, so no call made during startup or
+            // teardown lists as a second row.
+            let presence = spawn_tui_presence();
+
             // A plugin-disabled TUI is a diagnostic fallback with no Hangar
             // consumer. Do not leave a background daemon behind for it.
             if !plugins::plugins_disabled() {
@@ -204,14 +213,6 @@ async fn tokio_main() -> Result<()> {
                     tracing::warn!(error = %error, "failed to install daily release checker");
                 }
             }
-
-            // #963: the TUI's one presence connection, held from here until
-            // quit on every screen, plugins or not. It is how
-            // `hangar connections list` knows a TUI is running; it dials once
-            // the daemon is reachable, reconnects after a daemon restart, and
-            // marks every other daemon call this process makes as transient so
-            // the registry lists this TUI exactly once.
-            let presence = spawn_tui_presence();
 
             // Best-effort: drop shipped default presets into
             // ~/.agents-in-a-box/presets.toml on first run. Never overwrites
@@ -309,10 +310,6 @@ async fn tokio_main() -> Result<()> {
 
             let tui_result = run_tui(&mut app_state, &mut layout).await;
 
-            // Close before the slower teardown below, so the registry drops the
-            // row as soon as the operator quits.
-            presence.close().await;
-
             // Explicitly tear down the plugin runtime before `app_state`
             // drops. Without this, `AppState.plugin_runtime_owner: Option<Runtime>`
             // drops inside `#[tokio::main]`'s active runtime context and
@@ -326,6 +323,9 @@ async fn tokio_main() -> Result<()> {
             // Best-effort: stop the shared Headroom proxy so it does not
             // orphan after the TUI exits.
             headroom::stop();
+
+            // Last, so the row is listed for as long as this TUI can still act.
+            presence.close().await;
 
             tui_result
         }
@@ -371,8 +371,9 @@ async fn tokio_main() -> Result<()> {
 /// logs transitions, never toasts: a TUI with no daemon is a normal state.
 fn spawn_tui_presence() -> fleet::bridge::daemon::PresenceLease {
     use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
-    use fleet::bridge::daemon::{PresenceLease, PresenceState};
+    use fleet::bridge::daemon::{PresenceLease, PresenceState, mark_process_as_surface};
 
+    mark_process_as_surface();
     let lease = PresenceLease::spawn(SurfaceInfo {
         kind: SurfaceKind::Tui,
         pid: std::process::id(),
