@@ -348,7 +348,6 @@ hangar.daemons_state.shared.rows[].last_error
 hangar.daemons_state.shared.rows[].reason
 hangar.daemons_state.shared.rows[].state
 hangar.hangar_daemon_config_loaded
-hangar.pending_daemon_config_edits[][]
 inbox
 logs.last_logs_session_id
 logs.live_logs{}[].level
