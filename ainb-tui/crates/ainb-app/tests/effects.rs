@@ -4,7 +4,7 @@
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::screens::ids;
-use ainb_app::app::{TerminalTarget, ToolTerminal};
+use ainb_app::app::{TerminalTarget, TmuxSessionName, ToolTerminal};
 use ainb_app::models::{Session, Workspace};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, SectionId, dispatch};
 
@@ -13,6 +13,14 @@ fn bumped(before: &[u64], after: &[u64]) -> Vec<SectionId> {
         .into_iter()
         .filter(|id| before[id.index()] != after[id.index()])
         .collect()
+}
+
+/// The editor effect for `path`, with the test home's (empty) preference.
+fn open_editor(path: &str) -> Effect {
+    Effect::OpenEditor {
+        path: ainb_app::app::EditorPath::new(path).expect("absolute"),
+        preferred_editor: None,
+    }
 }
 
 fn command(name: &str) -> Intent {
@@ -59,9 +67,7 @@ fn open_in_editor_returns_open_editor_for_the_selected_worktree() {
 
     assert_eq!(
         effects,
-        vec![Effect::OpenEditor(
-            "/parity/api/worktrees/feat-login".into()
-        )]
+        vec![open_editor("/parity/api/worktrees/feat-login")]
     );
     assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
     assert!(
@@ -88,7 +94,10 @@ fn attach_on_a_session_returns_attach_terminal_for_that_session() {
 
     assert_eq!(
         effects,
-        vec![Effect::AttachTerminal(TerminalTarget::Session(session_id))]
+        vec![Effect::AttachTerminal(TerminalTarget::Session {
+            id: session_id,
+            tmux_session: TmuxSessionName::new("tmux_api_feat").expect("valid name"),
+        })]
     );
     assert_eq!(
         bumped(&before, &state.versions()),
@@ -127,7 +136,7 @@ fn attach_on_an_other_tmux_row_returns_attach_terminal_by_name() {
     assert_eq!(
         effects,
         vec![Effect::AttachTerminal(TerminalTarget::Tmux(
-            "scratch".to_string()
+            TmuxSessionName::new("scratch").expect("valid name")
         ))]
     );
     assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
@@ -180,7 +189,7 @@ fn quick_shell_returns_attach_terminal_for_the_workspace_shell_at_the_worktree()
         effects,
         vec![Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
             workspace_path: "/parity/api".into(),
-            tmux_session: shell_name,
+            tmux_session: TmuxSessionName::new(shell_name).expect("valid name"),
             new_shell: true,
             target_dir: Some("/parity/api/worktrees/feat-login".into()),
         })]
@@ -197,6 +206,8 @@ fn attach_interactive_returns_attach_terminal_in_place() {
     isolated_home();
     let keymap = Keymap::defaults();
     let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
+    state.sessions.workspaces[0].sessions[0].tmux_session_name = Some("tmux_api_feat".to_string());
+    let show_menu_bar = state.config.app_config.ui_preferences.show_session_menu_bar;
     let before = state.versions();
 
     let effects = dispatch(
@@ -208,7 +219,10 @@ fn attach_interactive_returns_attach_terminal_in_place() {
 
     assert_eq!(
         effects,
-        vec![Effect::AttachTerminal(TerminalTarget::InPlace)]
+        vec![Effect::AttachTerminal(TerminalTarget::InPlace {
+            tmux_session: TmuxSessionName::new("tmux_api_feat").expect("valid name"),
+            show_menu_bar,
+        })]
     );
     assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
     assert!(
@@ -410,7 +424,7 @@ fn effects_queued_outside_dispatch_wait_for_the_next_hand_over() {
         effects,
         vec![
             Effect::Detach,
-            Effect::OpenEditor("/parity/api/worktrees/feat-login".into()),
+            open_editor("/parity/api/worktrees/feat-login"),
         ]
     );
     state.emit(Effect::Detach);
