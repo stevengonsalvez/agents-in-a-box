@@ -289,6 +289,57 @@ fn reentering_on_a_different_row_retargets_the_embed() {
     );
 }
 
+/// The production path: the host opens the client and reports it. The reducer
+/// adopts it only while the user is still on the session list with its row
+/// selected; a client that lands after they left is closed, not attached out
+/// of sight.
+#[test]
+fn an_opened_client_is_adopted_only_while_the_session_list_shows_its_row() {
+    use ainb::app::reports::{self, LocalEmbed};
+    use ainb::app::screens::ids;
+
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("adopt");
+    let keymap = ainb::Keymap::defaults();
+    let report_opened = |state: &mut AppState| {
+        let client = ainb::tmux::EmbedClient::attach(&session, 26, 100).expect("host attach");
+        let report = reports::in_place_opened(&session, &LocalEmbed::keep(client));
+        let _ = ainb::dispatch(state, &keymap, &mut ainb::app::NoRenderer, report);
+    };
+
+    let mut state = AppState::new();
+    state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
+    state.tmux.selected_other_tmux_index = Some(0);
+
+    state.shell.current_screen = ids::GIT_VIEW.to_string();
+    report_opened(&mut state);
+    let adopted_after_leaving = state.tmux.embed.is_some();
+
+    state.shell.current_screen = ids::SESSION_LIST.to_string();
+    report_opened(&mut state);
+    let adopted_here = state.is_interactive_pane();
+
+    state.release_interactive_pane();
+    let alive = session_alive(&session);
+    kill_session(&session);
+
+    assert!(
+        !adopted_after_leaving,
+        "a client reported after the user left the session list must not be adopted"
+    );
+    assert!(
+        adopted_here,
+        "the same report on the session list adopts the client"
+    );
+    assert!(
+        alive,
+        "closing or releasing the client leaves the tmux session running"
+    );
+}
+
 /// Mode-boundary tripwire: while the embed is interactive, host mouse handling
 /// never runs (clicks/wheel don't break the mode), ':' reaches the PTY instead
 /// of opening the slash palette, and after release the host owns the mouse
