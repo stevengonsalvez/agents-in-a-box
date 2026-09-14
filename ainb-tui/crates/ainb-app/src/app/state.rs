@@ -207,21 +207,68 @@ const MAX_OBSERVER_FAILURES: u8 = 3;
 
 fn host_tmux_session_name() -> Option<&'static str> {
     static HOST_TMUX_SESSION: OnceLock<Option<String>> = OnceLock::new();
-    HOST_TMUX_SESSION
-        .get_or_init(|| {
-            std::env::var_os("TMUX")?;
-            let output = std::process::Command::new("tmux")
-                .args(["display-message", "-p", "#{session_name}"])
-                .output()
-                .ok()?;
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8(output.stdout).ok())
-                .flatten()
-                .map(|name| name.trim().to_string())
+    HOST_TMUX_SESSION.get_or_init(detect_host_tmux_session).as_deref()
+}
+
+/// The tmux session whose pane this process runs in.
+///
+/// Matched by process ancestry against every pane's pid first. A bare
+/// `tmux display-message -p` names the most recently active client's session
+/// when `TMUX_PANE` is not set, which is another session whenever a terminal is
+/// attached elsewhere; the own-session guard then missed, and the observer
+/// mirrored the TUI into itself (#990). `TMUX_PANE` is the fallback for a
+/// process whose ancestry cannot be read.
+fn detect_host_tmux_session() -> Option<String> {
+    std::env::var_os("TMUX")?;
+    let panes = tmux_stdout(&["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"]);
+    if let Some(name) = panes.and_then(|panes| session_for_ancestry(&panes, &process_ancestry())) {
+        return Some(name);
+    }
+    let pane = std::env::var("TMUX_PANE").ok()?;
+    tmux_stdout(&["display-message", "-p", "-t", &pane, "#{session_name}"])
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn tmux_stdout(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("tmux").args(args).output().ok()?;
+    output.status.success().then(|| String::from_utf8(output.stdout).ok()).flatten()
+}
+
+/// This process's pid, then its parent's, up to init.
+fn process_ancestry() -> Vec<u32> {
+    let mut ancestry = Vec::new();
+    let mut pid = std::process::id();
+    // Bounded: a pane's shell is a handful of hops up, and a cycle cannot loop.
+    for _ in 0..32 {
+        ancestry.push(pid);
+        let Some(parent) = std::process::Command::new("ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|out| out.trim().parse::<u32>().ok())
+        else {
+            break;
+        };
+        if parent <= 1 || ancestry.contains(&parent) {
+            break;
+        }
+        pid = parent;
+    }
+    ancestry
+}
+
+/// The session of the pane whose pid is the NEAREST entry of `ancestry`, from
+/// `tmux list-panes -a -F '#{pane_pid} #{session_name}'` output. Nearest first,
+/// so a TUI in a nested tmux names its own pane rather than an outer one.
+pub(crate) fn session_for_ancestry(panes: &str, ancestry: &[u32]) -> Option<String> {
+    ancestry.iter().find_map(|pid| {
+        panes.lines().find_map(|line| {
+            let (pane_pid, session) = line.split_once(' ')?;
+            (pane_pid.trim().parse::<u32>().ok()? == *pid).then(|| session.to_string())
         })
-        .as_deref()
+    })
 }
 
 impl AppState {
@@ -489,6 +536,15 @@ impl AppState {
         } else {
             self.get_selected_session().and_then(|s| s.tmux_session_name.clone())
         }
+    }
+
+    /// True when the selected row is the tmux session this TUI runs in.
+    ///
+    /// Its preview would mirror the TUI into itself, so the preview pane shows
+    /// a placeholder instead and no observer is started.
+    pub fn is_host_tmux_session_selected(&self) -> bool {
+        self.selected_tmux_name()
+            .is_some_and(|name| host_tmux_session_name() == Some(name.as_str()))
     }
 
     /// True while an interactive embed is focused.
