@@ -1490,6 +1490,10 @@ async fn run_effects(
 ) -> Result<()> {
     let mut queue = std::collections::VecDeque::from(effects);
     while let Some(effect) = queue.pop_front() {
+        // The step that queued this effect may have released the preview
+        // pane (a full-screen attach does). Close that client now, not on the
+        // next loop, so it cannot outlive an effect that blocks this loop.
+        clients.reconcile(&app.state);
         let plugins = app.state.plugins_host.plugin_runtime.clone();
         for report in
             ainb::effect_host::execute(effect, terminal, ui, clients, plugins.as_ref()).await?
