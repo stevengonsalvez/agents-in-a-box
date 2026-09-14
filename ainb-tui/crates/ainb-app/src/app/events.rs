@@ -3858,9 +3858,12 @@ impl EventHandler {
                 embed,
             } => {
                 // Another process's client cannot be adopted here; a client
-                // for a row the user has since left is closed, not shown.
+                // for a row or a screen the user has since left is closed, not
+                // attached out of sight.
                 if let Some(client) = embed.adopt() {
-                    if state.selected_tmux_name().as_deref() == Some(tmux_session.as_str()) {
+                    if state.shell.current_screen == crate::app::screens::ids::SESSION_LIST
+                        && state.selected_tmux_name().as_deref() == Some(tmux_session.as_str())
+                    {
                         state.adopt_interactive_pane(tmux_session, client);
                     } else {
                         let mut client = client;
