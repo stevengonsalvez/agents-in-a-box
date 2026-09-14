@@ -1441,6 +1441,7 @@ pub fn defaults() -> Vec<Binding> {
             AppEvent::InPlaceFailed {
                 tmux_session: String::new(),
                 error: String::new(),
+                unsupported: false,
             },
             "Say why the in-place attach would not open",
         ),
