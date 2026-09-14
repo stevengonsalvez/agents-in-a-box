@@ -7102,11 +7102,17 @@ impl EventHandler {
                 width,
                 height,
             } => {
+                use crate::app::sections::ScreenWatch;
                 let plugin_screen =
                     crate::app::screens::builtin::plugin_id_for_screen(&screen).is_some();
                 let watched = state.plugins_host.watched_plugin_screens.contains_key(&screen);
                 let now = std::time::Instant::now();
                 let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
+                if watching
+                    && (width > ScreenWatch::MAX_VIEWPORT.0 || height > ScreenWatch::MAX_VIEWPORT.1)
+                {
+                    tracing::warn!(%screen, width, height, "watch viewport clamped to the maximum");
+                }
                 if !plugin_screen {
                     tracing::warn!(%screen, "watch request for a screen no plugin owns");
                 } else if watching && (width == 0 || height == 0) {
@@ -7121,11 +7127,14 @@ impl EventHandler {
                         false
                     });
                 } else if watching {
-                    let mut watch = crate::app::sections::ScreenWatch::default();
+                    let mut watch = ScreenWatch::default();
                     watch.renew(now, width, height, lease);
                     state.plugins_host.watched_plugin_screens.insert(screen, watch);
-                } else if watched {
-                    state.plugins_host.watched_plugin_screens.remove(&screen);
+                } else {
+                    // A stop names no watcher, so removing the watch would end
+                    // every other host's too. The stopping host just stops
+                    // renewing, and its request lapses with the lease.
+                    tracing::debug!(%screen, "watch stop; the request lapses with its lease");
                 }
             }
             AppEvent::NavigateTo(screen_id) => {
