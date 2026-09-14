@@ -50,7 +50,7 @@ pub const STATUS_LINGER: Duration = Duration::from_secs(20);
 /// The immutable snapshot the background collector publishes and `render` reads.
 /// Cheap to clone the `Arc`; the `Mutex` is held only for the microseconds it
 /// takes to swap or clone the row vector — never across I/O.
-#[derive(Debug, Default)]
+#[derive(serde::Serialize, Debug, Default)]
 pub struct Snapshot {
     /// Most-recently-collected daemon rows.
     pub rows: Vec<DaemonStatus>,
@@ -86,7 +86,7 @@ pub struct Snapshot {
 
 /// What the Daemons screen needs to know about the ATC supervisor beyond its
 /// runtime row: which brain its heartbeat would use.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct AtcModeView {
     pub name: String,
     pub provider: String,
@@ -109,13 +109,15 @@ pub struct AtcModeView {
 /// `render` only ever clones the latest published snapshot under a microsecond
 /// lock. A mid-crash daemon, a stale socket on a slow FS, or a saturated accept
 /// backlog can stall the background thread but can NEVER freeze the UI.
-#[derive(Debug, Default)]
+#[derive(serde::Serialize, Debug, Default)]
 pub struct DaemonsState {
     /// The snapshot the background collector publishes into. `None` until the
     /// first render lazily spawns the collector.
+    #[serde(serialize_with = "crate::wire::fields::locked_shared")]
     pub shared: Option<Arc<Mutex<Snapshot>>>,
     /// Wakes the collector for an immediate re-collect. `None` until the
     /// collector is armed.
+    #[serde(skip)]
     pub wake: Option<std::sync::mpsc::Sender<()>>,
     /// Index of the highlighted row, clamped to the snapshot on every render.
     pub selected: usize,
@@ -143,6 +145,7 @@ pub struct DaemonsState {
     /// The in-flight hook install/repair, if one is running. Same shape and
     /// same one-outstanding guarantee as [`DaemonsState::inflight`]; the Hooks
     /// box is a panel rather than a row, so it needs its own slot.
+    #[serde(skip)]
     pub hooks_inflight: Option<(
         tokio::sync::mpsc::UnboundedReceiver<String>,
         std::time::Instant,
@@ -155,6 +158,7 @@ pub struct DaemonsState {
     /// also has to be READABLE, and the collector republishes every two
     /// seconds, so expiry is a wall clock the reader can keep up with rather
     /// than the next collect.
+    #[serde(serialize_with = "crate::wire::fields::text_of_timed")]
     pub hooks_status: Option<(String, std::time::Instant)>,
     /// A tmux session the screen wants attached. Drained by the key handler,
     /// which owns the app-level pending-action slot; the component itself must
@@ -163,15 +167,16 @@ pub struct DaemonsState {
 }
 
 /// A daemon action the host is running.
-#[derive(Debug, Clone, Copy)]
+#[derive(serde::Serialize, Debug, Clone, Copy)]
 pub struct InFlight {
     pub action: Action,
     pub generation: u64,
+    #[serde(skip)]
     pub started: std::time::Instant,
 }
 
 /// A daemon action asked for and not yet handed to the host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaemonActionRequest {
     pub daemon: DaemonKind,
     pub action: Action,
@@ -179,7 +184,7 @@ pub struct DaemonActionRequest {
 }
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct ActionMenu {
     pub kind: DaemonKind,
     /// Index into [`ActionMenu::entries`].
@@ -191,7 +196,7 @@ pub struct ActionMenu {
 }
 
 /// The parts of a row's status that decide which entries its menu offers.
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 struct RowFacts {
     /// The provisioned ATC instance, when there is one. `None` means every
     /// lifecycle verb would bail. Read from a typed field, never inferred from
@@ -275,7 +280,7 @@ impl ActionMenu {
 }
 
 /// What a finished lifecycle action reported.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ActionOutcome {
     pub action: Action,
     pub ok: bool,
