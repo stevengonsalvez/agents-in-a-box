@@ -225,6 +225,12 @@ pub enum AppEvent {
     DaemonActionFinished {
         report: crate::app::reports::DaemonActionReport,
     },
+    /// Click the code review sidebar row `target`; nothing when it is gone.
+    GitReviewSelectRow {
+        target: crate::components::code_review::render::ReviewRowId,
+    },
+    /// Scroll the git view's active tab by this many lines, down when positive.
+    GitViewScrollBy(i32),
     /// Click home sidebar `item`; a second click on it opens it.
     HomeSidebarClickItem {
         item: crate::components::sidebar::SidebarItem,
@@ -3543,6 +3549,24 @@ impl EventHandler {
                         }
                         _ => {}
                     }
+                }
+            }
+            AppEvent::GitReviewSelectRow { target } => {
+                // Read first: a click on a row that is gone writes nothing.
+                let row = state
+                    .git_view
+                    .git_view_state
+                    .as_ref()
+                    .and_then(|git| git.review_row_index(&target));
+                if let Some(row) = row {
+                    if let Some(ref mut git_state) = state.git_view.git_view_state {
+                        git_state.review_click_row(row);
+                    }
+                }
+            }
+            AppEvent::GitViewScrollBy(lines) => {
+                if let Some(ref mut git_state) = state.git_view.git_view_state {
+                    git_state.scroll_active_tab_by(lines);
                 }
             }
             AppEvent::GitReviewToggleCollapse => {
