@@ -40,8 +40,8 @@ fn all_frames(state: &ainb_app::AppState) -> Vec<(SectionId, serde_json::Value)>
 #[test]
 fn every_section_has_one_object_frame() {
     isolated_home();
-    let state = shape::sample_state(&mut shape::PlainSeed);
-    let frames = all_frames(&state);
+    let states = shape::sample_states(&mut shape::PlainSeed);
+    let frames = all_frames(&states[0]);
     assert_eq!(frames.len(), SectionId::COUNT);
     let names: BTreeSet<_> = SectionId::ALL.into_iter().map(section_name).collect();
     assert_eq!(names.len(), SectionId::COUNT, "section wire names collide");
@@ -53,7 +53,7 @@ fn every_section_has_one_object_frame() {
 #[test]
 fn leaf_key_paths_match_the_committed_fixture() {
     isolated_home();
-    let current = shape::key_paths(&shape::sample_state(&mut shape::PlainSeed));
+    let current = shape::key_paths(&shape::sample_states(&mut shape::PlainSeed));
     if std::env::var_os("UPDATE_SECTION_KEY_PATHS").is_some() {
         std::fs::write(
             shape::COMMITTED_KEY_PATHS_FILE,
@@ -74,8 +74,8 @@ fn leaf_key_paths_match_the_committed_fixture() {
 #[test]
 fn the_sample_shape_does_not_depend_on_what_it_is_seeded_with() {
     isolated_home();
-    let plain = shape::key_paths(&shape::sample_state(&mut shape::PlainSeed));
-    let canary = shape::key_paths(&shape::sample_state(&mut CanarySeed::default()));
+    let plain = shape::key_paths(&shape::sample_states(&mut shape::PlainSeed));
+    let canary = shape::key_paths(&shape::sample_states(&mut CanarySeed::default()));
     assert_eq!(plain, canary);
 }
 
@@ -182,6 +182,14 @@ const DENY_WORDS: &[&str] = &[
 /// Fields whose key matches a deny word and still carry text, each with why
 /// the text is safe on the wire. Keyed by the traced `Owner.field`.
 const NAME_ALLOW: &[(&str, &str)] = &[
+    (
+        "ConfigPopupType::TextInput",
+        "the plain-text popup variant (`Input` in its name); its value is scrubbed",
+    ),
+    (
+        "ConfigPopupType::TextInput.value",
+        "a plain setting being edited, scrubbed; secret and credential-bearing rows open SecretInput",
+    ),
     ("ActionOutcome.detail", "daemon action output, scrubbed"),
     ("BrowseRow.install_uri", "catalog install URI, scrubbed"),
     ("ChangedFile.path", "repo-relative path of a changed file"),
@@ -474,7 +482,7 @@ fn inert(value: &str) -> bool {
 #[test]
 fn no_deny_listed_key_carries_text_unless_allow_listed() {
     isolated_home();
-    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
     let allow: BTreeMap<_, _> = NAME_ALLOW.iter().copied().collect();
     let mut hits: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
     for leaf in trace.strings.iter().filter(|l| !inert(&l.value)) {
@@ -654,7 +662,7 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
 #[test]
 fn no_opaque_or_unbounded_type_reaches_the_wire_unless_allow_listed() {
     isolated_home();
-    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
     let allow: BTreeMap<_, _> = TYPE_ALLOW.iter().copied().collect();
     let mut hits: BTreeMap<String, (String, &'static str)> = BTreeMap::new();
     for field in &trace.fields {
@@ -693,6 +701,7 @@ fn no_opaque_or_unbounded_type_reaches_the_wire_unless_allow_listed() {
 /// so each one is named here: a pass-through wrapper cannot slip a field past
 /// the type deny-list without showing up in review.
 const SERIALIZER_REDACTED: &[&str] = &[
+    "ConfigPopupType::TextInput.value",
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
     "AnswerPhase::Failed.reason",
@@ -791,7 +800,7 @@ const SERIALIZER_REDACTED: &[&str] = &[
 #[test]
 fn every_field_behind_a_custom_serializer_is_named() {
     isolated_home();
-    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
     let wrapped: BTreeSet<String> = trace
         .fields
         .iter()
@@ -943,7 +952,7 @@ fn structured_but_empty(
 #[test]
 fn the_sample_fills_every_structured_subtree() {
     isolated_home();
-    let trace = shape::trace_state(&shape::sample_state(&mut shape::PlainSeed));
+    let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
     let waived: BTreeMap<_, _> = UNFILLED_WAIVED.iter().copied().collect();
     let empty: BTreeSet<String> = trace
         .fields
@@ -972,6 +981,10 @@ fn the_sample_fills_every_structured_subtree() {
 /// Typed fields the frame shows on purpose, so their marker MUST appear. Every
 /// other typed label's marker must not.
 const CANARY_SHOWN: &[(&str, &str)] = &[
+    (
+        "config.text_popup",
+        "a plain setting's value in the edit popup, scrubbed; secret rows open SecretInput",
+    ),
     (
         "new_session.configure.branch_edit",
         "a branch name being typed; the surface draws the field it edits",
@@ -1036,7 +1049,7 @@ impl Seed for CanarySeed {
 fn no_typed_text_reaches_the_wire() {
     isolated_home();
     let mut seed = CanarySeed::default();
-    let state = shape::sample_state(&mut seed);
+    let states = shape::sample_states(&mut seed);
     let seeded: BTreeSet<_> = seed.typed.iter().copied().collect();
     let declared: BTreeSet<_> = shape::TYPED_LABELS.iter().copied().collect();
     assert_eq!(
@@ -1044,7 +1057,11 @@ fn no_typed_text_reaches_the_wire() {
         "TYPED_LABELS and the sample builder disagree"
     );
 
-    let blob: String = all_frames(&state).iter().map(|(_, frame)| frame.to_string()).collect();
+    let blob: String = states
+        .iter()
+        .flat_map(|state| all_frames(state))
+        .map(|(_, frame)| frame.to_string())
+        .collect();
     let shown: BTreeMap<_, _> = CANARY_SHOWN.iter().copied().collect();
     let mut leaked = Vec::new();
     let mut missing = Vec::new();
@@ -1151,14 +1168,16 @@ fn no_credential_shaped_value_reaches_the_wire() {
             "tripwire cannot see {sample}"
         );
     }
-    let state = shape::sample_state(&mut seed);
+    let states = shape::sample_states(&mut seed);
     assert!(
         seed.captured.len() >= seed.samples.len(),
         "every credential shape is seeded at least once"
     );
     let mut found = Vec::new();
-    for (id, frame) in all_frames(&state) {
-        find_in_frame(section_name(id), &frame, &mut found);
+    for state in &states {
+        for (id, frame) in all_frames(state) {
+            find_in_frame(section_name(id), &frame, &mut found);
+        }
     }
     assert!(
         found.is_empty(),
