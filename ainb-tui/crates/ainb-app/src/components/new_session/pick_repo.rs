@@ -551,20 +551,7 @@ pub fn handle_key(state: &mut PickRepoState, key: &Chord) -> PickRepoOutcome {
                 return PickRepoOutcome::Stay;
             }
             let parsed = parse_with(&state.filter, &RealFs);
-            // The filter can be a pasted clipboard; the log gets its length, as
-            // the mirror frame does, and the parse kind.
-            let kind = match &parsed {
-                RepoSource::HttpsUrl(_) => "https url",
-                RepoSource::SshUrl(_) => "ssh url",
-                RepoSource::SshSession(_) => "ssh session",
-                RepoSource::LocalPath(_) => "local path",
-                RepoSource::GithubShorthand { .. } => "github shorthand",
-                RepoSource::Filter(_) => "filter",
-            };
-            tracing::debug!(
-                "pick_repo: smart-parse {} chars -> {kind}",
-                state.filter.chars().count()
-            );
+            tracing::debug!("{}", smart_parse_log_line(&state.filter, &parsed));
             state.defaults.last_repo = Some(state.filter.clone());
             resolve_outcome(parsed)
         }
@@ -661,4 +648,38 @@ fn collect_local_repo_paths(state: &PickRepoState) -> Vec<PathBuf> {
             _ => None,
         })
         .collect()
+}
+
+/// The debug line for an Enter that smart-parses the filter. The filter can be
+/// a pasted clipboard, so the line gets its length, as the mirror frame does,
+/// and the parse kind; never the text.
+fn smart_parse_log_line(filter: &str, parsed: &RepoSource) -> String {
+    let kind = match parsed {
+        RepoSource::HttpsUrl(_) => "https url",
+        RepoSource::SshUrl(_) => "ssh url",
+        RepoSource::SshSession(_) => "ssh session",
+        RepoSource::LocalPath(_) => "local path",
+        RepoSource::GithubShorthand { .. } => "github shorthand",
+        RepoSource::Filter(_) => "filter",
+    };
+    format!(
+        "pick_repo: smart-parse {} chars -> {kind}",
+        filter.chars().count()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_smart_parse_log_line_names_the_filter_length_never_its_text() {
+        let pasted = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB";
+        let line = smart_parse_log_line(pasted, &RepoSource::Filter(pasted.to_string()));
+        assert_eq!(
+            line,
+            format!("pick_repo: smart-parse {} chars -> filter", pasted.len())
+        );
+        assert!(!line.contains("ghp_"), "{line}");
+    }
 }
