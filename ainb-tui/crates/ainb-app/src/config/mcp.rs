@@ -52,8 +52,10 @@ pub enum McpInstallation {
 
     /// Git repository
     Git {
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
         url: String,
         branch: Option<String>,
+        #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
         install_command: Option<String>,
     },
 
@@ -61,7 +63,10 @@ pub enum McpInstallation {
     PreInstalled,
 
     /// Custom installation script
-    Custom { script: String },
+    Custom {
+        #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+        script: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
