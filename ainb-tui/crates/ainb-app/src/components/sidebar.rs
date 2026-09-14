@@ -193,7 +193,7 @@ impl SidebarItem {
 }
 
 /// Sidebar state
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct SidebarState {
     /// Currently selected item index
     pub selected_index: usize,
