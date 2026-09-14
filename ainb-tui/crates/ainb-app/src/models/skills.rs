@@ -10,6 +10,7 @@ use tracing::{debug, warn};
 #[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct Skill {
     pub name: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub description: String,
     pub user_invocable: Option<bool>,
     pub source_path: PathBuf,
@@ -19,6 +20,7 @@ pub struct Skill {
 #[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct AgentDef {
     pub name: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub description: String,
     pub tools: Vec<String>,
     pub source_path: PathBuf,
