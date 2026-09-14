@@ -13198,6 +13198,7 @@ impl App {
     ///
     /// Effects are returned only after the whole step has written state, so
     /// the host acts on committed state.
+    #[must_use = "the effects are host work the tick did not perform; run them or they are lost"]
     pub async fn tick(&mut self) -> anyhow::Result<Vec<crate::app::effect::Effect>> {
         self.tick_inner().await?;
         Ok(self.state.take_effects())
