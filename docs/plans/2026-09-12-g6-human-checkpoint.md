@@ -109,7 +109,7 @@ Terminal B (a third shell, or after backgrounding web):
 ./target/debug/ainb hangar connections list
 ```
 
-Terminal A can stay on the home screen: a running TUI holds one connection to the daemon from startup until quit, on every screen.
+Terminal A can stay on the home screen: a running TUI holds one connection to the daemon from startup until quit, on every screen. Do not open the Hangar screen (`g`) before this step: the Hangar plugin is its own process and lists its own `tui` row with its own pid while it runs.
 
 - **Pass:** one `tui` row and one `web` row, each with its process pid and the daemon host. The `tui` pid is Terminal A's `ainb`. A `cli` row is the `connections list` command itself; the TUI's own polls never add one.
 - **Pass:** quit Terminal A, run the list again, and the `tui` row is gone.
