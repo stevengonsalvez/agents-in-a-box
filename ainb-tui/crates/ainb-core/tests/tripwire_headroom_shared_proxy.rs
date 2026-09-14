@@ -122,7 +122,7 @@ fn start_tui(home: &Path, session: &str) -> TmuxGuard {
         .status()
         .expect("launch tui");
     assert!(
-        wait_until(Duration::from_secs(60), || capture_pane(session).contains("Agents in a Box")),
+        wait_until(Duration::from_mins(1), || capture_pane(session).contains("Agents in a Box")),
         "TUI in {session} never drew its home screen:\n{}",
         capture_pane(session)
     );
