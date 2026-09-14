@@ -773,7 +773,10 @@ fn axis_handle_action_forwarded_and_ui_state_read_back() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let (payload, version, publisher) = view.expect("the action published ui.state");
-    assert_eq!(publisher, id, "ui.state is stamped with the publishing plugin");
+    assert_eq!(
+        publisher, id,
+        "ui.state is stamped with the publishing plugin"
+    );
     let first: serde_json::Value = serde_json::from_slice(&payload).expect("ui.state is JSON");
     assert_eq!(first["actions"], 1);
 
@@ -782,9 +785,7 @@ fn axis_handle_action_forwarded_and_ui_state_read_back() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut next = None;
     while std::time::Instant::now() < deadline {
-        next = handle
-            .snapshot_get_versioned(topics::UI_STATE)
-            .filter(|(_, v, _)| *v > version);
+        next = handle.snapshot_get_versioned(topics::UI_STATE).filter(|(_, v, _)| *v > version);
         if next.is_some() {
             break;
         }
