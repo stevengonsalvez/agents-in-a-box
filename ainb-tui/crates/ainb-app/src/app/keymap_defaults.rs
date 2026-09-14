@@ -1327,6 +1327,67 @@ pub fn defaults() -> Vec<Binding> {
             AppEvent::MigrateLayoutWidths { columns: 0 },
             "Convert saved column widths into fractions of the host's screen",
         ),
+        unbound(
+            Context::Global,
+            "attach_finished",
+            AppEvent::AttachFinished {
+                target: crate::app::reports::AttachedTo::Witr,
+                outcome: crate::app::reports::AttachOutcome::Detached,
+            },
+            "Apply how a full-screen terminal attach ended",
+        ),
+        unbound(
+            Context::Global,
+            "shell_prepared",
+            AppEvent::ShellPrepared {
+                workspace: std::path::PathBuf::new(),
+                outcome: crate::app::reports::ShellOutcome::Failed(String::new()),
+            },
+            "Apply how preparing a workspace shell went",
+        ),
+        unbound(
+            Context::Global,
+            "abtop_setup_finished",
+            AppEvent::AbtopSetupFinished { ok: false },
+            "Announce whether abtop --setup started",
+        ),
+        unbound(
+            Context::Global,
+            "in_place_sized",
+            AppEvent::InPlaceSized { rows: 0, cols: 0 },
+            "Attach the selected row in place at the size the host measured",
+        ),
+        unbound(
+            Context::Global,
+            "detached",
+            AppEvent::Detached,
+            "Release the in-place terminal the user left",
+        ),
+        unbound(
+            Context::Global,
+            "editor_finished",
+            AppEvent::EditorFinished {
+                outcome: crate::app::reports::EditorOutcome::NoneFound,
+            },
+            "Announce how opening an editor went",
+        ),
+        unbound(
+            Context::Global,
+            "clipboard_failed",
+            AppEvent::ClipboardFailed {
+                error: String::new(),
+            },
+            "Announce that the clipboard could not be read",
+        ),
+        unbound(
+            Context::Global,
+            "login_finished",
+            AppEvent::LoginFinished {
+                auth_dir: std::path::PathBuf::new(),
+                exited_ok: false,
+            },
+            "Finish the OAuth login from the credentials it wrote",
+        ),
     ]);
 
     rows
