@@ -18,9 +18,16 @@
 //! The envelope is the whole view, not a delta: the snapshot bus keeps only the
 //! latest payload per topic and replays nothing, so a plugin that subscribes
 //! late reads one envelope and has everything. It carries the rows exactly as
-//! the daemon joined them (the same data the plugin read directly before), so
-//! the trust boundary does not move. `StatusView` itself stays without
-//! `Serialize` (#983): the wire shape lives here and nowhere else.
+//! the daemon joined them, `cwd`, `display_name`, raw `current_request` and
+//! fingerprints included, which the #983 section 20 frame leaves out. Moving
+//! them from the plugin's own daemon socket onto the plugin bus is a trust
+//! boundary change, bounded by the runtime's topic-scoped `event_bus` grant:
+//! only a plugin whose grant names [`AGENT_STATUS_TOPIC`] can read it (the
+//! in-tree hangar plugin), the blanket grant does not cover `fleet.` topics,
+//! and the TUI host is the only publisher. Failure reasons are scrubbed by the
+//! host before publishing. `StatusView` itself stays without `Serialize`
+//! (#983): the wire shape lives here and nowhere else, locked by
+//! `the_envelope_key_paths_match_the_committed_list`.
 
 use serde::{Deserialize, Serialize};
 
