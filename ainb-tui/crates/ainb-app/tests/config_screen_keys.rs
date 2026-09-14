@@ -80,32 +80,49 @@ fn enter_on_categories_pane_toggles_the_tree_node() {
     );
 }
 
+/// The Claude auth row opens its own popup, never the generic choice popup:
+/// picking "API key" there also stores the key in the OS keychain, and the
+/// choice popup would set `claude_provider = api_key` with no key stored.
+fn assert_auth_popup_not_choice_popup(state: &AppState) {
+    assert!(
+        state.onboarding.auth_provider_popup_state.show_popup,
+        "enter on the Claude auth row must open the auth provider popup"
+    );
+    assert!(
+        !state.config.config_popup_state.show_popup,
+        "the generic choice popup must not open for the Claude auth row"
+    );
+}
+
 #[test]
 fn enter_on_claude_auth_row_opens_the_auth_provider_popup() {
     let mut state = config_screen();
     let screen = &mut state.config.config_screen_state;
-    screen.start_search();
-    for character in ConfigScreenState::CLAUDE_PROVIDER_KEY.chars() {
-        screen.push_search_char(character);
-    }
-    assert_eq!(
-        screen.current_setting().map(|row| row.key.as_str()),
-        Some(ConfigScreenState::CLAUDE_PROVIDER_KEY)
-    );
-    // Leave search with the cursor still on the auth row.
-    screen.search = None;
     screen.focused_pane = ConfigPane::Settings;
     assert_eq!(
         screen.current_setting().map(|row| row.key.as_str()),
+        Some(ConfigScreenState::CLAUDE_PROVIDER_KEY),
+        "the first settings row is the Claude auth row"
+    );
+
+    press(&mut state, Key::Enter);
+
+    assert_auth_popup_not_choice_popup(&state);
+}
+
+#[test]
+fn enter_on_claude_auth_row_while_searching_opens_the_auth_provider_popup() {
+    let mut state = config_screen();
+    press(&mut state, Key::Char('/'));
+    type_text(&mut state, "claude_provider");
+    assert_eq!(
+        state.config.config_screen_state.current_setting().map(|row| row.key.as_str()),
         Some(ConfigScreenState::CLAUDE_PROVIDER_KEY)
     );
 
-    let event = EventHandler::handle_key_event(Chord::new(Key::Enter, Mods::NONE), &mut state);
+    press(&mut state, Key::Enter);
 
-    assert!(
-        matches!(event, Some(AppEvent::AuthProviderPopupOpen)),
-        "enter on the Claude auth row must open the auth provider popup, got {event:?}"
-    );
+    assert_auth_popup_not_choice_popup(&state);
 }
 
 #[test]
