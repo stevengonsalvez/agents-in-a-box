@@ -61,6 +61,9 @@ pub enum Effect {
     RunDaemonAction {
         daemon: crate::fleet::daemons::probe::DaemonKind,
         action: crate::cli::daemon::Action,
+        /// Echoed in the report, so a report for an earlier request (one the
+        /// row gave up on) is not taken for this one.
+        generation: u64,
     },
 }
 
