@@ -1,0 +1,1 @@
+{"width": 120, "height": 36, "workspaces": [{"name": "api", "path": "/parity/api", "sessions": [{"name": "feat-login", "status": "running"}, {"name": "fix-cache", "status": "idle"}, {"name": "docs-readme"}]}, {"name": "web", "path": "/parity/web", "sessions": [{"name": "spike-ssr", "status": "running"}]}], "selected": [0, 1], "screen": {"kind": "session_list"}}

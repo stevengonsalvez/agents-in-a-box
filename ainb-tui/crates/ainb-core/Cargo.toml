@@ -30,6 +30,8 @@ ainb-app = { path = "../ainb-app", version = "1.28.2" }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+# The system clipboard, read for Effect::PasteClipboard.
+arboard = { workspace = true }
 
 # Docker
 futures-util = { workspace = true }

@@ -1138,6 +1138,21 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn statusline_probe_invalidate_forces_refresh() {
+        use crate::cli::statusline_install::StatuslineStatus;
+
+        let probe = crate::app::state::StatuslineProbe::default();
+        *probe.cache.lock().unwrap() =
+            Some((Some(StatuslineStatus::NotConfigured), Instant::now()));
+
+        probe.invalidate();
+        assert!(
+            probe.cache.lock().unwrap().is_none(),
+            "invalidation must drop the cached entry"
+        );
+    }
+
+    #[test]
     fn statusline_cache_returns_value_on_first_call_and_records_time() {
         use crate::cli::statusline_install::StatuslineStatus;
 

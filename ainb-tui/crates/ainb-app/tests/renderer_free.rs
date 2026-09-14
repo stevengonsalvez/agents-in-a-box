@@ -5,7 +5,8 @@
 //! declared directly or pulled in through another crate, ties it back to a
 //! terminal. Two checks, because they fail differently: the manifest check
 //! names the line that was added, the resolve-graph check catches a transitive
-//! edge the manifest cannot show.
+//! edge the manifest cannot show. A third keeps the reducer's event enum
+//! behind `dispatch` in every build a host ships.
 
 use std::collections::{BTreeSet, HashMap};
 use std::process::Command;
@@ -93,5 +94,46 @@ fn no_renderer_crate_is_reachable_through_normal_dependencies() {
         reached.is_empty(),
         "ainb-app reaches {reached:?} through its normal dependencies; \
          `cargo tree -p ainb-app -e normal -i <crate>` shows the path"
+    );
+}
+
+/// `test-support` makes the reducer's event enum public so integration tests
+/// can assert on resolved events. A build any host ships must never enable
+/// it, or a host could match on that enum again instead of dispatching.
+#[test]
+fn test_support_is_off_in_the_normal_dependency_graph() {
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "tree",
+            "--workspace",
+            "--edges",
+            "normal",
+            "--invert",
+            "ainb-app",
+            "--format",
+            "{p} {f}",
+            "--prefix",
+            "none",
+            "--depth",
+            "0",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo tree");
+    assert!(
+        output.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let tree = String::from_utf8_lossy(&output.stdout);
+    let features = tree
+        .lines()
+        .find(|line| line.starts_with("ainb-app "))
+        .and_then(|line| line.rsplit(' ').next())
+        .unwrap_or_else(|| panic!("ainb-app missing from cargo tree output:\n{tree}"));
+    assert!(
+        !features.split(',').any(|feature| feature == "test-support"),
+        "a normal dependency enables ainb-app/test-support ({features}); \
+         `cargo tree --workspace -e normal -i ainb-app -e features` shows which"
     );
 }

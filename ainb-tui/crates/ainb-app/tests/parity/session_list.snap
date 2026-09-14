@@ -1,0 +1,36 @@
+╭ 📊  Status────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│🗨️  OFF  │  ⚠ Live Claude Code usage off · press W to enable                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  Workspaces (2)F [all] B[-]─────────╮ preview │ ask │ err │ thread │ pal │ log ──────────────────────────────────────
+│    ▼  api (3)                       ││                               No logs available                              │
+│  1 ☐ ├─ ainb/feat-login        ● RUN ││                                                                              │
+│         ✻                            ││               Logs will appear here when containers are active.              │
+│▶ 2 ☐ ├─ ainb/fix-cache        ○ IDLE ││                                                                              │
+│         ✻                            ││                                                                              │
+│  3 ☐ └─ ainb/docs-readme       STOP ││                                                                              │
+│         ✻                            ││                                                                              │
+│    ▼  web (1)                       ││                                                                              │
+│  4 ☐ └─ ainb/spike-ssr         ● RUN ││                                                                              │
+│         ✻                            ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+│                                      ││                                                                              │
+╰ Enter select │ s ⭐  │ $ shell │ Space╯ ⇥ tab │ Enter attach │ 1-9 attach (any tab) ───────────────────────────────────
+┌Session Info──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ fix-cache │ ○ Idle │  ainb/fix-cache                                                                                 │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+╭ ⌨ Session actions ─────────────────────────────────────────────────────────────────────────────────── Panels & views ╮
+│    new  attach  → Pane attach  1-9 quick  Space select    │                      i stats  w witr                     │
+│            r resume  delete  ⇧D del-sel  star             │                k skills  m memory  t abtop               │
+│          o editor  $ shell  p commit  F2 rename           │                   git  claude  ⇧Expand                   │
+│             f refresh  ⇧F filter  u re-auth               │      Tab focus  ⇧M expand/collapse  ?/H help  q home     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

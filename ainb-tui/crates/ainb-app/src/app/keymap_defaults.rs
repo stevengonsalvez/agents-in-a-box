@@ -916,7 +916,11 @@ pub fn defaults() -> Vec<Binding> {
         quick_commit: "p" => AppEvent::QuickCommitStart,
         editor: "o" => AppEvent::OpenInEditor,
         expand: "E" => AppEvent::ToggleExpandAll,
-        sidebar: "B" => AppEvent::ToggleSessionsSidebar,
+    );
+    append_action_rows!(rows, Context::screen("session_list"),
+        sidebar: "B" => KeyAction::Ui(UiAction::ToggleSessionsSidebar),
+    );
+    append_app_rows!(rows, Context::screen("session_list"),
         menu_bar: "M" => AppEvent::ToggleSessionMenuBar,
         stats: "i" => AppEvent::GoToStats,
         witr: "w" => AppEvent::GoToWitr,

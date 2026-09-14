@@ -1,0 +1,36 @@
+╭ 📊  Status────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│🗨️  OFF  │  ⚠ Live Claude Code usage off · press W to enable                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭  Workspaces (2)F [all] B[-]─────────╮ preview │ ask │ err │ thread │ pal │ log ──────────────────────────────────────
+│  ▼  api (3)                         ││                               No logs available                              │
+│1 ☐ ├─ ainb╭──────────────────────────────────────── New Session ─────────────────────────────────────────╮           │
+│       ✻   │> type to filter, or paste owner/repo · https://… · ssh://user@host · /local/path             │           │
+│2 ☐ ├─ ainb│                                                                                              │           │
+│       ✻   │                                                                                              │           │
+│3 ☐ └─ ainb│                                                                                              │           │
+│       ✻   │                                                                                              │           │
+│  ▼  web (│                                                                                              │           │
+│4 ☐ └─ ainb│                                                                                              │           │
+│       ✻   │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+│           │                                                                                              │           │
+╰ Enter sele│                                                                                              │────────────
+┌Session Det│                                                                                              │───────────┐
+│           │                         Enter=Select  Esc=Quit  ^R=Reset  ^F=Favorite                        │           │
+└───────────│                                                                                              │───────────┘
+╭ ⌨ Session ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ls & views ╮
+│    new  attach  → Pane attach  1-9 quick  Space select    │                      i stats  w witr                     │
+│            r resume  delete  ⇧D del-sel  star             │                k skills  m memory  t abtop               │
+│          o editor  $ shell  p commit  F2 rename           │                   git  claude  ⇧Expand                   │
+│             f refresh  ⇧F filter  u re-auth               │      Tab focus  ⇧M expand/collapse  ?/H help  q home     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
