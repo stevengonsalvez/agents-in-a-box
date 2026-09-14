@@ -362,7 +362,6 @@
     {"context":"config.search","chord":"backspace","action":"App(ConfigSearchBackspace)"},
     {"context":"config.search","chord":"ctrl+k","action":"App(ConfigSecretToKeychain)"},
     {"context":"config.categories","chord":"enter","action":"App(ConfigToggleExpand)"},
-    {"context":"config.claude_auth","chord":"enter","action":"App(AuthProviderPopupOpen)"},
     {"context":"auth_provider_popup.input","chord":"enter","action":"App(AuthProviderPopupSelect)"},
     {"context":"auth_provider_popup.input","chord":"esc","action":"App(AuthProviderPopupClose)"},
     {"context":"auth_provider_popup.input","chord":"backspace","action":"App(AuthProviderPopupBackspace)"},
