@@ -51,6 +51,19 @@ pub struct TmuxPreviewPane {
     scroll_offset: usize,
     /// Maximum scroll offset (updated when rendering)
     max_scroll: usize,
+    /// The screen of the host's live tmux client, handed over before each
+    /// frame. `None` draws the pane's frame with nothing in it.
+    terminal_screen: Option<TerminalScreen>,
+}
+
+/// A live client's vt100 screen, shared with the reader thread that feeds it.
+#[derive(Clone)]
+struct TerminalScreen(std::sync::Arc<std::sync::RwLock<vt100::Parser>>);
+
+impl std::fmt::Debug for TerminalScreen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TerminalScreen")
+    }
 }
 
 impl TmuxPreviewPane {
@@ -60,7 +73,17 @@ impl TmuxPreviewPane {
             preview_mode: PreviewMode::Normal,
             scroll_offset: 0,
             max_scroll: 0,
+            terminal_screen: None,
         }
+    }
+
+    /// Draw the live pane from `screen`, the host's client's screen, until the
+    /// next call.
+    pub fn show_terminal(
+        &mut self,
+        screen: Option<std::sync::Arc<std::sync::RwLock<vt100::Parser>>>,
+    ) {
+        self.terminal_screen = screen.map(TerminalScreen);
     }
 
     /// Render the live interactive terminal observer with input focus.
@@ -99,9 +122,8 @@ impl TmuxPreviewPane {
             .style(Style::default().bg(DARK_BG))
             .title(title);
 
-        match state.tmux.embed.as_ref() {
-            Some(embed) => {
-                let parser = embed.parser();
+        match self.terminal_screen.as_ref() {
+            Some(TerminalScreen(parser)) => {
                 let guard = parser.read();
                 match guard {
                     Ok(g) => {
