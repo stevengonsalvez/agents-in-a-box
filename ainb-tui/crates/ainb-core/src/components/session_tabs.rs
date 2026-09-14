@@ -1481,7 +1481,7 @@ mod tests {
         with_daemon(&mut state, false, true);
         assert!(state.pal_daemon_cta_armed());
 
-        state.fleet.daemon_start_cta.start();
+        state.fleet.daemon_start_cta.start(1);
         assert!(!state.pal_daemon_cta_armed());
         assert!(!footer_text(&state, SessionTab::Pal, true).contains(START_DAEMON_VERB));
     }
