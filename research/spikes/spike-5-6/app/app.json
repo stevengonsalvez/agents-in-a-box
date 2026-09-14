@@ -13,7 +13,8 @@
       "infoPlist": {
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
-        }
+        },
+        "NSLocalNetworkUsageDescription": "Connects to the scratch spike peer on this network."
       }
     },
     "android": {
