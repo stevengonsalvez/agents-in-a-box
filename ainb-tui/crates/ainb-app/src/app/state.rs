@@ -3204,6 +3204,23 @@ impl AppState {
         self.effects.push(effect);
     }
 
+    /// Queue a write of `store` for the host, after this step.
+    pub fn persist(&mut self, store: crate::app::effect::Persist) {
+        self.emit(crate::app::effect::Effect::Persist(store));
+    }
+
+    /// Queue a write of the user config as it stands now.
+    pub fn persist_app_config(&mut self) {
+        let config = crate::app::effect::Snapshot(self.config.app_config.clone());
+        self.persist(crate::app::effect::Persist::AppConfig(config));
+    }
+
+    /// Queue a write of the session labels as they stand now.
+    pub fn persist_session_labels(&mut self) {
+        let labels = crate::app::effect::Snapshot(self.session_labels.session_label_store.clone());
+        self.persist(crate::app::effect::Persist::SessionLabels(labels));
+    }
+
     /// Hand the queued effects to the host, oldest first.
     #[must_use]
     pub fn take_effects(&mut self) -> Vec<crate::app::effect::Effect> {
@@ -3829,8 +3846,6 @@ impl AppState {
     /// Only writes when at least one path is VALID, so invalid/empty input never
     /// clobbers previously-saved config.
     pub fn persist_onboarding_git_dirs(&mut self) {
-        use crate::config::OnboardingConfig;
-
         let Some(state) = self.onboarding.onboarding_state.as_ref() else {
             return;
         };
@@ -3839,18 +3854,15 @@ impl AppState {
             return;
         }
 
-        // Onboarding record — load first so we preserve completed/version/etc.
-        let mut cfg = OnboardingConfig::load().unwrap_or_default();
-        cfg.git_directories = valid.clone();
-        if let Err(e) = cfg.save() {
-            warn!("Failed to persist onboarding git directories: {}", e);
-        }
+        // The onboarding record keeps completed/version/etc.: the host sets
+        // the directories on the record on disk.
+        self.persist(crate::app::effect::Persist::OnboardingGitDirectories(
+            valid.clone(),
+        ));
 
         // App-config scan paths (what session creation actually reads).
         self.config.app_config.workspace_defaults.workspace_scan_paths = valid;
-        if let Err(e) = self.config.app_config.save() {
-            warn!("Failed to persist workspace scan paths: {}", e);
-        }
+        self.persist_app_config();
     }
 
     /// Complete the onboarding process
@@ -3858,7 +3870,9 @@ impl AppState {
         if let Some(state) = &self.onboarding.onboarding_state {
             // Save onboarding config
             let config = Self::onboarding_config_from_state(state);
-            config.save().map_err(|e| format!("Failed to save onboarding config: {}", e))?;
+            self.effects.push(crate::app::effect::Effect::Persist(
+                crate::app::effect::Persist::Onboarding(crate::app::effect::Snapshot(config)),
+            ));
 
             // Update app config with git directories
             self.config.app_config.workspace_defaults.workspace_scan_paths =
@@ -3897,12 +3911,7 @@ impl AppState {
                 }
             }
 
-            if let Err(e) = self.config.app_config.save() {
-                warn!(
-                    "Failed to save app config during onboarding completion: {}",
-                    e
-                );
-            }
+            self.persist_app_config();
         }
 
         // Clean up and return to home
@@ -6309,9 +6318,7 @@ impl AppState {
     pub fn toggle_session_menu_bar(&mut self) {
         let show = !self.config.app_config.ui_preferences.show_session_menu_bar;
         self.config.app_config.ui_preferences.show_session_menu_bar = show;
-        if let Err(e) = self.config.app_config.save() {
-            warn!("Failed to persist show_session_menu_bar: {}", e);
-        }
+        self.persist_app_config();
         self.add_info_notification(if show {
             "Keymap legend shown".to_string()
         } else {
@@ -6324,9 +6331,7 @@ impl AppState {
     pub fn cycle_session_filter(&mut self) {
         self.sessions.session_filter = self.sessions.session_filter.next();
         self.config.app_config.ui_preferences.session_filter = self.sessions.session_filter;
-        if let Err(e) = self.config.app_config.save() {
-            warn!("Failed to persist session filter: {}", e);
-        }
+        self.persist_app_config();
         // Selection indices are positional over the *displayed* list. Resetting
         // to the first session of the first workspace is simplest and matches
         // what `load_real_workspaces` already does after a refresh.
@@ -6548,9 +6553,7 @@ impl AppState {
                 // Persist to disk
                 if let Some(key) = tmux_name {
                     self.session_labels.session_label_store.set(key, session.display_name.clone());
-                    if let Err(e) = self.session_labels.session_label_store.save() {
-                        warn!("Failed to save session labels: {}", e);
-                    }
+                    self.persist_session_labels();
                 }
             }
         }
@@ -6652,10 +6655,7 @@ impl AppState {
 
         if let Some(tmux_name) = tmux_name {
             self.session_labels.session_label_store.set(tmux_name, label);
-            if let Err(error) = self.session_labels.session_label_store.save() {
-                self.add_error_notification(format!("Failed to save session label: {error}"));
-                return;
-            }
+            self.persist_session_labels();
         }
         self.cancel_session_label_rename();
     }
@@ -7713,11 +7713,8 @@ impl AppState {
                         self.session_labels
                             .session_label_store
                             .set(tmux_name, Some(prefix.clone()));
-                        if let Err(error) = self.session_labels.session_label_store.save() {
-                            self.add_error_notification(format!(
-                                "Session started but prefix could not be saved: {error}"
-                            ));
-                        } else if let Some(session) = self.find_session_mut(session_id) {
+                        self.persist_session_labels();
+                        if let Some(session) = self.find_session_mut(session_id) {
                             session.display_name = Some(prefix.clone());
                         }
                     }
@@ -12560,17 +12557,13 @@ impl AppState {
                 ),
             };
 
-            if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
-                meta.headroom_enabled = false;
-            }
-            if let Err(e) = store.save() {
-                // Non-fatal: we still attempt the respawn; the flag will be
-                // re-read from a stale store on the next restart, so log clearly.
-                warn!(
-                    "Failed to persist headroom_enabled=false for {}: {}",
-                    tmux_session_name, e
-                );
-            }
+            // The host writes the flag under the store's lock once this step
+            // ends. A failed write is reported and the respawn still goes
+            // ahead; the flag is re-read from a stale store on the next restart.
+            self.persist(crate::app::effect::Persist::SessionHeadroom {
+                tmux_session: tmux_session_name.clone(),
+                enabled: false,
+            });
             launch_settings
         };
 
