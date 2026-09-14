@@ -133,6 +133,8 @@ config.changelog_state.total_lines
 config.config_popup_state.description
 config.config_popup_state.popup_type.SecretInput.cursor_position
 config.config_popup_state.popup_type.SecretInput.value_len
+config.config_popup_state.popup_type.TextInput.cursor_position
+config.config_popup_state.popup_type.TextInput.value
 config.config_popup_state.setting_key
 config.config_popup_state.show_popup
 config.config_popup_state.title
