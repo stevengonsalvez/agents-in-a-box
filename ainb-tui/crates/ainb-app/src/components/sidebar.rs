@@ -2,8 +2,6 @@
 // state types and the logic that does not draw. The renderer lives in
 // `ainb-core::components::sidebar`, which re-exports this module.
 
-use crate::geometry::Area;
-
 pub const DEFAULT_SIDEBAR_WIDTH: u16 = 26;
 
 pub const MIN_SIDEBAR_WIDTH: u16 = 16;
@@ -205,8 +203,6 @@ pub struct SidebarState {
     pub show_labels: bool,
     /// Active sessions count (for badge display)
     pub active_sessions_count: usize,
-    /// Preferred sidebar width, clamped against the current terminal width at render time.
-    pub preferred_width: u16,
 }
 
 impl SidebarState {
@@ -216,7 +212,6 @@ impl SidebarState {
             is_focused: true,
             show_labels: true,
             active_sessions_count: 0,
-            preferred_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 
@@ -253,14 +248,6 @@ impl SidebarState {
         }
     }
 
-    pub fn set_preferred_width(&mut self, width: u16, terminal_width: u16) {
-        self.preferred_width = Self::clamp_width(width, terminal_width);
-    }
-
-    pub fn effective_width(&self, terminal_width: u16) -> u16 {
-        Self::clamp_width(self.preferred_width, terminal_width)
-    }
-
     pub fn clamp_width(width: u16, terminal_width: u16) -> u16 {
         if terminal_width == 0 {
             return 0;
@@ -279,27 +266,6 @@ impl Default for SidebarState {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Map a click row to a sidebar item. Row heights are variable (the
-/// selected item is 2 rows, the rest 1), so the selected index is needed
-/// to walk the rows correctly. `area` is where the renderer last drew the
-/// sidebar; the row layout here mirrors its title, spacer and item rows.
-pub fn item_index_at(area: Area, y: u16, selected_index: usize) -> Option<usize> {
-    let first_item_y = area.y.saturating_add(3); // title(2) + spacer(1)
-    if y < first_item_y {
-        return None;
-    }
-
-    let mut row = first_item_y;
-    for idx in 0..SidebarItem::all().len() {
-        let height = if idx == selected_index { 2 } else { 1 };
-        if y >= row && y < row.saturating_add(height) {
-            return Some(idx);
-        }
-        row = row.saturating_add(height);
-    }
-    None
 }
 
 #[cfg(test)]
