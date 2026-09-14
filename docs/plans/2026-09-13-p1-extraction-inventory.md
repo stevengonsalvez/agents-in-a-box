@@ -352,22 +352,22 @@ Both commands are unbound rows. `ainb diff-review` keeps its layout local and ca
 | `RuntimeHandle::send_action` in the `plugin.owned.action` arm | `RunPluginAction {plugin, action_id, payload}` | `plugin_action_undelivered {plugin, action_id}` when no running plugin took it |
 | `enter_interactive_pane` opening the writable embed (a PTY) | `AttachTerminal(InPlace {tmux_session, show_menu_bar})` | `in_place_opened {tmux_session, embed}`, the client parked process-locally as a `LocalEmbed` handle and adopted once; or `in_place_failed {tmux_session, error}` |
 
-`in_place_sized` is gone: the host sizes the client from its own terminal and sidebar. The read-only preview observer is still opened by `AppState::sync_terminal_observer`, which only the run loop calls; `host_side_effects.rs` names both sites.
+`in_place_sized` is gone: the host sizes the client from its own terminal and sidebar. `enter_interactive_pane` is deleted; `tripwire_interactive_pane` drives the key's command, opens the client as the host does and dispatches the report. A report is adopted only while the session list shows the row it names; otherwise the client is closed. The read-only preview observer is still opened by `AppState::sync_terminal_observer`, which only the run loop calls; `host_side_effects.rs` names both sites.
 
-The executor is `execute(effect, terminal, ui, plugins)`, with no `&AppState`. The data it read from state now rides on the effect, through validating constructors: `TmuxSessionName::new` (not empty, no `:` or `.`, no control characters) on `Session`, `InPlace`, `Tmux` and `WorkspaceShell`, and `EditorPath::new` (absolute) with the preferred editor on `OpenEditor`.
+The executor is `execute(effect, terminal, ui, plugins)`, with no `&AppState`. The data it read from state now rides on the effect, through validating constructors: `TmuxSessionName::new` (not empty, no `:` or `.`, no control characters, no leading `$`, `%`, `@` or `=`; both attach sites pass `=name` so tmux matches exactly) on `Session`, `InPlace`, `Tmux` and `WorkspaceShell`, and `EditorPath::new` (absolute) with the preferred editor on `OpenEditor`.
 
 ### Per-plugin `ui.state`
 
 | Layer | Change |
 |-------|--------|
 | protocol 0.1.2 | `topics::ui_state_topic(plugin)`, prefix `ui.state/`; `wire-surface.lock` regenerated a second time (goal amended) |
-| runtime | a plugin's bare `ui.state` publish is stored under `ui.state/<publisher>`; a publish to another plugin's slot is dropped |
-| CTS | `axis_two_plugins_publish_ui_state_without_overwriting_each_other` |
-| host | `record_plugin_ui_state(plugin, running, snapshot)` evicts a stopped plugin's view and refuses one over `MAX_PLUGIN_UI_STATE_BYTES` (256 KiB); `plugin.owned.watch_screen {screen, watching}` keeps a plugin screen rendering while another host watches it |
+| runtime | a plugin's bare `ui.state` publish is stored under `ui.state/<publisher>`; a publish to another plugin's slot is dropped; the slot is cleared when the plugin's process goes |
+| CTS | `axis_two_plugins_publish_ui_state_without_overwriting_each_other`, `axis_a_crashed_plugins_ui_state_is_gone_before_it_restarts` |
+| host | `record_plugin_ui_state(plugin, running, snapshot)` evicts a stopped plugin's view, refuses one over `MAX_PLUGIN_UI_STATE_BYTES` (256 KiB), and never takes a version at or below the last one seen stopped or refused (`plugin_ui_state_spent`); `plugin.owned.watch_screen {screen, watching}` keeps a plugin screen rendering while another host watches it, as a 30 s lease that lapses unless renewed and goes when the plugin is quarantined or unregistered; views and watches are not in the section frame (#983) |
 
 ### Command context gate
 
-`Intent::Command` resolves a row only when its context is active, through the same `active_contexts` as `Intent::Key`. Report rows (`global.*`) and plugin action rows resolve everywhere. The slash palette's `/recall` now names the unbound `global.open_learnings` instead of a Learnings-screen row. Tests: `pointer_commands.rs::a_command_scoped_to_another_screen_changes_nothing`, `the_slash_palette_opens_learnings_from_any_screen`.
+`Intent::Command` resolves a row only when its context is active, through the same `active_contexts` as `Intent::Key`. Host-authored rows (the report ids and plugin actions) resolve everywhere. `global.wire_statusline` writes Claude Code's settings, so it is in `KEY_ONLY_COMMANDS` and never runs by name (`key_only_commands.rs`). The slash palette's `/recall` now names the unbound `global.open_learnings` instead of a Learnings-screen row. Tests: `pointer_commands.rs::a_command_scoped_to_another_screen_changes_nothing`, `the_slash_palette_opens_learnings_from_any_screen`.
 
 ### Tripwires in CI
 
@@ -378,6 +378,8 @@ Job `core-tripwires` runs `cargo nextest run -p ainb -E 'binary(/^tripwire_/)'` 
 | What | Where |
 |------|-------|
 | `sessions_sidebar_width` is a column count | becomes a fraction of the row with the same one-time migration, because a desktop host has no columns |
-| `app_config.save()` in 8 reducer arms in `events.rs` and 6 in `state.rs` | a persistence effect the host runs after the commit, so `dispatch` never blocks on disk |
+| Synchronous disk writes on reducer paths: `app_config.save()` (7 in `events.rs`, 4 in `state.rs`), the favourites store (2 in `events.rs`, 1 in `components/new_session/pick_repo.rs`), the session label store (3 in `state.rs`), `interactive::SessionStore` (1 in `state.rs`), and the onboarding and auth-provider config loads and saves (1 in `events.rs`, 2 in `state.rs`) | one persistence effect covering every store, run by the host after the commit, so `dispatch` never blocks on disk; a source guard in the `CALL_SITES` style keeps the count at zero |
+| `AppState` still owns the terminal clients: `tmux.embed` holds the writable `EmbedClient` the host opened (handed over as a process-local `LocalEmbed`), and `sync_terminal_observer` opens the read-only one | the host keeps the client and state keeps the session name and focus; until then `TerminalTarget::InPlace` is terminal-host-only, and a second host cannot implement it |
+| `Intent::Command` carries no origin: report ids and plugin actions are runnable by any surface that can dispatch, and only `KEY_ONLY_COMMANDS` is refused by name | an origin on intents, or report rows a non-host surface cannot send, before any off-process surface dispatches |
 | Home and log-history wheel and click writes | `ainb-core/src/main.rs` mouse loop |
 
