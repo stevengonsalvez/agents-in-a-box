@@ -51,4 +51,39 @@ MODE=lock bash scripts/android-socket-lifetime.sh
 bash scripts/android-banners.sh
 ```
 
-`pairing.json` holds a scratch host key and token and is gitignored. iOS was not built: the measuring box had no Xcode.
+`pairing.json` holds a scratch host key and token and is gitignored.
+
+## iOS (simulator, or a phone over USB)
+
+Needs Xcode. The simulator reaches `peerd` on loopback; a phone needs the mac's
+LAN address in `pairing.json` and signing with the team Xcode already has.
+
+```bash
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+(cd app/modules/ainb-wire && npx ubrn build ios --config ubrn.config.yaml --and-generate --release)
+cd app && CI=1 npx expo prebuild --platform ios
+# size delta: unsigned device builds with and without the crate
+(cd ios && xcodebuild -workspace ainbwirespike.xcworkspace -scheme ainbwirespike -configuration Release \
+    -sdk iphoneos -destination generic/platform=iOS -derivedDataPath "$RUN/dd-wire" CODE_SIGNING_ALLOWED=NO build)
+(cd ios && SPIKE_NO_WIRE=1 pod install && SPIKE_NO_WIRE=1 xcodebuild -workspace ainbwirespike.xcworkspace \
+    -scheme ainbwirespike -configuration Release -sdk iphoneos -destination generic/platform=iOS \
+    -derivedDataPath "$RUN/dd-nowire" CODE_SIGNING_ALLOWED=NO build && pod install)
+
+# simulator actuator: simctl cannot lock the device or see banners
+GEM_HOME="$(brew --prefix cocoapods)/libexec" ruby ../ios/add-actuator-target.rb
+(cd ios && xcodebuild build-for-testing -workspace ainbwirespike.xcworkspace -scheme AinbSpikeUITests \
+    -configuration Release -destination "id=$SIM" -derivedDataPath "$RUN/dd-uit" ARCHS=arm64)
+xcrun simctl install "$SIM" "$RUN/dd-uit/Build/Products/Release-iphonesimulator/ainbwirespike.app"
+
+# measurements
+export SIM XCTESTRUN="$(ls "$RUN"/dd-uit/Build/Products/*.xctestrun)" PEER_LOG="$RUN/peerd.log" EVENTS="$RUN/events.log" \
+    APP="$RUN/dd-uit/Build/Products/Release-iphonesimulator/ainbwirespike.app"
+bash scripts/ios-sim-cold-start.sh
+MODE=background bash scripts/ios-sim-socket-lifetime.sh
+MODE=lock bash scripts/ios-sim-socket-lifetime.sh
+bash scripts/ios-sim-custody.sh
+LOCK=1 bash scripts/ios-sim-banners.sh
+```
+
+Use a dedicated simulator device (`xcrun simctl create`), and never quit the
+Simulator app mid-run: it shuts the booted device down.
