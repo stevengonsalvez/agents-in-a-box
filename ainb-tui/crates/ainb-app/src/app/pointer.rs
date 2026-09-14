@@ -30,9 +30,7 @@ pub mod ids {
     pub const SKILL_MANAGER_SELECT_UNIT: &str = "skill_manager.select_unit";
     /// `{"pane": "sources" | "units"}`
     pub const SKILL_MANAGER_FOCUS_PANE: &str = "skill_manager.focus_pane";
-    /// No arguments.
-    pub const SKILL_MANAGER_BEGIN_RESIZE_SOURCES: &str = "skill_manager.begin_resize_sources";
-    /// No arguments.
+    /// `{"width": u16}`
     pub const SKILL_MANAGER_SAVE_SOURCES_WIDTH: &str = "skill_manager.save_sources_width";
     /// No arguments.
     pub const HOME_BEGIN_SIDEBAR_RESIZE: &str = "home.begin_sidebar_resize";
@@ -110,16 +108,13 @@ pub fn focus_skill_pane(pane: FocusedSkillPane) -> Intent {
     command(ids::SKILL_MANAGER_FOCUS_PANE, json!({ "pane": pane }))
 }
 
-/// Start dragging the Sources panel edge.
+/// Persist the Sources panel width a renderer just set.
 #[must_use]
-pub fn begin_skill_sources_resize() -> Intent {
-    command(ids::SKILL_MANAGER_BEGIN_RESIZE_SOURCES, Value::Null)
-}
-
-/// Persist the Sources panel width a drag just set.
-#[must_use]
-pub fn save_skill_sources_width() -> Intent {
-    command(ids::SKILL_MANAGER_SAVE_SOURCES_WIDTH, Value::Null)
+pub fn save_skill_sources_width(width: u16) -> Intent {
+    command(
+        ids::SKILL_MANAGER_SAVE_SOURCES_WIDTH,
+        json!({ "width": width }),
+    )
 }
 
 /// Start dragging the home sidebar's resize edge.
@@ -139,6 +134,7 @@ pub fn click_home_sidebar_item(index: usize) -> Intent {
 pub(crate) fn event_for(id: &CommandId, args: &Args) -> Option<AppEvent> {
     let index = |key: &str| args.get(key)?.as_u64().and_then(|n| usize::try_from(n).ok());
     let flag = |key: &str| args.get(key)?.as_bool();
+    let width = || index("width").and_then(|n| u16::try_from(n).ok());
     let pane = || args.get("pane")?.as_str();
     let bare = |event: AppEvent| args.is_null().then_some(event);
     Some(match id.as_str() {
@@ -154,7 +150,7 @@ pub(crate) fn event_for(id: &CommandId, args: &Args) -> Option<AppEvent> {
             _ => return None,
         }),
         ids::SESSION_LIST_SAVE_PANE_LAYOUT => AppEvent::SaveSessionsPaneLayout {
-            width: index("width").and_then(|n| u16::try_from(n).ok())?,
+            width: width()?,
             collapsed: flag("collapsed")?,
         },
         ids::SKILL_MANAGER_ALL_SOURCES => bare(AppEvent::SkillManagerClearSourceFilter)?,
@@ -169,8 +165,9 @@ pub(crate) fn event_for(id: &CommandId, args: &Args) -> Option<AppEvent> {
             "units" => FocusedSkillPane::Units,
             _ => return None,
         }),
-        ids::SKILL_MANAGER_BEGIN_RESIZE_SOURCES => bare(AppEvent::SkillManagerBeginResizeSources)?,
-        ids::SKILL_MANAGER_SAVE_SOURCES_WIDTH => bare(AppEvent::SkillManagerPersistSourcesWidth)?,
+        ids::SKILL_MANAGER_SAVE_SOURCES_WIDTH => {
+            AppEvent::SkillManagerSaveSourcesWidth { width: width()? }
+        }
         ids::HOME_BEGIN_SIDEBAR_RESIZE => bare(AppEvent::HomeSidebarBeginResize)?,
         ids::HOME_CLICK_SIDEBAR_ITEM => AppEvent::HomeSidebarClickItem {
             index: index("index")?,
@@ -196,8 +193,7 @@ mod tests {
             select_skill_source(1),
             select_skill_unit(3),
             focus_skill_pane(FocusedSkillPane::Units),
-            begin_skill_sources_resize(),
-            save_skill_sources_width(),
+            save_skill_sources_width(48),
             begin_home_sidebar_resize(),
             click_home_sidebar_item(0),
         ];
