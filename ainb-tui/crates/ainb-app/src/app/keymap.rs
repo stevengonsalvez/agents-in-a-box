@@ -466,7 +466,6 @@ impl KeyContext {
             "config.api_key" => Self::Screen("config", SubContext::Named("api_key")),
             "config.search" => Self::Screen("config", SubContext::Named("search")),
             "config.categories" => Self::Screen("config", SubContext::Named("categories")),
-            "config.claude_auth" => Self::Screen("config", SubContext::Named("claude_auth")),
             "config_popup.input" => Self::Screen("config_popup", SubContext::Named("input")),
             "auth_provider_popup.input" => {
                 Self::Screen("auth_provider_popup", SubContext::Named("input"))
@@ -697,12 +696,6 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                     == crate::app::state::ConfigPane::Categories
                 {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("categories")));
-                } else if state.config.config_screen_state.current_setting().is_some_and(|row| {
-                    row.key == crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
-                }) {
-                    // The Claude auth row opens its own popup: picking "API
-                    // key" there also stores the key in the OS keychain.
-                    contexts.push(KeyContext::Screen(screen, SubContext::Named("claude_auth")));
                 }
             }
             screen_ids::GIT_VIEW => {
