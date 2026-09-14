@@ -40,8 +40,14 @@ async fn capture(tmux_session: &str, lines: u32, ansi: Ansi) -> Result<String> {
         "-S",
         scroll_arg.as_str(),
     ];
-    if ansi == Ansi::Kept {
-        args.push("-e");
+    match ansi {
+        Ansi::Kept => args.push("-e"),
+        // `-J` joins lines tmux soft-wrapped at the pane width. Without it a
+        // token longer than the pane is split across two lines, and every
+        // reader of this text, a redaction scrub included, sees two halves
+        // that match no shape. The send path's `-e` capture keeps the wrap: its
+        // composer check compares the pane's rows as drawn.
+        Ansi::Stripped => args.push("-J"),
     }
     let output = Command::new("tmux")
         .args(args)
