@@ -81,9 +81,12 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
     // Surface 1: the TUI fleet panel, as an operator sees it. The daemon's ONE
     // joined read (`fleet/roster_status`, #1015) is round-tripped through its
     // wire encoding, folded into section 20 by the host, published as the
-    // agent-status envelope and folded by the panel (#1031), exactly the path a
-    // running TUI takes. What is asserted is the RENDERED screen, painted into a
-    // ratatui `TestBackend` the way the TUI paints the plugin's buffer.
+    // agent-status envelope and folded by the panel (#1031): the same fold,
+    // encode and decode a running TUI performs, minus the plugin runtime's
+    // delivery, which `agent_status_host.rs`
+    // (`a_section_change_reaches_a_subscribed_plugin_through_the_runtime`)
+    // covers. What is asserted is the RENDERED screen, painted into a ratatui
+    // `TestBackend` the way the TUI paints the plugin's buffer.
     {
         let joined = wire_round_trip(
             &ainb_hangar_daemon::fleet::roster_status(store.pool())
