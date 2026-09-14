@@ -2314,14 +2314,25 @@ export type FrameBatch_Serialize = {
 export type Frame_Serialize = {
 	/**  Stable wire name, [`section_name`]. */
 	section: string,
-	/**  The section's [`Versioned`](crate::app::versioned::Versioned) version. */
+	/**
+	 *  The section's [`Versioned`](crate::app::versioned::Versioned) version.
+	 *  Ordered only within one [`Self::epoch`].
+	 */
 	version: number,
+	/**
+	 *  The sending host process's [`host_epoch`]. A renderer that sees a larger
+	 *  epoch from a host drops everything it held from that host first.
+	 */
+	epoch: number,
 	host_id: HostId,
 	/**  Present on sections whose content comes from a daemon read. */
 	daemon_read?: DaemonRead | null,
 	/**
 	 *  `section_json` for the section: redacted by construction. In TypeScript
 	 *  it is `unknown`; `SectionBodies[frame.section]` names its shape.
+	 * 
+	 *  Private: the host side can only fill it through [`Self::new`], so no
+	 *  frame body comes from anywhere but the redacting serializer.
 	 */
 	body: unknown,
 };
