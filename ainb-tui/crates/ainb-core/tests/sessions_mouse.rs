@@ -1,10 +1,10 @@
 //! Sessions screen mouse behavior regression tests.
 
-use ainb::app::events::AppEvent;
+use ainb::app::mouse::{Gesture, gesture};
 use ainb::app::screens::ids as screen_ids;
 use ainb::app::state::FocusedPane;
 use ainb::app::ui_state::UiState;
-use ainb::app::{AppState, EventHandler};
+use ainb::app::{AppState, Btn, Effect, Intent, Keymap, Pos, TerminalTarget, dispatch};
 use ainb::components::session_list::SessionListComponent;
 use ainb::models::{Session, Workspace};
 use ratatui::Terminal;
@@ -84,19 +84,29 @@ fn state_with_two_sessions() -> (tempfile::TempDir, AppState, UiState) {
     state_with_sessions(2)
 }
 
+/// Left-click at (`x`, `y`) through dispatch, with `ui` as the host that
+/// hit-tests it, exactly as the run loop does.
+fn click(state: &mut AppState, ui: &mut UiState, x: u16, y: u16) -> Vec<Effect> {
+    let press = Intent::Mouse(Pos { x, y }, Btn::Left);
+    dispatch(state, &Keymap::defaults(), ui, press)
+}
+
+/// A drag, release or hover, then whatever intent it finished.
+fn finish_gesture(kind: Gesture, state: &mut AppState, ui: &mut UiState, x: u16, y: u16) {
+    if let Some(intent) = gesture(kind, Pos { x, y }, state, ui) {
+        dispatch(state, &Keymap::defaults(), ui, intent);
+    }
+}
+
 #[test]
 fn sessions_mouse_click_selects_session_row_without_async_work() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (_home, mut state, mut ui) = state_with_two_sessions();
 
     let second = session_row_y(&ui, 1);
-    let outcome = ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseClick { x: 8, y: second },
-        &mut state,
-        &mut ui,
-    );
+    let effects = click(&mut state, &mut ui, 8, second);
 
-    assert!(outcome.is_none());
+    assert!(effects.is_empty());
     assert_eq!(state.sessions.selected_workspace_index, Some(0));
     assert_eq!(state.sessions.selected_session_index, Some(1));
     assert!(state.shell.pending_async_action.is_some());
@@ -108,19 +118,15 @@ fn sessions_mouse_double_click_attaches_selected_session_row() {
     let (_home, mut state, mut ui) = state_with_two_sessions();
 
     let row = session_row_y(&ui, 1);
-    let first = ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseClick { x: 8, y: row },
-        &mut state,
-        &mut ui,
-    );
-    let second = ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseClick { x: 8, y: row },
-        &mut state,
-        &mut ui,
-    );
+    let first = click(&mut state, &mut ui, 8, row);
+    let second = click(&mut state, &mut ui, 8, row);
 
-    assert!(first.is_none());
-    assert!(matches!(second, Some(AppEvent::AttachTmuxSession)));
+    let session_id = state.sessions.workspaces[0].sessions[1].id;
+    assert!(first.is_empty());
+    assert_eq!(
+        second,
+        vec![Effect::AttachTerminal(TerminalTarget::Session(session_id))]
+    );
     assert_eq!(state.sessions.selected_workspace_index, Some(0));
     assert_eq!(state.sessions.selected_session_index, Some(1));
 }
@@ -132,22 +138,11 @@ fn sessions_mouse_double_click_requires_same_attachable_row() {
 
     let first_row = session_row_y(&ui, 0);
     let second_row = session_row_y(&ui, 1);
-    let first = ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseClick { x: 8, y: first_row },
-        &mut state,
-        &mut ui,
-    );
-    let second = ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseClick {
-            x: 8,
-            y: second_row,
-        },
-        &mut state,
-        &mut ui,
-    );
+    let first = click(&mut state, &mut ui, 8, first_row);
+    let second = click(&mut state, &mut ui, 8, second_row);
 
-    assert!(first.is_none());
-    assert!(second.is_none());
+    assert!(first.is_empty());
+    assert!(second.is_empty());
     assert_eq!(state.sessions.selected_workspace_index, Some(0));
     assert_eq!(state.sessions.selected_session_index, Some(1));
 }
@@ -157,12 +152,8 @@ fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (home, mut state, mut ui) = state_with_two_sessions();
 
-    ainb::app::mouse::handle_mouse_event(AppEvent::MouseClick { x: 39, y: 8 }, &mut state, &mut ui);
-    ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseDragging { x: 55, y: 8 },
-        &mut state,
-        &mut ui,
-    );
+    click(&mut state, &mut ui, 39, 8);
+    finish_gesture(Gesture::Drag, &mut state, &mut ui, 55, 8);
 
     assert_eq!(ui.sessions_pane.preferred_width, 56);
     let config_path = home.path().join(".agents-in-a-box/config/config.toml");
@@ -171,11 +162,7 @@ fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
         "drag hot path should not persist config before mouse release"
     );
 
-    ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseDragEnd { x: 55, y: 8 },
-        &mut state,
-        &mut ui,
-    );
+    finish_gesture(Gesture::Release, &mut state, &mut ui, 55, 8);
 
     let config = std::fs::read_to_string(config_path).expect("persisted config");
     assert!(config.contains("sessions_sidebar_width = 56"));
@@ -186,12 +173,12 @@ fn sessions_mouse_toggle_collapses_and_expands_sidebar() {
     let _guard = HOME_LOCK.lock().expect("home env lock");
     let (home, mut state, mut ui) = state_with_two_sessions();
 
-    ainb::app::mouse::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 3 }, &mut state, &mut ui);
+    click(&mut state, &mut ui, 2, 3);
     assert!(ui.sessions_pane.collapsed);
     assert_eq!(ui.sessions_pane.effective_width(120), 5);
 
     ui.sessions_pane.set_layout(Rect::new(0, 3, 5, 20), Rect::new(5, 3, 115, 20));
-    ainb::app::mouse::handle_mouse_event(AppEvent::MouseClick { x: 2, y: 4 }, &mut state, &mut ui);
+    click(&mut state, &mut ui, 2, 4);
 
     assert!(!ui.sessions_pane.collapsed);
     assert_eq!(ui.sessions_pane.effective_width(120), 40);
