@@ -130,6 +130,13 @@ impl HomeScreenV2State {
         on_edge
     }
 
+    /// Start a sidebar resize drag a renderer has already hit-tested onto the
+    /// resize edge.
+    pub fn start_sidebar_resize(&mut self) {
+        self.sidebar_resize_active = true;
+        self.sidebar_edge_hovered = true;
+    }
+
     pub fn drag_sidebar_resize(&mut self, x: u16, terminal_width: u16) -> bool {
         if !self.sidebar_resize_active {
             return false;
@@ -155,12 +162,23 @@ impl HomeScreenV2State {
         y: u16,
         now: Instant,
     ) -> Option<SidebarClickOutcome> {
+        let item_index = self.sidebar_item_index_at(x, y)?;
+        Some(self.click_sidebar_item(item_index, now))
+    }
+
+    /// The sidebar item under (`x`, `y`) in the last painted sidebar, if any.
+    /// The resize edge is not an item.
+    pub fn sidebar_item_index_at(&self, x: u16, y: u16) -> Option<usize> {
         let rect = self.last_sidebar_rect?;
         if !rect.contains(x, y) || self.is_on_sidebar_edge(x, y) {
             return None;
         }
+        super::sidebar::item_index_at(rect, y, self.sidebar.selected_index)
+    }
 
-        let item_index = super::sidebar::item_index_at(rect, y, self.sidebar.selected_index)?;
+    /// Select and focus sidebar item `item_index`, reporting whether this
+    /// click and the last one on the same item make a double-click.
+    pub fn click_sidebar_item(&mut self, item_index: usize, now: Instant) -> SidebarClickOutcome {
         self.sidebar.select_index(item_index);
         self.focus = HomeScreenFocus::Sidebar;
         self.sidebar.is_focused = true;
@@ -175,10 +193,10 @@ impl HomeScreenV2State {
             .unwrap_or(false);
         self.last_sidebar_click = Some((item_index, now));
 
-        Some(SidebarClickOutcome {
+        SidebarClickOutcome {
             item: self.sidebar.selected_item(),
             double_click,
-        })
+        }
     }
 }
 
