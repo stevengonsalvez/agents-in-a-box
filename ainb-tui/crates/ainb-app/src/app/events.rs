@@ -161,6 +161,34 @@ pub enum AppEvent {
         x: u16,
         y: u16,
     },
+    // Pointer commands: a press a renderer has hit-tested, naming what was
+    // under the pointer by its place in state. See `crate::app::pointer`.
+    /// Select session-list row `row`; `open` attaches it, as a double-click does.
+    SessionListSelectRow {
+        row: usize,
+        open: bool,
+    },
+    /// Open the context menu of session-list row `row`, when it is a session.
+    SessionListOpenRowMenu {
+        row: usize,
+    },
+    /// Focus a pane of the session list.
+    SessionListFocusPane(crate::app::state::FocusedPane),
+    /// Persist the sessions pane's width and collapsed flag as preferences.
+    SaveSessionsPaneLayout {
+        width: u16,
+        collapsed: bool,
+    },
+    /// Start dragging the Skill Manager's Sources panel edge.
+    SkillManagerBeginResizeSources,
+    /// Focus a Skill Manager panel without selecting anything in it.
+    SkillManagerFocusPane(crate::components::skill_manager_screen::FocusedSkillPane),
+    /// Start dragging the home sidebar's resize edge.
+    HomeSidebarBeginResize,
+    /// Click home sidebar item `index`; a second click on it opens it.
+    HomeSidebarClickItem {
+        index: usize,
+    },
     // New session creation events. Phase 6 (new-session redesign) retired
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
     // host-level Esc handler for the `Creating` step.
@@ -2441,6 +2469,35 @@ impl EventHandler {
                 let dismissed = state.dismiss_notifications();
                 tracing::debug!("Event: DismissNotifications - cleared={dismissed}");
             }
+            AppEvent::SessionListSelectRow { row, open } => {
+                if let Some(target) = state.session_list_row_target(row) {
+                    state.select_session_list_row(target);
+                    if open {
+                        Self::process_event(AppEvent::AttachTmuxSession, state);
+                    }
+                }
+            }
+            AppEvent::SessionListOpenRowMenu { row } => {
+                use crate::app::state::{AttachableRef, SessionListRowTarget};
+                if let Some(SessionListRowTarget::Attachable(
+                    target @ (AttachableRef::WorkspaceSession { .. }
+                    | AttachableRef::SshSession { .. }),
+                )) = state.session_list_row_target(row)
+                {
+                    state.open_session_context_menu(target);
+                }
+            }
+            AppEvent::SessionListFocusPane(pane) => {
+                state.shell.focused_pane = pane;
+            }
+            AppEvent::SaveSessionsPaneLayout { width, collapsed } => {
+                let preferences = &mut state.config.app_config.ui_preferences;
+                preferences.sessions_sidebar_width = Some(width);
+                preferences.sessions_sidebar_collapsed = Some(collapsed);
+                if let Err(e) = state.config.app_config.save() {
+                    tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
+                }
+            }
             AppEvent::AttachTmuxSession => {
                 tracing::info!("[ACTION] Processing AttachTmuxSession event");
                 tracing::debug!(
@@ -3458,6 +3515,18 @@ impl EventHandler {
                 state.shell.home_screen_state.select_right();
             }
             // AINB 2.0: Home screen V2 events
+            AppEvent::HomeSidebarBeginResize => {
+                state.shell.home_screen_v2_state.start_sidebar_resize();
+            }
+            AppEvent::HomeSidebarClickItem { index } => {
+                let outcome = state
+                    .shell
+                    .home_screen_v2_state
+                    .click_sidebar_item(index, std::time::Instant::now());
+                if outcome.double_click {
+                    Self::process_event(AppEvent::HomeScreenSidebarSelect, state);
+                }
+            }
             AppEvent::HomeScreenSidebarUp => {
                 tracing::debug!("HomeScreen V2 sidebar up");
                 state.shell.home_screen_v2_state.sidebar.move_up();
@@ -4437,6 +4506,12 @@ impl EventHandler {
             }
             AppEvent::SkillManagerPersistSourcesWidth => {
                 Self::persist_skill_manager_sources_width(state);
+            }
+            AppEvent::SkillManagerBeginResizeSources => {
+                state.skills.skill_manager_state.resize_active = true;
+            }
+            AppEvent::SkillManagerFocusPane(pane) => {
+                state.skills.skill_manager_state.focused_pane = pane;
             }
             AppEvent::SkillManagerOpenLibrary => {
                 // `[l]` — open the own-skill Library view, sourced from
