@@ -37,7 +37,7 @@ lazy_static! {
     /// `xoxe-`, refresh `xoxr-`, …) AND app-level tokens (`xapp-…`), which use a
     /// distinct `xapp` prefix rather than `xox`.
     static ref SLACK_TOKEN: Regex =
-        Regex::new(r"(?:xox[baprse]|xapp)-[A-Za-z0-9-]+").expect("valid slack token regex");
+        Regex::new(r"(?:xox[bapcdrse]|xapp)-[A-Za-z0-9-]+").expect("valid slack token regex");
     /// Discord bot tokens: three base64url segments of roughly 24+ / 6–12 / 27+
     /// chars (`<user-id>.<timestamp>.<hmac>`). The middle (timestamp) segment is a
     /// BOUNDED RANGE, not a fixed 6, because newer Discord tokens widen it (a
@@ -61,6 +61,24 @@ lazy_static! {
     static ref OPENAI_KEY: Regex =
         Regex::new(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}")
             .expect("valid openai key regex");
+    /// Stripe secret and restricted keys, live and test.
+    static ref STRIPE_KEY: Regex =
+        Regex::new(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}").expect("valid stripe key regex");
+    /// npm access tokens.
+    static ref NPM_TOKEN: Regex =
+        Regex::new(r"\bnpm_[A-Za-z0-9]{36}\b").expect("valid npm token regex");
+    /// PyPI upload tokens (a macaroon, always `pypi-AgEIcHlwaS5vcmc…`).
+    static ref PYPI_TOKEN: Regex =
+        Regex::new(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}").expect("valid pypi token regex");
+    /// Hugging Face user access tokens.
+    static ref HUGGING_FACE_TOKEN: Regex =
+        Regex::new(r"\bhf_[A-Za-z0-9]{34,}\b").expect("valid hugging face token regex");
+    /// DigitalOcean personal access tokens.
+    static ref DIGITALOCEAN_TOKEN: Regex =
+        Regex::new(r"\bdo[por]_v1_[a-f0-9]{64}\b").expect("valid digitalocean token regex");
+    /// SendGrid API keys: `SG.<22>.<43>`.
+    static ref SENDGRID_KEY: Regex =
+        Regex::new(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b").expect("valid sendgrid key regex");
     /// PEM armour lines, for input that arrives one line at a time.
     static ref PEM_BEGIN: Regex =
         Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").expect("valid pem begin regex");
@@ -99,7 +117,7 @@ lazy_static! {
 /// PEM runs first so a key block is removed whole before a narrower pattern
 /// eats a line of its body, and the Anthropic shape runs before the `sk-` one
 /// so an `sk-ant-` key is named for what it is.
-fn shapes() -> [(&'static str, &'static Regex); 13] {
+fn shapes() -> [(&'static str, &'static Regex); 19] {
     [
         ("pem private key", &PEM_PRIVATE_KEY),
         ("telegram bot token", &TELEGRAM_TOKEN),
@@ -112,6 +130,12 @@ fn shapes() -> [(&'static str, &'static Regex); 13] {
         ("gitlab token", &GITLAB_TOKEN),
         ("aws access key", &AWS_ACCESS_KEY),
         ("google api key", &GOOGLE_API_KEY),
+        ("stripe key", &STRIPE_KEY),
+        ("npm token", &NPM_TOKEN),
+        ("pypi token", &PYPI_TOKEN),
+        ("hugging face token", &HUGGING_FACE_TOKEN),
+        ("digitalocean token", &DIGITALOCEAN_TOKEN),
+        ("sendgrid key", &SENDGRID_KEY),
         ("jwt", &JWT),
         ("url userinfo", &URL_USERINFO),
     ]
@@ -368,6 +392,18 @@ mod tests {
                     fake("", 'l', 12)
                 ),
             ),
+            ("stripe key", fake("sk_live_", 'S', 24)),
+            ("stripe key", fake("rk_live_", 'R', 24)),
+            ("npm token", fake("npm_", 'N', 36)),
+            ("pypi token", fake("pypi-AgEIcHlwaS5vcmc", 'P', 60)),
+            ("hugging face token", fake("hf_", 'H', 34)),
+            ("digitalocean token", fake("dop_v1_", 'a', 64)),
+            (
+                "sendgrid key",
+                format!("{}.{}", fake("SG.", 'G', 22), fake("", 'g', 43)),
+            ),
+            ("slack token", fake("xoxc-", '1', 40)),
+            ("slack token", fake("xoxd-", '2', 40)),
         ];
         for (shape, secret) in cases {
             let text = format!("before {secret} after");
@@ -391,6 +427,8 @@ mod tests {
             "ainb-task-123e4567-e89b-12d3-a456-426614174000",
             "agents/fix-risk-assessment-for-the-new-billing-flow-v2",
             "tmux session ainb-disk-cleanup-0123456789abcdef0123456789abcdef",
+            "npm_config_cache=/tmp/npm and hf_home=/tmp/hf",
+            "risk_live_update and task_test_runner",
         ] {
             assert_eq!(scrub(clean), clean);
             assert!(find_secret(clean).is_none(), "{clean}");
