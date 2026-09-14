@@ -299,6 +299,12 @@ async fn tokio_main() -> Result<()> {
                 let _ = crossterm::event::read();
             }
 
+            // Lease the shared Headroom proxy for this TUI's lifetime, so a
+            // second TUI quitting does not stop a proxy this one still uses.
+            if let Err(e) = headroom::register_user() {
+                tracing::warn!("could not register as a headroom proxy user: {e}");
+            }
+
             let tui_result = run_tui(&mut app_state, &mut layout).await;
 
             // Explicitly tear down the plugin runtime before `app_state`
@@ -312,8 +318,9 @@ async fn tokio_main() -> Result<()> {
             }
 
             // Best-effort: stop the shared Headroom proxy so it does not
-            // orphan after the TUI exits.
-            headroom::stop();
+            // orphan after the TUI exits, unless another live TUI still holds
+            // a lease on it.
+            headroom::release_user_and_stop_if_unused();
 
             tui_result
         }
