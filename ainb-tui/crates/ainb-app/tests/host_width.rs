@@ -2,7 +2,6 @@
 // surfaces at different widths driving one crate never share a value.
 
 use ainb_app::app::RendererHost;
-use ainb_app::app::events::AppEvent;
 use ainb_app::app::keymap::ScrollAction;
 use ainb_app::{AppState, Btn, CommandId, Intent, Keymap, Pos, dispatch};
 /// A host with a fixed surface width and nothing else.
@@ -15,7 +14,7 @@ impl RendererHost for Surface {
         Some(self.0)
     }
 
-    fn pointer(&mut self, _state: &mut AppState, _pos: Pos, _btn: Btn) -> Option<AppEvent> {
+    fn pointer(&mut self, _state: &AppState, _pos: Pos, _btn: Btn) -> Option<Intent> {
         None
     }
 }
