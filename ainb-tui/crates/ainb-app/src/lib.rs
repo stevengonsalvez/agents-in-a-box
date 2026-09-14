@@ -21,7 +21,6 @@ pub mod fleet;
 pub mod geometry;
 pub mod git;
 pub mod headroom;
-pub mod host;
 pub mod interactive;
 pub mod mcp_pool;
 pub mod models;
@@ -41,5 +40,6 @@ pub mod widgets;
 pub mod test_support;
 
 pub use app::{
-    AppState, Btn, Chord, CommandId, Intent, Key, Keymap, Mods, Pos, SectionId, Versioned, dispatch,
+    AppState, Btn, Chord, CommandId, Effect, Intent, Key, Keymap, Mods, Pos, SectionId, Versioned,
+    dispatch,
 };

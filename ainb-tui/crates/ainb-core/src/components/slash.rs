@@ -32,8 +32,8 @@ impl SlashCommand for QuitCommand {
 
 /// `/recall` — opens the learnings knowledge-base browser.
 ///
-/// Aliased by `/memory`; both dispatch `AppEvent::GoToLearnings` (see
-/// `EventHandler::slash_command_event`). Mirrors the learnings plugin's
+/// Aliased by `/memory`; both run the `home.learnings` command (see
+/// `app::slash_command_intent`). Mirrors the learnings plugin's
 /// manifest `provides.commands = ["/recall", "/memory"]`.
 pub struct RecallCommand;
 impl SlashCommand for RecallCommand {
@@ -70,7 +70,7 @@ impl SlashCommandRegistry {
     }
 
     /// Built-ins: `/help`, `/quit`, plus the learnings plugin's `/recall`
-    /// + `/memory` (host-mapped in `EventHandler::slash_command_event`).
+    /// + `/memory` (host-mapped in `app::slash_command_intent`).
     /// Plugins extend further via `register()` in Phase 4.
     pub fn built_ins() -> Self {
         let mut r = Self::new();
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn palette_enter_emits_execute_recall() {
         // Typing `/recall` + Enter yields Execute("recall") — the bare name
-        // the main loop hands to `EventHandler::slash_command_event`.
+        // the main loop hands to `app::slash_command_intent`.
         let mut p = SlashPalette::new(SlashCommandRegistry::built_ins());
         p.handle_key(press(KeyCode::Char(':')));
         for c in "/recall".chars() {

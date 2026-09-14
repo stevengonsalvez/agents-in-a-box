@@ -22,7 +22,7 @@ fn command_intent_bumps_only_the_section_it_changes() {
     let before = state.versions();
     assert!(!state.shell.help_visible);
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -46,7 +46,7 @@ fn text_intent_bumps_only_the_section_holding_the_field() {
         .open_text("Branch prefix", "", "branch_prefix", "");
     let before = state.versions();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -65,7 +65,7 @@ fn key_intent_resolves_through_the_keymap() {
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -81,7 +81,7 @@ fn pointer_intent_without_a_renderer_changes_nothing() {
     let mut state = AppState::new();
     let before = state.versions();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -97,7 +97,7 @@ fn unknown_command_changes_nothing() {
     let mut state = AppState::new();
     let before = state.versions();
 
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -152,16 +152,22 @@ fn intents_round_trip_through_json() {
 
 #[test]
 fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
-    use ainb_app::app::events::AppEvent;
-    use ainb_app::app::keymap::{Binding, KeyAction, KeyContext};
+    use ainb_app::app::keymap::{Binding, KeyContext};
     use ainb_app::app::keymap_toml::KeymapOverrides;
 
-    let mut rows = Keymap::defaults().bindings().cloned().collect::<Vec<_>>();
+    let defaults = Keymap::defaults();
+    // The same action `global.help` runs, on a row with no key.
+    let toggle_help = defaults
+        .command(&CommandId::new("global.help"))
+        .expect("global.help row")
+        .action
+        .clone();
+    let mut rows = defaults.bindings().cloned().collect::<Vec<_>>();
     rows.push(Binding {
         id: "help_from_palette",
         ctx: KeyContext::Global,
         chord: None,
-        action: KeyAction::App(AppEvent::ToggleHelp),
+        action: toggle_help.clone(),
         doc: "Toggle keyboard help from the palette",
     });
     let keymap = Keymap::new(rows).expect("an unbound row is valid");
@@ -173,7 +179,7 @@ fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
 
     let mut state = AppState::new();
     let before = state.versions();
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut NoRenderer,
@@ -190,8 +196,54 @@ fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
     let overrides = KeymapOverrides::parse("[global]\nhelp_from_palette = \"ctrl+g\"\n")
         .expect("valid override");
     let bound = keymap.with_overrides(&overrides).expect("an override can bind it");
-    assert!(matches!(
-        bound.resolve(&[KeyContext::Global], &chord),
-        Some(KeyAction::App(AppEvent::ToggleHelp))
-    ));
+    assert_eq!(
+        format!("{:?}", bound.resolve(&[KeyContext::Global], &chord)),
+        format!("{:?}", Some(toggle_help)),
+        "the override binds the row's own action"
+    );
+}
+
+#[test]
+fn command_args_replace_the_payload_of_a_row_that_carries_one() {
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = ainb_app::app::screens::ids::SESSION_LIST.to_string();
+    let attach_one = || CommandId::new("session_list.attach_one");
+
+    // The row attaches position 1; the argument asks for position 7, which an
+    // empty list does not have, and the notice names the argument.
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Command(attach_one(), serde_json::json!(7)),
+    );
+    let latest = state.shell.notifications.last().map(|note| note.message.clone());
+    assert_eq!(latest.as_deref(), Some("No session at position 7"));
+}
+
+#[test]
+fn command_args_that_do_not_fit_the_row_change_nothing() {
+    let keymap = Keymap::defaults();
+    let rejected = [
+        // A row with no payload takes only Null.
+        ("global.help", serde_json::json!({ "n": 1 })),
+        // Wrong payload type.
+        ("session_list.attach_one", serde_json::json!("seven")),
+        // Positions count from 1.
+        ("session_list.attach_one", serde_json::json!(0)),
+    ];
+    for (id, args) in rejected {
+        let mut state = AppState::new();
+        state.shell.current_screen = ainb_app::app::screens::ids::SESSION_LIST.to_string();
+        let before = state.versions();
+        let effects = dispatch(
+            &mut state,
+            &keymap,
+            &mut NoRenderer,
+            Intent::Command(CommandId::new(id), args.clone()),
+        );
+        assert!(effects.is_empty(), "{id} {args}");
+        assert!(bumped(&before, &state.versions()).is_empty(), "{id} {args}");
+    }
 }

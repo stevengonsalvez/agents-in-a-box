@@ -2698,6 +2698,14 @@ pub struct AppState {
     pub recovery: Versioned<RecoverySection>,
 
     pub mcp_pool: Versioned<McpPoolSection>,
+
+    /// Effects queued by the step being applied, for the host to drain. Not a
+    /// section: see [`crate::app::effect::EffectOutbox`].
+    effects: crate::app::effect::EffectOutbox,
+
+    /// Whether the Claude statusline is wired, cached. Not a section either:
+    /// see [`StatuslineProbe`].
+    statusline: StatuslineProbe,
 }
 
 /// Result of background workspace loading
@@ -2963,8 +2971,6 @@ pub enum AsyncAction {
     BulkStopSessions(Vec<Uuid>),           // Soft-stop many sessions (tmux only; keeps worktrees)
     RefreshWorkspaces,                     // Manual refresh of workspace data
     FetchContainerLogs(Uuid),              // Fetch container logs for a session
-    AttachToContainer(Uuid),               // Attach to a container session
-    AttachToTmuxSession(Uuid),             // Attach to a tmux session
     KillContainer(Uuid),                   // Kill container for a session
     AuthSetupOAuth,                        // Run OAuth authentication setup
     AuthSetupApiKey,                       // Save API key authentication
@@ -2975,29 +2981,54 @@ pub enum AsyncAction {
     /// process is replaced. Claude gets `--continue` to preserve the
     /// conversation; Codex restarts fresh (no continue flag exists).
     DowngradeHeadroom(Uuid),
-    CleanupOrphaned,           // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String), // Attach to a non-agents-in-a-box tmux session by name
-    AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
-    AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
-    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
+    CleanupOrphaned,       // Clean up orphaned containers without worktrees
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
-    // Shell session actions (one shell per workspace)
-    OpenWorkspaceShell {
-        workspace_index: usize,                 // Index of workspace to open shell for
-        target_dir: Option<std::path::PathBuf>, // Optional: cd to this directory (worktree)
-    },
-    OpenShellAtPath(std::path::PathBuf), // Open shell directly at a path (no workspace required)
-    KillWorkspaceShell(usize),           // Kill workspace shell by workspace index
-    // Editor action
-    OpenInEditor(std::path::PathBuf), // Open workspace in preferred editor
+    // Shell session actions (one shell per workspace); opening one is
+    // `Effect::AttachTerminal(TerminalTarget::WorkspaceShell)`.
+    KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     // Onboarding actions
     OnboardingCheckDeps,          // Run dependency check during onboarding
     OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
     /// Fetch + parse a skill source (git clone) off the event loop, then
     /// open the Skill Manager's source-preview picker with the result.
     SkillPreviewFetch(String),
+}
+
+impl AppState {
+    /// Queue work for the host. The reducer calls this instead of performing
+    /// the side effect itself.
+    pub fn emit(&mut self, effect: crate::app::effect::Effect) {
+        self.effects.push(effect);
+    }
+
+    /// Hand the queued effects to the host, oldest first.
+    #[must_use]
+    pub fn take_effects(&mut self) -> Vec<crate::app::effect::Effect> {
+        self.effects.take()
+    }
+
+    /// Apply the event a background result deferred to the host's next loop
+    /// iteration, if any, and return the effects it queued.
+    pub fn apply_pending_event(&mut self) -> Vec<crate::app::effect::Effect> {
+        if let Some(event) = self.shell.pending_event.take() {
+            crate::app::events::EventHandler::process_event(event, self);
+        }
+        self.take_effects()
+    }
+
+    /// Whether the Claude statusline is wired into `~/.claude/settings.json`,
+    /// read through a TTL cache. `None` when the settings file could not be
+    /// read.
+    pub fn statusline_status(&self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
+        self.statusline.status()
+    }
+
+    /// Drop the cached statusline status so the next read re-detects.
+    pub fn invalidate_statusline_status(&self) {
+        self.statusline.invalidate();
+    }
 }
 
 impl Default for AppState {
@@ -3043,6 +3074,8 @@ impl Default for AppState {
             git_view: Versioned::default(),
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
+            effects: crate::app::effect::EffectOutbox::default(),
+            statusline: StatuslineProbe::default(),
             // Initialize quick commit state
 
             // Initialize other tmux sessions
@@ -3112,20 +3145,52 @@ fn merge_oldest_call_day(
 /// scrolling activity.
 pub const STATUSLINE_STATUS_CACHE_TTL_SECS: u64 = 15;
 
+type StatuslineCache = Option<(
+    Option<crate::cli::statusline_install::StatuslineStatus>,
+    Instant,
+)>;
+
+/// The statusline probe, shared by the `W` shortcut in the reducer and every
+/// host's status bar.
+///
+/// An app service rather than renderer state: the answer comes from the
+/// filesystem, not from anything a renderer drew, and two hosts asking share
+/// one cache. The cache sits behind a lock so a renderer holding `&AppState`
+/// can read it without writing a section, which would bump that section's
+/// version every frame.
+#[derive(Debug, Default)]
+pub struct StatuslineProbe {
+    cache: std::sync::Mutex<StatuslineCache>,
+}
+
+impl StatuslineProbe {
+    /// The cached status, re-detected once the TTL has passed.
+    pub fn status(&self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
+        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        AppState::statusline_status_cached_inner(
+            &mut cache,
+            std::time::Duration::from_secs(STATUSLINE_STATUS_CACHE_TTL_SECS),
+            Instant::now(),
+            crate::cli::statusline_install::detect_statusline_status,
+        )
+    }
+
+    /// Drop the cached status so the next read re-detects.
+    pub fn invalidate(&self) {
+        *self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Test seam for [`crate::app::ui_state::UiState::statusline_status`], which
-    /// owns the cache itself. Lets unit tests inject
-    /// a clock and a fake detector to verify TTL coalescing without
-    /// touching the filesystem.
+    /// Test seam for [`StatuslineProbe::status`]. Lets unit tests inject a
+    /// clock and a fake detector to verify TTL coalescing without touching
+    /// the filesystem.
     pub fn statusline_status_cached_inner<F>(
-        cache: &mut Option<(
-            Option<crate::cli::statusline_install::StatuslineStatus>,
-            Instant,
-        )>,
+        cache: &mut StatuslineCache,
         ttl: std::time::Duration,
         now: Instant,
         detect: F,
@@ -6943,78 +7008,6 @@ impl AppState {
         self.sessions.workspaces.get(workspace_idx)?.sessions.get(session_idx)
     }
 
-    /// Attach to a container session using docker exec with proper terminal handling
-    pub async fn attach_to_container(
-        &mut self,
-        session_id: Uuid,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::docker::ContainerManager;
-
-        // Find the session to get container ID
-        let container_id = self
-            .sessions
-            .workspaces
-            .iter()
-            .flat_map(|w| &w.sessions)
-            .find(|s| s.id == session_id)
-            .and_then(|s| s.container_id.as_ref())
-            .cloned();
-
-        if let Some(container_id) = container_id {
-            info!(
-                "Attaching to container {} for session {}",
-                container_id, session_id
-            );
-
-            // Check if container is running
-            let container_manager = ContainerManager::new().await?;
-            let status = container_manager.get_container_status(&container_id).await?;
-
-            match status {
-                crate::docker::ContainerStatus::Running => {
-                    // Start an interactive bash shell instead of Claude CLI directly
-                    // This gives users more flexibility to run claude when needed
-                    // Force bash to read .bashrc to load custom session environment
-                    let exec_command = vec![
-                        "/bin/bash".to_string(),
-                        "-l".to_string(), // Login shell to read .bash_profile/.bashrc
-                        "-i".to_string(), // Interactive shell
-                    ];
-
-                    match crate::docker::exec_interactive_blocking(&container_id, exec_command)
-                        .await
-                    {
-                        Ok(_exit_status) => {
-                            info!(
-                                "Successfully detached from container {} for session {}",
-                                container_id, session_id
-                            );
-                            // The container session has ended, stay in current view
-                            Ok(())
-                        }
-                        Err(e) => {
-                            error!("Failed to exec into container {}: {}", container_id, e);
-                            Err(format!("Failed to attach to container: {}", e).into())
-                        }
-                    }
-                }
-                _ => {
-                    warn!(
-                        "Cannot attach to container {} - it is not running (status: {:?})",
-                        container_id, status
-                    );
-                    Err(format!("Container is not running (status: {:?})", status).into())
-                }
-            }
-        } else {
-            warn!(
-                "Cannot attach to session {} - no container ID found",
-                session_id
-            );
-            Err("No container associated with this session".into())
-        }
-    }
-
     /// Kill the container for a session (force stop and cleanup)
     pub async fn kill_container(
         &mut self,
@@ -9737,22 +9730,6 @@ impl AppState {
                     }
                     self.shell.ui_needs_refresh = true;
                 }
-                AsyncAction::AttachToContainer(session_id) => {
-                    info!("Attaching to container for session {}", session_id);
-                    if let Err(e) = self.attach_to_container(session_id).await {
-                        error!(
-                            "Failed to attach to container for session {}: {}",
-                            session_id, e
-                        );
-                    }
-                    self.shell.ui_needs_refresh = true;
-                }
-                AsyncAction::AttachToTmuxSession(_session_id) => {
-                    // NOTE: This action must be handled in main.rs where terminal access is available
-                    // The terminal handle is needed to call attach_to_tmux_session
-                    warn!("AttachToTmuxSession action should be handled in main loop, not here");
-                    self.shell.ui_needs_refresh = true;
-                }
                 AsyncAction::KillContainer(session_id) => {
                     info!("Killing container for session {}", session_id);
                     if let Err(e) = self.kill_container(session_id).await {
@@ -9815,22 +9792,6 @@ impl AppState {
                 }
                 // Terminal actions - must be handled in main.rs where terminal access is available
                 // PUT THE ACTION BACK so main loop can handle it
-                action @ AsyncAction::AttachToOtherTmux(_) => {
-                    debug!("AttachToOtherTmux action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::AttachWitr => {
-                    debug!("AttachWitr action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::AttachAbtop => {
-                    debug!("AttachAbtop action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::SetupAbtopRateLimits => {
-                    debug!("SetupAbtopRateLimits action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
                     self.shell.pending_async_action = Some(action);
@@ -9854,20 +9815,8 @@ impl AppState {
                         }
                     }
                 }
-                action @ AsyncAction::OpenWorkspaceShell { .. } => {
-                    debug!("OpenWorkspaceShell action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::OpenShellAtPath(_) => {
-                    debug!("OpenShellAtPath action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
                 action @ AsyncAction::KillWorkspaceShell(_) => {
                     debug!("KillWorkspaceShell action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::OpenInEditor(_) => {
-                    debug!("OpenInEditor action deferred to main loop");
                     self.shell.pending_async_action = Some(action);
                 }
                 AsyncAction::OnboardingInstallDep(dep_id) => {
@@ -10030,86 +9979,47 @@ impl AppState {
             }
         }
 
-        // Temporarily exit TUI to run interactive container
-        info!("Exiting TUI to run interactive authentication");
+        // The login needs the tty, which only the host that owns it can lend.
+        // It reports the exit back through `finish_oauth_login`.
+        info!("Handing the terminal to the interactive authentication");
+        self.emit(crate::app::effect::Effect::AttachTerminal(
+            crate::app::effect::TerminalTarget::ClaudeLogin {
+                auth_dir,
+                image: image_name.to_string(),
+            },
+        ));
 
-        // Hand the terminal over: the host leaves raw mode, the alternate
-        // screen, mouse capture and bracketed paste (the modes it set up).
-        let _ = crate::host::release_terminal();
+        Ok(())
+    }
 
-        println!("\n🔐 Claude Authentication Setup\n");
-        println!("This will guide you through the OAuth authentication process.");
-        println!("You'll be prompted to open a URL in your browser to complete authentication.\n");
-
-        // Run the auth container interactively
-        // Use inherit for stdin/stdout/stderr to ensure proper TTY forwarding
-        let status = std::process::Command::new("docker")
-            .args([
-                "run",
-                "--rm",
-                "-it",
-                "-v",
-                &format!("{}:/home/claude-user/.claude", auth_dir.display()),
-                "-e",
-                "PATH=/home/claude-user/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "-e",
-                "HOME=/home/claude-user",
-                "-e",
-                "AUTH_METHOD=oauth",  // Specify OAuth method
-                "-w",
-                "/home/claude-user",
-                "--user",
-                "claude-user",
-                "--entrypoint",
-                "bash",
-                image_name,
-                "-c",
-                "/app/scripts/auth-setup.sh",
-            ])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()?;
-
-        // Check if authentication was successful
+    /// Record how the interactive OAuth login the host ran for
+    /// [`crate::app::effect::TerminalTarget::ClaudeLogin`] ended. Success needs
+    /// both a clean exit and a non-empty `.credentials.json` in `auth_dir`.
+    /// Returns whether it succeeded, so the host can tell the user before it
+    /// restores its screen.
+    pub fn finish_oauth_login(&mut self, auth_dir: &std::path::Path, exited_ok: bool) -> bool {
         let credentials_path = auth_dir.join(".credentials.json");
-        let success =
-            status.success() && credentials_path.exists() && credentials_path.metadata()?.len() > 0;
+        let success = exited_ok
+            && std::fs::metadata(&credentials_path).is_ok_and(|metadata| metadata.len() > 0);
 
         if success {
-            println!("\n✅ Authentication successful!");
-            println!("Press Enter to continue...");
-            let _ = std::io::stdin().read_line(&mut String::new());
-
             // Success - transition to main view
             self.onboarding.auth_setup_state = None;
             self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
             self.check_current_directory_status();
             self.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
-        } else {
-            println!("\n❌ Authentication failed!");
-            println!("Press Enter to return to the authentication menu...");
-            let _ = std::io::stdin().read_line(&mut String::new());
-
-            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
-                auth_state.error_message = Some(
-                    "❌ Authentication failed\n\n\
-                     Please try again or use API Key method."
-                        .to_string(),
-                );
-                auth_state.is_processing = false;
-            }
+        } else if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
+            auth_state.error_message = Some(
+                "❌ Authentication failed\n\n\
+                 Please try again or use API Key method."
+                    .to_string(),
+            );
+            auth_state.is_processing = false;
         }
-
-        // Re-enable raw mode and the full input mode set established at startup —
-        // without re-enabling mouse capture + bracketed paste, mouse events stop
-        // arriving after the auth flow returns to the TUI.
-        let _ = crate::host::reclaim_terminal();
 
         // Force UI refresh
         self.shell.ui_needs_refresh = true;
-
-        Ok(())
+        success
     }
 
     /// Check if Docker is available and running (synchronous, static version)
@@ -13284,7 +13194,17 @@ impl App {
         Ok(())
     }
 
-    pub async fn tick(&mut self) -> anyhow::Result<()> {
+    /// Advance background work one step and hand back the effects it queued.
+    ///
+    /// Effects are returned only after the whole step has written state, so
+    /// the host acts on committed state.
+    #[must_use = "the effects are host work the tick did not perform; run them or they are lost"]
+    pub async fn tick(&mut self) -> anyhow::Result<Vec<crate::app::effect::Effect>> {
+        self.tick_inner().await?;
+        Ok(self.state.take_effects())
+    }
+
+    async fn tick_inner(&mut self) -> anyhow::Result<()> {
         // Clean up expired notifications
         self.state.cleanup_expired_notifications();
 

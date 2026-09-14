@@ -6,9 +6,10 @@
 //! pane (Processes/Ports/Containers/Locks tabs) — lives only inside
 //! witr's bubbletea TUI; it has no JSON/WireBuffer equivalent, so it
 //! cannot be stubbed. ainb therefore embeds it the same way it attaches
-//! to an agent session: `w` → `AppEvent::GoToWitr` → `AsyncAction::
-//! AttachWitr` → the main loop runs `tmux new-session -A -d -s ainb-witr
-//! "witr -i"` and attaches (TUI suspend → witr's TUI → resume on quit).
+//! to an agent session: `w` → `AppEvent::GoToWitr` →
+//! `Effect::AttachTerminal(Tool(Witr))` → the effect host runs
+//! `tmux new-session -A -d -s ainb-witr "witr -i"` and attaches (TUI
+//! suspend → witr's TUI → resume on quit).
 //!
 //! This test drives the real chain: launch ainb in tmux, press `w`, and
 //! assert the `ainb-witr` session now exists running witr's interactive
@@ -27,7 +28,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// tmux session ainb spawns for the embedded witr browser. Must match
-/// `WITR_SESSION` in `crates/ainb-core/src/main.rs`'s `AttachWitr` arm.
+/// the session `crates/ainb-core/src/effect_host.rs` attaches for
+/// `Effect::AttachTerminal(TerminalTarget::Tool(ToolTerminal::Witr))`.
 const WITR_SESSION: &str = "ainb-witr";
 static WITR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -224,7 +226,7 @@ fn pressing_w_embeds_witr_interactive_browser() {
 /// Witr is the odd panel out: instead of a wire-rendered screen it hands
 /// the terminal to `witr -i` (suspend/attach) and resumes ainb when witr
 /// quits. The overlay-panels contract is that resume lands on the ORIGIN
-/// screen, and it gets that for free precisely because `AttachWitr` never
+/// screen, and it gets that for free precisely because the host's witr attach never
 /// touches `current_screen`. This test proves the for-free guarantee
 /// holds end-to-end: a regression that navigated somewhere on the witr
 /// path (or reset `current_screen` on resume) would surface as ainb

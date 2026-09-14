@@ -1,0 +1,36 @@
+    ╭──────────╮
+   ╱│          │╲     A I N B  -  Agents in a Box
+  ╱ │  ◉    ◉  │ ╲
+ ╱  │    ──    │  ╲   Your AI-Powered Development Hub                    v<version>
+│   │          │   │
+│   ╰──────────╯   │
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◆ AINB                 │╭ 📖  Getting Started ────────────────────────────────────────────────────────────────────────╮
+                         ││  Agents in a Box                                                                           │
+                         ││                                                                                            │
+█ 🚀   Sessions      [s]  ││  You're on the **Sessions** screen. Start an agent session, or open Setup.                 │
+█     Manage Active      ││                                                                                            │
+  🛠️   Setup         [u]  ││  ─────────────────────────────────────────                                                 │
+  ⚙️   Config        [o]  ││                                                                                            │
+  🧠   Skills Catalogue[c]││  Start here                                                                                │
+  🧰   Skills (manager)[z]││                                                                                            │
+  📚   Memory        [m]  ││  • `n`         **New session** — pick a repo and launch an agent                           │
+  📊   Stats         [i]  ││  • `s`         **Sessions** — go to your running sessions                                  │
+  ⚙  Daemons        [d]  ││  • `Enter`     Open / attach the selected session                                          │
+  🌳   Witr          [w]  ││  • `1`–`9`     Jump straight to a session by number                                        │
+  📡   abtop         [t]  ││  • `?`         Help — every key for this screen                                            │
+  🧬   MCP           [p]  ││  • `q`         Quit                                                                        │
+  📋   Logs          [l]  ││                                                                                            │
+  🔄   Recovery      [r]  ││  To attach: `a` full-screen, `→` in a split pane, or `Enter`.                              │
+  🛩️   Hangar        [g]  ││                                                                                            │
+  📝   Changelog     [v]  ││  Each session runs in its own git worktree + tmux + agent, fully isolated.                 │
+  ❓   Help          [?]  ││                                                                                            │
+                         ││  ─────────────────────────────────────────                                                 │
+                         ││                                                                                            │
+                         ││  💡  `Esc` in the setup wizard returns here. Press `?` for the full keymap.                 │
+                         │╰────────────────────────────────────────────────────────────────────────────────────────────╯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   No workspaces configured - press s to go to Sessions
+
+  Enter select | Tab content | ↑↓ navigate | ? help | q quit
+

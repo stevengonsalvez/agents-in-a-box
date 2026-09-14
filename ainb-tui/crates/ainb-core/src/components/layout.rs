@@ -1136,7 +1136,7 @@ impl LayoutComponent {
         let existing_w: usize = status_spans.iter().map(|s| s.content.chars().count()).sum();
         const SEP_W: usize = 5; // "  │  "
         let avail = area_inner_w.saturating_sub(existing_w + SEP_W);
-        let live_spans = build_live_status_spans(state, ui, avail);
+        let live_spans = build_live_status_spans(state, avail);
         if !live_spans.is_empty() {
             status_spans.push(Span::styled("  │  ", Style::default().fg(SUBDUED_BORDER)));
             status_spans.extend(live_spans);
@@ -1469,19 +1469,15 @@ mod menu_bar_render_tests {
 /// bar. Returns an empty vec when nothing should render (statusline
 /// unwired AND user declined, or status detection failed).
 ///
-/// The settings.json read goes through [`UiState::statusline_status`]
+/// The settings.json read goes through [`AppState::statusline_status`]
 /// so the top bar's 30-60Hz redraws don't translate into 30-60Hz
 /// filesystem reads.
-pub fn build_live_status_spans(
-    state: &AppState,
-    ui: &mut UiState,
-    max_width: usize,
-) -> Vec<Span<'static>> {
+pub fn build_live_status_spans(state: &AppState, max_width: usize) -> Vec<Span<'static>> {
     use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
 
-    let status = ui.statusline_status();
+    let status = state.statusline_status();
     let decision = state.config.app_config.ui_preferences.statusline_decision;
 
     // Trust the cache: if Tier1 data is flowing — whether it came from

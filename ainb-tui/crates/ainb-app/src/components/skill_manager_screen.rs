@@ -102,17 +102,33 @@ pub fn clamp_sources_width(width: u16, term_w: u16) -> u16 {
     width.clamp(MIN_SOURCES_WIDTH, max)
 }
 
+/// Columns one `[` or `]` press moves the Sources panel edge.
+pub const SOURCES_WIDTH_STEP: u16 = 2;
+
+/// The Sources width one step leaves on a `term_w` surface: the panel as
+/// drawn, widened (`grow`) or narrowed by [`SOURCES_WIDTH_STEP`], clamped.
+#[must_use]
+pub fn step_sources_width(width: u16, grow: bool, term_w: u16) -> u16 {
+    let current = clamp_sources_width(width, term_w);
+    let stepped = if grow {
+        current.saturating_add(SOURCES_WIDTH_STEP)
+    } else {
+        current.saturating_sub(SOURCES_WIDTH_STEP)
+    };
+    clamp_sources_width(stepped, term_w)
+}
+
 /// Aggregate view-model the screen renders.
 ///
 /// Hand-populated for tests; the production runtime will assemble
 /// this from `ainb_skill_core::Manifest` + `ainb_skill_core::Lockfile` +
 /// `ainb_usage::UsageCache`.
 ///
-/// NOTE: `Default` is implemented by hand (NOT derived) so the
-/// resize/focus fields get sane non-zero defaults — `sources_width`
-/// must default to [`DEFAULT_SOURCES_WIDTH`] (32), not 0, and
-/// `focused_pane` to [`FocusedSkillPane::Units`]. A derived `Default`
-/// would zero `sources_width` and collapse the Sources panel.
+/// NOTE: `Default` is implemented by hand (NOT derived) so
+/// `focused_pane` defaults to [`FocusedSkillPane::Units`]. The Sources
+/// panel's width is not here: it is layout each renderer keeps for its own
+/// surface, starting from `ui_preferences.skill_manager_sources_width` or
+/// [`DEFAULT_SOURCES_WIDTH`].
 #[derive(Debug, Clone)]
 pub struct SkillsScreenData {
     pub sources: Vec<SourceRow>,
@@ -169,11 +185,6 @@ pub struct SkillsScreenData {
     /// dry-run plan. Renders the planned mutations as a git-style diff;
     /// `Enter` applies, `Esc` cancels. Nothing is written until applied.
     pub sync_confirm: Option<SyncConfirmState>,
-    /// Width (terminal columns) of the left Sources panel. Resizable by
-    /// dragging the Sources/Units divider or via `[`/`]`. Persisted to
-    /// `ui_preferences.skill_manager_sources_width` on resize-finish and
-    /// re-applied on screen-open. Defaults to [`DEFAULT_SOURCES_WIDTH`].
-    pub sources_width: u16,
     /// Which top panel owns keyboard focus (`Tab` toggles). The focused
     /// panel renders a bright/gold border + active cursor; the other is
     /// muted. Defaults to [`FocusedSkillPane::Units`].
@@ -188,10 +199,6 @@ pub struct SkillsScreenData {
     /// the "All sources" affordance. Keyed on `SourceRow.uri` because
     /// that's what `UnitRow.source` is built from.
     pub source_filter: Option<String>,
-    /// True while a Sources/Units divider drag is in flight (between
-    /// `MouseClick` on the edge and `MouseDragEnd`). Drives the bright
-    /// edge highlight and gates `drag_resize`.
-    pub resize_active: bool,
     /// `Some(uri)` after the first `[r]` on a unit — arms a one-shot
     /// confirm so a single keypress can't uninstall. A second `[r]` on
     /// the *same* unit confirms; moving the cursor (which changes the
@@ -219,11 +226,9 @@ impl Default for SkillsScreenData {
             preview_loading: None,
             source_remove_confirm: None,
             sync_confirm: None,
-            sources_width: DEFAULT_SOURCES_WIDTH,
             focused_pane: FocusedSkillPane::default(),
             source_selected: 0,
             source_filter: None,
-            resize_active: false,
             pending_remove_confirm: None,
         }
     }
@@ -1266,19 +1271,6 @@ impl SkillsScreenData {
         } else {
             false
         }
-    }
-
-    /// Grow the Sources panel by `delta` columns, clamped to the legal
-    /// range for `term_w`. Used by the `]` keybind.
-    pub fn grow_sources(&mut self, delta: u16, term_w: u16) {
-        let current = clamp_sources_width(self.sources_width, term_w);
-        self.sources_width = clamp_sources_width(current.saturating_add(delta), term_w);
-    }
-
-    /// Shrink the Sources panel by `delta` columns, clamped. Used by `[`.
-    pub fn shrink_sources(&mut self, delta: u16, term_w: u16) {
-        let current = clamp_sources_width(self.sources_width, term_w);
-        self.sources_width = clamp_sources_width(current.saturating_sub(delta), term_w);
     }
 }
 

@@ -1,0 +1,36 @@
+╭ 📊  Status────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│🗨️  OFF  │  ⚠ Live Claud┌Help - Press ? or Esc to close────────────────────────────────────────┐                       │
+╰───────────────────────│Navigation:                                                           │───────────────────────╯
+╭  Workspaces (2)F [all│  ↓            Next session                                           │────────────────────────
+│    ▼  api (3)        │  ↑            Previous session                                       │                       │
+│▶ 1 ☐ ├─ ainb/feat-logi│  Home/End     Top / bottom                                           │                       │
+│         ✻             │  Shift+↑/↓    Scroll the selected session's output                   │e active.              │
+│  2 ☐ ├─ ainb/fix-cache│                                                                      │                       │
+│         ✻             │Session Actions:                                                      │                       │
+│  3 ☐ └─ ainb/docs-read│  n            New session (local or remote)                          │                       │
+│         ✻             │  a            Attach — full-screen takeover (Ctrl+B then D to leave) │                       │
+│    ▼  web (1)        │  →            Pane attach (keeps the session list visible)           │                       │
+│  4 ☐ └─ ainb/spike-ssr│  1-9          Quick-attach to numbered session                       │                       │
+│         ✻             │  Enter        Resume (stopped) / attach (running)                    │                       │
+│                       │  r            Resume stopped session (tmux)                          │                       │
+│                       │  Space        Select / deselect session                              │                       │
+│                       │  d            Delete session                                         │                       │
+│                       │  Shift+D      Delete selected sessions                               │                       │
+│                       │  o            Open in editor                                         │                       │
+│                       │  $            Quick shell                                            │                       │
+│                       │  F2           Rename SSH / 'Other tmux' session                      │                       │
+│                       │  s / Shift+S  Star / unstar workspace                                │                       │
+│                       │  Shift+F      Cycle session filter (active/stopped/all)              │                       │
+│                       │  f            Refresh workspaces                                     │                       │
+│                       │  u            Re-authenticate credentials                            │                       │
+│                       │                                                                      │                       │
+╰ Enter select │ s ⭐  │ │Git Actions:                                                          │────────────────────────
+┌Session Info───────────│  g            Show git view                                          │───────────────────────┐
+│ feat-login │ ● Running│  p            Commit & push                                          │                       │
+└───────────────────────│                                                                      │───────────────────────┘
+╭ ⌨ Session actions ────│Tools:                                                                │─────── Panels & views ╮
+│    new  attach  → Pane│  c            Toggle Claude chat                                     │tr                     │
+│            r resume  d│                                                                      │ t abtop               │
+│          o editor  $ s│Panels (closing returns here):                                        │pand                   │
+│             f refresh └──────────────────────────────────────────────────────────────────────┘  ?/H help  q home     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

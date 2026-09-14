@@ -16,7 +16,7 @@ use std::time::Instant;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
-use crate::app::keymap::{ScrollAction, UiAction};
+use crate::app::keymap::{HostAction, ScrollAction};
 use crate::app::screens::ScreenId;
 use crate::app::state::{
     AppState, AttachableRef, COLLAPSED_SESSIONS_SIDEBAR_WIDTH, DEFAULT_SESSIONS_SIDEBAR_WIDTH,
@@ -266,6 +266,45 @@ impl SessionsPaneState {
         self.edge_hovered = false;
     }
 }
+/// The Skill Manager's Sources panel as this renderer lays it out.
+///
+/// Renderer-local because a width only means something against one surface:
+/// a step taken on a narrow terminal must not shrink the panel another
+/// surface draws from the same state.
+#[derive(Debug, Default, Clone)]
+pub struct SkillSourcesPane {
+    /// The width the user set on this surface, before clamping. `None` until
+    /// they resize here, so the saved preference applies.
+    width: Option<u16>,
+    /// A divider drag is in flight: the edge draws bright and drags move it.
+    pub resize_active: bool,
+}
+
+impl SkillSourcesPane {
+    /// The width before clamping: this surface's, else `saved` (the
+    /// `ui_preferences.skill_manager_sources_width` preference), else the
+    /// default.
+    #[must_use]
+    pub fn preferred_width(&self, saved: Option<u16>) -> u16 {
+        self.width
+            .or(saved)
+            .unwrap_or(crate::components::skill_manager_screen::DEFAULT_SOURCES_WIDTH)
+    }
+
+    /// The width drawn on a `term_w` surface.
+    #[must_use]
+    pub fn width_on(&self, saved: Option<u16>, term_w: u16) -> u16 {
+        crate::components::skill_manager_screen::clamp_sources_width(
+            self.preferred_width(saved),
+            term_w,
+        )
+    }
+
+    pub const fn set_width(&mut self, width: u16) {
+        self.width = Some(width);
+    }
+}
+
 /// Renderer-local state for the ratatui host.
 ///
 /// Owned by the run loop next to the `LayoutComponent`, passed to every
@@ -275,6 +314,9 @@ pub struct UiState {
     /// Sidebar geometry, hover, resize drag, and the row heights the mouse hit
     /// test resolves a click through.
     pub sessions_pane: SessionsPaneState,
+    /// The Skill Manager's Sources panel width and divider drag on this
+    /// surface.
+    pub skill_sources: SkillSourcesPane,
     /// Interior of the live-session embed pane, as last painted. The embed
     /// client is sized from it and mouse input inside it is forwarded to the
     /// PTY, so a stale value sends clicks to the wrong cells.
@@ -288,13 +330,6 @@ pub struct UiState {
     /// Per-plugin-screen origin `(x, y)`, so absolute mouse coordinates can be
     /// translated into the plugin's own space.
     pub plugin_render_origins: HashMap<ScreenId, (u16, u16)>,
-    /// TTL cache behind the status bar's statusline probe: `(value, read_at)`.
-    /// Holding `W`, or any rapid keystroke, would otherwise hit the filesystem
-    /// once per frame.
-    statusline_status_cache: Option<(
-        Option<crate::cli::statusline_install::StatuslineStatus>,
-        Instant,
-    )>,
     /// Size `(rows, cols)` the embed should be resized to, measured off the
     /// pane interior the layout just carved. Only the layout knows that rect,
     /// but the resize is a mutation, so the draw records the want here and the
@@ -325,10 +360,10 @@ pub struct UiState {
     /// Scroll offset of the Log History session list, mirroring core's
     /// selection for the same reason as [`Self::session_recovery_list`].
     pub log_history_list: ListState,
-    /// Scroll intents resolved from the keymap this iteration, drained by the
-    /// run loop into [`Self::apply`]. The reducer never sees them: scrolling a
-    /// pane is renderer-local by definition.
-    queued: Vec<ScrollAction>,
+    /// Layout work resolved from the keymap this iteration, drained by the run
+    /// loop into [`Self::apply_host`]. The reducer never sees it: scrolling a
+    /// pane or collapsing the sidebar is renderer-local by definition.
+    queued: Vec<HostAction>,
     /// Set when a `UiAction` changed something the user can see, so the run
     /// loop repaints without waiting for the animation floor.
     pub needs_redraw: bool,
@@ -343,43 +378,52 @@ impl UiState {
         );
     }
 
-    /// Read the statusline status with a TTL-bounded cache.
-    ///
-    /// The probe reads `~/.claude/settings.json`; the status bar asks for it
-    /// once a frame and the `W` shortcut once a keystroke, so without the TTL
-    /// both would pay a filesystem read every time.
-    ///
-    /// It took an `&AppState` it never read, to make the call site look like a
-    /// projection of app state. It is not one: nothing here depends on app
-    /// state, and a parameter that exists to suggest otherwise is worse than
-    /// no parameter.
-    pub fn statusline_status(
-        &mut self,
-    ) -> Option<crate::cli::statusline_install::StatuslineStatus> {
-        AppState::statusline_status_cached_inner(
-            &mut self.statusline_status_cache,
-            std::time::Duration::from_secs(crate::app::state::STATUSLINE_STATUS_CACHE_TTL_SECS),
-            Instant::now(),
-            crate::cli::statusline_install::detect_statusline_status,
-        )
-    }
-
-    /// Drop the cached statusline status so the next reader re-detects. Called
-    /// after the install event lands so the CTA flips on the very next frame
-    /// instead of waiting out the TTL.
-    pub fn invalidate_statusline_status(&mut self) {
-        self.statusline_status_cache = None;
-    }
-
-    /// Record a scroll intent the keymap resolved. Queued rather than applied
-    /// on the spot because the key path does not hold the layout.
-    pub fn queue(&mut self, action: ScrollAction) {
+    /// Record layout work the keymap resolved. Queued rather than applied on
+    /// the spot because the key path does not hold the layout.
+    pub fn queue(&mut self, action: HostAction) {
         self.queued.push(action);
     }
 
     /// Take everything queued since the last drain.
-    pub fn take_queued(&mut self) -> Vec<ScrollAction> {
+    pub fn take_queued(&mut self) -> Vec<HostAction> {
         std::mem::take(&mut self.queued)
+    }
+
+    /// Apply queued layout work on a surface `columns` wide. Returns the
+    /// intent that persists it, when the change is a preference the user
+    /// keeps across launches.
+    pub fn apply_host(
+        &mut self,
+        action: HostAction,
+        layout: &mut LayoutComponent,
+        state: &AppState,
+        columns: u16,
+    ) -> Option<crate::app::Intent> {
+        match action {
+            HostAction::Scroll(scroll) => {
+                self.apply(scroll, layout, state);
+                None
+            }
+            HostAction::ToggleSessionsSidebar => {
+                self.sessions_pane.toggle_collapsed();
+                self.needs_redraw = true;
+                Some(crate::app::pointer::save_sessions_pane_layout(
+                    self.sessions_pane.preferred_width,
+                    self.sessions_pane.collapsed,
+                ))
+            }
+            HostAction::GrowSkillSources | HostAction::ShrinkSkillSources => {
+                let saved = state.config.app_config.ui_preferences.skill_manager_sources_width;
+                let width = crate::components::skill_manager_screen::step_sources_width(
+                    self.skill_sources.preferred_width(saved),
+                    action == HostAction::GrowSkillSources,
+                    columns,
+                );
+                self.skill_sources.set_width(width);
+                self.needs_redraw = true;
+                Some(crate::app::pointer::save_skill_sources_width(width))
+            }
+        }
     }
 
     /// Apply one renderer-local scroll intent to the host layout.
@@ -441,54 +485,20 @@ impl crate::app::state::SessionsPaneHitTest for SessionsPaneState {
     }
 }
 
-/// The terminal host's side of intent dispatch: scrolls are queued for the
-/// run loop to apply against the layout, the statusline status comes from the
-/// TTL cache, and pointer presses are hit-tested against the panes this
-/// renderer last drew.
-impl crate::app::events::RendererHost for UiState {
-    fn queue_scroll(&mut self, action: ScrollAction) {
-        self.queue(action);
-    }
-
-    fn statusline_status(&mut self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
-        Self::statusline_status(self)
-    }
-
-    fn columns(&self) -> Option<u16> {
-        crossterm::terminal::size().ok().map(|(columns, _)| columns)
+/// The terminal host's side of intent dispatch: layout work is queued for the
+/// run loop to apply, and pointer presses are hit-tested
+/// against the panes this renderer last drew.
+impl crate::app::RendererHost for UiState {
+    fn queue(&mut self, action: HostAction) {
+        Self::queue(self, action);
     }
 
     fn pointer(
         &mut self,
-        state: &mut crate::app::AppState,
+        state: &crate::app::AppState,
         pos: crate::app::Pos,
         btn: crate::app::Btn,
-    ) -> Option<crate::app::events::AppEvent> {
-        use crate::app::events::AppEvent;
-        let (x, y) = (pos.x, pos.y);
-        let event = match btn {
-            crate::app::Btn::Left => AppEvent::MouseClick { x, y },
-            crate::app::Btn::Right => AppEvent::MouseRightClick { x, y },
-            crate::app::Btn::Middle => return None,
-        };
-        crate::app::mouse::handle_mouse_event(event, state, self)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cli::statusline_install::StatuslineStatus;
-
-    #[test]
-    fn invalidate_statusline_status_forces_refresh() {
-        let mut ui = UiState::default();
-        ui.statusline_status_cache = Some((Some(StatuslineStatus::NotConfigured), Instant::now()));
-
-        ui.invalidate_statusline_status();
-        assert!(
-            ui.statusline_status_cache.is_none(),
-            "invalidation must drop the cached entry"
-        );
+    ) -> Option<crate::app::Intent> {
+        crate::app::mouse::press(state, self, pos, btn)
     }
 }

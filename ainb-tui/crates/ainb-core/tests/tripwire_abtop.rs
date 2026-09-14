@@ -7,7 +7,7 @@
 //! has no JSON/WireBuffer equivalent, so it cannot be stubbed. ainb embeds it
 //! the same way it attaches to an agent session: `t` → `AppEvent::GoToAbtop`
 //! → (first launch) a one-time consent dialog offering `abtop --setup` →
-//! `AsyncAction::AttachAbtop` → the main loop runs `tmux new-session -A -d -s
+//! `Effect::AttachTerminal(Tool(Abtop))` → the host runs `tmux new-session -A -d -s
 //! ainb-abtop "abtop --exit-on-jump"` and attaches (TUI suspend → abtop's TUI
 //! → resume on quit).
 //!
@@ -29,7 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// tmux session ainb spawns for the embedded abtop monitor. Must match
-/// `ABTOP_SESSION` in `crates/ainb-core/src/main.rs`'s `AttachAbtop` arm.
+/// the session `crates/ainb-core/src/effect_host.rs` attaches for
+/// `Effect::AttachTerminal(TerminalTarget::Tool(ToolTerminal::Abtop))`.
 const ABTOP_SESSION: &str = "ainb-abtop";
 static ABTOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -207,7 +208,7 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
     );
 
     // Choose "Just open abtop" (the 2nd tri-option): Right cycles forward,
-    // Enter confirms → `AsyncAction::AttachAbtop` (no `abtop --setup`).
+    // Enter confirms → `Effect::AttachTerminal(Tool(Abtop))` (no `abtop --setup`).
     send_key(&session, "Right");
     thread::sleep(Duration::from_millis(300));
     send_key(&session, "Enter");
@@ -248,7 +249,7 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
 /// shortcut is now mirrored there, like stats/witr/skills) returns to the
 /// session list when the user quits abtop — not home.
 ///
-/// Like witr, abtop is a tmux suspend/attach (`AttachAbtop` never touches
+/// Like witr, abtop is a tmux suspend/attach (the host's abtop attach never touches
 /// `current_screen`), so resume-on-origin is automatic — this proves it
 /// end-to-end and that the new session-list `t` binding actually launches
 /// abtop. Seeds `abtop-setup-dismissed` so the first-run consent dialog

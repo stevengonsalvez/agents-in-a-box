@@ -9,7 +9,6 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use ainb::app::events::{AppEvent, EventHandler};
 use ainb::app::state::{AppState, FocusedPane};
 use ainb::app::ui_state::UiState;
 use ainb::components::{LayoutComponent, TmuxPreviewPane};
@@ -293,7 +292,7 @@ fn reentering_on_a_different_row_retargets_the_embed() {
 /// Mode-boundary tripwire: while the embed is interactive, host mouse handling
 /// never runs (clicks/wheel don't break the mode), ':' reaches the PTY instead
 /// of opening the slash palette, and after release the host owns the mouse
-/// again. Drives the REAL state-level handlers (EventHandler::handle_mouse_event,
+/// again. Drives the REAL state-level handlers (dispatch of a pointer intent,
 /// encode_key_event/encode_mouse_event + write_input — exactly what the event
 /// loop calls) against a REAL tmux session.
 #[test]
@@ -335,12 +334,14 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     );
 
     // ── (a) mouse click through the real state-level handler: swallowed ──
-    let click = ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseClick { x: px, y: py },
+    let before_click = state.versions();
+    let click = ainb::dispatch(
         &mut state,
+        &ainb::Keymap::defaults(),
         &mut ui,
+        ainb::Intent::Mouse(ainb::Pos { x: px, y: py }, ainb::Btn::Left),
     );
-    let click_swallowed = click.is_none();
+    let click_swallowed = click.is_empty() && state.versions() == before_click;
     let still_interactive_after_click = state.is_interactive_pane() && state.tmux.embed.is_some();
 
     // ── (b) ':' through the interactive key path reaches the PTY ──
@@ -408,10 +409,11 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     // Next frame re-lays-out the normal split; (80,10) sits in the preview
     // pane, so a click there must move focus to LiveLogs.
     draw_frame(&mut term, &mut layout, &mut state, &mut ui);
-    let _ = ainb::app::mouse::handle_mouse_event(
-        AppEvent::MouseClick { x: px, y: py },
+    let _ = ainb::dispatch(
         &mut state,
+        &ainb::Keymap::defaults(),
         &mut ui,
+        ainb::Intent::Mouse(ainb::Pos { x: px, y: py }, ainb::Btn::Left),
     );
     let host_mouse_back = state.shell.focused_pane == FocusedPane::LiveLogs;
 

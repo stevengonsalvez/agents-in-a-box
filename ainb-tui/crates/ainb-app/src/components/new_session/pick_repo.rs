@@ -79,10 +79,10 @@ pub enum PickRepoOutcome {
     /// Source needs an async clone before advancing. Phase 5 wires the
     /// spinner display; Phase 4 stops here.
     StartClone(RepoSource),
-    /// Ctrl+V pressed — the caller (events.rs) reads the OS clipboard and
-    /// appends it to the filter via `append_filter`. Clipboard access lives
-    /// in the app layer (`EventHandler::get_clipboard_text`), keeping this
-    /// component pure and testable.
+    /// Ctrl+V pressed. The caller asks the host for the clipboard
+    /// (`Effect::PasteClipboard`), whose text comes back as a paste and is
+    /// appended to the filter via `append_filter`, keeping this component
+    /// pure and testable.
     PasteFromClipboard,
     /// Surface a transient message to the user (favorite added/removed, or a
     /// refusal) and stay on the picker. The dispatcher maps `is_error` to an

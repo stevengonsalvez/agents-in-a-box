@@ -686,11 +686,14 @@ impl Screen for SkillManagerScreen {
     fn id(&self) -> &str {
         ids::SKILL_MANAGER
     }
-    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, _ui: &mut UiState) {
-        crate::components::skill_manager_screen::render(
+    fn render(&mut self, frame: &mut Frame, area: Rect, state: &AppState, ui: &mut UiState) {
+        let saved = state.config.app_config.ui_preferences.skill_manager_sources_width;
+        crate::components::skill_manager_screen::render_with_sources(
             frame,
             area,
             &state.skills.skill_manager_state,
+            ui.skill_sources.preferred_width(saved),
+            ui.skill_sources.resize_active,
         );
     }
 }

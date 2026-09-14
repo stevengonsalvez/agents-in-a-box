@@ -307,7 +307,7 @@ fn learnings_screen_opens_and_renders_title() {
 ///
 /// Drives the real binary: `:` opens the slash-command palette, `/recall`
 /// types the command (the palette strips the leading `/`), `Enter` executes
-/// it → `EventHandler::slash_command_event("recall")` → `GoToLearnings` →
+/// it → `app::slash_command_intent("recall")` → `home.learnings` →
 /// `current_screen = learnings` → the plugin renders its title token.
 ///
 /// Same traps/guards as the `m`-shortcut test above: skips without tmux or

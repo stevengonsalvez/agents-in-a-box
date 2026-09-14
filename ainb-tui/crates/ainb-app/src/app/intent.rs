@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::app::effect::Effect;
 use crate::app::events::{EventHandler, RendererHost};
 use crate::app::keymap::{Chord, CommandId, Keymap};
 use crate::app::state::AppState;
@@ -21,8 +22,11 @@ pub enum Intent {
     Text(String),
 }
 
-/// Arguments to a [`Intent::Command`]. Commands derived from the keymap carry
-/// their payload in the table row and take `Args::Null`.
+/// Arguments to a [`Intent::Command`].
+///
+/// `Args::Null` runs the row as the keymap wrote it; a row that carries a
+/// payload (a session position, a step, a character) takes a replacement
+/// payload here instead. See [`crate::app::keymap::KeyAction::with_args`].
 pub type Args = serde_json::Value;
 
 /// A cell position in the renderer's frame, column then row from top left.
@@ -41,19 +45,22 @@ pub enum Btn {
     Middle,
 }
 
-/// Apply one intent to `state`.
+/// Apply one intent to `state` and return the effects it queued, for the host
+/// to execute now that the state is written.
 ///
 /// This is the whole input surface for a renderer with no host-side events of
 /// its own. The TUI host uses [`EventHandler::resolve_intent`] instead,
 /// because it handles a few resolved events (embed sizing, sidebar collapse)
 /// against its own layout before the reducer sees the rest.
+#[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
 pub fn dispatch(
     state: &mut AppState,
     keymap: &Keymap,
     host: &mut dyn RendererHost,
     intent: Intent,
-) {
+) -> Vec<Effect> {
     if let Some(event) = EventHandler::resolve_intent(intent, state, keymap, host) {
         EventHandler::process_event(event, state);
     }
+    state.take_effects()
 }

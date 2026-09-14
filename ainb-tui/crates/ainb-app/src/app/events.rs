@@ -4,9 +4,11 @@
 
 #[cfg(test)]
 use super::keymap::test_key_codes::*;
+use crate::app::effect::{Effect, TerminalTarget, ToolTerminal};
 use crate::app::intent::{Btn, Intent, Pos};
 use crate::app::keymap::{
-    Chord, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
+    Chord, HostAction, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction,
+    active_contexts,
 };
 #[cfg(test)]
 use crate::app::keymap::{Key, Mods};
@@ -22,43 +24,31 @@ use tracing::info;
 
 /// What intent dispatch needs from the renderer it runs under.
 ///
-/// Some intents resolve to renderer-local work: scrolling a pane, asking
-/// whether wiring the Claude statusline would be productive (a terminal host
-/// answers from a short-lived cache), or finding what sits under the pointer,
-/// which only the renderer that drew the frame knows. The TUI's `UiState`
+/// Some intents resolve to renderer-local work: scrolling a pane, collapsing
+/// the sessions sidebar, or finding what sits under the pointer, which only
+/// the renderer that drew the frame knows. The TUI's `UiState`
 /// implements this; [`NoRenderer`] serves tests and hosts with none of it.
 pub trait RendererHost {
-    /// Queue a renderer-local scroll the keymap resolved.
-    fn queue_scroll(&mut self, action: ScrollAction);
-    /// The Claude statusline wiring status, possibly from the host's cache.
-    fn statusline_status(&mut self) -> Option<StatuslineStatus>;
-    /// Width, in columns, of the surface this host renders into, or `None`
-    /// when it has none. Layout clamps read it per host, so two surfaces at
-    /// different widths never share one value.
-    fn columns(&self) -> Option<u16>;
-    /// Hit-test a press at `pos` against the last drawn frame and apply it.
-    /// Returns the event for the reducer, if the press produced one.
-    fn pointer(&mut self, state: &mut AppState, pos: Pos, btn: Btn) -> Option<AppEvent>;
+    /// Queue renderer-local work the keymap resolved, for the host to apply
+    /// against its own layout.
+    fn queue(&mut self, action: HostAction);
+    /// Hit-test a press at `pos` against the last drawn frame. Returns the
+    /// intent the press means, usually a [`crate::app::pointer`] command naming
+    /// what was under it, for dispatch to apply. The host reads state but
+    /// never writes it.
+    fn pointer(&mut self, state: &AppState, pos: Pos, btn: Btn) -> Option<Intent>;
 }
 
-/// A [`RendererHost`] with no renderer: scrolls are dropped, nothing is under
-/// the pointer, and the statusline status is detected fresh on every ask.
+/// A [`RendererHost`] with no renderer: layout work is dropped and nothing is
+/// under the pointer.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoRenderer;
 
 impl RendererHost for NoRenderer {
-    fn queue_scroll(&mut self, _action: ScrollAction) {}
+    fn queue(&mut self, _action: HostAction) {}
 
-    fn columns(&self) -> Option<u16> {
+    fn pointer(&mut self, _state: &AppState, _pos: Pos, _btn: Btn) -> Option<Intent> {
         None
-    }
-
-    fn pointer(&mut self, _state: &mut AppState, _pos: Pos, _btn: Btn) -> Option<AppEvent> {
-        None
-    }
-
-    fn statusline_status(&mut self) -> Option<StatuslineStatus> {
-        crate::cli::statusline_install::detect_statusline_status().ok()
     }
 }
 
@@ -105,7 +95,6 @@ pub enum AppEvent {
     ToggleClaudeChat,   // Toggle Claude chat visibility
     NewSession,         // Create session in current directory
     SearchWorkspace,    // Search all workspaces
-    AttachSession,
     DetachSession,
     KillContainer,
     ReauthenticateCredentials,
@@ -142,31 +131,31 @@ pub enum AppEvent {
     SessionStartHangarDaemon,
     /// Toggle the sessions sidebar between full width and the thin rail —
     /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
-    ToggleSessionsSidebar,
-    // Mouse events
-    MouseClick {
-        x: u16,
-        y: u16,
+    // Pointer commands: a press a renderer has hit-tested, naming what was
+    // under the pointer by its place in state. See `crate::app::pointer`.
+    /// Select session-list row `row`; `open` attaches it, as a double-click does.
+    SessionListSelectRow {
+        row: usize,
+        open: bool,
     },
-    MouseRightClick {
-        x: u16,
-        y: u16,
+    /// Open the context menu of session-list row `row`, when it is a session.
+    SessionListOpenRowMenu {
+        row: usize,
     },
-    MouseDragStart {
-        x: u16,
-        y: u16,
+    /// Focus a pane of the session list.
+    SessionListFocusPane(crate::app::state::FocusedPane),
+    /// Persist the sessions pane's width and collapsed flag as preferences.
+    SaveSessionsPaneLayout {
+        width: u16,
+        collapsed: bool,
     },
-    MouseDragEnd {
-        x: u16,
-        y: u16,
-    },
-    MouseDragging {
-        x: u16,
-        y: u16,
-    },
-    MouseMove {
-        x: u16,
-        y: u16,
+    /// Focus a Skill Manager panel without selecting anything in it.
+    SkillManagerFocusPane(crate::components::skill_manager_screen::FocusedSkillPane),
+    /// Start dragging the home sidebar's resize edge.
+    HomeSidebarBeginResize,
+    /// Click home sidebar item `index`; a second click on it opens it.
+    HomeSidebarClickItem {
+        index: usize,
     },
     // New session creation events. Phase 6 (new-session redesign) retired
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
@@ -365,9 +354,11 @@ pub enum AppEvent {
     SkillManagerUnitClick {
         position: usize,
     },
-    /// A Sources/Units divider drag finished — persist the resized
-    /// Sources-panel width to config.
-    SkillManagerPersistSourcesWidth,
+    /// A renderer resized the Sources panel: persist `width` as the
+    /// preference every renderer starts from.
+    SkillManagerSaveSourcesWidth {
+        width: u16,
+    },
     /// `[m]` on the SkillManager screen — re-run the discovery
     /// walkers and force the banner to re-appear (ignores any prior
     /// skip-marker). Fixes the empty-state "press [m] to refresh"
@@ -764,7 +755,29 @@ mod picker_local_paths_tests {
     }
 }
 
+/// The reducer: resolves input to the crate's event enum and applies it.
+///
+/// Crate-private outside the `test-support` feature, like that enum. Hosts
+/// drive it through [`crate::app::dispatch`] and the free functions below.
 pub struct EventHandler;
+
+/// Whether keys go to a free-form text field, so a host must not read a
+/// printable key as a shortcut of its own (the slash palette's `:`).
+pub fn is_in_text_input_context(state: &AppState) -> bool {
+    EventHandler::is_in_text_input_context(state)
+}
+
+/// Whether a Skill Manager overlay covers its panels, so a pointer press must
+/// not reach the panels underneath.
+pub fn skill_manager_overlay_open(state: &AppState) -> bool {
+    EventHandler::skill_manager_overlay_open(state)
+}
+
+/// The intent a slash-palette command name runs, or `None` when the host maps
+/// no command to it.
+pub fn slash_command_intent(cmd: &str) -> Option<Intent> {
+    EventHandler::slash_command_intent(cmd)
+}
 
 /// Whether Esc-ing out of Configure should write this repo into
 /// `SessionDefaults::per_repo` at all.
@@ -833,29 +846,6 @@ impl PersistOutcome {
 }
 
 impl EventHandler {
-    /// Apply the persisted SkillManager Sources-panel width to the live
-    /// screen state on screen-open. `None` keeps the in-memory default
-    /// (32). Only the minimum is enforced here: the renderer clamps the width
-    /// against its own surface at draw, and the resize keys clamp against the
-    /// host's width before stepping, so a stale oversized value can never
-    /// starve the Units table.
-    fn apply_skill_manager_sources_width(state: &mut AppState) {
-        if let Some(width) = state.config.app_config.ui_preferences.skill_manager_sources_width {
-            state.skills.skill_manager_state.sources_width =
-                crate::components::skill_manager_screen::clamp_sources_width(width, u16::MAX);
-        }
-    }
-
-    /// Persist the current SkillManager Sources-panel width to config.
-    /// Called on `[`/`]` resize and on divider-drag-end.
-    fn persist_skill_manager_sources_width(state: &mut AppState) {
-        state.config.app_config.ui_preferences.skill_manager_sources_width =
-            Some(state.skills.skill_manager_state.sources_width);
-        if let Err(e) = state.config.app_config.save() {
-            tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
-        }
-    }
-
     /// True when a SkillManager overlay (banner / input prompt / library
     /// / browse / source-preview modal) is open OR the help overlay is
     /// visible — i.e. the underlying Sources/Units panels are NOT the
@@ -888,28 +878,22 @@ impl EventHandler {
     }
 
     /// Map a slash-command name (leading `/` already stripped by the
-    /// palette) to the host `AppEvent` it dispatches, or `None` if no host
-    /// mapping exists (e.g. a plugin-owned or unknown command — the caller
-    /// falls back to its log-only stub).
+    /// palette) to the intent it dispatches, or `None` if no host mapping
+    /// exists (e.g. a plugin-owned or unknown command; the caller falls back
+    /// to its log-only stub).
     ///
     /// P9: the `learnings` plugin advertises `/recall` + `/memory` in its
-    /// manifest `provides.commands`. Both open the learnings screen via the
-    /// SAME path the global `m` shortcut uses — `AppEvent::GoToLearnings`
-    /// (handler at the `GoToLearnings` arm of `process_event`). No open
-    /// logic is duplicated here; this is purely the name→event lookup.
-    pub fn slash_command_event(cmd: &str) -> Option<AppEvent> {
+    /// manifest `provides.commands`. Both run the home screen's `m` row,
+    /// `home.learnings`, so they open the learnings screen by the same path
+    /// the shortcut does. This is purely the name to command lookup.
+    pub fn slash_command_intent(cmd: &str) -> Option<Intent> {
         match cmd {
-            "recall" | "memory" => Some(AppEvent::GoToLearnings),
+            "recall" | "memory" => Some(Intent::Command(
+                crate::app::keymap::CommandId::new("home.learnings"),
+                serde_json::Value::Null,
+            )),
             _ => None,
         }
-    }
-
-    /// Get text from system clipboard
-    fn get_clipboard_text() -> Result<String, Box<dyn std::error::Error>> {
-        use arboard::Clipboard;
-        let mut clipboard = Clipboard::new()?;
-        let text = clipboard.get_text()?;
-        Ok(text)
     }
 
     /// Dispatch a bracketed-paste event to the right New Session text-entry step.
@@ -1149,15 +1133,15 @@ impl EventHandler {
     /// is ignored at the global layer and falls through to the active
     /// view's normal handling.
     ///
-    /// The settings.json read goes through [`RendererHost::statusline_status`]
+    /// The settings.json read goes through [`AppState::statusline_status`]
     /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
     /// the filesystem.
-    fn should_wire_statusline(state: &AppState, host: &mut dyn RendererHost) -> bool {
+    fn should_wire_statusline(state: &AppState) -> bool {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
         let live_source = state.fleet.live_window_watcher.snapshot().source;
-        let status = host.statusline_status();
+        let status = state.statusline_status();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
 
@@ -1235,11 +1219,25 @@ impl EventHandler {
     ) -> Option<AppEvent> {
         match intent {
             Intent::Key(chord) => Self::handle_key_event_with_keymap(chord, state, keymap, host),
-            Intent::Command(id, _args) => {
-                let action = keymap.command(&id)?.action.clone();
+            Intent::Command(id, args) => {
+                let Some(binding) = keymap.command(&id) else {
+                    return crate::app::pointer::event_for(&id, &args).or_else(|| {
+                        tracing::warn!("command `{id}` is unknown or rejected arguments {args}");
+                        None
+                    });
+                };
+                let Some(action) = binding.action.with_args(&args) else {
+                    tracing::warn!("command `{id}` rejected arguments {args}");
+                    return None;
+                };
                 Self::apply_key_action(action, state, host)
             }
-            Intent::Mouse(pos, btn) => host.pointer(state, pos, btn),
+            // A press resolves to what was under it; a host answering a press
+            // with another press would loop, so that answer is dropped.
+            Intent::Mouse(pos, btn) => match host.pointer(state, pos, btn)? {
+                Intent::Mouse(..) => None,
+                intent => Self::resolve_intent(intent, state, keymap, host),
+            },
             Intent::Text(text) => Self::handle_paste_event(text.clone(), state).or_else(|| {
                 Self::paste_into_text_input(&text, state);
                 None
@@ -1425,16 +1423,14 @@ impl EventHandler {
                 Self::route_pal_dial(|dial| dial.retry(), state)
             }
             PalRetry => None,
+            // The panel width is the renderer's layout: each host steps and
+            // clamps it against its own surface, then saves the preference.
             UiAction::SkillManagerShrinkSources => {
-                let term_w = host.columns().unwrap_or(80);
-                state.skills.skill_manager_state.shrink_sources(2, term_w);
-                Self::persist_skill_manager_sources_width(state);
+                host.queue(HostAction::ShrinkSkillSources);
                 None
             }
             UiAction::SkillManagerGrowSources => {
-                let term_w = host.columns().unwrap_or(80);
-                state.skills.skill_manager_state.grow_sources(2, term_w);
-                Self::persist_skill_manager_sources_width(state);
+                host.queue(HostAction::GrowSkillSources);
                 None
             }
             UiAction::DaemonsCloseOverlay => {
@@ -1448,8 +1444,7 @@ impl EventHandler {
             UiAction::DaemonsConfirmMenu => {
                 state.hangar.daemons_state.confirm_menu();
                 if let Some(session) = state.hangar.daemons_state.take_attach_request() {
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::AttachToOtherTmux(session));
+                    state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session)));
                 }
                 None
             }
@@ -1520,7 +1515,7 @@ impl EventHandler {
                 }
             }
             UiAction::UsageWireStatusline => {
-                Self::should_wire_statusline(state, host).then_some(AppEvent::UsageWireStatusline)
+                Self::should_wire_statusline(state).then_some(AppEvent::UsageWireStatusline)
             }
             // A read-only mirror uses tmux's own scrollback, so entering the
             // host's scroll mode over it would swallow navigation invisibly.
@@ -1534,7 +1529,11 @@ impl EventHandler {
             // its `LayoutComponent`, never handed to the reducer. One arm, so a
             // new `ScrollAction` cannot be left out of it.
             UiAction::Scroll(scroll) => {
-                host.queue_scroll(scroll);
+                host.queue(HostAction::Scroll(scroll));
+                None
+            }
+            UiAction::ToggleSessionsSidebar => {
+                host.queue(HostAction::ToggleSessionsSidebar);
                 None
             }
         }
@@ -1809,25 +1808,9 @@ impl EventHandler {
                     None
                 }
                 PickRepoOutcome::PasteFromClipboard => {
-                    // Ctrl+V on the picker: read the OS clipboard here (app
-                    // layer owns clipboard access) and append to the filter.
-                    match Self::get_clipboard_text() {
-                        Ok(text) => {
-                            if let Some(pick) = state
-                                .new_session
-                                .new_session_state
-                                .as_mut()
-                                .and_then(|s| s.pick_repo_state.as_mut())
-                            {
-                                pick.append_filter(&text);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("PickRepo clipboard paste failed: {}", e);
-                            state
-                                .add_error_notification(format!("Could not read clipboard: {}", e));
-                        }
-                    }
+                    // Ctrl+V on the picker: the host reads the clipboard and
+                    // pastes it back as text, the bracketed-paste route.
+                    state.emit(Effect::PasteClipboard);
                     None
                 }
                 PickRepoOutcome::BackToHome => {
@@ -1914,24 +1897,6 @@ impl EventHandler {
         } else {
             None
         }
-    }
-
-    fn prepare_exact_fleet_attach(tmux_target: &str) -> Result<String, String> {
-        let session_name =
-            tmux_target.split_once(':').map_or(tmux_target, |(session, _)| session).trim();
-        if session_name.is_empty() {
-            return Err("tmux target has no session name".to_string());
-        }
-        for command in ["select-window", "select-pane"] {
-            let status = std::process::Command::new("tmux")
-                .args([command, "-t", tmux_target])
-                .status()
-                .map_err(|error| format!("tmux {command}: {error}"))?;
-            if !status.success() {
-                return Err(format!("tmux {command} rejected {tmux_target}"));
-            }
-        }
-        Ok(session_name.to_string())
     }
 
     /// Write every pending settings-screen edit, returning how many landed.
@@ -2164,14 +2129,10 @@ impl EventHandler {
             // applies it in the main loop where `UiState` is in scope and
             // persists it. Same shape as EnterInteractivePane below: the arm
             // exists for exhaustiveness, not to do nothing quietly.
-            // The sidebar's collapsed flag is renderer state, so the host
-            // applies it in the main loop where `UiState` is in scope and
-            // persists it there. The arm exists for exhaustiveness, not to do
-            // nothing quietly.
-            AppEvent::ToggleSessionsSidebar => {}
-            // Entering the interactive embed is handled in the main loop (it needs
-            // the terminal size and the embed lives in the event loop) — no-op here.
-            AppEvent::EnterInteractivePane => {}
+            // Only the host knows the pane size, so it performs the attach.
+            AppEvent::EnterInteractivePane => {
+                state.emit(Effect::AttachTerminal(TerminalTarget::InPlace));
+            }
             // Other tmux rename events
             AppEvent::OtherTmuxStartRename => state.start_other_tmux_rename(),
             AppEvent::OtherTmuxRenameChar(c) => state.other_tmux_rename_char(c),
@@ -2444,10 +2405,33 @@ impl EventHandler {
                 let dismissed = state.dismiss_notifications();
                 tracing::debug!("Event: DismissNotifications - cleared={dismissed}");
             }
-            AppEvent::AttachSession => {
-                if let Some(session_id) = state.get_selected_session_id() {
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::AttachToContainer(session_id));
+            AppEvent::SessionListSelectRow { row, open } => {
+                if let Some(target) = state.session_list_row_target(row) {
+                    state.select_session_list_row(target);
+                    if open {
+                        Self::process_event(AppEvent::AttachTmuxSession, state);
+                    }
+                }
+            }
+            AppEvent::SessionListOpenRowMenu { row } => {
+                use crate::app::state::{AttachableRef, SessionListRowTarget};
+                if let Some(SessionListRowTarget::Attachable(
+                    target @ (AttachableRef::WorkspaceSession { .. }
+                    | AttachableRef::SshSession { .. }),
+                )) = state.session_list_row_target(row)
+                {
+                    state.open_session_context_menu(target);
+                }
+            }
+            AppEvent::SessionListFocusPane(pane) => {
+                state.shell.focused_pane = pane;
+            }
+            AppEvent::SaveSessionsPaneLayout { width, collapsed } => {
+                let preferences = &mut state.config.app_config.ui_preferences;
+                preferences.sessions_sidebar_width = Some(width);
+                preferences.sessions_sidebar_collapsed = Some(collapsed);
+                if let Err(e) = state.config.app_config.save() {
+                    tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
                 }
             }
             AppEvent::AttachTmuxSession => {
@@ -2469,8 +2453,7 @@ impl EventHandler {
                         if let Some(tmux_name) = &ssh_session.tmux_session_name {
                             let session_name = tmux_name.clone();
                             tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
-                            state.shell.pending_async_action =
-                                Some(AsyncAction::AttachToOtherTmux(session_name));
+                            state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session_name)));
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux session name");
                             state.add_error_notification(
@@ -2488,8 +2471,7 @@ impl EventHandler {
                             "[ACTION] Attaching to other tmux session: {}",
                             session_name
                         );
-                        state.shell.pending_async_action =
-                            Some(AsyncAction::AttachToOtherTmux(session_name));
+                        state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session_name)));
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
                     }
@@ -2503,8 +2485,9 @@ impl EventHandler {
                                     "[ACTION] Attaching to workspace shell: {}",
                                     session_name
                                 );
-                                state.shell.pending_async_action =
-                                    Some(AsyncAction::AttachToOtherTmux(session_name));
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(
+                                    session_name,
+                                )));
                             } else {
                                 tracing::warn!(
                                     "[ACTION] Shell selected but no shell session found in workspace"
@@ -2524,8 +2507,7 @@ impl EventHandler {
                             session.status
                         );
                     }
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::AttachToTmuxSession(session_id));
+                    state.emit(Effect::AttachTerminal(TerminalTarget::Session(session_id)));
                 } else {
                     tracing::warn!(
                         "[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
@@ -2542,6 +2524,9 @@ impl EventHandler {
                             .to_string(),
                     );
                 }
+            }
+            AppEvent::DetachSession if state.is_interactive_pane() => {
+                state.emit(Effect::Detach);
             }
             AppEvent::DetachSession => {
                 // Clear attached session and return to home screen
@@ -2752,8 +2737,7 @@ impl EventHandler {
                 // Open session's workspace in preferred editor
                 if let Some(session) = state.selected_session() {
                     let workspace_path = std::path::PathBuf::from(&session.workspace_path);
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::OpenInEditor(workspace_path));
+                    state.emit(Effect::OpenEditor(workspace_path));
                 } else {
                     state.add_warning_notification("⚠️ No session selected".to_string());
                 }
@@ -2775,10 +2759,10 @@ impl EventHandler {
                     };
 
                     tracing::info!("Opening workspace shell, target_dir: {:?}", target_dir);
-                    state.shell.pending_async_action = Some(AsyncAction::OpenWorkspaceShell {
+                    state.emit(Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
                         workspace_index: workspace_idx,
                         target_dir,
-                    });
+                    }));
                 } else {
                     state.add_warning_notification("No workspace selected".to_string());
                 }
@@ -2952,17 +2936,22 @@ impl EventHandler {
                             }
                             crate::app::state::ConfirmAction::SetupAbtopRateLimits => {
                                 // Run `abtop --setup`, then open abtop.
-                                state.shell.pending_async_action =
-                                    Some(AsyncAction::SetupAbtopRateLimits);
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                    ToolTerminal::AbtopWithSetup,
+                                )));
                             }
                             crate::app::state::ConfirmAction::OpenAbtopSkipSetup => {
                                 // Decline setup this time; open abtop now.
-                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                    ToolTerminal::Abtop,
+                                )));
                             }
                             crate::app::state::ConfirmAction::DismissAbtopSetup => {
                                 // Never offer again, then open abtop.
                                 state.dismiss_abtop_setup();
-                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                    ToolTerminal::Abtop,
+                                )));
                             }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
                                 // Install the ainb-hooks plugin for both agents.
@@ -3425,7 +3414,6 @@ impl EventHandler {
                         HomeTile::SkillManager => {
                             tracing::info!("Navigating to SkillManager view (spec §10.1)");
                             state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
-                            Self::apply_skill_manager_sources_width(state);
                         }
                         HomeTile::Mcp => {
                             tracing::info!("Opening MCP pool overlay");
@@ -3462,6 +3450,18 @@ impl EventHandler {
                 state.shell.home_screen_state.select_right();
             }
             // AINB 2.0: Home screen V2 events
+            AppEvent::HomeSidebarBeginResize => {
+                state.shell.home_screen_v2_state.start_sidebar_resize();
+            }
+            AppEvent::HomeSidebarClickItem { index } => {
+                let outcome = state
+                    .shell
+                    .home_screen_v2_state
+                    .click_sidebar_item(index, std::time::Instant::now());
+                if outcome.double_click {
+                    Self::process_event(AppEvent::HomeScreenSidebarSelect, state);
+                }
+            }
             AppEvent::HomeScreenSidebarUp => {
                 tracing::debug!("HomeScreen V2 sidebar up");
                 state.shell.home_screen_v2_state.sidebar.move_up();
@@ -3516,7 +3516,9 @@ impl EventHandler {
                         // Hand the terminal to witr's own interactive TUI
                         // (see AppEvent::GoToWitr) rather than a
                         // plugin-rendered screen.
-                        state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
+                        state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                            ToolTerminal::Witr,
+                        )));
                     }
                     SidebarItem::Abtop => {
                         tracing::info!("Launching abtop (top-for-agents) from sidebar");
@@ -3527,7 +3529,9 @@ impl EventHandler {
                         if state.should_offer_abtop_setup() {
                             state.show_abtop_setup_prompt();
                         } else {
-                            state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                ToolTerminal::Abtop,
+                            )));
                         }
                     }
                     SidebarItem::Skills => {
@@ -3551,7 +3555,6 @@ impl EventHandler {
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
                         state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
-                        Self::apply_skill_manager_sources_width(state);
                         // Mirror the discovery flow from the `m` keybind
                         // handler (AppEvent::GoToSkillManager) — sidebar entry
                         // must trigger the same hdt.9 live-data rehydrate +
@@ -3765,7 +3768,9 @@ impl EventHandler {
                 // agent session) and resume ainb when the user quits it.
                 // The witr plugin still owns the `ainb witr` CLI + `/witr`
                 // slash; only the screen is the embedded binary.
-                state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
+                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                    ToolTerminal::Witr,
+                )));
             }
             AppEvent::GoToLearnings => {
                 tracing::info!("Navigating to Learnings (knowledge-base browser)");
@@ -3796,7 +3801,9 @@ impl EventHandler {
                 if state.should_offer_abtop_setup() {
                     state.show_abtop_setup_prompt();
                 } else {
-                    state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                    state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                        ToolTerminal::Abtop,
+                    )));
                 }
             }
             AppEvent::GoToSkills => {
@@ -3810,7 +3817,6 @@ impl EventHandler {
             AppEvent::GoToSkillManager => {
                 tracing::info!("Navigating to SkillManager (spec §10.1)");
                 state.shell.current_screen = screen_ids::SKILL_MANAGER.to_string();
-                Self::apply_skill_manager_sources_width(state);
                 let ainb_home = ainb_skill_core::default_ainb_home();
                 // P8 live-data binding (hdt.9): rehydrate Sources /
                 // Units / Detail panels from $AINB_HOME/manifest.yaml
@@ -4362,8 +4368,8 @@ impl EventHandler {
             }
             AppEvent::SkillManagerOpenUnitInEditor => {
                 // `[o]` — open the selected unit's deployed skill dir in the
-                // user's editor. Reuses the generic OpenInEditor async action
-                // (resolve_editor → $EDITOR fallback chain). Open the parent
+                // user's editor through the host's `Effect::OpenEditor`
+                // (preferred editor, `code`, then `$EDITOR`). Open the parent
                 // dir when the deployed path is a file (e.g. SKILL.md) so the
                 // whole skill folder lands in the editor.
                 //
@@ -4392,7 +4398,7 @@ impl EventHandler {
                         } else {
                             p
                         };
-                        state.shell.pending_async_action = Some(AsyncAction::OpenInEditor(target));
+                        state.emit(Effect::OpenEditor(target));
                     }
                     None => {
                         state.add_warning_notification(
@@ -4431,8 +4437,14 @@ impl EventHandler {
                     );
                 }
             }
-            AppEvent::SkillManagerPersistSourcesWidth => {
-                Self::persist_skill_manager_sources_width(state);
+            AppEvent::SkillManagerSaveSourcesWidth { width } => {
+                state.config.app_config.ui_preferences.skill_manager_sources_width = Some(width);
+                if let Err(e) = state.config.app_config.save() {
+                    tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
+                }
+            }
+            AppEvent::SkillManagerFocusPane(pane) => {
+                state.skills.skill_manager_state.focused_pane = pane;
             }
             AppEvent::SkillManagerOpenLibrary => {
                 // `[l]` — open the own-skill Library view, sourced from
@@ -5391,15 +5403,10 @@ impl EventHandler {
                 state.config.config_popup_state.insert_str(&text);
             }
             AppEvent::ConfigPopupPasteClipboard => {
-                // Ctrl+V: read the OS clipboard directly (works regardless of
-                // whether the terminal delivers bracketed-paste events).
-                match Self::get_clipboard_text() {
-                    Ok(text) => state.config.config_popup_state.insert_str(&text),
-                    Err(e) => {
-                        tracing::warn!("Clipboard paste failed: {}", e);
-                        state.add_error_notification(format!("Could not read clipboard: {}", e));
-                    }
-                }
+                // Ctrl+V: the host reads the clipboard and pastes it back as
+                // text, so this works whether or not the terminal delivers
+                // bracketed-paste events.
+                state.emit(Effect::PasteClipboard);
             }
             AppEvent::ConfigPopupDelete => {
                 state.config.config_popup_state.delete_forward();
@@ -5546,15 +5553,16 @@ impl EventHandler {
                 }
                 // Read uncached: the install is a once-per-session action, so
                 // it can afford the settings.json read, and it must not act on a
-                // value up to the TTL old. The renderer drops its own cache
-                // after this event lands (`UiState::invalidate_statusline_status`
-                // in the run loop) so the CTA flips on the very next frame.
+                // value up to the TTL old.
                 match crate::cli::statusline_install::detect_statusline_status().ok() {
                     Some(StatuslineStatus::Configured) => return,
                     Some(_) => {}
                     None => return,
                 }
                 let outcome = install_statusline();
+                // settings.json may just have changed; drop the cache so every
+                // host's CTA flips on its very next frame.
+                state.invalidate_statusline_status();
                 match outcome {
                     Ok(InstallOutcome::Installed) => {
                         state.config.app_config.ui_preferences.statusline_decision =
@@ -6431,15 +6439,6 @@ impl EventHandler {
                     state.start_onboarding(true, None);
                 }
             }
-            // Mouse events are handled directly in the main event loop
-            AppEvent::MouseClick { .. }
-            | AppEvent::MouseRightClick { .. }
-            | AppEvent::MouseDragStart { .. }
-            | AppEvent::MouseDragEnd { .. }
-            | AppEvent::MouseDragging { .. }
-            | AppEvent::MouseMove { .. } => {
-                // These are processed by handle_mouse_event
-            }
             // Phase 2c plugin-shaped variants. Today the in-core burndown
             // handlers still drive Analytics directly through the legacy
             // `Usage*` variants; the bridge module is responsible for
@@ -6992,14 +6991,31 @@ mod session_list_key_tests {
     }
 
     /// 'B' is the keyboard twin of the [-]/[+] sidebar glyph (mouse-only
-    /// before). Mapping-level test: no persistence side effects here.
+    /// before). The collapse is the renderer's layout, so the key hands it to
+    /// the host and gives the reducer nothing.
     #[test]
     fn shift_b_toggles_sessions_sidebar() {
+        #[derive(Default)]
+        struct Recorder(Vec<HostAction>);
+        impl RendererHost for Recorder {
+            fn queue(&mut self, action: HostAction) {
+                self.0.push(action);
+            }
+            fn pointer(&mut self, _: &AppState, _: Pos, _: Btn) -> Option<Intent> {
+                None
+            }
+        }
+
         let mut state = session_list_state();
-        assert!(matches!(
-            key(&mut state, 'B'),
-            Some(AppEvent::ToggleSessionsSidebar)
-        ));
+        let mut host = Recorder::default();
+        let event = EventHandler::handle_key_event_with_keymap(
+            Chord::new(Char('B'), Mods::NONE),
+            &mut state,
+            &Keymap::defaults(),
+            &mut host,
+        );
+        assert!(event.is_none());
+        assert_eq!(host.0, [HostAction::ToggleSessionsSidebar]);
     }
 }
 
@@ -7668,8 +7684,8 @@ mod text_input_guard_tests {
         assert!(matches!(evt, AppEvent::ToggleHelp));
     }
 
-    /// Ctrl+V in a Config text popup must route to the direct-clipboard
-    /// paste (arboard), not type a literal `v`. This is the reliable paste
+    /// Ctrl+V in a Config text popup must route to the clipboard paste the
+    /// host performs, not type a literal `v`. This is the reliable paste
     /// path that does not depend on the terminal delivering bracketed
     /// `Event::Paste` — the reason Cmd+V "did nothing" in some setups.
     #[test]
@@ -8203,35 +8219,33 @@ mod skill_manager_sync_keybind_tests {
 mod slash_command_dispatch_tests {
     //! P9: the learnings plugin advertises `/recall` + `/memory` slash
     //! commands (manifest `provides.commands`). Both must route to the SAME
-    //! screen-open path the global `m` shortcut uses — i.e. emit
-    //! `AppEvent::GoToLearnings`, whose handler sets
+    //! screen-open path the global `m` shortcut uses: run the
+    //! `home.learnings` row, whose handler sets
     //! `current_screen = "learnings"`.
     //!
-    //! `slash_command_event` is the pure name→event mapping the main loop
-    //! calls when the slash palette emits `SlashAction::Execute(cmd)`. The
-    //! palette already strips the leading `/`, so the input here is the bare
-    //! command name (`"recall"`, not `"/recall"`).
+    //! `slash_command_intent` is the pure name to command mapping the main
+    //! loop calls when the slash palette emits `SlashAction::Execute(cmd)`.
+    //! The palette already strips the leading `/`, so the input here is the
+    //! bare command name (`"recall"`, not `"/recall"`).
 
     use super::*;
     use crate::app::screens::ids as screen_ids;
 
-    #[test]
-    fn slash_recall_opens_learnings_screen() {
-        // `/recall` → GoToLearnings.
-        let evt = EventHandler::slash_command_event("recall")
-            .expect("/recall must map to a GoToLearnings event");
-        assert!(
-            matches!(evt, AppEvent::GoToLearnings),
-            "/recall must emit GoToLearnings, got {evt:?}"
-        );
-
-        // …and processing that event actually opens the learnings screen
-        // (same end-state the `m` shortcut produces).
+    /// Dispatch the slash command on the home screen and return the screen it
+    /// leaves the app on.
+    fn screen_after(cmd: &str) -> String {
+        let intent = EventHandler::slash_command_intent(cmd)
+            .unwrap_or_else(|| panic!("/{cmd} must map to a command"));
         let mut state = AppState::default();
         state.shell.current_screen = screen_ids::HOME.to_string();
-        EventHandler::process_event(evt, &mut state);
+        let _ = crate::app::dispatch(&mut state, &Keymap::defaults(), &mut NoRenderer, intent);
+        state.shell.current_screen.clone()
+    }
+
+    #[test]
+    fn slash_recall_opens_learnings_screen() {
         assert_eq!(
-            state.shell.current_screen,
+            screen_after("recall"),
             screen_ids::LEARNINGS,
             "dispatching /recall must set current_screen to learnings"
         );
@@ -8239,19 +8253,8 @@ mod slash_command_dispatch_tests {
 
     #[test]
     fn slash_memory_opens_learnings_screen() {
-        // `/memory` → GoToLearnings (the second manifest alias).
-        let evt = EventHandler::slash_command_event("memory")
-            .expect("/memory must map to a GoToLearnings event");
-        assert!(
-            matches!(evt, AppEvent::GoToLearnings),
-            "/memory must emit GoToLearnings, got {evt:?}"
-        );
-
-        let mut state = AppState::default();
-        state.shell.current_screen = screen_ids::HOME.to_string();
-        EventHandler::process_event(evt, &mut state);
         assert_eq!(
-            state.shell.current_screen,
+            screen_after("memory"),
             screen_ids::LEARNINGS,
             "dispatching /memory must set current_screen to learnings"
         );
@@ -8259,11 +8262,11 @@ mod slash_command_dispatch_tests {
 
     #[test]
     fn unknown_slash_command_is_not_routed() {
-        // A command name with no host mapping returns None — the main loop
+        // A command name with no host mapping returns None: the main loop
         // leaves it to the existing log-only fallback (no panic, no nav).
         assert!(
-            EventHandler::slash_command_event("definitely-not-a-command").is_none(),
-            "unknown slash commands must not map to an event"
+            EventHandler::slash_command_intent("definitely-not-a-command").is_none(),
+            "unknown slash commands must not map to a command"
         );
     }
 }
