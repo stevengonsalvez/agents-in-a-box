@@ -495,6 +495,7 @@ pub struct SshTarget {
     pub host: String,
     pub port: u16,
     pub user: Option<String>,
+    #[serde(skip_serializing_if = "crate::wire::fields::omit_in_frame")]
     pub identity_file: Option<std::path::PathBuf>,
 }
 
@@ -630,9 +631,11 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
     pub last_accessed: DateTime<Utc>,
     pub git_changes: GitChanges,
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub recent_logs: Option<String>,
     pub skip_permissions: bool, // Whether to use --dangerously-skip-permissions flag
     pub mode: SessionMode,      // Interactive or Boss mode
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub boss_prompt: Option<String>, // The prompt for boss mode execution
     #[serde(default)]
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
@@ -649,7 +652,8 @@ pub struct Session {
 
     // Tmux integration fields
     pub tmux_session_name: Option<String>, // Name of the tmux session if using tmux backend
-    pub preview_content: Option<String>,   // Cached preview content for display
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    pub preview_content: Option<String>, // Cached preview content for display
     pub is_attached: bool,                 // Whether user is currently attached to the session
 
     /// Live "needs you" chips, recomputed every preview refresh and rendered
