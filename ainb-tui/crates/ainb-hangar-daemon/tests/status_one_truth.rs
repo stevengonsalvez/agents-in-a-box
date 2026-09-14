@@ -588,3 +588,56 @@ async fn an_answered_question_is_not_reported_waiting_on_the_next_read() {
     let cleared = AttentionRepo::drift_against_fleet_session(store.pool()).await.expect("drift");
     assert!(cleared.is_clean(), "the clearing hook ends it: {cleared:?}");
 }
+
+/// #1015 budget: the joined read costs ONE whole-Fleet projection, where a
+/// surface reading `fleet/snapshot` and `fleet/status` separately paid two per
+/// Fleet event. Its rows carry the stored host, and its status half is exactly
+/// what `fleet/status` derives.
+#[tokio::test]
+async fn the_joined_read_costs_one_projection_and_matches_the_status_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    hook(
+        &store,
+        "e-ask",
+        "AskUserQuestion",
+        Some("AskUserQuestion"),
+        BASE_MS,
+        Some(raise(0, BASE_MS)),
+    )
+    .await;
+
+    let before = ainb_hangar_daemon::fleet::projection_reads();
+    let joined = ainb_hangar_daemon::fleet::roster_status(store.pool())
+        .await
+        .expect("joined read");
+    assert_eq!(
+        ainb_hangar_daemon::fleet::projection_reads() - before,
+        1,
+        "one joined read is one projection read"
+    );
+
+    let before = ainb_hangar_daemon::fleet::projection_reads();
+    let status = status_rows(store.pool()).await.expect("status");
+    let _snapshot = ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot");
+    assert_eq!(
+        ainb_hangar_daemon::fleet::projection_reads() - before,
+        2,
+        "the two separate reads it replaces cost two"
+    );
+
+    let row = joined
+        .rows
+        .iter()
+        .find(|row| row.status.session_key == SESSION_KEY)
+        .expect("row");
+    let alone = status.rows.iter().find(|row| row.session_key == SESSION_KEY).expect("status");
+    assert_eq!(&row.status, alone);
+    assert_eq!(row.status.host_id, "local");
+    assert_eq!(row.status.state, AgentState::Waiting);
+    assert_eq!(
+        row.status.wait_kind,
+        Some(ainb_hangar_proto::agent_status::WaitKind::Ask)
+    );
+    assert_eq!(row.read_revision, joined.read_revision);
+}
