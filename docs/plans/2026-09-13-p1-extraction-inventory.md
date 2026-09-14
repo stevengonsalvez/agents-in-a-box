@@ -371,7 +371,7 @@ The executor is `execute(effect, terminal, ui, plugins)`, with no `&AppState`. T
 
 ### Tripwires in CI
 
-Job `core-tripwires` runs `cargo nextest run -p ainb -E 'binary(/^tripwire_/)'` minus `ainb-core/tests/tripwire_ci_exclusions.txt`, serially, and fails when nothing passed or the `SKIP:` lines are at least the pass count. Each exclusion carries an issue and a reason, checked by `ci_tripwire_exclusions.rs`. The 13 excluded binaries are red on v2 both before and after #1008 on the same box (#1023, #1024, #1025).
+Job `core-tripwires` runs `cargo nextest run -p ainb -E 'binary(/^tripwire_/)'` minus `ainb-core/tests/tripwire_ci_exclusions.txt`, serially, and fails when nothing passed or the `SKIP:` lines are at least the pass count. Each exclusion carries an issue and a reason, checked by `ci_tripwire_exclusions.rs`. 13 excluded binaries are red on v2 both before and after #1008 on the same box (#1023, #1024, #1025); 3 more are red only on the CI runner (#1027). The first CI run also caught one #1008 regression, fixed here: `tripwire_plugin_runtime_baseline`'s fixture had no `event_bus` grant, so the bus dropped its snapshot.
 
 ### Left for P5
 
