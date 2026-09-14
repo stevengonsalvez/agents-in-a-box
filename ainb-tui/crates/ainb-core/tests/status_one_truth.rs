@@ -84,11 +84,17 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
     // asserted is the RENDERED screen, painted into a ratatui `TestBackend` the
     // way the TUI paints the plugin's buffer.
     {
-        let joined = wire_round_trip(
+        let mut joined = wire_round_trip(
             &ainb_hangar_daemon::fleet::roster_status(store.pool())
                 .await
                 .expect("joined read"),
         );
+        // The daemon stamps `read_at_ms` from its wall clock, but this fixture
+        // runs on a synthetic one: the read lands 42 s after the evidence, on
+        // the daemon's clock, at the same instant the panel receives it. Cards
+        // age on the daemon clock, so the read must carry that instant.
+        assert!(joined.read_at_ms > 0, "the joined read carries the daemon clock");
+        joined.read_at_ms = expected.4 + 42_000;
         let pane = panel_from(joined.clone(), expected.4 + 42_000);
         let held = pane.status_for(SESSION_KEY).expect("the panel holds the daemon's row");
         assert_eq!(
