@@ -1,3 +1,5 @@
+#![allow(missing_docs)]
+
 // ABOUTME: The code review screen's pointer commands name what was hit by path,
 // so a click resolved against one frame acts on the same row after the tree
 // changed, and the wheel scrolls through the reducer rather than the host.
