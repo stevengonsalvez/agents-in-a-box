@@ -930,6 +930,7 @@ impl KeyAction {
     ) -> Option<Option<AppEvent>> {
         crate::app::pointer::with_args(event, args)
             .or_else(|| crate::app::reports::with_args(event, args))
+            .or_else(|| crate::app::plugin_action::with_args(event, args))
     }
 
     fn carries_payload(&self) -> bool {
