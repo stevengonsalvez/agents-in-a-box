@@ -88,11 +88,41 @@ pub struct Frame {
     pub daemon_read: Option<DaemonRead>,
     /// `section_json` for the section: redacted by construction. In TypeScript
     /// it is `unknown`; `SectionBodies[frame.section]` names its shape.
+    ///
+    /// Private: the host side can only fill it through [`Self::new`], so no
+    /// frame body comes from anywhere but the redacting serializer.
     #[cfg_attr(feature = "typescript-bindings", specta(type = specta_typescript::Unknown))]
-    pub body: serde_json::Value,
+    body: serde_json::Value,
 }
 
 impl Frame {
+    /// The frame for one section of `state`: its wire name, version, daemon
+    /// read and redacted body, from this host process ([`HostId::local`],
+    /// [`host_epoch`]).
+    #[must_use]
+    pub fn new(state: &AppState, id: SectionId) -> Self {
+        Self {
+            section: section_name(id).to_string(),
+            version: state.versions()[id.index()],
+            epoch: host_epoch(),
+            host_id: HostId::local(),
+            daemon_read: crate::wire::daemon_read(state, id),
+            body: section_json(state, id),
+        }
+    }
+
+    /// The redacted section body.
+    #[must_use]
+    pub const fn body(&self) -> &serde_json::Value {
+        &self.body
+    }
+
+    /// Take the body out, for a store that keeps it.
+    #[must_use]
+    pub fn into_body(self) -> serde_json::Value {
+        self.body
+    }
+
     /// The section this frame names, if the wire name is one this build knows.
     #[must_use]
     pub fn section_id(&self) -> Option<SectionId> {
@@ -234,12 +264,10 @@ impl Mirror {
             }
             self.sent[id.index()] = Some(version);
             frames.push(Frame {
-                section: section_name(id).to_string(),
-                version,
                 epoch: self.epoch,
                 host_id: self.host_id.clone(),
                 daemon_read: (self.daemon_read)(state, id),
-                body: section_json(state, id),
+                ..Frame::new(state, id)
             });
         }
         FrameBatch { frames }
