@@ -8,7 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ainb_hangar_proto::agent_status::{AgentState, AgentStatusRow, RosterStatusResult, WaitKind};
+use ainb_hangar_proto::agent_status::{AgentState, AgentStatusRow, WaitKind};
+use ainb_hangar_proto::status_topic::AgentStatusEnvelope;
 use ainb_hangar_proto::status_view::{StatusView, ViewHealth};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use serde::{Deserialize, Serialize};
@@ -822,14 +823,17 @@ pub struct FleetPaneState {
     mode: FleetMode,
     feedback: Option<String>,
     now_ms: i64,
-    head_revision: i64,
-    /// The last `fleet/roster_status` read folded by the one reducer every
-    /// surface shares (#1015). The roster on screen is built from its cards.
+    /// The view the host's agent-status owner published, folded by the one
+    /// reducer every surface shares (#1015, #1031). The roster on screen is
+    /// built from its cards; the panel reads nothing of its own.
     view: Option<StatusView>,
-    /// Why there is no view at all (no read yet, an older daemon, a read that
-    /// failed before any landed). The panel renders it; it never derives a
-    /// state of its own.
+    /// Why there is no view at all (nothing published yet, or a daemon that
+    /// serves no status read). The panel renders it; it never derives a state
+    /// of its own.
     view_absent: Option<String>,
+    /// The last envelope sequence applied, so an older envelope delivered late
+    /// never steps the panel backwards.
+    envelope_sequence: u64,
 }
 
 impl Default for FleetPaneState {
@@ -841,36 +845,28 @@ impl Default for FleetPaneState {
             mode: FleetMode::Browse,
             feedback: None,
             now_ms: 0,
-            head_revision: 0,
             view: None,
             view_absent: None,
+            envelope_sequence: 0,
         }
     }
 }
 
 impl FleetPaneState {
-    pub const fn head_revision(&self) -> i64 {
-        self.head_revision
-    }
-
-    /// Fold one `fleet/roster_status` read through [`StatusView`] and rebuild
-    /// the roster from its cards (#1015). Returns whether anything rendered
-    /// changed; a read older than the one held is refused and changes nothing.
-    pub fn apply_read(&mut self, result: RosterStatusResult, now_ms: i64) -> bool {
-        let changed = match &mut self.view {
-            Some(view) if result.read_revision < view.read_revision => return false,
-            Some(view) => view.apply(result, now_ms),
-            None => {
-                self.view = Some(StatusView::from_read(result, now_ms));
-                true
-            }
-        };
-        self.view_absent = None;
-        if let Some(view) = &mut self.view {
-            view.observe_head(self.head_revision);
+    /// Fold one envelope the host's agent-status owner published (#1031):
+    /// its view through [`Self::apply_view`], or its absent reason through
+    /// [`Self::mark_absent`]. An envelope at or below the last applied
+    /// sequence is dropped. Returns whether it was applied.
+    pub fn apply_envelope(&mut self, envelope: AgentStatusEnvelope) -> bool {
+        if envelope.sequence <= self.envelope_sequence {
+            return false;
         }
-        self.rebuild_roster_from_view();
-        changed
+        self.envelope_sequence = envelope.sequence;
+        match envelope.into_view() {
+            Ok(view) => self.apply_view(view),
+            Err(reason) => self.mark_absent(reason),
+        }
+        true
     }
 
     /// Take a whole [`StatusView`] folded elsewhere (section 20 of the app
@@ -895,20 +891,8 @@ impl FleetPaneState {
         self.set_sessions(roster);
     }
 
-    /// The last read failed for `reason`. With a view the host is unreachable
-    /// and its rows stay frozen; without one the view is absent.
-    pub fn mark_read_failed(&mut self, reason: impl Into<String>, now_ms: i64) {
-        let reason = reason.into();
-        match &mut self.view {
-            Some(view) => {
-                view.mark_unreachable(reason, now_ms);
-            }
-            None => self.view_absent = Some(reason),
-        }
-    }
-
-    /// The daemon cannot serve the read at all (an older daemon): no view, no
-    /// rows, and the reason on screen. No fallback to a local derivation.
+    /// The owner has no view (a daemon that serves no status read): no view,
+    /// no rows, and the reason on screen. No fallback to a local derivation.
     pub fn mark_absent(&mut self, reason: impl Into<String>) {
         self.view = None;
         self.view_absent = Some(reason.into());
@@ -940,7 +924,7 @@ impl FleetPaneState {
         let Some(view) = &self.view else {
             return Some(format!(
                 "absent: {}",
-                self.view_absent.as_deref().unwrap_or("no fleet/roster_status read yet")
+                self.view_absent.as_deref().unwrap_or("no agent status published yet")
             ));
         };
         match &view.health {
@@ -959,13 +943,6 @@ impl FleetPaneState {
                 view.host_id,
                 format_age(self.now_ms, *stale_since_ms)
             )),
-        }
-    }
-
-    pub fn observe_revision(&mut self, revision: i64) {
-        self.head_revision = self.head_revision.max(revision);
-        if let Some(view) = &mut self.view {
-            view.observe_head(self.head_revision);
         }
     }
 
@@ -2665,10 +2642,7 @@ pub fn render_fleet(
             || format!("0/{}", visible.len()),
             |index| format!("{}/{}", index + 1, visible.len()),
         );
-        let header = format!(
-            "  ACTION QUEUE  ·  {} sessions  ·  F5 refresh",
-            visible.len()
-        );
+        let header = format!("  ACTION QUEUE  ·  {} sessions", visible.len());
         put_str(buffer, 0, header_y, &header, FG, list_width);
         let position_width = position.chars().count() as u16;
         put_str(
@@ -4325,7 +4299,7 @@ mod tests {
     /// `fleet/roster_status` read leaves them. Rows carry their own status.
     fn seed(state: &mut FleetPaneState, rows: Vec<FleetSessionRow>) {
         state.view = Some(StatusView::from_read(
-            RosterStatusResult {
+            ainb_hangar_proto::agent_status::RosterStatusResult {
                 rows: Vec::new(),
                 read_revision: 0,
                 unknown_events: Vec::new(),
@@ -4398,8 +4372,8 @@ mod tests {
     fn joined(
         revision: i64,
         rows: Vec<(ainb_hangar_proto::fleet::FleetSession, AgentStatusRow)>,
-    ) -> RosterStatusResult {
-        RosterStatusResult {
+    ) -> ainb_hangar_proto::agent_status::RosterStatusResult {
+        ainb_hangar_proto::agent_status::RosterStatusResult {
             rows: rows
                 .into_iter()
                 .map(
@@ -4428,7 +4402,10 @@ mod tests {
             ..test_status("claude:scan", AgentState::Working)
         };
         let mut state = FleetPaneState::default();
-        assert!(state.apply_read(joined(3, vec![(session, status)]), 50_000));
+        state.apply_view(StatusView::from_read(
+            joined(3, vec![(session, status)]),
+            50_000,
+        ));
         assert!(state.visible_sessions().is_empty(), "working is not a wait");
         state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::Running)).state;
         state = reduce_fleet(&state, FleetEvent::Tick(54_000)).state;
@@ -4461,7 +4438,7 @@ mod tests {
             ..test_status("claude:done", AgentState::Idle)
         };
         let mut state = FleetPaneState::default();
-        state.apply_read(joined(1, vec![(session, status)]), 1);
+        state.apply_view(StatusView::from_read(joined(1, vec![(session, status)]), 1));
         state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::Completed)).state;
         let keys: Vec<_> =
             state.visible_sessions().iter().map(|row| row.session_key.clone()).collect();
@@ -4488,7 +4465,7 @@ mod tests {
     #[test]
     fn an_absent_view_is_named_in_the_lens_body_at_any_width() {
         let mut state = FleetPaneState::default();
-        state.mark_absent("daemon has no fleet/roster_status");
+        state.mark_absent("daemon serves no agent status read");
         for width in [140_u16, 40] {
             let mut buffer = WireBuffer::new(width, 24);
             render_fleet(&mut buffer, width, 0, 20, &state);
@@ -4507,14 +4484,15 @@ mod tests {
         use ainb_hangar_proto::fleet::{AttentionState, LifecycleState};
         let session = wire_session("claude:ask", LifecycleState::Idle, AttentionState::Ask);
         let mut state = FleetPaneState::default();
-        state.apply_read(
+        let mut view = StatusView::from_read(
             joined(
                 3,
                 vec![(session, test_status("claude:ask", AgentState::Waiting))],
             ),
             1_000,
         );
-        state.observe_revision(5);
+        view.observe_head(5);
+        state.apply_view(view.clone());
         let mut buffer = WireBuffer::new(140, 24);
         render_fleet(&mut buffer, 140, 0, 20, &state);
         let text = screen_text(&buffer, 140, 20);
@@ -4524,7 +4502,8 @@ mod tests {
             "the frozen row still renders: {text}"
         );
 
-        state.mark_read_failed("connection refused", 2_000);
+        view.mark_unreachable("connection refused", 2_000);
+        state.apply_view(view);
         state = reduce_fleet(&state, FleetEvent::Tick(62_000)).state;
         let mut buffer = WireBuffer::new(140, 24);
         render_fleet(&mut buffer, 140, 0, 20, &state);
@@ -4571,9 +4550,11 @@ mod tests {
         );
     }
 
-    /// An older read is refused, and a session a newer read omits is gone.
+    /// #1031: an envelope older than the one applied is dropped, a session a
+    /// newer envelope omits is gone, and an absent envelope empties the panel
+    /// with its reason.
     #[test]
-    fn an_older_read_is_refused_and_an_omitted_session_is_removed() {
+    fn an_older_envelope_is_dropped_and_an_omitted_session_is_removed() {
         use ainb_hangar_proto::fleet::{AttentionState, LifecycleState};
         let pair = |key: &str| {
             (
@@ -4584,19 +4565,36 @@ mod tests {
                 },
             )
         };
+        let envelope = |sequence: u64, read| {
+            AgentStatusEnvelope::from_view(sequence, &StatusView::from_read(read, 1))
+        };
         let mut state = FleetPaneState::default();
-        assert!(state.apply_read(joined(10, vec![pair("claude:a"), pair("claude:b")]), 1));
+        assert!(state.apply_envelope(envelope(
+            2,
+            joined(10, vec![pair("claude:a"), pair("claude:b")])
+        )));
         assert!(
-            !state.apply_read(joined(9, vec![pair("claude:a")]), 2),
-            "older than held"
+            !state.apply_envelope(envelope(1, joined(11, vec![pair("claude:a")]))),
+            "published before the one held"
         );
         assert!(state.status_for("claude:b").is_some());
-        assert!(state.apply_read(joined(11, vec![pair("claude:a")]), 3));
+        assert!(state.apply_envelope(envelope(3, joined(11, vec![pair("claude:a")]))));
         assert!(
             state.status_for("claude:b").is_none(),
             "an omitted session is gone"
         );
         assert_eq!(state.health_line(), None);
+
+        assert!(state.apply_envelope(AgentStatusEnvelope::absent(
+            4,
+            "daemon serves no agent status read",
+            11
+        )));
+        assert!(state.visible_sessions().is_empty());
+        assert_eq!(
+            state.health_line().as_deref(),
+            Some("absent: daemon serves no agent status read")
+        );
     }
 
     fn row_text(buffer: &WireBuffer, row: u16, width: u16) -> String {

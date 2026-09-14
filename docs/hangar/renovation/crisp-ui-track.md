@@ -123,7 +123,7 @@ Worst screen in the app, and the one multica says should be the single attention
 - **Three stacked count rows saying the same thing** in two vocabularies:
   - row 0: `1 Needs input 0  2 Idle 0  3 Completed 0  4 Running 0  [5 All 0]` (`fleet.rs:376`)
   - row 1: `0 INPUT  0 RUN  0 IDLE  0 DONE` (`fleet.rs:2644`)
-  - row 2: `ACTION QUEUE · 0 sessions · F5 refresh` + `0/0` (`fleet.rs:2596`)
+  - row 2: `ACTION QUEUE · 0 sessions` + `0/0` (`fleet.rs:2596`; the `F5 refresh` hint went with the plugin's own Fleet read in #1031)
 - Empty state is broken grammar: `No all sessions` (`fleet.rs:2709`,
   `format!("No {} sessions", state.filter.label().to_lowercase())`).
 

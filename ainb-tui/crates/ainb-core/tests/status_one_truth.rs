@@ -78,11 +78,15 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
     assert_eq!(expected.3, 0, "tier 0 is the hook push");
     assert!(expected.4 > 0, "the evidence clock must be stamped");
 
-    // Surface 1: the TUI fleet panel, as an operator sees it. The panel folds
-    // the daemon's ONE joined read (`fleet/roster_status`, #1015), round-tripped
-    // through its wire encoding exactly as the plugin receives it, and what is
-    // asserted is the RENDERED screen, painted into a ratatui `TestBackend` the
-    // way the TUI paints the plugin's buffer.
+    // Surface 1: the TUI fleet panel, as an operator sees it. The daemon's ONE
+    // joined read (`fleet/roster_status`, #1015) is round-tripped through its
+    // wire encoding, folded into section 20 by the host, published as the
+    // agent-status envelope and folded by the panel (#1031): the same fold,
+    // encode and decode a running TUI performs, minus the plugin runtime's
+    // delivery, which `agent_status_host.rs`
+    // (`a_section_change_reaches_a_subscribed_plugin_through_the_runtime`)
+    // covers. What is asserted is the RENDERED screen, painted into a ratatui
+    // `TestBackend` the way the TUI paints the plugin's buffer.
     {
         let joined = wire_round_trip(
             &ainb_hangar_daemon::fleet::roster_status(store.pool())
@@ -111,9 +115,10 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             "the waiting agent's card and detail say what it waits on:\n{screen}"
         );
 
-        // The pre-section read (`[fleet.status] legacy_panel`): the two
-        // separate replies, joined by the one proto join and folded by the same
-        // reducer, must paint the same cells, words and colours alike.
+        // The pre-section read (`[fleet.status] legacy_panel`, and an N-1
+        // daemon): the host's two separate replies, joined by the one proto
+        // join and published the same way, must paint the same cells, words
+        // and colours alike.
         let snapshot = wire_round_trip(
             &ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot"),
         );
@@ -127,9 +132,9 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             "the legacy two-read panel must paint the same"
         );
 
-        // Section 20 alone (#1015 criterion 2): the app state folds the same
-        // joined read into section 20, the Fleet roster section stays empty,
-        // and a panel built from section 20 only paints the same cells.
+        // The envelope carries the whole view (#1031): a panel handed section
+        // 20's view directly, with no publish in between, paints the same
+        // cells, and the Fleet roster section is neither written nor needed.
         let mut app = ainb::app::state::AppState::default();
         assert!(app.apply_agent_status_read(joined.clone(), expected.4 + 42_000));
         assert_eq!(
@@ -154,7 +159,7 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         assert_eq!(
             render_panel(&from_section).1,
             cells,
-            "a panel built from section 20 alone must paint the same cells"
+            "a panel built from section 20's view directly must paint the same cells"
         );
 
         // One word per state, everywhere (#1015 criterion 2): every token on
@@ -258,14 +263,20 @@ fn wire_round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T)
     serde_json::from_value(serde_json::to_value(value).expect("encodes")).expect("decodes")
 }
 
-/// The Fleet panel as the plugin builds it from one joined read, ticked to `now_ms`.
+/// The Fleet panel as a running TUI builds it from one joined read (#1031):
+/// the host folds the read into section 20 and encodes the envelope it
+/// publishes, and the plugin decodes it and folds it, ticked to `now_ms`.
 fn panel_from(
     read: ainb_hangar_proto::agent_status::RosterStatusResult,
     now_ms: i64,
 ) -> ainb_plugin_hangar::screen::fleet::FleetPaneState {
     use ainb_plugin_hangar::screen::fleet::{FleetEvent, FleetPaneState, reduce_fleet};
+    let mut app = ainb::app::state::AppState::default();
+    app.apply_agent_status_read(read, now_ms);
+    let payload =
+        ainb::agent_status_host::encode(&app.agent_status, 1).expect("section 20 publishes");
     let mut pane = FleetPaneState::default();
-    pane.apply_read(read, now_ms);
+    assert!(pane.apply_envelope(serde_json::from_slice(&payload).expect("the envelope decodes")));
     reduce_fleet(&pane, FleetEvent::Tick(now_ms)).state
 }
 
