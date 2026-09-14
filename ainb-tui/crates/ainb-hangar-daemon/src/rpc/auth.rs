@@ -88,8 +88,9 @@ pub struct AuthenticatedHello {
     pub capabilities: Vec<String>,
     /// The paired device this connection belongs to (R1, off-box only).
     pub device: Option<DeviceInfo>,
-    /// The client declared this a call connection from a process whose
-    /// presence another connection holds, so the registry does not list it.
+    /// The client ASKED that this call connection not be listed because its
+    /// process's presence is held by another connection. A request only: the
+    /// registry honours it solely beside a listed row at the same pid.
     pub transient: bool,
 }
 
