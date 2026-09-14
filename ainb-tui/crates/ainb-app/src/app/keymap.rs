@@ -350,6 +350,9 @@ pub enum KeyContext {
     Global,
 }
 
+/// The keymap row that releases the in-place interactive pane.
+pub const EMBED_DETACH_ROW: &str = "detach";
+
 /// Terminal-host state that is intentionally outside `AppState` until Phase 3.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostFlags {
@@ -1116,6 +1119,17 @@ impl Keymap {
     /// All rows, stable default order, for docs and the CLI.
     pub fn bindings(&self) -> impl Iterator<Item = &Binding> {
         self.bindings.iter()
+    }
+
+    /// Whether `chord` releases the in-place pane.
+    ///
+    /// While the pane is live a host sends every key to its client except this
+    /// one, which it turns into the `embed_interactive.detach` command, so the
+    /// reducer still decides the release.
+    #[must_use]
+    pub fn releases_in_place_pane(&self, chord: &Chord) -> bool {
+        self.binding_for(&KeyContext::EmbedInteractive, EMBED_DETACH_ROW)
+            .is_some_and(|row| row.chord.as_ref() == Some(chord))
     }
 
     /// Locate a named row for tests and TOML override validation.

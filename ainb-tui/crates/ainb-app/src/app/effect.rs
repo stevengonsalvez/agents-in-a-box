@@ -87,9 +87,10 @@ pub enum Effect {
 /// A tmux session name an effect can target.
 ///
 /// Not empty, free of the `:` and `.` tmux reads as window and pane separators
-/// and of control characters, and not starting with `$`, `%`, `@` or `=`,
-/// which tmux reads as a session, pane or window id or an exact-match marker,
-/// so such a name could reach another session.
+/// and of control characters, with no whitespace at either end, and not
+/// starting with `$`, `%`, `@` or `=`, which tmux reads as a session, pane or
+/// window id or an exact-match marker, so such a name could reach another
+/// session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxSessionName(String);
 
@@ -99,6 +100,7 @@ impl TmuxSessionName {
     pub fn new(name: impl Into<String>) -> Option<Self> {
         let name = name.into();
         let addressable = !name.is_empty()
+            && name.trim() == name
             && !name.contains([':', '.'])
             && !name.starts_with(['$', '%', '@', '='])
             && !name.chars().any(char::is_control);
@@ -108,6 +110,14 @@ impl TmuxSessionName {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+/// Written as the bare name, for a frame. There is deliberately no
+/// `Deserialize`: a name only comes into being through [`TmuxSessionName::new`].
+impl serde::Serialize for TmuxSessionName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
     }
 }
 
@@ -142,11 +152,37 @@ pub enum TerminalTarget {
     /// list's own preview pane instead of full screen, laid out with or
     /// without the session menu bar.
     ///
-    /// Terminal host: sizes the pane for its layout, opens a tmux client on
-    /// it and reports [`crate::app::reports::in_place_opened`] with the
-    /// client parked for the reducer to adopt, or
-    /// [`crate::app::reports::in_place_failed`] with the error.
+    /// Terminal host: sizes the pane for its layout, opens a writable tmux
+    /// client on it, keeps the client, and reports
+    /// [`crate::app::reports::in_place_opened`], or
+    /// [`crate::app::reports::in_place_failed`] with the error. A host must
+    /// not report `in_place_opened` before it holds the client: the reducer
+    /// focuses the pane on that report. While the pane is live the host sends
+    /// every key to the client except the chord
+    /// [`crate::app::keymap::Keymap::releases_in_place_pane`] names, which it
+    /// runs as `embed_interactive.detach`. A host that can never hold a
+    /// writable client answers `in_place_failed` with `unsupported`. It closes the
+    /// client once `TmuxSection::embed_session` no longer names the session,
+    /// which is how the reducer declines or releases it. Output, input and
+    /// exit stay between the host and its client; an exit or a closed input
+    /// channel comes back as [`crate::app::reports::terminal_exited`] or
+    /// [`crate::app::reports::terminal_input_closed`]. Desktop host: the same
+    /// contract with its own terminal widget.
     InPlace {
+        tmux_session: TmuxSessionName,
+        show_menu_bar: bool,
+    },
+    /// A read-only mirror of the selected row's tmux session `tmux_session`
+    /// in the session list's preview pane.
+    ///
+    /// Terminal host: opens a read-only tmux client that never sizes the
+    /// session's window, keeps it, and reports
+    /// [`crate::app::reports::observer_opened`], or
+    /// [`crate::app::reports::observer_failed`] (marked unsupported when its
+    /// tmux cannot keep a client out of the window size). Release, exit and
+    /// ownership follow [`TerminalTarget::InPlace`]. A host with no terminal
+    /// widget reports it unsupported.
+    Observe {
         tmux_session: TmuxSessionName,
         show_menu_bar: bool,
     },
@@ -230,6 +266,9 @@ mod tests {
             "%1",
             "@2",
             "=work",
+            " work",
+            "work ",
+            "work\t",
         ] {
             assert_eq!(TmuxSessionName::new(bad), None, "{bad:?}");
         }

@@ -9,7 +9,6 @@ mod tests {
         AppState, MAX_OBSERVER_FAILURES, NewSessionState, NewSessionStep, SessionAgentOption,
     };
     use crate::models::{OtherTmuxSession, SessionAgentType, SessionMode};
-    use crate::tmux::pty_wrapper::lock_registry_for_test;
     use std::path::PathBuf;
 
     // ========================================================================
@@ -104,48 +103,50 @@ mod tests {
         );
     }
 
+    /// Wait out the settle delay a new selection needs before its observer
+    /// is requested, and return the request.
+    fn settled_observer_request(state: &mut AppState) -> Option<crate::app::effect::Effect> {
+        assert!(
+            state.request_terminal_observer().is_none(),
+            "first tick settles"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        state.request_terminal_observer()
+    }
+
+    fn observe(name: &str) -> crate::app::effect::Effect {
+        crate::app::effect::Effect::AttachTerminal(crate::app::effect::TerminalTarget::Observe {
+            tmux_session: crate::app::effect::TmuxSessionName::new(name).expect("valid name"),
+            show_menu_bar: AppState::new().config.app_config.ui_preferences.show_session_menu_bar,
+        })
+    }
+
     #[test]
     fn dead_observer_stays_suppressed_for_the_retry_window() {
-        if std::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map_or(true, |output| !output.status.success())
-        {
-            eprintln!("SKIP: tmux unavailable");
-            return;
-        }
-        if !crate::tmux::EmbedClient::read_only_observer_supported() {
-            eprintln!("SKIP: tmux lacks ignore-size client support");
-            return;
-        }
-        let _registry_guard = lock_registry_for_test();
-
-        let missing = format!("ainb-missing-observer-{}", std::process::id());
-        let mut state = state_with_other_tmux_sessions(&[missing.as_str()]);
+        let missing = "ainb-missing-observer";
+        let mut state = state_with_other_tmux_sessions(&[missing]);
         state.shell.current_screen = "session_list".to_string();
 
-        assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(state.sync_terminal_observer(24, 80), "starts observer once");
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while !state.poll_embed_exit() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        assert_eq!(settled_observer_request(&mut state), Some(observe(missing)));
+        state.adopt_terminal_observer(missing);
+        state.terminal_exited(missing);
 
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
-            Some(missing.as_str())
+            state.host.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
+            Some(missing)
         );
-        assert!(state.tmux.embed.is_none(), "dead observer must release");
         assert!(
-            !state.sync_terminal_observer(24, 80),
+            state.tmux.embed_session.is_none(),
+            "dead observer must release"
+        );
+        assert!(
+            state.request_terminal_observer().is_none(),
             "same stale selection must not respawn an observer"
         );
 
         state.tmux.selected_other_tmux_index = None;
-        assert!(!state.sync_terminal_observer(24, 80));
-        assert!(state.tmux.observer_failed_target.is_none());
+        assert!(state.request_terminal_observer().is_none());
+        assert!(state.host.observer_failed_target.is_none());
     }
 
     #[test]
@@ -156,7 +157,7 @@ mod tests {
         }
 
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.host.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3)
         );
         assert!(state.shell.notifications.iter().any(|notification| {
@@ -166,133 +167,80 @@ mod tests {
 
     #[test]
     fn observer_spawn_keeps_prior_failure_count_until_grace_period() {
-        if std::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map_or(true, |output| !output.status.success())
-        {
-            eprintln!("SKIP: tmux unavailable");
-            return;
-        }
-        if !crate::tmux::EmbedClient::read_only_observer_supported() {
-            eprintln!("SKIP: tmux lacks ignore-size client support");
-            return;
-        }
-        let _registry_guard = lock_registry_for_test();
-
-        let session = format!("ainb-observer-retry-reset-{}", std::process::id());
-        let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &session, "sh"])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        assert!(created, "failed to create tmux session");
-
-        let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
+        let session = "ainb-observer-retry-reset";
+        let mut state = state_with_other_tmux_sessions(&[session]);
         state.shell.current_screen = "session_list".to_string();
-        state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
-        assert!(!state.sync_terminal_observer(24, 80), "first tick settles");
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(state.sync_terminal_observer(24, 80), "observer starts");
+        state.host.observer_failed_target =
+            Some((session.to_string(), std::time::Instant::now(), 2));
+
+        assert_eq!(settled_observer_request(&mut state), Some(observe(session)));
+        state.adopt_terminal_observer(session);
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.host.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(2),
             "a spawned client can still fail asynchronously"
         );
 
         state.release_interactive_pane();
-        state.record_observer_failure(session.clone());
+        state.record_observer_failure(session.to_string());
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.host.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3),
             "a failed spawn must advance the existing retry count"
         );
-
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &format!("={session}")])
-            .status();
     }
 
     #[test]
     fn surviving_observer_clears_prior_failure_count_after_grace_period() {
-        if std::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map_or(true, |output| !output.status.success())
-        {
-            eprintln!("SKIP: tmux unavailable");
-            return;
-        }
-        if !crate::tmux::EmbedClient::read_only_observer_supported() {
-            eprintln!("SKIP: tmux lacks ignore-size client support");
-            return;
-        }
-        let _registry_guard = lock_registry_for_test();
-
-        let session = format!("ainb-observer-grace-{}", std::process::id());
-        let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &session, "sh"])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        assert!(created, "failed to create tmux session");
-
-        let mut state = state_with_other_tmux_sessions(&[session.as_str()]);
+        let session = "ainb-observer-grace";
+        let mut state = state_with_other_tmux_sessions(&[session]);
         state.shell.current_screen = "session_list".to_string();
-        state.tmux.observer_failed_target = Some((session.clone(), std::time::Instant::now(), 2));
-        assert!(!state.sync_terminal_observer(24, 80));
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(state.sync_terminal_observer(24, 80));
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!state.poll_embed_exit());
-        assert!(state.tmux.observer_failed_target.is_none());
+        state.host.observer_failed_target =
+            Some((session.to_string(), std::time::Instant::now(), 2));
 
-        state.release_interactive_pane();
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &format!("={session}")])
-            .status();
+        assert_eq!(settled_observer_request(&mut state), Some(observe(session)));
+        state.adopt_terminal_observer(session);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!state.tick_terminal_pane());
+        assert!(state.host.observer_failed_target.is_none());
     }
 
     #[test]
     fn retry_suppression_releases_the_previous_observer() {
-        if std::process::Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map_or(true, |output| !output.status.success())
-        {
-            eprintln!("SKIP: tmux unavailable");
-            return;
-        }
-        if !crate::tmux::EmbedClient::read_only_observer_supported() {
-            eprintln!("SKIP: tmux lacks ignore-size client support");
-            return;
-        }
-        let _registry_guard = lock_registry_for_test();
-
-        let active = format!("ainb-observer-active-{}", std::process::id());
-        let blocked = format!("ainb-observer-blocked-{}", std::process::id());
-        let created = std::process::Command::new("tmux")
-            .args(["new-session", "-d", "-s", &active, "sh"])
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        assert!(created, "failed to create tmux session");
-
-        let mut state = state_with_other_tmux_sessions(&[active.as_str(), blocked.as_str()]);
+        let active = "ainb-observer-active";
+        let blocked = "ainb-observer-blocked";
+        let mut state = state_with_other_tmux_sessions(&[active, blocked]);
         state.shell.current_screen = "session_list".to_string();
-        assert!(!state.sync_terminal_observer(24, 80));
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(state.sync_terminal_observer(24, 80));
+        assert_eq!(settled_observer_request(&mut state), Some(observe(active)));
+        state.adopt_terminal_observer(active);
 
         state.tmux.selected_other_tmux_index = Some(1);
-        state.tmux.observer_failed_target =
-            Some((blocked, std::time::Instant::now(), MAX_OBSERVER_FAILURES));
-        assert!(!state.sync_terminal_observer(24, 80));
-        assert!(state.tmux.embed.is_none());
+        state.host.observer_failed_target = Some((
+            blocked.to_string(),
+            std::time::Instant::now(),
+            MAX_OBSERVER_FAILURES,
+        ));
+        assert!(state.request_terminal_observer().is_none());
+        assert!(state.tmux.embed_session.is_none());
+    }
 
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &format!("={active}")])
-            .status();
+    /// A report for a client the preview no longer wants names nothing, so the
+    /// host closes it; an unsupported host is not asked again.
+    #[test]
+    fn a_late_or_unsupported_observer_report_leaves_no_session_named() {
+        let mut state = state_with_other_tmux_sessions(&["ainb-first", "ainb-second"]);
+        state.shell.current_screen = "session_list".to_string();
+
+        state.adopt_terminal_observer("ainb-second");
+        assert!(state.tmux.embed_session.is_none(), "not the selected row");
+
+        state.observer_failed("ainb-first".to_string(), "no ignore-size", true);
+        assert!(state.request_terminal_observer().is_none());
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            state.request_terminal_observer().is_none(),
+            "a host that cannot mirror is not asked again for the same row"
+        );
     }
 
     #[test]

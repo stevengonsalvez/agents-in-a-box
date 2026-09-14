@@ -158,6 +158,7 @@ dependencies = [
  "insta",
  "mockall",
  "nix 0.27.1",
+ "portable-pty",
  "pretty_assertions",
  "proptest",
  "rand 0.8.7",
@@ -265,7 +266,6 @@ dependencies = [
  "mockall",
  "nix 0.27.1",
  "notify",
- "portable-pty",
  "pretty_assertions",
  "proptest",
  "pulldown-cmark",
@@ -296,7 +296,6 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "vt100",
  "which",
 ]
 

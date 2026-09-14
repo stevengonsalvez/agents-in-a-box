@@ -43,3 +43,41 @@
 
 Begin by outputting your plan. Then execute end-to-end without checking
 in until done or genuinely blocked.
+
+-- PROGRESS LOG --
+
+Plan, staged as the constraints allow:
+1. P5a, criterion 1: the host owns the terminal client and the in-place attach is portable.
+2. P5b, criterion 2 part: one persistence effect over every reducer write to disk, a failed-write report, a source guard.
+3. P5c, criterion 2 rest: the runtime handle out of `AppState` (or the named divergence), `watch_screen` with a viewport, `sessions_sidebar_width` as a fraction.
+4. P5d, criterion 3: command gate precedence and the `HostFlags` decision, the per-test tripwire ratchet with a scheduled excluded-set job and a skip-set guard, a verdict per red tripwire, the mirror granularity decision with lane K, the programme row.
+
+Also taken in P5 from the #1021 fix verification: `TmuxSessionName::new` refuses whitespace at either end (e0bc31076).
+
+P5a, done on `stevengonsalvez/p5-hosts`:
+- `TmuxSection` holds `embed_session: Option<TmuxSessionName>` and no client. `LocalEmbed` and its process-global registry are deleted. `enter_interactive_pane` went in P4; `sync_terminal_observer` is replaced by `AppState::request_terminal_observer`, which decides and returns `Effect::AttachTerminal(TerminalTarget::Observe)` without touching a PTY.
+- The terminal host keeps the client in `ainb-core/src/terminal_clients.rs` (`TerminalClients`), threaded through `run_intent`, `run_effects` and `effect_host::execute`. `embed_client.rs` and `pty_wrapper.rs` moved to `ainb-core/src/tmux/`; `ainb-app` no longer depends on `portable-pty` or `vt100`, and `portable-pty` left `REACHABLE_TODAY`.
+- Reports by session name: `in_place_opened`, `observer_opened`, `observer_failed {unsupported}`, `terminal_exited`, `terminal_input_closed`.
+- Evidence: `ainb-app/tests/terminal_host_contract.rs` (a headless host with no PTY attaches in place, releases on detach, on leaving the session list and on a client exit, and mirrors the selection read-only); `tripwire_interactive_pane` (5) through `TerminalClients`; `tripwire_keymap_surface` (real binary, Ctrl+C reaches the embed and Ctrl+Q returns); `state_tests.rs` observer retry rules through reports.
+
+- Host-only fields out of the sections (lane K's list for W0-mirror, #1036): `HostOnlyState` is a non-versioned `AppState.host` holding the tmux session handles and preview task, the observer's settle and retry bookkeeping, the workspace load receiver and pacing timers, the three new-session receivers, the log streaming coordinator, sender, per-session update times and session log handles, and the fleet live-window watcher, Pal chat, Pal dial, daemon start offer, session chat, attention poller flag and generation, and the Headroom and token refresh timers. Writing any of them bumps no section. The only test that pinned a bump on one (`reports.rs`, a tmux section bump when a missing session's handle is dropped) now expects none. The sessions tripwires that drive those paths pass locally: tab strip, Pal engine swap, Pal daemon CTA, log tab, attention chips, keymap surface.
+
+Decisions:
+- In-place is portable, not terminal-host-only. A report names the session and never carries a client, so any host implements it from the effect docs. There is no `in_place_unsupported` report because no host needs one; a host with no terminal widget answers `Observe` with `observer_failed {unsupported: true}` and the reducer stops asking for that row.
+- Release is reconciliation, not an effect. The host closes any client whose session `embed_session` no longer names, checked each loop before the frame. A declined report, a row change, a screen change and a detach all release the same way, and a report the reducer ignores cannot leak a client.
+- The client lives outside `ainb-core/src/app/*` (the constraint), so `TerminalClients` is a module of its own that the run loop owns, not a `UiState` field, and the preview pane is handed its screen before each frame (`TmuxPreviewPane::show_terminal`).
+- The reducer keeps the observer's decisions (settle delay, retry backoff, the own-session rule) and their bookkeeping fields next to `embed_session`. The host keeps what only a client can know: whether tmux supports a read-only client, whether it exited, whether input was written.
+- New pane output no longer bumps the tmux section. The bytes are the local host's; a mirrored host renders its own client, so a section bump per PTY write told a subscriber nothing it could draw.
+- A failed input write is a report (`terminal_input_closed`), so the host no longer writes state or posts the notice itself.
+- The Pal and session chat hosts and the Pal dial tick every frame as host-only state and ask for a repaint when they moved; they no longer bump the fleet section, because no other host can draw from a chat handle this process holds.
+
+P5a review (#1043, "Review of c1065b26"), applied on `stevengonsalvez/p5-hosts`:
+- The host closes a released client before every effect, not only once per loop, so a full-screen attach or an editor never runs with a stale preview client open.
+- A read-only observer takes no input; `in_place_failed` carries `unsupported`, and the reducer stops asking a host that set it.
+- The routing rule a host owes while the pane is live (every key to the client except the chord `Keymap::releases_in_place_pane` names) and the report order (`in_place_opened` only once a client is held) are in the `InPlace` doc and pinned by the headless host.
+- Terminal host reads of `AppState.host` are fenced (`HOST_STATE_READS`: the session log, the Pal dial and the daemon start offer draw from it until D1), and a probe keeps `HostOnlyState` from ever deriving `Serialize`.
+
+D1 inputs, not P5 work (from the design review of #1043):
+- The reducer shells out: `AppState` asks `tmux::process_detection::host_tmux_session_name()` (a `tmux display-message` subprocess) to apply the own-session rule. A second host has its own answer, so it belongs on the host's report or a host fact, not a reducer call.
+- `AppState::default` loads `AppConfig` from disk. A reducer built for a second host, or a test, reads the user's files; construction should take the config as an argument.
+- The reducer reads the wall clock (`Instant::now()` in the observer settle and retry rules, lease renewal and tick pacing). Replaying a mirrored host's intents needs time to arrive on the intent or a host clock the reducer is given.

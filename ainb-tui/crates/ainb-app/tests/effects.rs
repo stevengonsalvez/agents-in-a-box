@@ -234,20 +234,7 @@ fn attach_interactive_returns_attach_terminal_in_place() {
 #[test]
 fn detach_while_interactive_returns_detach_and_leaves_the_pane_to_the_host() {
     isolated_home();
-    let tmux_available = std::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    if !tmux_available {
-        eprintln!("SKIP: tmux unavailable");
-        return;
-    }
-    let session = format!("ainb-effects-detach-{}", std::process::id());
-    let created = std::process::Command::new("tmux")
-        .args(["new-session", "-d", "-s", &session, "sh"])
-        .status()
-        .is_ok_and(|status| status.success());
-    assert!(created, "failed to create tmux session");
+    let session = "ainb-effects-detach".to_string();
 
     let keymap = Keymap::defaults();
     let mut state = AppState::new();
@@ -259,8 +246,8 @@ fn detach_while_interactive_returns_detach_and_leaves_the_pane_to_the_host() {
         1,
     )];
     state.tmux.selected_other_tmux_index = Some(0);
-    // The host's side of `A`: run the effect the key returns and dispatch the
-    // report, as `effect_host::open_in_place` does.
+    // The host's side of `A`: run the effect the key returns and report the
+    // client it opened. The client stays with the host, so none is needed here.
     for effect in dispatch(
         &mut state,
         &keymap,
@@ -268,10 +255,7 @@ fn detach_while_interactive_returns_detach_and_leaves_the_pane_to_the_host() {
         command("session_list.attach_interactive"),
     ) {
         if let Effect::AttachTerminal(TerminalTarget::InPlace { tmux_session, .. }) = effect {
-            let client = ainb_app::tmux::EmbedClient::attach(tmux_session.as_str(), 24, 80)
-                .expect("host attach");
-            let embed = ainb_app::app::reports::LocalEmbed::keep(client);
-            let report = ainb_app::app::reports::in_place_opened(tmux_session.as_str(), &embed);
+            let report = ainb_app::app::reports::in_place_opened(tmux_session.as_str());
             let _ = dispatch(&mut state, &keymap, &mut NoRenderer, report);
         }
     }
@@ -286,10 +270,6 @@ fn detach_while_interactive_returns_detach_and_leaves_the_pane_to_the_host() {
     );
     let after = state.versions();
     let still_interactive = state.is_interactive_pane();
-    state.release_interactive_pane();
-    let _ = std::process::Command::new("tmux")
-        .args(["kill-session", "-t", &session])
-        .status();
 
     assert!(attached, "the host attach under test needs a live pane");
     assert_eq!(effects, vec![Effect::Detach]);
