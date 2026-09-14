@@ -54,7 +54,7 @@ pub fn section_json(state: &AppState, id: SectionId) -> serde_json::Value {
 /// that fed it yet: the Fleet poller and section 20 (T0-section) gain one when
 /// they land on the frame, and add their arm here.
 #[must_use]
-pub fn daemon_read(_state: &AppState, id: SectionId) -> Option<frame::DaemonRead> {
+pub const fn daemon_read(_state: &AppState, id: SectionId) -> Option<frame::DaemonRead> {
     match id {
         SectionId::Sessions
         | SectionId::SessionLabels
