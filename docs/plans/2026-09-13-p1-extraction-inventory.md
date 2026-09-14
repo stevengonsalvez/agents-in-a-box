@@ -1,6 +1,6 @@
 # P1 extraction inventory: `ainb-app`
 
-Status: P1a and P1b merged, P1c implemented. Base spec: `2026-09-04-desktop-shared-core-spec.md`, rows P1 to P5 of "Extraction plan". Goal: `goals/2026-09-13-p1-ainb-app.md`.
+Status: P1a, P1b and P1c merged; P2 implemented (section "P2" below). Base spec: `2026-09-04-desktop-shared-core-spec.md`, rows P1 to P5 of "Extraction plan". Goal: `goals/2026-09-13-p1-ainb-app.md`.
 
 This is the checklist reviewers hold each P1 PR against. Every row names a module, its size, what in it touches ratatui or crossterm, where it ends up, and the shim that keeps `ainb::<path>` and `crate::<path>` resolving in `ainb-core`.
 
@@ -213,3 +213,74 @@ These state types still live in `ainb-core`, because only the terminal renderer 
 | `app/ui_state.rs` | `UiState`: scroll, hover, pane rects, plugin geometry |
 
 The session list, fleet panel, new-session, daemons, git view, code review, recovery, Skill Manager, log history and config states already live in `ainb-app`, from P1b and P1c. Their renderers and the renderer-local fields in `UiState` stay in core.
+
+## P2: sessions and effects
+
+Goal: `goals/2026-09-13-p2-p5-effects-and-hosts.md`, first of four staged PRs. Two overrides from the orchestrator apply: no `Serialize` on any section or moved type (#983), and P2 closes the P1c seams in the table above.
+
+### Effect
+
+The reducer queues host work on an outbox that is not a section, so queuing bumps no version. `dispatch` and `App::tick` drain it and return `Vec<Effect>`; the TUI host runs each effect after the step that queued it has written state (`ainb-core/src/effect_host.rs`). Every variant's doc comment says which host executes it and what that host does when it cannot.
+
+| Variant | Produced by | Terminal host | On failure |
+|---------|-------------|---------------|------------|
+| `AttachTerminal(Session(id))` | `a`, a double-click on a session row, the `1`-`9` rows | suspends, attaches the session's tmux, resumes | notice naming the target |
+| `AttachTerminal(InPlace)` | `A` | sizes and enters the preview's interactive embed | notice when the row has no tmux or the attach fails |
+| `AttachTerminal(Tmux(name))` | Other tmux and SSH rows, the daemons menu | full-screen attach | notice naming the target |
+| `AttachTerminal(Tool(Witr / Abtop / AbtopWithSetup))` | `w`, `t`, the sidebar tiles, the abtop setup confirm | runs the tool in its own tmux session and attaches | notice "Failed to open" with the error |
+| `AttachTerminal(WorkspaceShell { .. })` | quick shell | creates or reuses the workspace shell, then attaches | notice |
+| `AttachTerminal(ClaudeLogin { auth_dir, image })` | the OAuth setup async action, once Docker is ready | leaves its input modes, runs the auth container on the tty, reports the exit to `AppState::finish_oauth_login` | a child that cannot start reports a failed exit; the reducer shows "Authentication failed" |
+| `Detach` | Ctrl+Q while interactive | releases the embed to the read-only preview | no live terminal is a no-op |
+| `OpenEditor(path)` | `o`, the session context menu | `preferred_editor`, else `code`, else `$EDITOR`, detached | notice saying how to set an editor |
+| `PasteClipboard` | Ctrl+V on the repo picker and in a config text popup | reads the clipboard with `arboard`, dispatches `Intent::Text` | notice "Could not read clipboard"; nothing dispatched |
+
+Additions to the spec's enum, each proven by the call site it replaced: the `TerminalTarget` variants beyond a session id (`InPlace`, `Tmux`, `Tool`, `WorkspaceShell`, `ClaudeLogin`) and `PasteClipboard`. `Notify`, `Clipboard` and `OpenUrl` land with their first producers: onboarding's OSC 52 copy and the welcome and log-history copies in P5, the daemons URL in P3. The unreachable `AttachToContainer` path and `docker::exec_interactive_blocking` are deleted, not converted.
+
+### Seams closed
+
+| P1c seam | P2 |
+|----------|----|
+| `RendererHost::pointer` returned `Option<AppEvent>` from `&mut AppState` | `pointer(&mut self, &AppState, Pos, Btn) -> Option<Intent>`. The TUI hit-test (`mouse::press`) answers with a keymap command (menu bar, filter glyph) or a pointer command naming what was under the pointer by its place in state: `session_list.select_row {row, open}`, `open_row_menu {row}`, `focus_pane {pane}`, `save_pane_layout {width, collapsed}`, `skill_manager.all_sources`, `select_source {index}`, `select_unit {position}`, `focus_pane {pane}`, `save_sources_width {width}`, `home.begin_sidebar_resize`, `home.click_sidebar_item {index}` (`ainb_app::app::pointer`). Drags, releases and hovers are `mouse::gesture`, which returns the command that saves a finished resize. |
+| `AppEvent` public | The `events` module, `AppEvent` and `EventHandler` are public only under the `test-support` feature, for integration tests that assert on resolved events. Hosts use `dispatch`, `RendererHost`, `NoRenderer` and three free queries (`is_in_text_input_context`, `skill_manager_overlay_open`, `slash_command_intent`). The run loop matches on no reducer event: keys, pastes and slash commands go through `dispatch`, the deferred pending event through `AppState::apply_pending_event`. `renderer_free.rs` fails if any normal dependency enables `ainb-app/test-support`. |
+| `Args` dropped | `KeyAction::with_args` replaces the payload of a row that carries one (a session position, a step, an agent, a character) from `Args` of the matching JSON type. `Null` runs the row as written; anything else is refused and the command does not run. Pointer commands parse their own payloads the same way. |
+| `host::TERMINAL` process global | Deleted with `ainb_app::host`. Its one caller, the OAuth login, is `AttachTerminal(ClaudeLogin)`, so only the host that owns a terminal ever releases its modes. |
+| `RendererHost::statusline_status` | `AppState::statusline_status` over a `StatuslineProbe`: a TTL cache behind a lock beside the effect outbox, readable through `&AppState` without writing a section. The reducer invalidates it after the `W` install. |
+| `RendererHost::columns` and a shared clamped width | Gone. The Skill Manager Sources width and its divider drag live in the TUI's `UiState` (`SkillSourcesPane`), starting from the saved preference. `[` and `]` resolve to `HostAction::ShrinkSkillSources` / `GrowSkillSources`, which the host steps against its own width and then saves. `ainb-core/tests/host_width.rs` draws one `AppState` from two hosts at 80 and 200 columns: a step on either moves only its own divider. |
+
+`RendererHost::queue_scroll(ScrollAction)` became `queue(HostAction)` with `Scroll`, `ToggleSessionsSidebar`, `GrowSkillSources` and `ShrinkSkillSources`, so the sidebar toggle stopped being a reducer event the host intercepted.
+
+### Guards
+
+| Test | Fails when |
+|------|------------|
+| `ainb-app/tests/host_side_effects.rs` manifest check | `[dependencies]` gains a clipboard, browser-open, editor or terminal-attach crate, or loses one of the two still listed: `arboard` (welcome and log-history copies, P5) and `portable-pty` (the preview embed's tmux client) |
+| `ainb-app/tests/host_side_effects.rs` source walk | A module's count of `Command::new(`, `CommandBuilder::new(`, `arboard`, `copy_osc52(`, `webbrowser` or `open::that` lines, outside `#[cfg(test)]` modules and comments, differs from its allow-list entry. Each entry carries its reason; the list is a ratchet both ways. |
+| `ainb-app/tests/renderer_free.rs` | ratatui or crossterm is reachable through normal dependencies, or a normal dependency enables `test-support` |
+| `ainb-app/tests/effects.rs` | One test per effect kind: the intent that asks for host work returns exactly that effect and moves exactly the expected section versions |
+
+### Behaviour changes
+
+| Change | Why |
+|--------|-----|
+| The immediate tick after a key now follows a key that closes a confirmation dialog with async work queued, instead of after `NewSession`, `SearchWorkspace` or `ConfirmationConfirm` | The host no longer sees the event. `NewSession` and `SearchWorkspace` have queued no async work since the new-session redesign, and the next loop iteration repaints them anyway. |
+| After the OAuth login the host clears the terminal before the next frame | The screen is re-entered, and ratatui's diff would otherwise keep a blank buffer. |
+| `B` resolves to a renderer-local `UiAction` | The keymap golden (`tests/fixtures/keymap_rows.txt`) records `Ui(ToggleSessionsSidebar)`; `keyboard-shortcuts.md` is unchanged because the Markdown prints no action kind. |
+| A Sources resize on one surface saves the preference, which a surface that has not resized starts from; it no longer moves another surface's panel | Width is per host. |
+| A press on the home sidebar off its resize edge no longer clears the hover flag | The flag follows pointer moves already; the press path only reads state now. |
+
+### Screens
+
+`fleet_panel` and `inbox` are N/A: v2 deleted both host screens (`f80512864` "delete the host Fleet panel", `62dedf28e` "delete the host notifyd Inbox"), and `ainb-app/src/app/sections.rs` keeps the inbox section empty on purpose. The other states the goal lists were already in `ainb-app` with their reducers after P1c.
+
+### Left for P3 to P5
+
+| What | Where | Step |
+|------|-------|------|
+| OSC 52 copy of the installer command | `app/events.rs`, `clipboard.rs` | P5 `Effect::Clipboard` |
+| `arboard` copies | `components/welcome_panel.rs`, `components/log_history_viewer.rs` | P5 `Effect::Clipboard` |
+| Daemon start and stop verbs, a daemons URL | `components/daemons.rs` | P3 |
+| Detached tmux recreation in recovery | `components/session_recovery.rs` | P5 |
+| Home sidebar geometry, hover and resize drag in `AppState` | `components/home_screen_v2.rs`, `ainb-core/src/app/mouse.rs` gestures | P5, the same move the Sources pane made |
+| Log-history and code-review click paths, wheel scrolling of home, git view and log history | `ainb-core/src/main.rs` mouse loop | P4 (code review), P5 |
+| `Pos` is a terminal cell | `ainb_app::app::intent` | the desktop host names what it hit through pointer commands instead |
+
