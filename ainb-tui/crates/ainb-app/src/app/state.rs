@@ -3054,6 +3054,17 @@ impl AppState {
     pub fn invalidate_statusline_status(&self) {
         self.statusline.invalidate();
     }
+
+    /// Copy the statusline probe's answer and the live-window snapshot into
+    /// their sections, bumping each only when its value changed. Renderers
+    /// read the sections, so every host, local or mirrored, draws the same
+    /// status bar.
+    pub fn refresh_statusline(&mut self) {
+        let live = self.fleet.live_window_watcher.snapshot();
+        self.fleet.set_if_changed(|fleet| &mut fleet.live_window, live);
+        let status = self.statusline_status();
+        self.config.set_if_changed(|config| &mut config.statusline_status, status);
+    }
 }
 
 impl Default for AppState {
@@ -12859,8 +12870,11 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let mut state = AppState::new();
+        // So the first frame, drawn before the first tick, has the status bar.
+        state.refresh_statusline();
         Self {
-            state: AppState::new(),
+            state,
             plugin_runtime_owner: None,
             usage_dir_watcher: None,
             plugin_render_outcomes: std::collections::HashMap::new(),
@@ -13323,6 +13337,8 @@ impl App {
     async fn tick_inner(&mut self) -> anyhow::Result<()> {
         // Clean up expired notifications
         self.state.cleanup_expired_notifications();
+
+        self.state.refresh_statusline();
 
         // Check for completed background workspace loading
         if self.state.check_workspace_loading_complete() {
