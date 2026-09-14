@@ -113,6 +113,14 @@ impl TmuxSessionName {
     }
 }
 
+/// Written as the bare name, for a frame. There is deliberately no
+/// `Deserialize`: a name only comes into being through [`TmuxSessionName::new`].
+impl serde::Serialize for TmuxSessionName {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
 /// A path an editor is asked to open: absolute, so it means the same thing to
 /// every host whatever its working directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,11 +152,31 @@ pub enum TerminalTarget {
     /// list's own preview pane instead of full screen, laid out with or
     /// without the session menu bar.
     ///
-    /// Terminal host: sizes the pane for its layout, opens a tmux client on
-    /// it and reports [`crate::app::reports::in_place_opened`] with the
-    /// client parked for the reducer to adopt, or
-    /// [`crate::app::reports::in_place_failed`] with the error.
+    /// Terminal host: sizes the pane for its layout, opens a writable tmux
+    /// client on it, keeps the client, and reports
+    /// [`crate::app::reports::in_place_opened`], or
+    /// [`crate::app::reports::in_place_failed`] with the error. It closes the
+    /// client once `TmuxSection::embed_session` no longer names the session,
+    /// which is how the reducer declines or releases it. Output, input and
+    /// exit stay between the host and its client; an exit or a closed input
+    /// channel comes back as [`crate::app::reports::terminal_exited`] or
+    /// [`crate::app::reports::terminal_input_closed`]. Desktop host: the same
+    /// contract with its own terminal widget.
     InPlace {
+        tmux_session: TmuxSessionName,
+        show_menu_bar: bool,
+    },
+    /// A read-only mirror of the selected row's tmux session `tmux_session`
+    /// in the session list's preview pane.
+    ///
+    /// Terminal host: opens a read-only tmux client that never sizes the
+    /// session's window, keeps it, and reports
+    /// [`crate::app::reports::observer_opened`], or
+    /// [`crate::app::reports::observer_failed`] (marked unsupported when its
+    /// tmux cannot keep a client out of the window size). Release, exit and
+    /// ownership follow [`TerminalTarget::InPlace`]. A host with no terminal
+    /// widget reports it unsupported.
+    Observe {
         tmux_session: TmuxSessionName,
         show_menu_bar: bool,
     },
