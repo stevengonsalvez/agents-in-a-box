@@ -147,15 +147,27 @@ impl AgentStatusHost {
         state: &AppState,
         runtime: Option<&ainb_plugin_runtime::RuntimeHandle>,
     ) -> bool {
-        let Some(runtime) = runtime.filter(|_| self.unpublished) else {
+        let Some(runtime) = runtime else {
             return false;
         };
-        self.unpublished = false;
+        self.publish_with(state, |topic, payload| {
+            runtime.publish_snapshot(topic, payload.into());
+        })
+    }
+
+    /// [`Self::publish`] through `send`. The change stays unpublished until an
+    /// envelope actually goes out: a section mid-reset, with nothing to encode
+    /// yet, is published by a later iteration instead of being forgotten.
+    fn publish_with(&mut self, state: &AppState, send: impl FnOnce(&str, Vec<u8>)) -> bool {
+        if !self.unpublished {
+            return false;
+        }
         let Some(payload) = encode(&state.agent_status, self.sequence + 1) else {
             return false;
         };
         self.sequence += 1;
-        runtime.publish_snapshot(AGENT_STATUS_TOPIC, payload.into());
+        send(AGENT_STATUS_TOPIC, payload);
+        self.unpublished = false;
         true
     }
 }
@@ -909,6 +921,54 @@ mod tests {
             encode(&state.agent_status, 3),
             None,
             "a reset publishes nothing until its read lands"
+        );
+    }
+
+    /// #1038 review item 6: a change stays unpublished while there is no
+    /// runtime or nothing to encode, and is cleared only once an envelope goes
+    /// out.
+    #[tokio::test]
+    async fn a_change_stays_unpublished_until_an_envelope_goes_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host =
+            AgentStatusHost::spawn_timed(dialer(dir.path().join("missing.sock")), false, fast());
+        let mut state = AppState::default();
+        host.unpublished = true;
+
+        assert!(!host.publish(&state, None), "no runtime: held");
+        assert!(host.unpublished);
+        let mut sent = Vec::new();
+        assert!(
+            !host.publish_with(&state, |topic, payload| sent
+                .push((topic.to_string(), payload))),
+            "nothing to encode mid-reset: held"
+        );
+        assert!(
+            host.unpublished,
+            "a failed encode does not clear the change"
+        );
+
+        apply(
+            &mut state,
+            AgentStatusUpdate::Read(
+                RosterStatusResult {
+                    rows: Vec::new(),
+                    read_revision: 2,
+                    unknown_events: Vec::new(),
+                },
+                5,
+            ),
+        );
+        assert!(host.publish_with(&state, |topic, payload| {
+            sent.push((topic.to_string(), payload))
+        }));
+        assert!(!host.unpublished);
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, AGENT_STATUS_TOPIC);
+        assert!(
+            !host.publish_with(&state, |topic, payload| sent
+                .push((topic.to_string(), payload))),
+            "published once"
         );
     }
 }
