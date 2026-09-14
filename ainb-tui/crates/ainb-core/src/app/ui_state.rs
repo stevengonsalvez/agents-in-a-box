@@ -16,7 +16,7 @@ use std::time::Instant;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 
-use crate::app::keymap::{ScrollAction, UiAction};
+use crate::app::keymap::{HostAction, ScrollAction};
 use crate::app::screens::ScreenId;
 use crate::app::state::{
     AppState, AttachableRef, COLLAPSED_SESSIONS_SIDEBAR_WIDTH, DEFAULT_SESSIONS_SIDEBAR_WIDTH,
@@ -318,10 +318,10 @@ pub struct UiState {
     /// Scroll offset of the Log History session list, mirroring core's
     /// selection for the same reason as [`Self::session_recovery_list`].
     pub log_history_list: ListState,
-    /// Scroll intents resolved from the keymap this iteration, drained by the
-    /// run loop into [`Self::apply`]. The reducer never sees them: scrolling a
-    /// pane is renderer-local by definition.
-    queued: Vec<ScrollAction>,
+    /// Layout work resolved from the keymap this iteration, drained by the run
+    /// loop into [`Self::apply_host`]. The reducer never sees it: scrolling a
+    /// pane or collapsing the sidebar is renderer-local by definition.
+    queued: Vec<HostAction>,
     /// Set when a `UiAction` changed something the user can see, so the run
     /// loop repaints without waiting for the animation floor.
     pub needs_redraw: bool,
@@ -336,15 +336,39 @@ impl UiState {
         );
     }
 
-    /// Record a scroll intent the keymap resolved. Queued rather than applied
-    /// on the spot because the key path does not hold the layout.
-    pub fn queue(&mut self, action: ScrollAction) {
+    /// Record layout work the keymap resolved. Queued rather than applied on
+    /// the spot because the key path does not hold the layout.
+    pub fn queue(&mut self, action: HostAction) {
         self.queued.push(action);
     }
 
     /// Take everything queued since the last drain.
-    pub fn take_queued(&mut self) -> Vec<ScrollAction> {
+    pub fn take_queued(&mut self) -> Vec<HostAction> {
         std::mem::take(&mut self.queued)
+    }
+
+    /// Apply queued layout work. Returns the intent that persists it, when
+    /// the change is a preference the user keeps across launches.
+    pub fn apply_host(
+        &mut self,
+        action: HostAction,
+        layout: &mut LayoutComponent,
+        state: &AppState,
+    ) -> Option<crate::app::Intent> {
+        match action {
+            HostAction::Scroll(scroll) => {
+                self.apply(scroll, layout, state);
+                None
+            }
+            HostAction::ToggleSessionsSidebar => {
+                self.sessions_pane.toggle_collapsed();
+                self.needs_redraw = true;
+                Some(crate::app::pointer::save_sessions_pane_layout(
+                    self.sessions_pane.preferred_width,
+                    self.sessions_pane.collapsed,
+                ))
+            }
+        }
     }
 
     /// Apply one renderer-local scroll intent to the host layout.
@@ -406,12 +430,12 @@ impl crate::app::state::SessionsPaneHitTest for SessionsPaneState {
     }
 }
 
-/// The terminal host's side of intent dispatch: scrolls are queued for the
-/// run loop to apply against the layout, and pointer presses are hit-tested
+/// The terminal host's side of intent dispatch: layout work is queued for the
+/// run loop to apply, and pointer presses are hit-tested
 /// against the panes this renderer last drew.
 impl crate::app::events::RendererHost for UiState {
-    fn queue_scroll(&mut self, action: ScrollAction) {
-        self.queue(action);
+    fn queue(&mut self, action: HostAction) {
+        Self::queue(self, action);
     }
 
     fn columns(&self) -> Option<u16> {
