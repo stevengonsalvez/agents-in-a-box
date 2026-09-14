@@ -45,7 +45,7 @@ pub const CODEX_CACHE_MAX_AGE_SECS: u64 = 600;
 
 /// Where the data came from. Drives the render path's fidelity choices
 /// (Tier1 → bars + cost + reset; Tier2 → 5h bar only; None → CTA).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Tier1Cache,
     Tier2Local,
@@ -53,7 +53,7 @@ pub enum Source {
 }
 
 /// Snapshot of the user's live OAuth-window state at one point in time.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq)]
 pub struct LiveWindow {
     pub five_hour_pct: Option<u8>,
     pub seven_day_pct: Option<u8>,
