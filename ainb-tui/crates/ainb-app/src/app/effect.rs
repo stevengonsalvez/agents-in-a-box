@@ -37,6 +37,15 @@ pub enum Effect {
     /// posts an error notice saying how to set one. Desktop host: the same
     /// resolution, or the platform's default handler for the path.
     OpenEditor(PathBuf),
+    /// Paste the clipboard's text into the field that has focus, for a paste
+    /// key (Ctrl+V) the terminal did not deliver as a bracketed paste.
+    ///
+    /// Terminal host: reads the system clipboard and dispatches the text as
+    /// [`crate::app::Intent::Text`], the route a bracketed paste takes. When
+    /// the clipboard cannot be read (a headless host with no display server,
+    /// or no text on it) it posts an error notice saying so and dispatches
+    /// nothing. Desktop host: reads its platform clipboard, same dispatch.
+    PasteClipboard,
 }
 
 /// What an [`Effect::AttachTerminal`] attaches to.
