@@ -73,12 +73,12 @@ fn mirror_frames_carry_exactly_the_checked_section_json() {
 /// session's, so those two owners are the only ones allowed it.
 #[test]
 fn no_frame_carries_a_sessions_cwd_label_or_pending_request() {
-    isolated_home();
     const WITHHELD: [&str; 3] = ["cwd", "current_request", "display_name"];
     const NOT_A_SESSION: [&str; 2] = [
         "FileTreeItem.display_name",
         "SessionLogSummary.display_name",
     ];
+    isolated_home();
     let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
     let carried: BTreeSet<String> = trace
         .fields
