@@ -4235,6 +4235,11 @@ pub(crate) fn test_status(key: &str, state: AgentState) -> AgentStatusRow {
         has_open_request: state == AgentState::Waiting,
         pane_unbound: false,
         pane_unbound_detail: None,
+        host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID.into(),
+        turn_complete: false,
+        wait_kind: (state == AgentState::Waiting)
+            .then_some(ainb_hangar_proto::agent_status::WaitKind::Ask),
+        attachment: ainb_hangar_proto::agent_status::Attachment::Tmux,
     }
 }
 
