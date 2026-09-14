@@ -23,7 +23,7 @@ use std::time::Instant;
 use super::attention::{Answerable, SessionAttention};
 
 /// Where the answer is coming from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskFocus {
     /// One of the structured options is selected.
     Options,
@@ -32,11 +32,12 @@ pub enum AskFocus {
 }
 
 /// What the last send did, when one has been fired.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub enum AnswerPhase {
     /// Sent, waiting for the transport to report. The chip reads `SENT`.
     InFlight {
         /// When it was fired, so the pane can show how long it has been going.
+        #[serde(skip)]
         since: Instant,
         /// The text that was sent, kept so a failure can put a TYPED answer
         /// back. `None` when the answer was a picked option: that option is
@@ -73,13 +74,17 @@ pub enum AnswerPhase {
 /// Reset when the operator moves to a different request: an option cursor left
 /// over from the previous question would pre-select an answer to a question
 /// nobody read.
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct AskState {
     /// The chip this state belongs to, so a stale one is discarded rather than
     /// applied to whatever is selected now.
     request: Option<String>,
     focus: AskFocus,
     cursor: usize,
+    #[serde(
+        rename = "free_text_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     free_text: String,
     /// What each send did, keyed by the request it was answering.
     ///
@@ -99,6 +104,7 @@ pub struct AskState {
     /// outcome into nothing, so a failed send would report as neither sent nor
     /// failed. Each entry names the request it belongs to, so an outcome
     /// cannot be attributed to whatever question is on screen when it lands.
+    #[serde(skip)]
     inbox: Arc<Mutex<Vec<(String, AnswerPhase)>>>,
 }
 
