@@ -689,6 +689,7 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 }],
                 read_revision: 3,
                 unknown_events: Vec::new(),
+                read_at_ms: 0,
             },
             5,
         );
