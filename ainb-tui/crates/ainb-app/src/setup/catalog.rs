@@ -13,7 +13,7 @@ pub use crate::cli::deps::Consumer;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
-pub enum Tier {
+pub enum DepTier {
     /// Blocks core functionality if missing — onboarding cannot complete.
     Required,
     /// Strongly advised; onboarding warns but can proceed.
@@ -24,13 +24,13 @@ pub enum Tier {
     Suggested,
 }
 
-impl Tier {
+impl DepTier {
     pub fn label(self) -> &'static str {
         match self {
-            Tier::Required => "required",
-            Tier::Recommended => "recommended",
-            Tier::Optional => "optional",
-            Tier::Suggested => "suggested",
+            DepTier::Required => "required",
+            DepTier::Recommended => "recommended",
+            DepTier::Optional => "optional",
+            DepTier::Suggested => "suggested",
         }
     }
 }
@@ -189,7 +189,7 @@ pub struct Dep {
     pub name: &'static str,
     /// One-line "what it's for".
     pub why: &'static str,
-    pub tier: Tier,
+    pub tier: DepTier,
     pub detect: Detect,
     pub install: Install,
     /// Cross-cutting features that consume this dep (a dep may serve several).
@@ -226,7 +226,7 @@ const fn dep(
     id: &'static str,
     name: &'static str,
     why: &'static str,
-    tier: Tier,
+    tier: DepTier,
     detect: Detect,
     install: Install,
     consumers: &'static [Consumer],
@@ -248,10 +248,10 @@ const fn dep(
 /// list the TUI wizard renders and the CLI drives.
 pub fn catalog() -> Vec<Topic> {
     use Consumer::*;
+    use DepTier::*;
     use Detect::*;
     use Install::*;
     use Platform::*;
-    use Tier::*;
 
     vec![
         Topic {
@@ -764,8 +764,8 @@ mod tests {
         let core = topics.iter().find(|t| t.id == "core").unwrap();
         let git = core.deps.iter().find(|d| d.id == "git").unwrap();
         let tmux = core.deps.iter().find(|d| d.id == "tmux").unwrap();
-        assert_eq!(git.tier, Tier::Required);
-        assert_eq!(tmux.tier, Tier::Required);
+        assert_eq!(git.tier, DepTier::Required);
+        assert_eq!(tmux.tier, DepTier::Required);
     }
 
     #[test]
