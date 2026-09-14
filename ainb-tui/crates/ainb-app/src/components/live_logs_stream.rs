@@ -32,11 +32,13 @@ impl LogLevel {
 
 // Log entry types that correspond to app state
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct LogEntry {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub level: LogEntryLevel,
     pub source: String, // Container name or source
     #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub message: String,
     pub session_id: Option<uuid::Uuid>,
     #[serde(skip)]
@@ -46,6 +48,7 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum LogEntryLevel {
     Debug,
     Info,
