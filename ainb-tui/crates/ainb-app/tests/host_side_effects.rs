@@ -62,8 +62,10 @@ const REACHABLE_TODAY: &[(&str, &str)] = &[
     (
         "portable-pty",
         "the session preview embed: a tmux client in a PTY whose screen the TUI \
-         draws, started by the host's AttachTerminal(InPlace) and its read-only \
-         observer",
+         draws. The reducer starts it (enter_interactive_pane on the host's \
+         in_place_sized report, and the read-only observer the run loop syncs \
+         through AppState::sync_terminal_observer); moving that start to the host \
+         is #1017",
     ),
 ];
 
