@@ -42,6 +42,22 @@ pub struct PluginInitParams {
     /// keep decoding. The plugin parses this into its typed config struct.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// The surface hosting this plugin process (#1040): its kind (`tui`,
+    /// `desktop`, ...) and pid. A plugin that talks to the hangar daemon names
+    /// this host so its connection folds into the host's presence instead of
+    /// listing as a second surface. Absent from a host that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<PluginHost>,
+}
+
+/// The surface hosting a plugin process, as the runtime reports it at init.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginHost {
+    /// The host surface's kind, as the hangar daemon names surfaces (`tui`,
+    /// `desktop`).
+    pub kind: String,
+    /// The host process id: the plugin's parent.
+    pub pid: u32,
 }
 
 /// `plugin/init` result: plugin echoes its name + version so the host
@@ -1036,6 +1052,10 @@ mod tests {
             granted_capabilities: vec!["read_sessions".into()],
             abi_version: 2,
             config: serde_json::Value::Null,
+            host: Some(PluginHost {
+                kind: "tui".into(),
+                pid: 4242,
+            }),
         });
         rt(&PluginInitResult {
             name: "burndown".into(),
@@ -1551,6 +1571,7 @@ mod tests {
         }"#;
         let p: PluginInitParams = serde_json::from_str(legacy).unwrap();
         assert_eq!(p.config, serde_json::Value::Null);
+        assert_eq!(p.host, None, "a host that predates #1040 names no host");
 
         // With `config` present it round-trips byte-stably.
         let with_config = PluginInitParams {
@@ -1558,6 +1579,7 @@ mod tests {
             granted_capabilities: vec!["read_paths".into()],
             abi_version: 2,
             config: serde_json::json!({ "learnings_dir": "~/.learnings" }),
+            host: None,
         };
         let json = serde_json::to_string(&with_config).unwrap();
         let back: PluginInitParams = serde_json::from_str(&json).unwrap();
