@@ -433,7 +433,7 @@ impl crate::app::state::SessionsPaneHitTest for SessionsPaneState {
 /// The terminal host's side of intent dispatch: layout work is queued for the
 /// run loop to apply, and pointer presses are hit-tested
 /// against the panes this renderer last drew.
-impl crate::app::events::RendererHost for UiState {
+impl crate::app::RendererHost for UiState {
     fn queue(&mut self, action: HostAction) {
         Self::queue(self, action);
     }
