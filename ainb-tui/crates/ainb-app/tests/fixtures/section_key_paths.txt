@@ -326,6 +326,7 @@ hangar.daemons_state.inflight
 hangar.daemons_state.menu
 hangar.daemons_state.outcomes{}.action
 hangar.daemons_state.outcomes{}.detail
+hangar.daemons_state.outcomes{}.local_only
 hangar.daemons_state.outcomes{}.ok
 hangar.daemons_state.outcomes{}.summary
 hangar.daemons_state.selected
