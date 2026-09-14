@@ -9,7 +9,7 @@
 /// hand-written rows below happen to reach. The screen renders the subset that
 /// actually has rows today; `CONFIG_REGISTRY` is the source of truth for the
 /// rest, and wiring it in is what removes that gap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConfigCategory {
     Authentication,
     Workspace,
@@ -143,6 +143,44 @@ pub struct ConfigSetting {
     pub description: String,
 }
 
+/// Rows mirror the whole config tree, env maps and imported MCP blobs
+/// included (`container_templates.*.config.environment.*`,
+/// `mcp_servers.*.definition.env.*`, `mcp_servers.*.definition.config`). So the
+/// ROW decides what a frame may carry: a credential-bearing key keeps its name
+/// and loses its value, and every other free-text value goes through
+/// `redact::scrub`. `Secret` rows redact themselves in `SecretValue`.
+impl serde::Serialize for ConfigSetting {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let value = match &self.value {
+            ConfigValue::Text(text) if !text.is_empty() && credential_bearing_key(&self.key) => {
+                ConfigValue::Text(crate::fleet::bridge::redact::REDACTED.to_string())
+            }
+            ConfigValue::Text(text) => ConfigValue::Text(crate::fleet::bridge::redact::scrub(text)),
+            other => other.clone(),
+        };
+        let mut row = serializer.serialize_struct("ConfigSetting", 4)?;
+        row.serialize_field("key", &self.key)?;
+        row.serialize_field("label", &self.label)?;
+        row.serialize_field("value", &value)?;
+        row.serialize_field("description", &self.description)?;
+        row.end()
+    }
+}
+
+/// Whether a config row's value is a credential by where it lives: an entry
+/// of an environment or build-args map, or an opaque imported MCP definition.
+#[must_use]
+pub fn credential_bearing_key(key: &str) -> bool {
+    let segments: Vec<&str> = key.split('.').collect();
+    let map_entry = segments.len() >= 2
+        && matches!(
+            segments[segments.len() - 2],
+            "env" | "environment" | "build_args"
+        );
+    map_entry || key.ends_with(".definition.config")
+}
+
 /// A credential row: the *reference* config.toml stores, plus whether that
 /// reference currently resolves to a non-empty secret.
 ///
@@ -150,10 +188,11 @@ pub struct ConfigSetting {
 /// literal's characters either, only a status and the source it came from. The
 /// resolved value is deliberately not kept: nothing on this screen needs it, and
 /// not holding it is the cheapest way to guarantee it cannot be painted.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct SecretValue {
     /// Exactly what config.toml holds: empty, a literal, `$ENV_VAR`, or
     /// `keychain:<service>`.
+    #[serde(serialize_with = "crate::wire::fields::secret_source")]
     pub reference: String,
     /// Whether `reference` resolved when the row was built. Resolving a
     /// `keychain:` reference shells out to `/usr/bin/security`, so this is
@@ -189,7 +228,7 @@ impl SecretValue {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub enum ConfigValue {
     Text(String),
     /// A credential. Rendered as status + source, never as the value.
