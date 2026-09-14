@@ -705,7 +705,7 @@ async fn run_tui_loop(
                             SlashAction::Execute(cmd) => {
                                 // Route host-mapped slash commands (e.g. the
                                 // learnings plugin's `/recall` + `/memory`,
-                                // wired in P9) to the same AppEvent path the
+                                // wired in P9) to the same keymap command the
                                 // global keyboard shortcuts use. Commands with
                                 // no host mapping fall through to the log-only
                                 // stub (plugin-owned dispatch lands later).
@@ -1105,21 +1105,17 @@ async fn run_tui_loop(
                                 "Live session input channel closed — released".to_string(),
                             );
                         }
-                    } else if let Some(app_event) = EventHandler::resolve_intent(
-                        ainb::Intent::Text(text),
-                        &mut app.state,
-                        &keymap,
-                        &mut ui,
-                    ) {
-                        EventHandler::process_event(app_event, &mut app.state);
+                    } else {
+                        run_intent(ainb::Intent::Text(text), app, &keymap, &mut ui, terminal)
+                            .await?;
                     }
                 }
             }
         }
 
-        // Process any pending events
-        if let Some(pending_event) = app.state.shell.pending_event.take() {
-            EventHandler::process_event(pending_event, &mut app.state);
+        // Apply the event a background result deferred to this iteration.
+        for effect in app.state.apply_pending_event() {
+            ainb::effect_host::execute(effect, app, terminal, &mut ui).await?;
         }
 
         // Update last_tick on every iteration so the event-poll timeout
