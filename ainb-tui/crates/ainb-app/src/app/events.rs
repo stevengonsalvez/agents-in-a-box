@@ -220,10 +220,12 @@ pub enum AppEvent {
     TerminalInputClosed {
         tmux_session: String,
     },
-    /// The in-place client on `tmux_session` would not open.
+    /// The in-place client on `tmux_session` would not open; `unsupported`
+    /// when the host can never open one.
     InPlaceFailed {
         tmux_session: String,
         error: String,
+        unsupported: bool,
     },
     /// The host's plugin runtime had no running `plugin` for `action_id`.
     PluginActionUndelivered {
@@ -3919,8 +3921,12 @@ impl EventHandler {
             AppEvent::InPlaceFailed {
                 tmux_session,
                 error,
+                unsupported,
             } => {
                 tracing::warn!("failed to attach interactive embed to {tmux_session}: {error}");
+                if unsupported {
+                    state.host.in_place_unsupported = true;
+                }
                 state.add_error_notification(format!(
                     "Live attach to '{tmux_session}' failed: {error}"
                 ));
