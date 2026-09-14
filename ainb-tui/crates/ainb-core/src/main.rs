@@ -709,8 +709,8 @@ async fn run_tui_loop(
                                 // global keyboard shortcuts use. Commands with
                                 // no host mapping fall through to the log-only
                                 // stub (plugin-owned dispatch lands later).
-                                if let Some(app_event) = EventHandler::slash_command_event(&cmd) {
-                                    EventHandler::process_event(app_event, &mut app.state);
+                                if let Some(intent) = EventHandler::slash_command_intent(&cmd) {
+                                    run_intent(intent, app, &keymap, &mut ui, terminal).await?;
                                 } else {
                                     tracing::info!(
                                         "slash command requested (no host mapping): /{}",
@@ -772,75 +772,49 @@ async fn run_tui_loop(
                     let Some(chord) = chord else {
                         continue;
                     };
-                    let resolved = EventHandler::resolve_intent(
-                        ainb::Intent::Key(chord),
-                        &mut app.state,
-                        &keymap,
-                        &mut ui,
-                    );
-                    // Scroll intents the table resolved never reach the reducer.
+                    // Confirming a dialog queues its async work (a delete, a
+                    // stop). Tick straight away so it starts, and the frame
+                    // shows it, without waiting out the app tick.
+                    let confirming = app.state.shell.confirmation_dialog.is_some();
+                    run_intent(ainb::Intent::Key(chord), app, &keymap, &mut ui, terminal).await?;
+                    // Layout work the table resolved never reaches the reducer.
                     for action in ui.take_queued() {
-                        ui.apply(action, layout, &app.state);
+                        if let Some(save) = ui.apply_host(action, layout, &app.state) {
+                            run_intent(save, app, &keymap, &mut ui, terminal).await?;
+                        }
                     }
-                    if let Some(app_event) = resolved {
-                        // Handle scroll events for live logs and tmux preview
-                        use crate::app::events::AppEvent;
-                        match app_event {
-                            // The sidebar's collapsed flag is renderer state,
-                            // so the host applies it. Persisted here for the
-                            // same reason the [-]/[+] mouse glyph persists it.
-                            AppEvent::ToggleSessionsSidebar => {
-                                ui.sessions_pane.toggle_collapsed();
-                                let save = ainb::app::pointer::save_sessions_pane_layout(
-                                    ui.sessions_pane.preferred_width,
-                                    ui.sessions_pane.collapsed,
-                                );
-                                run_intent(save, app, &keymap, &mut ui, terminal).await?;
-                            }
-                            AppEvent::NewSession
-                            | AppEvent::SearchWorkspace
-                            | AppEvent::ConfirmationConfirm => {
-                                // Process the event to queue the async action
-                                EventHandler::process_event(app_event, &mut app.state);
-
-                                // IMMEDIATELY process the async action for responsive UI
-                                // This ensures dialogs appear without delay and session creation/deletion starts immediately
-                                use tracing::{error, info};
-                                info!(">>> Immediately processing async action for responsive UI");
-                                match app.tick().await {
-                                    Ok(effects) => {
-                                        info!(">>> Immediate tick completed successfully");
-                                        for effect in effects {
-                                            ainb::effect_host::execute(
-                                                effect, app, terminal, &mut ui,
-                                            )
-                                            .await?;
-                                        }
-                                        last_app_tick = Instant::now();
-                                        // Force UI refresh. The tick runs here
-                                        // for the same reason it runs before the
-                                        // main draw: this frame would otherwise
-                                        // paint an unreconciled `session_tab`,
-                                        // skip the Ask pane's retarget, and read
-                                        // `chat_host` where the tick would have
-                                        // ticked `chat_host_for`.
-                                        layout.tick_before_draw(&mut app.state);
-                                        terminal.draw(|frame| {
-                                            layout.render(frame, &app.state, &mut ui);
-                                        })?;
-                                        crate::components::layout::publish_after_draw(
-                                            &mut app.state,
-                                            &mut ui,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(">>> Error during immediate tick: {}", e);
-                                    }
+                    if confirming
+                        && app.state.shell.confirmation_dialog.is_none()
+                        && app.state.shell.pending_async_action.is_some()
+                    {
+                        use tracing::{error, info};
+                        info!(">>> Immediately processing async action for responsive UI");
+                        match app.tick().await {
+                            Ok(effects) => {
+                                info!(">>> Immediate tick completed successfully");
+                                for effect in effects {
+                                    ainb::effect_host::execute(effect, app, terminal, &mut ui)
+                                        .await?;
                                 }
+                                last_app_tick = Instant::now();
+                                // Force UI refresh. The tick runs here
+                                // for the same reason it runs before the
+                                // main draw: this frame would otherwise
+                                // paint an unreconciled `session_tab`,
+                                // skip the Ask pane's retarget, and read
+                                // `chat_host` where the tick would have
+                                // ticked `chat_host_for`.
+                                layout.tick_before_draw(&mut app.state);
+                                terminal.draw(|frame| {
+                                    layout.render(frame, &app.state, &mut ui);
+                                })?;
+                                crate::components::layout::publish_after_draw(
+                                    &mut app.state,
+                                    &mut ui,
+                                );
                             }
-                            _ => {
-                                // Process other events normally
-                                EventHandler::process_event(app_event, &mut app.state);
+                            Err(e) => {
+                                error!(">>> Error during immediate tick: {}", e);
                             }
                         }
                     }
