@@ -4476,7 +4476,7 @@ impl AppState {
         tokio::spawn(async {
             if !crate::headroom::is_healthy().await {
                 warn!("Headroom proxy down with a live session — watchdog respawning");
-                let _ = crate::headroom::ensure_proxy_running().await;
+                let _ = crate::headroom::ensure_proxy_running_for_live_users().await;
             }
         });
     }
