@@ -135,7 +135,14 @@ async fn a_tui_with_its_hangar_plugin_dialled_is_one_tui_row() {
     // TUI as its host.
     let _plugin = plugin_dial(
         &socket,
-        ainb_plugin_hangar::plugin::auth_hello_params(&token, tui_pid),
+        ainb_plugin_hangar::plugin::auth_hello_params(
+            &token,
+            tui_pid.wrapping_add(7),
+            Some(&ainb_plugin_protocol::params::PluginHost {
+                kind: "tui".into(),
+                pid: tui_pid,
+            }),
+        ),
     )
     .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
