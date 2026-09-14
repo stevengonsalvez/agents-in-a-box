@@ -896,14 +896,6 @@ impl EventHandler {
         }
     }
 
-    /// Get text from system clipboard
-    fn get_clipboard_text() -> Result<String, Box<dyn std::error::Error>> {
-        use arboard::Clipboard;
-        let mut clipboard = Clipboard::new()?;
-        let text = clipboard.get_text()?;
-        Ok(text)
-    }
-
     /// Dispatch a bracketed-paste event to the right New Session text-entry step.
     /// Returns `None` when the user isn't currently in a text-entry step that
     /// accepts paste, so the text is dropped silently rather than typed literally.
@@ -1816,25 +1808,9 @@ impl EventHandler {
                     None
                 }
                 PickRepoOutcome::PasteFromClipboard => {
-                    // Ctrl+V on the picker: read the OS clipboard here (app
-                    // layer owns clipboard access) and append to the filter.
-                    match Self::get_clipboard_text() {
-                        Ok(text) => {
-                            if let Some(pick) = state
-                                .new_session
-                                .new_session_state
-                                .as_mut()
-                                .and_then(|s| s.pick_repo_state.as_mut())
-                            {
-                                pick.append_filter(&text);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("PickRepo clipboard paste failed: {}", e);
-                            state
-                                .add_error_notification(format!("Could not read clipboard: {}", e));
-                        }
-                    }
+                    // Ctrl+V on the picker: the host reads the clipboard and
+                    // pastes it back as text, the bracketed-paste route.
+                    state.emit(Effect::PasteClipboard);
                     None
                 }
                 PickRepoOutcome::BackToHome => {
@@ -5445,15 +5421,10 @@ impl EventHandler {
                 state.config.config_popup_state.insert_str(&text);
             }
             AppEvent::ConfigPopupPasteClipboard => {
-                // Ctrl+V: read the OS clipboard directly (works regardless of
-                // whether the terminal delivers bracketed-paste events).
-                match Self::get_clipboard_text() {
-                    Ok(text) => state.config.config_popup_state.insert_str(&text),
-                    Err(e) => {
-                        tracing::warn!("Clipboard paste failed: {}", e);
-                        state.add_error_notification(format!("Could not read clipboard: {}", e));
-                    }
-                }
+                // Ctrl+V: the host reads the clipboard and pastes it back as
+                // text, so this works whether or not the terminal delivers
+                // bracketed-paste events.
+                state.emit(Effect::PasteClipboard);
             }
             AppEvent::ConfigPopupDelete => {
                 state.config.config_popup_state.delete_forward();
@@ -7731,8 +7702,8 @@ mod text_input_guard_tests {
         assert!(matches!(evt, AppEvent::ToggleHelp));
     }
 
-    /// Ctrl+V in a Config text popup must route to the direct-clipboard
-    /// paste (arboard), not type a literal `v`. This is the reliable paste
+    /// Ctrl+V in a Config text popup must route to the clipboard paste the
+    /// host performs, not type a literal `v`. This is the reliable paste
     /// path that does not depend on the terminal delivering bracketed
     /// `Event::Paste` — the reason Cmd+V "did nothing" in some setups.
     #[test]
