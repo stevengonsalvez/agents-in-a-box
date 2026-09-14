@@ -863,4 +863,128 @@ mod tests {
         assert_eq!(raw.savings.total_tokens, 0);
         assert_eq!(raw.summary.api_requests, 0);
     }
+
+    /// Point `AINB_HOME` (and the proxy port) at a scratch home for one test,
+    /// restoring both on drop. Callers hold `HEADROOM_ENV_LOCK`.
+    struct ScratchHome {
+        dir: tempfile::TempDir,
+        old_home: Option<std::ffi::OsString>,
+        old_port: Option<std::ffi::OsString>,
+    }
+
+    impl ScratchHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("scratch home");
+            let old_home = std::env::var_os("AINB_HOME");
+            let old_port = std::env::var_os("AINB_HEADROOM_PORT");
+            // A port nothing listens on, so the proxy always reads as down.
+            let port = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("reserve port")
+                .local_addr()
+                .expect("port")
+                .port();
+            std::env::set_var("AINB_HOME", dir.path());
+            std::env::set_var("AINB_HEADROOM_PORT", port.to_string());
+            std::fs::create_dir_all(users_dir()).expect("users dir");
+            Self { dir, old_home, old_port }
+        }
+    }
+
+    impl Drop for ScratchHome {
+        fn drop(&mut self) {
+            match self.old_home.take() {
+                Some(v) => std::env::set_var("AINB_HOME", v),
+                None => std::env::remove_var("AINB_HOME"),
+            }
+            match self.old_port.take() {
+                Some(v) => std::env::set_var("AINB_HEADROOM_PORT", v),
+                None => std::env::remove_var("AINB_HEADROOM_PORT"),
+            }
+        }
+    }
+
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("sleep").arg("600").spawn().expect("spawn sleep")
+    }
+
+    /// A pid that no longer exists: a child that has been reaped.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("reap true");
+        pid
+    }
+
+    /// Another live TUI's lease keeps the proxy running when this one quits.
+    #[test]
+    fn a_live_users_lease_keeps_the_proxy_on_release() {
+        let _guard = HEADROOM_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = ScratchHome::new();
+        let mut proxy = sleeper();
+        let mut other_tui = sleeper();
+        std::fs::write(pid_file(), proxy.id().to_string()).expect("proxy.pid");
+        register_user().expect("register this process");
+        std::fs::write(users_dir().join(other_tui.id().to_string()), b"").expect("lease");
+
+        let stopped = release_user_and_stop_if_unused();
+
+        let proxy_running = proxy.try_wait().expect("poll proxy").is_none();
+        let _ = proxy.kill();
+        let _ = proxy.wait();
+        let _ = other_tui.kill();
+        let _ = other_tui.wait();
+        assert!(!stopped, "a live user's lease must keep the proxy");
+        assert!(proxy_running, "the proxy must not receive SIGTERM");
+        assert!(pid_file().exists());
+        assert!(
+            !users_dir().join(std::process::id().to_string()).exists(),
+            "release drops this process's own lease"
+        );
+    }
+
+    /// A crashed TUI leaves its lease behind; it must not pin the proxy.
+    #[test]
+    fn a_crashed_users_stale_lease_does_not_keep_the_proxy() {
+        let _guard = HEADROOM_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = ScratchHome::new();
+        let mut proxy = sleeper();
+        std::fs::write(pid_file(), proxy.id().to_string()).expect("proxy.pid");
+        let crashed = dead_pid();
+        std::fs::write(users_dir().join(crashed.to_string()), b"").expect("stale lease");
+        register_user().expect("register this process");
+
+        let stopped = release_user_and_stop_if_unused();
+
+        let exited = (0..50).any(|_| {
+            std::thread::sleep(Duration::from_millis(100));
+            proxy.try_wait().expect("poll proxy").is_some()
+        });
+        if !exited {
+            let _ = proxy.kill();
+            let _ = proxy.wait();
+        }
+        assert!(stopped, "the last live user's release stops the proxy");
+        assert!(exited, "the proxy must receive SIGTERM");
+        assert!(!pid_file().exists());
+        assert!(
+            !users_dir().join(crashed.to_string()).exists(),
+            "the dead pid's lease is pruned"
+        );
+    }
+
+    /// The watchdog must not bring back a proxy nobody holds a lease on. The
+    /// spawn path opens `proxy.log` before it spawns, so no log and no pid
+    /// file proves the spawn was never attempted.
+    #[test]
+    fn the_watchdog_does_not_respawn_without_a_live_user() {
+        let _guard = HEADROOM_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _home = ScratchHome::new();
+        std::fs::write(users_dir().join(dead_pid().to_string()), b"").expect("stale lease");
+
+        let watchdog = ensure_proxy_running_under_process_lock(true);
+
+        assert!(watchdog.is_ok(), "watchdog with no live user: {watchdog:?}");
+        assert!(!log_file().exists(), "no spawn was attempted");
+        assert!(!pid_file().exists(), "no proxy was spawned");
+    }
 }
