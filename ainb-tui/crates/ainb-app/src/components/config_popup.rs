@@ -12,6 +12,9 @@ pub enum ConfigPopupType {
     },
     /// Text input field
     TextInput {
+        /// A plain setting's value (secret and credential-bearing rows open
+        /// `SecretInput`), scrubbed in case a credential was pasted into it.
+        #[serde(serialize_with = "crate::wire::fields::scrub_str")]
         value: String,
         cursor_position: usize,
     },
