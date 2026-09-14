@@ -119,7 +119,7 @@ fn frames_name_only_the_sections_that_changed() {
     };
     assert_eq!(frame.section_id(), Some(SectionId::Sessions));
     assert_eq!(frame.version, state.versions()[SectionId::Sessions.index()]);
-    assert_eq!(frame.body["expand_all_workspaces"], false);
+    assert_eq!(frame.body()["expand_all_workspaces"], false);
 
     // A change in a section nobody subscribed to frames nothing.
     state.fleet.get_mut().attention_elsewhere = 3;
@@ -370,7 +370,7 @@ fn a_card_ages_on_the_daemon_clock_across_a_90_second_skew() {
     let read = frame.daemon_read.expect("section 20 names its daemon read");
     assert_eq!(read.revision, 7);
     assert_eq!(read.clock_ms, daemon_read_at);
-    let observed = frame.body["view"]["cards"][0]["evidence_observed_at"].as_i64().unwrap();
+    let observed = frame.body()["view"]["cards"][0]["evidence_observed_at"].as_i64().unwrap();
     assert_eq!(read.clock_ms - observed, 5_000, "the age a renderer draws");
     assert!(
         local_now - observed < 0,
@@ -401,7 +401,7 @@ fn a_fleet_row_ages_on_the_daemon_clock_across_a_90_second_skew() {
     let batch = Mirror::new(HostId::new("h1"), subscription).batch(&state);
     let frame = &batch.frames[0];
     let clock = frame.daemon_read.expect("the Fleet frame names the daemon clock").clock_ms;
-    let stamp = frame.body["fleet_snapshot"][0]["attention_updated_at"].as_i64().unwrap();
+    let stamp = frame.body()["fleet_snapshot"][0]["attention_updated_at"].as_i64().unwrap();
     assert_eq!(clock - stamp, 5_000, "the age a renderer draws");
     assert!(
         local_now - stamp < 0,
