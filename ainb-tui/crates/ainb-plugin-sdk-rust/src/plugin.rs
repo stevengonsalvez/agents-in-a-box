@@ -42,6 +42,9 @@ pub struct InitContext<'a> {
     /// JSON value. `null` when the host omitted config (ABI-2 back-compat).
     /// Plugins parse this into their typed config struct.
     pub config: &'a Value,
+    /// The surface hosting this plugin process and its pid, when the host
+    /// reports one (#1040). `None` from a host that predates it.
+    pub host: Option<&'a ainb_plugin_protocol::params::PluginHost>,
 }
 
 /// Captured stdout / stderr / exit code from a CLI dispatch.
