@@ -304,11 +304,10 @@ fn render_panel(
     let cells = (0..PANEL_HEIGHT)
         .flat_map(|y| (0..PANEL_WIDTH).map(move |x| (x, y)))
         .map(|(x, y)| {
-            buffer
-                .cell((x, y))
-                .map_or((" ".to_string(), ratatui::style::Color::Reset), |cell| {
-                    (cell.symbol().to_string(), cell.fg)
-                })
+            buffer.cell((x, y)).map_or_else(
+                || (" ".to_string(), ratatui::style::Color::Reset),
+                |cell| (cell.symbol().to_string(), cell.fg),
+            )
         })
         .collect();
     (screen, cells)
