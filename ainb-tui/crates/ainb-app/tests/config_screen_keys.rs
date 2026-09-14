@@ -144,7 +144,10 @@ fn search_letters_that_are_global_or_nav_keys_reach_the_query() {
         state.config.config_screen_state.search.as_deref(),
         Some("Hjkhls")
     );
-    assert!(!state.shell.help_visible, "`H` in search must not open help");
+    assert!(
+        !state.shell.help_visible,
+        "`H` in search must not open help"
+    );
 }
 
 #[test]
