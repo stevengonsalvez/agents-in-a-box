@@ -198,11 +198,19 @@ pub struct ScreenWatch {
 }
 
 impl ScreenWatch {
-    /// Requests kept per screen; an older one past this is dropped first.
+    /// Distinct viewports kept per screen; past this the oldest is dropped.
+    /// A host renewing one size holds one entry, so only this many different
+    /// sizes watched at once can reach it.
     const MAX_REQUESTS: usize = 16;
 
-    /// Record a request for `width` by `height` at `now`, dropping requests
-    /// older than `lease`.
+    /// The largest viewport a watch may ask a plugin to render. A larger
+    /// request is clamped to it, so a host cannot make a plugin allocate an
+    /// arbitrarily large frame.
+    pub const MAX_VIEWPORT: (u16, u16) = (1024, 512);
+
+    /// Record a request for `width` by `height` at `now`, clamped to
+    /// [`Self::MAX_VIEWPORT`]. A request for a size already live renews that
+    /// entry's lease instead of adding one. Requests older than `lease` go.
     pub fn renew(
         &mut self,
         now: std::time::Instant,
@@ -210,16 +218,27 @@ impl ScreenWatch {
         height: u16,
         lease: std::time::Duration,
     ) {
+        let (width, height) = (
+            width.min(Self::MAX_VIEWPORT.0),
+            height.min(Self::MAX_VIEWPORT.1),
+        );
         self.lapse(now, lease);
+        if let Some(entry) = self.requests.iter_mut().find(|(_, w, h)| (*w, *h) == (width, height))
+        {
+            entry.0 = now;
+            return;
+        }
         if self.requests.len() >= Self::MAX_REQUESTS {
             self.requests.remove(0);
         }
         self.requests.push((now, width, height));
     }
 
-    /// Drop requests older than `lease` at `now`.
-    pub fn lapse(&mut self, now: std::time::Instant, lease: std::time::Duration) {
+    /// Drop requests older than `lease` at `now`. Returns whether any went.
+    pub fn lapse(&mut self, now: std::time::Instant, lease: std::time::Duration) -> bool {
+        let before = self.requests.len();
         self.requests.retain(|(at, _, _)| now.saturating_duration_since(*at) <= lease);
+        self.requests.len() != before
     }
 
     /// The size to render at: the largest width and the largest height any
