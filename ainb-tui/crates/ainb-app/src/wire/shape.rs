@@ -205,6 +205,10 @@ pub const TYPED_LABELS: &[&str] = &[
     "session_labels.rename_buffer",
     // The plain-text popup variant from `sample_states`.
     "config.text_popup",
+    // Name editors on the Configure form.
+    "new_session.configure.branch_prefix_edit",
+    "new_session.configure.session_prefix_edit",
+    "new_session.configure.save_preset_modal",
 ];
 
 /// Every sample the checks trace: [`sample_state`], whose config popup is the
@@ -987,6 +991,7 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
         let dockerfile: crate::config::ContainerTemplate = serde_json::from_value(serde_json::json!({
             "name": "custom",
             "description": "built from a Dockerfile",
+            "default_mcp_servers": ["github"],
             "config": {
                 "image_source": {
                     "type": "Dockerfile",
@@ -994,6 +999,11 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
                     "build_args": { "NPM_TOKEN": seed.text("config.container.build_args", Captured) },
                 },
                 "volumes": [{ "host_path": "/home/sample/.cache", "container_path": "/cache" }],
+                "entrypoint": ["/bin/sh", "-c"],
+                "user": "agent",
+                "system_packages": ["git"],
+                "npm_packages": ["typescript"],
+                "python_packages": ["ruff"],
             },
         }))
         .expect("sample dockerfile template parses");
@@ -1110,5 +1120,156 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
             status: Some(seed.text("skills.browse.status", Captured)),
             ..skills::BrowseViewState::default()
         });
+    }
+    fill_text_fields(state, seed);
+}
+
+/// The plain text fields no screen above fills. An empty string is inert to
+/// every leak check, so each gets a value; `the_sample_fills_every_string_field`
+/// names any the builder misses.
+#[allow(clippy::too_many_lines)]
+fn fill_text_fields(state: &mut AppState, seed: &mut dyn Seed) {
+    use TextKind::{Captured, Typed};
+
+    {
+        let config = state.config.get_mut();
+        let app = &mut config.app_config;
+        app.authentication.github_method = Some("gh".to_string());
+        app.docker.host = Some(seed.text("config.docker.host", Captured));
+        app.fleet.terminal = Some("ghostty".to_string());
+        app.fleet.interview.surface = Some("tmux".to_string());
+        app.ui_preferences.config_tree_expanded = vec!["fleet".to_string()];
+        app.ui_preferences.preferred_editor = Some("code".to_string());
+        app.usage.model_aliases =
+            HashMap::from([("sonnet".to_string(), "claude-sonnet-4-5".to_string())]);
+        app.workspace_defaults.exclude_paths = vec!["node_modules".to_string()];
+        app.workspace_defaults.workspace_scan_paths = vec![PathBuf::from("/work")];
+        let screen = &mut config.config_screen_state;
+        screen.dirty.insert("web.listen".to_string());
+        screen.expanded.insert("fleet".to_string());
+    }
+    {
+        let onboarding = state.onboarding.get_mut();
+        if let Some(provider) = onboarding.auth_provider_popup_state.providers.first_mut() {
+            provider.icon = "key".to_string();
+        }
+        if let Some(wizard) = onboarding.onboarding_state.as_mut() {
+            wizard.auth_method = Some("api_key".to_string());
+            wizard.skipped_dependencies = vec!["docker".to_string()];
+        }
+    }
+    {
+        let sessions = state.sessions.get_mut();
+        for session in &mut sessions.workspaces[0].sessions {
+            session.container_id = Some("c0ffee".to_string());
+        }
+        let tmux = state.tmux.get_mut();
+        tmux.embed_session = Some("ainb-managed".to_string());
+        tmux.selected_other_tmux_sessions.insert("scratch".to_string());
+        state.shell.get_mut().previous_screen = Some(crate::app::screens::ids::HOME.to_string());
+        let fleet = state.fleet.get_mut();
+        fleet.live_window.model = Some("claude-sonnet-4-5".to_string());
+        fleet.live_window.codex_plan_type = Some("plus".to_string());
+        for row in fleet
+            .fleet_snapshot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter_mut()
+        {
+            row.process_start_fingerprint = Some("pid:4242@1".to_string());
+        }
+    }
+    {
+        let git = state.git_view.get_mut();
+        if let Some(view) = git.git_view_state.as_mut() {
+            view.expanded_folders.insert("src".to_string());
+            view.review_ui.collapsed_dirs.insert("docs".to_string());
+        }
+    }
+    {
+        let new_session = state.new_session.get_mut();
+        if let Some(configure) = new_session
+            .new_session_state
+            .as_mut()
+            .and_then(|flow| flow.configure_state.as_mut())
+        {
+            configure.branch_override = Some("agents/sample".to_string());
+            configure.branch_prefix_edit =
+                Some(seed.text("new_session.configure.branch_prefix_edit", Typed));
+            configure.session_prefix = "sample".to_string();
+            configure.session_prefix_edit =
+                Some(seed.text("new_session.configure.session_prefix_edit", Typed));
+            configure.save_preset_modal =
+                Some(seed.text("new_session.configure.save_preset_modal", Typed));
+            configure.existing_branches = vec!["agents/older".to_string()];
+            configure.current_preset.skills = vec!["review".to_string()];
+            configure.current_preset.plugins = vec!["notifyd".to_string()];
+        }
+    }
+    {
+        let logs = state.log_streams.get_mut();
+        logs.log_history_state.selected_log_file = Some("session.jsonl".to_string());
+        let hangar = state.hangar.get_mut();
+        hangar.daemons_state.attach_request = Some("ainb-atc".to_string());
+        if let Some(shared) = hangar.daemons_state.shared.as_ref() {
+            use ainb_plugin_notifyd::install as hooks;
+            shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner).hook_health =
+                Some(hooks::HookHealth {
+                    bundled_version: "1.1.0".to_string(),
+                    installed_version: Some("1.0.0".to_string()),
+                    version_current: false,
+                    script_path: PathBuf::from("/home/sample/.claude/hooks/ainb-notify.sh"),
+                    script_ready: true,
+                    hook_binary: Some(PathBuf::from("/opt/homebrew/bin/ainb")),
+                    hook_binary_mode: Some(hooks::HookBinaryMode::Release),
+                    hook_binary_ready: true,
+                    running_binary: Some(PathBuf::from("/opt/homebrew/bin/ainb")),
+                    hook_binary_is_running_binary: true,
+                    agents: vec![hooks::HookAgentHealth {
+                        agent: "claude".to_string(),
+                        installed: true,
+                        wiring_ready: false,
+                        detail: seed.text("hangar.hook_health.agent_detail", Captured),
+                    }],
+                    notify_socket_live: true,
+                    approve_socket_live: true,
+                    last_event: Some(seed.text("hangar.hook_health.last_event", Captured)),
+                    issues: vec![hooks::HookHealthIssue {
+                        component: "hooks".to_string(),
+                        message: seed.text("hangar.hook_health.issue", Captured),
+                        repair: "ainb doctor --fix-hooks".to_string(),
+                    }],
+                });
+        }
+        state.skills.get_mut().skills_state.data = Some(crate::models::SkillsData {
+            skills: vec![crate::models::skills::Skill {
+                name: "review".to_string(),
+                description: seed.text("skills.data.skill_description", Captured),
+                user_invocable: Some(true),
+                source_path: PathBuf::from("/home/sample/.claude/skills/review/SKILL.md"),
+            }],
+            agents: vec![crate::models::skills::AgentDef {
+                name: "reviewer".to_string(),
+                description: seed.text("skills.data.agent_description", Captured),
+                tools: vec!["Read".to_string()],
+                source_path: PathBuf::from("/home/sample/.claude/agents/reviewer.md"),
+            }],
+            associations: HashMap::from([("reviewer".to_string(), vec!["review".to_string()])]),
+        });
+        let recovery = &mut state.recovery.get_mut().session_recovery_state;
+        for orphan in &mut recovery.orphaned_sessions {
+            orphan.label = Some("orphan label".to_string());
+        }
+        for worktree in &mut recovery.orphaned_worktrees {
+            worktree.id = Some("wt-1".to_string());
+            worktree.label = Some("worktree label".to_string());
+            worktree.last_commit = Some(seed.text("recovery.worktree.last_commit", Captured));
+        }
+        let skills = &mut state.skills.get_mut().skill_manager_state;
+        skills.pending_remove_confirm = Some("sample".to_string());
+        if let Some(detail) = skills.detail.as_mut() {
+            detail.last_used = Some("2026-09-14".to_string());
+            detail.requires = vec!["base".to_string()];
+        }
     }
 }
