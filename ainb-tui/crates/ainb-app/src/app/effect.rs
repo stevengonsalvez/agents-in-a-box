@@ -2,7 +2,7 @@
 // terminal, an editor, the clipboard or a browser; it describes the work as an
 // `Effect`, and whichever host drained the outbox carries it out.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -13,10 +13,11 @@ use uuid::Uuid;
 /// finished writing state, so a host always acts on committed state. Each
 /// variant says which host executes it and what that host does when it cannot.
 ///
-/// A host never writes state. Whatever the work changed (a session detached,
-/// a login wrote credentials, a tool was missing) comes back as a report
-/// intent from [`crate::app::reports`], which the host dispatches like any
-/// other; the reducer turns it into state and notices.
+/// A host never writes state, and it never reads it either: everything an
+/// effect needs rides on the effect. Whatever the work changed (a session
+/// detached, a login wrote credentials, a tool was missing) comes back as a
+/// report intent from [`crate::app::reports`], which the host dispatches like
+/// any other; the reducer turns it into state and notices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Give the user a live terminal on `target`.
@@ -34,14 +35,18 @@ pub enum Effect {
     /// Desktop host: returns keyboard focus from the terminal tab to the app.
     /// With no live terminal this is a no-op, not an error.
     Detach,
-    /// Open `path` in the user's preferred editor.
+    /// Open `path` in the user's editor.
     ///
-    /// Terminal host: runs the configured `preferred_editor`, else `code`,
-    /// else `$EDITOR`, whichever is on `PATH` first, detached, and reports
-    /// which with [`crate::app::reports::editor_finished`], or that none
-    /// resolved or the editor failed to start. Desktop host: the same
-    /// resolution, or the platform's default handler for the path.
-    OpenEditor(PathBuf),
+    /// Terminal host: runs `preferred_editor`, else `code`, else `$EDITOR`,
+    /// whichever is on `PATH` first, detached, and reports which with
+    /// [`crate::app::reports::editor_finished`], or that none resolved or the
+    /// editor failed to start. Desktop host: the same resolution, or the
+    /// platform's default handler for the path.
+    OpenEditor {
+        path: EditorPath,
+        /// The configured `preferred_editor`, read when the effect was queued.
+        preferred_editor: Option<String>,
+    },
     /// Paste the clipboard's text into the field that has focus, for a paste
     /// key (Ctrl+V) the terminal did not deliver as a bracketed paste.
     ///
@@ -65,22 +70,84 @@ pub enum Effect {
         /// row gave up on) is not taken for this one.
         generation: u64,
     },
+    /// Ask `plugin` to run its own action `action_id` with `payload`, over
+    /// `plugin/handle_action`.
+    ///
+    /// Terminal host: sends it through the plugin runtime it owns; when the
+    /// runtime has no such plugin running, reports
+    /// [`crate::app::reports::plugin_action_undelivered`]. What the action
+    /// changed arrives through the plugin's render and its `ui.state` view.
+    RunPluginAction {
+        plugin: String,
+        action_id: String,
+        payload: serde_json::Value,
+    },
+}
+
+/// A tmux session name an effect can target: not empty, and free of the `:`
+/// and `.` tmux reads as window and pane separators and of control
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TmuxSessionName(String);
+
+impl TmuxSessionName {
+    /// The name, or `None` when tmux could not address a session by it.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Option<Self> {
+        let name = name.into();
+        let addressable =
+            !name.is_empty() && !name.contains([':', '.']) && !name.chars().any(char::is_control);
+        addressable.then_some(Self(name))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A path an editor is asked to open: absolute, so it means the same thing to
+/// every host whatever its working directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditorPath(PathBuf);
+
+impl EditorPath {
+    /// The path, or `None` when it is empty or relative.
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Option<Self> {
+        let path = path.into();
+        path.is_absolute().then_some(Self(path))
+    }
+
+    #[must_use]
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
 }
 
 /// What an [`Effect::AttachTerminal`] attaches to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TerminalTarget {
-    /// An ainb session's own tmux session.
-    Session(Uuid),
-    /// The selected row's tmux session, writable in the session list's own
-    /// preview pane instead of full screen. Terminal host: measures the pane
-    /// for its current layout and reports it with
-    /// [`crate::app::reports::in_place_sized`]; the reducer attaches, and when
-    /// the row has no tmux session or the attach fails, a notice says which.
-    InPlace,
+    /// The ainb session `id`, through its tmux session `tmux_session`.
+    Session {
+        id: Uuid,
+        tmux_session: TmuxSessionName,
+    },
+    /// The selected row's tmux session `tmux_session`, writable in the session
+    /// list's own preview pane instead of full screen, laid out with or
+    /// without the session menu bar.
+    ///
+    /// Terminal host: sizes the pane for its layout, opens a tmux client on
+    /// it and reports [`crate::app::reports::in_place_opened`] with the
+    /// client parked for the reducer to adopt, or
+    /// [`crate::app::reports::in_place_failed`] with the error.
+    InPlace {
+        tmux_session: TmuxSessionName,
+        show_menu_bar: bool,
+    },
     /// A named tmux session ainb did not create: an "Other tmux" row, an SSH
     /// session's tmux, or a workspace shell that already exists.
-    Tmux(String),
+    Tmux(TmuxSessionName),
     /// A companion tool run in its own tmux session.
     Tool(ToolTerminal),
     /// The shell of the workspace at `workspace_path`: tmux session
@@ -92,7 +159,7 @@ pub enum TerminalTarget {
     /// end with [`crate::app::reports::attach_finished`].
     WorkspaceShell {
         workspace_path: PathBuf,
-        tmux_session: String,
+        tmux_session: TmuxSessionName,
         new_shell: bool,
         target_dir: Option<PathBuf>,
     },
@@ -140,5 +207,29 @@ impl EffectOutbox {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tmux_session_name_tmux_cannot_address_is_refused() {
+        for bad in ["", "work:1", "work.0", "bell\u{7}"] {
+            assert_eq!(TmuxSessionName::new(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            TmuxSessionName::new("tmux_api_feat-login").map(|name| name.as_str().to_string()),
+            Some("tmux_api_feat-login".to_string())
+        );
+    }
+
+    #[test]
+    fn an_editor_path_must_be_absolute() {
+        for bad in ["", "relative/file.rs", "./file.rs"] {
+            assert_eq!(EditorPath::new(bad), None, "{bad:?}");
+        }
+        assert!(EditorPath::new("/parity/api/worktrees/feat-login").is_some());
     }
 }
