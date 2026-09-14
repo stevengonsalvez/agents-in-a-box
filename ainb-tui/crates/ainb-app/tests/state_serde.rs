@@ -693,8 +693,6 @@ fn no_opaque_or_unbounded_type_reaches_the_wire_unless_allow_listed() {
 /// so each one is named here: a pass-through wrapper cannot slip a field past
 /// the type deny-list without showing up in review.
 const SERIALIZER_REDACTED: &[&str] = &[
-    "ActionOutcome.detail",
-    "ActionOutcome.summary",
     "AgentAuthStatus.has_key",
     "AnswerPhase::Failed.draft_len",
     "AnswerPhase::Failed.reason",
