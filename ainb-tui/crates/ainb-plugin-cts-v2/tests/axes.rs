@@ -888,6 +888,42 @@ fn axis_two_plugins_publish_ui_state_without_overwriting_each_other() {
     );
 }
 
+/// A plugin's view goes with its process: after a crash, a host reading
+/// `ui.state/<plugin>` finds nothing until the restarted plugin publishes,
+/// never the last screen of the process that died.
+#[test]
+fn axis_a_crashed_plugins_ui_state_is_gone_before_it_restarts() {
+    use ainb_plugin_runtime::topics;
+
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-action-forward"));
+    let mut m = manifest("cts-view-crash");
+    m.provides.cli_namespaces = vec!["action".into()];
+    m.capabilities.event_bus = CapabilityGrant::Bool(true);
+    m.provides.snapshots = vec![topics::UI_STATE.into()];
+    let id = register(&rt, bin, m);
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    let topic = topics::ui_state_topic(id.as_str());
+    assert!(handle.send_action(&id, "view.before", serde_json::Value::Null));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.snapshot_get_versioned(&topic).is_none() {
+        assert!(std::time::Instant::now() < deadline, "{topic} never landed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    handle.inject_kill(&id).expect("inject_kill");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while handle.snapshot_get_versioned(&topic).is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{topic} still holds the dead process's view"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 // =====================================================================
 // A15: event_stream_subscribe — cap-gated streaming, cancellation,
 //      anti-cheat sentinel verification, restart cleanup
