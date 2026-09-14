@@ -204,6 +204,7 @@ fn fleet_rows<S: Serializer>(
 /// full tool input of a pending approval), `cwd` and `display_name` (the
 /// operator's paths and labels, #983 M19). The failure reason and the unbound
 /// detail are free text, so they are scrubbed as the frame is built.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 struct AgentStatusView<'a> {
     absent: Option<String>,
@@ -211,6 +212,7 @@ struct AgentStatusView<'a> {
     view: Option<StatusViewFrame<'a>>,
 }
 
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 struct StatusViewFrame<'a> {
     host_id: &'a str,
@@ -221,6 +223,7 @@ struct StatusViewFrame<'a> {
     cards: Vec<AgentCardFrame<'a>>,
 }
 
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum HealthFrame {
@@ -235,6 +238,7 @@ enum HealthFrame {
     },
 }
 
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Serialize)]
 struct AgentCardFrame<'a> {
     session_key: &'a str,
@@ -605,6 +609,7 @@ struct SectionBodies<'a> {
     recovery: RecoveryView<'a>,
     onboarding: OnboardingView<'a>,
     shell: ShellView<'a>,
+    agent_status: AgentStatusView<'a>,
 }
 
 /// Register every section view with the TypeScript export, named for its section.
@@ -631,4 +636,5 @@ pub(crate) fn register_section_views(types: specta::Types) -> specta::Types {
         .register::<RecoveryView<'static>>()
         .register::<OnboardingView<'static>>()
         .register::<ShellView<'static>>()
+        .register::<AgentStatusView<'static>>()
 }
