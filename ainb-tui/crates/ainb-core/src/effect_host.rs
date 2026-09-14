@@ -688,7 +688,9 @@ fn open_editor(app: &mut App, path: &std::path::Path) {
         return;
     };
     info!("Opening {} in {}", path.display(), editor);
-    match std::process::Command::new(&editor).arg(path).spawn() {
+    // `--` ends option parsing, so a path that starts with `-` is opened, not
+    // read as an editor flag.
+    match std::process::Command::new(&editor).arg("--").arg(path).spawn() {
         Ok(_) => app.state.add_success_notification(format!("📝 Opened in {}", editor)),
         Err(e) => {
             error!("Failed to open editor: {}", e);
