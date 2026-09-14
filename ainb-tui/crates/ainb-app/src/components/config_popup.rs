@@ -388,3 +388,28 @@ pub enum ConfigPopupValue {
     Boolean(bool),
     Number(i64),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_popup_edits_like_text_and_serialises_only_its_length() {
+        let mut popup = ConfigPopupState::new();
+        popup.open_secret("Bot token", "", "fleet.bridge.telegram.token", "abc");
+        assert!(popup.is_text_entry());
+        popup.input_char('d');
+        popup.insert_str("ef\n");
+        popup.cursor_home();
+        popup.delete_forward();
+        popup.cursor_end();
+        popup.backspace();
+        match popup.get_value() {
+            Some(ConfigPopupValue::Text(value)) => assert_eq!(value, "bcde"),
+            other => panic!("expected text, got {other:?}"),
+        }
+        let json = serde_json::to_value(&popup).expect("popup serialises");
+        assert_eq!(json["popup_type"]["SecretInput"]["value_len"], 4);
+        assert!(!json.to_string().contains("bcde"), "{json}");
+    }
+}
