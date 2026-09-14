@@ -152,16 +152,22 @@ fn intents_round_trip_through_json() {
 
 #[test]
 fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
-    use ainb_app::app::events::AppEvent;
-    use ainb_app::app::keymap::{Binding, KeyAction, KeyContext};
+    use ainb_app::app::keymap::{Binding, KeyContext};
     use ainb_app::app::keymap_toml::KeymapOverrides;
 
-    let mut rows = Keymap::defaults().bindings().cloned().collect::<Vec<_>>();
+    let defaults = Keymap::defaults();
+    // The same action `global.help` runs, on a row with no key.
+    let toggle_help = defaults
+        .command(&CommandId::new("global.help"))
+        .expect("global.help row")
+        .action
+        .clone();
+    let mut rows = defaults.bindings().cloned().collect::<Vec<_>>();
     rows.push(Binding {
         id: "help_from_palette",
         ctx: KeyContext::Global,
         chord: None,
-        action: KeyAction::App(AppEvent::ToggleHelp),
+        action: toggle_help.clone(),
         doc: "Toggle keyboard help from the palette",
     });
     let keymap = Keymap::new(rows).expect("an unbound row is valid");
@@ -190,10 +196,11 @@ fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
     let overrides = KeymapOverrides::parse("[global]\nhelp_from_palette = \"ctrl+g\"\n")
         .expect("valid override");
     let bound = keymap.with_overrides(&overrides).expect("an override can bind it");
-    assert!(matches!(
-        bound.resolve(&[KeyContext::Global], &chord),
-        Some(KeyAction::App(AppEvent::ToggleHelp))
-    ));
+    assert_eq!(
+        format!("{:?}", bound.resolve(&[KeyContext::Global], &chord)),
+        format!("{:?}", Some(toggle_help)),
+        "the override binds the row's own action"
+    );
 }
 
 #[test]
