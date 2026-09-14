@@ -40,12 +40,8 @@ impl SnapshotManager {
             let tmux_alive = Self::check_tmux_alive(tmux_name).await;
             let git_branch = Self::get_git_branch(&metadata.worktree_path).await;
             let git_dirty_files = Self::get_git_dirty_files(&metadata.worktree_path).await;
-            // Written to ~/.agents-in-a-box/snapshots and kept: scrub the capture
-            // first, as every other place pane text is kept does.
             let pane_content = if tmux_alive {
-                Self::capture_pane(tmux_name)
-                    .await
-                    .map(|pane| crate::fleet::bridge::redact::scrub(&pane))
+                Self::capture_pane(tmux_name).await.map(|pane| Self::kept_pane(&pane))
             } else {
                 None
             };
@@ -69,8 +65,22 @@ impl SnapshotManager {
         })
     }
 
+    /// A pane capture as a snapshot keeps it. Written to
+    /// ~/.agents-in-a-box/snapshots and kept, so scrubbed first, as every other
+    /// place pane text is kept is.
+    fn kept_pane(pane: &str) -> String {
+        crate::fleet::bridge::redact::scrub(pane)
+    }
+
     pub async fn save_snapshot(snapshot: &SessionSnapshot) -> Result<PathBuf> {
         let base = dirs::home_dir().unwrap_or_default().join(".agents-in-a-box").join("snapshots");
+        Self::save_snapshot_in(&base, snapshot).await
+    }
+
+    async fn save_snapshot_in(
+        base: &std::path::Path,
+        snapshot: &SessionSnapshot,
+    ) -> Result<PathBuf> {
         let dirname = snapshot.timestamp.format("%Y-%m-%d-%H%M%S").to_string();
         let dir = base.join(&dirname);
         tokio::fs::create_dir_all(&dir).await?;
@@ -193,5 +203,46 @@ impl SnapshotManager {
                     None
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_token_in_a_captured_pane_is_redacted_in_the_snapshot_files() {
+        let token = "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB";
+        let base = tempfile::tempdir().expect("scratch snapshots dir");
+        let snapshot = SessionSnapshot {
+            timestamp: Utc::now(),
+            sessions: vec![SessionSnapshotEntry {
+                tmux_session_name: "tmux_seeded".to_string(),
+                session_id: "s1".to_string(),
+                worktree_path: PathBuf::from("/w/seeded"),
+                workspace_name: "seeded".to_string(),
+                agent_type: "Claude".to_string(),
+                git_branch: None,
+                git_dirty_files: Vec::new(),
+                pane_content: Some(SnapshotManager::kept_pane(&format!(
+                    "$ export GITHUB_TOKEN={token}\n"
+                ))),
+                tmux_alive: true,
+            }],
+        };
+
+        let dir = SnapshotManager::save_snapshot_in(base.path(), &snapshot).await.expect("saved");
+
+        for file in ["snapshot.json", "tmux_seeded.pane.txt"] {
+            let written = std::fs::read_to_string(dir.join(file)).expect(file);
+            assert!(
+                !written.contains(token),
+                "{file} kept the token:\n{written}"
+            );
+            assert!(
+                written.contains(crate::fleet::bridge::redact::REDACTED),
+                "{file} names the redaction:\n{written}"
+            );
+        }
     }
 }
