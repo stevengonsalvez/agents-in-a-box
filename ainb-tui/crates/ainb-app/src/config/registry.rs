@@ -882,6 +882,10 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         key: "fleet.status.legacy_classify_primary",
         why: "the one-release T0 rollback, set in config.toml when a fleet reads worse after the status store lands; removed at T0+2, so a settings row would advertise it as a permanent preference",
     },
+    Entry::Hidden {
+        key: "fleet.status.legacy_panel",
+        why: "the one-release T0-section rollback, set in config.toml to return the Fleet panel to its two pre-section reads; removed the release after section 20 ships, so a settings row would advertise it as a permanent preference",
+    },
     Entry::Row(ConfigRow {
         key: "fleet.enrich",
         category: C::Fleet,
