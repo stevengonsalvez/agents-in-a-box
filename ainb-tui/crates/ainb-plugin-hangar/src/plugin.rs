@@ -366,6 +366,11 @@ pub struct HangarPlugin {
     /// The latest agent-status envelope read at init, until it is folded
     /// (#1031), or why the subscription was refused.
     agent_status_seed: Option<tokio::sync::oneshot::Receiver<std::result::Result<Vec<u8>, String>>>,
+    /// The surface hosting this plugin, from `plugin/init` (#1040).
+    host: Option<ainb_plugin_sdk::PluginHost>,
+    /// The daemon refused the `plugin` hello as undecodable (a build that
+    /// predates the kind): redial with the pre-#1040 hello.
+    legacy_hello: bool,
     /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
     /// screen on a fresh machine until the user accepts (`y`), then `Dismissed`.
     /// Initialised from the recorded `warnings_ack` on `plugin/init`.
@@ -581,6 +586,43 @@ struct WizardDispatch {
     target_branch: Option<String>,
 }
 
+/// The `auth/hello` params for this plugin's daemon connection (#1040).
+///
+/// The plugin announces itself as a `plugin` surface under its own pid, and
+/// names the surface hosting it (`host`, from `plugin/init`) with a request to
+/// be `transient`. The daemon folds the connection into that host's presence
+/// only when the host pid is the connection's peer or the peer's parent, so a
+/// running TUI stays one `tui` row with its hangar screen open, a desktop host
+/// is named as a desktop, and a claim the kernel does not back stays listed.
+///
+/// No host, or a host pid of 0 or 1 (init, which a real host never is), makes
+/// no claim: the connection is an ordinary listed `plugin` row.
+#[must_use]
+pub fn auth_hello_params(
+    token: &str,
+    own_pid: u32,
+    host: Option<&ainb_plugin_sdk::PluginHost>,
+) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "token": token,
+        "surface": { "kind": "plugin", "pid": own_pid },
+    });
+    if let Some(host) = host.filter(|host| host.pid > 1) {
+        params["host"] = serde_json::json!({ "kind": host.kind, "pid": host.pid });
+        params["transient"] = serde_json::Value::Bool(true);
+    }
+    params
+}
+
+/// The pre-#1040 hello shape, for a daemon too old to decode the `plugin`
+/// surface kind: listed under this process's own pid as before.
+fn legacy_auth_hello_params(token: &str, own_pid: u32) -> serde_json::Value {
+    serde_json::json!({
+        "token": token,
+        "surface": { "kind": "tui", "pid": own_pid },
+    })
+}
+
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
 ///
 /// The home resolves exactly like [`crate::firstrun::state_path`]
@@ -589,23 +631,6 @@ struct WizardDispatch {
 /// read here is the one the daemon wrote at boot. `None` when the file is
 /// missing or empty (the daemon then rejects the connection with a clear
 /// UNAUTHORIZED error instead of a hang).
-/// The `auth/hello` params for this plugin's daemon connection (#1040).
-///
-/// The plugin runs as a direct child of the TUI that hosts it, so it announces
-/// the TUI's pid (`host_pid`, its parent) and asks to be `transient`. The
-/// daemon honours that only beside a listed row at the same pid, which is the
-/// TUI's own presence lease, so a running TUI stays one `tui` row with its
-/// hangar screen open. With no presence at that pid (a plugin hosted outside a
-/// TUI) the daemon lists the connection like any other, so it never hides.
-#[must_use]
-pub fn auth_hello_params(token: &str, host_pid: u32) -> serde_json::Value {
-    serde_json::json!({
-        "token": token,
-        "surface": { "kind": "tui", "pid": host_pid },
-        "transient": true,
-    })
-}
-
 fn read_daemon_token() -> Option<String> {
     let path = ainb_hangar_proto::auth::default_token_file()?;
     let raw = std::fs::read_to_string(path).ok()?;
@@ -688,6 +713,8 @@ impl Default for HangarPlugin {
             snapshot_generation: 1,
             snapshot_response_ids: BTreeMap::new(),
             agent_status_seed: None,
+            host: None,
+            legacy_hello: false,
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
             pending_detail_slug: None,
@@ -1032,7 +1059,11 @@ impl HangarPlugin {
         let auth_body = match encode_request(
             AUTH_REQ_ID,
             daemon_methods::AUTH_HELLO,
-            auth_hello_params(&token, std::os::unix::process::parent_id()),
+            if self.legacy_hello {
+                legacy_auth_hello_params(&token, std::process::id())
+            } else {
+                auth_hello_params(&token, std::process::id(), self.host.as_ref())
+            },
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -1340,6 +1371,12 @@ impl HangarPlugin {
             // the daemon is unreachable.
             RpcId::Number(AUTH_REQ_ID) => {
                 if let Some(err) = &resp.error {
+                    // An older daemon cannot decode the `plugin` surface kind
+                    // and refuses the hello's shape, not its token: the
+                    // reconnect uses the hello it understands.
+                    if !self.legacy_hello && err.message.contains("auth/hello params must be") {
+                        self.legacy_hello = true;
+                    }
                     self.conn.on_error(format!("daemon auth rejected: {}", err.message));
                 }
             }
@@ -5666,7 +5703,8 @@ impl Plugin for HangarPlugin {
         MANIFEST_TOML
     }
 
-    async fn on_init(&mut self, host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
+    async fn on_init(&mut self, host: &HostClient, ctx: InitContext<'_>) -> Result<()> {
+        self.host = ctx.host.cloned();
         // P5.6: decide whether to show the first-run danger-full-access modal
         // from the recorded acks in `~/.agents-in-a-box/hangar/state.toml`. A missing file
         // (fresh machine) → no acks → the modal shows once.
@@ -6315,22 +6353,45 @@ mod tests {
         assert_eq!(m.provides.cli_namespaces, ["hangar"]);
     }
 
-    /// #1038 review item 1: the grant names exactly the topics this plugin
-    /// reads or publishes, never the whole bus.
-    /// #1040: the plugin's hello names its host's pid and asks to be folded
-    /// into that host's presence.
+    /// #1040 and #1053 review item 2: the plugin's hello is a `plugin` surface
+    /// under its own pid that names its host and asks to be folded into it.
     #[test]
-    fn the_daemon_hello_announces_the_host_pid_as_transient() {
-        let params = auth_hello_params("secret", 4242);
+    fn the_daemon_hello_names_the_plugin_and_its_host() {
+        let host = ainb_plugin_sdk::PluginHost {
+            kind: "desktop".into(),
+            pid: 4242,
+        };
+        let params = auth_hello_params("secret", 5151, Some(&host));
         assert_eq!(params["token"], "secret");
-        assert_eq!(params["surface"]["kind"], "tui");
-        assert_eq!(params["surface"]["pid"], 4242);
+        assert_eq!(params["surface"]["kind"], "plugin");
+        assert_eq!(params["surface"]["pid"], 5151);
+        assert_eq!(params["host"]["kind"], "desktop");
+        assert_eq!(params["host"]["pid"], 4242);
         assert_eq!(params["transient"], true);
         let hello: ainb_hangar_proto::auth::HelloParams =
             serde_json::from_value(params).expect("the daemon's hello shape");
         assert!(hello.transient);
+        assert_eq!(hello.host.map(|host| host.pid), Some(4242));
     }
 
+    /// #1053 review item 2: a host pid of 1 (or none) is refused before the
+    /// dial: the hello claims no host and does not ask to be transient.
+    #[test]
+    fn a_host_pid_of_one_makes_no_claim() {
+        let init = ainb_plugin_sdk::PluginHost {
+            kind: "tui".into(),
+            pid: 1,
+        };
+        for host in [Some(&init), None] {
+            let params = auth_hello_params("secret", 5151, host);
+            assert_eq!(params["surface"]["kind"], "plugin");
+            assert!(params.get("host").is_none(), "{params}");
+            assert!(params.get("transient").is_none(), "{params}");
+        }
+    }
+
+    /// #1038 review item 1: the grant names exactly the topics this plugin
+    /// reads or publishes, never the whole bus.
     #[test]
     fn manifest_grants_event_bus_for_its_topics_and_plugin_data() {
         let m: Manifest = toml::from_str(MANIFEST_TOML).unwrap();
