@@ -65,6 +65,8 @@ const NAME_TAIL: &str = "tailmark";
 /// The warning `$` raises with no workspace selected. Deliberately unrelated
 /// wording, so the expiry half cannot pass on the dismiss half's leftovers.
 const WARNING_TEXT: &str = "No workspace selected";
+/// The left half of the preview placeholder's headline for the TUI's own session.
+const OWN_SESSION_PLACEHOLDER: &str = "This is the tmux session ainb";
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -296,10 +298,25 @@ fn an_error_notice_carries_its_remedy_is_dismissable_and_outlives_itself_in_the_
 
     // The headline is what the old box could hold. These are the rows it could
     // not, and they are the whole point of the longer lifetime.
-    for token in ["Failed to attach to", ERROR_REMEDY, "refuses to nest"] {
+    //
+    // "refuses" and "to nest" are checked apart: the selected row is the TUI's
+    // own session, so the preview pane beside the notice shows the own-session
+    // placeholder, and `flat()` joins each screen row left to right. Where the
+    // notice wraps between the two words, placeholder text lands between them.
+    for token in ["Failed to attach to", ERROR_REMEDY, "refuses", "to nest"] {
         if !shown.contains(token) {
             tmux.bail(&format!("the notice is missing {token:?}"));
         }
+    }
+
+    // The selected row is this TUI's own session, so the preview beside the
+    // notice must be the own-session placeholder (#990), not a mirror of the
+    // TUI inside itself. The notice covers the right half of the headline, so
+    // assert on its left half.
+    if !shown.contains(OWN_SESSION_PLACEHOLDER) {
+        tmux.bail(&format!(
+            "the own-session preview placeholder is missing {OWN_SESSION_PLACEHOLDER:?}"
+        ));
     }
 
     // And the session name — one token wider than the box — was BROKEN across

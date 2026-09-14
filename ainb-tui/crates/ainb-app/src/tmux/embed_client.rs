@@ -21,6 +21,20 @@ use crate::tmux::pty_wrapper::PtyWrapper;
 /// unboundedly.
 const WRITER_QUEUE_CAPACITY: usize = 256;
 
+/// The smallest screen the vt100 model is ever given, in rows and columns.
+///
+/// vt100 0.16 panics on a one-row screen as soon as a line wraps
+/// (`grid.rs:683`, subtract with overflow) and on a one-column screen as soon
+/// as a wide glyph arrives, and the embed is sized from the host terminal, so
+/// a short or narrow terminal was enough to crash the TUI (#990). Two is the
+/// floor a fuzz of fresh screens found no panic at.
+const MIN_SCREEN_DIM: u16 = 2;
+
+/// A vt100 screen model of at least [`MIN_SCREEN_DIM`] in each direction.
+fn screen_parser(rows: u16, cols: u16) -> vt100::Parser {
+    vt100::Parser::new(rows.max(MIN_SCREEN_DIM), cols.max(MIN_SCREEN_DIM), 0)
+}
+
 /// Enforce the environment the embed's `tmux attach` client depends on.
 ///
 /// portable-pty 0.9's `CommandBuilder::new` seeds the child with the FULL
@@ -149,8 +163,8 @@ impl EmbedClient {
                 anyhow::ensure!(status.success(), "tmux {command} rejected {target}");
             }
         }
-        let rows = rows.max(1);
-        let cols = cols.max(1);
+        let rows = rows.max(MIN_SCREEN_DIM);
+        let cols = cols.max(MIN_SCREEN_DIM);
 
         let mut cmd = CommandBuilder::new("tmux");
         cmd.arg("attach-session");
@@ -168,7 +182,7 @@ impl EmbedClient {
 
         let pty = PtyWrapper::start_with_size(cmd, rows, cols).context("spawn tmux attach PTY")?;
 
-        let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(RwLock::new(screen_parser(rows, cols)));
         let exited = Arc::new(AtomicBool::new(false));
         // Starts dirty so the first interactive frame paints immediately.
         let dirty = Arc::new(AtomicBool::new(true));
@@ -294,14 +308,17 @@ impl EmbedClient {
     /// cached size change, so the next frame retries from a consistent state
     /// instead of rendering a screen model that disagrees with the PTY.
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        let rows = rows.max(1);
-        let cols = cols.max(1);
+        let rows = rows.max(MIN_SCREEN_DIM);
+        let cols = cols.max(MIN_SCREEN_DIM);
         if rows == self.rows && cols == self.cols {
             return Ok(());
         }
         self.pty.resize(cols, rows)?;
+        // A fresh model, not `set_size`: vt100 0.16 can panic on the next
+        // write after shrinking a screen that holds content, and tmux repaints
+        // the whole client on the SIGWINCH the PTY resize just sent.
         if let Ok(mut p) = self.parser.write() {
-            p.screen_mut().set_size(rows, cols);
+            *p = screen_parser(rows, cols);
         }
         self.rows = rows;
         self.cols = cols;
@@ -595,5 +612,101 @@ mod tests {
             alive,
             "shutting down the embed client must NOT kill the tmux session"
         );
+    }
+
+    /// Issue #990: the TUI panicked in vt100 (`grid.rs:683`, attempt to
+    /// subtract with overflow) while it mirrored a tmux pane. vt100 0.16 panics
+    /// on a screen one row tall as soon as a line wraps, and on a screen one
+    /// column wide as soon as a wide glyph arrives. The observer is sized from
+    /// the host terminal (`interactive_embed_size` gives 1 row on a 15-row
+    /// terminal with the menu bar shown), so a short terminal was enough.
+    ///
+    /// Drives a real observer at those geometries, then feeds its screen
+    /// model the bytes a mirrored full-width TUI produces. Any panic fails the
+    /// test.
+    #[test]
+    fn observer_screen_survives_degenerate_preview_geometry() {
+        if !tmux_available() {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+        if !EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
+            return;
+        }
+        let _g = lock_serial();
+        let session = new_session("geometry");
+        let wide_frame = format!("{}\r\n🦊🦊🦊 {}\r\n", "─".repeat(120), "x".repeat(120));
+
+        let mut outcomes = Vec::new();
+        for (rows, cols) in [(1, 38), (1, 80), (24, 1), (0, 0)] {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut client = EmbedClient::observe(&session, rows, cols).expect("observe");
+                client.parser().write().expect("parser lock").process(wide_frame.as_bytes());
+                // Shrinking into the same geometry after content exists.
+                client.resize(24, 80).expect("grow");
+                client.parser().write().expect("parser lock").process(wide_frame.as_bytes());
+                client.resize(rows, cols).expect("shrink");
+                client.parser().write().expect("parser lock").process(wide_frame.as_bytes());
+            }));
+            outcomes.push(((rows, cols), outcome.is_ok()));
+        }
+        kill_session(&session);
+        for ((rows, cols), survived) in outcomes {
+            assert!(
+                survived,
+                "vt100 panicked for an observer sized {rows}x{cols}"
+            );
+        }
+    }
+
+    /// No terminal geometry can panic the screen model: every size from 0x0 to
+    /// 12x12 gets a deterministic stream of wraps, scroll regions, cursor
+    /// jumps, insert/delete and wide glyphs. With a floor of 1 instead of 2,
+    /// this sweep panics inside vt100 (screen.rs:730 on vt100 0.16.2).
+    #[test]
+    fn screen_parser_never_panics_at_any_small_geometry() {
+        let pieces: [&[u8]; 24] = [
+            b"a",
+            b"wrap wrap wrap ",
+            "\u{1F98A}".as_bytes(),
+            "\u{4F60}".as_bytes(),
+            b"\r",
+            b"\n",
+            b"\t",
+            b"\x1b[1;1r",
+            b"\x1b[2;1r",
+            b"\x1b[r",
+            b"\x1b[9B",
+            b"\x1b[99;99H",
+            b"\x1bM",
+            b"\x1bD",
+            b"\x1b[2L",
+            b"\x1b[2M",
+            b"\x1b[3@",
+            b"\x1b[3P",
+            b"\x1b[?6h",
+            b"\x1b[?7l",
+            b"\x1b[S",
+            b"\x1b[T",
+            b"\x1b[?1049h",
+            b"\x1b7\x1b8",
+        ];
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for rows in 0..=12 {
+            for cols in 0..=12 {
+                let mut parser = screen_parser(rows, cols);
+                for _ in 0..200 {
+                    let index = usize::try_from(next() % pieces.len() as u64).unwrap_or(0);
+                    parser.process(pieces[index]);
+                }
+            }
+        }
     }
 }

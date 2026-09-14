@@ -83,7 +83,7 @@ const CALL_SITES: &[(&str, usize, &str)] = &[
     ),
     (
         "app/state.rs",
-        22,
+        21,
         "session lifecycle run from the tick: tmux new-session -d, list and kill; docker \
          inspect, build and run; gh auth status; git worktree prune. Detached or captured",
     ),
@@ -196,8 +196,8 @@ const CALL_SITES: &[(&str, usize, &str)] = &[
     ("tmux/mod.rs", 5, "tmux service, output captured"),
     (
         "tmux/process_detection.rs",
-        2,
-        "process detection through ps and tmux",
+        4,
+        "process detection through ps and tmux, including the host session lookup",
     ),
     ("tmux/session.rs", 8, "tmux session service, detached"),
 ];

@@ -177,6 +177,97 @@ impl Default for ClaudeProcessDetector {
     }
 }
 
+/// How long a failed host-session probe is trusted before the next probe.
+const HOST_SESSION_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The tmux session whose pane this process runs in, or `None` outside tmux.
+///
+/// Only a successful detection is cached for the process lifetime. A failed
+/// probe (tmux busy, `ps` missing for a moment) is retried after
+/// [`HOST_SESSION_RETRY`], so one transient hiccup does not disable the
+/// own-session guard for good, and a TUI that keeps failing does not spawn
+/// `tmux` and `ps` on every frame.
+pub fn host_tmux_session_name() -> Option<&'static str> {
+    static HOST_SESSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static LAST_MISS: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+    if let Some(name) = HOST_SESSION.get() {
+        return Some(name.as_str());
+    }
+    std::env::var_os("TMUX")?;
+    let last_miss = || LAST_MISS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last_miss().is_some_and(|at| at.elapsed() < HOST_SESSION_RETRY) {
+        return None;
+    }
+    let Some(name) = detect_host_tmux_session() else {
+        *last_miss() = Some(std::time::Instant::now());
+        return None;
+    };
+    Some(HOST_SESSION.get_or_init(|| name).as_str())
+}
+
+/// Probe tmux for the session whose pane this process runs in.
+///
+/// Matched by process ancestry against every pane's pid first. A bare
+/// `tmux display-message -p` names the most recently active client's session
+/// when `TMUX_PANE` is not set, which is another session whenever a terminal is
+/// attached elsewhere; the own-session guard then missed, and the observer
+/// mirrored the TUI into itself (#990). `TMUX_PANE` is the fallback for a
+/// process whose ancestry cannot be read.
+fn detect_host_tmux_session() -> Option<String> {
+    let panes = tmux_stdout(&["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"]);
+    if let Some(name) = panes.and_then(|panes| session_for_ancestry(&panes, &process_ancestry())) {
+        return Some(name);
+    }
+    let pane = std::env::var("TMUX_PANE").ok()?;
+    tmux_stdout(&["display-message", "-p", "-t", &pane, "#{session_name}"])
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn tmux_stdout(args: &[&str]) -> Option<String> {
+    let output = Command::new("tmux").args(args).output().ok()?;
+    output.status.success().then(|| String::from_utf8(output.stdout).ok()).flatten()
+}
+
+/// This process's pid, then its parent's, up to init.
+fn process_ancestry() -> Vec<u32> {
+    let mut ancestry = Vec::new();
+    let mut pid = std::process::id();
+    // Bounded: a pane's shell is a handful of hops up, and a cycle cannot loop.
+    for _ in 0..32 {
+        ancestry.push(pid);
+        let Some(parent) = Command::new("ps")
+            .args(["-o", "ppid=", "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .and_then(|out| out.trim().parse::<u32>().ok())
+        else {
+            break;
+        };
+        if parent <= 1 || ancestry.contains(&parent) {
+            break;
+        }
+        pid = parent;
+    }
+    ancestry
+}
+
+/// The session of the pane whose pid is the nearest entry of `ancestry`.
+///
+/// `panes` is `tmux list-panes -a -F '#{pane_pid} #{session_name}'` output.
+/// Nearest first, so a TUI in a nested tmux names its own pane rather than an
+/// outer one.
+pub fn session_for_ancestry(panes: &str, ancestry: &[u32]) -> Option<String> {
+    ancestry.iter().find_map(|pid| {
+        panes.lines().find_map(|line| {
+            let (pane_pid, session) = line.split_once(' ')?;
+            (pane_pid.trim().parse::<u32>().ok()? == *pid).then(|| session.to_string())
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

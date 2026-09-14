@@ -4507,6 +4507,48 @@ mod notice_surface_tests {
 }
 
 #[cfg(test)]
+mod host_tmux_session_tests {
+    use crate::tmux::process_detection::session_for_ancestry;
+
+    const PANES: &str = "\
+4101 ainb-chat-126424
+5230 g6-verify
+5230 g6-verify
+7777 outer session with spaces
+";
+
+    /// The pane that hosts this process wins, whichever client was used last.
+    #[test]
+    fn the_nearest_ancestor_pane_names_the_host_session() {
+        // ainb (9001) <- shell (5230, the g6-verify pane) <- tmux server
+        assert_eq!(
+            session_for_ancestry(PANES, &[9001, 5230, 1200]),
+            Some("g6-verify".to_string())
+        );
+    }
+
+    /// A TUI in a nested tmux names its own pane, not the outer one.
+    #[test]
+    fn a_nested_tmux_names_the_inner_pane() {
+        assert_eq!(
+            session_for_ancestry(PANES, &[9001, 4101, 7777]),
+            Some("ainb-chat-126424".to_string())
+        );
+        assert_eq!(
+            session_for_ancestry(PANES, &[9001, 7777]),
+            Some("outer session with spaces".to_string())
+        );
+    }
+
+    /// Outside every pane (a TUI launched from a detached helper), no session.
+    #[test]
+    fn no_ancestor_pane_means_no_host_session() {
+        assert_eq!(session_for_ancestry(PANES, &[9001, 1200]), None);
+        assert_eq!(session_for_ancestry("", &[9001]), None);
+    }
+}
+
+#[cfg(test)]
 mod config_keys_to_save_tests {
     use crate::app::state::{AppliedEdits, ConfigScreenState};
     use crate::config::settings_model::ConfigValue;

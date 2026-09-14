@@ -29,7 +29,6 @@ use crate::fleet::attention::{Answerable, AttentionKind, SessionAttention};
 use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use chrono;
@@ -205,25 +204,6 @@ const OBSERVER_RETRY_DELAY: Duration = Duration::from_secs(2);
 const OBSERVER_SUCCESS_GRACE: Duration = Duration::from_millis(250);
 const MAX_OBSERVER_FAILURES: u8 = 3;
 
-fn host_tmux_session_name() -> Option<&'static str> {
-    static HOST_TMUX_SESSION: OnceLock<Option<String>> = OnceLock::new();
-    HOST_TMUX_SESSION
-        .get_or_init(|| {
-            std::env::var_os("TMUX")?;
-            let output = std::process::Command::new("tmux")
-                .args(["display-message", "-p", "#{session_name}"])
-                .output()
-                .ok()?;
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8(output.stdout).ok())
-                .flatten()
-                .map(|name| name.trim().to_string())
-        })
-        .as_deref()
-}
-
 impl AppState {
     /// Fold the poller's publish counter into the fleet section.
     ///
@@ -316,6 +296,16 @@ impl AppState {
             self.add_warning_notification("No tmux session on this row".to_string());
             return false;
         };
+        // The same own-session rule the observer and the preview placeholder
+        // use, by detection rather than by counting on tmux to refuse a nested
+        // attach: that refusal depends on `TMUX` reaching the attach client
+        // through the PTY's inherited environment.
+        if self.is_host_tmux_session_selected() {
+            self.add_warning_notification(format!(
+                "'{name}' is the tmux session ainb is running in; attaching it here would nest it"
+            ));
+            return false;
+        }
         // tmux mirrors a session to every attached client, but all clients
         // fight over its size — attaching alongside an existing client is the
         // user's call, so allow it and warn (never block).
@@ -352,7 +342,7 @@ impl AppState {
             self.release_interactive_pane();
             return false;
         };
-        if host_tmux_session_name() == Some(name.as_str()) {
+        if crate::tmux::process_detection::host_tmux_session_name() == Some(name.as_str()) {
             self.release_interactive_pane();
             return false;
         }
@@ -489,6 +479,16 @@ impl AppState {
         } else {
             self.get_selected_session().and_then(|s| s.tmux_session_name.clone())
         }
+    }
+
+    /// True when the selected row is the tmux session this TUI runs in.
+    ///
+    /// Its preview would mirror the TUI into itself, so the preview pane shows
+    /// a placeholder instead and no observer is started.
+    pub fn is_host_tmux_session_selected(&self) -> bool {
+        self.selected_tmux_name().is_some_and(|name| {
+            crate::tmux::process_detection::host_tmux_session_name() == Some(name.as_str())
+        })
     }
 
     /// True while an interactive embed is focused.
