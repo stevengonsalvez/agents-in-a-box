@@ -35,6 +35,19 @@ fn action(
     }
 }
 
+/// A command with no key: a pointer row whose payload only a renderer's
+/// hit-test supplies. The event here is a placeholder the row's `Args`
+/// replace; a payload row refuses to run without them.
+fn unbound(ctx: KeyContext, id: &'static str, event: AppEvent, doc: &'static str) -> Binding {
+    Binding {
+        id,
+        ctx,
+        chord: None,
+        action: KeyAction::App(event),
+        doc,
+    }
+}
+
 macro_rules! append_app_rows {
     ($rows:expr, $ctx:expr, $( $id:ident : $chord:literal => $event:expr ),+ $(,)?) => {
         $(
@@ -1224,6 +1237,90 @@ pub fn defaults() -> Vec<Binding> {
     append_app_rows!(rows, Context::Screen("session_recovery", super::keymap::SubContext::Named("filtered")),
         clear: "esc" => AppEvent::SessionRecoverySearchCancel,
     );
+
+    // Pointer commands (`crate::app::pointer::ids`): unbound, so the generated
+    // shortcut docs skip them, but listed by `Keymap::commands` with every
+    // other command.
+    use crate::app::state::{FocusedPane, SessionListRowId};
+    use crate::components::skill_manager_screen::FocusedSkillPane;
+    rows.extend([
+        unbound(
+            Context::screen("session_list"),
+            "select_row",
+            AppEvent::SessionListSelectRow {
+                target: SessionListRowId::SshHeader,
+                open: false,
+            },
+            "Select the row a click names; open attaches it",
+        ),
+        unbound(
+            Context::screen("session_list"),
+            "open_row_menu",
+            AppEvent::SessionListOpenRowMenu {
+                target: SessionListRowId::SshHeader,
+            },
+            "Open the context menu of the session a click names",
+        ),
+        unbound(
+            Context::screen("session_list"),
+            "focus_pane",
+            AppEvent::SessionListFocusPane(FocusedPane::Sessions),
+            "Focus the pane a click lands in",
+        ),
+        unbound(
+            Context::screen("session_list"),
+            "save_pane_layout",
+            AppEvent::SaveSessionsPaneLayout {
+                width: 0,
+                collapsed: false,
+            },
+            "Save the sessions pane width and collapsed flag a renderer set",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "all_sources",
+            AppEvent::SkillManagerClearSourceFilter,
+            "Show units from all sources",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "select_source",
+            AppEvent::SkillManagerSourceClick { uri: String::new() },
+            "Filter by the source a click names",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "select_unit",
+            AppEvent::SkillManagerUnitClick { uri: String::new() },
+            "Select the unit a click names",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "focus_pane",
+            AppEvent::SkillManagerFocusPane(FocusedSkillPane::Units),
+            "Focus the panel a click lands in",
+        ),
+        unbound(
+            Context::screen("skill_manager"),
+            "save_sources_width",
+            AppEvent::SkillManagerSaveSourcesWidth { width: 0 },
+            "Save the Sources panel width a renderer set",
+        ),
+        unbound(
+            Context::screen("home"),
+            "begin_sidebar_resize",
+            AppEvent::HomeSidebarBeginResize,
+            "Start dragging the sidebar edge",
+        ),
+        unbound(
+            Context::screen("home"),
+            "click_sidebar_item",
+            AppEvent::HomeSidebarClickItem {
+                item: crate::components::sidebar::SidebarItem::Sessions,
+            },
+            "Select the sidebar item a click names; a second click opens it",
+        ),
+    ]);
 
     rows
 }
