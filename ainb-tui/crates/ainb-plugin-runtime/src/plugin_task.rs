@@ -20,13 +20,13 @@ use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
     ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
     EventStreamCancelParams, EventStreamSubscribeParams, EventStreamSubscribeResult, FsDirEntry,
-    FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult, HandleEventParams,
-    HandleActionParams, HandleKeyParams, HandleMouseParams, LogParams, PluginInitParams, PluginInitResult,
-    PluginShutdownParams, RenderParams, RenderResult, SecretStoreGetParams, SnapshotGetParams,
-    SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
-    SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
-    UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams, Viewport,
-    WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceSetActiveParams,
+    FsReadDirParams, FsReadDirResult, FsReadFileParams, FsReadFileResult, HandleActionParams,
+    HandleEventParams, HandleKeyParams, HandleMouseParams, LogParams, PluginInitParams,
+    PluginInitResult, PluginShutdownParams, RenderParams, RenderResult, SecretStoreGetParams,
+    SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams,
+    SnapshotSubscribeResult, SpawnManagedSubprocessParams, SpawnManagedSubprocessResult,
+    UnixSocketCloseParams, UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams,
+    Viewport, WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceSetActiveParams,
     WorkspaceSetDefaultParams,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
