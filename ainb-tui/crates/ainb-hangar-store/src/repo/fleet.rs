@@ -436,6 +436,40 @@ pub struct ApplyFleetEventWithAttention {
     pub raised: bool,
     /// The ids this call retired, for the `AttentionAnswered` nudges.
     pub closed: Vec<String>,
+    /// Revisions of `session_superseded` events THIS call committed, for the
+    /// revision nudges. Empty when nothing was superseded or it already had been.
+    pub superseded: Vec<i64>,
+}
+
+/// Which inferred duplicate a hook event retires behind its managed session,
+/// in the same transaction as the event itself (#962).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupersedeRequest {
+    /// The binding already names the discovered row it came from.
+    Key {
+        /// The inferred session key to hide.
+        legacy_key: String,
+    },
+    /// Retire every visible degraded row of this provider on the exact pane
+    /// and process the hook reported.
+    MatchingPane {
+        /// Provider token, e.g. `claude`.
+        provider: String,
+        /// Exact tmux target the hook reported.
+        tmux_target: String,
+        /// Process start fingerprint the hook reported.
+        process_start_fingerprint: String,
+    },
+}
+
+/// What one in-transaction supersede did.
+enum SupersedeOutcome {
+    /// This call committed the `session_superseded` event at this revision.
+    Superseded(i64),
+    /// An earlier call already committed it at this revision.
+    AlreadyDone(i64),
+    /// No visible degraded legacy row, or no visible managed row.
+    NotApplicable,
 }
 
 /// Consistent Fleet snapshot and its global revision head.
@@ -584,11 +618,73 @@ impl FleetRepo {
         event: &NewFleetEvent,
         projection: Option<&AttentionProjection>,
     ) -> Result<ApplyFleetEventWithAttention, FleetRepoError> {
+        Self::apply_hook_event(pool, event, projection, None).await
+    }
+
+    /// [`Self::apply_event_with_attention`] that also retires the inferred
+    /// duplicate the hook's pane binding names, in the SAME transaction (#962).
+    ///
+    /// The supersede used to be its own transaction after this one committed,
+    /// so a crash between the two left the duplicate row visible for good: the
+    /// next hook re-confirms the binding without a legacy key and never looks
+    /// again. Running it here makes the event, its inbox projection, and the
+    /// duplicate's retirement one commit.
+    ///
+    /// The supersede runs even when the event is a replay. Its event id is
+    /// derived from the two keys, so a second pass is a no-op, and a row left
+    /// visible by a build that still supersedes in a separate transaction is
+    /// healed by the next replay rather than never.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::apply_event_with_attention`]; nothing is committed on error.
+    pub async fn apply_hook_event(
+        pool: &SqlitePool,
+        event: &NewFleetEvent,
+        projection: Option<&AttentionProjection>,
+        supersede: Option<&SupersedeRequest>,
+    ) -> Result<ApplyFleetEventWithAttention, FleetRepoError> {
         with_write_lock_retry(move || async move {
             let mut tx = pool.begin_with(IMMEDIATE_TRANSACTION).await?;
             let fleet = Self::apply_event_in_tx(&mut tx, event, None).await?;
             let mut closed = Vec::new();
             let mut raised = false;
+            let mut superseded = Vec::new();
+            if let Some(request) = supersede {
+                let legacy_keys = match request {
+                    SupersedeRequest::Key { legacy_key } => vec![legacy_key.clone()],
+                    SupersedeRequest::MatchingPane {
+                        provider,
+                        tmux_target,
+                        process_start_fingerprint,
+                    } => {
+                        sqlx::query_scalar::<_, String>(
+                            "SELECT session_key FROM fleet_session WHERE session_key != ? \
+                             AND provider = ? AND management_state = 'DEGRADED' \
+                             AND tmux_target = ? AND process_start_fingerprint = ? \
+                             AND visible = 1",
+                        )
+                        .bind(&event.session_key)
+                        .bind(provider)
+                        .bind(tmux_target)
+                        .bind(process_start_fingerprint)
+                        .fetch_all(&mut *tx)
+                        .await?
+                    }
+                };
+                for legacy_key in legacy_keys {
+                    if let SupersedeOutcome::Superseded(revision) = Self::supersede_in_tx(
+                        &mut tx,
+                        &legacy_key,
+                        &event.session_key,
+                        event.observed_at,
+                    )
+                    .await?
+                    {
+                        superseded.push(revision);
+                    }
+                }
+            }
             // A replayed event is a no-op, projection included. The event id is
             // the idempotency key for the WHOLE step, not just for the
             // `fleet_event` insert, and the inbox half is not idempotent on its
@@ -606,6 +702,7 @@ impl FleetRepo {
                     fleet,
                     raised,
                     closed,
+                    superseded,
                 });
             }
             if let Some(projection) = projection {
@@ -650,6 +747,7 @@ impl FleetRepo {
                 fleet,
                 raised,
                 closed,
+                superseded,
             })
         })
         .await
@@ -924,32 +1022,46 @@ impl FleetRepo {
         managed_key: &str,
         observed_at: i64,
     ) -> Result<Option<i64>, FleetRepoError> {
-        let event_id = format!("fleet-supersede:{legacy_key}:{managed_key}");
         let mut tx = pool.begin_with(IMMEDIATE_TRANSACTION).await?;
-        if let Some(prior) = event_by_id(&mut tx, &event_id).await? {
-            tx.commit().await?;
-            return Ok(Some(prior.revision));
+        let outcome = Self::supersede_in_tx(&mut tx, legacy_key, managed_key, observed_at).await?;
+        tx.commit().await?;
+        Ok(match outcome {
+            SupersedeOutcome::Superseded(revision) | SupersedeOutcome::AlreadyDone(revision) => {
+                Some(revision)
+            }
+            SupersedeOutcome::NotApplicable => None,
+        })
+    }
+
+    /// The supersession's guards and writes, inside a caller's transaction.
+    async fn supersede_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        legacy_key: &str,
+        managed_key: &str,
+        observed_at: i64,
+    ) -> Result<SupersedeOutcome, FleetRepoError> {
+        let event_id = format!("fleet-supersede:{legacy_key}:{managed_key}");
+        if let Some(prior) = event_by_id(tx, &event_id).await? {
+            return Ok(SupersedeOutcome::AlreadyDone(prior.revision));
         }
         let version: Option<i64> = sqlx::query_scalar(
             "SELECT version FROM fleet_session WHERE session_key = ? \
              AND management_state = 'DEGRADED' AND visible = 1",
         )
         .bind(legacy_key)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         let Some(version) = version else {
-            tx.commit().await?;
-            return Ok(None);
+            return Ok(SupersedeOutcome::NotApplicable);
         };
         let managed_exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM fleet_session WHERE session_key = ? AND visible = 1)",
         )
         .bind(managed_key)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         if !managed_exists {
-            tx.commit().await?;
-            return Ok(None);
+            return Ok(SupersedeOutcome::NotApplicable);
         }
         let next_version = version + 1;
         sqlx::query(
@@ -960,7 +1072,7 @@ impl FleetRepo {
         .bind(next_version)
         .bind(observed_at)
         .bind(legacy_key)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         let payload = serde_json::json!({ "supersededBy": managed_key }).to_string();
         let revision = sqlx::query(
@@ -974,16 +1086,15 @@ impl FleetRepo {
         .bind(observed_at)
         .bind(payload)
         .bind(next_version)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .last_insert_rowid();
         sqlx::query("UPDATE fleet_session SET updated_revision = ? WHERE session_key = ?")
             .bind(revision)
             .bind(legacy_key)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        tx.commit().await?;
-        Ok(Some(revision))
+        Ok(SupersedeOutcome::Superseded(revision))
     }
 
     /// Session keys a retention pass may demote out of the visible roster.
@@ -3841,6 +3952,109 @@ mod tests {
             FleetRepo::list_archived(pool, 50).await.unwrap().is_empty(),
             "and must leave the archived list"
         );
+    }
+
+    /// #962: a hook event and the duplicate it retires are ONE commit. A fault
+    /// inside the supersede (injected here with an abort trigger) must roll the
+    /// event back too, so the store never holds the managed row beside a still
+    /// visible duplicate; the replay after the fault clears then lands both.
+    #[tokio::test]
+    async fn a_hook_event_and_the_duplicate_it_supersedes_commit_together() {
+        let (_dir, store) = store().await;
+        let pool = store.pool();
+        FleetRepo::apply_event(
+            pool,
+            &event(
+                "e-legacy",
+                "claude:legacy",
+                100,
+                ObservationAuthority::Inferred,
+                FleetSessionPatch {
+                    provider: Some("claude".to_string()),
+                    management_state: Some("DEGRADED".to_string()),
+                    tmux_target: Some("dev:1.0".to_string()),
+                    process_start_fingerprint: Some("pane=%1;pid=1".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let hook = event(
+            "e-hook",
+            "claude:managed",
+            200,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                provider: Some("claude".to_string()),
+                management_state: Some("MANAGED".to_string()),
+                tmux_target: Some("dev:1.0".to_string()),
+                process_start_fingerprint: Some("pane=%1;pid=1".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        let request = SupersedeRequest::MatchingPane {
+            provider: "claude".to_string(),
+            tmux_target: "dev:1.0".to_string(),
+            process_start_fingerprint: "pane=%1;pid=1".to_string(),
+        };
+        let roster = || async {
+            FleetRepo::snapshot(pool)
+                .await
+                .unwrap()
+                .sessions
+                .into_iter()
+                .map(|row| row.session_key)
+                .collect::<Vec<_>>()
+        };
+
+        sqlx::query(
+            "CREATE TRIGGER inject_supersede_fault BEFORE UPDATE OF superseded_by \
+             ON fleet_session BEGIN SELECT RAISE(ABORT, 'injected supersede fault'); END",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        FleetRepo::apply_hook_event(pool, &hook, None, Some(&request))
+            .await
+            .expect_err("the injected fault fails the whole step");
+        assert_eq!(
+            roster().await,
+            vec!["claude:legacy".to_string()],
+            "no managed row without its supersede, and the legacy row untouched"
+        );
+        let hook_events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM fleet_event WHERE event_id = 'e-hook'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            hook_events, 0,
+            "the hook event rolled back with the supersede"
+        );
+
+        sqlx::query("DROP TRIGGER inject_supersede_fault").execute(pool).await.unwrap();
+        let applied = FleetRepo::apply_hook_event(pool, &hook, None, Some(&request))
+            .await
+            .expect("the replay lands once the fault clears");
+        assert_eq!(applied.superseded.len(), 1, "{applied:?}");
+        assert_eq!(roster().await, vec!["claude:managed".to_string()]);
+
+        let replay = FleetRepo::apply_hook_event(pool, &hook, None, Some(&request))
+            .await
+            .expect("a second replay is a no-op");
+        assert!(replay.fleet.duplicate);
+        assert!(
+            replay.superseded.is_empty(),
+            "no second supersede event: {replay:?}"
+        );
+        let supersedes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM fleet_event WHERE event_type = 'session_superseded'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(supersedes, 1);
     }
 
     /// The revival clause must not resurrect a SUPERSEDED duplicate. Both
