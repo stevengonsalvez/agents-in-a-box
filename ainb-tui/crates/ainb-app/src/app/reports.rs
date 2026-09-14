@@ -33,6 +33,8 @@ pub mod ids {
     pub const CLIPBOARD_FAILED: &str = "global.clipboard_failed";
     /// `{"auth_dir": path, "exited_ok": bool}`
     pub const LOGIN_FINISHED: &str = "global.login_finished";
+    /// `{"report": DaemonActionReport}`
+    pub const DAEMON_ACTION_FINISHED: &str = "global.daemon_action_finished";
 
     /// Every report command id.
     pub const ALL: &[&str] = &[
@@ -45,6 +47,7 @@ pub mod ids {
         EDITOR_FINISHED,
         CLIPBOARD_FAILED,
         LOGIN_FINISHED,
+        DAEMON_ACTION_FINISHED,
     ];
 }
 
@@ -115,6 +118,22 @@ pub enum EditorOutcome {
     Failed(String),
 }
 
+/// What `ainb daemon <daemon> <verb>` reported when it exited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonActionReport {
+    /// The daemon's stable id, as `ainb daemon` spells it.
+    pub daemon: String,
+    /// The verb, as `ainb daemon` spells it.
+    pub verb: String,
+    /// Whether the command exited zero.
+    pub ok: bool,
+    /// One line for the daemon's row.
+    pub summary: String,
+    /// Everything the command said: argv, exit status and output.
+    pub detail: String,
+}
+
 fn command(id: &str, args: Args) -> Intent {
     Intent::Command(CommandId::new(id), args)
 }
@@ -181,6 +200,12 @@ pub fn login_finished(auth_dir: &Path, exited_ok: bool) -> Intent {
         ids::LOGIN_FINISHED,
         json!({ "auth_dir": auth_dir, "exited_ok": exited_ok }),
     )
+}
+
+/// Report how a daemon lifecycle command ended.
+#[must_use]
+pub fn daemon_action_finished(report: &DaemonActionReport) -> Intent {
+    command(ids::DAEMON_ACTION_FINISHED, json!({ "report": report }))
 }
 
 /// Whether an OAuth login that exited `exited_ok` left credentials in
@@ -260,6 +285,12 @@ struct LoginArgs {
     exited_ok: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DaemonArgs {
+    report: DaemonActionReport,
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(args: &Args) -> Option<T> {
     serde_json::from_value(args.clone()).ok()
 }
@@ -307,6 +338,11 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
             parse::<LoginArgs>(args).map(|args| AppEvent::LoginFinished {
                 auth_dir: args.auth_dir,
                 exited_ok: args.exited_ok,
+            })
+        }
+        AppEvent::DaemonActionFinished { .. } => {
+            parse::<DaemonArgs>(args).map(|args| AppEvent::DaemonActionFinished {
+                report: args.report,
             })
         }
         _ => return None,
