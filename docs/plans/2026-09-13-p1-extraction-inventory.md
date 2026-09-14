@@ -331,3 +331,53 @@ The bus keeps one `ui.state` value, so two plugins publishing in one tick keep t
 | 5 statusline for a remote host | probe answer and live window copied into the Config and Fleet sections on the tick, bumped only on change | `statusline_from_sections.rs` |
 | 6 unit-free widths | `home_sidebar_fraction`, `skill_manager_sources_fraction`; one-time migration by the startup width report | `host_width.rs` 80 and 200, `reports.rs` migration |
 
+## P4: review screens and the P3 review items
+
+Goal criteria 2 (`git_view`, `code_review`) and 3b (#1017).
+
+### Review screens
+
+| Before | After | Test |
+|--------|-------|------|
+| The code review sidebar's drawn rect and scroll window were `Cell`s inside `CodeReviewState`, in the shared GitView section | `ReviewSidebarLayout {rect, window}` lives in `UiState.review_sidebar`; the renderer records it while drawing | `ainb-core/tests/review_mouse.rs` |
+| `main.rs` hit-tested a Review tab click and wrote the selection | `ainb-core/src/app/mouse.rs` hit-tests and dispatches `git_view.select_review_row {target}`, naming the row by `ReviewRowId` (a directory or file path), resolved where the row is now | `ainb-app/tests/review_commands.rs` (identity after the tree changed, a gone file changes nothing) |
+| `main.rs` wheel wrote the git view scroll offsets | `git_view.scroll {lines}`, applied by the reducer to the active tab only | `review_commands.rs::the_wheel_scrolls_the_review_through_the_reducer` |
+
+Both commands are unbound rows. `ainb diff-review` keeps its layout local and calls the same resolver. Home and log-history wheel and click paths stay in `main.rs` for P5.
+
+### Side effects out of the reducer
+
+| Was in the reducer | Effect | Report |
+|--------------------|--------|--------|
+| `RuntimeHandle::send_action` in the `plugin.owned.action` arm | `RunPluginAction {plugin, action_id, payload}` | `plugin_action_undelivered {plugin, action_id}` when no running plugin took it |
+| `enter_interactive_pane` opening the writable embed (a PTY) | `AttachTerminal(InPlace {tmux_session, show_menu_bar})` | `in_place_opened {tmux_session, embed}`, the client parked process-locally as a `LocalEmbed` handle and adopted once; or `in_place_failed {tmux_session, error}` |
+
+`in_place_sized` is gone: the host sizes the client from its own terminal and sidebar. The read-only preview observer is still opened by `AppState::sync_terminal_observer`, which only the run loop calls; `host_side_effects.rs` names both sites.
+
+The executor is `execute(effect, terminal, ui, plugins)`, with no `&AppState`. The data it read from state now rides on the effect, through validating constructors: `TmuxSessionName::new` (not empty, no `:` or `.`, no control characters) on `Session`, `InPlace`, `Tmux` and `WorkspaceShell`, and `EditorPath::new` (absolute) with the preferred editor on `OpenEditor`.
+
+### Per-plugin `ui.state`
+
+| Layer | Change |
+|-------|--------|
+| protocol 0.1.2 | `topics::ui_state_topic(plugin)`, prefix `ui.state/`; `wire-surface.lock` regenerated a second time (goal amended) |
+| runtime | a plugin's bare `ui.state` publish is stored under `ui.state/<publisher>`; a publish to another plugin's slot is dropped |
+| CTS | `axis_two_plugins_publish_ui_state_without_overwriting_each_other` |
+| host | `record_plugin_ui_state(plugin, running, snapshot)` evicts a stopped plugin's view and refuses one over `MAX_PLUGIN_UI_STATE_BYTES` (256 KiB); `plugin.owned.watch_screen {screen, watching}` keeps a plugin screen rendering while another host watches it |
+
+### Command context gate
+
+`Intent::Command` resolves a row only when its context is active, through the same `active_contexts` as `Intent::Key`. Report rows (`global.*`) and plugin action rows resolve everywhere. The slash palette's `/recall` now names the unbound `global.open_learnings` instead of a Learnings-screen row. Tests: `pointer_commands.rs::a_command_scoped_to_another_screen_changes_nothing`, `the_slash_palette_opens_learnings_from_any_screen`.
+
+### Tripwires in CI
+
+Job `core-tripwires` runs `cargo nextest run -p ainb -E 'binary(/^tripwire_/)'` minus `ainb-core/tests/tripwire_ci_exclusions.txt`, serially, and fails when nothing passed or the `SKIP:` lines are at least the pass count. Each exclusion carries an issue and a reason, checked by `ci_tripwire_exclusions.rs`. The 13 excluded binaries are red on v2 both before and after #1008 on the same box (#1023, #1024, #1025).
+
+### Left for P5
+
+| What | Where |
+|------|-------|
+| `sessions_sidebar_width` is a column count | becomes a fraction of the row with the same one-time migration, because a desktop host has no columns |
+| `app_config.save()` in 8 reducer arms in `events.rs` and 6 in `state.rs` | a persistence effect the host runs after the commit, so `dispatch` never blocks on disk |
+| Home and log-history wheel and click writes | `ainb-core/src/main.rs` mouse loop |
+
