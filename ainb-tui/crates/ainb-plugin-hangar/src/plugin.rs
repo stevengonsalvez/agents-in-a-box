@@ -364,8 +364,8 @@ pub struct HangarPlugin {
     snapshot_generation: i64,
     snapshot_response_ids: BTreeMap<i64, i64>,
     /// The latest agent-status envelope read at init, until it is folded
-    /// (#1031).
-    agent_status_seed: Option<tokio::sync::oneshot::Receiver<Vec<u8>>>,
+    /// (#1031), or why the subscription was refused.
+    agent_status_seed: Option<tokio::sync::oneshot::Receiver<Result<Vec<u8>, String>>>,
     /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
     /// screen on a fresh machine until the user accepts (`y`), then `Dismissed`.
     /// Initialised from the recorded `warnings_ack` on `plugin/init`.
@@ -2447,15 +2447,22 @@ impl HangarPlugin {
         }
     }
 
-    /// Fold the envelope the init-time `snapshot_get` found, once it lands.
+    /// Fold the envelope the init-time `snapshot_get` found, once it lands. A
+    /// refused subscription names its cause on the panel (#1038 review): no
+    /// envelope will ever arrive, and a bare "nothing published yet" would hide
+    /// why.
     fn drain_agent_status_seed(&mut self) {
         let Some(seed) = self.agent_status_seed.as_mut() else {
             return;
         };
         match seed.try_recv() {
-            Ok(payload) => {
+            Ok(Ok(payload)) => {
                 self.agent_status_seed = None;
                 self.apply_agent_status(&payload);
+            }
+            Ok(Err(reason)) => {
+                self.agent_status_seed = None;
+                self.screens.fleet.mark_absent(reason);
             }
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => self.agent_status_seed = None,
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
@@ -5668,11 +5675,12 @@ impl Plugin for HangarPlugin {
                         "hangar: agent status subscription refused, the Fleet panel stays absent: {error}"
                     ))
                     .await;
+                let _ = seed_tx.send(Err(format!("agent status subscription refused: {error}")));
                 return;
             }
             if let Ok(latest) = seeder.snapshot_get(AGENT_STATUS_TOPIC).await {
                 if let Some(payload) = latest.payload {
-                    let _ = seed_tx.send(payload.to_vec());
+                    let _ = seed_tx.send(Ok(payload.to_vec()));
                 }
             }
         });
@@ -9611,6 +9619,26 @@ mod tests {
             plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
             Some(AgentState::Waiting)
         );
+    }
+
+    /// #1038 review item 8: a refused `snapshot_subscribe` names its cause
+    /// in the panel instead of "nothing published yet".
+    #[test]
+    fn a_refused_subscription_names_its_cause_on_the_panel() {
+        let mut plugin = connected_plugin_with_issue();
+        let (seed_tx, seed_rx) = tokio::sync::oneshot::channel();
+        plugin.agent_status_seed = Some(seed_rx);
+        seed_tx
+            .send(Err(
+                "agent status subscription refused: capability denied: event_bus".into(),
+            ))
+            .unwrap();
+        plugin.drain_agent_status_seed();
+        assert_eq!(
+            plugin.screens.fleet.health_line().as_deref(),
+            Some("absent: agent status subscription refused: capability denied: event_bus")
+        );
+        assert!(plugin.agent_status_seed.is_none());
     }
 
     /// #1031 failure story: an owner whose daemon serves no status read
