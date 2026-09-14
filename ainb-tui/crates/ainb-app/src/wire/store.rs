@@ -81,7 +81,7 @@ pub struct MirrorStore {
     /// The boot epoch each host's held versions count in.
     epochs: BTreeMap<HostId, u64>,
     transactions: u64,
-    frames_applied: u64,
+    sections_committed: u64,
     frames_ignored: u64,
     effects: Vec<Effect>,
 }
@@ -92,7 +92,7 @@ impl std::fmt::Debug for MirrorStore {
             .field("subscription", &self.subscription)
             .field("sections", &self.sections.keys().collect::<Vec<_>>())
             .field("transactions", &self.transactions)
-            .field("frames_applied", &self.frames_applied)
+            .field("sections_committed", &self.sections_committed)
             .field("frames_ignored", &self.frames_ignored)
             .field("effects", &self.effects.len())
             .finish()
@@ -107,7 +107,7 @@ impl MirrorStore {
             sections: BTreeMap::new(),
             epochs: BTreeMap::new(),
             transactions: 0,
-            frames_applied: 0,
+            sections_committed: 0,
             frames_ignored: 0,
             effects: Vec::new(),
         }
@@ -146,10 +146,11 @@ impl MirrorStore {
         self.transactions
     }
 
-    /// Frames that changed the store.
+    /// Sections written by commits: a drain that stages five frames for one
+    /// section counts one.
     #[must_use]
-    pub const fn frames_applied(&self) -> u64 {
-        self.frames_applied
+    pub const fn sections_committed(&self) -> u64 {
+        self.sections_committed
     }
 
     /// Frames dropped: an unsubscribed or unknown section, or a version the
@@ -203,7 +204,7 @@ impl MirrorStore {
         if drain.staged.is_empty() && dropped.is_empty() {
             return self.unchanged();
         }
-        self.frames_applied += drain.staged.len() as u64;
+        self.sections_committed += drain.staged.len() as u64;
         let changed: BTreeSet<SectionKey> =
             dropped.iter().chain(drain.staged.keys()).cloned().collect();
         for key in &dropped {
