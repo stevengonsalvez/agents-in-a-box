@@ -40,6 +40,7 @@ use uuid::Uuid;
 /// Location of an attachable row inside `AppState`, independent of the
 /// row's current visible position.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AttachableRef {
     WorkspaceSession {
         workspace_idx: usize,
@@ -74,6 +75,7 @@ pub enum SessionContextAction {
 /// Absent fields mean Hangar has never observed them. The UI must omit those
 /// fields, never replace them with a guessed provider default.
 #[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionFleetMetadata {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -87,6 +89,7 @@ pub struct SessionFleetMetadata {
 
 /// Ephemeral state for the keyboard-accessible right-click context menu.
 #[derive(serde::Serialize, Debug, Clone, Copy)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionContextMenu {
     pub target: AttachableRef,
     pub selected: usize,
@@ -94,6 +97,7 @@ pub struct SessionContextMenu {
 
 /// Notification system for TUI messages
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum NotificationType {
     Success,
     Error,
@@ -102,8 +106,10 @@ pub enum NotificationType {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct Notification {
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub message: String,
     pub notification_type: NotificationType,
     #[serde(skip)]
@@ -190,6 +196,7 @@ impl Notification {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum FocusedPane {
     Sessions, // Left pane - workspace/session list
     LiveLogs, // Right pane - live logs
@@ -615,13 +622,16 @@ pub enum SessionListRowId {
 pub use crate::app::screens::{ScreenId, ids as screen_ids};
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfirmationDialog {
     pub title: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub message: String,
     pub confirm_action: ConfirmAction,
     pub selected_option: bool, // true = Yes, false = No (binary mode)
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub warning: Option<String>, // Optional warning (e.g., uncommitted files in worktree)
     // Tri-option mode: when `options` is `Some`, the dialog renders one button per
     // entry and Left/Right cycles `selected_index`. The final-option index is
@@ -632,12 +642,14 @@ pub struct ConfirmationDialog {
 
 /// One choice in a tri-option (or n-option) confirmation dialog.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct DialogOption {
     pub label: String,
     pub action: ConfirmAction,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfirmAction {
     DeleteSession(Uuid),
     StopSession(Uuid), // Soft-stop interactive session (tmux only; preserves worktree)
@@ -798,6 +810,7 @@ pub struct McpFetchResult {
 /// the overlay is open; dropping it (on close) stops all refresh activity —
 /// nothing polls the daemon when the overlay isn't showing.
 #[derive(serde::Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct McpOverlayState {
     pub pool_enabled: bool,
     pub daemon_running: bool,
@@ -815,6 +828,7 @@ pub struct McpOverlayState {
     /// Status line from the last in-overlay action (e.g. `import`). Sticky
     /// across plain refreshes; cleared only when the overlay closes.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub last_action: Option<String>,
 }
 
@@ -952,6 +966,7 @@ pub(crate) fn mcp_import_blocking(to_user: bool) -> McpFetchResult {
 // ============================================================================
 
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum HomeTile {
     SkillManager, // Install / sync / doctor (spec §10.1)
     Config,       // Settings & presets
@@ -1013,6 +1028,7 @@ impl HomeTile {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct HomeScreenState {
     pub selected_tile: usize,
     pub tiles: Vec<HomeTile>,
@@ -1425,6 +1441,7 @@ fn config_value_to_toml(value: &ConfigValue) -> toml::Value {
 
 /// Tracks which pane has focus in the config screen
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum ConfigPane {
     #[default]
     Categories,
@@ -1463,6 +1480,7 @@ pub struct AppliedEdits {
 /// list, and a save routes every edit through
 /// [`registry::set_validated`](crate::config::registry::set_validated).
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfigScreenState {
     /// Index into [`visible_nodes`](Self::visible_nodes) — the tree row the
     /// left pane has selected.
@@ -1491,6 +1509,7 @@ pub struct ConfigScreenState {
         rename = "search_len",
         serialize_with = "crate::wire::fields::opt_char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     pub search: Option<String>,
     /// Keys the user has actually edited this session, and therefore the only
     /// keys a save writes.
@@ -1524,6 +1543,7 @@ pub struct ConfigScreenState {
         rename = "edit_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub edit_buffer: String,
     /// True when entering API key (special handling - saves to keychain)
     pub api_key_input_mode: bool,
@@ -2472,6 +2492,7 @@ pub(crate) fn merge_external_sections(seed: &mut toml::Value, on_disk: &toml::Va
 
 // Auth provider option for the popup
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AuthProviderOption {
     pub id: String,
     pub name: String,
@@ -2495,6 +2516,7 @@ impl AuthProviderOption {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AuthProviderPopupState {
     pub providers: Vec<AuthProviderOption>,
     pub selected_index: usize,
@@ -2503,6 +2525,7 @@ pub struct AuthProviderPopupState {
         rename = "api_key_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub api_key_input: String,
     pub show_popup: bool,
 }
@@ -2680,6 +2703,7 @@ impl AuthProviderPopupState {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AuthMethod {
     OAuth,
     ApiKey,
@@ -2687,33 +2711,40 @@ pub enum AuthMethod {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AuthSetupState {
     pub selected_method: AuthMethod,
     #[serde(
         rename = "api_key_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub api_key_input: String,
     pub is_processing: bool,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error_message: Option<String>,
     pub show_cursor: bool,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ClaudeChatState {
     #[serde(
         rename = "message_count",
         serialize_with = "crate::wire::fields::len_of"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub messages: Vec<ClaudeMessage>,
     #[serde(
         rename = "input_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub input_buffer: String,
     pub is_streaming: bool,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub current_streaming_response: Option<String>,
     pub associated_session_id: Option<Uuid>,
     pub total_tokens_used: u32,
@@ -3003,6 +3034,7 @@ pub enum BranchCheckoutMode {
 }
 
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct NewSessionState {
     /// The current step in the redesigned 2-screen flow (PickRepo →
     /// Configure → Creating).
@@ -3055,6 +3087,7 @@ struct ConfigureLaunchSnapshot {
 }
 
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum NewSessionStep {
     /// Phase 6 (new-session redesign): the unified repo picker (screen 1).
     /// Owns its own state via `NewSessionState.pick_repo_state`.
