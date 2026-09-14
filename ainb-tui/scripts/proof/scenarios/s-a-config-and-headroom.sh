@@ -70,8 +70,9 @@ scenario() {
   # ---- Step 5: one headroom proxy -----------------------------------------
   fixture_session || { check "the headroom fixture session starts" false; return; }
   local store="$HOME/.agents-in-a-box/sessions.json" pidfile="$HOME/.agents-in-a-box/headroom/proxy.pid"
-  jq '.sessions |= map_values(.headroom_enabled = true)' "$store" >"$store.tmp" && mv "$store.tmp" "$store"
-  observe "fixture session marked headroom_enabled in the session store"
+  check "the fixture session is marked headroom_enabled in the session store" \
+    bash -c "jq '.sessions |= map_values(.headroom_enabled = true)' '$store' >'$store.tmp' && mv '$store.tmp' '$store' \
+      && jq -e '[.sessions[] | .headroom_enabled] | length > 0 and all' '$store' >/dev/null"
 
   start_tui a || { check "TUI A restarts for the headroom step" false; return; }
   check "TUI A's watchdog starts the proxy (pid file within 30 s)" wait_for 30 test -s "$pidfile"
