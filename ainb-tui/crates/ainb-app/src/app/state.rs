@@ -617,9 +617,11 @@ pub use crate::app::screens::{ScreenId, ids as screen_ids};
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct ConfirmationDialog {
     pub title: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub message: String,
     pub confirm_action: ConfirmAction,
-    pub selected_option: bool,   // true = Yes, false = No (binary mode)
+    pub selected_option: bool, // true = Yes, false = No (binary mode)
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub warning: Option<String>, // Optional warning (e.g., uncommitted files in worktree)
     // Tri-option mode: when `options` is `Some`, the dialog renders one button per
     // entry and Left/Right cycles `selected_index`. The final-option index is
