@@ -27,7 +27,7 @@
 
 PROOF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AINB_TUI_DIR="$(cd "$PROOF_LIB_DIR/../.." && pwd)"
-AINB_BIN="${AINB_BIN:-$AINB_TUI_DIR/target/debug/ainb}"
+AINB_BIN="${AINB_BIN:-${CARGO_TARGET_DIR:-$AINB_TUI_DIR/target}/debug/ainb}"
 : "${PROOF_OUT:?run.sh exports PROOF_OUT}"
 PROOF_COLS=160
 PROOF_ROWS=48
@@ -123,7 +123,8 @@ world_up() {
   export TMUX_TMPDIR="$PROOF_WORLD/tmux"
   unset TMUX TMUX_PANE
   mkdir -p "$HOME/.agents-in-a-box/config" "$TMUX_TMPDIR" "$PROOF_WORLD/bin"
-  export PATH="$PROOF_WORLD/bin:$AINB_TUI_DIR/target/debug:$PROOF_BASE_PATH"
+  PATH="$PROOF_WORLD/bin:${AINB_BIN%/*}:$PROOF_BASE_PATH"
+  export PATH
   export AINB_PLUGIN_ROOT="$AINB_TUI_DIR/dist/plugins"
 
   # `ainb init` records onboarding, so the setup wizard never opens.
