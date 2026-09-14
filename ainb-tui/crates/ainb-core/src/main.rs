@@ -33,8 +33,8 @@ use std::{
 // second time, so every module has one home and one set of visibility rules.
 use ainb::{app, cli, components, config, fleet, headroom, perf, plugins, tmux};
 
+use app::App;
 use app::keymap::{KeyAction, KeyContext, Keymap, ScrollAction, UiAction};
-use app::{App, EventHandler};
 use components::LayoutComponent;
 use components::slash::{SlashAction, SlashCommandRegistry, SlashPalette};
 
@@ -697,9 +697,7 @@ async fn run_tui_loop(
                             &app.state.shell.current_screen,
                         )
                         .is_some()
-                            || crate::app::events::EventHandler::is_in_text_input_context(
-                                &app.state,
-                            ));
+                            || crate::app::is_in_text_input_context(&app.state));
                     if !palette_open_suppressed && (slash_palette.is_open() || colon) {
                         match slash_palette.handle_key(key_event) {
                             SlashAction::Execute(cmd) => {
@@ -709,7 +707,7 @@ async fn run_tui_loop(
                                 // global keyboard shortcuts use. Commands with
                                 // no host mapping fall through to the log-only
                                 // stub (plugin-owned dispatch lands later).
-                                if let Some(intent) = EventHandler::slash_command_intent(&cmd) {
+                                if let Some(intent) = crate::app::slash_command_intent(&cmd) {
                                     run_intent(intent, app, &keymap, &mut ui, terminal).await?;
                                 } else {
                                     tracing::info!(
