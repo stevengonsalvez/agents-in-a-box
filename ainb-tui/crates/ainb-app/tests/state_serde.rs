@@ -1270,11 +1270,8 @@ fn no_typed_text_reaches_the_wire() {
         "TYPED_LABELS and the sample builder disagree"
     );
 
-    let blob: String = states
-        .iter()
-        .flat_map(|state| all_frames(state))
-        .map(|(_, frame)| frame.to_string())
-        .collect();
+    let blob: String =
+        states.iter().flat_map(all_frames).map(|(_, frame)| frame.to_string()).collect();
     let shown: BTreeMap<_, _> = CANARY_SHOWN.iter().copied().collect();
     let mut leaked = Vec::new();
     let mut missing = Vec::new();
