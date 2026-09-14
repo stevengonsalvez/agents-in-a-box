@@ -40,8 +40,12 @@ impl SnapshotManager {
             let tmux_alive = Self::check_tmux_alive(tmux_name).await;
             let git_branch = Self::get_git_branch(&metadata.worktree_path).await;
             let git_dirty_files = Self::get_git_dirty_files(&metadata.worktree_path).await;
+            // Written to ~/.agents-in-a-box/snapshots and kept: scrub the capture
+            // first, as every other place pane text is kept does.
             let pane_content = if tmux_alive {
-                Self::capture_pane(tmux_name).await
+                Self::capture_pane(tmux_name)
+                    .await
+                    .map(|pane| crate::fleet::bridge::redact::scrub(&pane))
             } else {
                 None
             };
