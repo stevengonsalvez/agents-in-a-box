@@ -1062,10 +1062,12 @@ impl EventHandler {
         // opened via `ConfigEditSetting` is included only for its
         // `TextInput` / `NumberInput` variants (via
         // `ConfigPopupState::is_text_entry`); `Choice` and `Boolean`
-        // popups are navigation-only, so `H` is still allowed there.
+        // popups are navigation-only, so `H` is still allowed there. The `/`
+        // filter box is free-form too: every printable key belongs in the query.
         let config_text_active = state.shell.current_screen == screen_ids::CONFIG
             && (state.config.config_screen_state.editing
                 || state.config.config_screen_state.api_key_input_mode
+                || state.config.config_screen_state.is_searching()
                 || state.config.config_popup_state.is_text_entry());
 
         // Onboarding wizard text-entry steps: git-directories path input,
@@ -1932,6 +1934,7 @@ impl EventHandler {
         // the section once and borrows the two fields off the inner struct.
         let config = state.config.get_mut();
         let mut applied = config.config_screen_state.apply_to_app_config(&mut config.app_config)?;
+        let keys_to_save = config.config_screen_state.keys_to_save(&applied);
         // Nothing to write: return before touching the file. `save()` renders
         // the whole AppConfig from the snapshot loaded at startup, so pressing
         // `S` with no edits would revert anything `ainb config set` or another
@@ -1957,7 +1960,9 @@ impl EventHandler {
                 queued_for_daemon,
             });
         }
-        state.config.app_config.save()?;
+        // Only the keys this screen changed: the rest of `app_config` is the
+        // startup snapshot, and saving it whole reverted another TUI's edit.
+        state.config.app_config.save_keys(&keys_to_save)?;
         // Collected, not propagated — the same rule the modelled rows already
         // follow. An external value the registry rejects (a `0` in a
         // `min: 1` row, say) used to fail the whole save with `?`, so
@@ -4919,11 +4924,17 @@ impl EventHandler {
             AppEvent::ConfigEditSetting => {
                 let selected = state.config.config_screen_state.current_setting().cloned();
                 if let Some(setting) = selected {
-                    // A row core cannot persist says so instead of opening an
-                    // editor that would throw the value away.
-                    if let Some(reason) =
+                    // The Claude auth row opens its own popup, from the list
+                    // and from a search match alike: picking "API key" there
+                    // also stores the key in the OS keychain, which the generic
+                    // choice popup cannot do.
+                    if setting.key == crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY {
+                        Self::process_event(AppEvent::AuthProviderPopupOpen, state);
+                    } else if let Some(reason) =
                         crate::config::screen_model::read_only_reason(&setting.key)
                     {
+                        // A row core cannot persist says so instead of opening
+                        // an editor that would throw the value away.
                         state.add_info_notification(format!("{}: {reason}", setting.label));
                     } else {
                         let title = setting.label.clone();
@@ -5180,7 +5191,12 @@ impl EventHandler {
                             // Persist auth provider to config.toml
                             state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::ApiKey;
-                            if let Err(e) = state.config.app_config.save() {
+                            // Only this key: the rest of `app_config` is the startup snapshot,
+                            // and a whole-file save reverts what another TUI wrote since (#987).
+                            if let Err(e) = state.config.app_config.save_keys(&[
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                    .to_string(),
+                            ]) {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
@@ -5224,7 +5240,12 @@ impl EventHandler {
                             // Persist auth provider to config.toml
                             state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::SystemAuth;
-                            if let Err(e) = state.config.app_config.save() {
+                            // Only this key: the rest of `app_config` is the startup snapshot,
+                            // and a whole-file save reverts what another TUI wrote since (#987).
+                            if let Err(e) = state.config.app_config.save_keys(&[
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                    .to_string(),
+                            ]) {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
@@ -5264,7 +5285,14 @@ impl EventHandler {
                         // Persist switch to system auth in config.toml
                         state.config.app_config.authentication.claude_provider =
                             crate::config::ClaudeAuthProvider::SystemAuth;
-                        if let Err(e) = state.config.app_config.save() {
+                        // Only this key: the rest of `app_config` is the startup snapshot,
+                        // and a whole-file save reverts what another TUI wrote since (#987).
+                        if let Err(e) = state
+                            .config
+                            .app_config
+                            .save_keys(&[crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                .to_string()])
+                        {
                             tracing::warn!("Failed to save config: {}", e);
                         }
                     }

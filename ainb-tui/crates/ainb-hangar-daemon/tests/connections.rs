@@ -110,6 +110,24 @@ impl Client {
         );
     }
 
+    /// `auth/hello` with an explicit surface pid and `transient` request.
+    async fn hello_with(&mut self, home: &std::path::Path, kind: &str, pid: u32, transient: bool) {
+        let token = std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(home))
+            .expect("read daemon token");
+        let mut params = serde_json::json!({
+            "token": token.trim(),
+            "surface": { "kind": kind, "pid": pid },
+        });
+        if transient {
+            params["transient"] = serde_json::Value::Bool(true);
+        }
+        let response = self.call(methods::AUTH_HELLO, params).await;
+        assert!(
+            response["error"].is_null(),
+            "hello must succeed: {response}"
+        );
+    }
+
     async fn subscribe_connections(&mut self) {
         let response = self.call(methods::ATTENTION_SUBSCRIBE, serde_json::json!({})).await;
         assert!(
@@ -491,4 +509,324 @@ async fn answer_provenance_comes_from_authenticated_connection_not_client() {
         "daemon provenance must use the registry surface and host, not client input"
     );
     assert_ne!(answered.answered_by.as_deref(), Some(spoofed_by));
+}
+
+/// A daemon on its own runtime and thread, so stopping it drops every task and
+/// socket it served, the way a killed daemon process does. Aborting the
+/// in-process `serve` task alone would leave its connection tasks running.
+struct IsolatedDaemon {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl IsolatedDaemon {
+    async fn start(home: &Path) -> Self {
+        let home = home.to_path_buf();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("daemon runtime");
+            runtime.block_on(async move {
+                let (_socket, _store) = start_server(&home).await;
+                let _ = ready_tx.send(());
+                let _ = stop_rx.await;
+            });
+            // Dropping the runtime here, off any async context, cancels the
+            // accept loop and every connection task, closing their sockets.
+            drop(runtime);
+        });
+        ready_rx.await.expect("daemon thread reached its serve loop");
+        Self {
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+
+    fn stop(mut self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("daemon thread exits cleanly");
+        }
+    }
+}
+
+impl Drop for IsolatedDaemon {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// The lease's dialer, reading the token fresh each attempt as `from_env` does,
+/// so a daemon that (re)writes it after the surface started is still reached.
+fn lease_dialer(home: &Path) -> ainb_hangar_client::Dialer {
+    let home = home.to_path_buf();
+    Box::new(move || {
+        let token = std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(&home))
+            .map_err(|error| ainb_hangar_client::DaemonError::Token(error.to_string()))?;
+        Ok(ainb_hangar_client::DaemonClient::with_parts(
+            rpc::socket_path_in(&home),
+            token.trim().to_string(),
+        ))
+    })
+}
+
+fn tui_surface() -> ainb_hangar_proto::connections::SurfaceInfo {
+    ainb_hangar_proto::connections::SurfaceInfo {
+        kind: ainb_hangar_proto::connections::SurfaceKind::Tui,
+        pid: std::process::id(),
+    }
+}
+
+async fn wait_for_state(
+    lease: &ainb_hangar_client::PresenceLease,
+    want: &ainb_hangar_client::PresenceState,
+    within: Duration,
+) {
+    let mut state = lease.state();
+    tokio::time::timeout(within, state.wait_for(|current| current == want))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "lease never reached {want:?}; last: {:?}",
+                *lease.state().borrow()
+            )
+        })
+        .expect("lease task alive");
+}
+
+/// Kinds and pids of every listed row, from a fresh raw observer that is not a
+/// `DaemonClient` and so never transient.
+async fn listed_surfaces(home: &Path) -> Vec<(String, u64)> {
+    let mut observer = Client::connect(&rpc::socket_path_in(home)).await;
+    observer.hello(home, Some("cli")).await;
+    observer.connections().await["connections"]
+        .as_array()
+        .expect("connections array")
+        .iter()
+        .filter(|row| row["surface"]["pid"] != 4242)
+        .map(|row| {
+            (
+                row["surface"]["kind"].as_str().unwrap_or_default().to_string(),
+                row["surface"]["pid"].as_u64().unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// #963: a surface holding a presence lease is exactly one row, however many
+/// call connections the same process opens, and whatever kind those calls
+/// declare. The row comes back after a daemon restart and goes on close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn presence_lease_is_one_row_across_calls_and_daemon_restart() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let daemon = IsolatedDaemon::start(home.path()).await;
+    let pid = u64::from(std::process::id());
+
+    let lease =
+        ainb_hangar_client::PresenceLease::spawn_with(tui_surface(), lease_dialer(home.path()));
+    wait_for_state(
+        &lease,
+        &ainb_hangar_client::PresenceState::Connected,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        listed_surfaces(home.path()).await,
+        vec![("tui".to_string(), pid)]
+    );
+
+    // A connection-change subscriber must see nothing from this process's calls.
+    let mut watcher = Client::connect(&rpc::socket_path_in(home.path())).await;
+    watcher.hello(home.path(), Some("web")).await;
+    watcher.subscribe_connections().await;
+
+    // The same process dialing as the TUI's poll sites (`tui`) and as the
+    // untouched `from_env` sites (`cli`). Each listing is taken WHILE that call
+    // connection is open, so it would contain itself if it were listed.
+    let token = std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(home.path()))
+        .expect("daemon token");
+    let cli_call = ainb_hangar_client::DaemonClient::with_parts(
+        rpc::socket_path_in(home.path()),
+        token.trim().to_string(),
+    );
+    let mut tui_call = cli_call.clone();
+    tui_call.set_surface(tui_surface());
+    for call in [&cli_call, &tui_call] {
+        let seen = call.connections_list().await.expect("transient call is served");
+        let ours: Vec<_> = seen
+            .connections
+            .iter()
+            .filter(|row| u64::from(row.surface.pid) == pid)
+            .map(|row| row.surface.kind.as_str())
+            .collect();
+        assert_eq!(ours, vec!["tui"], "one row for this process: {seen:?}");
+    }
+    if let Ok(event) = tokio::time::timeout(
+        Duration::from_millis(300),
+        watcher.next_connections_changed(),
+    )
+    .await
+    {
+        panic!("a transient call changed the listed registry: {event}");
+    }
+    drop(watcher);
+
+    // Kill the daemon: the row cannot outlive it, and the lease notices.
+    daemon.stop();
+    let lost = ainb_hangar_client::PresenceState::Connected;
+    let mut state = lease.state();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        state.wait_for(|current| *current != lost),
+    )
+    .await
+    .expect("lease notices the daemon went away")
+    .expect("lease task alive");
+
+    let restarted = Instant::now();
+    let daemon = IsolatedDaemon::start(home.path()).await;
+    wait_for_state(
+        &lease,
+        &ainb_hangar_client::PresenceState::Connected,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(restarted.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        listed_surfaces(home.path()).await,
+        vec![("tui".to_string(), pid)]
+    );
+
+    lease.close().await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let listed = listed_surfaces(home.path()).await;
+        if listed.iter().all(|(kind, _)| kind != "tui") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tui row outlived the lease: {listed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    daemon.stop();
+}
+
+/// #963: a surface started before its daemon registers once the daemon is up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn presence_lease_registers_once_a_late_daemon_comes_up() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let lease =
+        ainb_hangar_client::PresenceLease::spawn_with(tui_surface(), lease_dialer(home.path()));
+
+    // No daemon, no token: the lease waits quietly rather than failing.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        matches!(
+            *lease.state().borrow(),
+            ainb_hangar_client::PresenceState::Waiting { .. }
+        ),
+        "lease must wait for a daemon: {:?}",
+        *lease.state().borrow()
+    );
+
+    let daemon = IsolatedDaemon::start(home.path()).await;
+    wait_for_state(
+        &lease,
+        &ainb_hangar_client::PresenceState::Connected,
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        listed_surfaces(home.path()).await,
+        vec![("tui".to_string(), u64::from(std::process::id()))]
+    );
+    lease.close().await;
+    daemon.stop();
+}
+
+/// #963, web half: the web surface's one-shot reads are transient beside its
+/// presence socket, so only that socket is ever listed. Before the flag each
+/// read listed a second `web` row for its lifetime, which an exact-count smoke
+/// saw as flicker.
+#[tokio::test]
+async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let (socket, _store) = start_server(home.path()).await;
+
+    // The web server's presence socket, at this process's pid, as `serve`
+    // holds it.
+    let mut presence = Client::connect(&socket).await;
+    presence.hello_with(home.path(), "web", std::process::id(), false).await;
+
+    let mut watcher = Client::connect(&socket).await;
+    watcher.hello(home.path(), Some("tui")).await;
+    watcher.subscribe_connections().await;
+
+    let token = std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(home.path()))
+        .expect("daemon token");
+    let web = ainb_web::daemon::DaemonClient::with_parts(socket.clone(), token.trim().to_string());
+    for _ in 0..3 {
+        web.attention_list_fleet().await.expect("one-shot web read is served");
+    }
+
+    if let Ok(event) = tokio::time::timeout(
+        Duration::from_millis(300),
+        watcher.next_connections_changed(),
+    )
+    .await
+    {
+        panic!("a one-shot web read changed the listed registry: {event}");
+    }
+    let listed = watcher.connections().await;
+    let web_rows = listed["connections"].as_array().map_or(0, |rows| {
+        rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
+    });
+    assert_eq!(web_rows, 1, "only the presence socket is listed: {listed}");
+    drop(presence);
+}
+
+/// Review finding on #998: the daemon, not the client, decides transient. A
+/// transient hello with no listed presence at its pid is listed like any other
+/// connection and announced to subscribers, so no client can hide by asking.
+#[tokio::test]
+async fn a_transient_hello_without_a_presence_at_its_pid_is_listed_and_announced() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let (socket, _store) = start_server(home.path()).await;
+
+    let mut watcher = Client::connect(&socket).await;
+    watcher.hello(home.path(), Some("tui")).await;
+    watcher.subscribe_connections().await;
+
+    let mut hiding = Client::connect(&socket).await;
+    hiding.hello_with(home.path(), "cli", 31337, true).await;
+
+    let changed = watcher.next_connections_changed().await;
+    let announced = changed["connections"]
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|row| row["surface"]["pid"] == 31337));
+    assert!(
+        announced,
+        "the refused transient row must be announced: {changed}"
+    );
+
+    let listed = watcher.connections().await;
+    assert!(
+        listed["connections"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["surface"]["pid"] == 31337)),
+        "the refused transient row must be listed: {listed}"
+    );
+    drop(hiding);
 }

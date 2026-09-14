@@ -1,0 +1,14 @@
+---
+rust:
+  directory: ../../../rust/ainb-wire-mobile
+  manifestPath: Cargo.toml
+android:
+  targets:
+    - arm64-v8a
+    - x86_64
+  apiLevel: 24
+  useSharedLibrary: false
+ios:
+  targets:
+    - aarch64-apple-ios
+    - aarch64-apple-ios-sim

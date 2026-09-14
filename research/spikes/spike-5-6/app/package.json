@@ -1,0 +1,30 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "main": "index.ts",
+  "dependencies": {
+    "@ubjs/core": "^0.31.0-5",
+    "expo": "~57.0.22",
+    "expo-application": "~57.0.3",
+    "expo-build-properties": "~57.0.17",
+    "expo-linking": "~57.0.10",
+    "expo-notifications": "~57.0.18",
+    "expo-secure-store": "~57.0.4",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-ainb-wire": "file:modules/ainb-wire",
+    "uniffi-bindgen-react-native": "^0.31.0-5"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "private": true
+}

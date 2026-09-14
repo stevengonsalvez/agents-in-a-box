@@ -23,6 +23,10 @@
 /// The part-2 chat and Pal calls, in their own file so two parallel
 /// landings dedup across a boundary instead of inside one `impl` list.
 mod chat;
+/// The one long-lived connection a running surface holds (#963).
+mod presence;
+
+pub use presence::{Dialer, PresenceLease, PresenceState, mark_process_as_surface};
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -700,6 +704,22 @@ impl DaemonClient {
 
     /// Dial the socket and complete the mandatory `auth/hello` first frame.
     async fn dial(&self) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
+        self.dial_with(self.hello_params()).await
+    }
+
+    /// [`Self::dial`] for a presence lease's own connection: always listed,
+    /// even though the lease marks every other connection in this process
+    /// transient.
+    async fn dial_presence(
+        &self,
+    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
+        self.dial_with(self.hello_params_with(false)).await
+    }
+
+    async fn dial_with(
+        &self,
+        hello_params: Value,
+    ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
         let stream =
             UnixStream::connect(&self.socket).await.map_err(|source| DaemonError::Connect {
                 path: self.socket.display().to_string(),
@@ -707,7 +727,7 @@ impl DaemonClient {
             })?;
         let (read_half, mut writer) = stream.into_split();
         let mut reader = BufReader::new(read_half);
-        write_frame(&mut writer, methods::AUTH_HELLO, self.hello_params(), 1).await?;
+        write_frame(&mut writer, methods::AUTH_HELLO, hello_params, 1).await?;
         let hello = read_response(&mut reader).await?;
         if let Some(error) = hello.error {
             return Err(DaemonError::Rpc {
@@ -721,7 +741,13 @@ impl DaemonClient {
     /// Encode the optional surface extension without widening every client call
     /// site's public parameter list.
     fn hello_params(&self) -> Value {
-        json!({
+        self.hello_params_with(presence::lease_held())
+    }
+
+    /// The hello frame, marked `transient` when this process's presence is
+    /// held by a [`PresenceLease`] connection rather than by this one.
+    fn hello_params_with(&self, transient: bool) -> Value {
+        let mut params = json!({
             "token": self.token,
             "surface": self.surface,
             // D17: what this build can speak, and what it understands. A daemon
@@ -729,7 +755,11 @@ impl DaemonClient {
             // the same bare `{}` it always did.
             "protocol": ainb_hangar_proto::protocol::ProtocolRange::supported(),
             "capabilities": ainb_hangar_proto::protocol::catalogue_strings(),
-        })
+        });
+        if transient {
+            params["transient"] = Value::Bool(true);
+        }
+        params
     }
 
     async fn open_connections_subscription_inner(

@@ -186,6 +186,15 @@ async fn tokio_main() -> Result<()> {
         Some(("tui", _)) | None => {
             entered_tui = true;
 
+            // #963: the TUI's one presence connection, held from here until
+            // quit on every screen, plugins or not. It is how
+            // `hangar connections list` knows a TUI is running; it dials once
+            // the daemon is reachable and reconnects after a daemon restart.
+            // Spawned before the first daemon call below, and the process is
+            // marked a surface for good, so no call made during startup or
+            // teardown lists as a second row.
+            let presence = spawn_tui_presence();
+
             // A plugin-disabled TUI is a diagnostic fallback with no Hangar
             // consumer. Do not leave a background daemon behind for it.
             if !plugins::plugins_disabled() {
@@ -299,6 +308,12 @@ async fn tokio_main() -> Result<()> {
                 let _ = crossterm::event::read();
             }
 
+            // Lease the shared Headroom proxy for this TUI's lifetime, so a
+            // second TUI quitting does not stop a proxy this one still uses.
+            if let Err(e) = headroom::register_user() {
+                tracing::warn!("could not register as a headroom proxy user: {e}");
+            }
+
             let tui_result = run_tui(&mut app_state, &mut layout).await;
 
             // Explicitly tear down the plugin runtime before `app_state`
@@ -312,8 +327,12 @@ async fn tokio_main() -> Result<()> {
             }
 
             // Best-effort: stop the shared Headroom proxy so it does not
-            // orphan after the TUI exits.
-            headroom::stop();
+            // orphan after the TUI exits, unless another live TUI still holds
+            // a lease on it.
+            headroom::release_user_and_stop_if_unused();
+
+            // Last, so the row is listed for as long as this TUI can still act.
+            presence.close().await;
 
             tui_result
         }
@@ -351,6 +370,55 @@ async fn tokio_main() -> Result<()> {
     }
 
     result
+}
+
+/// Hold this TUI's presence row in the daemon's connection registry.
+///
+/// The lease owns the connection lifecycle; this only names the surface and
+/// logs transitions, never toasts: a TUI with no daemon is a normal state.
+fn spawn_tui_presence() -> fleet::bridge::daemon::PresenceLease {
+    use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
+    use fleet::bridge::daemon::{PresenceLease, PresenceState, mark_process_as_surface};
+
+    mark_process_as_surface();
+    let lease = PresenceLease::spawn(SurfaceInfo {
+        kind: SurfaceKind::Tui,
+        pid: std::process::id(),
+    });
+    let mut state = lease.state();
+    // Panic-free on purpose: the global panic handler tears the terminal down,
+    // so nothing here unwraps, and the lease task's own failures arrive as
+    // states, not panics.
+    tokio::spawn(async move {
+        while state.changed().await.is_ok() {
+            match &*state.borrow_and_update() {
+                PresenceState::Connected => {
+                    tracing::info!("tui presence connected to hangar daemon")
+                }
+                PresenceState::Waiting { error } => {
+                    tracing::debug!(error = ?error, "tui presence waiting for hangar daemon");
+                }
+                PresenceState::Closed => tracing::debug!("tui presence closed"),
+            }
+        }
+        // The sender is gone. Only `close()` publishes `Closed` first; any other
+        // end (the task panicked or was aborted) leaves this TUI unlisted in
+        // `hangar connections list` until restart, so say why.
+        let last = state.borrow().clone();
+        match last {
+            PresenceState::Closed => {}
+            PresenceState::Connected => tracing::warn!(
+                "tui presence task ended without close while connected (panicked or \
+                 aborted); this TUI is no longer listed in hangar connections"
+            ),
+            PresenceState::Waiting { error } => tracing::warn!(
+                last_error = ?error,
+                "tui presence task ended without close while waiting for the daemon \
+                 (panicked or aborted); this TUI will not be listed in hangar connections"
+            ),
+        }
+    });
+    lease
 }
 
 async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {

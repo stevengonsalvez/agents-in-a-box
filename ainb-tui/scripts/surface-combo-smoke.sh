@@ -67,6 +67,9 @@ fi
 
 FAILURES=0
 SESSIONS=()
+# Pids of the TUIs this combination launched. Each is `exec`ed into its pane,
+# so the pane pid IS the TUI pid the registry must report.
+TUI_PIDS=()
 
 log()  { printf '  %s\n' "$*"; }
 fail() { printf '  FAIL: %s\n' "$*" >&2; FAILURES=$((FAILURES + 1)); }
@@ -88,19 +91,15 @@ start_tui() {
   tmux send-keys -t "$name" \
     "HOME=$home AINB_HANGAR_HOME=$hangar_home AINB_DISABLE_PLUGINS=1 exec $AINB_BIN tui" Enter
 
-  # Open the session list, and keep pressing until it is on screen.
-  #
-  # A TUI parked on the home screen never dials the daemon: the attention
-  # poller is spawned from the sessions refresh, deliberately, so that an
-  # `ainb` invocation which never opens that surface never opens the socket.
-  # Without this the combination would be asserting that a TUI which is not
-  # using the daemon fails to register with it, which is true and useless.
+  # Left on the home screen, deliberately. A TUI holds its presence connection
+  # from startup on every screen (#963), so a TUI that never leaves home must
+  # still be listed; opening the session list first would hide a regression.
   local deadline=$((SECONDS + 45))
   while (( SECONDS < deadline )); do
-    if tmux capture-pane -t "$name" -p 2>/dev/null | grep -q "Workspaces ("; then
+    if tmux capture-pane -t "$name" -p 2>/dev/null | grep -q "Stats"; then
+      TUI_PIDS+=("$(tmux display-message -p -t "$name" '#{pane_pid}')")
       return 0
     fi
-    tmux send-keys -t "$name" "s" 2>/dev/null || true
     sleep 1
   done
   return 1
@@ -114,15 +113,46 @@ start_web() {
     "HOME=$home AINB_HANGAR_HOME=$hangar_home exec $AINB_BIN web --listen 127.0.0.1:$port" Enter
 }
 
+# The surfaces the registry lists, minus the `cli` rows, as one comparable
+# string: `tui:<pid>` per TUI row (pids sorted), `web` per web row, and
+# `cli-from-tui:<pid>` for any `cli` row carrying a TUI's pid. `cli` rows from
+# other pids are this script's own `connections list` probes and are ignored.
+surfaces_seen() {
+  local home="$1" hangar_home="$2" tui_pids
+  tui_pids=$(printf '%s\n' "${TUI_PIDS[@]:-}" | jq -R 'select(length > 0) | tonumber' | jq -sc .)
+  HOME="$home" AINB_HANGAR_HOME="$hangar_home" "$AINB_BIN" hangar connections list --format json 2>/dev/null \
+    | jq -r --argjson tuis "$tui_pids" '
+        [ .connections[].surface
+          | if .kind == "tui" then "tui:\(.pid)"
+            elif .kind == "cli" and (.pid as $p | $tuis | index($p)) then "cli-from-tui:\(.pid)"
+            elif .kind == "cli" then empty
+            else .kind end ]
+        | sort | join(",")' 2>/dev/null || true
+}
+
+# What `surfaces_seen` must print for this combination.
+surfaces_expected() {
+  local surface pid
+  {
+    # `if`, not `&&`: a false last test would fail the group under pipefail.
+    for pid in "${TUI_PIDS[@]:-}"; do
+      if [[ -n "$pid" ]]; then printf 'tui:%s\n' "$pid"; fi
+    done
+    for surface in "$@"; do
+      if [[ "$surface" == web ]]; then printf 'web\n'; fi
+    done
+  } | sort | paste -sd, -
+}
+
 # Poll rather than sleep: a surface's connection appears when it appears, and a
-# fixed sleep is either flaky or slow.
-wait_for_kinds() {
+# fixed sleep is either flaky or slow. Exact match, not substring: a second
+# `tui` row from one TUI is the defect (#963), not a pass.
+wait_for_surfaces() {
   local home="$1" hangar_home="$2" want="$3" deadline=$((SECONDS + 45))
   local seen=""
   while (( SECONDS < deadline )); do
-    seen=$(HOME="$home" AINB_HANGAR_HOME="$hangar_home" "$AINB_BIN" hangar connections list --format json 2>/dev/null \
-      | jq -r '[.connections[].surface.kind] | sort | join(",")' 2>/dev/null || true)
-    if [[ "$seen" == *"$want"* ]]; then
+    seen=$(surfaces_seen "$home" "$hangar_home")
+    if [[ "$seen" == "$want" ]]; then
       printf '%s' "$seen"
       return 0
     fi
@@ -158,6 +188,7 @@ run_combo() {
     return
   fi
 
+  TUI_PIDS=()
   local i=0 port
   for surface in "${surfaces[@]}"; do
     i=$((i + 1))
@@ -175,34 +206,24 @@ run_combo() {
     esac
   done
 
-  # The kinds the registry must name.
-  #
-  # Only `web` is asserted, and that is a statement about a known defect rather
-  # than about this script. A running TUI never appears in the registry at all
-  # (issue #963): `DaemonClient::from_env` hard-codes every client to
-  # `SurfaceKind::Cli` and `set_surface` has no callers, and separately the TUI
-  # holds no connection for the registry to list. Asserting a `tui` row here
-  # would wire a permanently red CI job to a defect this script did not cause
-  # and cannot fix from lane A.
-  #
-  # The TUI combinations still carry their weight: they prove the daemon comes
-  # up, the registry answers, concurrent writers do not drop each other's keys,
-  # and nothing is left holding a lock. When #963 lands, the `expected` line
-  # below becomes the full surface list and this comment goes away.
-  local seen expected
-  expected=$(printf '%s\n' "${surfaces[@]}" | sort -u | grep -v '^tui$' | paste -sd, - || true)
-  if [[ -z "$expected" ]]; then
-    seen=$(HOME="$home" AINB_HANGAR_HOME="$hangar_home" "$AINB_BIN" hangar connections list \
-      --format json 2>/dev/null | jq -r '[.connections[].surface.kind] | sort | join(",")' || true)
-    if [[ -n "$seen" ]]; then
-      log "registry reachable, kinds: $seen (no surface kind asserted, see #963)"
-    else
-      fail "$label: the connection registry did not answer at all"
-    fi
-  elif seen=$(wait_for_kinds "$home" "$hangar_home" "$expected"); then
-    log "connections: $seen (asserted: $expected)"
+  # The registry must name exactly the surfaces that are running: one `tui`
+  # row per TUI with that TUI's pid, one `web` row per web server, and no
+  # `cli` row from a TUI's own polls.
+  local seen expected sample
+  expected=$(surfaces_expected "${surfaces[@]}")
+  if seen=$(wait_for_surfaces "$home" "$hangar_home" "$expected"); then
+    log "connections: $seen"
+    # A presence that flickers is not a presence: the same answer every second.
+    for sample in 1 2 3 4 5; do
+      sleep 1
+      seen=$(surfaces_seen "$home" "$hangar_home")
+      if [[ "$seen" != "$expected" ]]; then
+        fail "$label: sample $sample saw ${seen:-<none>}, want $expected"
+        break
+      fi
+    done
   else
-    fail "$label: the registry never named $expected (saw: ${seen:-<none>})"
+    fail "$label: the registry never named exactly $expected (saw: ${seen:-<none>})"
   fi
 
   # One concurrent config write per surface slot, then every key must survive.
@@ -225,7 +246,36 @@ run_combo() {
     log "config survived concurrent writes: branch_prefix=$prefix"
   fi
 
+  # Quit every surface the orderly way first (ctrl+c is the TUI's quit key), so
+  # the check below covers the TUI closing its own presence, not only the
+  # kernel closing a killed process's socket.
+  local name
+  for name in "${SESSIONS[@]:-}"; do
+    # Plain name: `=name` is a session target, and send-keys needs a pane.
+    if [[ -n "$name" ]]; then tmux send-keys -t "$name" C-c 2>/dev/null || true; fi
+  done
+
+  # A quit surface leaves the registry. Only a listing that actually answered
+  # counts: an empty result from a failed call would pass vacuously.
+  if (( ${#TUI_PIDS[@]} > 0 )); then
+    local gone=0 gone_deadline=$((SECONDS + 10))
+    while (( SECONDS < gone_deadline )); do
+      if HOME="$home" AINB_HANGAR_HOME="$hangar_home" "$AINB_BIN" hangar connections list --format json 2>/dev/null \
+        | jq -e '.connections | type == "array"' >/dev/null 2>&1; then
+        seen=$(surfaces_seen "$home" "$hangar_home")
+        if [[ "$seen" != *tui:* ]]; then gone=1; break; fi
+      fi
+      sleep 1
+    done
+    if (( gone )); then
+      log "tui rows gone after quit"
+    else
+      fail "$label: tui rows outlived their TUIs (saw: ${seen:-<no listing>})"
+    fi
+  fi
+
   kill_sessions
+
   "$AINB_BIN" hangar daemon stop >/dev/null 2>&1 || true
 
   # Nothing may outlive the run. An orphan proxy pid file points at a process
