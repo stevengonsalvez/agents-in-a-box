@@ -39,6 +39,10 @@ pub trait RendererHost {
     fn pointer(&mut self, state: &AppState, pos: Pos, btn: Btn) -> Option<Intent>;
 }
 
+/// Rows that write outside ainb (`global.wire_statusline` edits Claude Code's
+/// settings), so they run from a key press and never from `Intent::Command`.
+pub const KEY_ONLY_COMMANDS: &[&str] = &["global.wire_statusline"];
+
 /// A [`RendererHost`] with no renderer: layout work is dropped and nothing is
 /// under the pointer.
 #[derive(Debug, Default, Clone, Copy)]
@@ -1464,16 +1468,23 @@ impl EventHandler {
                     tracing::warn!("command `{id}` is unknown");
                     return None;
                 };
-                // The same gate a key passes: a row runs only while its
-                // context is active, so a click resolved on one screen cannot
-                // act after the user has left it. A plugin action names its
-                // plugin explicitly and runs from any screen.
+                // Host-authored rows (a host's reports, a plugin action naming
+                // its plugin) run from any screen. A row that writes outside
+                // ainb runs only from its key, so no other surface can fire it
+                // by name. Every other row passes the gate a key passes: it
+                // runs only while its context is active, so a click resolved
+                // on one screen cannot act after the user has left it.
+                if KEY_ONLY_COMMANDS.contains(&id.as_str()) {
+                    tracing::warn!("command `{id}` runs only from its key");
+                    return None;
+                }
+                let host_authored = crate::app::reports::ids::ALL.contains(&id.as_str())
+                    || crate::app::plugin_action::ids::ALL.contains(&id.as_str());
                 let flags = HostFlags {
                     embed_interactive: state.is_interactive_pane(),
                     ..HostFlags::default()
                 };
-                let everywhere = crate::app::plugin_action::ids::ALL.contains(&id.as_str());
-                if !everywhere && !active_contexts(state, &flags).contains(&binding.ctx) {
+                if !host_authored && !active_contexts(state, &flags).contains(&binding.ctx) {
                     tracing::warn!("command `{id}` is not active on this screen");
                     return None;
                 }
