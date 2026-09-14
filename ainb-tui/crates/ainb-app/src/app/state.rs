@@ -3063,8 +3063,7 @@ impl Default for AppState {
             warn!("Failed to load config, using defaults: {}", e);
             AppConfig::default()
         });
-        let mut home_screen_v2_state = HomeScreenV2State::default();
-        home_screen_v2_state.restore_sidebar_width(app_config.ui_preferences.home_sidebar_width);
+        let home_screen_v2_state = HomeScreenV2State::default();
         // Read before the literal moves `app_config` into its section.
         let session_filter = app_config.ui_preferences.session_filter;
         Self {
