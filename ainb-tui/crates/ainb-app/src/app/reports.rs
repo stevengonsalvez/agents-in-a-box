@@ -25,7 +25,7 @@ pub mod ids {
     pub const ABTOP_SETUP_FINISHED: &str = "global.abtop_setup_finished";
     /// `{"tmux_session": String}`
     pub const IN_PLACE_OPENED: &str = "global.in_place_opened";
-    /// `{"tmux_session": String, "error": String}`
+    /// `{"tmux_session": String, "error": String, "unsupported": bool}`
     pub const IN_PLACE_FAILED: &str = "global.in_place_failed";
     /// `{"tmux_session": String}`
     pub const OBSERVER_OPENED: &str = "global.observer_opened";
@@ -271,11 +271,13 @@ pub fn in_place_opened(tmux_session: &str) -> Intent {
 }
 
 /// Report that the in-place client on `tmux_session` would not open.
+/// `unsupported` means this host can never open one, for any session, so the
+/// reducer stops asking it to.
 #[must_use]
-pub fn in_place_failed(tmux_session: &str, error: &str) -> Intent {
+pub fn in_place_failed(tmux_session: &str, error: &str, unsupported: bool) -> Intent {
     command(
         ids::IN_PLACE_FAILED,
-        json!({ "tmux_session": tmux_session, "error": error }),
+        json!({ "tmux_session": tmux_session, "error": error, "unsupported": unsupported }),
     )
 }
 
@@ -433,6 +435,7 @@ struct ObserverFailedArgs {
 struct InPlaceFailedArgs {
     tmux_session: String,
     error: String,
+    unsupported: bool,
 }
 
 #[derive(Deserialize)]
@@ -524,6 +527,7 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         }
         AppEvent::InPlaceFailed { .. } => {
             parse::<InPlaceFailedArgs>(args).map(|args| AppEvent::InPlaceFailed {
+                unsupported: args.unsupported,
                 tmux_session: args.tmux_session,
                 error: args.error,
             })
