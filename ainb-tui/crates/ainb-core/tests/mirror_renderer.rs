@@ -152,9 +152,9 @@ fn one_drain_is_one_transaction_and_effects_run_after_the_commit() {
         "three batches, one transaction"
     );
     assert_eq!(commit.changed, vec![SectionId::Sessions, SectionId::Shell]);
-    let seen = seen.lock().unwrap();
+    let effects_seen = seen.lock().unwrap().clone();
     assert_eq!(
-        seen.as_slice(),
+        effects_seen.as_slice(),
         [(
             before + 1,
             state.versions()[SectionId::Sessions.index()],
@@ -170,7 +170,7 @@ fn one_drain_is_one_transaction_and_effects_run_after_the_commit() {
 
     // An empty drain commits nothing and runs no effect.
     assert!(renderer.drain().changed.is_empty());
-    assert_eq!(seen.len(), 1);
+    assert_eq!(seen.lock().unwrap().len(), 1);
 }
 
 #[test]
