@@ -182,7 +182,9 @@ pub struct PluginsHostSection {
 pub struct PluginUiState {
     /// Snapshot bus version of the publish, increasing per topic.
     pub version: u64,
-    /// The plugin's view, in the shape the plugin documents.
+    /// The plugin's view, in the shape the plugin documents. Plugin-authored
+    /// text, so a frame carries it with every string scrubbed.
+    #[serde(serialize_with = "crate::wire::fields::scrub_json")]
     pub view: serde_json::Value,
 }
 
