@@ -20,7 +20,9 @@ def load_results(out: Path) -> list[dict]:
     if order_path.exists():
         order = [line.strip() for line in order_path.read_text().splitlines() if line.strip()]
     nodes = sorted(p.name for p in out.iterdir() if p.is_dir())
-    ranked = [n for n in order if n in nodes] + [n for n in nodes if n not in order]
+    # Every node the run meant to execute is ranked, directory or not: one
+    # that died before writing anything becomes a synthetic failure below.
+    ranked = order + [n for n in nodes if n not in order]
     results = []
     for node in ranked:
         path = out / node / "result.json"
