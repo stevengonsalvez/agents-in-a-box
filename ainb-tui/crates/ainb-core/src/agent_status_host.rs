@@ -34,7 +34,8 @@ use ainb_app::fleet::bridge::daemon::{DaemonClient, DaemonError, FleetStreamEven
 use ainb_hangar_proto::agent_status::{RosterStatusResult, join};
 use ainb_hangar_proto::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ;
 use ainb_hangar_proto::status_topic::{
-    AGENT_STATUS_ENVELOPE_MAX_BYTES, AGENT_STATUS_TOPIC, AgentStatusEnvelope, AgentStatusHealth,
+    AGENT_STATUS_CLOCK_TOPIC, AGENT_STATUS_ENVELOPE_MAX_BYTES, AGENT_STATUS_TOPIC,
+    AgentStatusClock, AgentStatusEnvelope, AgentStatusHealth,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -105,6 +106,8 @@ pub struct AgentStatusHost {
     unpublished: bool,
     /// The task was found finished and section 20 was told so.
     stop_reported: bool,
+    /// When the card clock was last published (#1054).
+    last_tick: Option<std::time::Instant>,
 }
 
 impl AgentStatusHost {
@@ -126,6 +129,7 @@ impl AgentStatusHost {
             sequence: 0,
             unpublished: false,
             stop_reported: false,
+            last_tick: None,
         }
     }
 
@@ -157,6 +161,13 @@ impl AgentStatusHost {
     ///
     /// With no plugin runtime yet the change is held and published once one
     /// exists, so a runtime that starts after the first read still gets it.
+    ///
+    /// This task is also the tick source for the cards' ages (#1054): while
+    /// section 20 holds cards it publishes the card clock on
+    /// [`AGENT_STATUS_CLOCK_TOPIC`] once a second, and right after every
+    /// envelope. Each publish marks the subscribing panel for a repaint, so an
+    /// idle card's age advances without a key press or a daemon event.
+    ///
     /// Returns whether an envelope was published.
     pub fn publish(
         &mut self,
@@ -166,26 +177,65 @@ impl AgentStatusHost {
         let Some(runtime) = runtime else {
             return false;
         };
-        self.publish_with(state, |topic, payload| {
-            runtime.publish_snapshot(topic, payload.into());
-        })
+        self.publish_with(
+            state,
+            std::time::Instant::now(),
+            now_ms(),
+            |topic, payload| {
+                runtime.publish_snapshot(topic, payload.into());
+            },
+        )
     }
 
-    /// [`Self::publish`] through `send`. The change stays unpublished until an
-    /// envelope actually goes out: a section mid-reset, with nothing to encode
-    /// yet, is published by a later iteration instead of being forgotten.
-    fn publish_with(&mut self, state: &AppState, send: impl FnOnce(&str, Vec<u8>)) -> bool {
-        if !self.unpublished {
-            return false;
+    /// [`Self::publish`] through `send`, at `now` and the local wall clock
+    /// `local_now_ms`. The change stays unpublished until an envelope actually
+    /// goes out: a section mid-reset, with nothing to encode yet, is published
+    /// by a later iteration instead of being forgotten.
+    fn publish_with(
+        &mut self,
+        state: &AppState,
+        now: std::time::Instant,
+        local_now_ms: i64,
+        mut send: impl FnMut(&str, Vec<u8>),
+    ) -> bool {
+        let mut published = false;
+        if self.unpublished {
+            if let Some(payload) = encode(&state.agent_status, self.sequence + 1) {
+                self.sequence += 1;
+                send(AGENT_STATUS_TOPIC, payload);
+                self.unpublished = false;
+                published = true;
+            }
         }
-        let Some(payload) = encode(&state.agent_status, self.sequence + 1) else {
-            return false;
-        };
-        self.sequence += 1;
-        send(AGENT_STATUS_TOPIC, payload);
-        self.unpublished = false;
-        true
+        let has_cards = state.agent_status.view.as_ref().is_some_and(|view| !view.cards.is_empty());
+        let tick_due = self.last_tick.is_none_or(|at| now.duration_since(at) >= CLOCK_TICK);
+        if has_cards && (published || tick_due) {
+            let tick = AgentStatusClock {
+                clock_ms: card_clock_ms(&state.agent_status, local_now_ms),
+            };
+            if let Ok(payload) = serde_json::to_vec(&tick) {
+                send(AGENT_STATUS_CLOCK_TOPIC, payload);
+                self.last_tick = Some(now);
+            }
+        }
+        published
     }
+}
+
+/// How often the card clock is published while section 20 holds cards: ages
+/// render in whole seconds.
+const CLOCK_TICK: Duration = Duration::from_secs(1);
+
+/// The clock a card's age is measured on: the daemon's, the clock evidence
+/// stamps are on.
+///
+/// Every daemon today is on this machine (`host_id = local`), so its clock is
+/// this one. When the joined read carries the daemon's clock at the read
+/// (#1036: `RosterStatusResult.read_at_ms`, `StatusView::daemon_now_ms`), this
+/// becomes `view.daemon_now_ms(local_now_ms)`, so a paired host with a skewed
+/// clock still ages its cards correctly.
+fn card_clock_ms(_section: &AgentStatusSection, local_now_ms: i64) -> i64 {
+    local_now_ms
 }
 
 /// Section 20 as the envelope the plugins fold, encoded.
@@ -965,7 +1015,7 @@ mod tests {
         assert!(host.unpublished);
         let mut sent = Vec::new();
         assert!(
-            !host.publish_with(&state, |topic, payload| sent
+            !host.publish_with(&state, std::time::Instant::now(), 1, |topic, payload| sent
                 .push((topic.to_string(), payload))),
             "nothing to encode mid-reset: held"
         );
@@ -985,14 +1035,16 @@ mod tests {
                 5,
             ),
         );
-        assert!(host.publish_with(&state, |topic, payload| {
-            sent.push((topic.to_string(), payload))
-        }));
+        assert!(
+            host.publish_with(&state, std::time::Instant::now(), 1, |topic, payload| {
+                sent.push((topic.to_string(), payload))
+            })
+        );
         assert!(!host.unpublished);
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, AGENT_STATUS_TOPIC);
         assert!(
-            !host.publish_with(&state, |topic, payload| sent
+            !host.publish_with(&state, std::time::Instant::now(), 1, |topic, payload| sent
                 .push((topic.to_string(), payload))),
             "published once"
         );
@@ -1075,5 +1127,127 @@ mod tests {
             reason.contains(ainb_app::fleet::bridge::redact::REDACTED),
             "{reason}"
         );
+    }
+
+    /// #1054: the host task is the tick source. Holding cards, it publishes the
+    /// card clock right after an envelope and then once a second, never faster,
+    /// and never while section 20 is empty.
+    #[tokio::test]
+    async fn the_host_publishes_the_card_clock_once_a_second_while_it_holds_cards() {
+        use ainb_hangar_proto::agent_status::{RosterStatusRow, status_row};
+        use ainb_hangar_proto::fleet::{
+            AttentionState, FleetCapabilities, FleetConfidence, FleetProvenance, FleetProvider,
+            FleetSession, LifecycleState, ManagementState, PaneBinding, TransportHealth,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut host =
+            AgentStatusHost::spawn_timed(dialer(dir.path().join("missing.sock")), false, fast());
+        let mut state = AppState::default();
+        let start = std::time::Instant::now();
+        let mut sent: Vec<(String, Vec<u8>)> = Vec::new();
+
+        apply(
+            &mut state,
+            AgentStatusUpdate::Read(
+                RosterStatusResult {
+                    rows: Vec::new(),
+                    read_revision: 1,
+                    unknown_events: Vec::new(),
+                },
+                1,
+            ),
+        );
+        host.unpublished = true;
+        host.publish_with(&state, start, 10_000, |topic, payload| {
+            sent.push((topic.into(), payload))
+        });
+        assert_eq!(
+            sent.iter().map(|(topic, _)| topic.as_str()).collect::<Vec<_>>(),
+            [AGENT_STATUS_TOPIC],
+            "no cards: no clock"
+        );
+
+        let session = FleetSession {
+            session_key: "claude:a".into(),
+            provider: FleetProvider::Claude,
+            provider_session_id: Some("a".into()),
+            tmux_target: None,
+            pane_binding: PaneBinding::Bound,
+            process_start_fingerprint: None,
+            cwd: "/w".into(),
+            display_name: None,
+            lifecycle: LifecycleState::Idle,
+            active_work_count: 0,
+            attention: AttentionState::Ask,
+            current_request_fingerprint: None,
+            current_request: None,
+            management: ManagementState::Managed,
+            transport_health: TransportHealth::Healthy,
+            capabilities: FleetCapabilities::default(),
+            provenance: FleetProvenance::Authoritative,
+            confidence: FleetConfidence::High,
+            discovered_at: 1,
+            last_observed_at: 1,
+            lifecycle_updated_at: 1,
+            attention_updated_at: 1,
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            version: 1,
+            updated_revision: 2,
+        };
+        apply(
+            &mut state,
+            AgentStatusUpdate::Read(
+                RosterStatusResult {
+                    rows: vec![RosterStatusRow {
+                        status: status_row(&session, true),
+                        session,
+                        read_revision: 2,
+                    }],
+                    read_revision: 2,
+                    unknown_events: Vec::new(),
+                },
+                2,
+            ),
+        );
+        host.unpublished = true;
+        sent.clear();
+        host.publish_with(&state, start, 10_000, |topic, payload| {
+            sent.push((topic.into(), payload))
+        });
+        assert_eq!(
+            sent.iter().map(|(topic, _)| topic.as_str()).collect::<Vec<_>>(),
+            [AGENT_STATUS_TOPIC, AGENT_STATUS_CLOCK_TOPIC],
+            "an envelope with cards is followed by the clock"
+        );
+        let tick: AgentStatusClock = serde_json::from_slice(&sent[1].1).unwrap();
+        assert_eq!(tick.clock_ms, 10_000);
+
+        sent.clear();
+        host.publish_with(
+            &state,
+            start + Duration::from_millis(400),
+            10_400,
+            |topic, payload| {
+                sent.push((topic.into(), payload));
+            },
+        );
+        assert!(sent.is_empty(), "not faster than once a second: {sent:?}");
+        host.publish_with(
+            &state,
+            start + Duration::from_millis(1_000),
+            11_000,
+            |topic, payload| {
+                sent.push((topic.into(), payload));
+            },
+        );
+        assert_eq!(
+            sent.iter().map(|(topic, _)| topic.as_str()).collect::<Vec<_>>(),
+            [AGENT_STATUS_CLOCK_TOPIC],
+            "an idle second later, the clock alone"
+        );
+        let tick: AgentStatusClock = serde_json::from_slice(&sent[0].1).unwrap();
+        assert_eq!(tick.clock_ms, 11_000);
     }
 }
