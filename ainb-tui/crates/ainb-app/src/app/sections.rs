@@ -925,6 +925,9 @@ pub struct HostOnlyState {
     // A spawned observer must survive briefly before it clears a prior retry
     // count. `tmux attach-session` reports some startup failures asynchronously.
     pub(crate) observer_started_at: Option<Instant>,
+    // The host answered an in-place attach with `unsupported`: it has no
+    // writable terminal, so the key stops asking it for one.
+    pub(crate) in_place_unsupported: bool,
     pub workspace_load_started: Option<Instant>,
     /// Channel receiver for background workspace loading results
     pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
@@ -1026,6 +1029,7 @@ impl Default for HostOnlyState {
             observer_pending: None,
             observer_failed_target: None,
             observer_started_at: None,
+            in_place_unsupported: false,
             workspace_load_started: None,
             workspace_load_receiver: None,
             last_snapshot_time: None,
