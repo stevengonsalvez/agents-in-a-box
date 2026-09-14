@@ -132,7 +132,7 @@ impl HomeScreenV2State {
 
     /// Start a sidebar resize drag a renderer has already hit-tested onto the
     /// resize edge.
-    pub fn start_sidebar_resize(&mut self) {
+    pub const fn start_sidebar_resize(&mut self) {
         self.sidebar_resize_active = true;
         self.sidebar_edge_hovered = true;
     }
