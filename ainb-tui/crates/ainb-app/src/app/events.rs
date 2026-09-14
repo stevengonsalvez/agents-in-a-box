@@ -1223,10 +1223,8 @@ impl EventHandler {
             Intent::Key(chord) => Self::handle_key_event_with_keymap(chord, state, keymap, host),
             Intent::Command(id, args) => {
                 let Some(binding) = keymap.command(&id) else {
-                    return crate::app::pointer::event_for(&id, &args).or_else(|| {
-                        tracing::warn!("command `{id}` is unknown or rejected arguments {args}");
-                        None
-                    });
+                    tracing::warn!("command `{id}` is unknown");
+                    return None;
                 };
                 let Some(action) = binding.action.with_args(&args) else {
                     tracing::warn!("command `{id}` rejected arguments {args}");
