@@ -50,6 +50,23 @@ fn every_section_has_one_object_frame() {
     }
 }
 
+/// A mirror frame's body is `section_json`, byte for byte, for every section of
+/// every sample. Every check in this file therefore covers what a renderer
+/// receives, not only what the seam returns.
+#[test]
+fn mirror_frames_carry_exactly_the_checked_section_json() {
+    use ainb_app::wire::frame::{HostId, Mirror, Subscription};
+    isolated_home();
+    for state in shape::sample_states(&mut shape::PlainSeed) {
+        let batch = Mirror::new(HostId::local(), Subscription::all()).batch(&state);
+        assert_eq!(batch.frames.len(), SectionId::COUNT);
+        for frame in batch.frames {
+            let id = frame.section_id().expect("a known section");
+            assert_eq!(frame.body, section_json(&state, id), "{}", frame.section);
+        }
+    }
+}
+
 #[test]
 fn leaf_key_paths_match_the_committed_fixture() {
     isolated_home();
