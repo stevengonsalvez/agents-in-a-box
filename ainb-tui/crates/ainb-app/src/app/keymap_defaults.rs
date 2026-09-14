@@ -1400,6 +1400,20 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Finish the OAuth login from the credentials it wrote",
         ),
+        unbound(
+            Context::Global,
+            "daemon_action_finished",
+            AppEvent::DaemonActionFinished {
+                report: crate::app::reports::DaemonActionReport {
+                    daemon: String::new(),
+                    verb: String::new(),
+                    ok: false,
+                    summary: String::new(),
+                    detail: String::new(),
+                },
+            },
+            "Show how a daemon lifecycle command ended on its row",
+        ),
     ]);
 
     rows
