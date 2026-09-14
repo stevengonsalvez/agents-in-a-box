@@ -248,6 +248,11 @@ impl MirrorStore {
     }
 
     /// Count one transaction and run every effect on the committed store.
+    ///
+    /// Effects are moved out while they run, since each reads the store. If one
+    /// unwinds, they are put back before the panic continues, so a renderer that
+    /// catches it keeps every effect registered instead of silently losing all
+    /// of them.
     fn commit(&mut self, changed: BTreeSet<SectionKey>) -> Commit {
         self.transactions += 1;
         let commit = Commit {
@@ -255,11 +260,17 @@ impl MirrorStore {
             transaction: self.transactions,
         };
         let mut effects = std::mem::take(&mut self.effects);
-        for effect in &mut effects {
-            effect(self, &commit);
-        }
+        let store = &*self;
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            for effect in &mut effects {
+                effect(store, &commit);
+            }
+        }));
         effects.append(&mut self.effects);
         self.effects = effects;
+        if let Err(panic) = ran {
+            std::panic::resume_unwind(panic);
+        }
         commit
     }
 
@@ -569,6 +580,39 @@ mod tests {
         assert!(
             later.changed.is_empty(),
             "an unsubscribed section stays out"
+        );
+    }
+
+    #[test]
+    fn a_panicking_effect_leaves_every_effect_registered() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let mut store = MirrorStore::new(Subscription::all());
+        let first = Arc::new(AtomicU32::new(0));
+        let later = Arc::new(AtomicU32::new(0));
+        let first_runs = Arc::clone(&first);
+        store.on_commit(move |_, _| {
+            assert!(
+                first_runs.fetch_add(1, Ordering::SeqCst) > 0,
+                "the first commit's effect fails"
+            );
+        });
+        let later_runs = Arc::clone(&later);
+        store.on_commit(move |_, _| {
+            later_runs.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drain(&mut store, "h", vec![frame("h", "shell", 1, 1)]);
+        }));
+        assert!(unwound.is_err());
+
+        drain(&mut store, "h", vec![frame("h", "shell", 1, 2)]);
+        assert_eq!(first.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            later.load(Ordering::SeqCst),
+            1,
+            "the later effect is still registered"
         );
     }
 
