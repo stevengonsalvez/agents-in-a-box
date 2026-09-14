@@ -511,7 +511,10 @@ impl ser::SerializeMap for Compound<'_> {
     type Ok = ();
     type Error = TraceError;
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), TraceError> {
-        self.pending_key = key.serialize(KeyString).ok();
+        // A key JSON cannot render still has a place in the key chain, so the name
+        // check sees that something unnamed is there instead of skipping it.
+        self.pending_key =
+            Some(key.serialize(KeyString).unwrap_or_else(|_| "<unrenderable>".to_string()));
         Ok(())
     }
     fn serialize_value<T: Serialize + ?Sized>(&mut self, v: &T) -> Result<(), TraceError> {
