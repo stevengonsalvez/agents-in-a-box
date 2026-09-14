@@ -425,7 +425,7 @@ impl LayoutComponent {
                 let log = state.get_selected_session().map_or(
                     crate::fleet::session_log::Log::Rows(Vec::new()),
                     |session| {
-                        state.log_streams.session_log.read(&crate::fleet::session_log::LogKey::new(
+                        state.host.session_log.read(&crate::fleet::session_log::LogKey::new(
                             &session.workspace_path,
                             AppState::agent_hook_name(session.agent_type),
                         ))
@@ -438,13 +438,13 @@ impl LayoutComponent {
             // state machine either way, so the two cannot drift in what they
             // render or which failures they report.
             SessionTab::Pal => {
-                let header = session_tabs::pal_header(&state.fleet.pal_dial);
+                let header = session_tabs::pal_header(&state.host.pal_dial);
                 // Inserted between the header and the conversation rather than
                 // replacing either. Both still have something true to say with
                 // the daemon down — the dials an operator recovers an adapter
                 // with, and the call the chat could not make — and the offer is
                 // the one thing neither of them could say.
-                let offer = state.pal_daemon_cta_open().then_some(&state.fleet.daemon_start_cta);
+                let offer = state.pal_daemon_cta_open().then_some(&state.host.daemon_start_cta);
                 // `chat_host`, not `chat_host_for`: the conversation was ticked
                 // in `tick_before_draw`, and `chat_host_for` ENDS by calling
                 // this, so what is painted is what was ticked rather than a
@@ -547,15 +547,15 @@ impl LayoutComponent {
                 // this pane never opens the notifications store. `spawn` is
                 // idempotent.
                 crate::fleet::session_log::spawn(
-                    &state.log_streams.session_log,
-                    &state.log_streams.session_log_running,
+                    &state.host.session_log,
+                    &state.host.session_log_running,
                 );
             }
             SessionTab::Pal => {
                 // The dial ticks with the pane, so the registry read and any
                 // in-flight configure land without the operator pressing
                 // anything, exactly like the chat host's own tick.
-                if state.fleet.update(|fleet| fleet.pal_dial.tick()) {
+                if state.host.pal_dial.tick() {
                     state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
                 let _ = state.chat_host_for(active);
