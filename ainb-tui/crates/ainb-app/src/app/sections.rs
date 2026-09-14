@@ -185,7 +185,52 @@ pub struct PluginsHostSection {
     /// terminal shows something else, each with when its watch was last
     /// renewed. A watch lapses unless renewed within
     /// `AppState::PLUGIN_SCREEN_WATCH_LEASE`, and goes when its plugin does.
-    pub watched_plugin_screens: std::collections::BTreeMap<String, std::time::Instant>,
+    pub watched_plugin_screens: std::collections::BTreeMap<String, ScreenWatch>,
+}
+
+/// The requests keeping one plugin screen rendering for hosts that are not
+/// showing it here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScreenWatch {
+    /// Each request still inside its lease: when it arrived, and the width
+    /// and height the requesting host draws the screen at.
+    pub requests: Vec<(std::time::Instant, u16, u16)>,
+}
+
+impl ScreenWatch {
+    /// Requests kept per screen; an older one past this is dropped first.
+    const MAX_REQUESTS: usize = 16;
+
+    /// Record a request for `width` by `height` at `now`, dropping requests
+    /// older than `lease`.
+    pub fn renew(
+        &mut self,
+        now: std::time::Instant,
+        width: u16,
+        height: u16,
+        lease: std::time::Duration,
+    ) {
+        self.lapse(now, lease);
+        if self.requests.len() >= Self::MAX_REQUESTS {
+            self.requests.remove(0);
+        }
+        self.requests.push((now, width, height));
+    }
+
+    /// Drop requests older than `lease` at `now`.
+    pub fn lapse(&mut self, now: std::time::Instant, lease: std::time::Duration) {
+        self.requests.retain(|(at, _, _)| now.saturating_duration_since(*at) <= lease);
+    }
+
+    /// The size to render at: the largest width and the largest height any
+    /// live request asked for, so no watching host gets a clipped view.
+    #[must_use]
+    pub fn viewport(&self) -> Option<(u16, u16)> {
+        self.requests.iter().fold(None, |size, (_, width, height)| {
+            let (w, h) = size.unwrap_or((0, 0));
+            Some(((*width).max(w), (*height).max(h)))
+        })
+    }
 }
 
 /// One plugin's `ui.state` view as the snapshot bus last delivered it. Never
