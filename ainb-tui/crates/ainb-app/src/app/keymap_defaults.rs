@@ -975,9 +975,6 @@ pub fn defaults() -> Vec<Binding> {
     append_app_rows!(rows, Context::Screen("config", super::keymap::SubContext::Named("categories")),
         toggle_expand: "enter" => AppEvent::ConfigToggleExpand,
     );
-    append_app_rows!(rows, Context::Screen("config", super::keymap::SubContext::Named("claude_auth")),
-        auth_provider: "enter" => AppEvent::AuthProviderPopupOpen,
-    );
     append_app_rows!(rows, Context::Screen("auth_provider_popup", super::keymap::SubContext::Named("input")),
         select: "enter" => AppEvent::AuthProviderPopupSelect,
         close: "esc" => AppEvent::AuthProviderPopupClose,
