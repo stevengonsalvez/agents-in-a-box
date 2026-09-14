@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 /// The host a frame or a row came from. One process-wide id per host; rows
 /// read from another host's daemon carry that daemon's id instead.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct HostId(String);
@@ -44,6 +45,7 @@ impl HostId {
 /// `clock_ms` is the daemon's own clock at the read. A renderer computes
 /// an age as `clock_ms - since_ms`, both on the daemon's clock, and never
 /// subtracts a remote timestamp from its local now.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonRead {
     pub revision: i64,
@@ -51,6 +53,7 @@ pub struct DaemonRead {
 }
 
 /// One section's state as a renderer receives it.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frame {
     /// Stable wire name, [`section_name`].
@@ -61,7 +64,9 @@ pub struct Frame {
     /// Present on sections whose content comes from a daemon read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon_read: Option<DaemonRead>,
-    /// `section_json` for the section: redacted by construction.
+    /// `section_json` for the section: redacted by construction. In TypeScript
+    /// it is `unknown`; `SectionBodies[frame.section]` names its shape.
+    #[cfg_attr(feature = "typescript-bindings", specta(type = specta_typescript::Unknown))]
     pub body: serde_json::Value,
 }
 
@@ -74,6 +79,7 @@ impl Frame {
 }
 
 /// Everything one host tick sends down the channel.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameBatch {
     pub frames: Vec<Frame>,
