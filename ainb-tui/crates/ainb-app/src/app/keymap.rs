@@ -851,6 +851,11 @@ pub enum HostAction {
     Scroll(ScrollAction),
     /// Collapse or expand the sessions sidebar.
     ToggleSessionsSidebar,
+    /// Widen the Skill Manager's Sources panel by one step, within this
+    /// renderer's width.
+    GrowSkillSources,
+    /// Narrow the Skill Manager's Sources panel by one step.
+    ShrinkSkillSources,
 }
 
 /// Renderer-local command: it is applied to the ratatui host's `UiState` and
