@@ -72,7 +72,7 @@ pub enum RepoCheck {
     Initializing,
     /// Remote is unreachable or missing. Blocks Launch; the message renders
     /// on the form.
-    Failed(String),
+    Failed(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
 }
 
 impl RepoCheck {
@@ -159,6 +159,10 @@ pub struct PickerBranchEntry {
 /// replaced in place when the background fetch lands (`loading` spinner).
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct BranchPickerState {
+    #[serde(
+        rename = "filter_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub filter: String,
     pub entries: Vec<PickerBranchEntry>,
     /// Index into `filtered_indices()` — NOT into `entries`.
@@ -166,6 +170,7 @@ pub struct BranchPickerState {
     /// True while the background fetch/ls-remote refresh is in flight.
     pub loading: bool,
     /// Inline error line (e.g. Checkout pick on an in-use branch).
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub error: Option<String>,
     /// Action applied on Enter; Tab toggles.
     pub mode: BaseMode,
