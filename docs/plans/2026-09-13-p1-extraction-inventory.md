@@ -253,8 +253,8 @@ Additions to the spec's enum, each proven by the call site it replaced: the `Ter
 
 | Test | Fails when |
 |------|------------|
-| `ainb-app/tests/host_side_effects.rs` manifest check | `[dependencies]` gains a clipboard, browser-open, editor or terminal-attach crate, or loses one of the two still listed: `arboard` (welcome and log-history copies, P5) and `portable-pty` (the preview embed's tmux client) |
-| `ainb-app/tests/host_side_effects.rs` source walk | A module's count of `Command::new(`, `CommandBuilder::new(`, `arboard`, `copy_osc52(`, `webbrowser` or `open::that` lines, outside `#[cfg(test)]` modules and comments, differs from its allow-list entry. Each entry carries its reason; the list is a ratchet both ways. |
+| `ainb-app/tests/host_side_effects.rs` dependency check | A clipboard, browser-open, editor or terminal-attach crate becomes reachable through normal dependencies for any target (the `cargo metadata` resolve walk, so target-gated and renamed dependencies count), or one of the three still listed stops being reachable: `arboard` and its Windows backend `clipboard-win` (welcome and log-history copies, P5) and `portable-pty` (the preview embed's tmux client) |
+| `ainb-app/tests/host_side_effects.rs` source walk | A module's count of `Command::new(`, `CommandBuilder::new(`, `arboard`, `copy_osc52(`, `webbrowser` or `open::that` lines, outside `#[cfg(test)]` modules and comments, differs from its allow-list entry. Each entry carries its reason; the list is a ratchet both ways. It is a line fence, not a call-graph check: a helper in an allow-listed module can be called from anywhere, and a spawn spelled through an alias or macro is not seen. |
 | `ainb-app/tests/renderer_free.rs` | ratatui or crossterm is reachable through normal dependencies, or a normal dependency enables `test-support` |
 | `ainb-app/tests/effects.rs` | One test per effect kind: the intent that asks for host work returns exactly that effect and moves exactly the expected section versions |
 
