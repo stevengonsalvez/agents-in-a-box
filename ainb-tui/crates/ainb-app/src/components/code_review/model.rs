@@ -66,8 +66,28 @@ pub struct Hunk {
     pub expanded_before: usize,
     /// How many of `gap_after` are currently revealed by the user.
     pub expanded_after: usize,
-    /// Rows in display order.
+    /// Rows in display order. A frame scrubs them as one text (a key block
+    /// spans rows) and drops the word-emphasis ranges of any row the scrub
+    /// changed, since those byte offsets point into the original text.
+    #[serde(serialize_with = "scrub_rows")]
     pub rows: Vec<DiffRow>,
+}
+
+fn scrub_rows<S: serde::Serializer>(rows: &[DiffRow], serializer: S) -> Result<S::Ok, S::Error> {
+    let raws: Vec<&str> = rows.iter().map(|row| row.raw.as_str()).collect();
+    let scrubbed = crate::fleet::bridge::redact::scrub_lines(&raws);
+    serializer.collect_seq(rows.iter().zip(scrubbed).map(|(row, raw)| {
+        let emphasis = if raw == row.raw {
+            row.emphasis.clone()
+        } else {
+            Vec::new()
+        };
+        DiffRow {
+            raw,
+            emphasis,
+            ..row.clone()
+        }
+    }))
 }
 
 /// Whether a row is unchanged context, an addition, or a removal.
