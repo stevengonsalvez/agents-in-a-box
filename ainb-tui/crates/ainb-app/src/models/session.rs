@@ -763,6 +763,7 @@ pub struct ShellSession {
     pub created_at: DateTime<Utc>,
     pub last_accessed: DateTime<Utc>,
     pub status: ShellSessionStatus,
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub preview_content: Option<String>, // Cached preview content for display
 }
 
