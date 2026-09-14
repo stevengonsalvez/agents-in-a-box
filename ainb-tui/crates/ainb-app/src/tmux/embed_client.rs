@@ -177,7 +177,8 @@ impl EmbedClient {
             }
         }
         cmd.arg("-t");
-        cmd.arg(session_name);
+        // Exact target: a bare name prefix-matches another session.
+        cmd.arg(format!("={session_name}"));
         apply_embed_env(&mut cmd);
 
         let pty = PtyWrapper::start_with_size(cmd, rows, cols).context("spawn tmux attach PTY")?;
