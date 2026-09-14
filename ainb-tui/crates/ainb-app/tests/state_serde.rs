@@ -1325,6 +1325,7 @@ fn credential_samples() -> Vec<String> {
         format!("SG.{}.{}", run('G', 22), run('g', 43)),
         format!("xoxc-{}", run('1', 40)),
         format!("xoxd-{}", run('2', 40)),
+        format!("AWS_SECRET_ACCESS_KEY={}", run('w', 40)),
     ]
 }
 
