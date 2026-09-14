@@ -472,9 +472,13 @@ async fn run_tui_loop(
     let mut slash_palette = SlashPalette::new(SlashCommandRegistry::built_ins());
 
     loop {
-        // Effects the previous iteration's events queued. They run here, after
-        // the step that queued them finished writing state, and before the
-        // frame that shows their result.
+        // Effects still on the outbox. dispatch, tick and apply_pending_event
+        // hand over what they queue, so two paths leave effects here: the
+        // clipboard paste re-queues the effects of the text it dispatched
+        // (one effect never runs inside another), and a tick that fails part
+        // way returns its error before handing over what it already queued.
+        // They run after the step that queued them finished writing state,
+        // and before the frame that shows their result.
         for effect in app.state.take_effects() {
             ainb::effect_host::execute(effect, app, &keymap, terminal, &mut ui).await?;
             needs_redraw = true;
