@@ -277,6 +277,12 @@ impl AppState {
         self.agent_status.update(|section| section.mark_absent(reason))
     }
 
+    /// The agent-status host reconnected: section 20 drops its view and keeps
+    /// the head it was told, so the next read cannot render live below it.
+    pub fn agent_status_reset(&mut self) -> bool {
+        self.agent_status.update(AgentStatusSection::reset)
+    }
+
     /// A newer Fleet revision was observed: section 20 goes stale until a read
     /// at or past it lands.
     pub fn observe_agent_status_head(&mut self, head_revision: i64) -> bool {
