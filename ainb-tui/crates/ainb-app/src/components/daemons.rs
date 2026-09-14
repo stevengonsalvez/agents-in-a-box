@@ -132,11 +132,14 @@ pub struct DaemonsState {
     /// In-flight actions per daemon, with when each was asked for. Present =
     /// an action is running, which also serves as the one-outstanding guard
     /// for that row.
-    pub inflight: std::collections::HashMap<&'static str, std::time::Instant>,
+    pub inflight: std::collections::HashMap<&'static str, InFlight>,
     /// Actions asked for and not yet handed to the host. Drained by the key
     /// handler, which queues each as an `Effect::RunDaemonAction`; the
     /// component itself must not reach into `AppState`.
-    pub action_requests: Vec<(DaemonKind, Action)>,
+    pub action_requests: Vec<DaemonActionRequest>,
+    /// The generation the next request takes. Shared with the Pal start offer
+    /// through [`DaemonsState::next_generation`].
+    pub generation: u64,
     /// The in-flight hook install/repair, if one is running. Same shape and
     /// same one-outstanding guarantee as [`DaemonsState::inflight`]; the Hooks
     /// box is a panel rather than a row, so it needs its own slot.
@@ -157,6 +160,22 @@ pub struct DaemonsState {
     /// which owns the app-level pending-action slot; the component itself must
     /// not reach into `AppState`.
     pub attach_request: Option<String>,
+}
+
+/// A daemon action the host is running.
+#[derive(Debug, Clone, Copy)]
+pub struct InFlight {
+    pub action: Action,
+    pub generation: u64,
+    pub started: std::time::Instant,
+}
+
+/// A daemon action asked for and not yet handed to the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaemonActionRequest {
+    pub daemon: DaemonKind,
+    pub action: Action,
+    pub generation: u64,
 }
 
 /// The open action menu: which daemon it belongs to and where the cursor is.
@@ -463,22 +482,47 @@ impl DaemonsState {
         if self.inflight.contains_key(kind.id()) {
             return;
         }
-        self.inflight.insert(kind.id(), std::time::Instant::now());
+        let generation = self.next_generation();
+        self.inflight.insert(
+            kind.id(),
+            InFlight {
+                action,
+                generation,
+                started: std::time::Instant::now(),
+            },
+        );
         self.outcomes.remove(kind.id());
-        self.action_requests.push((kind, action));
+        self.action_requests.push(DaemonActionRequest {
+            daemon: kind,
+            action,
+            generation,
+        });
+    }
+
+    /// A generation no earlier request used.
+    pub const fn next_generation(&mut self) -> u64 {
+        self.generation += 1;
+        self.generation
     }
 
     /// Take the actions asked for since the last call, oldest first.
-    pub fn take_action_requests(&mut self) -> Vec<(DaemonKind, Action)> {
+    pub fn take_action_requests(&mut self) -> Vec<DaemonActionRequest> {
         std::mem::take(&mut self.action_requests)
     }
 
-    /// Fold in what the host reported for `daemon`'s action.
+    /// Fold in what the host reported for `daemon`'s action of `generation`.
     ///
-    /// Ignored unless that daemon has an action in flight: a report that lands
-    /// after the give-up in [`DaemonsState::poll_actions`] must not overwrite
-    /// the timeout the row already shows with a result nobody is waiting for.
-    pub fn finish_action(&mut self, daemon: &str, outcome: ActionOutcome) -> bool {
+    /// Ignored unless that exact request is in flight: a report that lands
+    /// after the give-up in [`DaemonsState::poll_actions`], or after a later
+    /// request on the same row, must not overwrite what the row shows with a
+    /// result nobody is waiting for.
+    pub fn finish_action(&mut self, daemon: &str, generation: u64, outcome: ActionOutcome) -> bool {
+        let answers = self.inflight.get(daemon).is_some_and(|inflight| {
+            inflight.generation == generation && inflight.action == outcome.action
+        });
+        if !answers {
+            return false;
+        }
         let Some((id, _)) = self.inflight.remove_entry(daemon) else {
             return false;
         };
@@ -491,8 +535,8 @@ impl DaemonsState {
     /// blocking syscalls.
     pub fn poll_actions(&mut self) {
         let mut done = Vec::new();
-        for (id, started) in &self.inflight {
-            if started.elapsed() > ACTION_TIMEOUT {
+        for (id, inflight) in &self.inflight {
+            if inflight.started.elapsed() > ACTION_TIMEOUT {
                 // `inflight` doubles as the one-outstanding guard, so an action
                 // that never returns would pin its row on `⟳ working` and
                 // silently swallow every later action on that daemon for the
@@ -500,7 +544,7 @@ impl DaemonsState {
                 done.push((
                     *id,
                     ActionOutcome {
-                        action: Action::Restart,
+                        action: inflight.action,
                         ok: false,
                         summary: "timed out".to_string(),
                         detail: format!(
