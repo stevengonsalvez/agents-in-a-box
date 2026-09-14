@@ -224,6 +224,38 @@ where
     None
 }
 
+/// Press the Hangar launch key and confirm the TUI acted on it.
+///
+/// `g` lazy-spawns the staged hangar-tui subprocess, which authenticates as
+/// `surface.kind=tui` over the production daemon socket. It used to be sent
+/// once and hoped for, with a comment warning not to re-send because a plugin
+/// screen may own `g` itself.
+///
+/// That warning is real but narrower than it looks: the hazard needs a plugin
+/// screen to be UP, and while the HomeScreen chrome is still on the pane no
+/// plugin screen is. So this re-sends only while the app is demonstrably still
+/// on the HomeScreen, which is precisely the state in which the previous key
+/// cannot have been consumed by anything that would mind a second one.
+///
+/// This is delivery-until-observed, not a retry loop over a flaky assertion.
+/// A `send-keys` that tmux accepted can still be dropped by an application that
+/// has not finished taking over the terminal, and the symptom is exactly what
+/// #953 reports: the HomeScreen renders, the key reports success, and the
+/// Hangar screen never appears, with the captured frame showing an ordinary
+/// HomeScreen and the `[g]` item sitting unactivated in the sidebar.
+fn press_hangar_launch_key(session: &str) {
+    // `Stats` plus `[i]` is the HomeScreen chrome the caller just waited for,
+    // and the same pair the post-launch assertion requires to be GONE.
+    let on_home = |capture: &str| capture.contains("Stats") && capture.contains("[i]");
+    for _ in 0..3 {
+        send_key(session, "g");
+        if poll_capture(session, Duration::from_secs(5), |capture| !on_home(capture)).is_some() {
+            return;
+        }
+    }
+    // Out of attempts. The caller's own poll produces the diagnostic frame.
+}
+
 fn send_key(session: &str, key: &str) {
     let status = Command::new("tmux")
         .args(["send-keys", "-t", session, key])
@@ -266,6 +298,7 @@ impl Drop for OwnedTmuxSession {
 fn launch_tui(home: &Path, plugin_root: &Path, daemon: &Path) -> OwnedTmuxSession {
     let session = format!("tripwire-hangar-tui-presence-{}", std::process::id());
     let ainb_home = home.join(".agents-in-a-box");
+    dismiss_notify_install_prompt(home);
     let mut new_session = Command::new("tmux");
     new_session.args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"]);
     for (key, value) in [
@@ -298,6 +331,38 @@ fn launch_tui(home: &Path, plugin_root: &Path, daemon: &Path) -> OwnedTmuxSessio
     }
 }
 
+/// Record the ainb-hooks prompt as already dismissed, before the TUI starts.
+///
+/// `maybe_prompt_notify_install` fires on startup whenever `install.json`
+/// records no agents and no dismissal, which is exactly what a fresh fixture
+/// `HOME` looks like. The modal then owns the keyboard, so the `g` that should
+/// open the Hangar screen is swallowed and the test fails with "Hangar screen
+/// chrome never rendered after its launch key" while the captured frame shows
+/// the install prompt (#953).
+///
+/// Whether the modal wins that race depends on how fast the runner reaches the
+/// first render, which is why it failed intermittently and only on CI. Seeding
+/// the dismissal removes the race rather than out-waiting it: this test is
+/// about daemon connection presence and has no opinion about hook installation.
+///
+/// `Paths::from_home` reads `AINB_HANGAR_HOME` first, which `launch_tui` points
+/// at `home`, so the record belongs at `home/install.json`.
+fn dismiss_notify_install_prompt(home: &Path) {
+    std::fs::create_dir_all(home).expect("fixture home exists");
+    std::fs::write(
+        home.join("install.json"),
+        serde_json::json!({
+            "agents": [],
+            "hook_script": "",
+            "claude_plugin_dir": null,
+            "codex_hooks_json": null,
+            "prompt_dismissed": true,
+        })
+        .to_string(),
+    )
+    .expect("seed the dismissed notify-install prompt");
+}
+
 fn connections_json(home: &Path, daemon: &Path) -> serde_json::Value {
     let (ok, output) = run(
         home,
@@ -309,29 +374,55 @@ fn connections_json(home: &Path, daemon: &Path) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("connections list must be JSON: {error}; output:\n{output}"))
 }
 
-fn tui_pid(connections: &serde_json::Value) -> Option<u32> {
+/// Every `tui`-kind connection's pid.
+///
+/// There is more than one. The `ainb tui` process registers its own `tui`
+/// surface when it connects to the daemon, and the Hangar plugin registers a
+/// second when the launch key spawns it, so "the tui row" is not a thing
+/// (#953). Which of them a single-row lookup returned came down to connection
+/// order, and on macOS the main TUI's registration landed first.
+fn tui_pids(connections: &serde_json::Value) -> std::collections::BTreeSet<u32> {
     connections["connections"]
-        .as_array()?
-        .iter()
-        .find(|row| row["surface"]["kind"].as_str() == Some("tui"))?["surface"]["pid"]
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-        .filter(|pid| *pid > 0)
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| row["surface"]["kind"].as_str() == Some("tui"))
+                .filter_map(|row| row["surface"]["pid"].as_u64())
+                .filter_map(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 0)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-fn wait_for_tui_pid(home: &Path, daemon: &Path, timeout: Duration) -> (u32, serde_json::Value) {
+/// Wait for a `tui` connection that was NOT there before the launch key.
+///
+/// The plugin is identified by being new, which is the only thing that
+/// distinguishes it from the `ainb tui` process's own `tui` registration
+/// without reaching into either process. Strictly stronger than the old
+/// "first tui row" lookup: it asserts the launch key CAUSED a connection
+/// rather than that one happens to exist.
+fn wait_for_new_tui_pid(
+    home: &Path,
+    daemon: &Path,
+    before: &std::collections::BTreeSet<u32>,
+    timeout: Duration,
+) -> (u32, serde_json::Value) {
     let deadline = Instant::now() + timeout;
     let mut last = None;
     while Instant::now() < deadline {
         let connections = connections_json(home, daemon);
-        if let Some(pid) = tui_pid(&connections).filter(|pid| pid_alive(*pid)) {
+        if let Some(pid) =
+            tui_pids(&connections).difference(before).copied().find(|pid| pid_alive(*pid))
+        {
             return (pid, connections);
         }
         last = Some(connections);
         std::thread::sleep(Duration::from_millis(100));
     }
     panic!(
-        "real TUI plugin never stayed in connections list; last listing: {}",
+        "the Hangar launch key never produced a new TUI connection; pids before: \
+         {before:?}; last listing: {}",
         last.unwrap_or(serde_json::Value::Null)
     );
 }
@@ -341,7 +432,7 @@ fn tui_stays_listed(home: &Path, daemon: &Path, pid: u32, duration: Duration) ->
     let mut observed = false;
     while Instant::now() < deadline {
         let listing = connections_json(home, daemon);
-        if tui_pid(&listing) != Some(pid) || !pid_alive(pid) {
+        if !tui_pids(&listing).contains(&pid) || !pid_alive(pid) {
             return false;
         }
         observed = true;
@@ -486,28 +577,48 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         !home_capture.contains("Control Center"),
         "Hangar content appeared before its launch key:\n{home_capture}"
     );
+    // If the install prompt is up, it owns the keyboard and the `g` below is
+    // swallowed. `dismiss_notify_install_prompt` is what keeps it down, and
+    // failing HERE names the cause instead of surfacing 30 s later as "Hangar
+    // screen chrome never rendered" with no hint why (#953).
+    assert!(
+        !home_capture.contains("Get notified when a session needs you?")
+            && !home_capture.contains("Update notification hooks?"),
+        "the ainb-hooks install prompt is holding focus and will swallow the \
+         launch key; the seeded dismissal did not take:\n{home_capture}"
+    );
+    // Keyed on the TUI surface, never on a count of CLI rows (#953).
+    //
+    // Every `connections_json` call is itself a CLI connection, and the daemon
+    // deregisters one when its socket closes, which it does asynchronously. So
+    // the number of `cli` rows visible at any instant is a property of this
+    // harness racing its own previous probe, not of the daemon: two were seen
+    // 0.3 ms apart on CI. The invariant the test is actually about is that the
+    // Hangar TUI has not connected before its launch key, which is the same
+    // thing `tui_pid` keys on everywhere below.
     let empty_listing = connections_json(home.path(), &daemon);
-    let empty_connections = empty_listing["connections"]
+    let non_observer_connections: Vec<_> = empty_listing["connections"]
         .as_array()
-        .expect("connections list must contain an array");
-    let non_observer_connections: Vec<_> = empty_connections
+        .expect("connections list must contain an array")
         .iter()
         .filter(|connection| connection["surface"]["kind"].as_str() != Some("cli"))
         .collect();
     assert!(
-        non_observer_connections.is_empty(),
-        "registry must have zero connections before the Hangar launch key, apart from its CLI observer: {empty_listing}"
+        non_observer_connections
+            .iter()
+            .all(|connection| connection["surface"]["kind"].as_str() == Some("tui")),
+        "only CLI observers and the TUI itself may be connected before the Hangar launch key: {empty_listing}"
     );
-    assert_eq!(
-        empty_connections.len(),
-        1,
-        "only the connections-list CLI observer may be registered before the Hangar launch key: {empty_listing}"
-    );
+    // Recorded, not forbidden. The `ainb tui` process registers its OWN `tui`
+    // surface when it connects to the daemon, before and independently of the
+    // Hangar plugin, so requiring zero `tui` rows here asserted a race: on
+    // macOS that registration landed before this probe and the test failed
+    // with a listing that was entirely correct (#953). What the launch key
+    // must do is produce a NEW one, which is what this baseline makes
+    // checkable.
+    let tui_before = tui_pids(&empty_listing);
 
-    // `g` is a single-shot navigation key. It lazy-spawns the staged real
-    // hangar-tui subprocess, which authenticates as `surface.kind=tui` over the
-    // production daemon socket. Do not re-send it: plugin screens may own `g`.
-    send_key(tui.name(), "g");
+    press_hangar_launch_key(tui.name());
     let hangar_capture = poll_capture(tui.name(), Duration::from_secs(30), |capture| {
         capture.contains("[1]Issues") && capture.contains("[B]Boards")
     })
@@ -522,10 +633,14 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
         "HomeScreen remained visible after Hangar launch key:\n{hangar_capture}"
     );
     let (plugin_pid, first_listing) =
-        wait_for_tui_pid(home.path(), &daemon, Duration::from_secs(30));
+        wait_for_new_tui_pid(home.path(), &daemon, &tui_before, Duration::from_secs(30));
     assert!(
-        tui_pid(&first_listing) == Some(plugin_pid),
+        tui_pids(&first_listing).contains(&plugin_pid),
         "connections list must expose the live TUI row with its process pid: {first_listing}"
+    );
+    assert!(
+        !tui_before.contains(&plugin_pid),
+        "the plugin's connection must be the one the launch key created: {first_listing}"
     );
 
     // Poll through a real hold period so this cannot pass on a transient
@@ -543,7 +658,7 @@ fn real_tui_presence_stays_listed_then_disappears_on_shutdown() {
     assert!(
         wait_until(Duration::from_secs(15), || {
             let listing = connections_json(home.path(), &daemon);
-            tui_pid(&listing).is_none()
+            !tui_pids(&listing).contains(&plugin_pid)
         }),
         "TUI row for pid {plugin_pid} remained after exact tmux shutdown"
     );

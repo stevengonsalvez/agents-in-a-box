@@ -39,6 +39,7 @@
 //! | `FAKE_ACP_FAIL_TURN_SESSIONS` | comma list (or `*`) whose prompt answers `stopReason: refusal` |
 //! | `FAKE_ACP_STOP_REASON` | `stopReason` answered by every non-refused prompt (default `end_turn`; e.g. `max_tokens`) |
 //! | `FAKE_ACP_HANG_PROMPTS` | comma list (or `*`) of prompt TEXTS whose turn never answers |
+//! | `FAKE_ACP_HANG_CLOSE` | comma list of adapter session ids (or `*`) whose `session/close` never answers |
 //! | `FAKE_ACP_ECHO_PROMPT` | append the prompt text to the final agent message |
 //! | `FAKE_ACP_GHOST_SESSION` | per turn, emit one `session/update` AND one `session/request_permission` for THIS adapter session id, which no client session owns |
 //! | `FAKE_ACP_RPC_LOG` | append every `spawn`/`new`/`prompt`/`permission`/`cancel`/`close` this process observed to this path |
@@ -292,6 +293,12 @@ fn handle(
         }
         "session/close" => {
             record(&format!("close:{session_id}"));
+            // A close that never answers. Real adapters do this under load, and
+            // the daemon must not let it hold a pool slot: the route table is
+            // the daemon's own accounting, not the adapter's.
+            if selected("FAKE_ACP_HANG_CLOSE", &session_id) {
+                return;
+            }
             respond(out, id, &serde_json::json!({}));
         }
         _ => respond_error(out, id, -32601, "method not found"),

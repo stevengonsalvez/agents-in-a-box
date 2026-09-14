@@ -1,6 +1,6 @@
 # G6 human checkpoint: slice 1
 
-**Date:** 2026-09-12, re-verified 2026-09-13 against `v2` at `4cbab0970`
+**Date:** 2026-09-12, re-verified 2026-09-13 against `v2` at `4cbab0970`, steps 1 to 7 re-run 2026-09-13 against `v2` at `026f40828`
 **For:** Stevie, two terminals.
 **Covers:** the `[CHECKPOINT:human-verify]` for Phase 1 (keymap) and Phase 3 (scroll and mouse), the manual rows for S-A and S-B, and the manual row for S-C.
 **Also published as a page:** https://claude.ai/code/artifact/892c7758-68ef-48a3-831a-176386ac0657
@@ -11,13 +11,18 @@ Every command below is literal. The paths and chord names were re-run against `a
 
 ## Build the binary you are checking
 
+From the root of any checkout of this repository (this adds a fresh worktree, it does not touch the checkout you run it from):
+
 ```
-cd ~/orca/workspaces/agents-in-a-box/p0-closure/ainb-tui
-cargo build -p ainb -p ainb-hangar-daemon
+git fetch origin v2
+git worktree add --detach ../g6-v2 origin/v2
+cd ../g6-v2/ainb-tui
+CARGO_INCREMENTAL=0 cargo build -p ainb -p ainb-hangar-daemon
 bash scripts/build-plugins.sh
+./target/debug/ainb --version
 ```
 
-`target/debug/ainb` is the binary every step below means.
+`target/debug/ainb` is the binary every step below means, and every `./target/debug/ainb` below is run from that `ainb-tui` directory. The version line must name the `v2` SHA you checked out. Do not build from a closed lane's worktree: those branches are behind `v2`.
 
 ## 1. Keymap override (Phase 1)
 
@@ -76,6 +81,8 @@ Terminal B:
 
 In A, open Config (`o`) and change one setting. In B, change a DIFFERENT setting. Quit both, start either one again.
 
+How to change a setting on `v2` at `026f40828`: press `/`, move to the row with `up` / `down`, press `enter`, edit, `enter` to save. Plain `enter` on the settings list does not open the editor any more (the `config` keymap context has no `enter` row; only `config.search` does), even though the footer still says `Enter edit`. Quit with `ctrl+c`: on the home screen `q` is bound to `go_home`, not quit.
+
 - **Pass:** both settings survive. Before S-A the second writer's read-modify-write dropped the first.
 
 ## 5. One headroom proxy (S-A)
@@ -87,6 +94,8 @@ cat ~/.agents-in-a-box/headroom/proxy.pid
 ./target/debug/ainb
 cat ~/.agents-in-a-box/headroom/proxy.pid
 ```
+
+There is only a pid to read if A has a live session with Headroom enabled and `headroom` is on `PATH`; nothing starts the proxy at TUI launch. The second `cat` above runs after B exits, so also run it from a third shell while B is still open, and check B's log (`~/.agents-in-a-box/logs/`, newest file) for `spawned headroom proxy`.
 
 - **Pass:** the pid is unchanged, and B's log records no second spawn attempt.
 
@@ -100,7 +109,9 @@ Terminal B (a third shell, or after backgrounding web):
 ./target/debug/ainb hangar connections list
 ```
 
-- **Pass:** a `web` row with a pid and the daemon host.
+Terminal A must be on the session list (`s`): a TUI parked on the home screen never dials the daemon.
+
+- **Pass:** a `web` row with a pid and the daemon host. A `cli` row is the `connections list` command itself.
 - **Known broken, do not fail the checkpoint on it:** there will be NO `tui` row. This is issue #963, found by S-D's surface-combination smoke and not by this
   page: `DaemonClient::from_env` labels every client `cli`, and separately the TUI holds no connection for the registry to list at all. S-D fixed the first
   half (the TUI now says `tui` when it dials); the connection lifecycle is S-B's and is still open.
@@ -110,12 +121,16 @@ Terminal B (a third shell, or after backgrounding web):
 
 ## 7. An answered card retires everywhere (S-C, PR #936)
 
-This one needs a live ASK. With the TUI open on the control center (`g`, then `C`) and `ainb web` open in a browser, raise an ASK in any session, then answer it FROM THE WEB.
+This one needs a live ASK. With the TUI open on the control center and `ainb web` open in a browser, raise an ASK in any session, then answer it FROM THE WEB.
+
+Getting to the control center on `v2` at `026f40828`: from home press `g`, then `ctrl+p`, type `control`, press `enter`. The hangar no longer binds `C`. If the hangar shows the `danger-full-access` notice first, press `y`.
 
 - **Pass:** the TUI card disappears at once, and the title row reads `answered by web@<your host>` for about three seconds.
 - **Pass:** answering from the TUI instead closes the web card's options and reply box as soon as the request returns, with `answered by tui@<your host>` under the card.
 
 ## 8. Preview scroll, and Esc out of it (Phase 3, PR #945)
+
+**Attach and press:** `env -u TMUX TMUX_TMPDIR=/tmp/g6h/tmux tmux attach -t g6-manual`, then `s`, leave the cursor on row 1 (`ainb/session-e855a16b`, a live pane printing `agent tick`), then `shift+up`, `up` `k` `down` `j` `pageup` `pagedown`, then `esc`; leave with `ctrl+b` `d`. Never select the `g6-manual` row under `Other tmux`: selecting the TUI's own tmux session panics it.
 
 The chords in steps 8 and 9 are not transcribed from the plan. They are what
 the binary itself prints:
@@ -138,6 +153,8 @@ Before Phase 3 those six keys were `AppEvent` variants that the reducer handed s
 
 ## 9. Logs scroll and auto-scroll (Phase 3)
 
+**Attach and press:** `env -u TMUX TMUX_TMPDIR=/tmp/g6h/tmux tmux attach -t g6-manual`, then `s`, move to a row whose right pane shows the `[Space]AutoScroll:ON` hint, click once inside the right pane, then `up` `up` `up`, `space`, `end`, `home`. The G6 run on 2026-09-13 could not produce such a row: the log stream only renders for a selected row with no tmux session name, and every `ainb run` session and every `Other tmux` row has one, so if no row shows the hint, report that as the result of this step.
+
 Same screen, a session with no tmux pane, so the right pane is the live log stream. The hint line at its foot reads `[Space]AutoScroll:ON`.
 
 Click once inside the right pane, then:
@@ -153,6 +170,8 @@ up  up  up
 The click matters: focus follows the mouse into the right pane, and the scroll rows only resolve while that pane owns the keyboard.
 
 ## 10. Mouse: three on the sidebar, one on the legend (Phase 3)
+
+**Attach and press:** `env -u TMUX TMUX_TMPDIR=/tmp/g6h/tmux tmux attach -t g6-manual` (the private server has `mouse off`, so clicks reach ainb), then from the session list `q` for home; click a sidebar item once, click it twice inside 300 ms, drag the sidebar's right border; quit with `ctrl+c`, relaunch with `/tmp/g6h/start-manual.sh`, attach again and check the width; then `s` and click the bottom legend, then the collapsed hint row.
 
 Home screen (`q` from the session list).
 
