@@ -7,7 +7,7 @@
 //! has no JSON/WireBuffer equivalent, so it cannot be stubbed. ainb embeds it
 //! the same way it attaches to an agent session: `t` → `AppEvent::GoToAbtop`
 //! → (first launch) a one-time consent dialog offering `abtop --setup` →
-//! `AsyncAction::AttachAbtop` → the main loop runs `tmux new-session -A -d -s
+//! `Effect::AttachTerminal(Tool(Abtop))` → the host runs `tmux new-session -A -d -s
 //! ainb-abtop "abtop --exit-on-jump"` and attaches (TUI suspend → abtop's TUI
 //! → resume on quit).
 //!
@@ -207,7 +207,7 @@ fn pressing_t_offers_setup_then_embeds_abtop() {
     );
 
     // Choose "Just open abtop" (the 2nd tri-option): Right cycles forward,
-    // Enter confirms → `AsyncAction::AttachAbtop` (no `abtop --setup`).
+    // Enter confirms → `Effect::AttachTerminal(Tool(Abtop))` (no `abtop --setup`).
     send_key(&session, "Right");
     thread::sleep(Duration::from_millis(300));
     send_key(&session, "Enter");

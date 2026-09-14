@@ -4,6 +4,7 @@
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::screens::ids;
+use ainb_app::app::{TerminalTarget, ToolTerminal};
 use ainb_app::models::{Session, Workspace};
 use ainb_app::{AppState, CommandId, Effect, Intent, Keymap, SectionId, dispatch};
 
@@ -30,10 +31,16 @@ fn session_list_with_selection(path: &str) -> AppState {
     state
 }
 
-fn isolated_home() -> tempfile::TempDir {
-    let home = tempfile::tempdir().expect("scratch home");
-    std::env::set_var("HOME", home.path());
-    home
+/// One scratch `HOME` for the whole binary, set once before any test reads
+/// the environment, so parallel tests never swap it under each other.
+fn isolated_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let home = tempfile::tempdir().expect("scratch home");
+        std::env::set_var("HOME", home.path());
+        home
+    })
+    .path()
 }
 
 #[test]
@@ -61,4 +68,108 @@ fn open_in_editor_returns_open_editor_for_the_selected_worktree() {
         state.take_effects().is_empty(),
         "dispatch drained the outbox"
     );
+}
+
+#[test]
+fn attach_on_a_session_returns_attach_terminal_for_that_session() {
+    let _home = isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
+    let session_id = state.sessions.workspaces[0].sessions[0].id;
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("session_list.attach_tmux"),
+    );
+
+    assert_eq!(
+        effects,
+        vec![Effect::AttachTerminal(TerminalTarget::Session(session_id))]
+    );
+    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+    assert!(
+        state.shell.pending_async_action.is_none(),
+        "no async work queued for the attach"
+    );
+}
+
+#[test]
+fn attach_on_an_other_tmux_row_returns_attach_terminal_by_name() {
+    let _home = isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = ids::SESSION_LIST.to_string();
+    state.sessions.selected_workspace_index = None;
+    state.tmux.other_tmux_sessions = vec![ainb_app::models::other_tmux::OtherTmuxSession::new(
+        "scratch".to_string(),
+        false,
+        1,
+    )];
+    state.tmux.selected_other_tmux_index = Some(0);
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("session_list.attach_tmux"),
+    );
+
+    assert_eq!(
+        effects,
+        vec![Effect::AttachTerminal(TerminalTarget::Tmux(
+            "scratch".to_string()
+        ))]
+    );
+    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+}
+
+#[test]
+fn witr_returns_attach_terminal_for_the_witr_tool() {
+    let _home = isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with_selection("/parity/api");
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("session_list.witr"),
+    );
+
+    assert_eq!(
+        effects,
+        vec![Effect::AttachTerminal(TerminalTarget::Tool(
+            ToolTerminal::Witr
+        ))]
+    );
+    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
+}
+
+#[test]
+fn quick_shell_returns_attach_terminal_for_the_workspace_shell_at_the_worktree() {
+    let _home = isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("session_list.quick_shell"),
+    );
+
+    assert_eq!(
+        effects,
+        vec![Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
+            workspace_index: 0,
+            target_dir: Some("/parity/api/worktrees/feat-login".into()),
+        })]
+    );
+    assert_eq!(bumped(&before, &state.versions()), Vec::<SectionId>::new());
 }

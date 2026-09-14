@@ -2968,7 +2968,6 @@ pub enum AsyncAction {
     RefreshWorkspaces,                     // Manual refresh of workspace data
     FetchContainerLogs(Uuid),              // Fetch container logs for a session
     AttachToContainer(Uuid),               // Attach to a container session
-    AttachToTmuxSession(Uuid),             // Attach to a tmux session
     KillContainer(Uuid),                   // Kill container for a session
     AuthSetupOAuth,                        // Run OAuth authentication setup
     AuthSetupApiKey,                       // Save API key authentication
@@ -2979,22 +2978,13 @@ pub enum AsyncAction {
     /// process is replaced. Claude gets `--continue` to preserve the
     /// conversation; Codex restarts fresh (no continue flag exists).
     DowngradeHeadroom(Uuid),
-    CleanupOrphaned,           // Clean up orphaned containers without worktrees
-    AttachToOtherTmux(String), // Attach to a non-agents-in-a-box tmux session by name
-    AttachWitr, // Launch `witr -i` (process-causality browser) in a dedicated tmux session and attach full-screen
-    AttachAbtop, // Launch `abtop --exit-on-jump` (top-for-agents monitor) in a dedicated tmux session and attach full-screen
-    SetupAbtopRateLimits, // Run `abtop --setup` (rate-limit StatusLine hook) in a detached tmux pane, then queue AttachAbtop
+    CleanupOrphaned,       // Clean up orphaned containers without worktrees
     KillOtherTmux(String), // Kill a non-agents-in-a-box tmux session by name
     KillOtherTmuxSessions(Vec<String>), // Kill multiple non-agents-in-a-box tmux sessions by name
     ConfirmOtherTmuxRename, // Confirm and execute rename for "Other tmux" session
-    // Shell session actions (one shell per workspace)
-    OpenWorkspaceShell {
-        workspace_index: usize,                 // Index of workspace to open shell for
-        target_dir: Option<std::path::PathBuf>, // Optional: cd to this directory (worktree)
-    },
-    OpenShellAtPath(std::path::PathBuf), // Open shell directly at a path (no workspace required)
-    KillWorkspaceShell(usize),           // Kill workspace shell by workspace index
-    // Editor action
+    // Shell session actions (one shell per workspace); opening one is
+    // `Effect::AttachTerminal(TerminalTarget::WorkspaceShell)`.
+    KillWorkspaceShell(usize), // Kill workspace shell by workspace index
     // Onboarding actions
     OnboardingCheckDeps,          // Run dependency check during onboarding
     OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
@@ -9765,12 +9755,6 @@ impl AppState {
                     }
                     self.shell.ui_needs_refresh = true;
                 }
-                AsyncAction::AttachToTmuxSession(_session_id) => {
-                    // NOTE: This action must be handled in main.rs where terminal access is available
-                    // The terminal handle is needed to call attach_to_tmux_session
-                    warn!("AttachToTmuxSession action should be handled in main loop, not here");
-                    self.shell.ui_needs_refresh = true;
-                }
                 AsyncAction::KillContainer(session_id) => {
                     info!("Killing container for session {}", session_id);
                     if let Err(e) = self.kill_container(session_id).await {
@@ -9833,22 +9817,6 @@ impl AppState {
                 }
                 // Terminal actions - must be handled in main.rs where terminal access is available
                 // PUT THE ACTION BACK so main loop can handle it
-                action @ AsyncAction::AttachToOtherTmux(_) => {
-                    debug!("AttachToOtherTmux action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::AttachWitr => {
-                    debug!("AttachWitr action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::AttachAbtop => {
-                    debug!("AttachAbtop action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::SetupAbtopRateLimits => {
-                    debug!("SetupAbtopRateLimits action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
                 action @ AsyncAction::KillOtherTmux(_) => {
                     debug!("KillOtherTmux action deferred to main loop");
                     self.shell.pending_async_action = Some(action);
@@ -9871,14 +9839,6 @@ impl AppState {
                             self.add_error_notification(format!("Rename failed: {}", e));
                         }
                     }
-                }
-                action @ AsyncAction::OpenWorkspaceShell { .. } => {
-                    debug!("OpenWorkspaceShell action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
-                }
-                action @ AsyncAction::OpenShellAtPath(_) => {
-                    debug!("OpenShellAtPath action deferred to main loop");
-                    self.shell.pending_async_action = Some(action);
                 }
                 action @ AsyncAction::KillWorkspaceShell(_) => {
                     debug!("KillWorkspaceShell action deferred to main loop");

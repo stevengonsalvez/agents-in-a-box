@@ -17,7 +17,7 @@ pub mod snapshot;
 pub mod state;
 pub mod versioned;
 
-pub use effect::Effect;
+pub use effect::{Effect, TerminalTarget, ToolTerminal};
 pub use events::{EventHandler, NoRenderer, RendererHost};
 pub use intent::{Args, Btn, Intent, Pos, dispatch};
 pub use keymap::{Chord, CommandId, Key, Keymap, Mods};

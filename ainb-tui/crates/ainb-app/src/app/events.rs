@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 use super::keymap::test_key_codes::*;
+use crate::app::effect::{Effect, TerminalTarget, ToolTerminal};
 use crate::app::intent::{Btn, Intent, Pos};
 use crate::app::keymap::{
     Chord, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
@@ -1448,8 +1449,7 @@ impl EventHandler {
             UiAction::DaemonsConfirmMenu => {
                 state.hangar.daemons_state.confirm_menu();
                 if let Some(session) = state.hangar.daemons_state.take_attach_request() {
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::AttachToOtherTmux(session));
+                    state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session)));
                 }
                 None
             }
@@ -2469,8 +2469,7 @@ impl EventHandler {
                         if let Some(tmux_name) = &ssh_session.tmux_session_name {
                             let session_name = tmux_name.clone();
                             tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
-                            state.shell.pending_async_action =
-                                Some(AsyncAction::AttachToOtherTmux(session_name));
+                            state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session_name)));
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux session name");
                             state.add_error_notification(
@@ -2488,8 +2487,7 @@ impl EventHandler {
                             "[ACTION] Attaching to other tmux session: {}",
                             session_name
                         );
-                        state.shell.pending_async_action =
-                            Some(AsyncAction::AttachToOtherTmux(session_name));
+                        state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(session_name)));
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
                     }
@@ -2503,8 +2501,9 @@ impl EventHandler {
                                     "[ACTION] Attaching to workspace shell: {}",
                                     session_name
                                 );
-                                state.shell.pending_async_action =
-                                    Some(AsyncAction::AttachToOtherTmux(session_name));
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tmux(
+                                    session_name,
+                                )));
                             } else {
                                 tracing::warn!(
                                     "[ACTION] Shell selected but no shell session found in workspace"
@@ -2524,8 +2523,7 @@ impl EventHandler {
                             session.status
                         );
                     }
-                    state.shell.pending_async_action =
-                        Some(AsyncAction::AttachToTmuxSession(session_id));
+                    state.emit(Effect::AttachTerminal(TerminalTarget::Session(session_id)));
                 } else {
                     tracing::warn!(
                         "[ACTION] AttachTmuxSession: No session selected (workspace_idx={:?}, session_idx={:?})",
@@ -2752,7 +2750,7 @@ impl EventHandler {
                 // Open session's workspace in preferred editor
                 if let Some(session) = state.selected_session() {
                     let workspace_path = std::path::PathBuf::from(&session.workspace_path);
-                    state.emit(crate::app::effect::Effect::OpenEditor(workspace_path));
+                    state.emit(Effect::OpenEditor(workspace_path));
                 } else {
                     state.add_warning_notification("⚠️ No session selected".to_string());
                 }
@@ -2774,10 +2772,10 @@ impl EventHandler {
                     };
 
                     tracing::info!("Opening workspace shell, target_dir: {:?}", target_dir);
-                    state.shell.pending_async_action = Some(AsyncAction::OpenWorkspaceShell {
+                    state.emit(Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
                         workspace_index: workspace_idx,
                         target_dir,
-                    });
+                    }));
                 } else {
                     state.add_warning_notification("No workspace selected".to_string());
                 }
@@ -2951,17 +2949,22 @@ impl EventHandler {
                             }
                             crate::app::state::ConfirmAction::SetupAbtopRateLimits => {
                                 // Run `abtop --setup`, then open abtop.
-                                state.shell.pending_async_action =
-                                    Some(AsyncAction::SetupAbtopRateLimits);
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                    ToolTerminal::AbtopWithSetup,
+                                )));
                             }
                             crate::app::state::ConfirmAction::OpenAbtopSkipSetup => {
                                 // Decline setup this time; open abtop now.
-                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                    ToolTerminal::Abtop,
+                                )));
                             }
                             crate::app::state::ConfirmAction::DismissAbtopSetup => {
                                 // Never offer again, then open abtop.
                                 state.dismiss_abtop_setup();
-                                state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                    ToolTerminal::Abtop,
+                                )));
                             }
                             crate::app::state::ConfirmAction::InstallNotifyHooks => {
                                 // Install the ainb-hooks plugin for both agents.
@@ -3515,7 +3518,9 @@ impl EventHandler {
                         // Hand the terminal to witr's own interactive TUI
                         // (see AppEvent::GoToWitr) rather than a
                         // plugin-rendered screen.
-                        state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
+                        state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                            ToolTerminal::Witr,
+                        )));
                     }
                     SidebarItem::Abtop => {
                         tracing::info!("Launching abtop (top-for-agents) from sidebar");
@@ -3526,7 +3531,9 @@ impl EventHandler {
                         if state.should_offer_abtop_setup() {
                             state.show_abtop_setup_prompt();
                         } else {
-                            state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                            state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                                ToolTerminal::Abtop,
+                            )));
                         }
                     }
                     SidebarItem::Skills => {
@@ -3764,7 +3771,9 @@ impl EventHandler {
                 // agent session) and resume ainb when the user quits it.
                 // The witr plugin still owns the `ainb witr` CLI + `/witr`
                 // slash; only the screen is the embedded binary.
-                state.shell.pending_async_action = Some(AsyncAction::AttachWitr);
+                state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                    ToolTerminal::Witr,
+                )));
             }
             AppEvent::GoToLearnings => {
                 tracing::info!("Navigating to Learnings (knowledge-base browser)");
@@ -3795,7 +3804,9 @@ impl EventHandler {
                 if state.should_offer_abtop_setup() {
                     state.show_abtop_setup_prompt();
                 } else {
-                    state.shell.pending_async_action = Some(AsyncAction::AttachAbtop);
+                    state.emit(Effect::AttachTerminal(TerminalTarget::Tool(
+                        ToolTerminal::Abtop,
+                    )));
                 }
             }
             AppEvent::GoToSkills => {
@@ -4391,7 +4402,7 @@ impl EventHandler {
                         } else {
                             p
                         };
-                        state.emit(crate::app::effect::Effect::OpenEditor(target));
+                        state.emit(Effect::OpenEditor(target));
                     }
                     None => {
                         state.add_warning_notification(
