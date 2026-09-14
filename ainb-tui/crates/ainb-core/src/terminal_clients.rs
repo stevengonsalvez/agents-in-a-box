@@ -21,6 +21,9 @@ pub struct TerminalClients {
 struct Held {
     session: String,
     client: EmbedClient,
+    /// Opened in place, so input is the user's. A read-only observer mirrors
+    /// the session and never types into it.
+    writable: bool,
 }
 
 impl TerminalClients {
@@ -51,6 +54,7 @@ impl TerminalClients {
                 self.held = Some(Held {
                     session: name.to_string(),
                     client,
+                    writable: true,
                 });
                 reports::in_place_opened(name)
             }
@@ -80,6 +84,7 @@ impl TerminalClients {
                 self.held = Some(Held {
                     session: name.to_string(),
                     client,
+                    writable: false,
                 });
                 reports::observer_opened(name)
             }
@@ -96,10 +101,11 @@ impl TerminalClients {
         Some(reports::terminal_exited(&held.session))
     }
 
-    /// Send `bytes` to the client. When they cannot be written the client is
-    /// closed and the report for that comes back.
+    /// Send `bytes` to a writable client. A read-only observer takes none and
+    /// reports nothing. When they cannot be written the client is closed and
+    /// the report for that comes back.
     pub fn write_input(&mut self, bytes: &[u8]) -> Option<Intent> {
-        let held = self.held.as_ref()?;
+        let held = self.held.as_ref().filter(|held| held.writable)?;
         if held.client.write_input(bytes).is_ok() {
             return None;
         }
