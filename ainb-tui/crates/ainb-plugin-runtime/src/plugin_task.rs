@@ -1661,10 +1661,13 @@ impl PluginTask {
         let reap_threshold =
             Duration::from_secs(u64::from(self.plugin.manifest.lifecycle.idle_reap_secs))
                 .max(self.config.idle_reap);
-        let has_subs = self.plugin.manifest.subscribes.snapshots.iter().any(|_| true);
+        // A subscription to a stream keeps the plugin: a delivery published
+        // while it is reaped is gone. A latest-state topic does not, because the
+        // respawned plugin reads the latest value again (#1040).
+        let keeps_alive = self.plugin.manifest.subscribes.blocks_idle_reap();
         if matches!(*self.state.read(), LifecycleState::Running)
             && elapsed >= reap_threshold
-            && !has_subs
+            && !keeps_alive
         {
             info!(plugin = %self.plugin.id, "idle reap (idle for {elapsed:?})");
             self.shutdown().await;
