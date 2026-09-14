@@ -1,5 +1,7 @@
 //! T0-section (#1015): the host task keeps section 20 current from a real
-//! daemon, one joined read per Fleet revision.
+//! daemon, one joined read per Fleet revision, and (#1031) is the only
+//! agent-status reader in the process: the Fleet panel renders the envelope it
+//! publishes.
 //!
 //! A daemon serves on a temporary socket; the host task dials it exactly as the
 //! TUI does, and hook events applied through the daemon's own apply path must
@@ -131,4 +133,81 @@ async fn the_host_task_fills_section_20_and_follows_each_revision() {
         state.agent_status.version() > first_version,
         "a rendered change bumps section 20"
     );
+}
+
+/// #1031 budget, the #1015 criterion 9 number: one Fleet event costs this
+/// process at most ONE whole-Fleet projection. The host task pays it; the
+/// Fleet panel folds the published envelope and pays none, because it holds no
+/// daemon client at all.
+///
+/// Current-thread on purpose: the daemon's projection counter is thread-local,
+/// and here the daemon, the host task and the panel share the test's thread.
+#[tokio::test]
+async fn one_fleet_event_costs_this_process_one_projection() {
+    use ainb_hangar_daemon::fleet::projection_reads;
+    use ainb_hangar_proto::status_topic::AgentStatusEnvelope;
+    use ainb_plugin_hangar::screen::fleet::FleetPaneState;
+
+    let home = tempfile::tempdir().expect("home");
+    let (store, sink, socket, token) = start_daemon(home.path()).await;
+    hook(&store, &sink, "e-start", "SessionStart", 1_700_000_000_000).await;
+
+    let mut host = AgentStatusHost::spawn(
+        Box::new(move || Ok(DaemonClient::with_parts(socket.clone(), token.clone()))),
+        false,
+    );
+    let mut state = AppState::default();
+    wait_for(&mut host, &mut state, "the first joined read", |state| {
+        state
+            .agent_status
+            .view
+            .as_ref()
+            .is_some_and(|view| view.cards.contains_key("claude:host-1"))
+    })
+    .await;
+    // Let the subscription open and any read already owed land first.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    host.drain_into(&mut state);
+
+    let mut pane = FleetPaneState::default();
+    let mut sequence = 0;
+    let events = [
+        ("e-ask", "PreToolUse", 1_700_000_001_000),
+        ("e-answered", "PostToolUse", 1_700_000_002_000),
+        ("e-stop", "Stop", 1_700_000_003_000),
+    ];
+    for (event_id, event_type, at) in events {
+        let revision_before = state.agent_status.view.as_ref().expect("view").read_revision;
+        let reads_before = projection_reads();
+        hook(&store, &sink, event_id, event_type, at).await;
+        wait_for(&mut host, &mut state, event_id, |state| {
+            state
+                .agent_status
+                .view
+                .as_ref()
+                .is_some_and(|view| view.read_revision > revision_before)
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        host.drain_into(&mut state);
+
+        sequence += 1;
+        let payload = ainb::agent_status_host::encode(&state.agent_status, sequence)
+            .expect("section 20 publishes");
+        let envelope: AgentStatusEnvelope = serde_json::from_slice(&payload).expect("envelope");
+        assert!(pane.apply_envelope(envelope));
+
+        let view = state.agent_status.view.as_ref().expect("view");
+        let revisions = view.read_revision - revision_before;
+        let reads = i64::try_from(projection_reads() - reads_before).expect("small");
+        assert!(
+            (1..=revisions).contains(&reads),
+            "{event_id}: {reads} projection reads for {revisions} new revisions"
+        );
+        assert_eq!(
+            pane.status_view(),
+            Some(view),
+            "{event_id}: the panel renders exactly section 20"
+        );
+    }
 }
