@@ -477,8 +477,8 @@ async fn run_tui_loop(
     layout: &mut LayoutComponent,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    // The ratatui host's own state: geometry, scroll offsets, hover, and the
-    // status bar's TTL cache. Lives here, beside the `LayoutComponent`, because
+    // The ratatui host's own state: geometry, scroll offsets, hover and panel
+    // widths. Lives here, beside the `LayoutComponent`, because
     // none of it survives this process or crosses to another surface.
     let mut ui = crate::app::ui_state::UiState::default();
     ui.restore(&app.state.config.app_config);
@@ -487,6 +487,17 @@ async fn run_tui_loop(
     if let Some(warning) = keymap_warning {
         app.state.add_warning_notification(warning);
     }
+    // Layout widths saved as column counts by an older ainb become fractions
+    // of this terminal, the surface they were last sized on.
+    let columns = terminal.size().map_or(80, |size| size.width);
+    run_intent(
+        ainb::app::reports::migrate_layout_widths(columns),
+        app,
+        &keymap,
+        &mut ui,
+        terminal,
+    )
+    .await?;
     // Event-poll cadence: how often we wake up to check for a keystroke
     // or paste event. Drives the "time-to-first-response" for any input
     // the user generates — including keystrokes routed to plugin
@@ -985,20 +996,10 @@ async fn run_tui_loop(
 
                             if app.state.shell.current_screen == screen_ids::HOME {
                                 // Scroll welcome panel on home screen (right side only)
-                                let sidebar_width = app
-                                    .state
-                                    .shell
-                                    .home_screen_v2_state
-                                    .rendered_sidebar_width()
-                                    .unwrap_or_else(|| {
-                                        app.state
-                                            .shell
-                                            .home_screen_v2_state
-                                            .sidebar
-                                            .effective_width(
-                                                crossterm::terminal::size().unwrap_or((80, 24)).0,
-                                            )
-                                    });
+                                // Before the first frame there is no rect, so
+                                // the whole row counts as sidebar.
+                                let sidebar_width =
+                                    ui.home_sidebar_rect.map_or(u16::MAX, |rect| rect.width);
                                 if mouse_event.column >= sidebar_width {
                                     for _ in 0..SCROLL_LINES {
                                         if is_down {
@@ -1472,7 +1473,7 @@ async fn apply_gesture(
     ui: &mut crate::app::ui_state::UiState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
-    match crate::app::mouse::gesture(gesture, pos, &mut app.state, ui) {
+    match crate::app::mouse::gesture(gesture, pos, &app.state, ui) {
         Some(intent) => run_intent(intent, app, keymap, ui, terminal).await,
         None => Ok(()),
     }
