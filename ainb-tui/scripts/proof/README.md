@@ -27,9 +27,10 @@ scripts/proof/run.sh --only s-c-answered      # one node (repeatable); other res
 scripts/proof/run.sh --out /tmp/proof-out     # results somewhere else
 ```
 
-Needs `tmux`, `jq`, `git`, `curl` and `python3`. A full run takes about 20
-minutes. Exit status is 0 only when every node passes; a node whose failure is
-a filed defect still fails, and its row names the issue.
+Needs `tmux`, `jq`, `git`, `curl` and `python3`. A full run of the 17 nodes
+took 6 min 42 s on claude-gcp, plus the build when `--build` is given. Exit
+status is 0 only when every node passes; a node whose failure is a filed
+defect still fails, and its row names the issue.
 
 ## What a result holds
 
