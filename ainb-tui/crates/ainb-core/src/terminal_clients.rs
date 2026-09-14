@@ -58,7 +58,7 @@ impl TerminalClients {
                 });
                 reports::in_place_opened(name)
             }
-            Err(error) => reports::in_place_failed(name, &error.to_string()),
+            Err(error) => reports::in_place_failed(name, &error.to_string(), false),
         }
     }
 
