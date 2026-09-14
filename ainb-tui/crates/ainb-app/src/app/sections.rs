@@ -900,6 +900,12 @@ mod agent_status_section_tests {
     }
 }
 
+/// A base-branch refresh result: its generation, and the branches or why not.
+pub type BranchRefreshPayload = (
+    u64,
+    Result<Vec<crate::git::branch_list::BranchEntry>, String>,
+);
+
 /// What only the process running the reducer can use: channels and task
 /// handles, worker liveness flags, the handles background workers write
 /// through, and the timers that pace the tick.
@@ -936,12 +942,7 @@ pub struct HostOnlyState {
     /// re-list runs on `spawn_blocking`; the result lands here and is applied
     /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
     /// generation guard, so results from a closed or reopened picker are dropped.
-    pub branch_refresh_receiver: Option<
-        mpsc::UnboundedReceiver<(
-            u64,
-            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
-        )>,
-    >,
+    pub branch_refresh_receiver: Option<mpsc::UnboundedReceiver<BranchRefreshPayload>>,
     /// Background remote-repo pre-flight for the Configure screen (ls-remote
     /// at open: does the repo exist, does it have branches). Applied by
     /// `check_repo_check_complete` on the next tick; the `u64` is a
@@ -969,7 +970,7 @@ pub struct HostOnlyState {
     /// same reason, as [`Self::attention_poll_running`].
     pub session_log_running: Arc<std::sync::atomic::AtomicBool>,
     /// Background poller for the live OAuth-window snapshot. The render
-    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
+    /// path reads via `snapshot()` (cheap `RwLock` read + clone) instead of
     /// calling `live_window::current()` directly, because Tier 2's JSONL walk
     /// would otherwise stall input handling on every frame.
     pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
