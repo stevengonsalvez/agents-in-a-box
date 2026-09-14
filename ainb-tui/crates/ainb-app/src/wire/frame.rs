@@ -151,8 +151,29 @@ pub fn section_id_from_name(name: &str) -> Option<SectionId> {
 }
 
 /// The sections a renderer wants frames for.
+///
+/// On the wire, the list of wire names ([`section_name`]), so a remote renderer
+/// sends its filter to the host. A name this build does not know is skipped:
+/// a newer renderer can ask an older host for a section it lacks.
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+#[cfg_attr(feature = "typescript-bindings", specta(type = Vec<String>))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Subscription([bool; SectionId::COUNT]);
+
+impl Serialize for Subscription {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.sections().map(section_name))
+    }
+}
+
+impl<'de> Deserialize<'de> for Subscription {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let names = Vec::<String>::deserialize(deserializer)?;
+        let ids: Vec<SectionId> =
+            names.iter().filter_map(|name| section_id_from_name(name)).collect();
+        Ok(Self::only(&ids))
+    }
+}
 
 impl Subscription {
     /// Every section.
@@ -271,5 +292,25 @@ impl Mirror {
             });
         }
         FrameBatch { frames }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_subscription_travels_as_section_names_and_skips_unknown_ones() {
+        let subscription = Subscription::only(&[SectionId::Shell, SectionId::AgentStatus]);
+        let wire = serde_json::to_value(subscription).expect("serialises");
+        assert_eq!(wire, serde_json::json!(["shell", "agent_status"]));
+
+        let from_newer: Subscription = serde_json::from_value(serde_json::json!([
+            "agent_status",
+            "a_future_section",
+            "shell"
+        ]))
+        .expect("deserialises");
+        assert_eq!(from_newer, subscription);
     }
 }
