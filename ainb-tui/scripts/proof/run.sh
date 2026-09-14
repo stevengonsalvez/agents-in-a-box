@@ -81,6 +81,13 @@ done
 mkdir -p "$PROOF_OUT"
 if ((${#ONLY[@]} == 0)); then
   # A full run owns the whole directory: no result from an earlier run survives.
+  # It only ever clears a directory that is empty or was written by this
+  # harness, so `--out ~` or `--out .` cannot delete someone's files.
+  if [[ -n "$(find "$PROOF_OUT" -mindepth 1 -maxdepth 1 -print -quit)" ]] \
+    && [[ ! -f "$PROOF_OUT/order.txt" && ! -f "$PROOF_OUT/summary.json" ]]; then
+    echo "refusing to clear $PROOF_OUT: not empty and not a previous proof-out (no order.txt or summary.json)" >&2
+    exit 2
+  fi
   find "$PROOF_OUT" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 fi
 
