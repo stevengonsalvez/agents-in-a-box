@@ -869,6 +869,21 @@ impl FleetPaneState {
         if let Some(view) = &mut self.view {
             view.observe_head(self.head_revision);
         }
+        self.rebuild_roster_from_view();
+        changed
+    }
+
+    /// Take a whole [`StatusView`] folded elsewhere (section 20 of the app
+    /// state, or a mirrored host) and rebuild the roster from its cards. The
+    /// panel then renders exactly what that view says: this is how a surface
+    /// with only section 20 builds the same panel (#1015).
+    pub fn apply_view(&mut self, view: StatusView) {
+        self.view = Some(view);
+        self.view_absent = None;
+        self.rebuild_roster_from_view();
+    }
+
+    fn rebuild_roster_from_view(&mut self) {
         let roster = self.view.as_ref().map_or_else(Vec::new, |view| {
             view.cards()
                 .map(|card| FleetSessionRow {
@@ -878,7 +893,6 @@ impl FleetPaneState {
                 .collect()
         });
         self.set_sessions(roster);
-        changed
     }
 
     /// The last read failed for `reason`. With a view the host is unreachable
