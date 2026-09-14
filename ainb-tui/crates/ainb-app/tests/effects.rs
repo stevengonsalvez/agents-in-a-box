@@ -259,7 +259,23 @@ fn detach_while_interactive_returns_detach_and_leaves_the_pane_to_the_host() {
         1,
     )];
     state.tmux.selected_other_tmux_index = Some(0);
-    let attached = state.enter_interactive_pane(24, 80);
+    // The host's side of `A`: run the effect the key returns and dispatch the
+    // report, as `effect_host::open_in_place` does.
+    for effect in dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("session_list.attach_interactive"),
+    ) {
+        if let Effect::AttachTerminal(TerminalTarget::InPlace { tmux_session, .. }) = effect {
+            let client = ainb_app::tmux::EmbedClient::attach(tmux_session.as_str(), 24, 80)
+                .expect("host attach");
+            let embed = ainb_app::app::reports::LocalEmbed::keep(client);
+            let report = ainb_app::app::reports::in_place_opened(tmux_session.as_str(), &embed);
+            let _ = dispatch(&mut state, &keymap, &mut NoRenderer, report);
+        }
+    }
+    let attached = state.is_interactive_pane();
     let before = state.versions();
 
     let effects = dispatch(
