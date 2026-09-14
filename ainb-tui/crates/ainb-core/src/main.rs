@@ -979,16 +979,6 @@ async fn run_tui_loop(
                                     .log_streams
                                     .log_history_state
                                     .handle_click(col, row, 0, 0);
-                            } else if app.state.shell.current_screen
-                                == crate::app::screens::ids::GIT_VIEW
-                                && app.state.git_view.git_view_state.as_ref().is_some_and(|g| {
-                                    g.active_tab == crate::components::git_view::GitTab::Review
-                                })
-                            {
-                                // Code Review sidebar: click a file/folder row to select/toggle.
-                                if let Some(ref mut git_state) = app.state.git_view.git_view_state {
-                                    git_state.review_sidebar_click(col, row);
-                                }
                             } else {
                                 let press = ainb::Intent::Mouse(
                                     ainb::Pos { x: col, y: row },
@@ -1037,33 +1027,18 @@ async fn run_tui_loop(
                                     }
                                 }
                             } else if app.state.shell.current_screen == screen_ids::GIT_VIEW {
-                                // Scroll git view content (markdown or diff)
-                                if let Some(ref mut git_state) = app.state.git_view.git_view_state {
-                                    match git_state.active_tab {
-                                        crate::components::git_view::GitTab::Review => {
-                                            if is_down {
-                                                git_state.review_scroll_down(SCROLL_LINES);
-                                            } else {
-                                                git_state.review_scroll_up(SCROLL_LINES);
-                                            }
-                                        }
-                                        crate::components::git_view::GitTab::Diff => {
-                                            if is_down {
-                                                git_state.scroll_diff_down_by(SCROLL_LINES);
-                                            } else {
-                                                git_state.scroll_diff_up_by(SCROLL_LINES);
-                                            }
-                                        }
-                                        crate::components::git_view::GitTab::Markdown => {
-                                            if is_down {
-                                                git_state.scroll_markdown_down_by(SCROLL_LINES);
-                                            } else {
-                                                git_state.scroll_markdown_up_by(SCROLL_LINES);
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
+                                // The scroll offsets are the git view's state,
+                                // so the wheel is a command the reducer applies.
+                                let lines = i32::try_from(SCROLL_LINES).unwrap_or(3);
+                                let lines = if is_down { lines } else { -lines };
+                                run_intent(
+                                    ainb::app::pointer::scroll_git_view(lines),
+                                    app,
+                                    &keymap,
+                                    &mut ui,
+                                    terminal,
+                                )
+                                .await?;
                             } else if app.state.shell.current_screen == screen_ids::LOG_HISTORY {
                                 // Scroll log history viewer
                                 // Shift+Scroll = horizontal, normal scroll = vertical
@@ -1489,7 +1464,8 @@ async fn run_effects(
 ) -> Result<()> {
     let mut queue = std::collections::VecDeque::from(effects);
     while let Some(effect) = queue.pop_front() {
-        for report in ainb::effect_host::execute(effect, &app.state, terminal, ui).await? {
+        let plugins = app.state.plugins_host.plugin_runtime.clone();
+        for report in ainb::effect_host::execute(effect, terminal, ui, plugins.as_ref()).await? {
             queue.extend(ainb::dispatch(&mut app.state, keymap, ui, report));
         }
     }

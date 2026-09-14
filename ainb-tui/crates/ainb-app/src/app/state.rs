@@ -319,21 +319,25 @@ impl AppState {
             .collect()
     }
 
-    /// Enter interactive mode by replacing the selected read-only tmux client
-    /// with a writable client feeding the same terminal parser path.
-    pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
-        let attached_elsewhere = self.selected_session_attached_elsewhere();
-        self.tmux.observer_pending = None;
-        self.tmux.observer_failed_target = None;
+    /// The tmux session an in-place attach of the selected row would open,
+    /// or `None` with the reason posted: no tmux session on the row, the tmux
+    /// session ainb itself runs in, or a name tmux cannot address. `None`
+    /// without a notice when that session is already the live pane.
+    ///
+    /// Releases a live pane on a different session, so the new client is the
+    /// only one sizing the preview.
+    pub fn in_place_target(&mut self) -> Option<crate::app::effect::TmuxSessionName> {
+        self.tmux.set_if_changed(|tmux| &mut tmux.observer_pending, None);
+        self.tmux.set_if_changed(|tmux| &mut tmux.observer_failed_target, None);
         if self.tmux.embed.is_some() {
             if self.selected_tmux_name() == self.tmux.embed_session && self.is_interactive_pane() {
-                return true;
+                return None;
             }
             self.release_interactive_pane();
         }
         let Some(name) = self.selected_tmux_name() else {
             self.add_warning_notification("No tmux session on this row".to_string());
-            return false;
+            return None;
         };
         // The same own-session rule the observer and the preview placeholder
         // use, by detection rather than by counting on tmux to refuse a nested
@@ -343,28 +347,38 @@ impl AppState {
             self.add_warning_notification(format!(
                 "'{name}' is the tmux session ainb is running in; attaching it here would nest it"
             ));
-            return false;
+            return None;
         }
+        let target = crate::app::effect::TmuxSessionName::new(name.as_str());
+        if target.is_none() {
+            self.add_error_notification(format!(
+                "Cannot attach '{name}': tmux cannot address a session by that name"
+            ));
+        }
+        target
+    }
+
+    /// Make `client`, a tmux client on `tmux_session` a host opened, the live
+    /// in-place pane.
+    pub fn adopt_interactive_pane(
+        &mut self,
+        tmux_session: String,
+        client: crate::tmux::EmbedClient,
+    ) {
         // tmux mirrors a session to every attached client, but all clients
-        // fight over its size — attaching alongside an existing client is the
+        // fight over its size: attaching alongside an existing client is the
         // user's call, so allow it and warn (never block).
-        match crate::tmux::EmbedClient::attach(&name, rows, cols) {
-            Ok(client) => {
-                self.tmux.embed = Some(client);
-                self.tmux.embed_session = Some(name);
-                self.shell.focused_pane = FocusedPane::Preview;
-                if attached_elsewhere {
-                    self.add_warning_notification(
-                        "Note: session attached elsewhere — screen sizes may fight".to_string(),
-                    );
-                }
-                true
-            }
-            Err(e) => {
-                tracing::warn!("failed to attach interactive embed to {name}: {e}");
-                self.add_error_notification(format!("Live attach to '{name}' failed: {e}"));
-                false
-            }
+        let attached_elsewhere = self.selected_session_attached_elsewhere();
+        if self.tmux.embed.is_some() {
+            self.release_interactive_pane();
+        }
+        self.tmux.embed = Some(client);
+        self.tmux.embed_session = Some(tmux_session);
+        self.shell.focused_pane = FocusedPane::Preview;
+        if attached_elsewhere {
+            self.add_warning_notification(
+                "Note: session attached elsewhere, so screen sizes may fight".to_string(),
+            );
         }
     }
 
@@ -12674,30 +12688,66 @@ impl AppState {
     /// Called from `App::tick_plugin_renders`, which already holds a
     /// cloned runtime `handle`, so it's passed in rather than re-cloned
     /// per render tick.
-    /// Keep a plugin's `ui.state` publish, as `snapshot_get_versioned`
-    /// returns it, under the plugin that published it.
+    /// Keep `plugin`'s `ui.state` view, as `snapshot_get_versioned` returns
+    /// it from the plugin's own `ui.state/<plugin>` topic.
     ///
-    /// Bumps the plugins-host section only for a newer version from a plugin.
-    /// ponytail: the bus keeps one `ui.state` value, not one per plugin, so
-    /// two plugins publishing within one tick keep only the later; key the
-    /// topic by plugin when a second plugin publishes it.
+    /// A plugin that is not `running` loses its view, so a renderer never
+    /// draws a stopped plugin's last screen as live. A view over
+    /// [`MAX_PLUGIN_UI_STATE_BYTES`] is refused and the old one dropped. Bumps
+    /// the plugins-host section only when a view is kept or dropped.
     pub fn record_plugin_ui_state(
         &mut self,
+        plugin: &str,
+        running: bool,
         snapshot: Option<(bytes::Bytes, u64, ainb_plugin_runtime::types::PluginId)>,
     ) {
+        let offered = snapshot.as_ref().map(|(_, version, _)| *version);
+        // Host bookkeeping no frame carries, so recording it bumps nothing.
+        let spend = |state: &mut Self, version: Option<u64>| {
+            if let Some(version) = version {
+                state.plugins_host.update(|host| {
+                    let spent = host.plugin_ui_state_spent.entry(plugin.to_string()).or_default();
+                    *spent = (*spent).max(version);
+                    false
+                });
+            }
+        };
+        let evict = |state: &mut Self| {
+            if state.plugins_host.plugin_ui_states.contains_key(plugin) {
+                state.plugins_host.plugin_ui_states.remove(plugin);
+            }
+        };
+        if !running {
+            let kept = self.plugins_host.plugin_ui_states.get(plugin).map(|view| view.version);
+            spend(self, offered.max(kept));
+            evict(self);
+            return;
+        }
         let Some((payload, version, publisher)) = snapshot else {
             return;
         };
-        let plugin = publisher.as_str();
-        if plugin == ainb_plugin_runtime::snapshot::HOST_PUBLISHER {
-            return;
-        }
         if self
             .plugins_host
-            .plugin_ui_states
+            .plugin_ui_state_spent
             .get(plugin)
-            .is_some_and(|known| known.version >= version)
+            .is_some_and(|spent| *spent >= version)
+            || self
+                .plugins_host
+                .plugin_ui_states
+                .get(plugin)
+                .is_some_and(|known| known.version >= version)
         {
+            return;
+        }
+        if publisher.as_str() != plugin {
+            tracing::warn!(%plugin, publisher = %publisher, "ui.state view from another publisher ignored");
+            spend(self, Some(version));
+            return;
+        }
+        if payload.len() > MAX_PLUGIN_UI_STATE_BYTES {
+            tracing::warn!(%plugin, version, bytes = payload.len(), "ui.state view over the size cap refused");
+            spend(self, Some(version));
+            evict(self);
             return;
         }
         match serde_json::from_slice(&payload) {
@@ -12709,8 +12759,47 @@ impl AppState {
             }
             Err(error) => {
                 tracing::warn!(%plugin, version, %error, "ui.state publish is not JSON");
+                spend(self, Some(version));
             }
         }
+    }
+
+    /// How long another host's watch on a plugin screen lasts unless renewed.
+    /// A host keeping a screen live re-sends its watch within this; a host
+    /// that went away stops, and so does the rendering done for it.
+    pub const PLUGIN_SCREEN_WATCH_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Drop the watches not renewed within [`Self::PLUGIN_SCREEN_WATCH_LEASE`]
+    /// of `now`, and those whose plugin `gone` says has stopped for good.
+    pub fn release_plugin_screen_watches(
+        &mut self,
+        now: std::time::Instant,
+        gone: impl Fn(&str) -> bool,
+    ) {
+        let lapsed: Vec<String> = self
+            .plugins_host
+            .watched_plugin_screens
+            .iter()
+            .filter(|(screen, renewed)| {
+                now.saturating_duration_since(**renewed) > Self::PLUGIN_SCREEN_WATCH_LEASE
+                    || crate::app::screens::builtin::plugin_id_for_screen(screen).is_none_or(&gone)
+            })
+            .map(|(screen, _)| screen.clone())
+            .collect();
+        if !lapsed.is_empty() {
+            let host = self.plugins_host.get_mut();
+            for screen in lapsed {
+                host.watched_plugin_screens.remove(&screen);
+            }
+        }
+    }
+
+    /// Whether some host wants `screen_id`'s plugin rendering: the terminal
+    /// host is showing it, or another host asked to keep it live.
+    #[must_use]
+    pub fn plugin_screen_wanted(&self, screen_id: &str) -> bool {
+        self.shell.current_screen == screen_id
+            || self.plugins_host.watched_plugin_screens.contains_key(screen_id)
     }
 
     pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
@@ -12740,6 +12829,12 @@ impl AppState {
         self.shell.ui_needs_refresh = true;
     }
 }
+
+/// The largest `ui.state` view a plugin may publish, in bytes.
+///
+/// A view is a renderer's model of one screen; anything bigger is a plugin shipping data
+/// the host would hold in memory and mirror on every change.
+pub const MAX_PLUGIN_UI_STATE_BYTES: usize = 256 * 1024;
 
 /// How long a Docker answer is reused. Long enough that a wedged Docker costs
 /// one 3s probe per window across every call site, short enough that starting
@@ -13105,22 +13200,27 @@ impl App {
         // Honour any pending plugin close request (root-view Esc) before
         // kicking renders — a closed screen shouldn't get another paint.
         self.state.tick_panel_close_requests(&handle);
-        self.state.record_plugin_ui_state(
-            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_STATE),
-        );
+        for (_, plugin_id) in crate::app::screens::builtin::PLUGIN_SCREENS {
+            let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
+            let running = handle.lifecycle_state(&pid)
+                == Some(ainb_plugin_runtime::types::LifecycleState::Running);
+            // Read even when stopped: the version seen then is one a restart
+            // must not show again.
+            let snapshot = handle
+                .snapshot_get_versioned(&ainb_plugin_runtime::topics::ui_state_topic(plugin_id));
+            self.state.record_plugin_ui_state(plugin_id, running, snapshot);
+        }
+        self.state.release_plugin_screen_watches(std::time::Instant::now(), |plugin| {
+            matches!(
+                handle.lifecycle_state(&ainb_plugin_runtime::PluginId::from(plugin)),
+                None | Some(ainb_plugin_runtime::types::LifecycleState::Quarantined)
+            )
+        });
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.shell.current_screen`) with the plugin id that owns it.
-        const PLUGIN_SCREENS: &[(&str, &str)] = &[
-            (crate::app::screens::ids::ANALYTICS, "burndown"),
-            (crate::app::screens::ids::WITR, "witr"),
-            (crate::app::screens::ids::LEARNINGS, "learnings"),
-            (crate::app::screens::ids::ABTOP, "abtop"),
-            (crate::app::screens::ids::HANGAR, "hangar-tui"),
-        ];
-
-        for (screen_id, plugin_id) in PLUGIN_SCREENS {
+        for (screen_id, plugin_id) in crate::app::screens::builtin::PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
 
             // Refresh the text-capture flag from the plugin's last frame every
@@ -13183,14 +13283,21 @@ impl App {
             // consume, so a hidden plugin's dirty flag survives until the
             // user opens the screen and the first tick after the switch
             // kicks the deferred paint.
-            if self.state.shell.current_screen != *screen_id {
+            if !self.state.plugin_screen_wanted(screen_id) {
                 continue;
             }
 
             // Viewport comes from the previous frame's allocated area
             // (stashed by `PluginScreen::render`); (0, 0) means that render
-            // hasn't happened yet.
-            let (width, height) = viewports.render_areas.get(*screen_id).copied().unwrap_or((0, 0));
+            // hasn't happened yet. A screen another host keeps live but this
+            // one never drew renders at the plugin's fallback size: the frame
+            // is not painted here, only its `ui.state` view is read.
+            let shown_here = self.state.shell.current_screen == *screen_id;
+            let (width, height) = viewports
+                .render_areas
+                .get(*screen_id)
+                .copied()
+                .unwrap_or(if shown_here { (0, 0) } else { (80, 24) });
 
             // No allocated area stashed yet — the very first entry to this
             // screen, before `PluginScreen::render` has run once. Kicking now

@@ -208,10 +208,36 @@ impl GitViewState {
         code_review::render::sidebar_set_all_collapsed(&self.review, &mut self.review_ui, false);
     }
 
-    /// Handle a mouse click at screen `(x, y)` over the review sidebar.
-    pub fn review_sidebar_click(&mut self, x: u16, y: u16) {
-        if let Some(row) = code_review::render::sidebar_row_at(&self.review_ui, x, y) {
-            code_review::render::sidebar_click(&mut self.review, &mut self.review_ui, row);
+    /// The identity of review sidebar row `row`, for a renderer that hit a
+    /// row by where it drew it.
+    #[must_use]
+    pub fn review_row_id(&self, row: usize) -> Option<code_review::render::ReviewRowId> {
+        code_review::render::sidebar_row_id(&self.review, &self.review_ui, row)
+    }
+
+    /// Where the review sidebar row `id` names sits now, if it is still there.
+    #[must_use]
+    pub fn review_row_index(&self, id: &code_review::render::ReviewRowId) -> Option<usize> {
+        code_review::render::sidebar_row_index(&self.review, &self.review_ui, id)
+    }
+
+    /// Click review sidebar row `row`, as the renderer drew it.
+    pub fn review_click_row(&mut self, row: usize) {
+        code_review::render::sidebar_click(&mut self.review, &mut self.review_ui, row);
+    }
+
+    /// Scroll the active tab's content by `lines` (down when positive).
+    pub fn scroll_active_tab_by(&mut self, lines: i32) {
+        let n = lines.unsigned_abs() as usize;
+        let down = lines > 0;
+        match self.active_tab {
+            GitTab::Review if down => self.review_scroll_down(n),
+            GitTab::Review => self.review_scroll_up(n),
+            GitTab::Diff if down => self.scroll_diff_down_by(n),
+            GitTab::Diff => self.scroll_diff_up_by(n),
+            GitTab::Markdown if down => self.scroll_markdown_down_by(n),
+            GitTab::Markdown => self.scroll_markdown_up_by(n),
+            _ => {}
         }
     }
 

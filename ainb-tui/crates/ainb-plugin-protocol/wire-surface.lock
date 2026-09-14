@@ -5,7 +5,7 @@
 #
 # The regenerator REFUSES to write while the surface has changed but
 # ainb-plugin-protocol's version has not. Bump the version first.
-protocol_version = "0.1.1"
+protocol_version = "0.1.2"
 
 [lib]
 reexport errors :: { ProtocolError , RpcError }
@@ -351,6 +351,8 @@ struct WorkspaceDeleteResult [# [derive (Debug , Clone , Default , PartialEq , E
 [topics]
 const UI_CLOSE_REQUEST: & str = "ui.close_request"
 const UI_STATE: & str = "ui.state"
+const UI_STATE_PREFIX: & str = "ui.state/"
+fn ui_state_topic (plugin_id : & str) -> String
 struct UiCloseRequest [# [derive (Debug , Clone , PartialEq , Eq , serde :: Serialize , serde :: Deserialize)]]
   field screen_id: String
 

@@ -32,9 +32,34 @@ const SIDEBAR_WIDTH: u16 = 26;
 
 // ───────────────────────────── rendering ─────────────────────────────
 
-/// Render the Code Review surface into `area`. Records sidebar/body geometry on
-/// `ui` (via interior mutability) for mouse hit-testing.
-pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeReviewUi) {
+/// Where the sidebar tree was drawn: the list rect and its first visible row.
+/// A measurement of the last paint, so it lives with the renderer, not in the
+/// shared review state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReviewSidebarLayout {
+    /// The sidebar list region; empty before the first paint or with no files.
+    pub rect: Rect,
+    /// First visible tree row.
+    pub window: usize,
+}
+
+/// The tree-row index a press at `(x, y)` lands on, by the last paint.
+#[must_use]
+pub fn sidebar_row_at(layout: &ReviewSidebarLayout, x: u16, y: u16) -> Option<usize> {
+    let r = layout.rect;
+    (r.width > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
+        .then(|| layout.window + usize::from(y - r.y))
+}
+
+/// Render the Code Review surface into `area`, recording where the sidebar
+/// tree landed in `layout` for mouse hit-testing.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    model: &ReviewModel,
+    ui: &CodeReviewUi,
+    layout: &mut ReviewSidebarLayout,
+) {
     let total_hunks = hunk_anchors(&flatten(model)).len();
     let cur_hunk = if total_hunks == 0 {
         0
@@ -52,7 +77,7 @@ pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeRevie
     frame.render_widget(block, area);
 
     if model.files.is_empty() {
-        ui.sidebar_rect.set(crate::geometry::Area::default());
+        layout.rect = Rect::default();
         let empty = Paragraph::new(Line::from(Span::styled(
             "  No changes in this worktree.",
             Style::default().fg(MUTED_GRAY),
@@ -84,19 +109,14 @@ pub fn render(frame: &mut Frame, area: Rect, model: &ReviewModel, ui: &CodeRevie
     let sel = ui.sidebar_selected.min(tree.len().saturating_sub(1));
     // Keep the selected row inside the visible window.
     let vis = list_area.height as usize;
-    let mut window = ui.sidebar_window.get().min(tree.len().saturating_sub(1));
+    let mut window = layout.window.min(tree.len().saturating_sub(1));
     if sel < window {
         window = sel;
     } else if vis > 0 && sel >= window + vis {
         window = sel + 1 - vis;
     }
-    ui.sidebar_window.set(window);
-    ui.sidebar_rect.set(crate::geometry::Area::new(
-        list_area.x,
-        list_area.y,
-        list_area.width,
-        list_area.height,
-    ));
+    layout.window = window;
+    layout.rect = list_area;
 
     render_sidebar(
         frame,
@@ -493,7 +513,16 @@ mod tests {
         let ui = CodeReviewUi::default();
 
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        term.draw(|fr| render(fr, fr.area(), &model, &ui)).unwrap();
+        term.draw(|fr| {
+            render(
+                fr,
+                fr.area(),
+                &model,
+                &ui,
+                &mut ReviewSidebarLayout::default(),
+            );
+        })
+        .unwrap();
         let buf = term.backend().buffer();
 
         let mut text = String::new();
@@ -690,7 +719,16 @@ mod tests {
         // regressions any better.
         let start = Instant::now();
         for _ in 0..20 {
-            term.draw(|fr| render(fr, fr.area(), &model, &ui)).unwrap();
+            term.draw(|fr| {
+                render(
+                    fr,
+                    fr.area(),
+                    &model,
+                    &ui,
+                    &mut ReviewSidebarLayout::default(),
+                );
+            })
+            .unwrap();
         }
         let elapsed = start.elapsed();
         assert!(
@@ -751,22 +789,27 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        // Before any render the sidebar rect is empty → every click misses.
+        // Before any render the sidebar rect is empty, so every click misses.
         let ui = CodeReviewUi::default();
-        assert_eq!(sidebar_row_at(&ui, 5, 5), None);
+        let mut layout = ReviewSidebarLayout::default();
+        assert_eq!(sidebar_row_at(&layout, 5, 5), None);
 
         let model = ReviewModel {
             files: vec![file("src/a.rs", false, vec![hunk(0, 0, 2)])],
         };
         let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        term.draw(|f| render(f, f.area(), &model, &ui)).unwrap();
+        term.draw(|f| render(f, f.area(), &model, &ui, &mut layout)).unwrap();
 
         // render() recorded the sidebar list rect; clicks inside map to tree rows.
-        let r = ui.sidebar_rect.get();
+        let r = layout.rect;
         assert!(r.width > 0 && r.height > 0);
-        assert_eq!(sidebar_row_at(&ui, r.x, r.y), Some(0)); // src folder
-        assert_eq!(sidebar_row_at(&ui, r.x + 1, r.y + 1), Some(1)); // a.rs
-        assert_eq!(sidebar_row_at(&ui, r.x + r.width + 3, r.y), None); // outside
+        assert_eq!(sidebar_row_at(&layout, r.x, r.y), Some(0)); // src folder
+        assert_eq!(sidebar_row_at(&layout, r.x + 1, r.y + 1), Some(1)); // a.rs
+        assert_eq!(sidebar_row_at(&layout, r.x + r.width + 3, r.y), None); // outside
+        assert_eq!(
+            sidebar_row_id(&model, &ui, 1),
+            Some(ReviewRowId::File("src/a.rs".to_string()))
+        );
     }
 
     #[test]

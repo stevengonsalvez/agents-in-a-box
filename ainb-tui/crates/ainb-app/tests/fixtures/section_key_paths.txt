@@ -337,12 +337,7 @@ git_view.git_view_state.review_ui.collapsed_dirs[]
 git_view.git_view_state.review_ui.current_hunk
 git_view.git_view_state.review_ui.scroll
 git_view.git_view_state.review_ui.selected_file
-git_view.git_view_state.review_ui.sidebar_rect.height
-git_view.git_view_state.review_ui.sidebar_rect.width
-git_view.git_view_state.review_ui.sidebar_rect.x
-git_view.git_view_state.review_ui.sidebar_rect.y
 git_view.git_view_state.review_ui.sidebar_selected
-git_view.git_view_state.review_ui.sidebar_window
 git_view.git_view_state.selected_commit_index
 git_view.git_view_state.selected_file_index
 git_view.git_view_state.selected_tree_index
@@ -575,8 +570,6 @@ onboarding.setup_menu_state.selected_index
 onboarding.setup_menu_state.showing_confirmation
 plugins_host.plugin_captures_text
 plugins_host.plugin_render_errors{}
-plugins_host.plugin_ui_states{}.version
-plugins_host.plugin_ui_states{}.view{}
 recovery.session_recovery_state.action_result
 recovery.session_recovery_state.last_error
 recovery.session_recovery_state.loading

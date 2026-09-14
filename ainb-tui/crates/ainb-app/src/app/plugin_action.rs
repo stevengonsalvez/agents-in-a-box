@@ -14,8 +14,11 @@ pub mod ids {
     /// `{"plugin": String, "action_id": String, "payload": Value}`
     pub const PLUGIN_ACTION: &str = "plugin.owned.action";
 
+    /// `{"screen": String, "watching": bool}`
+    pub const WATCH_SCREEN: &str = "plugin.owned.watch_screen";
+
     /// Every plugin action command id.
-    pub const ALL: &[&str] = &[PLUGIN_ACTION];
+    pub const ALL: &[&str] = &[PLUGIN_ACTION, WATCH_SCREEN];
 }
 
 /// Ask `plugin` to run its action `action_id` with `payload`.
@@ -25,6 +28,23 @@ pub fn run(plugin: &str, action_id: &str, payload: Value) -> Intent {
         CommandId::new(ids::PLUGIN_ACTION),
         json!({ "plugin": plugin, "action_id": action_id, "payload": payload }),
     )
+}
+
+/// Keep `screen`'s plugin rendering while the terminal shows something
+/// else (`watching`), or stop.
+#[must_use]
+pub fn watch_screen(screen: &str, watching: bool) -> Intent {
+    Intent::Command(
+        CommandId::new(ids::WATCH_SCREEN),
+        json!({ "screen": screen, "watching": watching }),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatchArgs {
+    screen: String,
+    watching: bool,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +69,14 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                     action_id: args.action_id,
                     payload: args.payload,
                 }),
+        ),
+        AppEvent::WatchPluginScreen { .. } => Some(
+            serde_json::from_value::<WatchArgs>(args.clone()).ok().map(|args| {
+                AppEvent::WatchPluginScreen {
+                    screen: args.screen,
+                    watching: args.watching,
+                }
+            }),
         ),
         _ => None,
     }

@@ -157,7 +157,8 @@ impl<'a> AttachHandler<'a> {
         let status = Command::new("tmux")
             .arg("attach-session")
             .arg("-t")
-            .arg(session_name)
+            // Exact target, as for `has-session` above.
+            .arg(format!("={session_name}"))
             .status()
             .await
             .context("Failed to execute tmux attach-session")?;

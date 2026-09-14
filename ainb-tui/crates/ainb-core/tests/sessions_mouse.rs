@@ -127,7 +127,10 @@ fn sessions_mouse_double_click_attaches_selected_session_row() {
     assert!(first.is_empty());
     assert_eq!(
         second,
-        vec![Effect::AttachTerminal(TerminalTarget::Session(session_id))]
+        vec![Effect::AttachTerminal(TerminalTarget::Session {
+            id: session_id,
+            tmux_session: ainb::app::TmuxSessionName::new("tmux_second").expect("valid name"),
+        })]
     );
     assert_eq!(state.sessions.selected_workspace_index, Some(0));
     assert_eq!(state.sessions.selected_session_index, Some(1));
