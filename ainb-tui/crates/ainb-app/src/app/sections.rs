@@ -178,7 +178,7 @@ pub struct PluginsHostSection {
 }
 
 /// One plugin's `ui.state` view as the snapshot bus last delivered it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct PluginUiState {
     /// Snapshot bus version of the publish, increasing per topic.
     pub version: u64,
