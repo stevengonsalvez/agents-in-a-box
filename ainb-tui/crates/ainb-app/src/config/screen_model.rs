@@ -186,6 +186,7 @@ fn widen_with_detected_choices(setting: &mut ConfigSetting) {
 /// One node of the settings tree: a category root, or a TOML sub-table under
 /// it.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct ConfigTreeNode {
     pub category: ConfigCategory,
     /// Dotted path this node covers. Empty when the category's rows are
