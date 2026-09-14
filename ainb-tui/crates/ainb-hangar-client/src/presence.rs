@@ -18,7 +18,7 @@
 //! them, but does not list them, so one running TUI is exactly one row no
 //! matter how many polls it makes or which call sites label themselves `cli`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use ainb_hangar_proto::connections::SurfaceInfo;
@@ -40,14 +40,32 @@ const BACKOFF_MAX: Duration = Duration::from_secs(2);
 const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Longest a close waits for the task to drop its socket before aborting it.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// A connection must stay up this long before a later loss restarts the
+/// backoff at [`BACKOFF_INITIAL`]. Without it, a daemon that accepts hello and
+/// then drops the socket would see four dial, insert, remove, broadcast cycles
+/// a second.
+const BACKOFF_RESET_AFTER: Duration = Duration::from_secs(5);
 
 /// Live presence leases in this process. Non-zero marks every other daemon
 /// connection from this process as transient.
 static LEASES_HELD: AtomicUsize = AtomicUsize::new(0);
+/// Set once by [`mark_process_as_surface`] and never cleared.
+static PROCESS_IS_SURFACE: AtomicBool = AtomicBool::new(false);
 
-/// Whether this process currently holds a presence lease.
+/// Declare that this whole process is one surface whose presence is a lease.
+///
+/// From here to exit, every [`crate::DaemonClient`] connection is transient,
+/// including calls made before the lease first connects and after it closes,
+/// while the host is still starting up or tearing down. A host calls this
+/// once, before its first daemon call; [`PresenceLease`] alone only covers the
+/// lease's own lifetime.
+pub fn mark_process_as_surface() {
+    PROCESS_IS_SURFACE.store(true, Ordering::SeqCst);
+}
+
+/// Whether connections from this process must not list as their own rows.
 pub fn lease_held() -> bool {
-    LEASES_HELD.load(Ordering::SeqCst) > 0
+    PROCESS_IS_SURFACE.load(Ordering::SeqCst) || LEASES_HELD.load(Ordering::SeqCst) > 0
 }
 
 /// Where a lease's connection currently stands.
@@ -94,10 +112,14 @@ impl PresenceLease {
     /// [`Self::spawn`] with an explicit client source (the test seam).
     #[must_use]
     pub fn spawn_with(surface: SurfaceInfo, dialer: Dialer) -> Self {
+        Self::spawn_timed(surface, dialer, Timing::default())
+    }
+
+    fn spawn_timed(surface: SurfaceInfo, dialer: Dialer, timing: Timing) -> Self {
         let held = HeldGuard::acquire();
         let (state_tx, state) = watch::channel(PresenceState::Waiting { error: None });
         let (shutdown, shutdown_rx) = oneshot::channel();
-        let task = tokio::spawn(run(surface, dialer, state_tx, shutdown_rx));
+        let task = tokio::spawn(run(surface, dialer, timing, state_tx, shutdown_rx));
         Self {
             shutdown: Some(shutdown),
             task: Some(task),
@@ -150,6 +172,22 @@ impl Drop for HeldGuard {
     }
 }
 
+/// Heartbeat bounds, shortened only by the tests.
+#[derive(Debug, Clone, Copy)]
+struct Timing {
+    ping_interval: Duration,
+    ping_timeout: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            ping_interval: PING_INTERVAL,
+            ping_timeout: RPC_TIMEOUT,
+        }
+    }
+}
+
 /// Why a held connection ended.
 enum Held {
     Shutdown,
@@ -159,6 +197,7 @@ enum Held {
 async fn run(
     surface: SurfaceInfo,
     dialer: Dialer,
+    timing: Timing,
     state: watch::Sender<PresenceState>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
@@ -176,8 +215,12 @@ async fn run(
             dialed = attempt => match dialed {
                 Ok((reader, writer)) => {
                     state.send_replace(PresenceState::Connected);
-                    backoff = BACKOFF_INITIAL;
-                    match hold(reader, writer, &mut shutdown).await {
+                    let connected_at = tokio::time::Instant::now();
+                    let held = hold(reader, writer, timing, &mut shutdown).await;
+                    if connected_at.elapsed() >= BACKOFF_RESET_AFTER {
+                        backoff = BACKOFF_INITIAL;
+                    }
+                    match held {
                         Held::Shutdown => break,
                         Held::Lost(error) => error,
                     }
@@ -201,6 +244,7 @@ async fn run(
 async fn hold(
     mut reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
     mut writer: tokio::net::unix::OwnedWriteHalf,
+    timing: Timing,
     shutdown: &mut oneshot::Receiver<()>,
 ) -> Held {
     // `read_frame` is not cancel-safe, so frames are read on their own task and
@@ -217,8 +261,10 @@ async fn hold(
     });
     let _pump = AbortOnDrop(pump);
 
-    let mut ping =
-        tokio::time::interval_at(tokio::time::Instant::now() + PING_INTERVAL, PING_INTERVAL);
+    let mut ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + timing.ping_interval,
+        timing.ping_interval,
+    );
     let mut next_id: i64 = 2;
     // The id of an unanswered ping and when it is overdue.
     let mut pending: Option<(i64, tokio::time::Instant)> = None;
@@ -249,10 +295,13 @@ async fn hold(
                 if let Err(error) = write_frame(&mut writer, methods::PING, json!({}), id).await {
                     return Held::Lost(error.to_string());
                 }
-                pending = Some((id, tokio::time::Instant::now() + RPC_TIMEOUT));
+                pending = Some((id, tokio::time::Instant::now() + timing.ping_timeout));
             }
             () = overdue => {
-                return Held::Lost(format!("daemon did not answer ping within {RPC_TIMEOUT:?}"));
+                return Held::Lost(format!(
+                    "daemon did not answer ping within {:?}",
+                    timing.ping_timeout
+                ));
             }
         }
     }
@@ -263,5 +312,84 @@ struct AbortOnDrop(JoinHandle<()>);
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ainb_hangar_proto::connections::SurfaceKind;
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    use super::*;
+
+    /// A daemon that keeps the socket open but stops answering is a lost
+    /// presence: the lease must notice through the ping bound and redial,
+    /// rather than hold a row that nothing is serving.
+    #[tokio::test]
+    async fn an_unanswered_ping_drops_the_connection_and_redials() {
+        let temp = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temp.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake hangar socket");
+        let (accepted_tx, mut accepted) = mpsc::channel::<()>(4);
+        let server = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let (stream, _) = listener.accept().await.expect("accept lease");
+                let (read_half, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                let hello = read_frame(&mut reader).await.expect("read hello");
+                assert_eq!(hello["method"], methods::AUTH_HELLO);
+                assert!(hello["params"].get("transient").is_none(), "{hello}");
+                let body = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+                let frame = format!("Content-Length: {}\r\n\r\n", body.len());
+                writer.write_all(frame.as_bytes()).await.expect("ack head");
+                writer.write_all(body).await.expect("ack body");
+                let _ = accepted_tx.send(()).await;
+                // Read pings forever, answer none, never close.
+                held.push(tokio::spawn(async move {
+                    let _writer = writer;
+                    while read_frame(&mut reader).await.is_ok() {}
+                }));
+            }
+        });
+
+        let socket_for_dial = socket.clone();
+        let lease = PresenceLease::spawn_timed(
+            SurfaceInfo {
+                kind: SurfaceKind::Tui,
+                pid: 1,
+            },
+            Box::new(move || {
+                Ok(DaemonClient::with_parts(
+                    socket_for_dial.clone(),
+                    "t".into(),
+                ))
+            }),
+            Timing {
+                ping_interval: Duration::from_millis(50),
+                ping_timeout: Duration::from_millis(100),
+            },
+        );
+
+        let bound = Duration::from_secs(5);
+        tokio::time::timeout(bound, accepted.recv()).await.expect("first dial");
+        let mut state = lease.state();
+        let lost = tokio::time::timeout(
+            bound,
+            state.wait_for(|s| matches!(s, PresenceState::Waiting { error: Some(_) })),
+        )
+        .await
+        .expect("the silent daemon is noticed")
+        .expect("lease alive")
+        .clone();
+        assert!(
+            matches!(&lost, PresenceState::Waiting { error: Some(e) } if e.contains("ping")),
+            "{lost:?}"
+        );
+        tokio::time::timeout(bound, accepted.recv()).await.expect("the lease redials");
+
+        lease.close().await;
+        server.abort();
     }
 }
