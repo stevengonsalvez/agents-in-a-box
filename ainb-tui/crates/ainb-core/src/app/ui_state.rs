@@ -300,7 +300,7 @@ impl SkillSourcesPane {
         )
     }
 
-    pub fn set_width(&mut self, width: u16) {
+    pub const fn set_width(&mut self, width: u16) {
         self.width = Some(width);
     }
 }
