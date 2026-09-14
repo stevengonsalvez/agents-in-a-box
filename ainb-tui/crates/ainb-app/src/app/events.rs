@@ -165,9 +165,10 @@ pub enum AppEvent {
     },
     /// Focus a pane of the session list.
     SessionListFocusPane(crate::app::state::FocusedPane),
-    /// Persist the sessions pane's width and collapsed flag as preferences.
+    /// Persist the sessions pane's width, as a fraction of its row, and its
+    /// collapsed flag as preferences.
     SaveSessionsPaneLayout {
-        width: u16,
+        fraction: f64,
         collapsed: bool,
     },
     /// Focus a Skill Manager panel without selecting anything in it.
@@ -2742,9 +2743,12 @@ impl EventHandler {
             AppEvent::SessionListFocusPane(pane) => {
                 state.shell.focused_pane = pane;
             }
-            AppEvent::SaveSessionsPaneLayout { width, collapsed } => {
+            AppEvent::SaveSessionsPaneLayout {
+                fraction,
+                collapsed,
+            } => {
                 let preferences = &mut state.config.app_config.ui_preferences;
-                preferences.sessions_sidebar_width = Some(width);
+                preferences.sessions_sidebar_fraction = Some(fraction.clamp(0.0, 1.0));
                 preferences.sessions_sidebar_collapsed = Some(collapsed);
                 state.persist_app_config([
                     "ui_preferences.sessions_sidebar_width",
@@ -4017,6 +4021,7 @@ impl EventHandler {
                 // and its section version does not move.
                 let prefs = &state.config.app_config.ui_preferences;
                 let legacy = prefs.home_sidebar_width.is_some()
+                    || prefs.sessions_sidebar_width.is_some()
                     || prefs.skill_manager_sources_width.is_some();
                 if legacy && state.config.app_config.migrate_layout_widths(columns) {
                     // The legacy counts no longer serialise, so naming them
