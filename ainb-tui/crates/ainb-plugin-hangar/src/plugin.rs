@@ -710,7 +710,12 @@ impl Default for HangarPlugin {
             fleet_status_retry_at: None,
             fleet_status_failures: 0,
             fleet_status_logged: None,
-            legacy_panel: std::env::var(LEGACY_PANEL_ENV).is_ok_and(|value| value == "1"),
+            legacy_panel: std::env::var(LEGACY_PANEL_ENV).is_ok_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            }),
             legacy_snapshot: None,
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
