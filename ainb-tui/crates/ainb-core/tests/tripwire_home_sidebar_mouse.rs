@@ -138,19 +138,20 @@ fn tui_home_sidebar_mouse_resize_persists_and_restores() {
             );
         };
         assert!(
-            !pre_cap.contains("home_sidebar_width"),
+            !pre_cap.contains("home_sidebar_fraction"),
             "pre-capture unexpectedly contains config text:\n{pre_cap}"
         );
 
         // Home full layout starts sidebar content below the 7-row header.
         // Edge x=25 is the default 26-column sidebar border; drag to x=39
-        // requests a 40-column sidebar on this 120-column tmux pane.
+        // requests a 40-column sidebar on this 120-column tmux pane, saved as
+        // a third of the screen.
         send_sgr_mouse(&session, 0, 25, 10, true);
         send_sgr_mouse(&session, 32, 39, 10, true);
         send_sgr_mouse(&session, 0, 39, 10, false);
 
         let persisted = session.poll(Instant::now() + Duration::from_secs(10), |_| {
-            config_text(home_tmp.path()).contains("home_sidebar_width = 40")
+            config_text(home_tmp.path()).contains("home_sidebar_fraction = 0.333")
         });
         assert!(
             persisted.is_some(),
@@ -178,7 +179,7 @@ fn tui_home_sidebar_mouse_resize_persists_and_restores() {
             session.capture()
         );
         assert!(
-            config_text(home_tmp.path()).contains("home_sidebar_width = 40"),
+            config_text(home_tmp.path()).contains("home_sidebar_fraction = 0.333"),
             "relaunch lost persisted sidebar width:\n{}",
             config_text(home_tmp.path())
         );
