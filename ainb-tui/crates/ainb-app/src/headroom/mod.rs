@@ -365,8 +365,7 @@ fn live_users(except: Option<u32>) -> Vec<u32> {
     };
     let mut live = Vec::new();
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok())
-        else {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
         };
         if Some(pid) == except {
@@ -389,7 +388,10 @@ fn process_is_alive(pid: u32) -> bool {
     let Ok(raw) = i32::try_from(pid) else {
         return false;
     };
-    matches!(kill(Pid::from_raw(raw), None), Ok(()) | Err(nix::errno::Errno::EPERM))
+    matches!(
+        kill(Pid::from_raw(raw), None),
+        Ok(()) | Err(nix::errno::Errno::EPERM)
+    )
 }
 
 /// Drop this process's lease, then stop the ainb-managed proxy only if no
@@ -886,7 +888,11 @@ mod tests {
             std::env::set_var("AINB_HOME", dir.path());
             std::env::set_var("AINB_HEADROOM_PORT", port.to_string());
             std::fs::create_dir_all(users_dir()).expect("users dir");
-            Self { _dir: dir, old_home, old_port }
+            Self {
+                _dir: dir,
+                old_home,
+                old_port,
+            }
         }
     }
 
