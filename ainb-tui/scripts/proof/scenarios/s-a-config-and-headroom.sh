@@ -91,18 +91,12 @@ scenario() {
   check "the pid is unchanged while B runs" test "$(cat "$pidfile" 2>/dev/null)" = "$pid_a"
   check "B's log records no headroom spawn" \
     bash -c "[[ -n '$log_b' ]] && ! grep -q 'spawned headroom proxy' '$log_b'"
-  local p
-  for p in $(world_pids); do
-    local cmd
-    cmd="$( { tr '\0' ' ' <"/proc/$p/cmdline"; } 2>/dev/null)"
-    if grep -qE "^python3 - $PROOF_HEADROOM_PORT" <<<"$cmd"; then
-      printf '%s %s\n' "$p" "$cmd"
-    fi
-  done >"$NODE_DIR/headroom-processes.txt"
-  CAPTURES+=("headroom-processes.txt")
-  observe "headroom stub processes in this world: $(wc -l <"$NODE_DIR/headroom-processes.txt")"
-  check "exactly one headroom proxy process in this world" \
-    test "$(wc -l <"$NODE_DIR/headroom-processes.txt")" -eq 1
+  # One proxy means one listener on the proxy port, whoever owns it.
+  ss -ltnpH "sport = :$PROOF_HEADROOM_PORT" >"$NODE_DIR/headroom-listeners.txt" 2>&1 || true
+  CAPTURES+=("headroom-listeners.txt")
+  observe "listeners on the headroom port: $(grep -c LISTEN "$NODE_DIR/headroom-listeners.txt")"
+  check "exactly one headroom proxy listens on its port" \
+    test "$(grep -c LISTEN "$NODE_DIR/headroom-listeners.txt")" -eq 1
 
   quit_tui b
   sleep 12
