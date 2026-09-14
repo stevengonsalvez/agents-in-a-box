@@ -42,6 +42,9 @@ use tokio::task::JoinHandle;
 /// JSON-RPC "method not found": a daemon older than the read it was asked for.
 const METHOD_NOT_FOUND: i32 = -32601;
 
+/// The unreachable reason section 20 renders once the reader task has died.
+const READER_STOPPED: &str = "agent status reader stopped";
+
 /// Which daemon read the task pays per revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadPath {
@@ -100,6 +103,8 @@ pub struct AgentStatusHost {
     sequence: u64,
     /// Section 20 moved since the last publish.
     unpublished: bool,
+    /// The task was found finished and section 20 was told so.
+    stop_reported: bool,
 }
 
 impl AgentStatusHost {
@@ -120,15 +125,26 @@ impl AgentStatusHost {
             task,
             sequence: 0,
             unpublished: false,
+            stop_reported: false,
         }
     }
 
     /// Fold every update that has arrived into section 20. Returns whether
     /// section 20's version moved.
+    ///
+    /// Supervises the owner too: the task is panic-free and ends only when this
+    /// handle drops, so a finished task means it died (a panic, or an abort).
+    /// Section 20 then renders unreachable with that reason instead of freezing
+    /// its last read as live, because nothing else will ever read again.
     pub fn drain_into(&mut self, state: &mut AppState) -> bool {
         let mut changed = false;
         while let Ok(update) = self.updates.try_recv() {
             changed |= apply(state, update);
+        }
+        if !self.stop_reported && self.task.is_finished() {
+            self.stop_reported = true;
+            tracing::warn!("agent status: the reader task stopped");
+            changed |= state.agent_status_read_failed(READER_STOPPED.to_string(), now_ms());
         }
         self.unpublished |= changed;
         changed
@@ -970,5 +986,46 @@ mod tests {
                 .push((topic.to_string(), payload))),
             "published once"
         );
+    }
+
+    /// #1038 review item 7: a reader task that dies turns section 20
+    /// unreachable, once, instead of leaving the panel live on its last read.
+    #[tokio::test]
+    async fn a_dead_reader_marks_section_20_unreachable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut host =
+            AgentStatusHost::spawn_timed(dialer(dir.path().join("missing.sock")), false, fast());
+        let mut state = AppState::default();
+        apply(
+            &mut state,
+            AgentStatusUpdate::Read(
+                RosterStatusResult {
+                    rows: Vec::new(),
+                    read_revision: 3,
+                    unknown_events: Vec::new(),
+                },
+                5,
+            ),
+        );
+        host.task.abort();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !host.task.is_finished() {
+            assert!(tokio::time::Instant::now() < deadline, "the abort lands");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(host.drain_into(&mut state), "the stop is a change");
+        let health = &state.agent_status.view.as_ref().expect("view").health;
+        assert!(
+            matches!(
+                health,
+                ainb_hangar_proto::status_view::ViewHealth::Unreachable { reason, .. }
+                    if reason == READER_STOPPED
+            ),
+            "{health:?}"
+        );
+        assert!(host.unpublished, "and it is published");
+        let version = state.agent_status.version();
+        assert!(!host.drain_into(&mut state), "reported once");
+        assert_eq!(state.agent_status.version(), version);
     }
 }
