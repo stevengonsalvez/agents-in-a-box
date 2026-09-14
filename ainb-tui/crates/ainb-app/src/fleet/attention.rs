@@ -17,7 +17,7 @@ use std::fmt;
 /// them in this order (spec: "both chips shown, ASK first"). `Ord` is derived
 /// from the variant order deliberately — sorting a chip list sorts it into the
 /// order it renders in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AttentionKind {
     /// A structured question is waiting on a human. Blocks the agent.
     Ask,
@@ -91,7 +91,7 @@ impl fmt::Display for AttentionKind {
 /// Where an attention state was observed. The daemon wins over local producers
 /// while it is up (spec: "daemon row wins while the daemon is up"), and the
 /// source is carried so the merge can say WHY a row looks the way it does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttentionSource {
     /// Read from the local notifyd notifications store or the session's own
     /// status. Always available, daemon up or down.
@@ -106,7 +106,7 @@ pub enum AttentionSource {
 /// explanation is the silent no-op the spec forbids: the operator is looking at
 /// something that needs them and has no way to learn why the surface will not
 /// take their answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum Unanswerable {
     /// The row came from the daemon, and the daemon has since gone away, so the
     /// `attention/answer` call that would deliver the answer is unavailable.
@@ -147,7 +147,7 @@ impl Unanswerable {
 }
 
 /// How an answer to this row would be delivered.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum Answerable {
     /// Through the daemon's `attention/answer`, targeting this attention id.
     /// Unambiguous by construction: the id names exactly one open row, so the
@@ -225,7 +225,7 @@ pub const APPROVE_LABEL: &str = "approve";
 pub const DENY_LABEL: &str = "deny";
 
 /// One structured option an ASK offers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct AttentionOption {
     /// The label the operator picks and the text delivered as the answer.
     pub label: String,
@@ -234,7 +234,7 @@ pub struct AttentionOption {
 }
 
 /// One live attention state on one session row.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct SessionAttention {
     /// What the session needs.
     pub kind: AttentionKind,
@@ -248,6 +248,7 @@ pub struct SessionAttention {
     pub source: AttentionSource,
     /// The one-line question or reason the `ask` tab leads with, when the
     /// producer supplied one.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub detail: Option<String>,
     /// Structured answer options. EMPTY unless the producer supplied a
     /// structured request — a free-text composer, not a zero-option list.
@@ -431,7 +432,7 @@ pub fn format_age(now_ms: i64, since_ms: i64) -> String {
 /// and whether it was reachable at all. The two travel together on purpose: a
 /// consumer that saw only the rows could not tell "the daemon says nothing is
 /// waiting" from "the daemon did not answer", and those need opposite chips.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct DaemonAttention {
     /// Open rows keyed by their provider-owned session id.
     ///
@@ -440,9 +441,11 @@ pub struct DaemonAttention {
     pub by_session_id: std::collections::HashMap<String, Vec<SessionAttention>>,
     /// Open rows keyed by working directory for a deliberately guarded
     /// fallback when no exact provider-session match exists.
+    #[serde(skip)]
     pub by_cwd: std::collections::HashMap<String, Vec<SessionAttention>>,
     /// Cwd fallback rows that carried no provider session id. A known daemon
     /// id may never be guessed onto an uncorrelated local session by cwd.
+    #[serde(skip)]
     pub by_cwd_without_session_id: std::collections::HashMap<String, Vec<SessionAttention>>,
     /// One entry per daemon attention id, retained so rows with no cwd still
     /// count as elsewhere rather than vanishing from the surface.
@@ -450,6 +453,7 @@ pub struct DaemonAttention {
     /// `true` when the last poll reached the daemon, whatever it returned.
     pub reachable: bool,
     /// Why the last poll failed, for the one banner line the header shows.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub error: Option<String>,
     /// `true` when that failure means NOTHING IS SERVING the socket, so
     /// starting a daemon is the remedy a surface may offer.
