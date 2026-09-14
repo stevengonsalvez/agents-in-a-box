@@ -21,7 +21,9 @@
 //! daemon) and `secret_store_get` land in later phases.
 
 use ainb_hangar_proto::events::HangarEvent;
-use ainb_hangar_proto::status_topic::{AGENT_STATUS_TOPIC, AgentStatusEnvelope};
+use ainb_hangar_proto::status_topic::{
+    AGENT_STATUS_CLOCK_TOPIC, AGENT_STATUS_TOPIC, AgentStatusClock, AgentStatusEnvelope,
+};
 use ainb_hangar_proto::{RpcId, RpcResponse, methods as daemon_methods};
 use ainb_plugin_sdk::{
     CliOutput, HandleEventParams, HandleKeyParams, HostClient, InitContext, KeyCode,
@@ -2517,6 +2519,19 @@ impl HangarPlugin {
             }
             Err(tokio::sync::oneshot::error::TryRecvError::Closed) => self.agent_status_seed = None,
             Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Fold the host's card-clock tick into the Fleet panel (#1054). The publish
+    /// that delivered it also marked this plugin for a repaint, so the next
+    /// frame shows the advanced ages.
+    fn apply_agent_status_clock(&mut self, payload: &[u8]) {
+        match serde_json::from_slice::<AgentStatusClock>(payload) {
+            Ok(tick) => self.screens.fleet.set_clock_ms(tick.clock_ms),
+            Err(error) => {
+                self.pending_logs
+                    .push(format!("hangar: card clock tick did not decode: {error}"));
+            }
         }
     }
 
@@ -5730,6 +5745,15 @@ impl Plugin for HangarPlugin {
                 let _ = seed_tx.send(Err(format!("agent status subscription refused: {error}")));
                 return;
             }
+            // The card clock (#1054) needs no seed: the host ticks every
+            // second while it holds cards.
+            if let Err(error) = seeder.snapshot_subscribe(AGENT_STATUS_CLOCK_TOPIC).await {
+                let _ = seeder
+                    .log_info(format!(
+                        "hangar: card clock subscription refused, card ages render ?: {error}"
+                    ))
+                    .await;
+            }
             if let Ok(latest) = seeder.snapshot_get(AGENT_STATUS_TOPIC).await {
                 if let Some(payload) = latest.payload {
                     let _ = seed_tx.send(Ok(payload.to_vec()));
@@ -5744,6 +5768,10 @@ impl Plugin for HangarPlugin {
         if params.topic == AGENT_STATUS_TOPIC {
             self.drain_agent_status_seed();
             self.apply_agent_status(&params.payload);
+            return Ok(());
+        }
+        if params.topic == AGENT_STATUS_CLOCK_TOPIC {
+            self.apply_agent_status_clock(&params.payload);
             return Ok(());
         }
         // Only socket:<stream_id> deliveries for our current stream concern us.
@@ -6404,6 +6432,7 @@ mod tests {
             Some(
                 &[
                     AGENT_STATUS_TOPIC.to_string(),
+                    AGENT_STATUS_CLOCK_TOPIC.to_string(),
                     format!("{}*", ainb_plugin_sdk::topics::UI_STATE),
                     ainb_plugin_sdk::topics::UI_CLOSE_REQUEST.to_string(),
                 ][..]
@@ -9712,6 +9741,22 @@ mod tests {
             plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
             Some(AgentState::Waiting)
         );
+    }
+
+    /// #1054: a clock tick from the host becomes the Fleet panel's clock.
+    #[test]
+    fn a_host_clock_tick_sets_the_panel_clock() {
+        let mut plugin = connected_plugin_with_issue();
+        let tick = serde_json::to_vec(&AgentStatusClock {
+            clock_ms: 1_789_409_605_000,
+        })
+        .unwrap();
+        plugin.apply_agent_status_clock(&tick);
+        assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
+        let logs = plugin.pending_logs.len();
+        plugin.apply_agent_status_clock(b"not json");
+        assert_eq!(plugin.pending_logs.len(), logs + 1);
+        assert_eq!(plugin.screens.fleet.now_ms(), 1_789_409_605_000);
     }
 
     /// #1038 review item 8: a refused `snapshot_subscribe` names its cause
