@@ -51,6 +51,17 @@ pub enum Effect {
     /// or no text on it) it reports [`crate::app::reports::clipboard_failed`]
     /// instead. Desktop host: reads its platform clipboard, same dispatch.
     PasteClipboard,
+    /// Run `ainb daemon <daemon> <action>`, a daemon lifecycle verb.
+    ///
+    /// Terminal host: runs the command off the UI thread and, once it exits,
+    /// reports its exit status and output with
+    /// [`crate::app::reports::daemon_action_finished`]. A command that cannot
+    /// start is reported as a failure naming why. Desktop host: the same
+    /// command against the host it drives, reported the same way.
+    RunDaemonAction {
+        daemon: crate::fleet::daemons::probe::DaemonKind,
+        action: crate::cli::daemon::Action,
+    },
 }
 
 /// What an [`Effect::AttachTerminal`] attaches to.
