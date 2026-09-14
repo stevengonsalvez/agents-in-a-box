@@ -32,10 +32,10 @@ pub mod ids {
     pub const SKILL_MANAGER_SELECT_UNIT: &str = "skill_manager.select_unit";
     /// `{"pane": "sources" | "units"}`
     pub const SKILL_MANAGER_FOCUS_PANE: &str = "skill_manager.focus_pane";
-    /// `{"width": u16}`
+    /// `{"fraction": f64}`, of the screen width.
     pub const SKILL_MANAGER_SAVE_SOURCES_WIDTH: &str = "skill_manager.save_sources_width";
-    /// No arguments.
-    pub const HOME_BEGIN_SIDEBAR_RESIZE: &str = "home.begin_sidebar_resize";
+    /// `{"fraction": f64}`, of the screen width.
+    pub const HOME_SAVE_SIDEBAR_WIDTH: &str = "home.save_sidebar_width";
     /// `{"item": SidebarItem id}`
     pub const HOME_CLICK_SIDEBAR_ITEM: &str = "home.click_sidebar_item";
 
@@ -50,7 +50,7 @@ pub mod ids {
         SKILL_MANAGER_SELECT_UNIT,
         SKILL_MANAGER_FOCUS_PANE,
         SKILL_MANAGER_SAVE_SOURCES_WIDTH,
-        HOME_BEGIN_SIDEBAR_RESIZE,
+        HOME_SAVE_SIDEBAR_WIDTH,
         HOME_CLICK_SIDEBAR_ITEM,
     ];
 }
@@ -123,19 +123,32 @@ pub fn focus_skill_pane(pane: FocusedSkillPane) -> Intent {
     command(ids::SKILL_MANAGER_FOCUS_PANE, json!({ "pane": pane }))
 }
 
-/// Persist the Sources panel width a renderer just set.
+/// The fraction `width` columns make of a `columns`-wide screen.
+fn fraction_of(width: u16, columns: u16) -> f64 {
+    if columns == 0 {
+        return 0.0;
+    }
+    (f64::from(width) / f64::from(columns)).clamp(0.0, 1.0)
+}
+
+/// Persist the Sources panel width a renderer just set, `width` columns of a
+/// `columns`-wide screen.
 #[must_use]
-pub fn save_skill_sources_width(width: u16) -> Intent {
+pub fn save_skill_sources_width(width: u16, columns: u16) -> Intent {
     command(
         ids::SKILL_MANAGER_SAVE_SOURCES_WIDTH,
-        json!({ "width": width }),
+        json!({ "fraction": fraction_of(width, columns) }),
     )
 }
 
-/// Start dragging the home sidebar's resize edge.
+/// Persist the home sidebar width a renderer just set, `width` columns of a
+/// `columns`-wide screen.
 #[must_use]
-pub fn begin_home_sidebar_resize() -> Intent {
-    command(ids::HOME_BEGIN_SIDEBAR_RESIZE, Value::Null)
+pub fn save_home_sidebar_width(width: u16, columns: u16) -> Intent {
+    command(
+        ids::HOME_SAVE_SIDEBAR_WIDTH,
+        json!({ "fraction": fraction_of(width, columns) }),
+    )
 }
 
 /// Click home sidebar `item`.
@@ -179,8 +192,14 @@ struct LayoutArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WidthArgs {
-    width: u16,
+struct FractionArgs {
+    fraction: f64,
+}
+
+impl FractionArgs {
+    fn in_range(self) -> Option<f64> {
+        (0.0..=1.0).contains(&self.fraction).then_some(self.fraction)
+    }
 }
 
 #[derive(Deserialize)]
@@ -196,9 +215,8 @@ fn parse<T: for<'de> Deserialize<'de>>(args: &Args) -> Option<T> {
 /// The event a pointer row runs with `args` as its payload.
 ///
 /// `None` when `event` is not a pointer row's event; `Some(None)` when it is
-/// but `args` do not fit. Rows with a payload refuse `Null`, so running one
-/// by name without a hit-test changes nothing; the one row without a payload
-/// takes only `Null`.
+/// but `args` do not fit. Every pointer row that carries a payload refuses
+/// `Null`, so running one by name without a hit-test changes nothing.
 pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent>> {
     Some(match event {
         AppEvent::SessionListSelectRow { .. } => {
@@ -239,14 +257,15 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                 _ => None,
             })
         }
-        AppEvent::SkillManagerSaveSourcesWidth { .. } => parse::<WidthArgs>(args)
-            .map(|args| AppEvent::SkillManagerSaveSourcesWidth { width: args.width }),
+        AppEvent::SkillManagerSaveSourcesWidth { .. } => parse::<FractionArgs>(args)
+            .and_then(FractionArgs::in_range)
+            .map(|fraction| AppEvent::SkillManagerSaveSourcesWidth { fraction }),
+        AppEvent::HomeSidebarSaveWidth { .. } => parse::<FractionArgs>(args)
+            .and_then(FractionArgs::in_range)
+            .map(|fraction| AppEvent::HomeSidebarSaveWidth { fraction }),
         AppEvent::HomeSidebarClickItem { .. } => parse::<ItemArgs>(args)
             .and_then(|args| SidebarItem::from_id(&args.item))
             .map(|item| AppEvent::HomeSidebarClickItem { item }),
-        AppEvent::HomeSidebarBeginResize => {
-            args.is_null().then_some(AppEvent::HomeSidebarBeginResize)
-        }
         _ => return None,
     })
 }
