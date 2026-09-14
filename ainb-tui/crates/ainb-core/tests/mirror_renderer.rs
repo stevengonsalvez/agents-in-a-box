@@ -11,6 +11,8 @@ use ainb_app::wire::frame::{Frame, FrameBatch, HostId, Mirror, Subscription};
 use ainb_app::wire::section_json;
 use ainb_app::wire::store::{MirrorStore, ROOT_SELECTORS, Scalar};
 use ainb_app::{AppState, SectionId};
+use ainb_hangar_proto::agent_status as status;
+use ainb_hangar_proto::fleet as proto;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -61,6 +63,11 @@ fn send(mirror: &mut Mirror, tx: &mpsc::Sender<FrameBatch>, state: &AppState) ->
 
 const SUBSET: [SectionId; 3] = [SectionId::Sessions, SectionId::Shell, SectionId::Config];
 
+/// `sections` as held from this host, the shape `Commit::changed` reports.
+fn local(sections: &[SectionId]) -> Vec<(HostId, SectionId)> {
+    sections.iter().map(|id| (HostId::local(), *id)).collect()
+}
+
 #[test]
 fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     isolated_home();
@@ -78,10 +85,10 @@ fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
     let commit = renderer.drain();
     assert_eq!(
         commit.changed,
-        vec![SectionId::Sessions, SectionId::Config, SectionId::Shell]
+        local(&[SectionId::Sessions, SectionId::Config, SectionId::Shell])
     );
     for id in SUBSET {
-        let held = renderer.store.section(id).expect("subscribed section held");
+        let held = renderer.store.section(&HostId::local(), id).expect("subscribed section held");
         assert_eq!(held.version, state.versions()[id.index()]);
         assert_eq!(held.host_id, HostId::local());
         assert_eq!(
@@ -90,7 +97,7 @@ fn the_first_batch_frames_every_subscribed_section_and_nothing_else() {
             "the body is the redacted section frame"
         );
     }
-    assert!(renderer.store.section(SectionId::Fleet).is_none());
+    assert!(renderer.store.section(&HostId::local(), SectionId::Fleet).is_none());
 }
 
 #[test]
@@ -129,7 +136,9 @@ fn one_drain_is_one_transaction_and_effects_run_after_the_commit() {
     let seen: Arc<Mutex<Vec<(u64, u64, u64)>>> = Arc::default();
     let sink = Arc::clone(&seen);
     renderer.store.on_commit(move |store, commit| {
-        let version = |id: SectionId| store.section(id).map_or(0, |section| section.version);
+        let version = |id: SectionId| {
+            store.section(&HostId::local(), id).map_or(0, |section| section.version)
+        };
         sink.lock().unwrap().push((
             commit.transaction,
             version(SectionId::Sessions),
@@ -151,7 +160,10 @@ fn one_drain_is_one_transaction_and_effects_run_after_the_commit() {
         before + 1,
         "three batches, one transaction"
     );
-    assert_eq!(commit.changed, vec![SectionId::Sessions, SectionId::Shell]);
+    assert_eq!(
+        commit.changed,
+        local(&[SectionId::Sessions, SectionId::Shell])
+    );
     let effects_seen = seen.lock().unwrap().clone();
     assert_eq!(
         effects_seen.as_slice(),
@@ -163,7 +175,7 @@ fn one_drain_is_one_transaction_and_effects_run_after_the_commit() {
         "the effect ran once, after both sections were committed at their final versions"
     );
     assert_eq!(
-        renderer.store.section(SectionId::Sessions).unwrap().body["expand_all_workspaces"],
+        renderer.store.section(&HostId::local(), SectionId::Sessions).unwrap().body["expand_all_workspaces"],
         true,
         "the last frame of a section in a drain wins"
     );
@@ -197,7 +209,7 @@ fn an_unsubscribed_hot_section_applies_no_frame() {
     let commit = renderer.drain();
     assert!(commit.changed.is_empty());
     assert_eq!(renderer.store.frames_applied(), applied);
-    assert!(renderer.store.section(SectionId::Sessions).is_none());
+    assert!(renderer.store.section(&HostId::local(), SectionId::Sessions).is_none());
     assert_eq!(renderer.store.frames_ignored(), 1);
 
     // Subscribing later frames it in full on the next batch.
@@ -245,5 +257,125 @@ fn every_root_selector_returns_a_scalar() {
     assert_eq!(
         count(&renderer.store.read_selectors()),
         Some(Scalar::Count(1))
+    );
+}
+
+/// One roster row as a daemon on `host` reports it.
+fn roster_read(
+    host: &str,
+    read_at_ms: i64,
+    evidence_observed_at: i64,
+) -> status::RosterStatusResult {
+    let session = proto::FleetSession {
+        session_key: "claude:shared-key".to_string(),
+        provider: proto::FleetProvider::Claude,
+        provider_session_id: Some("s-1".to_string()),
+        tmux_target: Some("ainb-a".to_string()),
+        pane_binding: proto::PaneBinding::default(),
+        process_start_fingerprint: None,
+        cwd: format!("/home/{host}/repo"),
+        display_name: Some(format!("{host} session")),
+        lifecycle: proto::LifecycleState::Running,
+        active_work_count: 1,
+        attention: proto::AttentionState::default(),
+        current_request_fingerprint: None,
+        current_request: None,
+        management: proto::ManagementState::Managed,
+        transport_health: proto::TransportHealth::Healthy,
+        capabilities: proto::FleetCapabilities::default(),
+        provenance: proto::FleetProvenance::Authoritative,
+        confidence: proto::FleetConfidence::High,
+        discovered_at: 1,
+        last_observed_at: 2,
+        lifecycle_updated_at: 2,
+        attention_updated_at: 1,
+        model: None,
+        reasoning_effort: None,
+        model_updated_at: 0,
+        version: 1,
+        updated_revision: 3,
+    };
+    let row = status::AgentStatusRow {
+        host_id: host.to_string(),
+        evidence_observed_at,
+        ..status::status_row(&session, false)
+    };
+    status::RosterStatusResult {
+        rows: vec![status::RosterStatusRow {
+            session,
+            status: row,
+            read_revision: 7,
+        }],
+        read_revision: 7,
+        unknown_events: Vec::new(),
+        read_at_ms,
+    }
+}
+
+/// Two machines mirror the same session key into one renderer: both are held,
+/// each with its own host id and version, and the folded count is two.
+#[test]
+fn two_hosts_fold_into_one_renderer_without_collision() {
+    isolated_home();
+    let subscription = Subscription::only(&[SectionId::AgentStatus]);
+    let (tx, rx) = mpsc::channel();
+    let mut renderer = Renderer {
+        store: MirrorStore::new(subscription),
+        rx,
+    };
+    for host in ["h1", "h2"] {
+        let mut state = AppState::new();
+        state.apply_agent_status_read(roster_read(host, 10_000, 9_000), 10_000);
+        let mut mirror = Mirror::new(HostId::new(host), subscription);
+        tx.send(mirror.batch(&state)).unwrap();
+    }
+    let commit = renderer.drain();
+    let (h1, h2) = (HostId::new("h1"), HostId::new("h2"));
+    assert_eq!(
+        commit.changed,
+        vec![
+            (h1.clone(), SectionId::AgentStatus),
+            (h2.clone(), SectionId::AgentStatus)
+        ]
+    );
+    for host in [&h1, &h2] {
+        let card =
+            &renderer.store.section(host, SectionId::AgentStatus).unwrap().body["view"]["cards"][0];
+        assert_eq!(
+            card["host_id"],
+            host.as_str(),
+            "a row names the host it came from"
+        );
+        assert_eq!(card["session_key"], "claude:shared-key");
+    }
+    let selectors = renderer.store.read_selectors();
+    let read = |name: &str| selectors.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone());
+    assert_eq!(read("agent_count"), Some(Scalar::Count(2)));
+    assert_eq!(read("host_count"), Some(Scalar::Count(2)));
+}
+
+/// A daemon 90 s ahead: the section 20 frame carries the daemon's clock at the
+/// read, and a card's age is that clock minus its evidence stamp, 5 s. This
+/// surface's own clock minus the stamp is negative, the bug the frame avoids.
+#[test]
+fn a_card_ages_on_the_daemon_clock_across_a_90_second_skew() {
+    isolated_home();
+    const SKEW_MS: i64 = 90_000;
+    let local_now = 1_000_000;
+    let daemon_read_at = local_now + SKEW_MS;
+    let evidence = daemon_read_at - 5_000;
+    let mut state = AppState::new();
+    state.apply_agent_status_read(roster_read("h1", daemon_read_at, evidence), local_now);
+    let subscription = Subscription::only(&[SectionId::AgentStatus]);
+    let batch = Mirror::new(HostId::new("h1"), subscription).batch(&state);
+    let frame = &batch.frames[0];
+    let read = frame.daemon_read.expect("section 20 names its daemon read");
+    assert_eq!(read.revision, 7);
+    assert_eq!(read.clock_ms, daemon_read_at);
+    let observed = frame.body["view"]["cards"][0]["evidence_observed_at"].as_i64().unwrap();
+    assert_eq!(read.clock_ms - observed, 5_000, "the age a renderer draws");
+    assert!(
+        local_now - observed < 0,
+        "local now minus a remote stamp goes negative"
     );
 }
