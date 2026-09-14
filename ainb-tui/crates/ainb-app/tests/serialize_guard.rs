@@ -18,12 +18,16 @@ use std::path::{Path, PathBuf};
 macro_rules! is_serialize {
     ($ty:ty) => {{
         struct Probe<T>(std::marker::PhantomData<T>);
+        // Only one of the two traits is picked for a given `T`, so the other is
+        // unused in that expansion.
+        #[allow(dead_code)]
         trait Yes {
             fn check(&self) -> bool {
                 true
             }
         }
         impl<T: serde::Serialize> Yes for Probe<T> {}
+        #[allow(dead_code)]
         trait No {
             fn check(&self) -> bool {
                 false
@@ -144,7 +148,8 @@ fn current_call_sites() -> BTreeSet<String> {
             let mut in_test_module: Option<i64> = None;
             for (index, line) in lines.iter().enumerate() {
                 if let Some(depth) = in_test_module.as_mut() {
-                    *depth += line.matches('{').count() as i64 - line.matches('}').count() as i64;
+                    *depth += i64::try_from(line.matches('{').count()).unwrap_or(i64::MAX)
+                        - i64::try_from(line.matches('}').count()).unwrap_or(i64::MAX);
                     if *depth <= 0 {
                         in_test_module = None;
                     }
