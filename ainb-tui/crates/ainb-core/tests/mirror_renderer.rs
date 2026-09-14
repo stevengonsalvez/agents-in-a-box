@@ -359,8 +359,8 @@ fn two_hosts_fold_into_one_renderer_without_collision() {
 /// surface's own clock minus the stamp is negative, the bug the frame avoids.
 #[test]
 fn a_card_ages_on_the_daemon_clock_across_a_90_second_skew() {
-    isolated_home();
     const SKEW_MS: i64 = 90_000;
+    isolated_home();
     let local_now = 1_000_000;
     let daemon_read_at = local_now + SKEW_MS;
     let evidence = daemon_read_at - 5_000;
