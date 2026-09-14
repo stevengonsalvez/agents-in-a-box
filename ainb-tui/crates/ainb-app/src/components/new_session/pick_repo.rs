@@ -91,7 +91,11 @@ pub enum PickRepoOutcome {
     Notice { message: String, is_error: bool },
     /// A favorite was added or removed: the dispatcher queues the favorites
     /// store's write, shows `message` and stays on the picker.
-    FavoritesChanged { message: String },
+    FavoritesChanged {
+        message: String,
+        /// The favourites as they stand after the change, for the host to write.
+        favorites: crate::app::effect::Snapshot<crate::config::FavoritesStore>,
+    },
 }
 
 /// Persistent state for the picker. Constructed once per new-session
@@ -460,6 +464,7 @@ pub fn handle_key(state: &mut PickRepoState, key: &Chord) -> PickRepoOutcome {
                             state.rebuild_rows(&local_repos);
                             PickRepoOutcome::FavoritesChanged {
                                 message: format!("⭐ Added '{display}' to favorites"),
+                                favorites: crate::app::effect::Snapshot(state.favorites.clone()),
                             }
                         }
                         FavoriteToggle::Removed(display) => {
@@ -467,6 +472,7 @@ pub fn handle_key(state: &mut PickRepoState, key: &Chord) -> PickRepoOutcome {
                             state.rebuild_rows(&local_repos);
                             PickRepoOutcome::FavoritesChanged {
                                 message: format!("★ Removed '{display}' from favorites"),
+                                favorites: crate::app::effect::Snapshot(state.favorites.clone()),
                             }
                         }
                     };
