@@ -1093,7 +1093,17 @@ impl PluginTask {
         }
     }
 
+    /// The `event_bus` grant every snapshot-bus call needs; `-32001` without it.
+    fn require_event_bus(&self) -> Result<(), RpcError> {
+        if self.plugin.manifest.capabilities.event_bus.is_granted() {
+            Ok(())
+        } else {
+            Err(RpcError::capability_denied("event_bus"))
+        }
+    }
+
     fn host_snapshot_get(&self, params: Value) -> Result<Value, RpcError> {
+        self.require_event_bus()?;
         let p: SnapshotGetParams =
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
         let topic = Topic::from(p.topic);
@@ -1106,6 +1116,7 @@ impl PluginTask {
     }
 
     fn host_snapshot_subscribe(&self, params: Value) -> Result<Value, RpcError> {
+        self.require_event_bus()?;
         let p: SnapshotSubscribeParams =
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
         self.snapshots.subscribe(Topic::from(p.topic), self.plugin.id.clone());
@@ -1426,6 +1437,12 @@ impl PluginTask {
     async fn handle_host_notification(&self, method: &str, params: Value) {
         match method {
             methods::HOST_SNAPSHOT_PUBLISH => {
+                // A notification has no error reply, so a publish without the
+                // grant is dropped rather than answered with `-32001`.
+                if self.require_event_bus().is_err() {
+                    warn!(plugin = %self.plugin.id, "snapshot publish denied: no event_bus grant");
+                    return;
+                }
                 let Ok(p) = serde_json::from_value::<SnapshotPublishParams>(params) else {
                     warn!(plugin = %self.plugin.id, "bad snapshot publish");
                     return;
