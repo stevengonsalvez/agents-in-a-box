@@ -1701,7 +1701,14 @@ mod tests {
         // An action the host never reported, asked for long enough ago to be
         // past the give-up point.
         let started = std::time::Instant::now() - (ACTION_TIMEOUT + Duration::from_secs(1));
-        state.inflight.insert(DaemonKind::McpPool.id(), started);
+        state.inflight.insert(
+            DaemonKind::McpPool.id(),
+            InFlight {
+                action: Action::Restart,
+                generation: 1,
+                started,
+            },
+        );
 
         state.poll_actions();
 
@@ -1870,13 +1877,21 @@ mod tests {
         (home, state)
     }
 
-    fn report(daemon: DaemonKind, verb: &str, ok: bool, summary: &str) -> crate::app::Intent {
+    fn report(
+        daemon: DaemonKind,
+        verb: &str,
+        generation: u64,
+        ok: bool,
+        summary: &str,
+    ) -> crate::app::Intent {
         crate::app::reports::daemon_action_finished(&crate::app::reports::DaemonActionReport {
             daemon: daemon.id().to_string(),
             verb: verb.to_string(),
+            generation,
             ok,
             summary: summary.to_string(),
             detail: format!("cmd: ainb daemon {} {verb}", daemon.id()),
+            local: None,
         })
     }
 
@@ -1898,7 +1913,14 @@ mod tests {
 
         let effects = dispatch(&mut state, &keymap, &mut NoRenderer, enter);
 
-        let [Effect::RunDaemonAction { daemon, action }] = effects.as_slice() else {
+        let [
+            Effect::RunDaemonAction {
+                daemon,
+                action,
+                generation,
+            },
+        ] = effects.as_slice()
+        else {
             panic!("expected one daemon action, got {effects:?}");
         };
         assert_eq!(*daemon, DaemonKind::McpPool);
@@ -1912,7 +1934,13 @@ mod tests {
             &mut state,
             &keymap,
             &mut NoRenderer,
-            report(DaemonKind::McpPool, action.id(), true, "mcp pool started"),
+            report(
+                DaemonKind::McpPool,
+                action.id(),
+                *generation,
+                true,
+                "mcp pool started",
+            ),
         );
         assert!(effects.is_empty());
         let daemons = &state.hangar.daemons_state;
@@ -1923,10 +1951,11 @@ mod tests {
         assert_ne!(before, state.versions(), "the row's section moved");
     }
 
-    /// A report that lands after the row gave up does not replace the timeout
-    /// the row already shows.
+    /// A start the row gave up on, then a stop: the start's late report must
+    /// neither end the stop nor show on the row, and the stop's own report
+    /// lands.
     #[test]
-    fn a_report_after_the_give_up_is_ignored() {
+    fn a_late_report_for_a_timed_out_start_does_not_answer_the_retry() {
         use crate::app::{Keymap, NoRenderer, dispatch};
 
         let (_home, mut state) = app_on_daemons(vec![status(
@@ -1935,26 +1964,69 @@ mod tests {
             false,
             None,
         )]);
-        let started = std::time::Instant::now()
-            .checked_sub(ACTION_TIMEOUT + Duration::from_secs(1))
-            .expect("the clock is past the give-up point");
-        state.hangar.daemons_state.inflight.insert(DaemonKind::McpPool.id(), started);
-        state.hangar.daemons_state.poll_actions();
+        let keymap = Keymap::defaults();
+        let daemons = &mut state.hangar.daemons_state;
+        daemons.dispatch(DaemonKind::McpPool, Action::Start);
+        let [start] = daemons.take_action_requests()[..] else {
+            panic!("one start request");
+        };
+        // The start never reports in time.
+        daemons.inflight.get_mut(DaemonKind::McpPool.id()).expect("in flight").started =
+            std::time::Instant::now()
+                .checked_sub(ACTION_TIMEOUT + Duration::from_secs(1))
+                .expect("the clock is past the give-up point");
+        daemons.poll_actions();
+        assert_eq!(
+            daemons.outcomes[DaemonKind::McpPool.id()].summary,
+            "timed out"
+        );
+
+        daemons.dispatch(DaemonKind::McpPool, Action::Stop);
+        let [stop] = daemons.take_action_requests()[..] else {
+            panic!("one stop request");
+        };
+        assert_ne!(start.generation, stop.generation);
 
         let _ = dispatch(
             &mut state,
-            &Keymap::defaults(),
+            &keymap,
             &mut NoRenderer,
-            report(DaemonKind::McpPool, "start", true, "started late"),
+            report(
+                DaemonKind::McpPool,
+                "start",
+                start.generation,
+                true,
+                "started late",
+            ),
+        );
+        let daemons = &state.hangar.daemons_state;
+        assert!(
+            daemons.inflight.contains_key(DaemonKind::McpPool.id()),
+            "the stop is still running"
+        );
+        assert!(
+            !daemons.outcomes.contains_key(DaemonKind::McpPool.id()),
+            "the late start result must not show on the row"
         );
 
-        let outcome = state
-            .hangar
-            .daemons_state
-            .outcomes
-            .get(DaemonKind::McpPool.id())
-            .expect("the give-up outcome");
-        assert_eq!(outcome.summary, "timed out");
+        let _ = dispatch(
+            &mut state,
+            &keymap,
+            &mut NoRenderer,
+            report(
+                DaemonKind::McpPool,
+                "stop",
+                stop.generation,
+                true,
+                "mcp pool stopped",
+            ),
+        );
+        let daemons = &state.hangar.daemons_state;
+        assert!(daemons.inflight.is_empty());
+        assert_eq!(
+            daemons.outcomes[DaemonKind::McpPool.id()].summary,
+            "mcp pool stopped"
+        );
     }
 
     /// The Pal pane's start offer queues one start, however often it is
@@ -1968,13 +2040,17 @@ mod tests {
         let (_home, mut state) = app_on_daemons(Vec::new());
         EventHandler::process_event(AppEvent::SessionStartHangarDaemon, &mut state);
         EventHandler::process_event(AppEvent::SessionStartHangarDaemon, &mut state);
-        assert_eq!(
-            state.take_effects(),
-            vec![Effect::RunDaemonAction {
+        let effects = state.take_effects();
+        let [
+            Effect::RunDaemonAction {
                 daemon: DaemonKind::HangarDaemon,
                 action: Action::Start,
-            }]
-        );
+                generation,
+            },
+        ] = effects[..]
+        else {
+            panic!("expected one hangar start, got {effects:?}");
+        };
 
         let _ = dispatch(
             &mut state,
@@ -1983,6 +2059,7 @@ mod tests {
             report(
                 DaemonKind::HangarDaemon,
                 "start",
+                generation,
                 true,
                 "already running (pid 4242)",
             ),
