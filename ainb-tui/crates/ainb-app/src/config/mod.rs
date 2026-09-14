@@ -2152,9 +2152,7 @@ impl AppConfig {
             Err(err) => {
                 tracing::warn!(path = %config_path.display(), error = %err, "config lock unavailable; saving without it");
                 write_keys_into_unlocked(&config_path, &edits).and_then(|()| {
-                    removals
-                        .iter()
-                        .try_for_each(|key| remove_key_from_unlocked(&config_path, key))
+                    removals.iter().try_for_each(|key| remove_key_from_unlocked(&config_path, key))
                 })
             }
         };
