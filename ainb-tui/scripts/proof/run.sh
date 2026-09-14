@@ -92,6 +92,10 @@ for node in "${NODES[@]}"; do
   echo "== $node" >&2
   # A subshell per node: a scenario's exports, traps and globals die with it.
   (
+    # Scenarios poll with `cmd | grep -q`. Under pipefail a grep that matches
+    # and exits early gets its producer a SIGPIPE, and the match reads as a
+    # failure, so a node runs without it.
+    set +o pipefail
     # shellcheck source=lib.sh
     source "$PROOF_DIR/lib.sh"
     # shellcheck source=/dev/null
@@ -101,6 +105,13 @@ for node in "${NODES[@]}"; do
     scenario
     write_result
   )
+  # Teardown adds surface and daemon logs after the result is written; list
+  # every file that is actually beside the result.
+  if [[ -f "$PROOF_OUT/$node/result.json" ]]; then
+    files="$(find "$PROOF_OUT/$node" -maxdepth 1 -type f ! -name result.json -printf '%f\n' | sort | jq -R . | jq -sc .)"
+    jq --argjson files "$files" '.capture = $files' "$PROOF_OUT/$node/result.json" >"$PROOF_OUT/$node/result.json.tmp" \
+      && mv "$PROOF_OUT/$node/result.json.tmp" "$PROOF_OUT/$node/result.json"
+  fi
   echo "   $(jq -r 'if .pass then "PASS" else "FAIL" + (if .issue then " (#\(.issue))" else "" end) end' \
     "$PROOF_OUT/$node/result.json" 2>/dev/null || echo "NO RESULT")" >&2
 done
