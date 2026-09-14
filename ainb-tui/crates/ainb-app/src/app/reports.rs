@@ -23,8 +23,12 @@ pub mod ids {
     pub const SHELL_PREPARED: &str = "global.shell_prepared";
     /// `{"ok": bool}`
     pub const ABTOP_SETUP_FINISHED: &str = "global.abtop_setup_finished";
-    /// `{"rows": u16, "cols": u16}`
-    pub const IN_PLACE_SIZED: &str = "global.in_place_sized";
+    /// `{"tmux_session": String, "embed": LocalEmbed}`
+    pub const IN_PLACE_OPENED: &str = "global.in_place_opened";
+    /// `{"tmux_session": String, "error": String}`
+    pub const IN_PLACE_FAILED: &str = "global.in_place_failed";
+    /// `{"plugin": String, "action_id": String}`
+    pub const PLUGIN_ACTION_UNDELIVERED: &str = "global.plugin_action_undelivered";
     /// No arguments.
     pub const DETACHED: &str = "global.detached";
     /// `{"outcome": EditorOutcome}`
@@ -42,7 +46,9 @@ pub mod ids {
         ATTACH_FINISHED,
         SHELL_PREPARED,
         ABTOP_SETUP_FINISHED,
-        IN_PLACE_SIZED,
+        IN_PLACE_OPENED,
+        IN_PLACE_FAILED,
+        PLUGIN_ACTION_UNDELIVERED,
         DETACHED,
         EDITOR_FINISHED,
         CLIPBOARD_FAILED,
@@ -242,10 +248,80 @@ pub fn abtop_setup_finished(ok: bool) -> Intent {
     command(ids::ABTOP_SETUP_FINISHED, json!({ "ok": ok }))
 }
 
-/// Report the size the in-place terminal should take in the host's layout.
+/// Report that the host opened a tmux client on `tmux_session` for the
+/// in-place pane, parked as `embed` for the reducer to adopt.
 #[must_use]
-pub fn in_place_sized(rows: u16, cols: u16) -> Intent {
-    command(ids::IN_PLACE_SIZED, json!({ "rows": rows, "cols": cols }))
+pub fn in_place_opened(tmux_session: &str, embed: &LocalEmbed) -> Intent {
+    command(
+        ids::IN_PLACE_OPENED,
+        json!({ "tmux_session": tmux_session, "embed": embed }),
+    )
+}
+
+/// Report that the in-place client on `tmux_session` would not open.
+#[must_use]
+pub fn in_place_failed(tmux_session: &str, error: &str) -> Intent {
+    command(
+        ids::IN_PLACE_FAILED,
+        json!({ "tmux_session": tmux_session, "error": error }),
+    )
+}
+
+/// Report that the host's plugin runtime has no running `plugin` to take
+/// `action_id`.
+#[must_use]
+pub fn plugin_action_undelivered(plugin: &str, action_id: &str) -> Intent {
+    command(
+        ids::PLUGIN_ACTION_UNDELIVERED,
+        json!({ "plugin": plugin, "action_id": action_id }),
+    )
+}
+
+/// A tmux client the host opened for the in-place pane, parked in this
+/// process until the reducer adopts it.
+///
+/// Serialised as an opaque random handle, like [`LocalOutput`]: the client is
+/// a PTY this process owns, so only this process's reducer can adopt it, and
+/// only once. A report that is never dispatched leaves its client parked
+/// until the process ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LocalEmbed(String);
+
+type LocalEmbeds = std::sync::Mutex<std::collections::HashMap<String, crate::tmux::EmbedClient>>;
+
+fn local_embeds() -> &'static LocalEmbeds {
+    static EMBEDS: std::sync::OnceLock<LocalEmbeds> = std::sync::OnceLock::new();
+    EMBEDS.get_or_init(LocalEmbeds::default)
+}
+
+impl LocalEmbed {
+    /// A handle nothing is parked behind, for the keymap row's placeholder
+    /// event.
+    #[must_use]
+    pub const fn placeholder() -> Self {
+        Self(String::new())
+    }
+
+    /// Park `client` behind a new handle.
+    #[must_use]
+    pub fn keep(client: crate::tmux::EmbedClient) -> Self {
+        let handle = Uuid::new_v4().to_string();
+        local_embeds()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(handle.clone(), client);
+        Self(handle)
+    }
+
+    /// The parked client, once, in the process that parked it.
+    #[must_use]
+    pub fn adopt(&self) -> Option<crate::tmux::EmbedClient> {
+        local_embeds()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0)
+    }
 }
 
 /// Report that the user left the live terminal.
@@ -334,9 +410,23 @@ struct OkArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SizeArgs {
-    rows: u16,
-    cols: u16,
+struct OpenedArgs {
+    tmux_session: String,
+    embed: LocalEmbed,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InPlaceFailedArgs {
+    tmux_session: String,
+    error: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UndeliveredArgs {
+    plugin: String,
+    action_id: String,
 }
 
 #[derive(Deserialize)]
@@ -392,10 +482,22 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         AppEvent::AbtopSetupFinished { .. } => {
             parse::<OkArgs>(args).map(|args| AppEvent::AbtopSetupFinished { ok: args.ok })
         }
-        AppEvent::InPlaceSized { .. } => {
-            parse::<SizeArgs>(args).map(|args| AppEvent::InPlaceSized {
-                rows: args.rows,
-                cols: args.cols,
+        AppEvent::InPlaceOpened { .. } => {
+            parse::<OpenedArgs>(args).map(|args| AppEvent::InPlaceOpened {
+                tmux_session: args.tmux_session,
+                embed: args.embed,
+            })
+        }
+        AppEvent::InPlaceFailed { .. } => {
+            parse::<InPlaceFailedArgs>(args).map(|args| AppEvent::InPlaceFailed {
+                tmux_session: args.tmux_session,
+                error: args.error,
+            })
+        }
+        AppEvent::PluginActionUndelivered { .. } => {
+            parse::<UndeliveredArgs>(args).map(|args| AppEvent::PluginActionUndelivered {
+                plugin: args.plugin,
+                action_id: args.action_id,
             })
         }
         AppEvent::Detached => args.is_null().then_some(AppEvent::Detached),
