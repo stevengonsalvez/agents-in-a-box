@@ -35,6 +35,7 @@ pub mod text_editor;
 pub mod tmux;
 pub mod usage_cache;
 pub mod widgets;
+pub mod wire;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

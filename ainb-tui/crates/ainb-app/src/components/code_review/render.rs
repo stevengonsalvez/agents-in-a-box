@@ -6,7 +6,7 @@ use super::model::{DiffRow, ReviewFile, ReviewModel, RowKind};
 use std::collections::{BTreeMap, HashSet};
 
 /// Transient UI state for the review surface (selection + scroll).
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct CodeReviewUi {
     /// Index of the sidebar-selected file (mirrors the highlighted tree file).
     pub selected_file: usize,

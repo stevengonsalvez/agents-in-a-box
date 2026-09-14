@@ -15,14 +15,14 @@ pub fn sidebar_double_click_window() -> Duration {
 }
 
 /// Focus area on the home screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeScreenFocus {
     Sidebar,
     ContentPanel,
 }
 
 /// State for the refreshed home screen
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct HomeScreenV2State {
     /// Current focus (always sidebar for now)
     pub focus: HomeScreenFocus,
@@ -32,6 +32,7 @@ pub struct HomeScreenV2State {
     pub welcome: WelcomePanelState,
     /// Mascot animation
     pub mascot: MascotAnimation,
+    #[serde(skip)]
     last_sidebar_click: Option<(usize, Instant)>,
 }
 

@@ -3,7 +3,7 @@
 // `ainb-core::components::setup_menu`, which re-exports this module.
 
 /// Menu items in the setup menu
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupMenuItem {
     RerunWizard,
     CheckDependencies,
@@ -71,7 +71,7 @@ impl SetupMenuItem {
 }
 
 /// State for the setup menu
-#[derive(Debug)]
+#[derive(serde::Serialize, Debug)]
 pub struct SetupMenuState {
     /// Currently selected item index
     pub selected_index: usize,

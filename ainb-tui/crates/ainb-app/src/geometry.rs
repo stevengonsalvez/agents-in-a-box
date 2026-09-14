@@ -3,7 +3,7 @@
 // stores an `Area`, never a renderer's own rectangle type.
 
 /// A rectangle on the host's render surface, in cells from the top-left.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Area {
     pub x: u16,
     pub y: u16,

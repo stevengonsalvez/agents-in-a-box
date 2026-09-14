@@ -74,11 +74,11 @@ pub struct RepositoryPreset {
     pub permissions: PermissionSet,
 
     /// Custom CLAUDE.md rules to append
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub custom_rules: Option<String>,
 
     /// Environment variables to set
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
     pub environment: HashMap<String, String>,
 }
 

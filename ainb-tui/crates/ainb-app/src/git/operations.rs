@@ -299,11 +299,12 @@ fn get_git_credentials(url: &str) -> Option<(String, String)> {
 }
 
 /// Information about a single commit
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct CommitInfo {
     pub hash_short: String,
     pub author: String,
     pub date: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub message: String,
 }
 

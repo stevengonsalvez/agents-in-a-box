@@ -3921,16 +3921,16 @@ impl EventHandler {
                 };
                 // Output kept local to this process (a pairing code) is shown
                 // here; a report from elsewhere shows the redacted fields.
-                let (summary, detail) = report
-                    .local
-                    .as_ref()
-                    .and_then(crate::app::reports::LocalOutput::redeem)
-                    .unwrap_or((report.summary, report.detail));
+                let redeemed =
+                    report.local.as_ref().and_then(crate::app::reports::LocalOutput::redeem);
+                let local_only = redeemed.is_some();
+                let (summary, detail) = redeemed.unwrap_or((report.summary, report.detail));
                 let outcome = crate::components::daemons::ActionOutcome {
                     action,
                     ok: report.ok,
                     summary,
                     detail,
+                    local_only,
                 };
                 // The Pal pane's offer starts the same daemon the Daemons
                 // screen does, so one report can answer both.
@@ -5469,6 +5469,19 @@ impl EventHandler {
                                     *selected_idx,
                                 );
                             }
+                            // An env or build-args entry holds a credential by
+                            // where it lives, so it edits in the popup that
+                            // never serialises its value.
+                            crate::app::state::ConfigValue::Text(text)
+                                if crate::config::settings_model::credential_bearing_key(&key) =>
+                            {
+                                state.config.config_popup_state.open_secret(
+                                    &title,
+                                    &description,
+                                    &key,
+                                    text,
+                                );
+                            }
                             crate::app::state::ConfigValue::Text(text) => {
                                 state.config.config_popup_state.open_text(
                                     &title,
@@ -5484,7 +5497,7 @@ impl EventHandler {
                                 // land in config.toml. Ctrl+K is the path that
                                 // takes a literal, and it writes it to the
                                 // keychain instead.
-                                state.config.config_popup_state.open_text(
+                                state.config.config_popup_state.open_secret(
                                     &title,
                                     "reference: $ENV_VAR or keychain:<service> — Ctrl+K stores a literal in the keychain",
                                     &key,
@@ -5527,7 +5540,7 @@ impl EventHandler {
                         let service = crate::config::screen_model::keychain_service(&setting.key);
                         state.config.config_screen_state.keychain_target =
                             Some(setting.key.clone());
-                        state.config.config_popup_state.open_text(
+                        state.config.config_popup_state.open_secret(
                             &format!("{} → keychain", setting.label),
                             &format!(
                                 "stored under '{service}'; config.toml keeps only the reference"

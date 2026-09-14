@@ -735,6 +735,7 @@ Options:
       --offline          Skip skill-source reachability checks. Runtime checks stay local
       --fix-hooks        Repair installed notification hooks: stable binary launcher, extracted scripts, and agent wiring. Reports a broken dev target without changing it into a release hook
       --fix-daemons      Restart Ainb-managed daemon processes proved to be running an older Ainb release. Unknown or externally-owned processes are only reported
+      --wire-shape       Compare the mirror frame shape with the committed key-path fixture (issue #983). Prints added and removed leaf paths; exits non-zero on drift
   -h, --help             Print help
 
 EXAMPLES:

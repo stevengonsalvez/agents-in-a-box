@@ -43,7 +43,7 @@ pub struct ContainerTemplateConfig {
     pub entrypoint: Option<Vec<String>>,
 
     /// Environment variables
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
     pub environment: HashMap<String, String>,
 
     /// User to run as (optional)
@@ -93,6 +93,7 @@ pub enum ImageSource {
     /// Build from a Dockerfile
     Dockerfile {
         path: PathBuf,
+        #[serde(serialize_with = "crate::wire::fields::env_values_in_frame")]
         build_args: HashMap<String, String>,
     },
 
@@ -101,6 +102,7 @@ pub enum ImageSource {
         /// Override base image
         base_image: Option<String>,
         /// Additional build args
+        #[serde(serialize_with = "crate::wire::fields::env_values_in_frame")]
         build_args: HashMap<String, String>,
     },
 }

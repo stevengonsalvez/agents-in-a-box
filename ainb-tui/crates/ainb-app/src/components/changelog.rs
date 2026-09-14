@@ -8,14 +8,14 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag};
 const CHANGELOG_CONTENT: &str = include_str!("../../../../CHANGELOG.md");
 
 /// A line of rendered markdown content
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct MarkdownLine {
     pub content: String,
     pub style: MarkdownStyle,
 }
 
 /// Styling categories for markdown content
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
 pub enum MarkdownStyle {
     Heading1,
     Heading2,
@@ -29,7 +29,7 @@ pub enum MarkdownStyle {
 }
 
 /// State for the changelog viewer
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ChangelogState {
     /// Parsed markdown lines
     pub lines: Vec<MarkdownLine>,

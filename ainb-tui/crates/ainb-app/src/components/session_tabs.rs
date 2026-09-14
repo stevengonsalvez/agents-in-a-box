@@ -61,7 +61,7 @@ fn log_detail(row: &ainb_plugin_notifyd::NotificationRecord) -> String {
 ///
 /// Declaration order is STRIP order, left to right, and `cycle` walks it, so
 /// the rendered strip and the key that moves through it cannot disagree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SessionTab {
     /// The read-only tmux mirror. Today's default, and still the default.
     #[default]
