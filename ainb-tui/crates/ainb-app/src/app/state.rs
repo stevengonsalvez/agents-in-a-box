@@ -12660,32 +12660,52 @@ impl AppState {
         running: bool,
         snapshot: Option<(bytes::Bytes, u64, ainb_plugin_runtime::types::PluginId)>,
     ) {
+        let offered = snapshot.as_ref().map(|(_, version, _)| *version);
+        // Host bookkeeping no frame carries, so recording it bumps nothing.
+        let spend = |state: &mut Self, version: Option<u64>| {
+            if let Some(version) = version {
+                state.plugins_host.update(|host| {
+                    let spent = host.plugin_ui_state_spent.entry(plugin.to_string()).or_default();
+                    *spent = (*spent).max(version);
+                    false
+                });
+            }
+        };
         let evict = |state: &mut Self| {
             if state.plugins_host.plugin_ui_states.contains_key(plugin) {
                 state.plugins_host.plugin_ui_states.remove(plugin);
             }
         };
         if !running {
+            let kept = self.plugins_host.plugin_ui_states.get(plugin).map(|view| view.version);
+            spend(self, offered.max(kept));
             evict(self);
             return;
         }
         let Some((payload, version, publisher)) = snapshot else {
             return;
         };
-        if publisher.as_str() != plugin {
-            tracing::warn!(%plugin, publisher = %publisher, "ui.state view from another publisher ignored");
-            return;
-        }
         if self
             .plugins_host
-            .plugin_ui_states
+            .plugin_ui_state_spent
             .get(plugin)
-            .is_some_and(|known| known.version >= version)
+            .is_some_and(|spent| *spent >= version)
+            || self
+                .plugins_host
+                .plugin_ui_states
+                .get(plugin)
+                .is_some_and(|known| known.version >= version)
         {
+            return;
+        }
+        if publisher.as_str() != plugin {
+            tracing::warn!(%plugin, publisher = %publisher, "ui.state view from another publisher ignored");
+            spend(self, Some(version));
             return;
         }
         if payload.len() > MAX_PLUGIN_UI_STATE_BYTES {
             tracing::warn!(%plugin, version, bytes = payload.len(), "ui.state view over the size cap refused");
+            spend(self, Some(version));
             evict(self);
             return;
         }
@@ -12698,6 +12718,37 @@ impl AppState {
             }
             Err(error) => {
                 tracing::warn!(%plugin, version, %error, "ui.state publish is not JSON");
+                spend(self, Some(version));
+            }
+        }
+    }
+
+    /// How long another host's watch on a plugin screen lasts unless renewed.
+    /// A host keeping a screen live re-sends its watch within this; a host
+    /// that went away stops, and so does the rendering done for it.
+    pub const PLUGIN_SCREEN_WATCH_LEASE: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// Drop the watches not renewed within [`Self::PLUGIN_SCREEN_WATCH_LEASE`]
+    /// of `now`, and those whose plugin `gone` says has stopped for good.
+    pub fn release_plugin_screen_watches(
+        &mut self,
+        now: std::time::Instant,
+        gone: impl Fn(&str) -> bool,
+    ) {
+        let lapsed: Vec<String> = self
+            .plugins_host
+            .watched_plugin_screens
+            .iter()
+            .filter(|(screen, renewed)| {
+                now.saturating_duration_since(**renewed) > Self::PLUGIN_SCREEN_WATCH_LEASE
+                    || crate::app::screens::builtin::plugin_id_for_screen(screen).is_none_or(&gone)
+            })
+            .map(|(screen, _)| screen.clone())
+            .collect();
+        if !lapsed.is_empty() {
+            let host = self.plugins_host.get_mut();
+            for screen in lapsed {
+                host.watched_plugin_screens.remove(&screen);
             }
         }
     }
@@ -12707,7 +12758,7 @@ impl AppState {
     #[must_use]
     pub fn plugin_screen_wanted(&self, screen_id: &str) -> bool {
         self.shell.current_screen == screen_id
-            || self.plugins_host.watched_plugin_screens.contains(screen_id)
+            || self.plugins_host.watched_plugin_screens.contains_key(screen_id)
     }
 
     pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
@@ -13112,15 +13163,18 @@ impl App {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
             let running = handle.lifecycle_state(&pid)
                 == Some(ainb_plugin_runtime::types::LifecycleState::Running);
-            let snapshot = running
-                .then(|| {
-                    handle.snapshot_get_versioned(&ainb_plugin_runtime::topics::ui_state_topic(
-                        plugin_id,
-                    ))
-                })
-                .flatten();
+            // Read even when stopped: the version seen then is one a restart
+            // must not show again.
+            let snapshot = handle
+                .snapshot_get_versioned(&ainb_plugin_runtime::topics::ui_state_topic(plugin_id));
             self.state.record_plugin_ui_state(plugin_id, running, snapshot);
         }
+        self.state.release_plugin_screen_watches(std::time::Instant::now(), |plugin| {
+            matches!(
+                handle.lifecycle_state(&ainb_plugin_runtime::PluginId::from(plugin)),
+                None | Some(ainb_plugin_runtime::types::LifecycleState::Quarantined)
+            )
+        });
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
