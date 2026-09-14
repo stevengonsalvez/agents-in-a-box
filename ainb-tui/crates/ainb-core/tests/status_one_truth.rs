@@ -127,6 +127,36 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             "the legacy two-read panel must paint the same"
         );
 
+        // Section 20 alone (#1015 criterion 2): the app state folds the same
+        // joined read into section 20, the Fleet roster section stays empty,
+        // and a panel built from section 20 only paints the same cells.
+        let mut app = ainb::app::state::AppState::default();
+        assert!(app.apply_agent_status_read(joined.clone(), expected.4 + 42_000));
+        assert_eq!(
+            app.fleet.version(),
+            0,
+            "the Fleet section is neither written nor needed"
+        );
+        let section_view = app.agent_status.view.clone().expect("section 20 holds the read");
+        let section_card = section_view.cards().next().expect("one card");
+        assert_eq!(
+            section_card.status.host_identity_tuple(),
+            expected_host,
+            "section 20 must hold the daemon's tuple, host included"
+        );
+        let mut from_section = ainb_plugin_hangar::screen::fleet::FleetPaneState::default();
+        from_section.apply_view(section_view);
+        let from_section = ainb_plugin_hangar::screen::fleet::reduce_fleet(
+            &from_section,
+            ainb_plugin_hangar::screen::fleet::FleetEvent::Tick(expected.4 + 42_000),
+        )
+        .state;
+        assert_eq!(
+            render_panel(&from_section).1,
+            cells,
+            "a panel built from section 20 alone must paint the same cells"
+        );
+
         // One word per state, everywhere (#1015 criterion 2): every token on
         // a rendered card is `AgentState::as_str()` or the value of a field on
         // the card's row.
