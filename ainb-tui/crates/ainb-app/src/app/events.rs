@@ -1633,8 +1633,12 @@ impl EventHandler {
                 if let Some(session) = state.hangar.daemons_state.take_attach_request() {
                     Self::emit_full_screen_attach(state, TerminalTarget::Tmux(session));
                 }
-                for (daemon, action) in state.hangar.daemons_state.take_action_requests() {
-                    state.emit(Effect::RunDaemonAction { daemon, action });
+                for request in state.hangar.daemons_state.take_action_requests() {
+                    state.emit(Effect::RunDaemonAction {
+                        daemon: request.daemon,
+                        action: request.action,
+                        generation: request.generation,
+                    });
                 }
                 None
             }
@@ -3085,10 +3089,12 @@ impl EventHandler {
             // cannot open was to already know it was the hangar daemon, and to
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
-                if state.fleet.daemon_start_cta.start() {
+                let generation = state.hangar.daemons_state.next_generation();
+                if state.fleet.daemon_start_cta.start(generation) {
                     state.emit(Effect::RunDaemonAction {
                         daemon: crate::fleet::daemons::probe::DaemonKind::HangarDaemon,
                         action: crate::cli::daemon::Action::Start,
+                        generation,
                     });
                 }
                 state.shell.ui_needs_refresh = true;
@@ -3778,20 +3784,31 @@ impl EventHandler {
                     tracing::warn!(verb = %report.verb, "daemon report names no known verb");
                     return;
                 };
+                // Output kept local to this process (a pairing code) is shown
+                // here; a report from elsewhere shows the redacted fields.
+                let (summary, detail) = report
+                    .local
+                    .as_ref()
+                    .and_then(crate::app::reports::LocalOutput::redeem)
+                    .unwrap_or((report.summary, report.detail));
                 let outcome = crate::components::daemons::ActionOutcome {
                     action,
                     ok: report.ok,
-                    summary: report.summary,
-                    detail: report.detail,
+                    summary,
+                    detail,
                 };
                 // The Pal pane's offer starts the same daemon the Daemons
                 // screen does, so one report can answer both.
                 if report.daemon == crate::fleet::daemons::probe::DaemonKind::HangarDaemon.id()
                     && action == crate::cli::daemon::Action::Start
                 {
-                    state.fleet.daemon_start_cta.finish(&outcome);
+                    state.fleet.daemon_start_cta.finish(report.generation, &outcome);
                 }
-                state.hangar.daemons_state.finish_action(&report.daemon, outcome);
+                state.hangar.daemons_state.finish_action(
+                    &report.daemon,
+                    report.generation,
+                    outcome,
+                );
                 state.shell.ui_needs_refresh = true;
             }
             AppEvent::MigrateLayoutWidths { columns } => {
