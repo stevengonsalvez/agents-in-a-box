@@ -4,7 +4,6 @@
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::plugin_action::{self, ids};
-use ainb_app::app::state::NotificationType;
 use ainb_app::{AppState, CommandId, Intent, Keymap, SectionId, dispatch};
 use ainb_plugin_runtime::types::PluginId;
 
@@ -43,11 +42,14 @@ fn the_plugin_action_is_an_unbound_row_that_refuses_to_run_bare() {
     assert!(bumped(&before, &state.versions()).is_empty());
 }
 
+/// The reducer never touches the plugin runtime: it hands the action to
+/// the host as an effect, and whether a plugin was running to take it comes
+/// back as a report.
 #[test]
-fn an_action_for_a_plugin_that_is_not_running_says_so() {
+fn a_plugin_action_is_an_effect_for_the_host_not_a_runtime_call() {
     isolated_home();
     let mut state = AppState::new();
-    assert!(state.plugins_host.plugin_runtime.is_none());
+    let before = state.versions();
 
     let effects = dispatch(
         &mut state,
@@ -60,23 +62,20 @@ fn an_action_for_a_plugin_that_is_not_running_says_so() {
         ),
     );
 
-    assert!(
-        effects.is_empty(),
-        "the action goes to the plugin, not the host"
+    assert_eq!(
+        effects,
+        vec![ainb_app::Effect::RunPluginAction {
+            plugin: "hangar-tui".to_string(),
+            action_id: "board.open_card".to_string(),
+            payload: serde_json::json!({ "id": "card-7" }),
+        }]
     );
-    let errors: Vec<_> = state
-        .shell
-        .notifications
-        .iter()
-        .filter(|n| n.notification_type == NotificationType::Error)
-        .map(|n| n.message.clone())
-        .collect();
+    assert!(state.plugins_host.plugin_runtime.is_none());
     assert!(
-        errors.len() == 1
-            && errors[0].contains("board.open_card")
-            && errors[0].contains("hangar-tui"),
-        "{errors:?}"
+        bumped(&before, &state.versions()).is_empty(),
+        "queuing the action writes no section"
     );
+    assert!(state.shell.notifications.is_empty());
 }
 
 #[test]
