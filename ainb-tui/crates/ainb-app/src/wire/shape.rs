@@ -506,7 +506,7 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
             source: crate::git::repo_source::RepoSource::LocalPath(PathBuf::from(
                 "/work/sample-repo",
             )),
-            kind: crate::components::new_session::pick_repo::RowKind::Local,
+            kind: crate::components::new_session::pick_repo::RepoRowKind::Local,
         }];
         pick.filtered_indices = vec![0];
         pick.selected = 0;
