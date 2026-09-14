@@ -335,6 +335,12 @@ impl AppState {
             }
             self.release_interactive_pane();
         }
+        if self.host.in_place_unsupported {
+            self.add_warning_notification(
+                "This view cannot attach a session in place; attach it full screen".to_string(),
+            );
+            return None;
+        }
         let Some(name) = self.selected_tmux_name() else {
             self.add_warning_notification("No tmux session on this row".to_string());
             return None;
