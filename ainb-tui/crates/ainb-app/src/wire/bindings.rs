@@ -16,7 +16,7 @@
 // version or an epoch-millisecond timestamp, far below 2^53, which is where a
 // JSON number stops being exact.
 
-use crate::wire::frame::{DaemonRead, Frame, FrameBatch, HostId};
+use crate::wire::frame::{DaemonRead, Frame, FrameBatch, HostId, Subscription};
 use specta::Types;
 use specta::datatype::{DataType, Fields, NamedReferenceType, Primitive, Reference};
 use std::borrow::Cow;
@@ -31,7 +31,8 @@ pub fn types() -> Types {
         .register::<Frame>()
         .register::<FrameBatch>()
         .register::<HostId>()
-        .register::<DaemonRead>();
+        .register::<DaemonRead>()
+        .register::<Subscription>();
     crate::wire::register_section_views(types)
 }
 
