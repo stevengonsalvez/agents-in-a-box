@@ -308,11 +308,16 @@ fn non_test_lines(source: &str) -> Vec<&str> {
     kept
 }
 
-fn count_call_sites(dir: &Path, root: &Path, counts: &mut BTreeMap<String, usize>) {
+fn count_call_sites(
+    dir: &Path,
+    root: &Path,
+    patterns: &[&str],
+    counts: &mut BTreeMap<String, usize>,
+) {
     for entry in std::fs::read_dir(dir).expect("read source dir") {
         let path = entry.expect("dir entry").path();
         if path.is_dir() {
-            count_call_sites(&path, root, counts);
+            count_call_sites(&path, root, patterns, counts);
             continue;
         }
         let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
@@ -324,7 +329,7 @@ fn count_call_sites(dir: &Path, root: &Path, counts: &mut BTreeMap<String, usize
         let hits = non_test_lines(&source)
             .into_iter()
             .filter(|line| !line.trim_start().starts_with("//"))
-            .filter(|line| PATTERNS.iter().any(|pattern| line.contains(pattern)))
+            .filter(|line| patterns.iter().any(|pattern| line.contains(pattern)))
             .count();
         if hits > 0 {
             let relative = path
@@ -343,7 +348,7 @@ fn count_call_sites(dir: &Path, root: &Path, counts: &mut BTreeMap<String, usize
 fn process_and_clipboard_call_sites_match_the_allow_list() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = BTreeMap::new();
-    count_call_sites(&root, &root, &mut found);
+    count_call_sites(&root, &root, PATTERNS, &mut found);
     let allowed: BTreeMap<String, usize> = CALL_SITES
         .iter()
         .map(|(path, count, _)| ((*path).to_string(), *count))
@@ -368,6 +373,53 @@ fn process_and_clipboard_call_sites_match_the_allow_list() {
         "process or clipboard call sites changed:\n  {}\nA new host side effect \
          belongs in an Effect; a removed one shrinks its CALL_SITES entry",
         mismatches.join("\n  ")
+    );
+}
+
+/// Terminal-host modules that read `AppState.host`, with the number of lines
+/// that do and why. Paths are under `ainb-core/src/`. `HostOnlyState` is this
+/// process's handles and timers; a line here that draws from it is something
+/// a mirrored host cannot draw, so a new one belongs in a versioned section.
+const HOST_STATE_READS: &[(&str, usize, &str)] = &[(
+    "components/layout.rs",
+    6,
+    "accepted draw inputs until D1: the session log handle, the Pal dial and the \
+     daemon start offer are drawn from the handles their workers write (3 lines); \
+     the Log tab starts the session log worker and the Pal tab ticks its dial (3 lines)",
+)];
+
+#[test]
+fn terminal_host_reads_of_host_only_state_match_the_allow_list() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ainb-core/src");
+    let mut found = BTreeMap::new();
+    count_call_sites(&root, &root, &["state.host."], &mut found);
+    let allowed: BTreeMap<String, usize> = HOST_STATE_READS
+        .iter()
+        .map(|(path, count, _)| ((*path).to_string(), *count))
+        .collect();
+    assert_eq!(
+        found, allowed,
+        "reads of AppState.host in the terminal host changed; a new draw input \
+         belongs in a versioned section, a removed one shrinks HOST_STATE_READS"
+    );
+}
+
+/// `HostOnlyState` never serialises: nothing in it may reach a frame.
+#[test]
+fn host_only_state_is_not_serialize() {
+    trait NotSerialize {
+        const SERIALIZE: bool = false;
+    }
+    impl<T> NotSerialize for T {}
+    struct Probe<T>(std::marker::PhantomData<T>);
+    #[allow(dead_code)]
+    impl<T: serde::Serialize> Probe<T> {
+        const SERIALIZE: bool = true;
+    }
+    assert!(!Probe::<ainb_app::app::sections::HostOnlyState>::SERIALIZE);
+    assert!(
+        Probe::<String>::SERIALIZE,
+        "the probe detects a Serialize type"
     );
 }
 
