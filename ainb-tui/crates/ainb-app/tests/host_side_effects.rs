@@ -4,18 +4,24 @@
 //! clipboard are `Effect`s the reducer returns for a host to carry out. Two
 //! checks keep them out of the crate:
 //!
-//! - the manifest declares no clipboard, browser-open, editor or
-//!   terminal-attach crate beyond the ones listed with the step that removes
-//!   them, and
+//! - no clipboard, browser-open, editor or terminal-attach crate is reachable
+//!   through the crate's normal dependencies, for any target, beyond the ones
+//!   listed with the step that removes them, and
 //! - every line that spawns a process (`Command::new`, a PTY
 //!   `CommandBuilder::new`) or touches the clipboard sits in a module on the
 //!   allow-list, at exactly the count recorded there.
 //!
 //! Both lists are ratchets: a new call site fails, and so does a removed one
 //! until its entry shrinks, so the list always says what is left.
+//!
+//! The source walk is a line fence, not a call-graph check: it counts lines
+//! that spell a spawn or a clipboard call, per module. A helper in an
+//! allow-listed module can still be called from anywhere, and a spawn spelled
+//! through an alias or a macro is not seen.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::process::Command;
 
 /// Crates whose only job is a side effect a host owns.
 const HOST_EFFECT_CRATES: &[&str] = &[
@@ -43,11 +49,15 @@ const HOST_EFFECT_CRATES: &[&str] = &[
     "termion",
 ];
 
-/// Host-effect crates the manifest still declares, and why.
-const DECLARED_TODAY: &[(&str, &str)] = &[
+/// Host-effect crates still reachable, and why.
+const REACHABLE_TODAY: &[(&str, &str)] = &[
     (
         "arboard",
         "the welcome panel and log-history copies; P5 returns them as Effect::Clipboard",
+    ),
+    (
+        "clipboard-win",
+        "arboard's Windows backend; leaves with arboard",
     ),
     (
         "portable-pty",
@@ -202,39 +212,77 @@ const PATTERNS: &[&str] = &[
     "open::that",
 ];
 
-/// The `[dependencies]` names in a manifest (not dev or build dependencies).
-fn normal_dependencies(manifest: &str) -> Vec<String> {
-    let mut in_dependencies = false;
-    let mut names = Vec::new();
-    for line in manifest.lines().map(str::trim) {
-        if line.starts_with('[') {
-            in_dependencies = line == "[dependencies]";
+/// Package names reachable from `ainb-app` through normal dependency edges,
+/// for every target. Walks `cargo metadata`'s resolve graph, the same walk
+/// `renderer_free.rs` uses, so a target-gated, dotted or renamed dependency is
+/// seen by its real package name.
+fn reachable_through_normal_dependencies() -> BTreeSet<String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("cargo metadata");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("metadata json");
+    let names: BTreeMap<&str, &str> = metadata["packages"]
+        .as_array()
+        .expect("packages")
+        .iter()
+        .filter_map(|package| Some((package["id"].as_str()?, package["name"].as_str()?)))
+        .collect();
+    let root = names
+        .iter()
+        .find_map(|(id, name)| (*name == "ainb-app").then_some(*id))
+        .expect("ainb-app in metadata");
+    let nodes: BTreeMap<&str, &serde_json::Value> = metadata["resolve"]["nodes"]
+        .as_array()
+        .expect("resolve nodes")
+        .iter()
+        .filter_map(|node| Some((node["id"].as_str()?, node)))
+        .collect();
+
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
             continue;
         }
-        if !in_dependencies || line.is_empty() || line.starts_with('#') {
+        let Some(deps) = nodes.get(id).and_then(|node| node["deps"].as_array()) else {
             continue;
-        }
-        if let Some((name, _)) = line.split_once('=') {
-            names.push(name.trim().trim_matches('"').to_string());
+        };
+        for dep in deps {
+            let normal = dep["dep_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind["kind"].is_null()));
+            if let (true, Some(pkg)) = (normal, dep["pkg"].as_str()) {
+                stack.push(pkg);
+            }
         }
     }
-    names
+    seen.iter()
+        .filter_map(|id| names.get(id))
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 #[test]
-fn the_manifest_declares_no_host_effect_crate_beyond_the_listed_ones() {
-    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-        .expect("read ainb-app manifest");
-    let declared: std::collections::BTreeSet<String> = normal_dependencies(&manifest)
+fn no_host_effect_crate_is_reachable_beyond_the_listed_ones() {
+    let reached: BTreeSet<String> = reachable_through_normal_dependencies()
         .into_iter()
         .filter(|name| HOST_EFFECT_CRATES.contains(&name.as_str()))
         .collect();
-    let listed: std::collections::BTreeSet<String> =
-        DECLARED_TODAY.iter().map(|(name, _)| (*name).to_string()).collect();
+    let listed: BTreeSet<String> =
+        REACHABLE_TODAY.iter().map(|(name, _)| (*name).to_string()).collect();
     assert_eq!(
-        declared, listed,
-        "ainb-app's host-effect dependencies changed. A new one belongs in a host \
-         executing an Effect; a removed one comes off DECLARED_TODAY"
+        reached, listed,
+        "host-effect crates reachable from ainb-app changed. A new one belongs in a \
+         host executing an Effect (`cargo tree -p ainb-app -e normal -i <crate>` shows \
+         the path); a removed one comes off REACHABLE_TODAY"
     );
 }
 
@@ -321,7 +369,7 @@ fn process_and_clipboard_call_sites_match_the_allow_list() {
     let mismatches: Vec<String> = found
         .keys()
         .chain(allowed.keys())
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .filter(|path| found.get(*path) != allowed.get(*path))
         .map(|path| {
