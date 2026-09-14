@@ -347,6 +347,12 @@ pub struct RosterStatusResult {
     /// As [`AgentStatusResult::unknown_events`].
     #[serde(default)]
     pub unknown_events: Vec<UnknownEventCount>,
+    /// The daemon's own clock, epoch ms, when it took the read. Evidence stamps
+    /// (`evidence_observed_at`) are on this clock too, so a surface computes an
+    /// age from the two and never from its own now (W0-mirror). `0` from a
+    /// daemon that predates the field.
+    #[serde(default)]
+    pub read_at_ms: i64,
 }
 
 /// Join a roster snapshot and a status read per `session_key`.
@@ -376,6 +382,7 @@ pub fn join(snapshot: &FleetSnapshot, status: &AgentStatusResult) -> RosterStatu
         rows,
         read_revision,
         unknown_events: status.unknown_events.clone(),
+        read_at_ms: 0,
     }
 }
 
