@@ -156,6 +156,13 @@ pub const CAP_SOCKET_VERSIONED: &str = "hangar.socket.versioned";
 /// Capability: the in-memory live surface registry (`hangar/connections_list`
 /// plus the `ConnectionsChanged` event).
 pub const CAP_CONNECTIONS_REGISTRY: &str = "hangar.connections.registry";
+/// Capability: the daemon honours the optional `auth/hello` `transient` member.
+///
+/// A call connection is left out of the registry listing when its process
+/// already holds a listed presence at the same pid (#963). A client that does
+/// not see this string is talking to a daemon that ignores the member and
+/// lists every connection.
+pub const CAP_CONNECTIONS_TRANSIENT: &str = "hangar.connections.transient";
 /// Capability: the converged attention inbox, list, subscribe, answer.
 pub const CAP_ATTENTION_INBOX: &str = "hangar.attention.inbox";
 /// Capability: the wire attention row carries its `version`, so a client can
@@ -309,6 +316,7 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     // file records the order, so a new string goes after every existing one.
     CAP_ATTENTION_FENCE,
     crate::fleet::FLEET_CAPABILITY_STATUS_READ,
+    CAP_CONNECTIONS_TRANSIENT,
 ];
 
 /// Whether this build advertises `id`.

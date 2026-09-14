@@ -109,15 +109,10 @@ Terminal B (a third shell, or after backgrounding web):
 ./target/debug/ainb hangar connections list
 ```
 
-Terminal A must be on the session list (`s`): a TUI parked on the home screen never dials the daemon.
+Terminal A can stay on the home screen: a running TUI holds one connection to the daemon from startup until quit, on every screen. Do not open the Hangar screen (`g`) before this step: the Hangar plugin is its own process and lists its own `tui` row with its own pid while it runs.
 
-- **Pass:** a `web` row with a pid and the daemon host. A `cli` row is the `connections list` command itself.
-- **Known broken, do not fail the checkpoint on it:** there will be NO `tui` row. This is issue #963, found by S-D's surface-combination smoke and not by this
-  page: `DaemonClient::from_env` labels every client `cli`, and separately the TUI holds no connection for the registry to list at all. S-D fixed the first
-  half (the TUI now says `tui` when it dials); the connection lifecycle is S-B's and is still open.
-
-  So what this step can still tell you: the registry answers, and it names the web surface correctly. If you see a `tui` row, #963 has been fixed and this
-  note is stale.
+- **Pass:** one `tui` row and one `web` row, each with its process pid and the daemon host. The `tui` pid is Terminal A's `ainb`. A `cli` row is the `connections list` command itself; the TUI's own polls never add one.
+- **Pass:** quit Terminal A, run the list again, and the `tui` row is gone.
 
 ## 7. An answered card retires everywhere (S-C, PR #936)
 
@@ -202,5 +197,5 @@ Reply `approved`, or name the step and what you saw instead. A failure here is a
 
 S-D's merged head is the first in this lane with a fully green board: 26 pass, 1 skip, 0 fail, both OS legs.
 
-Known limitations you may run into, all filed rather than absorbed: #963 (above), #951 (`tripwire_burndown_keys` asserts a `p filter:` chip the plugin no longer
+Known limitations you may run into, all filed rather than absorbed: #951 (`tripwire_burndown_keys` asserts a `p filter:` chip the plugin no longer
 renders, so it cannot pass on any head), #966 (four sessions tripwires die mid-key-sequence on macOS, gated to Linux with the evidence attached).
