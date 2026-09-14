@@ -2116,6 +2116,72 @@ impl AppConfig {
         self.save_at_path(&config_path)
     }
 
+    /// Write only `keys`, each with its value in `self`, into the user config.
+    ///
+    /// [`save`](Self::save) renders every modelled key from `self`, which is
+    /// the snapshot this process loaded at startup. Two TUIs that each change a
+    /// different setting would then revert each other: the second writer puts
+    /// its stale copy of the first writer's key back. This is the read-merge-
+    /// write the Config screen needs instead: the file is re-read under the
+    /// config lock and only the named dotted keys are edited in place. A key
+    /// whose value serializes to nothing (an `Option` set to `None`) is removed.
+    pub fn save_keys(&self, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let config_dir = Self::get_user_config_dir()?;
+        fs::create_dir_all(&config_dir)?;
+        let config_path = config_dir.join("config.toml");
+
+        let root = toml::Value::try_from(self).context("config does not serialize to TOML")?;
+        let mut edits = Vec::new();
+        let mut removals = Vec::new();
+        for key in keys {
+            match registry::navigate_toml(&root, key) {
+                Ok(value) => edits.push((key.clone(), value.clone())),
+                Err(_) => removals.push(key.as_str()),
+            }
+        }
+
+        let result = match lock::lock_for(&config_path) {
+            Ok(lock) => write_keys_into_with_lock(&config_path, &edits, &lock).and_then(|()| {
+                removals
+                    .iter()
+                    .try_for_each(|key| remove_key_from_with_lock(&config_path, key, &lock))
+            }),
+            Err(err) => {
+                tracing::warn!(path = %config_path.display(), error = %err, "config lock unavailable; saving without it");
+                write_keys_into_unlocked(&config_path, &edits).and_then(|()| {
+                    removals
+                        .iter()
+                        .try_for_each(|key| remove_key_from_unlocked(&config_path, key))
+                })
+            }
+        };
+
+        let trigger = AuditTrigger::Automatic;
+        match &result {
+            Ok(()) => {
+                // Same reason as `save_at_path`: promoted tunables read a
+                // process-wide snapshot that would otherwise stay stale.
+                tunables::refresh_snapshot();
+                audit::audit_config_saved(
+                    &config_path.display().to_string(),
+                    trigger,
+                    AuditResult::Success,
+                    None,
+                );
+            }
+            Err(e) => audit::audit_config_saved(
+                &config_path.display().to_string(),
+                trigger,
+                AuditResult::Failed(e.to_string()),
+                None,
+            ),
+        }
+        result
+    }
+
     fn save_at_path(&self, config_path: &Path) -> Result<()> {
         let existing = read_existing(config_path)?;
         let content = self.overlay_onto_existing(&existing)?;
