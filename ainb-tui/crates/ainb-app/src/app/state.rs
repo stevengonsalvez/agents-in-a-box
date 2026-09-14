@@ -282,31 +282,6 @@ impl AppState {
             .collect()
     }
 
-    /// Enter interactive mode by replacing the selected read-only tmux client
-    /// with a writable client feeding the same terminal parser path.
-    pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
-        let Some(name) = self.in_place_target() else {
-            return self.tmux.embed.is_some() && self.is_interactive_pane();
-        };
-        match crate::tmux::EmbedClient::attach(name.as_str(), rows, cols) {
-            Ok(client) => {
-                self.adopt_interactive_pane(name.as_str().to_string(), client);
-                true
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "failed to attach interactive embed to {}: {e}",
-                    name.as_str()
-                );
-                self.add_error_notification(format!(
-                    "Live attach to '{}' failed: {e}",
-                    name.as_str()
-                ));
-                false
-            }
-        }
-    }
-
     /// The tmux session an in-place attach of the selected row would open,
     /// or `None` with the reason posted: no tmux session on the row, the tmux
     /// session ainb itself runs in, or a name tmux cannot address. `None`
