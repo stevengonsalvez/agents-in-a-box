@@ -404,6 +404,7 @@ mod tests {
             rows: Vec::new(),
             read_revision: 4,
             unknown_events: Vec::new(),
+            read_at_ms: 0,
         };
         assert!(apply(
             &mut state,
