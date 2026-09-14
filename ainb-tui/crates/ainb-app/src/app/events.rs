@@ -185,10 +185,20 @@ pub enum AppEvent {
     AbtopSetupFinished {
         ok: bool,
     },
-    /// The host sized the in-place terminal for its layout.
-    InPlaceSized {
-        rows: u16,
-        cols: u16,
+    /// The host opened a tmux client on `tmux_session` for the in-place pane.
+    InPlaceOpened {
+        tmux_session: String,
+        embed: crate::app::reports::LocalEmbed,
+    },
+    /// The in-place client on `tmux_session` would not open.
+    InPlaceFailed {
+        tmux_session: String,
+        error: String,
+    },
+    /// The host's plugin runtime had no running `plugin` for `action_id`.
+    PluginActionUndelivered {
+        plugin: String,
+        action_id: String,
     },
     /// The user left the live terminal.
     Detached,
@@ -905,6 +915,39 @@ impl EventHandler {
     /// Queue a full-screen attach. The attach owns terminal size and input, so
     /// the in-place pane's tmux client is released first and tmux has one
     /// authority; the preview reconnects after the user comes back.
+    /// Queue opening `path` in the user's editor, or say why a path the editor
+    /// could not be sent is not opened.
+    fn emit_open_editor(state: &mut AppState, path: impl Into<std::path::PathBuf>) {
+        let path = path.into();
+        match crate::app::effect::EditorPath::new(path.clone()) {
+            Some(path) => {
+                let preferred_editor =
+                    state.config.app_config.ui_preferences.preferred_editor.clone();
+                state.emit(Effect::OpenEditor {
+                    path,
+                    preferred_editor,
+                });
+            }
+            None => state.add_error_notification(format!(
+                "Cannot open '{}' in an editor: not an absolute path",
+                path.display()
+            )),
+        }
+    }
+
+    /// Queue a full-screen attach to the tmux session `name`, or say why a
+    /// name tmux could not address is not attached.
+    fn emit_tmux_attach(state: &mut AppState, name: &str) {
+        match crate::app::effect::TmuxSessionName::new(name) {
+            Some(tmux_session) => {
+                Self::emit_full_screen_attach(state, TerminalTarget::Tmux(tmux_session));
+            }
+            None => state.add_error_notification(format!(
+                "Cannot attach '{name}': tmux cannot address a session by that name"
+            )),
+        }
+    }
+
     fn emit_full_screen_attach(state: &mut AppState, target: TerminalTarget) {
         // Read first: releasing writes the tmux section even with nothing held.
         if state.tmux.embed.is_some()
@@ -1066,13 +1109,13 @@ impl EventHandler {
     /// to its log-only stub).
     ///
     /// P9: the `learnings` plugin advertises `/recall` + `/memory` in its
-    /// manifest `provides.commands`. Both run the home screen's `m` row,
-    /// `home.learnings`, so they open the learnings screen by the same path
-    /// the shortcut does. This is purely the name to command lookup.
+    /// manifest `provides.commands`. Both run `global.open_learnings`, the
+    /// unbound twin of the home screen's `m` row, so they open the learnings
+    /// screen from whatever screen the palette is on. This is purely the name to command lookup.
     pub fn slash_command_intent(cmd: &str) -> Option<Intent> {
         match cmd {
             "recall" | "memory" => Some(Intent::Command(
-                crate::app::keymap::CommandId::new("home.learnings"),
+                crate::app::keymap::CommandId::new("global.open_learnings"),
                 serde_json::Value::Null,
             )),
             _ => None,
@@ -1409,6 +1452,19 @@ impl EventHandler {
                     tracing::warn!("command `{id}` is unknown");
                     return None;
                 };
+                // The same gate a key passes: a row runs only while its
+                // context is active, so a click resolved on one screen cannot
+                // act after the user has left it. A plugin action names its
+                // plugin explicitly and runs from any screen.
+                let flags = HostFlags {
+                    embed_interactive: state.is_interactive_pane(),
+                    ..HostFlags::default()
+                };
+                let everywhere = crate::app::plugin_action::ids::ALL.contains(&id.as_str());
+                if !everywhere && !active_contexts(state, &flags).contains(&binding.ctx) {
+                    tracing::warn!("command `{id}` is not active on this screen");
+                    return None;
+                }
                 let Some(action) = binding.action.with_args(&args) else {
                     // Field names only: a payload can carry a pairing code, a
                     // path or typed text, none of which belongs in a log.
@@ -1631,7 +1687,7 @@ impl EventHandler {
             UiAction::DaemonsConfirmMenu => {
                 state.hangar.daemons_state.confirm_menu();
                 if let Some(session) = state.hangar.daemons_state.take_attach_request() {
-                    Self::emit_full_screen_attach(state, TerminalTarget::Tmux(session));
+                    Self::emit_tmux_attach(state, &session);
                 }
                 for request in state.hangar.daemons_state.take_action_requests() {
                     state.emit(Effect::RunDaemonAction {
@@ -2326,9 +2382,17 @@ impl EventHandler {
             // applies it in the main loop where `UiState` is in scope and
             // persists it. Same shape as EnterInteractivePane below: the arm
             // exists for exhaustiveness, not to do nothing quietly.
-            // Only the host knows the pane size, so it performs the attach.
+            // The reducer picks the target and refuses the ones it can name;
+            // only the host knows the pane size, so it opens the client.
             AppEvent::EnterInteractivePane => {
-                state.emit(Effect::AttachTerminal(TerminalTarget::InPlace));
+                if let Some(tmux_session) = state.in_place_target() {
+                    let show_menu_bar =
+                        state.config.app_config.ui_preferences.show_session_menu_bar;
+                    state.emit(Effect::AttachTerminal(TerminalTarget::InPlace {
+                        tmux_session,
+                        show_menu_bar,
+                    }));
+                }
             }
             // Other tmux rename events
             AppEvent::OtherTmuxStartRename => state.start_other_tmux_rename(),
@@ -2650,10 +2714,7 @@ impl EventHandler {
                         if let Some(tmux_name) = &ssh_session.tmux_session_name {
                             let session_name = tmux_name.clone();
                             tracing::info!("[ACTION] Attaching to SSH session: {}", session_name);
-                            Self::emit_full_screen_attach(
-                                state,
-                                TerminalTarget::Tmux(session_name),
-                            );
+                            Self::emit_tmux_attach(state, &session_name);
                         } else {
                             tracing::warn!("[ACTION] SSH session has no tmux session name");
                             state.add_error_notification(
@@ -2671,7 +2732,7 @@ impl EventHandler {
                             "[ACTION] Attaching to other tmux session: {}",
                             session_name
                         );
-                        Self::emit_full_screen_attach(state, TerminalTarget::Tmux(session_name));
+                        Self::emit_tmux_attach(state, &session_name);
                     } else {
                         tracing::warn!("[ACTION] Other tmux selected but no session found");
                     }
@@ -2685,10 +2746,7 @@ impl EventHandler {
                                     "[ACTION] Attaching to workspace shell: {}",
                                     session_name
                                 );
-                                Self::emit_full_screen_attach(
-                                    state,
-                                    TerminalTarget::Tmux(session_name),
-                                );
+                                Self::emit_tmux_attach(state, &session_name);
                             } else {
                                 tracing::warn!(
                                     "[ACTION] Shell selected but no shell session found in workspace"
@@ -2714,9 +2772,17 @@ impl EventHandler {
                         .iter()
                         .flat_map(|workspace| &workspace.sessions)
                         .find(|session| session.id == session_id)
-                        .map(|session| (session.name.clone(), session.tmux_session_name.is_some()));
+                        .map(|session| {
+                            (
+                                session.name.clone(),
+                                session
+                                    .tmux_session_name
+                                    .as_deref()
+                                    .and_then(crate::app::effect::TmuxSessionName::new),
+                            )
+                        });
                     match tmux_name {
-                        Some((_, true)) => {
+                        Some((_, Some(tmux_session))) => {
                             if let Some(session) = state
                                 .sessions
                                 .workspaces
@@ -2728,10 +2794,13 @@ impl EventHandler {
                             }
                             Self::emit_full_screen_attach(
                                 state,
-                                TerminalTarget::Session(session_id),
+                                TerminalTarget::Session {
+                                    id: session_id,
+                                    tmux_session,
+                                },
                             );
                         }
-                        Some((name, false)) => {
+                        Some((name, None)) => {
                             tracing::error!(
                                 "[ACTION] No tmux session name for session {session_id}"
                             );
@@ -2973,8 +3042,8 @@ impl EventHandler {
             AppEvent::OpenInEditor => {
                 // Open session's workspace in preferred editor
                 if let Some(session) = state.selected_session() {
-                    let workspace_path = std::path::PathBuf::from(&session.workspace_path);
-                    state.emit(Effect::OpenEditor(workspace_path));
+                    let workspace_path = session.workspace_path.clone();
+                    Self::emit_open_editor(state, workspace_path);
                 } else {
                     state.add_warning_notification("⚠️ No session selected".to_string());
                 }
@@ -3008,17 +3077,27 @@ impl EventHandler {
                             workspace.set_shell_session(shell);
                         }
                         let workspace_path = workspace.path.clone();
-                        let tmux_session = workspace
-                            .shell_session
-                            .as_ref()
-                            .map(|shell| shell.tmux_session_name.clone())
-                            .unwrap_or_default();
-                        state.emit(Effect::AttachTerminal(TerminalTarget::WorkspaceShell {
-                            workspace_path,
-                            tmux_session,
-                            new_shell,
-                            target_dir,
-                        }));
+                        let tmux_session = workspace.shell_session.as_ref().and_then(|shell| {
+                            crate::app::effect::TmuxSessionName::new(
+                                shell.tmux_session_name.as_str(),
+                            )
+                        });
+                        match tmux_session {
+                            Some(tmux_session) => {
+                                state.emit(Effect::AttachTerminal(
+                                    TerminalTarget::WorkspaceShell {
+                                        workspace_path,
+                                        tmux_session,
+                                        new_shell,
+                                        target_dir,
+                                    },
+                                ));
+                            }
+                            None => state.add_error_notification(
+                                "The workspace shell has no tmux session tmux can address"
+                                    .to_string(),
+                            ),
+                        }
                     } else {
                         state.add_error_notification("Workspace not found".to_string());
                     }
@@ -3744,14 +3823,34 @@ impl EventHandler {
                 }
                 state.shell.ui_needs_refresh = true;
             }
-            AppEvent::InPlaceSized { rows, cols } => {
-                // A missing tmux session or a failed attach is announced by
-                // enter_interactive_pane, which knows which case it hit.
-                if !state.enter_interactive_pane(rows, cols) {
-                    tracing::debug!(
-                        "in-place attach: no tmux session on selection or attach failed"
-                    );
+            AppEvent::InPlaceOpened {
+                tmux_session,
+                embed,
+            } => {
+                // Another process's client cannot be adopted here; a client
+                // for a row the user has since left is closed, not shown.
+                if let Some(client) = embed.adopt() {
+                    if state.selected_tmux_name().as_deref() == Some(tmux_session.as_str()) {
+                        state.adopt_interactive_pane(tmux_session, client);
+                    } else {
+                        let mut client = client;
+                        client.shutdown();
+                    }
                 }
+            }
+            AppEvent::InPlaceFailed {
+                tmux_session,
+                error,
+            } => {
+                tracing::warn!("failed to attach interactive embed to {tmux_session}: {error}");
+                state.add_error_notification(format!(
+                    "Live attach to '{tmux_session}' failed: {error}"
+                ));
+            }
+            AppEvent::PluginActionUndelivered { plugin, action_id } => {
+                state.add_error_notification(format!(
+                    "Could not run `{action_id}`: the {plugin} plugin is not running"
+                ));
             }
             AppEvent::Detached => {
                 if state.is_interactive_pane() {
@@ -4776,7 +4875,7 @@ impl EventHandler {
                         } else {
                             p
                         };
-                        state.emit(Effect::OpenEditor(target));
+                        Self::emit_open_editor(state, target);
                     }
                     None => {
                         state.add_warning_notification(
@@ -6876,18 +6975,16 @@ impl EventHandler {
                 let known = crate::app::screens::builtin::PLUGIN_SCREENS
                     .iter()
                     .any(|(_, owner)| *owner == plugin);
-                let sent = known
-                    && state.plugins_host.plugin_runtime.as_ref().is_some_and(|runtime| {
-                        runtime.send_action(
-                            &ainb_plugin_runtime::types::PluginId::new(plugin.as_str()),
-                            action_id.as_str(),
-                            payload,
-                        )
+                if known {
+                    state.emit(Effect::RunPluginAction {
+                        plugin,
+                        action_id,
+                        payload,
                     });
-                if !sent {
-                    tracing::warn!(%plugin, %action_id, "plugin action not delivered");
+                } else {
+                    tracing::warn!(%plugin, %action_id, "action for a plugin no screen owns");
                     state.add_error_notification(format!(
-                        "Could not run `{action_id}`: the {plugin} plugin is not running"
+                        "Could not run `{action_id}`: no screen is owned by a plugin named {plugin}"
                     ));
                 }
             }
