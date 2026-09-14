@@ -379,6 +379,9 @@ fn spawn_tui_presence() -> fleet::bridge::daemon::PresenceLease {
         pid: std::process::id(),
     });
     let mut state = lease.state();
+    // Panic-free on purpose: the global panic handler tears the terminal down,
+    // so nothing here unwraps, and the lease task's own failures arrive as
+    // states, not panics.
     tokio::spawn(async move {
         while state.changed().await.is_ok() {
             match &*state.borrow_and_update() {
@@ -390,6 +393,22 @@ fn spawn_tui_presence() -> fleet::bridge::daemon::PresenceLease {
                 }
                 PresenceState::Closed => tracing::debug!("tui presence closed"),
             }
+        }
+        // The sender is gone. Only `close()` publishes `Closed` first; any other
+        // end (the task panicked or was aborted) leaves this TUI unlisted in
+        // `hangar connections list` until restart, so say why.
+        let last = state.borrow().clone();
+        match last {
+            PresenceState::Closed => {}
+            PresenceState::Connected => tracing::warn!(
+                "tui presence task ended without close while connected (panicked or \
+                 aborted); this TUI is no longer listed in hangar connections"
+            ),
+            PresenceState::Waiting { error } => tracing::warn!(
+                last_error = ?error,
+                "tui presence task ended without close while waiting for the daemon \
+                 (panicked or aborted); this TUI will not be listed in hangar connections"
+            ),
         }
     });
     lease
