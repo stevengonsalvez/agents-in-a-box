@@ -866,10 +866,14 @@ pub struct FleetPaneState {
     /// snapshot so a roster refresh never loses the state (#962).
     status: BTreeMap<String, AgentStatusRow>,
     status_revision: i64,
-    /// False once the daemon answered that it has no `fleet/status`. The panel
-    /// then shows every session unverifiable and says why; it never falls back
-    /// to a reading of its own.
-    status_supported: bool,
+    /// The revision of the roster the status rows are joined onto, so a status
+    /// reply older than that roster is refused rather than joined (#962).
+    roster_revision: i64,
+    /// Why the panel holds no `fleet/status` rows right now (an older daemon,
+    /// a store fault, an undecodable reply). While set, every session is
+    /// unverifiable, the header and the lens body say why, and the panel never
+    /// falls back to a reading of its own.
+    status_unavailable: Option<String>,
 }
 
 impl Default for FleetPaneState {
@@ -884,7 +888,8 @@ impl Default for FleetPaneState {
             head_revision: 0,
             status: BTreeMap::new(),
             status_revision: 0,
-            status_supported: true,
+            roster_revision: 0,
+            status_unavailable: None,
         }
     }
 }
@@ -895,6 +900,7 @@ impl FleetPaneState {
             return;
         }
         self.head_revision = head_revision;
+        self.roster_revision = head_revision;
         self.set_sessions(roster);
     }
 
@@ -902,22 +908,32 @@ impl FleetPaneState {
         self.head_revision
     }
 
-    /// Take one `fleet/status` reply (#962). An older revision than the last
-    /// one applied is ignored, the same rule as [`Self::apply_snapshot`].
-    pub fn apply_status(&mut self, result: AgentStatusResult) {
-        if result.head_revision < self.status_revision {
-            return;
+    /// Take one `fleet/status` reply (#962).
+    ///
+    /// Refused, returning `false`, when it is older than the last status
+    /// applied OR older than the roster it would be joined onto: the rows
+    /// describe an earlier instant than the sessions on screen, so the caller
+    /// asks again instead. A session the reply no longer names loses its state
+    /// rather than keeping a stale one.
+    pub fn apply_status(&mut self, result: AgentStatusResult) -> bool {
+        if result.head_revision < self.status_revision
+            || result.head_revision < self.roster_revision
+        {
+            return false;
         }
         self.status_revision = result.head_revision;
-        self.status_supported = true;
+        self.status_unavailable = None;
         self.status = result.rows.into_iter().map(|row| (row.session_key.clone(), row)).collect();
-        self.join_status();
+        for row in &mut self.roster {
+            row.status = self.status.get(&row.session_key).cloned();
+        }
         self.preserve_or_reset_selection();
+        true
     }
 
-    /// The daemon has no `fleet/status`: drop every joined state.
-    pub fn mark_status_unsupported(&mut self) {
-        self.status_supported = false;
+    /// No `fleet/status` rows can be had, for `reason`: drop every joined state.
+    pub fn mark_status_unavailable(&mut self, reason: impl Into<String>) {
+        self.status_unavailable = Some(reason.into());
         self.status.clear();
         for row in &mut self.roster {
             row.status = None;
@@ -925,9 +941,16 @@ impl FleetPaneState {
         self.preserve_or_reset_selection();
     }
 
-    /// Whether the daemon serves `fleet/status` (true until it says otherwise).
-    pub const fn status_supported(&self) -> bool {
-        self.status_supported
+    /// Why the panel holds no `fleet/status` rows, if it does not.
+    #[must_use]
+    pub fn status_unavailable(&self) -> Option<&str> {
+        self.status_unavailable.as_deref()
+    }
+
+    /// True when sessions are on screen and not one of them has a state: the
+    /// panel can make no claim about any of them.
+    fn states_unverifiable(&self) -> bool {
+        !self.roster.is_empty() && self.roster.iter().all(|row| row.status.is_none())
     }
 
     /// The `fleet/status` row the panel holds for `session_key`.
@@ -1010,11 +1033,6 @@ impl FleetPaneState {
     /// Total active sessions in the operator roster.
     pub fn session_count(&self) -> usize {
         self.roster.iter().filter(|session| session.is_active_session()).count()
-    }
-
-    /// Sessions requiring operator review, independent from active lens.
-    pub fn attention_count(&self) -> usize {
-        self.roster.iter().filter(|session| session.is_waiting()).count()
     }
 
     pub fn feedback(&self) -> Option<&str> {
@@ -1655,7 +1673,11 @@ fn read_only_picker(row: &FleetSessionRow) -> bool {
 }
 
 fn answer_state_from_row(row: &FleetSessionRow) -> Option<AnswerState> {
-    if !row.attention_state.eq_ignore_ascii_case("ASK")
+    // The daemon says whether a human is needed; the snapshot's `ASK` only
+    // says the answer is a structured interview (#962). A scraped ASK the
+    // daemon ranks below newer evidence must not open one.
+    if !row.is_waiting()
+        || !row.attention_state.eq_ignore_ascii_case("ASK")
         || !row.is_managed()
         || !row.capabilities.contains("structured_answer")
     {
@@ -2645,17 +2667,20 @@ pub fn render_fleet(
             || format!("0/{}", visible.len()),
             |index| format!("{}/{}", index + 1, visible.len()),
         );
-        let header = if state.status_supported {
-            format!(
-                "  ACTION QUEUE  ·  {} sessions  ·  F5 refresh",
-                visible.len()
-            )
-        } else {
-            format!(
-                "  ACTION QUEUE  ·  {} sessions  ·  daemon has no fleet/status, states unverifiable",
-                visible.len()
-            )
-        };
+        let header = state.status_unavailable.as_deref().map_or_else(
+            || {
+                format!(
+                    "  ACTION QUEUE  ·  {} sessions  ·  F5 refresh",
+                    visible.len()
+                )
+            },
+            |reason| {
+                format!(
+                    "  ACTION QUEUE  ·  {} sessions  ·  states unverifiable: {reason}",
+                    visible.len()
+                )
+            },
+        );
         put_str(buffer, 0, header_y, &header, FG, list_width);
         let position_width = position.chars().count() as u16;
         put_str(
@@ -2744,7 +2769,29 @@ fn render_empty_lens(
     // All three branches are one voice (crisp B2 §2.1, lowercase): they are three
     // states of ONE line, and casing that changes with which lens is empty reads
     // as two different screens.
-    if state.roster.is_empty() {
+    if state.states_unverifiable() {
+        // No positive claim: with no `fleet/status` rows the panel cannot say
+        // that nothing needs you, only that it does not know (#962). The reason
+        // gets its own line so a narrow pane truncates it, not the warning.
+        put_str(buffer, left, row, "states unverifiable", ALERT, right);
+        let reason = state.status_unavailable.as_deref().unwrap_or("waiting for fleet/status");
+        put_str(
+            buffer,
+            left,
+            row.saturating_add(1),
+            &truncate_ellipsis(reason, usize::from(right.saturating_sub(left)).max(1)),
+            MUTED,
+            right,
+        );
+        put_str(
+            buffer,
+            left,
+            row.saturating_add(3),
+            "press 5 for all sessions",
+            MUTED,
+            right,
+        );
+    } else if state.roster.is_empty() {
         put_str(buffer, left, row, "no fleet sessions yet", FG, right);
         put_str(
             buffer,
@@ -4318,8 +4365,10 @@ mod tests {
         row.status = None;
         let mut state = FleetPaneState::default();
         state.set_sessions(vec![row]);
-        assert_eq!(state.attention_count(), 0, "no status yet is not a wait");
-        assert!(state.visible_sessions().is_empty());
+        assert!(
+            state.visible_sessions().is_empty(),
+            "no status yet is not a wait"
+        );
 
         let working = AgentStatusRow {
             evidence_observed_at: 12_000,
@@ -4330,7 +4379,7 @@ mod tests {
             head_revision: 3,
             unknown_events: Vec::new(),
         });
-        assert_eq!(state.attention_count(), 0);
+        assert!(state.visible_sessions().is_empty());
         state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::Running)).state;
         state = reduce_fleet(&state, FleetEvent::Tick(54_000)).state;
         let mut buffer = WireBuffer::new(120, 24);
@@ -4344,7 +4393,7 @@ mod tests {
         assert!(text.contains("working · hook · tier 0 · 42s"), "{text}");
 
         // An older status revision never overwrites a newer one.
-        state.apply_status(AgentStatusResult {
+        let _ = state.apply_status(AgentStatusResult {
             rows: vec![test_status("claude:scan", AgentState::Waiting)],
             head_revision: 2,
             unknown_events: Vec::new(),
@@ -4360,15 +4409,112 @@ mod tests {
     #[test]
     fn a_daemon_without_fleet_status_is_named_not_papered_over() {
         let mut state = state_with_roster();
-        state.mark_status_unsupported();
-        assert_eq!(state.attention_count(), 0);
+        state.mark_status_unavailable("daemon has no fleet/status");
+        assert!(state.visible_sessions().is_empty());
         state = reduce_fleet(&state, FleetEvent::SetFilter(FleetFilter::All)).state;
         let mut buffer = WireBuffer::new(140, 24);
         render_fleet(&mut buffer, 140, 0, 20, &state);
         let text = screen_text(&buffer, 140, 20);
-        assert!(text.contains("daemon has no fleet/status"), "{text}");
+        assert!(
+            text.contains("states unverifiable: daemon has no fleet/status"),
+            "{text}"
+        );
         assert!(text.contains("UNKNOWN"), "{text}");
         assert!(!text.contains("RUNNING"), "{text}");
+    }
+
+    /// Review of #1014, the green lie: with no status rows the needs-input
+    /// lens is empty because nothing is KNOWN, not because nothing is waiting.
+    /// The body must say so, never "nothing needs you", and the warning must
+    /// survive a narrow pane.
+    #[test]
+    fn an_empty_lens_without_status_says_unverifiable_never_nothing_needs_you() {
+        let mut rows = roster();
+        for row in &mut rows {
+            row.status = None;
+        }
+        let mut state = FleetPaneState::default();
+        state.set_sessions(rows);
+        state.mark_status_unavailable("status store unavailable");
+        for width in [140_u16, 40] {
+            let mut buffer = WireBuffer::new(width, 24);
+            render_fleet(&mut buffer, width, 0, 20, &state);
+            let text = screen_text(&buffer, width, 20);
+            assert!(
+                !text.contains("nothing needs you"),
+                "no positive claim at {width}: {text}"
+            );
+            assert!(
+                text.contains("states unverifiable"),
+                "warning at {width}: {text}"
+            );
+            assert!(
+                text.contains("status store"),
+                "the reason at {width}: {text}"
+            );
+        }
+    }
+
+    /// Review of #1014, one truth for the answer action: a snapshot `ASK`
+    /// the daemon does not call waiting opens no interview.
+    #[test]
+    fn a_scraped_ask_the_daemon_calls_working_opens_no_interview() {
+        let mut row = session("claude:scraped", "claude", "RUNNING", "ASK", "managed");
+        row.current_request_fingerprint = Some("fp".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"question": "Proceed?", "options": [{"label": "Yes"}]}]
+        }));
+        row.status = Some(test_status("claude:scraped", AgentState::Working));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row.clone()]);
+        state.selected_key = Some("claude:scraped".into());
+        begin_structured_answer(&mut state);
+        assert!(matches!(state.mode, FleetMode::Browse), "{:?}", state.mode);
+        assert_eq!(
+            state.feedback(),
+            Some("no actionable structured interviews")
+        );
+
+        row.status = Some(test_status("claude:scraped", AgentState::Waiting));
+        state.set_sessions(vec![row]);
+        state.selected_key = Some("claude:scraped".into());
+        begin_structured_answer(&mut state);
+        assert!(
+            matches!(state.mode, FleetMode::Answer(_)),
+            "a real wait still opens it"
+        );
+    }
+
+    /// Review of #1014: a status reply older than the roster it would join is
+    /// refused, and a session the reply stops naming loses its stale state.
+    #[test]
+    fn status_older_than_the_roster_is_refused_and_absent_rows_are_cleared() {
+        let status = |revision: i64, keys: &[&str]| AgentStatusResult {
+            rows: keys.iter().map(|key| test_status(key, AgentState::Working)).collect(),
+            head_revision: revision,
+            unknown_events: Vec::new(),
+        };
+        let mut rows = roster();
+        for row in &mut rows {
+            row.status = None;
+        }
+        let mut state = FleetPaneState::default();
+        state.apply_snapshot(10, rows);
+        assert!(
+            !state.apply_status(status(9, &["claude:ask"])),
+            "older than the roster"
+        );
+        assert!(state.status_for("claude:ask").is_none());
+
+        assert!(state.apply_status(status(10, &["claude:ask", "codex:run"])));
+        assert!(state.selected_session().is_none() || state.status_for("codex:run").is_some());
+        assert!(state.apply_status(status(11, &["claude:ask"])));
+        let codex = state.roster.iter().find(|row| row.session_key == "codex:run").unwrap();
+        assert!(
+            codex.status.is_none(),
+            "a session the daemon stopped naming has no state"
+        );
+        assert_eq!(state.status_unavailable(), None);
     }
 
     fn row_text(buffer: &WireBuffer, row: u16, width: u16) -> String {
@@ -4507,7 +4653,6 @@ mod tests {
         state.set_sessions(vec![blocked]);
 
         assert_eq!(state.session_count(), 0);
-        assert_eq!(state.attention_count(), 1);
         let keys: Vec<_> =
             state.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
         assert_eq!(keys, ["lost-ask"]);
