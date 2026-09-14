@@ -151,8 +151,16 @@ pub enum AppEvent {
     },
     /// Focus a Skill Manager panel without selecting anything in it.
     SkillManagerFocusPane(crate::components::skill_manager_screen::FocusedSkillPane),
-    /// Start dragging the home sidebar's resize edge.
-    HomeSidebarBeginResize,
+    /// A renderer resized the home sidebar: persist `fraction` of the screen
+    /// width as the preference every renderer starts from.
+    HomeSidebarSaveWidth {
+        fraction: f64,
+    },
+    /// Convert layout widths saved as column counts into fractions of a
+    /// `columns`-wide screen. The host reports its width once at startup.
+    MigrateLayoutWidths {
+        columns: u16,
+    },
     /// Click home sidebar `item`; a second click on it opens it.
     HomeSidebarClickItem {
         item: crate::components::sidebar::SidebarItem,
@@ -354,10 +362,10 @@ pub enum AppEvent {
     SkillManagerUnitClick {
         uri: String,
     },
-    /// A renderer resized the Sources panel: persist `width` as the
-    /// preference every renderer starts from.
+    /// A renderer resized the Sources panel: persist `fraction` of the screen
+    /// width as the preference every renderer starts from.
     SkillManagerSaveSourcesWidth {
-        width: u16,
+        fraction: f64,
     },
     /// `[m]` on the SkillManager screen — re-run the discovery
     /// walkers and force the banner to re-appear (ignores any prior
@@ -3450,8 +3458,24 @@ impl EventHandler {
                 state.shell.home_screen_state.select_right();
             }
             // AINB 2.0: Home screen V2 events
-            AppEvent::HomeSidebarBeginResize => {
-                state.shell.home_screen_v2_state.start_sidebar_resize();
+            AppEvent::HomeSidebarSaveWidth { fraction } => {
+                state.config.app_config.ui_preferences.home_sidebar_fraction =
+                    Some(fraction.clamp(0.0, 1.0));
+                if let Err(e) = state.config.app_config.save() {
+                    tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
+                }
+            }
+            AppEvent::MigrateLayoutWidths { columns } => {
+                // Read first: a config with nothing to migrate is not written,
+                // and its section version does not move.
+                let prefs = &state.config.app_config.ui_preferences;
+                let legacy = prefs.home_sidebar_width.is_some()
+                    || prefs.skill_manager_sources_width.is_some();
+                if legacy && state.config.app_config.migrate_layout_widths(columns) {
+                    if let Err(e) = state.config.app_config.save() {
+                        tracing::warn!("Failed to persist migrated layout widths: {}", e);
+                    }
+                }
             }
             AppEvent::HomeSidebarClickItem { item } => {
                 let index = crate::components::sidebar::SidebarItem::all()
@@ -4454,8 +4478,9 @@ impl EventHandler {
                     );
                 }
             }
-            AppEvent::SkillManagerSaveSourcesWidth { width } => {
-                state.config.app_config.ui_preferences.skill_manager_sources_width = Some(width);
+            AppEvent::SkillManagerSaveSourcesWidth { fraction } => {
+                state.config.app_config.ui_preferences.skill_manager_sources_fraction =
+                    Some(fraction.clamp(0.0, 1.0));
                 if let Err(e) = state.config.app_config.save() {
                     tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
                 }
