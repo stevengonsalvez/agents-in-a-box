@@ -122,7 +122,8 @@ fn start_tui(home: &Path, session: &str) -> TmuxGuard {
         .status()
         .expect("launch tui");
     assert!(
-        wait_until(Duration::from_mins(1), || capture_pane(session).contains("Agents in a Box")),
+        wait_until(Duration::from_mins(1), || capture_pane(session)
+            .contains("Agents in a Box")),
         "TUI in {session} never drew its home screen:\n{}",
         capture_pane(session)
     );
@@ -155,12 +156,7 @@ fn quitting_one_tui_keeps_the_shared_proxy_and_the_last_quit_stops_it() {
     let headroom_dir = home_path.join(".agents-in-a-box").join("headroom");
     std::fs::create_dir_all(&headroom_dir).expect("create headroom dir");
     let pid_path = headroom_dir.join("proxy.pid");
-    let mut proxy = ChildGuard(
-        Command::new("sleep")
-            .arg("600")
-            .spawn()
-            .expect("spawn fake proxy"),
-    );
+    let mut proxy = ChildGuard(Command::new("sleep").arg("600").spawn().expect("spawn fake proxy"));
     std::fs::write(&pid_path, proxy.0.id().to_string()).expect("write proxy.pid");
 
     let tag = std::process::id();
