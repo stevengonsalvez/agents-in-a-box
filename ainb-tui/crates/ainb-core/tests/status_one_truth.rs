@@ -132,7 +132,7 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             &ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot"),
         );
         let legacy = panel_from(
-            ainb_hangar_proto::agent_status::join(&snapshot, &wire_round_trip(&status)),
+            ainb_hangar_proto::agent_status::join(&snapshot, &wire_round_trip(&status), 0),
             expected.4 + 42_000,
         );
         assert_eq!(
