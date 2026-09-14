@@ -4,6 +4,7 @@
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::pointer::{self, ids};
+use ainb_app::app::reports;
 use ainb_app::app::screens::ids as screen_ids;
 use ainb_app::app::state::SessionListRowId;
 use ainb_app::models::{Session, Workspace};
@@ -28,36 +29,28 @@ fn every_pointer_command_is_an_unbound_row_in_the_one_registry() {
         let row = keymap.command(&CommandId::new(*id)).expect("row resolves");
         assert!(row.chord.is_none(), "{id} has a key");
     }
-    let unbound: Vec<&String> = listed
+    let mut unbound: Vec<&str> = listed
         .iter()
-        .filter(|id| {
-            keymap
-                .command(&CommandId::new(id.as_str()))
-                .is_some_and(|row| row.chord.is_none())
-        })
+        .map(String::as_str)
+        .filter(|id| keymap.command(&CommandId::new(*id)).is_some_and(|row| row.chord.is_none()))
         .collect();
+    let mut host_commands: Vec<&str> = ids::ALL.iter().chain(reports::ids::ALL).copied().collect();
+    unbound.sort_unstable();
+    host_commands.sort_unstable();
     assert_eq!(
-        unbound.len(),
-        ids::ALL.len(),
-        "only pointer commands are unbound"
+        unbound, host_commands,
+        "only pointer and report commands are unbound"
     );
 }
 
 #[test]
 fn a_pointer_command_run_without_its_payload_changes_nothing() {
     let keymap = Keymap::defaults();
-    for id in ids::ALL {
+    for id in ids::ALL.iter().chain(reports::ids::ALL) {
         let row = keymap.command(&CommandId::new(*id)).expect("row resolves");
         if row.action.with_args(&serde_json::Value::Null).is_some() {
-            // The two rows that take no payload.
-            assert!(
-                [
-                    ids::SKILL_MANAGER_ALL_SOURCES,
-                    ids::HOME_BEGIN_SIDEBAR_RESIZE
-                ]
-                .contains(id),
-                "{id} runs bare"
-            );
+            // The one row that takes no payload.
+            assert_eq!(*id, ids::SKILL_MANAGER_ALL_SOURCES, "{id} runs bare");
             continue;
         }
         let mut state = AppState::new();
