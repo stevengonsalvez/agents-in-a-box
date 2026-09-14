@@ -62,7 +62,7 @@ fn mirror_frames_carry_exactly_the_checked_section_json() {
         assert_eq!(batch.frames.len(), SectionId::COUNT);
         for frame in batch.frames {
             let id = frame.section_id().expect("a known section");
-            assert_eq!(frame.body, section_json(&state, id), "{}", frame.section);
+            assert_eq!(*frame.body(), section_json(&state, id), "{}", frame.section);
         }
     }
 }
