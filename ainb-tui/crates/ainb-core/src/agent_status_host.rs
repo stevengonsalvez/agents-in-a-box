@@ -391,7 +391,9 @@ async fn read(
 async fn two_reads(client: &DaemonClient) -> Result<RosterStatusResult, DaemonError> {
     let snapshot = client.fleet_snapshot().await?;
     let status = client.fleet_status().await?;
-    Ok(join(&snapshot, &status))
+    // Neither reply carries the daemon's clock, so the joined read has none and
+    // cards age on this surface's own now, as they did before the section read.
+    Ok(join(&snapshot, &status, 0))
 }
 
 /// Send a failure update and say how the connection ends.
