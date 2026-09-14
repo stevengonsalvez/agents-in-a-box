@@ -37,6 +37,24 @@ use crate::status_view::{AgentCard, StatusView, ViewHealth};
 /// The host-published snapshot topic the envelope rides on.
 pub const AGENT_STATUS_TOPIC: &str = "fleet.agent_status";
 
+/// The host-published topic carrying the clock cards age on (#1054).
+///
+/// A separate, tiny topic so a once-a-second tick never re-encodes every row
+/// of [`AGENT_STATUS_TOPIC`].
+pub const AGENT_STATUS_CLOCK_TOPIC: &str = "fleet.agent_status.clock";
+
+/// One tick of the clock a Fleet card's age is measured on (#1054).
+///
+/// Published by the host's agent-status task, the section 20 owner, once a
+/// second while it holds cards. Each publish also marks the subscribing panel
+/// for a repaint, which is what makes an idle card's age advance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentStatusClock {
+    /// The host's estimate of the daemon's clock, epoch ms: the clock evidence
+    /// stamps are on.
+    pub clock_ms: i64,
+}
+
 /// The largest encoded envelope the host publishes.
 ///
 /// The plugin framer refuses a body over 16 MiB, and a snapshot payload rides
@@ -196,6 +214,23 @@ impl AgentStatusEnvelope {
 
 #[cfg(test)]
 mod tests {
+    /// #1054: the clock tick has one stable field and round-trips.
+    #[test]
+    fn a_clock_tick_round_trips() {
+        let tick = AgentStatusClock {
+            clock_ms: 1_789_409_614_717,
+        };
+        let wire = serde_json::to_value(tick).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "clock_ms": 1_789_409_614_717_i64 })
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentStatusClock>(wire).unwrap(),
+            tick
+        );
+    }
+
     use super::*;
     use crate::agent_status::{RosterStatusResult, status_row};
     use crate::fleet::{
