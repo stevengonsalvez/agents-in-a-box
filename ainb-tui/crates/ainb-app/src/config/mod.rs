@@ -1083,6 +1083,9 @@ pub struct DockerConfig {
     /// - unix:///var/run/docker.sock
     /// - tcp://localhost:2376
     /// - npipe:////./pipe/docker_engine
+    ///
+    /// A `tcp://user:pass@host` URL carries a credential, so a frame scrubs it.
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
     pub host: Option<String>,
 
     /// Connection timeout in seconds
