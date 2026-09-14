@@ -10,18 +10,23 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing::{debug, error};
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct GitViewState {
     pub active_tab: GitTab,
     pub changed_files: Vec<ChangedFile>,
     pub selected_file_index: usize,
+    #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
     pub diff_content: Vec<String>,
     pub diff_scroll_offset: usize,
     pub worktree_path: PathBuf,
     pub is_dirty: bool,
     pub can_push: bool,
+    #[serde(
+        rename = "commit_message_len",
+        serialize_with = "crate::wire::fields::opt_char_count"
+    )]
     pub commit_message_input: Option<String>, // None = not in commit mode, Some = commit message being entered
-    pub commit_message_cursor: usize,         // Cursor position in commit message
+    pub commit_message_cursor: usize, // Cursor position in commit message
     // File tree state
     pub expanded_folders: HashSet<String>, // Tracks which folders are expanded
     pub file_tree_items: Vec<FileTreeItem>, // Flattened tree for rendering
@@ -38,7 +43,7 @@ pub struct GitViewState {
 }
 
 /// Represents an item in the file tree (either a folder or file)
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct FileTreeItem {
     pub display_name: String,          // Just the filename or folder name
     pub full_path: String,             // Full path for file operations
@@ -51,14 +56,16 @@ pub struct FileTreeItem {
 }
 
 /// A line of rendered markdown content
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct MarkdownLine {
+    /// Arbitrary repo file content, so a frame carries it scrubbed.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub content: String,
     pub style: MarkdownStyle,
 }
 
 /// Styling categories for markdown content
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
 pub enum MarkdownStyle {
     Heading1,
     Heading2,
@@ -74,7 +81,7 @@ pub enum MarkdownStyle {
     BlockQuote,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
 pub enum GitTab {
     Review,   // Warp-style unified code review (default surface)
     Files,    // Legacy file tree — retired from the tab cycle, kept for compatibility
@@ -83,7 +90,7 @@ pub enum GitTab {
     Markdown, // Preview for .md files
 }
 
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ChangedFile {
     pub path: String,
     pub status: GitFileStatus,
@@ -91,7 +98,7 @@ pub struct ChangedFile {
     pub deletions: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
 pub enum GitFileStatus {
     Added,
     Modified,
