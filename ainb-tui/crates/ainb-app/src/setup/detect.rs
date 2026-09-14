@@ -5,7 +5,7 @@
 use serde::Serialize;
 
 pub use crate::cli::deps::{Env, RealEnv};
-use crate::setup::catalog::{Consumer, Detect, Tier, Topic, catalog};
+use crate::setup::catalog::{Consumer, DepTier, Detect, Topic, catalog};
 
 /// Detected state of a single dependency.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -38,7 +38,7 @@ pub struct DepReport {
     pub id: &'static str,
     pub name: &'static str,
     pub why: &'static str,
-    pub tier: Tier,
+    pub tier: DepTier,
     pub consumers: Vec<Consumer>,
     /// Copy-paste install command.
     pub install_hint: String,
@@ -51,7 +51,7 @@ pub struct DepReport {
 impl DepReport {
     /// A missing required dependency — the things that actually block setup.
     pub fn is_blocking(&self) -> bool {
-        self.tier == Tier::Required && !self.satisfied
+        self.tier == DepTier::Required && !self.satisfied
     }
 }
 
@@ -79,13 +79,13 @@ impl SetupStatus {
 
     /// Every required dependency is satisfied.
     pub fn required_met(&self) -> bool {
-        self.all_deps().filter(|d| d.tier == Tier::Required).all(|d| d.satisfied)
+        self.all_deps().filter(|d| d.tier == DepTier::Required).all(|d| d.satisfied)
     }
 
     /// Required + recommended all satisfied.
     pub fn recommended_met(&self) -> bool {
         self.all_deps()
-            .filter(|d| matches!(d.tier, Tier::Required | Tier::Recommended))
+            .filter(|d| matches!(d.tier, DepTier::Required | DepTier::Recommended))
             .all(|d| d.satisfied)
     }
 
