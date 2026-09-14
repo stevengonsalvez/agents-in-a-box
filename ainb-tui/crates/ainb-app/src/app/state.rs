@@ -12537,6 +12537,45 @@ impl AppState {
     /// Called from `App::tick_plugin_renders`, which already holds a
     /// cloned runtime `handle`, so it's passed in rather than re-cloned
     /// per render tick.
+    /// Keep a plugin's `ui.state` publish, as `snapshot_get_versioned`
+    /// returns it, under the plugin that published it.
+    ///
+    /// Bumps the plugins-host section only for a newer version from a plugin.
+    /// ponytail: the bus keeps one `ui.state` value, not one per plugin, so
+    /// two plugins publishing within one tick keep only the later; key the
+    /// topic by plugin when a second plugin publishes it.
+    pub fn record_plugin_ui_state(
+        &mut self,
+        snapshot: Option<(bytes::Bytes, u64, ainb_plugin_runtime::types::PluginId)>,
+    ) {
+        let Some((payload, version, publisher)) = snapshot else {
+            return;
+        };
+        let plugin = publisher.as_str();
+        if plugin == ainb_plugin_runtime::snapshot::HOST_PUBLISHER {
+            return;
+        }
+        if self
+            .plugins_host
+            .plugin_ui_states
+            .get(plugin)
+            .is_some_and(|known| known.version >= version)
+        {
+            return;
+        }
+        match serde_json::from_slice(&payload) {
+            Ok(view) => {
+                self.plugins_host.plugin_ui_states.insert(
+                    plugin.to_string(),
+                    crate::app::sections::PluginUiState { version, view },
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%plugin, version, %error, "ui.state publish is not JSON");
+            }
+        }
+    }
+
     pub fn tick_panel_close_requests(&mut self, handle: &ainb_plugin_runtime::RuntimeHandle) {
         let Some((payload, version, publisher)) =
             handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_CLOSE_REQUEST)
@@ -12929,6 +12968,9 @@ impl App {
         // Honour any pending plugin close request (root-view Esc) before
         // kicking renders — a closed screen shouldn't get another paint.
         self.state.tick_panel_close_requests(&handle);
+        self.state.record_plugin_ui_state(
+            handle.snapshot_get_versioned(ainb_plugin_runtime::topics::UI_STATE),
+        );
 
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
