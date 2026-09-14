@@ -1971,13 +1971,11 @@ impl ConfigScreenState {
                 ));
             } else if Self::parse_plugin_toggle_key(key).is_some() {
                 toggled_a_plugin = true;
-            } else if screen_model::read_only_reason(key).is_some()
-                || registry::hangar_daemon_key(key).is_some()
-                || registry::is_external(key)
-                || applied.rejected.iter().any(|(rejected, _)| rejected == key)
+            } else if screen_model::read_only_reason(key).is_none()
+                && registry::hangar_daemon_key(key).is_none()
+                && !registry::is_external(key)
+                && !applied.rejected.iter().any(|(rejected, _)| rejected == key)
             {
-                continue;
-            } else {
                 keys.push(key.clone());
             }
         }
