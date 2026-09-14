@@ -53,6 +53,15 @@ final class Actuator: XCTestCase {
         }
     }
 
+    /// Taps the app's biometric probe button, then stays alive long enough for
+    /// the host to answer the Face ID sheet with a simulated match or non-match.
+    func testTapBiometricProbe() {
+        app.activate()
+        app.buttons["biometric gate"].tap()
+        stamp("biometric_probe_tapped")
+        sleep(20)
+    }
+
     /// Waits for a banner or lock-screen notification whose text contains
     /// SPIKE_BANNER (for example "scheduled 60s ahead"), up to SPIKE_WAIT_S.
     func testWaitBanner() {
