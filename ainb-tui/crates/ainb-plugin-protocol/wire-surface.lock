@@ -5,7 +5,7 @@
 #
 # The regenerator REFUSES to write while the surface has changed but
 # ainb-plugin-protocol's version has not. Bump the version first.
-protocol_version = "0.1.3"
+protocol_version = "0.2.0"
 
 [lib]
 reexport errors :: { ProtocolError , RpcError }
@@ -102,10 +102,11 @@ struct Provides [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize
   field commands: Vec < String > [# [serde (default)]]
   field cli_namespaces: Vec < String > [# [serde (default)]]
   field snapshots: Vec < String > [# [serde (default)]]
-struct Subscribes [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct Subscribes [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)] # [serde (deny_unknown_fields)]]
   field snapshots: Vec < String > [# [serde (default)]]
   field latest_state: Vec < String > [# [serde (default , skip_serializing_if = "Vec::is_empty")]]
 Subscribes::fn blocks_idle_reap (& self) -> bool
+Subscribes::fn validate (& self) -> Result < () , String >
 enum SpawnMode [# [derive (Debug , Clone , Copy , Default , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")]]
   variant Eager
   variant Lazy
@@ -151,6 +152,10 @@ struct PluginInitParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize ,
   field granted_capabilities: Vec < String >
   field abi_version: u32
   field config: serde_json :: Value [# [serde (default)]]
+  field host: Option < PluginHost > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+struct PluginHost [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field kind: String
+  field pid: u32
 struct PluginInitResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
   field name: String
   field version: String
