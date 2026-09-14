@@ -32,6 +32,10 @@ use std::sync::Mutex;
 
 /// The JSON a mirror host receives for one section.
 ///
+/// Reads the poller-published cells (`FleetSection.daemon_attention`,
+/// `fleet_snapshot`, the Daemons snapshot) under their locks, so a caller must
+/// not hold any of those locks across this call.
+///
 /// # Panics
 ///
 /// Never in practice: every type reachable from a view serialises to JSON
@@ -335,3 +339,71 @@ view!(ShellView<'a> for ShellSection {
     session_tab: crate::components::session_tabs::SessionTab,
     focused_pane: crate::app::state::FocusedPane,
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::ConfigValue;
+    use crate::components::config_popup::ConfigPopupType;
+
+    /// Build under a scratch `HOME`, holding the crate's env lock and putting
+    /// the previous value back, the same way the reducer tests do.
+    fn with_scratch_home<T>(body: impl FnOnce() -> T) -> T {
+        let _guard =
+            crate::config::tunables::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("scratch home");
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+        let out = body();
+        match previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    #[test]
+    fn enter_on_an_env_row_opens_a_popup_that_withholds_the_value() {
+        with_scratch_home(|| {
+            let mut state = shape::sample_state(&mut shape::PlainSeed);
+            let screen = &mut state.config.get_mut().config_screen_state;
+            let (category, index) = screen
+                .settings
+                .iter()
+                .find_map(|(category, rows)| {
+                    rows.iter()
+                        .position(|row| row.key.ends_with(".environment.ANTHROPIC_API_KEY"))
+                        .map(|index| (*category, index))
+                })
+                .expect("the sample template has an env row");
+            if let ConfigValue::Text(text) =
+                &mut screen.settings.get_mut(&category).unwrap()[index].value
+            {
+                *text = "env-value-marker".to_string();
+            }
+            screen.visible_rows = vec![(category, index)];
+            screen.selected_setting = 0;
+            crate::app::EventHandler::process_event(
+                crate::app::AppEvent::ConfigEditSetting,
+                &mut state,
+            );
+
+            assert!(matches!(
+                state.config.config_popup_state.popup_type,
+                ConfigPopupType::SecretInput { .. }
+            ));
+            let frame = section_json(&state, SectionId::Config).to_string();
+            assert!(!frame.contains("env-value-marker"), "{frame}");
+        });
+    }
+
+    #[test]
+    fn a_failed_answer_does_not_carry_the_typed_draft() {
+        let frame = with_scratch_home(|| {
+            let state = shape::sample_state(&mut shape::PlainSeed);
+            section_json(&state, SectionId::Fleet).to_string()
+        });
+        assert!(frame.contains("draft_len"), "{frame}");
+        assert!(!frame.contains("typed answer"), "{frame}");
+    }
+}
