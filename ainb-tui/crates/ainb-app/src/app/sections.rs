@@ -300,6 +300,11 @@ pub struct ConfigSection {
     pub config_popup_state: crate::components::config_popup::ConfigPopupState,
     // Changelog viewer state
     pub changelog_state: crate::components::ChangelogState,
+    /// Whether the Claude statusline is wired, from the shared probe, copied
+    /// in on the tick when it changes. Renderers draw the statusline CTA from
+    /// this rather than asking the probe, so a host that only receives
+    /// sections draws it too.
+    pub statusline_status: Option<crate::cli::statusline_install::StatuslineStatus>,
 }
 
 impl Default for ConfigSection {
@@ -312,6 +317,7 @@ impl Default for ConfigSection {
             app_config,
             config_popup_state: crate::components::config_popup::ConfigPopupState::default(),
             changelog_state: crate::components::ChangelogState::new(),
+            statusline_status: None,
         }
     }
 }
@@ -552,6 +558,10 @@ pub struct FleetSection {
     /// calling `live_window::current()` directly, because Tier 2's JSONL walk
     /// would otherwise stall input handling on every frame.
     pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
+    /// The watcher's latest snapshot, copied in on the tick when it changes.
+    /// Renderers draw the status bar's quota widget from this, so a host that
+    /// only receives sections draws it too.
+    pub live_window: crate::models::live_window::LiveWindow,
     // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
     // session is live but the proxy died).
     pub last_headroom_watchdog: Option<std::time::Instant>,
@@ -648,6 +658,7 @@ impl Default for FleetSection {
         Self {
             attention_baseline: HashMap::new(),
             live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
+            live_window: crate::models::live_window::LiveWindow::default(),
             last_headroom_watchdog: None,
             last_token_refresh_check: None,
             ask_state: crate::fleet::answer::AskState::default(),
