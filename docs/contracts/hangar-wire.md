@@ -61,6 +61,23 @@ A surface renders a Fleet card from this reply alone. `fleet/snapshot` and
 both and joins them pays two projections per Fleet event where this read pays
 one. The join is `ainb_hangar_proto::agent_status::join`, the only one.
 
+**Agent-status topic** (#1031, plugin runtime, not the daemon socket). In the
+TUI one host task reads agent status: it picks `fleet/roster_status` when the
+daemon advertises `fleet.roster_status.read`, otherwise (an N-1 daemon, or
+`[fleet.status] legacy_panel`) `fleet/snapshot` plus `fleet/status` joined by
+the same `join`, and pays at most one read per Fleet revision. After folding the
+reply into section 20 it publishes an `AgentStatusEnvelope`
+(`ainb_hangar_proto::status_topic`) on the host snapshot topic
+`fleet.agent_status`: `sequence`, the read `revision`, `host_id`, the local read
+clock, `head_revision`, a tagged `health` (`live`, `stale`, `unreachable`,
+`absent`) and the joined rows. The envelope is the whole view, never a delta,
+because the snapshot bus keeps only the latest payload. The hangar plugin
+subscribes, reads the latest once at init, drops any envelope at or below the
+last sequence it applied, and renders the Fleet panel from it with no Fleet
+subscription or read of its own, so a Fleet event costs the TUI process one
+projection. An encoded envelope over 6 MiB is published as `absent` with the
+reason instead of cut short.
+
 ### Sockets
 
 The daemon binds `hangar.sock` and symlinks `hangar-v<N>.sock` for every
