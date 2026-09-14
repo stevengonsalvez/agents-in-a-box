@@ -304,6 +304,7 @@ pub struct CommitInfo {
     pub hash_short: String,
     pub author: String,
     pub date: String,
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub message: String,
 }
 
