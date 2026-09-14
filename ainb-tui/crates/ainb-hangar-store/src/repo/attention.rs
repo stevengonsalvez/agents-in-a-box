@@ -696,7 +696,8 @@ impl AttentionRepo {
     pub async fn drift_against_fleet_session(
         pool: &SqlitePool,
     ) -> Result<AttentionDrift, sqlx::Error> {
-        // No settle window: the pre-#962 measure, until every caller passes a clock.
+        // No settle window: the strict pre-#962 measure, for tests that need
+        // every disagreement counted. The daemon sweep passes its clock.
         Self::drift_against_fleet_session_at(pool, i64::MAX).await
     }
 
