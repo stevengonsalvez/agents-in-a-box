@@ -6335,14 +6335,18 @@ mod tests {
         assert_eq!(m, back);
     }
 
+    /// #1053 review item 6: lazy, with an explicit ten-minute idle window and
+    /// a latest-state subscription that does not block the reap.
     #[test]
-    fn manifest_lifecycle_is_lazy_no_reap() {
+    fn manifest_lifecycle_is_lazy_with_an_explicit_reap_window() {
         let m: Manifest = toml::from_str(MANIFEST_TOML).unwrap();
         assert_eq!(
             m.lifecycle.spawn,
             ainb_plugin_protocol::manifest::SpawnMode::Lazy
         );
-        assert_eq!(m.lifecycle.idle_reap_secs, 0);
+        assert_eq!(m.lifecycle.idle_reap_secs, 600);
+        assert!(!m.subscribes.blocks_idle_reap());
+        assert_eq!(m.subscribes.validate(), Ok(()));
     }
 
     #[test]
