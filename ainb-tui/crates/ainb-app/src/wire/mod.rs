@@ -52,12 +52,17 @@ pub fn section_json(state: &AppState, id: SectionId) -> serde_json::Value {
 
 /// The daemon read behind a section's content, for [`frame::Mirror`].
 ///
-/// None of the 19 sections records the revision and clock of the daemon read
-/// that fed it yet: the Fleet poller and section 20 (T0-section) gain one when
-/// they land on the frame, and add their arm here.
+/// Section 20 is fed by one joined daemon read and says so. The Fleet poller's
+/// reads carry no revision or daemon clock yet, so its section has none.
 #[must_use]
-pub const fn daemon_read(_state: &AppState, id: SectionId) -> Option<frame::DaemonRead> {
+pub fn daemon_read(state: &AppState, id: SectionId) -> Option<frame::DaemonRead> {
     match id {
+        // Section 20 is one daemon read: its revision, and the daemon's clock
+        // at the read, so a renderer ages a card on the daemon's clock.
+        SectionId::AgentStatus => state.agent_status.view.as_ref().map(|view| frame::DaemonRead {
+            revision: view.read_revision,
+            clock_ms: view.read_at_ms,
+        }),
         SectionId::Sessions
         | SectionId::SessionLabels
         | SectionId::Tmux
