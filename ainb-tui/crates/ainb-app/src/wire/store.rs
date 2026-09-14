@@ -42,13 +42,14 @@ pub struct Commit {
 
 /// A value a root selector may return. There is no list or object variant, so
 /// a root selector cannot fan a single section write out to a list of readers
-/// (D15 invariant 3).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// (D15 invariant 3). One numeric variant only: under `serde(untagged)` a
+/// `Count` and a float would both be a bare JSON number, and a renderer could
+/// not tell which it read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Scalar {
     Bool(bool),
     Count(u64),
-    Number(f64),
     Text(String),
     Absent,
 }
