@@ -34,7 +34,7 @@ use ainb_app::fleet::bridge::daemon::{DaemonClient, DaemonError, FleetStreamEven
 use ainb_hangar_proto::agent_status::{RosterStatusResult, join};
 use ainb_hangar_proto::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ;
 use ainb_hangar_proto::status_topic::{
-    AGENT_STATUS_ENVELOPE_MAX_BYTES, AGENT_STATUS_TOPIC, AgentStatusEnvelope,
+    AGENT_STATUS_ENVELOPE_MAX_BYTES, AGENT_STATUS_TOPIC, AgentStatusEnvelope, AgentStatusHealth,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -196,13 +196,23 @@ impl AgentStatusHost {
 /// absent view with the reason, never cut short.
 #[must_use]
 pub fn encode(section: &AgentStatusSection, sequence: u64) -> Option<Vec<u8>> {
-    let envelope = match (&section.view, &section.absent) {
+    let mut envelope = match (&section.view, &section.absent) {
         (Some(view), _) => AgentStatusEnvelope::from_view(sequence, view),
         (None, Some(reason)) => {
             AgentStatusEnvelope::absent(sequence, reason.clone(), section.head_revision)
         }
         (None, None) => return None,
     };
+    // A failure reason can carry daemon error text verbatim (an RPC, IO or
+    // decode message), so it is scrubbed exactly as the section 20 frame
+    // scrubs it (`wire/mod.rs`). Here rather than in the proto, which has no
+    // redactor, so every publish passes through it.
+    match &mut envelope.health {
+        AgentStatusHealth::Unreachable { reason, .. } | AgentStatusHealth::Absent { reason } => {
+            *reason = ainb_app::fleet::bridge::redact::scrub(reason);
+        }
+        AgentStatusHealth::Live | AgentStatusHealth::Stale { .. } => {}
+    }
     let bytes = match serde_json::to_vec(&envelope) {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -1027,5 +1037,43 @@ mod tests {
         let version = state.agent_status.version();
         assert!(!host.drain_into(&mut state), "reported once");
         assert_eq!(state.agent_status.version(), version);
+    }
+
+    /// #1038 review item 4: a daemon RPC error carrying a token-shaped string
+    /// reaches the plugins redacted.
+    #[test]
+    fn a_token_in_a_daemon_error_is_published_redacted() {
+        let token = format!("ghp_{}", "a1B2c3D4e5".repeat(4));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        report(
+            &tx,
+            &DaemonError::Rpc {
+                code: -32000,
+                message: format!("store refused credential {token}"),
+            },
+        );
+        let mut state = AppState::default();
+        apply(
+            &mut state,
+            AgentStatusUpdate::Read(
+                RosterStatusResult {
+                    rows: Vec::new(),
+                    read_revision: 1,
+                    unknown_events: Vec::new(),
+                },
+                1,
+            ),
+        );
+        apply(&mut state, rx.try_recv().expect("a failure update"));
+        let envelope: AgentStatusEnvelope =
+            serde_json::from_slice(&encode(&state.agent_status, 1).unwrap()).unwrap();
+        let AgentStatusHealth::Unreachable { reason, .. } = envelope.health else {
+            panic!("unreachable: {:?}", envelope.health);
+        };
+        assert!(!reason.contains(&token), "{reason}");
+        assert!(
+            reason.contains(ainb_app::fleet::bridge::redact::REDACTED),
+            "{reason}"
+        );
     }
 }
