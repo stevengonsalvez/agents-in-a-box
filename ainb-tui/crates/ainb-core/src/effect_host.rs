@@ -49,8 +49,12 @@ pub fn execute<'t>(
         Effect::Detach => Work::Done(vec![reports::detached()]),
         Effect::OpenEditor(path) => Work::Done(vec![open_editor(state, &path)]),
         Effect::PasteClipboard => Work::Done(vec![paste_clipboard()]),
-        Effect::RunDaemonAction { daemon, action } => {
-            spawn_daemon_action(daemon, action);
+        Effect::RunDaemonAction {
+            daemon,
+            action,
+            generation,
+        } => {
+            spawn_daemon_action(daemon, action, generation);
             Work::Done(Vec::new())
         }
     };
@@ -104,12 +108,13 @@ pub fn take_deferred_reports() -> Vec<Intent> {
 fn spawn_daemon_action(
     daemon: crate::fleet::daemons::probe::DaemonKind,
     action: crate::cli::daemon::Action,
+    generation: u64,
 ) {
     let tx = deferred().0.clone();
     let spawned = std::thread::Builder::new().name("ainb-daemon-action".into()).spawn({
         let tx = tx.clone();
         move || {
-            let report = run_daemon_action(daemon.id(), action.id());
+            let report = run_daemon_action(daemon.id(), action.id()).sealed(generation);
             let _ = tx.send(reports::daemon_action_finished(&report));
         }
     });
@@ -117,9 +122,11 @@ fn spawn_daemon_action(
         let report = reports::DaemonActionReport {
             daemon: daemon.id().to_string(),
             verb: action.id().to_string(),
+            generation,
             ok: false,
             summary: format!("{} failed", action.id()),
             detail: format!("the worker that runs `ainb daemon` did not start: {error}"),
+            local: None,
         };
         let _ = tx.send(reports::daemon_action_finished(&report));
     }
@@ -536,12 +543,14 @@ fn run_daemon_action(kind_id: &str, verb: &str) -> reports::DaemonActionReport {
         return reports::DaemonActionReport {
             daemon: kind_id.to_string(),
             verb: verb.to_string(),
+            generation: 0,
             ok: false,
             summary: format!("{verb} unavailable"),
             detail: format!(
                 "cmd: {argv}\nrefusing to self-exec a cargo test binary \
                  (current_exe is a test harness, not `ainb`)"
             ),
+            local: None,
         };
     }
     let bin = match std::env::current_exe() {
@@ -550,9 +559,11 @@ fn run_daemon_action(kind_id: &str, verb: &str) -> reports::DaemonActionReport {
             return reports::DaemonActionReport {
                 daemon: kind_id.to_string(),
                 verb: verb.to_string(),
+                generation: 0,
                 ok: false,
                 summary: format!("{verb} failed"),
                 detail: format!("cmd: {argv}\ncould not resolve the running ainb binary: {e}"),
+                local: None,
             };
         }
     };
@@ -588,6 +599,7 @@ fn run_daemon_action(kind_id: &str, verb: &str) -> reports::DaemonActionReport {
             reports::DaemonActionReport {
                 daemon: kind_id.to_string(),
                 verb: verb.to_string(),
+                generation: 0,
                 ok,
                 summary,
                 detail: format!(
@@ -596,14 +608,17 @@ fn run_daemon_action(kind_id: &str, verb: &str) -> reports::DaemonActionReport {
                     if stdout.is_empty() { "(none)" } else { &stdout },
                     if stderr.is_empty() { "(none)" } else { &stderr },
                 ),
+                local: None,
             }
         }
         Err(e) => reports::DaemonActionReport {
             daemon: kind_id.to_string(),
             verb: verb.to_string(),
+            generation: 0,
             ok: false,
             summary: format!("{verb} failed"),
             detail: format!("cmd: {argv}\ncould not run it: {e}"),
+            local: None,
         },
     }
 }
@@ -708,6 +723,7 @@ mod daemon_action_tests {
         spawn_daemon_action(
             crate::fleet::daemons::probe::DaemonKind::McpPool,
             crate::cli::daemon::Action::Stop,
+            7,
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut reports = Vec::new();
@@ -724,6 +740,10 @@ mod daemon_action_tests {
         );
         assert_eq!(args["report"]["daemon"], "mcp-pool");
         assert_eq!(args["report"]["verb"], "stop");
+        assert_eq!(
+            args["report"]["generation"], 7,
+            "the report answers its request"
+        );
         assert_eq!(args["report"]["ok"], false);
         assert!(
             take_deferred_reports().is_empty(),
