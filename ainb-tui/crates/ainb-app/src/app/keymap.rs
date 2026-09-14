@@ -923,6 +923,15 @@ pub enum KeyAction {
 
 impl KeyAction {
     fn carries_payload(&self) -> bool {
+        // A pointer row carries a payload exactly when it refuses to run bare.
+        if let Self::App(event) = self {
+            if matches!(
+                crate::app::pointer::with_args(event, &serde_json::Value::Null),
+                Some(None)
+            ) {
+                return true;
+            }
+        }
         matches!(
             self,
             Self::App(
@@ -949,6 +958,13 @@ impl KeyAction {
     #[must_use]
     pub fn with_args(&self, args: &crate::app::intent::Args) -> Option<Self> {
         use serde_json::Value;
+        // Pointer rows parse their own structured payloads, and those that
+        // carry one refuse Null.
+        if let Self::App(event) = self {
+            if let Some(event) = crate::app::pointer::with_args(event, args) {
+                return event.map(Self::App);
+            }
+        }
         if args.is_null() {
             return Some(self.clone());
         }
