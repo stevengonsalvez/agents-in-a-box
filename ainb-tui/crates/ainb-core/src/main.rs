@@ -205,6 +205,14 @@ async fn tokio_main() -> Result<()> {
                 }
             }
 
+            // #963: the TUI's one presence connection, held from here until
+            // quit on every screen, plugins or not. It is how
+            // `hangar connections list` knows a TUI is running; it dials once
+            // the daemon is reachable, reconnects after a daemon restart, and
+            // marks every other daemon call this process makes as transient so
+            // the registry lists this TUI exactly once.
+            let presence = spawn_tui_presence();
+
             // Best-effort: drop shipped default presets into
             // ~/.agents-in-a-box/presets.toml on first run. Never overwrites
             // user-edited files (see `install_default_presets`). Also migrates
@@ -301,6 +309,10 @@ async fn tokio_main() -> Result<()> {
 
             let tui_result = run_tui(&mut app_state, &mut layout).await;
 
+            // Close before the slower teardown below, so the registry drops the
+            // row as soon as the operator quits.
+            presence.close().await;
+
             // Explicitly tear down the plugin runtime before `app_state`
             // drops. Without this, `AppState.plugin_runtime_owner: Option<Runtime>`
             // drops inside `#[tokio::main]`'s active runtime context and
@@ -351,6 +363,35 @@ async fn tokio_main() -> Result<()> {
     }
 
     result
+}
+
+/// Hold this TUI's presence row in the daemon's connection registry.
+///
+/// The lease owns the connection lifecycle; this only names the surface and
+/// logs transitions, never toasts: a TUI with no daemon is a normal state.
+fn spawn_tui_presence() -> fleet::bridge::daemon::PresenceLease {
+    use ainb_hangar_proto::connections::{SurfaceInfo, SurfaceKind};
+    use fleet::bridge::daemon::{PresenceLease, PresenceState};
+
+    let lease = PresenceLease::spawn(SurfaceInfo {
+        kind: SurfaceKind::Tui,
+        pid: std::process::id(),
+    });
+    let mut state = lease.state();
+    tokio::spawn(async move {
+        while state.changed().await.is_ok() {
+            match &*state.borrow_and_update() {
+                PresenceState::Connected => {
+                    tracing::info!("tui presence connected to hangar daemon")
+                }
+                PresenceState::Waiting { error } => {
+                    tracing::debug!(error = ?error, "tui presence waiting for hangar daemon");
+                }
+                PresenceState::Closed => tracing::debug!("tui presence closed"),
+            }
+        }
+    });
+    lease
 }
 
 async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
