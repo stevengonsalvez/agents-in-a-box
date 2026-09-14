@@ -24,6 +24,7 @@ use super::attention::{Answerable, SessionAttention};
 
 /// Where the answer is coming from.
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AskFocus {
     /// One of the structured options is selected.
     Options,
@@ -33,6 +34,7 @@ pub enum AskFocus {
 
 /// What the last send did, when one has been fired.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum AnswerPhase {
     /// Sent, waiting for the transport to report. The chip reads `SENT`.
     InFlight {
@@ -48,6 +50,7 @@ pub enum AnswerPhase {
             rename = "draft_len",
             serialize_with = "crate::wire::fields::opt_char_count"
         )]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
         draft: Option<String>,
     },
     /// The transport reported delivery. The chip clears on the next refresh,
@@ -60,6 +63,7 @@ pub enum AnswerPhase {
     Failed {
         /// The reason, verbatim from the transport.
         #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
         reason: String,
         /// What the operator had TYPED when this went out, so the pane can put
         /// it back. Carried on the outcome rather than restored the moment it
@@ -74,6 +78,7 @@ pub enum AnswerPhase {
             rename = "draft_len",
             serialize_with = "crate::wire::fields::opt_char_count"
         )]
+        #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
         draft: Option<String>,
     },
 }
@@ -84,6 +89,7 @@ pub enum AnswerPhase {
 /// over from the previous question would pre-select an answer to a question
 /// nobody read.
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct AskState {
     /// The chip this state belongs to, so a stale one is discarded rather than
     /// applied to whatever is selected now.
@@ -94,6 +100,7 @@ pub struct AskState {
         rename = "free_text_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     free_text: String,
     /// What each send did, keyed by the request it was answering.
     ///
