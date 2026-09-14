@@ -129,15 +129,14 @@ pub struct DaemonsState {
     /// stays on its own row rather than becoming a toast that scrolls away from
     /// the thing it is about.
     pub outcomes: std::collections::HashMap<&'static str, ActionOutcome>,
-    /// In-flight actions per daemon. Present = an action is running, which also
-    /// serves as the one-outstanding guard for that row.
-    pub inflight: std::collections::HashMap<
-        &'static str,
-        (
-            tokio::sync::mpsc::UnboundedReceiver<ActionOutcome>,
-            std::time::Instant,
-        ),
-    >,
+    /// In-flight actions per daemon, with when each was asked for. Present =
+    /// an action is running, which also serves as the one-outstanding guard
+    /// for that row.
+    pub inflight: std::collections::HashMap<&'static str, std::time::Instant>,
+    /// Actions asked for and not yet handed to the host. Drained by the key
+    /// handler, which queues each as an `Effect::RunDaemonAction`; the
+    /// component itself must not reach into `AppState`.
+    pub action_requests: Vec<(DaemonKind, Action)>,
     /// The in-flight hook install/repair, if one is running. Same shape and
     /// same one-outstanding guarantee as [`DaemonsState::inflight`]; the Hooks
     /// box is a panel rather than a row, so it needs its own slot.
@@ -453,33 +452,47 @@ impl DaemonsState {
         }
     }
 
-    /// Start one lifecycle action off the UI thread.
+    /// Ask for one lifecycle action.
     ///
     /// The whole point of the Daemons screen's rewrite: an action must never be
-    /// run inline. Shelling `ainb daemon …` on a throwaway thread keeps the UI
-    /// responsive AND gives the error view the real argv, exit status, and
-    /// stderr to show instead of a paraphrase.
+    /// run inline. The host runs `ainb daemon …` off the UI thread and reports
+    /// the real argv, exit status, and stderr back through
+    /// [`DaemonsState::finish_action`], so the error view shows them instead of
+    /// a paraphrase.
     pub fn dispatch(&mut self, kind: DaemonKind, action: Action) {
         if self.inflight.contains_key(kind.id()) {
             return;
         }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.inflight.insert(kind.id(), (rx, std::time::Instant::now()));
+        self.inflight.insert(kind.id(), std::time::Instant::now());
         self.outcomes.remove(kind.id());
-        let (kind_id, verb) = (kind.id(), action.id());
-        std::thread::spawn(move || {
-            let _ = tx.send(run_daemon_action(kind_id, verb, action));
-        });
+        self.action_requests.push((kind, action));
     }
 
-    /// Drain finished actions. Cheap enough for the render path — it is a
-    /// channel poll, not I/O, and the H-D2 rule is about blocking syscalls.
+    /// Take the actions asked for since the last call, oldest first.
+    pub fn take_action_requests(&mut self) -> Vec<(DaemonKind, Action)> {
+        std::mem::take(&mut self.action_requests)
+    }
+
+    /// Fold in what the host reported for `daemon`'s action.
+    ///
+    /// Ignored unless that daemon has an action in flight: a report that lands
+    /// after the give-up in [`DaemonsState::poll_actions`] must not overwrite
+    /// the timeout the row already shows with a result nobody is waiting for.
+    pub fn finish_action(&mut self, daemon: &str, outcome: ActionOutcome) -> bool {
+        let Some((id, _)) = self.inflight.remove_entry(daemon) else {
+            return false;
+        };
+        self.outcomes.insert(id, outcome);
+        true
+    }
+
+    /// Give up on actions the host never reported. Cheap enough for the render
+    /// path: a clock read per in-flight row, and the H-D2 rule is about
+    /// blocking syscalls.
     pub fn poll_actions(&mut self) {
         let mut done = Vec::new();
-        for (id, (rx, started)) in &mut self.inflight {
-            if let Ok(outcome) = rx.try_recv() {
-                done.push((*id, outcome));
-            } else if started.elapsed() > ACTION_TIMEOUT {
+        for (id, started) in &self.inflight {
+            if started.elapsed() > ACTION_TIMEOUT {
                 // `inflight` doubles as the one-outstanding guard, so an action
                 // that never returns would pin its row on `⟳ working` and
                 // silently swallow every later action on that daemon for the
@@ -660,89 +673,6 @@ fn run_hook_action(intent: BinaryIntent) -> String {
                 Err(error) => format!("pinning the running binary failed: {error:#}"),
             }
         }
-    }
-}
-
-/// Shell one `ainb daemon <kind> <action>` and capture everything it said.
-///
-/// Runs on a throwaway thread. The captured argv, exit status, and output are
-/// what the row's error view shows verbatim — the operator sees the actual
-/// failure, not our summary of it.
-pub fn run_daemon_action(kind_id: &str, verb: &str, action: Action) -> ActionOutcome {
-    let argv = format!("ainb daemon {kind_id} {verb}");
-    // Never self-exec a test harness: under `cargo test` current_exe() is the
-    // test binary, and libtest treats the trailing argv as name filters, so
-    // this would re-run the suite instead of running a subcommand. See
-    // `crate::self_exec_guard` and issue #715.
-    if crate::self_exec_guard::running_under_cargo_test() {
-        return ActionOutcome {
-            action,
-            ok: false,
-            summary: format!("{verb} unavailable"),
-            detail: format!(
-                "cmd: {argv}\nrefusing to self-exec a cargo test binary \
-                 (current_exe is a test harness, not `ainb`)"
-            ),
-        };
-    }
-    let bin = match std::env::current_exe() {
-        Ok(bin) => bin,
-        Err(e) => {
-            return ActionOutcome {
-                action,
-                ok: false,
-                summary: format!("{verb} failed"),
-                detail: format!("cmd: {argv}\ncould not resolve the running ainb binary: {e}"),
-            };
-        }
-    };
-    match std::process::Command::new(bin).args(["daemon", kind_id, verb]).output() {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            let ok = out.status.success();
-            // The LAST non-empty line, not the first — it was named `first_line`
-            // for long enough that a CLI ending its output with a help block
-            // badged the row with the help's closing line. Every verb reachable
-            // from this menu therefore has to end its stdout with the sentence
-            // worth badging; `fleet atc mode --set` prints its notes first for
-            // exactly this reason.
-            let badge_line = |s: &str| {
-                s.lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string()
-            };
-            let summary = if ok {
-                let line = badge_line(&stdout);
-                if line.is_empty() {
-                    format!("{verb} ok")
-                } else {
-                    line
-                }
-            } else {
-                format!("{verb} failed")
-            };
-            ActionOutcome {
-                action,
-                ok,
-                summary,
-                detail: format!(
-                    "cmd: {argv}\nexit: {}\n\nstdout:\n{}\n\nstderr:\n{}",
-                    out.status,
-                    if stdout.is_empty() { "(none)" } else { &stdout },
-                    if stderr.is_empty() { "(none)" } else { &stderr },
-                ),
-            }
-        }
-        Err(e) => ActionOutcome {
-            action,
-            ok: false,
-            summary: format!("{verb} failed"),
-            detail: format!("cmd: {argv}\ncould not run it: {e}"),
-        },
     }
 }
 
