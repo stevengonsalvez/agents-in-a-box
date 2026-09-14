@@ -97,6 +97,7 @@ pub struct AtcModeView {
     /// every frame while the ATC row was selected, in the file whose entire
     /// design is about keeping work off the UI thread. It is a pure function of
     /// the provider, so it belongs on the snapshot with everything else.
+    #[serde(serialize_with = "crate::wire::fields::scrub_lines")]
     pub help: Vec<String>,
 }
 
@@ -285,9 +286,11 @@ pub struct ActionOutcome {
     pub action: Action,
     pub ok: bool,
     /// One line for the row itself.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub summary: String,
     /// Everything the command said: the argv, its exit status, and its output.
     /// This is what the error view shows, verbatim.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub detail: String,
 }
 
