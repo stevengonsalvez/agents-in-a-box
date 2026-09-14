@@ -55,9 +55,21 @@ lazy_static! {
     /// Anthropic API and admin keys.
     static ref ANTHROPIC_KEY: Regex =
         Regex::new(r"sk-ant-[A-Za-z0-9_-]{20,}").expect("valid anthropic key regex");
-    /// OpenAI keys, legacy `sk-…` and project `sk-proj-…`.
+    /// OpenAI keys, legacy `sk-…` and project, service-account and admin
+    /// forms. Word-anchored: without `\b` a session id like `ainb-task-<uuid>`
+    /// or a branch like `fix-risk-assessment-…` matched from the `sk-` inside it.
     static ref OPENAI_KEY: Regex =
-        Regex::new(r"sk-(?:proj-)?[A-Za-z0-9_-]{32,}").expect("valid openai key regex");
+        Regex::new(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{32,}")
+            .expect("valid openai key regex");
+    /// PEM armour lines, for input that arrives one line at a time.
+    static ref PEM_BEGIN: Regex =
+        Regex::new(r"-----BEGIN [A-Z ]*PRIVATE KEY-----").expect("valid pem begin regex");
+    static ref PEM_END: Regex =
+        Regex::new(r"-----END [A-Z ]*PRIVATE KEY-----").expect("valid pem end regex");
+    /// ANSI CSI and OSC escape sequences, as `tmux capture-pane -e` keeps them.
+    static ref ANSI_ESCAPE: Regex =
+        Regex::new(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+            .expect("valid ansi escape regex");
     /// GitHub classic (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and fine-grained tokens.
     static ref GITHUB_TOKEN: Regex =
         Regex::new(r"gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{80,}")
@@ -127,8 +139,58 @@ pub const REDACTED: &str = "<redacted>";
 /// `digits:base64` form, so the `bot` prefix is also removed, and a URL keeps
 /// its scheme and host with only the userinfo replaced. Returns a new string;
 /// secret-free inputs round-trip unchanged.
+///
+/// Captured panes keep their colour codes, and an SGR sequence inside a token
+/// (a highlighted `.env`, a coloured prompt) splits it past every shape. When
+/// the text has escapes and a shape only appears once they are stripped, the
+/// stripped text is scrubbed and returned: the colours are lost only on the
+/// capture that actually held a secret.
 #[must_use]
 pub fn scrub(input: &str) -> String {
+    let scrubbed = scrub_shapes(input);
+    if !input.contains('\x1b') {
+        return scrubbed;
+    }
+    let plain = ANSI_ESCAPE.replace_all(&scrubbed, "");
+    if find_secret(&plain).is_some() {
+        scrub_shapes(&plain)
+    } else {
+        scrubbed
+    }
+}
+
+/// Scrub a sequence of lines that together form one text (a diff, an editor,
+/// an argument list), keeping one output line per input line.
+///
+/// [`scrub`] on each line alone would redact a PEM header and let every base64
+/// body line through, so a private-key block is tracked across lines: every
+/// line from `BEGIN` to `END` (or to the last line) becomes [`REDACTED`].
+#[must_use]
+pub fn scrub_lines<S: AsRef<str>>(lines: &[S]) -> Vec<String> {
+    let mut in_key = false;
+    lines
+        .iter()
+        .map(|line| {
+            let line = line.as_ref();
+            if in_key {
+                if let Some(end) = PEM_END.find(line) {
+                    in_key = false;
+                    return format!("{REDACTED}{}", scrub(&line[end.end()..]));
+                }
+                return REDACTED.to_string();
+            }
+            match PEM_BEGIN.find(line) {
+                Some(begin) if !PEM_END.is_match(&line[begin.end()..]) => {
+                    in_key = true;
+                    format!("{}{REDACTED}", scrub(&line[..begin.start()]))
+                }
+                _ => scrub(line),
+            }
+        })
+        .collect()
+}
+
+fn scrub_shapes(input: &str) -> String {
     let mut out = std::borrow::Cow::Borrowed(input);
     for (name, re) in shapes() {
         if !re.is_match(&out) {
@@ -321,6 +383,57 @@ mod tests {
                 "{scrubbed}"
             );
         }
+    }
+
+    #[test]
+    fn session_ids_and_branch_names_are_not_mistaken_for_openai_keys() {
+        for clean in [
+            "ainb-task-123e4567-e89b-12d3-a456-426614174000",
+            "agents/fix-risk-assessment-for-the-new-billing-flow-v2",
+            "tmux session ainb-disk-cleanup-0123456789abcdef0123456789abcdef",
+        ] {
+            assert_eq!(scrub(clean), clean);
+            assert!(find_secret(clean).is_none(), "{clean}");
+        }
+    }
+
+    #[test]
+    fn a_key_block_split_across_lines_is_redacted_line_by_line() {
+        let body = fake("", 'p', 64);
+        let lines = vec![
+            "+API=1".to_string(),
+            "+-----BEGIN RSA PRIVATE KEY-----".to_string(),
+            format!("+{body}"),
+            format!("+{body}"),
+            "+-----END RSA PRIVATE KEY----- tail".to_string(),
+            "+DONE=1".to_string(),
+        ];
+        let out = scrub_lines(&lines);
+        assert_eq!(out.len(), lines.len());
+        assert_eq!(out[0], "+API=1");
+        assert!(out[1..5].iter().all(|l| l.contains(REDACTED)), "{out:?}");
+        assert!(out.iter().all(|l| !l.contains(&body)), "{out:?}");
+        assert_eq!(out[4], format!("{REDACTED} tail"));
+        assert_eq!(out[5], "+DONE=1");
+        // A block the capture cut off redacts to the last line.
+        let cut = scrub_lines(&["-----BEGIN OPENSSH PRIVATE KEY-----", &body]);
+        assert_eq!(cut, vec![REDACTED.to_string(), REDACTED.to_string()]);
+    }
+
+    #[test]
+    fn a_token_split_by_colour_codes_is_still_scrubbed() {
+        let token = fake("ghp_", 'C', 36);
+        let coloured = format!(
+            "\x1b[32mexport GH={}\x1b[1m{}\x1b[0m",
+            &token[..10],
+            &token[10..]
+        );
+        let scrubbed = scrub(&coloured);
+        assert!(!scrubbed.contains(&token[10..]), "{scrubbed:?}");
+        assert!(scrubbed.contains(REDACTED));
+        // Colour stays when there is nothing to scrub.
+        let clean = "\x1b[32mcargo test\x1b[0m";
+        assert_eq!(scrub(clean), clean);
     }
 
     #[test]
