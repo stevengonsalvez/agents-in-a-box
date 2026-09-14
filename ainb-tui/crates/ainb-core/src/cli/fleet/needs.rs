@@ -288,6 +288,7 @@ pub fn stamp_rows(
                     tuple.2,
                     tuple.3,
                     tuple.4,
+                    &status_row.host_id,
                     status_row.pane_unbound,
                 );
             }
@@ -351,6 +352,7 @@ fn needs_row_from_status(status: &ainb_hangar_proto::agent_status::AgentStatusRo
         tuple.2,
         tuple.3,
         tuple.4,
+        &status.host_id,
         status.pane_unbound,
     );
     row

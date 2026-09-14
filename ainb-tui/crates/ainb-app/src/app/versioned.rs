@@ -95,7 +95,7 @@ impl<T> DerefMut for Versioned<T> {
     }
 }
 
-/// The 19 sections, in the order [`SectionVersions`] indexes them.
+/// The 20 sections, in the order [`SectionVersions`] indexes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SectionId {
     Sessions,
@@ -117,10 +117,12 @@ pub enum SectionId {
     Recovery,
     Onboarding,
     Shell,
+    /// Section 20: agent status from one joined daemon read (#1015).
+    AgentStatus,
 }
 
 impl SectionId {
-    pub const COUNT: usize = 19;
+    pub const COUNT: usize = 20;
 
     pub const ALL: [Self; Self::COUNT] = [
         Self::Sessions,
@@ -142,6 +144,7 @@ impl SectionId {
         Self::Recovery,
         Self::Onboarding,
         Self::Shell,
+        Self::AgentStatus,
     ];
 
     pub const fn index(self) -> usize {

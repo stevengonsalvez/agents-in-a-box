@@ -69,6 +69,7 @@ pub const fn section_name(id: SectionId) -> &'static str {
         SectionId::Recovery => "recovery",
         SectionId::Onboarding => "onboarding",
         SectionId::Shell => "shell",
+        SectionId::AgentStatus => "agent_status",
     }
 }
 
@@ -112,6 +113,7 @@ pub fn serialize_section<S: Serializer>(
         SectionId::Recovery => RecoveryView::from(&*state.recovery).serialize(serializer),
         SectionId::Onboarding => OnboardingView::from(&*state.onboarding).serialize(serializer),
         SectionId::Shell => ShellView::from(&*state.shell).serialize(serializer),
+        SectionId::AgentStatus => AgentStatusView::from(&*state.agent_status).serialize(serializer),
     }
 }
 
@@ -133,9 +135,9 @@ fn locked<T: Serialize, S: Serializer>(cell: &&Mutex<T>, serializer: S) -> Resul
 /// fingerprint and never the request.
 ///
 /// `cwd` stays (#983 M19): it is the working directory the fleet pane draws on
-/// each row, a path rather than a credential, and no deny word or type catches
-/// it, so this is where that decision is recorded. When section 20
-/// (`agent_status`) lands, its `cwd` and `current_request` join the deny-list.
+/// each row, a path rather than a credential. `cwd` and `current_request` are
+/// deny words, so this field is allow-listed by name in `tests/state_serde.rs`
+/// and section 20 (`agent_status`) leaves both off its frame.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn fleet_rows<S: Serializer>(
@@ -152,6 +154,121 @@ fn fleet_rows<S: Serializer>(
         })
         .collect();
     rows.serialize(serializer)
+}
+
+/// Section 20 (agent status) on the wire (#1015, #983).
+///
+/// `AgentStatusSection` and its `StatusView` deliberately do not derive
+/// `Serialize`, so this is the whole frame. It carries what a remote surface
+/// needs to draw a card (the state, its evidence, the wait kind, the
+/// attachment) and leaves OFF three roster fields: `current_request` (the
+/// full tool input of a pending approval), `cwd` and `display_name` (the
+/// operator's paths and labels, #983 M19). The failure reason and the unbound
+/// detail are free text, so they are scrubbed as the frame is built.
+#[derive(Serialize)]
+struct AgentStatusView<'a> {
+    absent: Option<String>,
+    head_revision: i64,
+    view: Option<StatusViewFrame<'a>>,
+}
+
+#[derive(Serialize)]
+struct StatusViewFrame<'a> {
+    host_id: &'a str,
+    read_revision: i64,
+    received_at_ms: i64,
+    head_revision: i64,
+    health: HealthFrame,
+    cards: Vec<AgentCardFrame<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum HealthFrame {
+    Live,
+    Stale {
+        read_revision: i64,
+        head_revision: i64,
+    },
+    Unreachable {
+        stale_since_ms: i64,
+        reason: String,
+    },
+}
+
+#[derive(Serialize)]
+struct AgentCardFrame<'a> {
+    session_key: &'a str,
+    provider: ainb_hangar_proto::fleet::FleetProvider,
+    lifecycle: ainb_hangar_proto::fleet::LifecycleState,
+    management: ainb_hangar_proto::fleet::ManagementState,
+    transport_health: ainb_hangar_proto::fleet::TransportHealth,
+    state: ainb_hangar_proto::agent_status::AgentState,
+    provenance: ainb_hangar_proto::agent_status::Provenance,
+    tier: ainb_hangar_proto::agent_status::Tier,
+    evidence_observed_at: i64,
+    has_open_request: bool,
+    pane_unbound: bool,
+    pane_unbound_detail: Option<String>,
+    host_id: &'a str,
+    turn_complete: bool,
+    wait_kind: Option<ainb_hangar_proto::agent_status::WaitKind>,
+    attachment: ainb_hangar_proto::agent_status::Attachment,
+}
+
+impl<'a> From<&'a crate::app::sections::AgentStatusSection> for AgentStatusView<'a> {
+    fn from(section: &'a crate::app::sections::AgentStatusSection) -> Self {
+        use ainb_hangar_proto::status_view::ViewHealth;
+        let scrub = |text: &str| crate::fleet::bridge::redact::scrub(text);
+        Self {
+            absent: section.absent.as_deref().map(scrub),
+            head_revision: section.head_revision,
+            view: section.view.as_ref().map(|view| StatusViewFrame {
+                host_id: &view.host_id,
+                read_revision: view.read_revision,
+                received_at_ms: view.received_at_ms,
+                head_revision: view.head_revision,
+                health: match &view.health {
+                    ViewHealth::Live => HealthFrame::Live,
+                    ViewHealth::Stale {
+                        read_revision,
+                        head_revision,
+                    } => HealthFrame::Stale {
+                        read_revision: *read_revision,
+                        head_revision: *head_revision,
+                    },
+                    ViewHealth::Unreachable {
+                        stale_since_ms,
+                        reason,
+                    } => HealthFrame::Unreachable {
+                        stale_since_ms: *stale_since_ms,
+                        reason: scrub(reason),
+                    },
+                },
+                cards: view
+                    .cards()
+                    .map(|card| AgentCardFrame {
+                        session_key: &card.status.session_key,
+                        provider: card.session.provider,
+                        lifecycle: card.session.lifecycle,
+                        management: card.session.management,
+                        transport_health: card.session.transport_health,
+                        state: card.status.state,
+                        provenance: card.status.provenance,
+                        tier: card.status.tier,
+                        evidence_observed_at: card.status.evidence_observed_at,
+                        has_open_request: card.status.has_open_request,
+                        pane_unbound: card.status.pane_unbound,
+                        pane_unbound_detail: card.status.pane_unbound_detail.as_deref().map(scrub),
+                        host_id: &card.status.host_id,
+                        turn_complete: card.status.turn_complete,
+                        wait_kind: card.status.wait_kind,
+                        attachment: card.status.attachment,
+                    })
+                    .collect(),
+            }),
+        }
+    }
 }
 
 /// Plugin render failures, scrubbed: an error string can carry a URL or token.

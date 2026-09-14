@@ -1,0 +1,619 @@
+//! The host task that keeps section 20 (agent status) current (T0-section, #1015).
+//!
+//! `ainb-app` reduces; the host owns the socket. This task holds a Fleet
+//! subscription, and for every revision it is told about it pays ONE daemon read,
+//! the joined `fleet/roster_status`, and hands the reply to the TUI loop, which
+//! folds it into section 20 through the section's reducer.
+//!
+//! ```text
+//!  daemon ──fleet/event──▶ task ──Head(rev)──▶ mpsc ──▶ drain_into ──▶ section 20
+//!         ◀─roster_status─      ──Read(rows)─▶
+//!  refused / gone        ──Failed / Absent──▶ (rows frozen, or absent, and why)
+//! ```
+//!
+//! Failures never become a state: a read that fails freezes the section's rows
+//! as unreachable, a daemon without the method leaves it absent, and the task
+//! retries with a bounded backoff. It is panic-free, because the TUI's panic
+//! handler tears the terminal down.
+
+use std::time::Duration;
+
+use ainb_app::app::state::AppState;
+use ainb_app::fleet::bridge::daemon::{DaemonClient, DaemonError, FleetStreamEvent};
+use ainb_hangar_proto::agent_status::RosterStatusResult;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+/// JSON-RPC "method not found": a daemon older than `fleet/roster_status`.
+const METHOD_NOT_FOUND: i32 = -32601;
+
+/// Retry and backoff bounds. Shortened only by the tests.
+#[derive(Debug, Clone, Copy)]
+struct Timing {
+    /// First retry wait after a failure.
+    backoff_initial: Duration,
+    /// Longest retry wait, and the wait after a daemon without the method.
+    backoff_max: Duration,
+    /// A connection must stay up this long before a later failure restarts
+    /// the backoff at `backoff_initial`, so a daemon that accepts and drops
+    /// cannot drive a tight reconnect loop (the `presence.rs` rule).
+    min_uptime: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            backoff_initial: Duration::from_millis(500),
+            backoff_max: Duration::from_secs(30),
+            min_uptime: Duration::from_secs(5),
+        }
+    }
+}
+
+/// One thing the task learned, for the TUI loop to fold into section 20.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentStatusUpdate {
+    /// A joined read landed, received at this local epoch-ms clock.
+    Read(RosterStatusResult, i64),
+    /// A newer Fleet revision was observed.
+    Head(i64),
+    /// The task reconnected: section 20 drops its view and keeps its head.
+    Reset,
+    /// A read or the subscription failed, for this reason, at this local clock.
+    Failed(String, i64),
+    /// The daemon cannot serve the joined read.
+    Absent(String),
+}
+
+/// Resolves a fresh daemon client for every connection attempt.
+pub type Dialer = Box<dyn Fn() -> Result<DaemonClient, DaemonError> + Send + Sync>;
+
+/// The running task and the channel its updates arrive on.
+pub struct AgentStatusHost {
+    updates: mpsc::UnboundedReceiver<AgentStatusUpdate>,
+    task: JoinHandle<()>,
+}
+
+impl AgentStatusHost {
+    /// Start the task. Must be called inside a tokio runtime.
+    #[must_use]
+    pub fn spawn(dialer: Dialer) -> Self {
+        Self::spawn_timed(dialer, Timing::default())
+    }
+
+    fn spawn_timed(dialer: Dialer, timing: Timing) -> Self {
+        let (tx, updates) = mpsc::unbounded_channel();
+        let task = tokio::spawn(run(dialer, tx, timing));
+        Self { updates, task }
+    }
+
+    /// Fold every update that has arrived into section 20. Returns whether
+    /// section 20's version moved.
+    pub fn drain_into(&mut self, state: &mut AppState) -> bool {
+        let mut changed = false;
+        while let Ok(update) = self.updates.try_recv() {
+            changed |= apply(state, update);
+        }
+        changed
+    }
+}
+
+impl Drop for AgentStatusHost {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// Fold one update into section 20 through its reducer entry points.
+pub fn apply(state: &mut AppState, update: AgentStatusUpdate) -> bool {
+    match update {
+        AgentStatusUpdate::Read(read, received_at_ms) => {
+            state.apply_agent_status_read(read, received_at_ms)
+        }
+        AgentStatusUpdate::Head(revision) => state.observe_agent_status_head(revision),
+        AgentStatusUpdate::Reset => state.agent_status_reset(),
+        AgentStatusUpdate::Failed(reason, now_ms) => state.agent_status_read_failed(reason, now_ms),
+        AgentStatusUpdate::Absent(reason) => state.agent_status_absent(reason),
+    }
+}
+
+fn now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
+        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+    })
+}
+
+/// Why a connection ended.
+enum Ended {
+    /// The daemon does not serve the joined read; wait long before asking again.
+    Absent,
+    /// Anything else: retry on the ordinary backoff.
+    Failed,
+    /// The update channel is gone: the TUI quit.
+    Closed,
+}
+
+async fn run(dialer: Dialer, tx: mpsc::UnboundedSender<AgentStatusUpdate>, timing: Timing) {
+    let mut backoff = timing.backoff_initial;
+    let mut connected_before = false;
+    loop {
+        let started = tokio::time::Instant::now();
+        let (ended, connected) = match dialer() {
+            Ok(client) => serve(&client, &tx, connected_before).await,
+            Err(error) => (report(&tx, &error), false),
+        };
+        connected_before |= connected;
+        // Only a connection that stayed up restarts the backoff.
+        if connected && started.elapsed() >= timing.min_uptime {
+            backoff = timing.backoff_initial;
+        }
+        let wait = match ended {
+            Ended::Closed => return,
+            Ended::Absent => timing.backoff_max,
+            Ended::Failed => backoff,
+        };
+        tokio::time::sleep(wait).await;
+        backoff = (backoff * 2).min(timing.backoff_max);
+    }
+}
+
+/// One connection: read, subscribe, and read once per revision the last read
+/// does not already cover, until it ends. Returns why it ended and whether a
+/// read landed on it.
+async fn serve(
+    client: &DaemonClient,
+    tx: &mpsc::UnboundedSender<AgentStatusUpdate>,
+    reconnect: bool,
+) -> (Ended, bool) {
+    let mut covered = match read(client, tx, reconnect).await {
+        Ok(read_revision) => read_revision,
+        Err(ended) => return (ended, false),
+    };
+    let (_seed, mut subscription) = match client.open_fleet_subscription(covered).await {
+        Ok(opened) => opened,
+        Err(error) => return (report(tx, &error), true),
+    };
+    loop {
+        match subscription.next_event().await {
+            Ok(FleetStreamEvent::Revision(event)) => {
+                if tx.send(AgentStatusUpdate::Head(event.revision)).is_err() {
+                    return (Ended::Closed, true);
+                }
+                // A burst: the last read already describes this revision.
+                if event.revision <= covered {
+                    continue;
+                }
+            }
+            Ok(FleetStreamEvent::ResyncRequired) => {}
+            Err(error) => return (report(tx, &error), true),
+        }
+        match read(client, tx, false).await {
+            Ok(read_revision) => covered = read_revision,
+            Err(ended) => return (ended, true),
+        }
+    }
+}
+
+/// One joined read: sends the reply (preceded by a reset on a reconnect) and
+/// returns its revision, or sends the failure and returns why the connection
+/// ends.
+async fn read(
+    client: &DaemonClient,
+    tx: &mpsc::UnboundedSender<AgentStatusUpdate>,
+    reset_first: bool,
+) -> Result<i64, Ended> {
+    match client.fleet_roster_status().await {
+        Ok(result) => {
+            if reset_first {
+                tx.send(AgentStatusUpdate::Reset).map_err(|_| Ended::Closed)?;
+            }
+            let revision = result.read_revision;
+            tx.send(AgentStatusUpdate::Read(result, now_ms())).map_err(|_| Ended::Closed)?;
+            Ok(revision)
+        }
+        Err(error) => Err(report(tx, &error)),
+    }
+}
+
+/// Send a failure update and say how the connection ends.
+///
+/// The rendered reason is generic for a dial or token failure: those errors
+/// carry the absolute socket path, which belongs in the log, not on screen.
+fn report(tx: &mpsc::UnboundedSender<AgentStatusUpdate>, error: &DaemonError) -> Ended {
+    let (update, ended) = match error {
+        DaemonError::Rpc { code, .. } if *code == METHOD_NOT_FOUND => (
+            AgentStatusUpdate::Absent("daemon has no fleet/roster_status".to_string()),
+            Ended::Absent,
+        ),
+        DaemonError::Connect { .. } => {
+            tracing::debug!(error = %error, "agent status: daemon not reachable");
+            (
+                AgentStatusUpdate::Failed("daemon not reachable".to_string(), now_ms()),
+                Ended::Failed,
+            )
+        }
+        DaemonError::Token(_) | DaemonError::NoHome => {
+            tracing::debug!(error = %error, "agent status: daemon credentials unavailable");
+            (
+                AgentStatusUpdate::Failed("daemon credentials unavailable".to_string(), now_ms()),
+                Ended::Failed,
+            )
+        }
+        other => (
+            AgentStatusUpdate::Failed(other.to_string(), now_ms()),
+            Ended::Failed,
+        ),
+    };
+    if tx.send(update).is_err() {
+        Ended::Closed
+    } else {
+        ended
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+
+    fn fast() -> Timing {
+        Timing {
+            backoff_initial: Duration::from_millis(20),
+            backoff_max: Duration::from_millis(160),
+            min_uptime: Duration::from_secs(5),
+        }
+    }
+
+    async fn frame(reader: &mut BufReader<OwnedReadHalf>) -> Option<Value> {
+        let mut length = None;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.ok()? == 0 {
+                return None;
+            }
+            let line = line.trim_end();
+            if line.is_empty() {
+                let mut body = vec![0_u8; length?];
+                reader.read_exact(&mut body).await.ok()?;
+                return serde_json::from_slice(&body).ok();
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("Content-Length") {
+                    length = value.trim().parse().ok();
+                }
+            }
+        }
+    }
+
+    async fn send(writer: &mut OwnedWriteHalf, value: &Value) {
+        let body = serde_json::to_vec(value).unwrap();
+        let head = format!("Content-Length: {}\r\n\r\n", body.len());
+        let _ = writer.write_all(head.as_bytes()).await;
+        let _ = writer.write_all(&body).await;
+        let _ = writer.flush().await;
+    }
+
+    fn joined(revision: i64) -> Value {
+        json!({ "rows": [], "read_revision": revision })
+    }
+
+    fn fleet_event(revision: i64) -> Value {
+        json!({
+            "method": "fleet/event",
+            "params": {
+                "revision": revision, "event_id": format!("e-{revision}"),
+                "session_key": "claude:x", "observed_at": 1, "provenance": "authoritative",
+                "event_type": "turn_started", "payload": {}, "session_version": 1, "applied": true
+            }
+        })
+    }
+
+    /// One fake daemon connection: acks hello, answers each `fleet/roster_status`
+    /// with `answer`, counting reads in `reads`, and after the subscription is
+    /// acked either closes or pushes `after_subscribe`.
+    async fn serve_connection(
+        stream: tokio::net::UnixStream,
+        reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        answer: impl Fn(&str) -> Value,
+        after_subscribe: Vec<Value>,
+        close_after_subscribe: bool,
+    ) {
+        let (read_half, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        while let Some(request) = frame(&mut reader).await {
+            let id = request["id"].clone();
+            let method = request["method"].as_str().unwrap_or_default().to_string();
+            match method.as_str() {
+                "auth/hello" => {
+                    send(
+                        &mut writer,
+                        &json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+                    )
+                    .await;
+                }
+                "fleet/roster_status" => {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut reply = answer(&method);
+                    reply["id"] = id;
+                    reply["jsonrpc"] = json!("2.0");
+                    send(&mut writer, &reply).await;
+                }
+                "fleet/subscribe" => {
+                    send(
+                        &mut writer,
+                        &json!({"jsonrpc": "2.0", "id": id, "result": {
+                            "snapshot": {"head_revision": 0, "sessions": []},
+                            "replay": [], "replay_state": {"state": "complete"}
+                        }}),
+                    )
+                    .await;
+                    if close_after_subscribe {
+                        return;
+                    }
+                    for event in &after_subscribe {
+                        send(&mut writer, event).await;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn drain_until(
+        host: &mut AgentStatusHost,
+        seen: &mut Vec<AgentStatusUpdate>,
+        done: impl Fn(&[AgentStatusUpdate]) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !done(seen) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "updates so far: {seen:?}"
+            );
+            while let Ok(update) = host.updates.try_recv() {
+                seen.push(update);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn dialer(socket: std::path::PathBuf) -> Dialer {
+        Box::new(move || Ok(DaemonClient::with_parts(socket.clone(), "t".to_string())))
+    }
+
+    /// The loop folds updates through section 20's reducers, and the version
+    /// moves only for a change.
+    #[test]
+    fn updates_fold_into_section_20_and_only_changes_bump_it() {
+        let mut state = AppState::default();
+        let before = state.agent_status.version();
+        assert!(apply(
+            &mut state,
+            AgentStatusUpdate::Absent("daemon has no fleet/roster_status".into())
+        ));
+        assert!(!apply(
+            &mut state,
+            AgentStatusUpdate::Absent("daemon has no fleet/roster_status".into())
+        ));
+        assert_eq!(state.agent_status.version(), before + 1);
+        let empty = RosterStatusResult {
+            rows: Vec::new(),
+            read_revision: 4,
+            unknown_events: Vec::new(),
+        };
+        assert!(apply(
+            &mut state,
+            AgentStatusUpdate::Read(empty.clone(), 10)
+        ));
+        assert!(!apply(
+            &mut state,
+            AgentStatusUpdate::Read(
+                RosterStatusResult {
+                    read_revision: 5,
+                    ..empty
+                },
+                11
+            )
+        ));
+        assert!(
+            apply(&mut state, AgentStatusUpdate::Head(9)),
+            "a newer head makes it stale"
+        );
+        assert!(apply(
+            &mut state,
+            AgentStatusUpdate::Failed("daemon not reachable".into(), 12)
+        ));
+    }
+
+    /// #1019 review, absent: a daemon without the method yields Absent, and the
+    /// task waits the long bound before asking again.
+    #[tokio::test]
+    async fn a_daemon_without_the_method_leaves_section_20_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = reads.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(serve_connection(
+                    stream,
+                    served.clone(),
+                    |_| json!({"error": {"code": -32601, "message": "method not found"}}),
+                    Vec::new(),
+                    false,
+                ));
+            }
+        });
+        let mut host = AgentStatusHost::spawn_timed(dialer(socket), fast());
+        let mut seen = Vec::new();
+        drain_until(&mut host, &mut seen, |seen| {
+            seen.iter().any(|update| matches!(update, AgentStatusUpdate::Absent(_)))
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an absent daemon is not re-asked inside the long bound"
+        );
+    }
+
+    /// #1019 review, backoff and item 8: a dial failure renders a generic
+    /// reason (no socket path) and retries on a growing, bounded backoff.
+    #[tokio::test]
+    async fn a_dead_socket_backs_off_and_never_renders_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("missing.sock");
+        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_attempts = attempts.clone();
+        let path = socket.clone();
+        let dialer: Dialer = Box::new(move || {
+            seen_attempts.lock().unwrap().push(std::time::Instant::now());
+            Ok(DaemonClient::with_parts(path.clone(), "t".to_string()))
+        });
+        let mut host = AgentStatusHost::spawn_timed(dialer, fast());
+        let mut seen = Vec::new();
+        drain_until(&mut host, &mut seen, |seen| seen.len() >= 4).await;
+        for update in &seen {
+            let AgentStatusUpdate::Failed(reason, _) = update else {
+                panic!("only failures from a dead socket: {update:?}");
+            };
+            assert_eq!(reason, "daemon not reachable");
+            assert!(!reason.contains(&socket.display().to_string()));
+        }
+        let times = attempts.lock().unwrap().clone();
+        let gaps: Vec<_> = times.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(gaps.len() >= 3, "{gaps:?}");
+        assert!(
+            gaps[2] > gaps[0],
+            "the wait grows between attempts: {gaps:?}"
+        );
+        assert!(
+            gaps.iter().all(|gap| *gap < Duration::from_secs(1)),
+            "and stays bounded: {gaps:?}"
+        );
+    }
+
+    /// #1019 review, reconnect: after a connection drops, the task resets
+    /// section 20 before the next read, and a read that lands below the head
+    /// the section was told renders stale, not live.
+    #[tokio::test]
+    async fn a_reconnect_resets_the_section_and_a_lower_read_renders_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = reads.clone();
+        tokio::spawn(async move {
+            // Connections 0 and 1 are the first incarnation: a read at 40, then
+            // a subscription it closes, as a killed daemon does. After that the
+            // store is rebuilt and its counter restarted at 3.
+            let mut index = 0;
+            while let Ok((stream, _)) = listener.accept().await {
+                let first_incarnation = index < 2;
+                index += 1;
+                let revision = if first_incarnation { 40 } else { 3 };
+                tokio::spawn(serve_connection(
+                    stream,
+                    served.clone(),
+                    move |_| json!({"result": joined(revision)}),
+                    Vec::new(),
+                    first_incarnation,
+                ));
+            }
+        });
+        let mut host = AgentStatusHost::spawn_timed(dialer(socket), fast());
+        let mut seen = Vec::new();
+        drain_until(&mut host, &mut seen, |seen| {
+            seen.iter().any(|update| matches!(update, AgentStatusUpdate::Read(read, _) if read.read_revision == 3))
+        })
+        .await;
+        let reset = seen
+            .iter()
+            .position(|update| *update == AgentStatusUpdate::Reset)
+            .expect("a reset");
+        let lower = seen
+            .iter()
+            .position(|update| matches!(update, AgentStatusUpdate::Read(read, _) if read.read_revision == 3))
+            .unwrap();
+        assert!(
+            reset < lower,
+            "the reset precedes the first read after reconnect: {seen:?}"
+        );
+
+        let mut state = AppState::default();
+        for update in seen {
+            apply(&mut state, update);
+        }
+        state.observe_agent_status_head(40);
+        let health = &state.agent_status.view.as_ref().expect("view").health;
+        assert!(
+            matches!(
+                health,
+                ainb_hangar_proto::status_view::ViewHealth::Stale {
+                    read_revision: 3,
+                    ..
+                }
+            ),
+            "a lower read after a reconnect renders stale: {health:?}"
+        );
+    }
+
+    /// #1019 review, coalescing: events the last read already covers cost no
+    /// read; only a revision past it does.
+    #[tokio::test]
+    async fn a_burst_of_covered_revisions_costs_no_extra_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let served = reads.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let count = served.clone();
+                tokio::spawn(serve_connection(
+                    stream,
+                    served.clone(),
+                    // The first read answers 10; any later read answers 11.
+                    move |_| {
+                        let revision = if count.load(std::sync::atomic::Ordering::SeqCst) <= 1 {
+                            10
+                        } else {
+                            11
+                        };
+                        json!({"result": joined(revision)})
+                    },
+                    vec![
+                        fleet_event(8),
+                        fleet_event(9),
+                        fleet_event(10),
+                        fleet_event(11),
+                    ],
+                    false,
+                ));
+            }
+        });
+        let mut host = AgentStatusHost::spawn_timed(dialer(socket), fast());
+        let mut seen = Vec::new();
+        drain_until(&mut host, &mut seen, |seen| {
+            seen.iter().any(|update| matches!(update, AgentStatusUpdate::Head(11)))
+                && seen
+                    .iter()
+                    .filter(|update| matches!(update, AgentStatusUpdate::Read(..)))
+                    .count()
+                    >= 2
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            reads.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "revisions 8, 9 and 10 are covered by the read at 10; only 11 costs a read"
+        );
+    }
+}

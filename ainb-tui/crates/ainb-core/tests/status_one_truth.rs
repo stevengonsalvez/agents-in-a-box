@@ -64,6 +64,12 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
         .find(|row| row.session_key == SESSION_KEY)
         .expect("the fixture session reached the store");
     let expected = daemon_row.identity_tuple();
+    // The addressable tuple (#1015): the same five values plus the host.
+    let expected_host = daemon_row.host_identity_tuple();
+    assert_eq!(
+        expected_host.5, "local",
+        "a single-host daemon stamps its rows local"
+    );
     assert_eq!(expected.1, "waiting", "the hook announced a live question");
     assert_eq!(
         expected.2, "hook",
@@ -72,63 +78,26 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
     assert_eq!(expected.3, 0, "tier 0 is the hook push");
     assert!(expected.4 > 0, "the evidence clock must be stamped");
 
-    // Surface 1: the TUI fleet panel, as an operator sees it. The panel takes
-    // the snapshot for its rows and `fleet/status` for their state (#962), both
-    // round-tripped through their wire encoding exactly as the plugin receives
-    // them, then renders. What is asserted is the RENDERED screen, painted into
-    // a ratatui `TestBackend` the way the TUI paints the plugin's buffer, so
-    // "one truth" is a fact about pixels and not about a helper the panel never
-    // draws.
+    // Surface 1: the TUI fleet panel, as an operator sees it. The panel folds
+    // the daemon's ONE joined read (`fleet/roster_status`, #1015), round-tripped
+    // through its wire encoding exactly as the plugin receives it, and what is
+    // asserted is the RENDERED screen, painted into a ratatui `TestBackend` the
+    // way the TUI paints the plugin's buffer.
     {
-        use ainb_plugin_hangar::screen::fleet::{
-            FleetEvent, FleetPaneState, FleetSessionRow, reduce_fleet, render_fleet,
-        };
-        use ratatui::{Terminal, backend::TestBackend};
-
-        const WIDTH: u16 = 140;
-        const HEIGHT: u16 = 30;
-
-        let snapshot =
-            ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot");
-        let snapshot: ainb_hangar_proto::fleet::FleetSnapshot =
-            serde_json::from_value(serde_json::to_value(&snapshot).expect("snapshot encodes"))
-                .expect("snapshot decodes");
-        let status_wire: ainb_hangar_proto::agent_status::AgentStatusResult =
-            serde_json::from_value(serde_json::to_value(&status).expect("status encodes"))
-                .expect("status decodes");
-        let rows: Vec<FleetSessionRow> = snapshot.sessions.into_iter().map(Into::into).collect();
-        let mut pane = FleetPaneState::default();
-        pane.apply_snapshot(snapshot.head_revision, rows);
-        pane.apply_status(status_wire);
-        let pane = reduce_fleet(&pane, FleetEvent::Tick(expected.4 + 42_000)).state;
-
+        let joined = wire_round_trip(
+            &ainb_hangar_daemon::fleet::roster_status(store.pool())
+                .await
+                .expect("joined read"),
+        );
+        let pane = panel_from(joined.clone(), expected.4 + 42_000);
         let held = pane.status_for(SESSION_KEY).expect("the panel holds the daemon's row");
         assert_eq!(
-            held.identity_tuple(),
-            expected,
+            held.host_identity_tuple(),
+            expected_host,
             "the TUI fleet panel must hold the daemon's tuple, not its own reading"
         );
 
-        let mut wire = ainb_plugin_protocol::wire_buffer::WireBuffer::new(WIDTH, HEIGHT);
-        render_fleet(&mut wire, WIDTH, 0, HEIGHT, &pane);
-        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).expect("test terminal");
-        terminal
-            .draw(|frame| {
-                let area = frame.area();
-                ainb::components::session_tabs::blit_wire(frame, area, wire);
-            })
-            .expect("draw the panel");
-        let buffer = terminal.backend().buffer();
-        let screen: String = (0..HEIGHT)
-            .map(|y| {
-                (0..WIDTH)
-                    .map(|x| buffer.cell((x, y)).map_or(" ", |cell| cell.symbol()))
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (screen, cells) = render_panel(&pane);
         let daemon_words = format!(
             "{} · {} · tier {} · 42s",
             expected.1, expected.2, expected.3
@@ -138,9 +107,60 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             "the rendered panel must show the daemon's tuple `{daemon_words}`:\n{screen}"
         );
         assert!(
-            screen.contains("─ ASK · 1 Q ") && screen.contains("ASK · 1 QUESTIONS"),
-            "the waiting agent's card and detail name its one open question:\n{screen}"
+            screen.contains("╭─ waiting · ask ") && screen.contains("waiting · ask · 1 questions"),
+            "the waiting agent's card and detail say what it waits on:\n{screen}"
         );
+
+        // The pre-section read (`[fleet.status] legacy_panel`): the two
+        // separate replies, joined by the one proto join and folded by the same
+        // reducer, must paint the same cells, words and colours alike.
+        let snapshot = wire_round_trip(
+            &ainb_hangar_daemon::fleet::snapshot_wire(store.pool()).await.expect("snapshot"),
+        );
+        let legacy = panel_from(
+            ainb_hangar_proto::agent_status::join(&snapshot, &wire_round_trip(&status)),
+            expected.4 + 42_000,
+        );
+        assert_eq!(
+            render_panel(&legacy).1,
+            cells,
+            "the legacy two-read panel must paint the same"
+        );
+
+        // Section 20 alone (#1015 criterion 2): the app state folds the same
+        // joined read into section 20, the Fleet roster section stays empty,
+        // and a panel built from section 20 only paints the same cells.
+        let mut app = ainb::app::state::AppState::default();
+        assert!(app.apply_agent_status_read(joined.clone(), expected.4 + 42_000));
+        assert_eq!(
+            app.fleet.version(),
+            0,
+            "the Fleet section is neither written nor needed"
+        );
+        let section_view = app.agent_status.view.clone().expect("section 20 holds the read");
+        let section_card = section_view.cards().next().expect("one card");
+        assert_eq!(
+            section_card.status.host_identity_tuple(),
+            expected_host,
+            "section 20 must hold the daemon's tuple, host included"
+        );
+        let mut from_section = ainb_plugin_hangar::screen::fleet::FleetPaneState::default();
+        from_section.apply_view(section_view);
+        let from_section = ainb_plugin_hangar::screen::fleet::reduce_fleet(
+            &from_section,
+            ainb_plugin_hangar::screen::fleet::FleetEvent::Tick(expected.4 + 42_000),
+        )
+        .state;
+        assert_eq!(
+            render_panel(&from_section).1,
+            cells,
+            "a panel built from section 20 alone must paint the same cells"
+        );
+
+        // One word per state, everywhere (#1015 criterion 2): every token on
+        // a rendered card is `AgentState::as_str()` or the value of a field on
+        // the card's row.
+        assert_card_tokens_are_row_words(&pane, &screen);
     }
 
     // Surface 2: `GET /api/needs`. The dashboard stamps every card from the
@@ -177,9 +197,10 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             card["provenance"].as_str().unwrap(),
             u8::try_from(card["tier"].as_u64().unwrap()).unwrap(),
             card["evidenceObservedAt"].as_i64().unwrap(),
+            card["hostId"].as_str().unwrap(),
         ),
-        expected,
-        "GET /api/needs must report the daemon's tuple"
+        expected_host,
+        "GET /api/needs must report the daemon's tuple, host included"
     );
 
     // Surface 3: `ainb fleet needs --format json`, driven through the real
@@ -196,9 +217,10 @@ async fn every_surface_reports_the_same_tuple_for_one_agent() {
             json["source"].as_str().unwrap(),
             u8::try_from(json["tier"].as_u64().unwrap()).unwrap(),
             json["evidence_observed_at"].as_i64().unwrap(),
+            json["host_id"].as_str().unwrap(),
         ),
-        expected,
-        "`ainb fleet needs --format json` must report the daemon's tuple"
+        expected_host,
+        "`ainb fleet needs --format json` must report the daemon's tuple, host included"
     );
 }
 
@@ -231,6 +253,144 @@ fn local_row(session_id: &str, cwd: &str) -> ainb_fleet_core::fleet::read::needs
     )
 }
 
+/// A value round-tripped through its JSON wire encoding, as a client gets it.
+fn wire_round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) -> T {
+    serde_json::from_value(serde_json::to_value(value).expect("encodes")).expect("decodes")
+}
+
+/// The Fleet panel as the plugin builds it from one joined read, ticked to `now_ms`.
+fn panel_from(
+    read: ainb_hangar_proto::agent_status::RosterStatusResult,
+    now_ms: i64,
+) -> ainb_plugin_hangar::screen::fleet::FleetPaneState {
+    use ainb_plugin_hangar::screen::fleet::{FleetEvent, FleetPaneState, reduce_fleet};
+    let mut pane = FleetPaneState::default();
+    pane.apply_read(read, now_ms);
+    reduce_fleet(&pane, FleetEvent::Tick(now_ms)).state
+}
+
+const PANEL_WIDTH: u16 = 140;
+const PANEL_HEIGHT: u16 = 30;
+/// The roster column `render_fleet` gives the cards at [`PANEL_WIDTH`].
+const CARD_COLUMNS: u16 = 93;
+
+/// Render the panel into a ratatui `TestBackend` through the TUI's own blit,
+/// returning the screen text and every cell's symbol and foreground.
+fn render_panel(
+    pane: &ainb_plugin_hangar::screen::fleet::FleetPaneState,
+) -> (String, Vec<(String, ratatui::style::Color)>) {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut wire = ainb_plugin_protocol::wire_buffer::WireBuffer::new(PANEL_WIDTH, PANEL_HEIGHT);
+    ainb_plugin_hangar::screen::fleet::render_fleet(&mut wire, PANEL_WIDTH, 0, PANEL_HEIGHT, pane);
+    let mut terminal =
+        Terminal::new(TestBackend::new(PANEL_WIDTH, PANEL_HEIGHT)).expect("terminal");
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            ainb::components::session_tabs::blit_wire(frame, area, wire);
+        })
+        .expect("draw the panel");
+    let buffer = terminal.backend().buffer();
+    let screen = (0..PANEL_HEIGHT)
+        .map(|y| {
+            (0..PANEL_WIDTH)
+                .map(|x| buffer.cell((x, y)).map_or(" ", |cell| cell.symbol()))
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cells = (0..PANEL_HEIGHT)
+        .flat_map(|y| (0..PANEL_WIDTH).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            buffer.cell((x, y)).map_or_else(
+                || (" ".to_string(), ratatui::style::Color::Reset),
+                |cell| (cell.symbol().to_string(), cell.fg),
+            )
+        })
+        .collect();
+    (screen, cells)
+}
+
+/// Every token on every rendered roster card must be a daemon state word or a
+/// value carried by the card's own row: the status half, the roster half, or
+/// the age of the row's evidence clock.
+fn assert_card_tokens_are_row_words(
+    pane: &ainb_plugin_hangar::screen::fleet::FleetPaneState,
+    screen: &str,
+) {
+    use ainb_hangar_proto::agent_status::AgentState;
+
+    fn leaves(value: &serde_json::Value, into: &mut std::collections::BTreeSet<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                for part in text.split(|c: char| c.is_whitespace() || matches!(c, '/' | ':')) {
+                    if !part.is_empty() {
+                        into.insert(part.to_string());
+                    }
+                }
+            }
+            serde_json::Value::Number(number) => {
+                into.insert(number.to_string());
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| leaves(item, into)),
+            serde_json::Value::Object(map) => map.values().for_each(|item| leaves(item, into)),
+            _ => {}
+        }
+    }
+
+    let view = pane.status_view().expect("a live view");
+    let mut allowed: std::collections::BTreeSet<String> = [
+        AgentState::Working,
+        AgentState::Waiting,
+        AgentState::Idle,
+        AgentState::Exited,
+        AgentState::Unverifiable,
+    ]
+    .iter()
+    .map(|state| state.as_str().to_string())
+    .collect();
+    for card in view.cards() {
+        leaves(
+            &serde_json::to_value(&card.status).expect("status"),
+            &mut allowed,
+        );
+        leaves(
+            &serde_json::to_value(&card.session).expect("session"),
+            &mut allowed,
+        );
+    }
+    let is_age = |token: &str| {
+        token
+            .strip_suffix(['s', 'm', 'h', 'd'])
+            .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+    };
+    let lines: Vec<&str> = screen.lines().collect();
+    let card_rows = 2..(2 + 4 * view.cards.len());
+    for row in card_rows {
+        let line: String = lines
+            .get(row)
+            .copied()
+            .unwrap_or_default()
+            .chars()
+            .take(usize::from(CARD_COLUMNS))
+            .collect();
+        for token in line
+            .split(|c: char| {
+                c.is_whitespace() || matches!(c, '·' | '╭' | '╮' | '╰' | '╯' | '─' | '│' | '▶')
+            })
+            .filter(|token| !token.is_empty())
+        {
+            assert!(
+                allowed.contains(token) || is_age(token),
+                "card token `{token}` is neither an AgentState word nor a field of its row \
+                 (row {row}):\n{screen}"
+            );
+        }
+    }
+}
+
 /// Two agents in one directory must not be given each other's identity.
 ///
 /// `stamp_from_daemon` used to correlate on `cwd` alone and stamp EVERY
@@ -256,6 +416,10 @@ fn two_agents_in_one_directory_keep_their_own_identity() {
         has_open_request: state == AgentState::Waiting,
         pane_unbound: false,
         pane_unbound_detail: None,
+        host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID.to_string(),
+        turn_complete: false,
+        wait_kind: None,
+        attachment: ainb_hangar_proto::agent_status::Attachment::None,
     };
 
     let mut rows = vec![local_row("agent-a", CWD), local_row("agent-b", CWD)];
@@ -318,6 +482,10 @@ fn an_ambiguous_directory_leaves_the_row_unstamped() {
         has_open_request: false,
         pane_unbound: false,
         pane_unbound_detail: None,
+        host_id: ainb_hangar_proto::agent_status::LOCAL_HOST_ID.to_string(),
+        turn_complete: false,
+        wait_kind: None,
+        attachment: ainb_hangar_proto::agent_status::Attachment::None,
     };
     let mut rows = vec![local_row("something-else", CWD)];
     ainb::cli::fleet::needs::stamp_rows(&mut rows, &[row("x"), row("y")]);

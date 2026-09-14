@@ -111,6 +111,10 @@ pub struct NeedsRow {
     /// by a replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_observed_at: Option<i64>,
+    /// The host the agent runs on (`local` until paired hosts), so a row stays
+    /// addressable off-box and the cross-surface tuple carries it (#1015).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
     /// True when no tmux pane is bound (issue #916): the agent may be asking
     /// and nothing can type an answer into it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -322,6 +326,7 @@ pub fn make_row(session: Session, context: NeedsContext, route_hint: RouteHint) 
         state: None,
         tier: None,
         evidence_observed_at: None,
+        host_id: None,
         pane_unbound: false,
     }
 }
@@ -340,6 +345,7 @@ impl NeedsRow {
         provenance: &'static str,
         tier: u8,
         evidence_observed_at: i64,
+        host_id: &str,
         pane_unbound: bool,
     ) {
         self.session_key = Some(session_key);
@@ -347,6 +353,7 @@ impl NeedsRow {
         self.source = Some(provenance.to_string());
         self.tier = Some(tier);
         self.evidence_observed_at = Some(evidence_observed_at);
+        self.host_id = Some(host_id.to_string());
         self.pane_unbound = pane_unbound;
     }
 }

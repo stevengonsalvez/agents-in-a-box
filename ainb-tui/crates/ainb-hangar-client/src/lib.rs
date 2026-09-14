@@ -394,6 +394,19 @@ impl DaemonClient {
         serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
     }
 
+    /// Read the roster and status joined per session in one daemon read
+    /// (`fleet/roster_status`, #1015).
+    ///
+    /// # Errors
+    /// Returns [`DaemonError`] when the daemon is unreachable, does not serve
+    /// the method, or the reply cannot be decoded.
+    pub async fn fleet_roster_status(
+        &self,
+    ) -> Result<ainb_hangar_proto::agent_status::RosterStatusResult, DaemonError> {
+        let result = self.call(methods::FLEET_ROSTER_STATUS, json!({})).await?;
+        serde_json::from_value(result).map_err(|e| DaemonError::Decode(e.to_string()))
+    }
+
     /// Read bounded Hangar runtime diagnostics, including Codex app-servers.
     pub async fn fleet_runtime_status(
         &self,

@@ -708,10 +708,62 @@ fn hook_work_update(
 pub async fn status_rows(
     pool: &SqlitePool,
 ) -> Result<ainb_hangar_proto::agent_status::AgentStatusResult, sqlx::Error> {
+    let projection = read_projection(pool).await?;
+    let snapshot = subscription_snapshot_wire(&projection);
+    status_from_projection(pool, &projection, &snapshot).await
+}
+
+/// Read the roster and status joined per session in ONE projection read
+/// (`fleet/roster_status`, #1015).
+///
+/// `status_rows` and `snapshot_wire` each read the whole Fleet projection, so a
+/// surface that called both paid for two per Fleet event and then joined the
+/// halves itself. Here both halves come from the same projection, so they
+/// describe the same instant, and the join is [`ainb_hangar_proto::agent_status::join`],
+/// the one every surface shares.
+///
+/// # Errors
+/// Propagates the store fault.
+pub async fn roster_status(
+    pool: &SqlitePool,
+) -> Result<ainb_hangar_proto::agent_status::RosterStatusResult, sqlx::Error> {
+    let projection = read_projection(pool).await?;
+    let snapshot = subscription_snapshot_wire(&projection);
+    let status = status_from_projection(pool, &projection, &snapshot).await?;
+    Ok(ainb_hangar_proto::agent_status::join(&snapshot, &status))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static PROJECTION_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Whole-Fleet projection reads made by the status reads on this thread.
+///
+/// For the read-amplification budget test (#1015). Thread-local so parallel
+/// tests cannot see each other's reads; drive it from a current-thread runtime.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn projection_reads() -> u64 {
+    PROJECTION_READS.with(std::cell::Cell::get)
+}
+
+async fn read_projection(
+    pool: &SqlitePool,
+) -> Result<ainb_hangar_store::repo::fleet::FleetSubscriptionProjection, sqlx::Error> {
+    #[cfg(any(test, feature = "test-support"))]
+    PROJECTION_READS.with(|reads| reads.set(reads.get() + 1));
+    FleetRepo::subscription_projection(pool, 0, 0).await
+}
+
+/// The status half of a read, from a projection the caller already holds.
+async fn status_from_projection(
+    pool: &SqlitePool,
+    projection: &ainb_hangar_store::repo::fleet::FleetSubscriptionProjection,
+    snapshot: &ainb_hangar_proto::fleet::FleetSnapshot,
+) -> Result<ainb_hangar_proto::agent_status::AgentStatusResult, sqlx::Error> {
     use std::collections::HashSet;
 
-    let projection = FleetRepo::subscription_projection(pool, 0, 0).await?;
-    let snapshot = subscription_snapshot_wire(&projection);
     let open: HashSet<String> = ainb_hangar_store::repo::attention::AttentionRepo::list_fleet(pool)
         .await?
         .into_iter()
@@ -723,14 +775,18 @@ pub async fn status_rows(
     // derivation: pre-migration rows read exactly as they do today.
     let stored_tiers: std::collections::HashMap<
         &str,
-        Option<ainb_hangar_proto::agent_status::Tier>,
+        (Option<ainb_hangar_proto::agent_status::Tier>, &str),
     > = projection
         .sessions
         .iter()
         .map(|row| {
             (
                 row.session.session_key.as_str(),
-                ainb_hangar_proto::agent_status::parse_tier(&row.session.tier),
+                (
+                    ainb_hangar_proto::agent_status::parse_tier(&row.session.tier),
+                    // The stored host, so a row is addressable off-box (#1015).
+                    row.session.host_id.as_str(),
+                ),
             )
         })
         .collect();
@@ -740,11 +796,16 @@ pub async fn status_rows(
         .map(|session| {
             let has_open_request =
                 session.provider_session_id.as_deref().is_some_and(|id| open.contains(id));
-            ainb_hangar_proto::agent_status::status_row_with_tier(
+            let stored = stored_tiers.get(session.session_key.as_str()).copied();
+            let mut row = ainb_hangar_proto::agent_status::status_row_with_tier(
                 session,
                 has_open_request,
-                stored_tiers.get(session.session_key.as_str()).copied().flatten(),
-            )
+                stored.and_then(|(tier, _)| tier),
+            );
+            if let Some((_, host_id)) = stored.filter(|(_, host_id)| !host_id.is_empty()) {
+                row.host_id = host_id.to_string();
+            }
+            row
         })
         .collect();
     // Why each unbound row is unbound. Computed only for the rows that are,
@@ -792,7 +853,7 @@ pub async fn status_rows(
 pub async fn snapshot_wire(
     pool: &SqlitePool,
 ) -> Result<ainb_hangar_proto::fleet::FleetSnapshot, sqlx::Error> {
-    let projection = FleetRepo::subscription_projection(pool, 0, 0).await?;
+    let projection = read_projection(pool).await?;
     Ok(subscription_snapshot_wire(&projection))
 }
 

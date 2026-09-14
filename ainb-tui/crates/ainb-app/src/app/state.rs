@@ -251,12 +251,49 @@ impl AppState {
             SectionId::Recovery => self.recovery.version(),
             SectionId::Onboarding => self.onboarding.version(),
             SectionId::Shell => self.shell.version(),
+            SectionId::AgentStatus => self.agent_status.version(),
         }
+    }
+
+    /// Fold one `fleet/roster_status` read into section 20 (#1015), bumping its
+    /// version only when a rendered fact changed. A read whose only difference
+    /// is transport heartbeat stamps leaves the version where it was.
+    pub fn apply_agent_status_read(
+        &mut self,
+        read: ainb_hangar_proto::agent_status::RosterStatusResult,
+        received_at_ms: i64,
+    ) -> bool {
+        self.agent_status.update(|section| section.apply_read(read, received_at_ms))
+    }
+
+    /// The host's agent-status read failed: section 20 renders the host
+    /// unreachable with its rows frozen, or absent if it never had rows.
+    pub fn agent_status_read_failed(&mut self, reason: impl Into<String>, now_ms: i64) -> bool {
+        let reason = reason.into();
+        self.agent_status.update(|section| section.mark_read_failed(reason, now_ms))
+    }
+
+    /// The daemon cannot serve the joined read: section 20 is absent, and why.
+    pub fn agent_status_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        self.agent_status.update(|section| section.mark_absent(reason))
+    }
+
+    /// The agent-status host reconnected: section 20 drops its view and keeps
+    /// the head it was told, so the next read cannot render live below it.
+    pub fn agent_status_reset(&mut self) -> bool {
+        self.agent_status.update(AgentStatusSection::reset)
+    }
+
+    /// A newer Fleet revision was observed: section 20 goes stale until a read
+    /// at or past it lands.
+    pub fn observe_agent_status_head(&mut self, head_revision: i64) -> bool {
+        self.agent_status.update(|section| section.observe_head(head_revision))
     }
 
     /// Every section's current version, indexed by [`SectionId::index`].
     ///
-    /// A surface keeps the array it last saw and compares; that is 19 integer
+    /// A surface keeps the array it last saw and compares; that is 20 integer
     /// compares, against a diff of 117 fields of which several are SQLite
     /// handles and channel receivers that cannot be compared at all.
     #[must_use]
@@ -2820,6 +2857,9 @@ pub struct AppState {
 
     pub mcp_pool: Versioned<McpPoolSection>,
 
+    /// Section 20: agent status from one joined daemon read (T0-section).
+    pub agent_status: Versioned<AgentStatusSection>,
+
     /// Effects queued by the step being applied, for the host to drain. Not a
     /// section: see [`crate::app::effect::EffectOutbox`].
     effects: crate::app::effect::EffectOutbox,
@@ -3207,6 +3247,7 @@ impl Default for AppState {
             git_view: Versioned::default(),
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
+            agent_status: Versioned::default(),
             effects: crate::app::effect::EffectOutbox::default(),
             statusline: StatuslineProbe::default(),
             // Initialize quick commit state

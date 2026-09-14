@@ -2,6 +2,31 @@
 # Locked by tests/state_serde.rs (issue #983). A new line here is a new
 # field on the mirror wire: triage it against the four leak checks first.
 # Regenerate: UPDATE_SECTION_KEY_PATHS=1 cargo test -p ainb-app --test state_serde
+agent_status.absent
+agent_status.head_revision
+agent_status.view.cards[].attachment
+agent_status.view.cards[].evidence_observed_at
+agent_status.view.cards[].has_open_request
+agent_status.view.cards[].host_id
+agent_status.view.cards[].lifecycle
+agent_status.view.cards[].management
+agent_status.view.cards[].pane_unbound
+agent_status.view.cards[].pane_unbound_detail
+agent_status.view.cards[].provenance
+agent_status.view.cards[].provider
+agent_status.view.cards[].session_key
+agent_status.view.cards[].state
+agent_status.view.cards[].tier
+agent_status.view.cards[].transport_health
+agent_status.view.cards[].turn_complete
+agent_status.view.cards[].wait_kind
+agent_status.view.head_revision
+agent_status.view.health.kind
+agent_status.view.health.reason
+agent_status.view.health.stale_since_ms
+agent_status.view.host_id
+agent_status.view.read_revision
+agent_status.view.received_at_ms
 claude_chat.claude_chat_state.associated_session_id
 claude_chat.claude_chat_state.current_streaming_response
 claude_chat.claude_chat_state.input_len
@@ -60,6 +85,7 @@ config.app_config.fleet.idle_min
 config.app_config.fleet.interview.surface
 config.app_config.fleet.state_stale_ms
 config.app_config.fleet.status.legacy_classify_primary
+config.app_config.fleet.status.legacy_panel
 config.app_config.fleet.terminal
 config.app_config.fleet.tmux_idle_after_secs
 config.app_config.fleet.transport

@@ -29,6 +29,7 @@ pub mod protocol;
 pub mod reprime;
 pub mod settings;
 pub mod snapshots;
+pub mod status_view;
 pub mod transcript;
 
 /// Re-export the notification routing vocabulary (tcp T5) so proto-only consumers

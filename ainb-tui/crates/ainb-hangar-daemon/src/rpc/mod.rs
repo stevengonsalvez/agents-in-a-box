@@ -1544,6 +1544,7 @@ async fn handle(
         methods::FLEET_NEGOTIATE => handle_fleet_negotiate(req, health).await,
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
         methods::FLEET_STATUS => handle_fleet_status(pool).await,
+        methods::FLEET_ROSTER_STATUS => handle_fleet_roster_status(pool).await,
         // Receiver registration occurs in `serve_conn` before this snapshot is
         // read. The ack carries its exact head, then the forwarder drains rows
         // committed after that head before waiting for live wakeups.
@@ -1879,6 +1880,19 @@ async fn handle_fleet_status(pool: &SqlitePool) -> Result<serde_json::Value, Rpc
 
     require_fleet_capability(FLEET_CAPABILITY_STATUS_READ)?;
     let result = crate::fleet::status_rows(pool).await.map_err(|error| store_err(&error))?;
+    to_value(&result)
+}
+
+/// Return the roster and status joined per session from ONE projection read
+/// (#1015), so no surface fetches both halves and joins them itself.
+///
+/// Gated like `fleet/status`: a client must be able to ask whether a daemon
+/// serves the joined read before it stops making the two separate ones.
+async fn handle_fleet_roster_status(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ;
+
+    require_fleet_capability(FLEET_CAPABILITY_ROSTER_STATUS_READ)?;
+    let result = crate::fleet::roster_status(pool).await.map_err(|error| store_err(&error))?;
     to_value(&result)
 }
 

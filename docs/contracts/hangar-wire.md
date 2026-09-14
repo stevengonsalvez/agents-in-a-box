@@ -50,6 +50,17 @@ its pid is listed like any other connection, and a Pal connection is always
 listed. A daemon that does not advertise the capability ignores the member and
 lists every connection.
 
+**`fleet/roster_status`** (#1015, capability `fleet.roster_status.read`). One
+read that returns every visible session's roster entry and its D14 status row
+joined per `session_key`, both derived from ONE Fleet projection, so they
+describe the same instant. Each row carries the `read_revision`, and the status
+half carries `host_id` (`local` until paired hosts), `turn_complete`, the
+`wait_kind` enum, `has_open_request`, `pane_unbound` and the `attachment` enum.
+A surface renders a Fleet card from this reply alone. `fleet/snapshot` and
+`fleet/status` stay for callers that need only one half; a client that reads
+both and joins them pays two projections per Fleet event where this read pays
+one. The join is `ainb_hangar_proto::agent_status::join`, the only one.
+
 ### Sockets
 
 The daemon binds `hangar.sock` and symlinks `hangar-v<N>.sock` for every
