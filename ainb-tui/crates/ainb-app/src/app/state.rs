@@ -283,18 +283,47 @@ impl AppState {
     /// Enter interactive mode by replacing the selected read-only tmux client
     /// with a writable client feeding the same terminal parser path.
     pub fn enter_interactive_pane(&mut self, rows: u16, cols: u16) -> bool {
-        let attached_elsewhere = self.selected_session_attached_elsewhere();
-        self.tmux.observer_pending = None;
-        self.tmux.observer_failed_target = None;
+        let Some(name) = self.in_place_target() else {
+            return self.tmux.embed.is_some() && self.is_interactive_pane();
+        };
+        match crate::tmux::EmbedClient::attach(name.as_str(), rows, cols) {
+            Ok(client) => {
+                self.adopt_interactive_pane(name.as_str().to_string(), client);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to attach interactive embed to {}: {e}",
+                    name.as_str()
+                );
+                self.add_error_notification(format!(
+                    "Live attach to '{}' failed: {e}",
+                    name.as_str()
+                ));
+                false
+            }
+        }
+    }
+
+    /// The tmux session an in-place attach of the selected row would open,
+    /// or `None` with the reason posted: no tmux session on the row, the tmux
+    /// session ainb itself runs in, or a name tmux cannot address. `None`
+    /// without a notice when that session is already the live pane.
+    ///
+    /// Releases a live pane on a different session, so the new client is the
+    /// only one sizing the preview.
+    pub fn in_place_target(&mut self) -> Option<crate::app::effect::TmuxSessionName> {
+        self.tmux.set_if_changed(|tmux| &mut tmux.observer_pending, None);
+        self.tmux.set_if_changed(|tmux| &mut tmux.observer_failed_target, None);
         if self.tmux.embed.is_some() {
             if self.selected_tmux_name() == self.tmux.embed_session && self.is_interactive_pane() {
-                return true;
+                return None;
             }
             self.release_interactive_pane();
         }
         let Some(name) = self.selected_tmux_name() else {
             self.add_warning_notification("No tmux session on this row".to_string());
-            return false;
+            return None;
         };
         // The same own-session rule the observer and the preview placeholder
         // use, by detection rather than by counting on tmux to refuse a nested
@@ -304,28 +333,38 @@ impl AppState {
             self.add_warning_notification(format!(
                 "'{name}' is the tmux session ainb is running in; attaching it here would nest it"
             ));
-            return false;
+            return None;
         }
+        let target = crate::app::effect::TmuxSessionName::new(name.as_str());
+        if target.is_none() {
+            self.add_error_notification(format!(
+                "Cannot attach '{name}': tmux cannot address a session by that name"
+            ));
+        }
+        target
+    }
+
+    /// Make `client`, a tmux client on `tmux_session` a host opened, the live
+    /// in-place pane.
+    pub fn adopt_interactive_pane(
+        &mut self,
+        tmux_session: String,
+        client: crate::tmux::EmbedClient,
+    ) {
         // tmux mirrors a session to every attached client, but all clients
-        // fight over its size — attaching alongside an existing client is the
+        // fight over its size: attaching alongside an existing client is the
         // user's call, so allow it and warn (never block).
-        match crate::tmux::EmbedClient::attach(&name, rows, cols) {
-            Ok(client) => {
-                self.tmux.embed = Some(client);
-                self.tmux.embed_session = Some(name);
-                self.shell.focused_pane = FocusedPane::Preview;
-                if attached_elsewhere {
-                    self.add_warning_notification(
-                        "Note: session attached elsewhere — screen sizes may fight".to_string(),
-                    );
-                }
-                true
-            }
-            Err(e) => {
-                tracing::warn!("failed to attach interactive embed to {name}: {e}");
-                self.add_error_notification(format!("Live attach to '{name}' failed: {e}"));
-                false
-            }
+        let attached_elsewhere = self.selected_session_attached_elsewhere();
+        if self.tmux.embed.is_some() {
+            self.release_interactive_pane();
+        }
+        self.tmux.embed = Some(client);
+        self.tmux.embed_session = Some(tmux_session);
+        self.shell.focused_pane = FocusedPane::Preview;
+        if attached_elsewhere {
+            self.add_warning_notification(
+                "Note: session attached elsewhere, so screen sizes may fight".to_string(),
+            );
         }
     }
 
@@ -13035,15 +13074,7 @@ impl App {
         // Static plugin-screen routing table. Pairs a stable screen id
         // (consumed by `PluginScreen` and matched against
         // `state.shell.current_screen`) with the plugin id that owns it.
-        const PLUGIN_SCREENS: &[(&str, &str)] = &[
-            (crate::app::screens::ids::ANALYTICS, "burndown"),
-            (crate::app::screens::ids::WITR, "witr"),
-            (crate::app::screens::ids::LEARNINGS, "learnings"),
-            (crate::app::screens::ids::ABTOP, "abtop"),
-            (crate::app::screens::ids::HANGAR, "hangar-tui"),
-        ];
-
-        for (screen_id, plugin_id) in PLUGIN_SCREENS {
+        for (screen_id, plugin_id) in crate::app::screens::builtin::PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
 
             // Refresh the text-capture flag from the plugin's last frame every
