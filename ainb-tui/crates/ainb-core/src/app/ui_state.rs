@@ -266,6 +266,45 @@ impl SessionsPaneState {
         self.edge_hovered = false;
     }
 }
+/// The Skill Manager's Sources panel as this renderer lays it out.
+///
+/// Renderer-local because a width only means something against one surface:
+/// a step taken on a narrow terminal must not shrink the panel another
+/// surface draws from the same state.
+#[derive(Debug, Default, Clone)]
+pub struct SkillSourcesPane {
+    /// The width the user set on this surface, before clamping. `None` until
+    /// they resize here, so the saved preference applies.
+    width: Option<u16>,
+    /// A divider drag is in flight: the edge draws bright and drags move it.
+    pub resize_active: bool,
+}
+
+impl SkillSourcesPane {
+    /// The width before clamping: this surface's, else `saved` (the
+    /// `ui_preferences.skill_manager_sources_width` preference), else the
+    /// default.
+    #[must_use]
+    pub fn preferred_width(&self, saved: Option<u16>) -> u16 {
+        self.width
+            .or(saved)
+            .unwrap_or(crate::components::skill_manager_screen::DEFAULT_SOURCES_WIDTH)
+    }
+
+    /// The width drawn on a `term_w` surface.
+    #[must_use]
+    pub fn width_on(&self, saved: Option<u16>, term_w: u16) -> u16 {
+        crate::components::skill_manager_screen::clamp_sources_width(
+            self.preferred_width(saved),
+            term_w,
+        )
+    }
+
+    pub fn set_width(&mut self, width: u16) {
+        self.width = Some(width);
+    }
+}
+
 /// Renderer-local state for the ratatui host.
 ///
 /// Owned by the run loop next to the `LayoutComponent`, passed to every
@@ -275,6 +314,9 @@ pub struct UiState {
     /// Sidebar geometry, hover, resize drag, and the row heights the mouse hit
     /// test resolves a click through.
     pub sessions_pane: SessionsPaneState,
+    /// The Skill Manager's Sources panel width and divider drag on this
+    /// surface.
+    pub skill_sources: SkillSourcesPane,
     /// Interior of the live-session embed pane, as last painted. The embed
     /// client is sized from it and mouse input inside it is forwarded to the
     /// PTY, so a stale value sends clicks to the wrong cells.
@@ -347,13 +389,15 @@ impl UiState {
         std::mem::take(&mut self.queued)
     }
 
-    /// Apply queued layout work. Returns the intent that persists it, when
-    /// the change is a preference the user keeps across launches.
+    /// Apply queued layout work on a surface `columns` wide. Returns the
+    /// intent that persists it, when the change is a preference the user
+    /// keeps across launches.
     pub fn apply_host(
         &mut self,
         action: HostAction,
         layout: &mut LayoutComponent,
         state: &AppState,
+        columns: u16,
     ) -> Option<crate::app::Intent> {
         match action {
             HostAction::Scroll(scroll) => {
@@ -367,6 +411,17 @@ impl UiState {
                     self.sessions_pane.preferred_width,
                     self.sessions_pane.collapsed,
                 ))
+            }
+            HostAction::GrowSkillSources | HostAction::ShrinkSkillSources => {
+                let saved = state.config.app_config.ui_preferences.skill_manager_sources_width;
+                let width = crate::components::skill_manager_screen::step_sources_width(
+                    self.skill_sources.preferred_width(saved),
+                    action == HostAction::GrowSkillSources,
+                    columns,
+                );
+                self.skill_sources.set_width(width);
+                self.needs_redraw = true;
+                Some(crate::app::pointer::save_skill_sources_width(width))
             }
         }
     }
@@ -436,10 +491,6 @@ impl crate::app::state::SessionsPaneHitTest for SessionsPaneState {
 impl crate::app::RendererHost for UiState {
     fn queue(&mut self, action: HostAction) {
         Self::queue(self, action);
-    }
-
-    fn columns(&self) -> Option<u16> {
-        crossterm::terminal::size().ok().map(|(columns, _)| columns)
     }
 
     fn pointer(
