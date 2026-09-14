@@ -2067,7 +2067,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            state.fleet.daemon_start_cta.status(),
+            state.host.daemon_start_cta.status(),
             &CtaStatus::Reported {
                 ok: true,
                 detail: "already running (pid 4242)".to_string(),

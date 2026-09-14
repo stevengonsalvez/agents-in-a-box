@@ -11,6 +11,7 @@ pub mod app;
 pub mod cli;
 pub mod components;
 pub mod effect_host;
+pub mod terminal_clients;
 pub mod tmux;
 
 #[cfg(any(test, feature = "test-support"))]

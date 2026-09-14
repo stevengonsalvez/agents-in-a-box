@@ -223,10 +223,8 @@ impl AppState {
     /// versioned copy only when it moved, so exactly one bump lands per
     /// publish, and none at all on a frame where the daemon said nothing.
     pub fn refresh_daemon_attention_generation(&mut self) -> bool {
-        let published = self
-            .fleet
-            .daemon_attention_generation
-            .load(std::sync::atomic::Ordering::Acquire);
+        let published =
+            self.host.daemon_attention_generation.load(std::sync::atomic::Ordering::Acquire);
         self.fleet.set_if_changed(|fleet| &mut fleet.daemon_attention_seen, published)
     }
 
@@ -334,13 +332,21 @@ impl AppState {
     /// Releases a live pane on a different session, so the new client is the
     /// only one sizing the preview.
     pub fn in_place_target(&mut self) -> Option<crate::app::effect::TmuxSessionName> {
-        self.tmux.set_if_changed(|tmux| &mut tmux.observer_pending, None);
-        self.tmux.set_if_changed(|tmux| &mut tmux.observer_failed_target, None);
-        if self.tmux.embed.is_some() {
-            if self.selected_tmux_name() == self.tmux.embed_session && self.is_interactive_pane() {
+        self.host.observer_pending = None;
+        self.host.observer_failed_target = None;
+        if self.tmux.embed_session.is_some() {
+            if self.selected_tmux_name().as_deref() == self.embed_session_name()
+                && self.is_interactive_pane()
+            {
                 return None;
             }
             self.release_interactive_pane();
+        }
+        if self.host.in_place_unsupported {
+            self.add_warning_notification(
+                "This view cannot attach a session in place; attach it full screen".to_string(),
+            );
+            return None;
         }
         let Some(name) = self.selected_tmux_name() else {
             self.add_warning_notification("No tmux session on this row".to_string());
@@ -365,22 +371,15 @@ impl AppState {
         target
     }
 
-    /// Make `client`, a tmux client on `tmux_session` a host opened, the live
-    /// in-place pane.
-    pub fn adopt_interactive_pane(
-        &mut self,
-        tmux_session: String,
-        client: crate::tmux::EmbedClient,
-    ) {
+    /// Make the writable client the host opened on `tmux_session` the live,
+    /// focused in-place pane.
+    pub fn adopt_interactive_pane(&mut self, tmux_session: crate::app::effect::TmuxSessionName) {
         // tmux mirrors a session to every attached client, but all clients
         // fight over its size: attaching alongside an existing client is the
         // user's call, so allow it and warn (never block).
         let attached_elsewhere = self.selected_session_attached_elsewhere();
-        if self.tmux.embed.is_some() {
-            self.release_interactive_pane();
-        }
-        self.tmux.embed = Some(client);
         self.tmux.embed_session = Some(tmux_session);
+        self.host.observer_started_at = None;
         self.shell.focused_pane = FocusedPane::Preview;
         if attached_elsewhere {
             self.add_warning_notification(
@@ -389,84 +388,106 @@ impl AppState {
         }
     }
 
-    /// Keep one read-only tmux client on the selected terminal. The observer
-    /// consumes the same PTY byte stream as interactive attach, but input stays
-    /// host-owned until [`Self::is_interactive_pane`] becomes true.
+    /// The read-only client the host should open now for the selected
+    /// terminal, as an effect, or `None` when there is nothing to open: no
+    /// tmux session on the row, the row is the session ainb runs in, it is
+    /// already mirrored, it has not settled after a selection change, or it
+    /// is backing off after failures. Any other live client is released.
     ///
-    /// Returns true when the observed target changes.
-    pub fn sync_terminal_observer(&mut self, rows: u16, cols: u16) -> bool {
-        let target = self.selected_tmux_name();
-        let Some(name) = target else {
-            self.tmux.observer_pending = None;
-            self.tmux.observer_failed_target = None;
+    /// The host asks each tick while the session list shows and no pane is
+    /// interactive, and runs what comes back like any other effect.
+    pub fn request_terminal_observer(&mut self) -> Option<crate::app::effect::Effect> {
+        let Some(name) = self.selected_tmux_name() else {
+            self.host.observer_pending = None;
+            self.host.observer_failed_target = None;
             self.release_interactive_pane();
-            return false;
+            return None;
         };
         if crate::tmux::process_detection::host_tmux_session_name() == Some(name.as_str()) {
             self.release_interactive_pane();
-            return false;
+            return None;
         }
         let now = Instant::now();
         if self
-            .tmux
+            .host
             .observer_failed_target
             .as_ref()
             .is_some_and(|(failed, _, _)| failed != &name)
         {
-            self.tmux.observer_failed_target = None;
+            self.host.observer_failed_target = None;
         }
-        if self.tmux.embed_session.as_deref() == Some(name.as_str()) && self.tmux.embed.is_some() {
-            self.tmux.observer_pending = None;
-            return false;
+        if self.embed_session_name() == Some(name.as_str()) {
+            self.host.observer_pending = None;
+            return None;
         }
-        if !crate::tmux::EmbedClient::read_only_observer_supported() {
-            self.release_interactive_pane();
-            self.tmux.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
-            self.add_warning_notification(
-                "Live preview requires tmux client ignore-size support".to_string(),
-            );
-            return false;
-        }
-        if let Some((failed, retry_at, attempts)) = &self.tmux.observer_failed_target {
+        if let Some((failed, retry_at, attempts)) = &self.host.observer_failed_target {
             if failed == &name && (*attempts >= MAX_OBSERVER_FAILURES || now < *retry_at) {
                 self.release_interactive_pane();
-                return false;
+                return None;
             }
         }
         if !self.observer_target_settled(&name, now) {
             self.release_interactive_pane();
-            return false;
+            return None;
         }
-
         self.release_interactive_pane();
-        match crate::tmux::EmbedClient::observe(&name, rows, cols) {
-            Ok(client) => {
-                self.tmux.embed = Some(client);
-                self.tmux.embed_session = Some(name);
-                // `attach-session` can spawn successfully then immediately
-                // fail (for example, if tmux rejects a client flag). Keep a
-                // prior retry count until this client survives one grace
-                // period so failed spawns cannot reset the retry cap.
-                self.tmux.observer_started_at = Some(now);
-                true
-            }
-            Err(e) => {
-                tracing::debug!("failed to observe terminal {name}: {e}");
-                self.record_observer_failure(name);
-                false
-            }
+        let Some(tmux_session) = crate::app::effect::TmuxSessionName::new(name.as_str()) else {
+            // Nothing a retry could change.
+            self.host.observer_failed_target = Some((name, now, MAX_OBSERVER_FAILURES));
+            return None;
+        };
+        Some(crate::app::effect::Effect::AttachTerminal(
+            crate::app::effect::TerminalTarget::Observe {
+                tmux_session,
+                show_menu_bar: self.config.app_config.ui_preferences.show_session_menu_bar,
+            },
+        ))
+    }
+
+    /// Show the read-only client the host opened on `tmux_session`, if the
+    /// preview still wants it. One that arrives after the user moved on stays
+    /// unnamed here, so the host closes it.
+    pub fn adopt_terminal_observer(&mut self, tmux_session: &str) {
+        let wanted = self.shell.current_screen == screen_ids::SESSION_LIST
+            && !self.is_interactive_pane()
+            && self.tmux.embed_session.is_none()
+            && self.selected_tmux_name().as_deref() == Some(tmux_session);
+        if let Some(name) =
+            crate::app::effect::TmuxSessionName::new(tmux_session).filter(|_| wanted)
+        {
+            self.tmux.embed_session = Some(name);
+            // `attach-session` can spawn successfully then immediately fail
+            // (for example, if tmux rejects a client flag). Keep a prior retry
+            // count until this client survives one grace period so failed
+            // spawns cannot reset the retry cap.
+            self.host.observer_started_at = Some(Instant::now());
+        }
+    }
+
+    /// The read-only client on `tmux_session` would not open. A host that
+    /// cannot mirror at all is not retried; any other failure backs off.
+    pub fn observer_failed(&mut self, tmux_session: String, error: &str, unsupported: bool) {
+        if unsupported {
+            self.host.observer_failed_target =
+                Some((tmux_session, Instant::now(), MAX_OBSERVER_FAILURES));
+            self.add_warning_notification(
+                "Live preview requires tmux client ignore-size support".to_string(),
+            );
+        } else {
+            tracing::debug!("failed to observe terminal {tmux_session}: {error}");
+            self.record_observer_failure(tmux_session);
         }
     }
 
     fn record_observer_failure(&mut self, session: String) {
         let attempts = self
-            .tmux
+            .host
             .observer_failed_target
             .as_ref()
             .filter(|(failed, _, _)| failed == &session)
             .map_or(1, |(_, _, attempts)| attempts.saturating_add(1))
             .min(MAX_OBSERVER_FAILURES);
-        self.tmux.observer_failed_target = Some((
+        self.host.observer_failed_target = Some((
             session.clone(),
             Instant::now() + OBSERVER_RETRY_DELAY.saturating_mul(attempts.into()),
             attempts,
@@ -479,14 +500,14 @@ impl AppState {
     }
 
     fn observer_target_settled(&mut self, target: &str, now: Instant) -> bool {
-        match self.tmux.observer_pending.as_ref() {
+        match self.host.observer_pending.as_ref() {
             Some((pending, ready_at)) if pending == target && now >= *ready_at => {
-                self.tmux.observer_pending = None;
+                self.host.observer_pending = None;
                 true
             }
             Some((pending, _)) if pending == target => false,
             _ => {
-                self.tmux.observer_pending =
+                self.host.observer_pending =
                     Some((target.to_string(), now + OBSERVER_SETTLE_DELAY));
                 false
             }
@@ -509,13 +530,11 @@ impl AppState {
         }
     }
 
-    /// Release the ephemeral client. Read-only preview reconnects next loop.
+    /// Release the live pane: the host closes its client on the next pass.
+    /// The read-only preview reconnects on a later tick.
     pub fn release_interactive_pane(&mut self) {
-        if let Some(mut client) = self.tmux.embed.take() {
-            client.shutdown();
-        }
         self.tmux.embed_session = None;
-        self.tmux.observer_started_at = None;
+        self.host.observer_started_at = None;
         if self.shell.focused_pane == FocusedPane::Preview {
             self.shell.focused_pane = FocusedPane::Sessions;
         }
@@ -553,7 +572,20 @@ impl AppState {
 
     /// True while an interactive embed is focused.
     pub fn is_interactive_pane(&self) -> bool {
-        self.tmux.embed.is_some() && self.shell.focused_pane == FocusedPane::Preview
+        self.tmux.embed_session.is_some() && self.shell.focused_pane == FocusedPane::Preview
+    }
+
+    /// The tmux session the host's live client is on, if any.
+    pub fn embed_session_name(&self) -> Option<&str> {
+        self.tmux
+            .embed_session
+            .as_ref()
+            .map(crate::app::effect::TmuxSessionName::as_str)
+    }
+
+    /// Whether the host's live client is on `tmux_session`.
+    pub fn embed_session_is(&self, tmux_session: &str) -> bool {
+        self.embed_session_name() == Some(tmux_session)
     }
 
     /// True when the selected terminal has a read-only observer client.
@@ -563,59 +595,47 @@ impl AppState {
     }
 
     fn is_observing_tmux_session(&self, session: &str) -> bool {
-        !self.is_interactive_pane()
-            && self.tmux.embed.is_some()
-            && self.tmux.embed_session.as_deref() == Some(session)
+        !self.is_interactive_pane() && self.embed_session_is(session)
     }
 
-    /// If the observer has ended or become invisible, stop it. Keys can never
-    /// be forwarded to an invisible PTY.
+    /// The host's client on `tmux_session` ended on its own. An interactive
+    /// pane says so; a read-only mirror counts it as a failure and backs off.
+    pub fn terminal_exited(&mut self, tmux_session: &str) {
+        if !self.embed_session_is(tmux_session) {
+            return;
+        }
+        let interactive = self.is_interactive_pane();
+        self.release_interactive_pane();
+        if interactive {
+            self.add_info_notification("Live session ended, released".to_string());
+        } else {
+            self.record_observer_failure(tmux_session.to_string());
+        }
+    }
+
+    /// Release a live pane the session list no longer shows, so keys are
+    /// never forwarded to an invisible pane, and clear the retry count of a
+    /// read-only client that outlived its grace period.
     ///
-    /// Returns true when it released (the layout changed → repaint needed).
-    pub fn poll_embed_exit(&mut self) -> bool {
-        if self.tmux.embed.is_none() {
+    /// Returns true when it released (the layout changed, so repaint).
+    pub fn tick_terminal_pane(&mut self) -> bool {
+        if self.tmux.embed_session.is_none() {
             return false;
         }
-        let exited = self.tmux.embed.as_ref().is_some_and(|e| e.has_exited());
-        let invisible = self.shell.current_screen != screen_ids::SESSION_LIST;
-        let interactive = self.is_interactive_pane();
-        let session = self.tmux.embed_session.clone();
-        if exited || invisible {
+        if self.shell.current_screen != screen_ids::SESSION_LIST {
             self.release_interactive_pane();
-            if exited && interactive {
-                self.add_info_notification("Live session ended, released".to_string());
-            } else if exited {
-                if let Some(session) = session {
-                    self.record_observer_failure(session);
-                }
-            }
             return true;
         }
-        if !interactive
+        if !self.is_interactive_pane()
             && self
-                .tmux
+                .host
                 .observer_started_at
                 .is_some_and(|started| started.elapsed() >= OBSERVER_SUCCESS_GRACE)
         {
-            self.tmux.observer_started_at = None;
-            self.tmux.observer_failed_target = None;
+            self.host.observer_started_at = None;
+            self.host.observer_failed_target = None;
         }
         false
-    }
-
-    /// New embed output since the last call? Clears the embed's dirty flag.
-    /// The render loop polls this as a repaint trigger: live PTY output
-    /// arrives without host input, so the dirty-gate (perf bead `wai`) would
-    /// otherwise hold the pane at the 250ms animation floor.
-    /// Take the embed's dirty flag, bumping the tmux section when it was set.
-    ///
-    /// The embed is the tmux section's own interior-mutability hole: the PTY
-    /// reader thread marks it dirty as bytes stream in, through a handle the
-    /// render path holds by `&`. Taking the flag through `update` means the
-    /// one place that learns "the pane changed" is also the place that says so
-    /// to a subscriber, and a frame with no new bytes still bumps nothing.
-    pub fn embed_take_dirty(&mut self) -> bool {
-        self.tmux.update(|tmux| tmux.embed.as_ref().is_some_and(|e| e.take_dirty()))
     }
 }
 
@@ -2912,6 +2932,10 @@ pub struct AppState {
     /// Whether the Claude statusline is wired, cached. Not a section either:
     /// see [`StatuslineProbe`].
     statusline: StatuslineProbe,
+
+    /// Channels, task handles, worker flags and pacing timers only this
+    /// process can use. Not a section: see [`HostOnlyState`].
+    pub host: HostOnlyState,
 }
 
 /// Result of background workspace loading
@@ -3245,7 +3269,7 @@ impl AppState {
     /// read the sections, so every host, local or mirrored, draws the same
     /// status bar.
     pub fn refresh_statusline(&mut self) {
-        let live = self.fleet.live_window_watcher.snapshot();
+        let live = self.host.live_window_watcher.snapshot();
         self.fleet.set_if_changed(|fleet| &mut fleet.live_window, live);
         let status = self.statusline_status();
         self.config.set_if_changed(|config| &mut config.statusline_status, status);
@@ -3297,6 +3321,7 @@ impl Default for AppState {
             agent_status: Versioned::default(),
             effects: crate::app::effect::EffectOutbox::default(),
             statusline: StatuslineProbe::default(),
+            host: HostOnlyState::default(),
             // Initialize quick commit state
 
             // Initialize other tmux sessions
@@ -3551,7 +3576,7 @@ impl AppState {
         &mut self,
         session_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(coordinator) = &mut self.log_streams.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.host.log_streaming_coordinator {
             // Find the session to get container info
             let session_info = self
                 .sessions
@@ -3587,7 +3612,7 @@ impl AppState {
         &mut self,
         session_id: Uuid,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(coordinator) = &mut self.log_streams.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.host.log_streaming_coordinator {
             info!("Stopping log streaming for session {}", session_id);
             coordinator.stop_streaming(session_id).await?;
         }
@@ -4206,9 +4231,9 @@ impl AppState {
         &mut self,
     ) -> mpsc::UnboundedSender<WorkspaceLoadResult> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.workspace_load.workspace_load_receiver = Some(rx);
+        self.host.workspace_load_receiver = Some(rx);
         self.workspace_load.is_loading_workspaces = true;
-        self.workspace_load.workspace_load_started = Some(Instant::now());
+        self.host.workspace_load_started = Some(Instant::now());
         self.workspace_load.workspace_load_error = None;
         tx
     }
@@ -4216,11 +4241,11 @@ impl AppState {
     /// Check for completed background workspace loading and apply results
     /// Returns true if workspaces were updated
     pub fn check_workspace_loading_complete(&mut self) -> bool {
-        if let Some(ref mut receiver) = self.workspace_load.workspace_load_receiver {
+        if let Some(ref mut receiver) = self.host.workspace_load_receiver {
             match receiver.try_recv() {
                 Ok(result) => {
                     self.workspace_load.is_loading_workspaces = false;
-                    self.workspace_load.workspace_load_receiver = None;
+                    self.host.workspace_load_receiver = None;
 
                     match result {
                         WorkspaceLoadResult::Success(mut workspaces) => {
@@ -4274,7 +4299,7 @@ impl AppState {
                                             tmux_name,
                                             "claude".to_string(),
                                         );
-                                        self.tmux.tmux_sessions.insert(session.id, tmux_session);
+                                        self.host.tmux_sessions.insert(session.id, tmux_session);
                                         debug!(
                                             "Populated tmux_sessions for session {}: {}",
                                             session.id, session.name
@@ -4284,7 +4309,7 @@ impl AppState {
                             }
                             info!(
                                 "Populated tmux_sessions with {} entries",
-                                self.tmux.tmux_sessions.len()
+                                self.host.tmux_sessions.len()
                             );
 
                             // Set initial selection
@@ -4350,12 +4375,12 @@ impl AppState {
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {
                     // Still loading, check for timeout
-                    if let Some(started) = self.workspace_load.workspace_load_started {
+                    if let Some(started) = self.host.workspace_load_started {
                         if started.elapsed().as_secs() > Self::DOCKER_TIMEOUT_SECS * 3 {
                             // Hard timeout - stop waiting
                             warn!("Workspace loading hard timeout reached");
                             self.workspace_load.is_loading_workspaces = false;
-                            self.workspace_load.workspace_load_receiver = None;
+                            self.host.workspace_load_receiver = None;
                             self.workspace_load.workspace_load_error =
                                 Some("Loading timed out".to_string());
                             self.add_warning_notification(
@@ -4368,7 +4393,7 @@ impl AppState {
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // Channel closed without result - error
                     self.workspace_load.is_loading_workspaces = false;
-                    self.workspace_load.workspace_load_receiver = None;
+                    self.host.workspace_load_receiver = None;
                     self.workspace_load.workspace_load_error =
                         Some("Loading task failed".to_string());
                     return true;
@@ -4742,14 +4767,14 @@ impl AppState {
         const INTERVAL_SECS: u64 = 10;
         let now = std::time::Instant::now();
         let due = self
-            .fleet
+            .host
             .last_headroom_watchdog
             .map(|last| now.duration_since(last).as_secs() >= INTERVAL_SECS)
             .unwrap_or(true);
         if !due {
             return;
         }
-        self.fleet.last_headroom_watchdog = Some(now);
+        self.host.last_headroom_watchdog = Some(now);
 
         let has_headroom_session = crate::interactive::SessionStore::load()
             .sessions
@@ -4825,7 +4850,7 @@ impl AppState {
         self.new_session.branch_refresh_seq += 1;
         let seq = self.new_session.branch_refresh_seq;
         let (tx, rx) = mpsc::unbounded_channel();
-        self.new_session.branch_refresh_receiver = Some(rx);
+        self.host.branch_refresh_receiver = Some(rx);
         tokio::spawn(async move {
             let join = tokio::task::spawn_blocking(move || -> Result<Vec<BranchEntry>, String> {
                 match list_path {
@@ -4864,18 +4889,18 @@ impl AppState {
     pub fn check_branch_refresh_complete(&mut self) -> bool {
         use crate::components::new_session::configure::PickerBranchEntry;
 
-        let Some(ref mut receiver) = self.new_session.branch_refresh_receiver else {
+        let Some(ref mut receiver) = self.host.branch_refresh_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.new_session.branch_refresh_receiver = None;
+                self.host.branch_refresh_receiver = None;
                 return false;
             }
         };
-        self.new_session.branch_refresh_receiver = None;
+        self.host.branch_refresh_receiver = None;
         if seq != self.new_session.branch_refresh_seq {
             // A newer picker session superseded this refresh.
             return false;
@@ -5047,7 +5072,7 @@ impl AppState {
                         interactive_session.tmux_session_name.clone(),
                         "claude".to_string(),
                     );
-                    self.tmux.tmux_sessions.insert(interactive_session.session_id, tmux_session);
+                    self.host.tmux_sessions.insert(interactive_session.session_id, tmux_session);
                 }
             }
             Err(e) => {
@@ -5795,7 +5820,7 @@ impl AppState {
                 self.previous_session();
             }
         }
-        self.workspace_load.last_preview_update = None;
+        self.host.last_preview_update = None;
         true
     }
 
@@ -6355,7 +6380,7 @@ impl AppState {
                 self.sessions.selected_workspace_index = new_idx;
             }
         }
-        self.workspace_load.last_preview_update = None;
+        self.host.last_preview_update = None;
     }
 
     /// Predicate used by both rendering and counts so the displayed list and
@@ -7955,7 +7980,7 @@ impl AppState {
             self.new_session.repo_check_seq += 1;
             let seq = self.new_session.repo_check_seq;
             let (tx, rx) = mpsc::unbounded_channel();
-            self.new_session.repo_check_receiver = Some(rx);
+            self.host.repo_check_receiver = Some(rx);
             tokio::spawn(async move {
                 let join = tokio::task::spawn_blocking(move || {
                     crate::git::RemoteRepoManager::new()
@@ -7983,18 +8008,18 @@ impl AppState {
     pub fn check_repo_check_complete(&mut self) -> bool {
         use crate::components::new_session::configure::RepoCheck;
 
-        let Some(ref mut receiver) = self.new_session.repo_check_receiver else {
+        let Some(ref mut receiver) = self.host.repo_check_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.new_session.repo_check_receiver = None;
+                self.host.repo_check_receiver = None;
                 return false;
             }
         };
-        self.new_session.repo_check_receiver = None;
+        self.host.repo_check_receiver = None;
         if seq != self.new_session.repo_check_seq {
             // A newer Configure form superseded this check.
             return false;
@@ -8078,7 +8103,7 @@ impl AppState {
         self.new_session.repo_init_seq += 1;
         let seq = self.new_session.repo_init_seq;
         let (tx, rx) = mpsc::unbounded_channel();
-        self.new_session.repo_init_receiver = Some(rx);
+        self.host.repo_init_receiver = Some(rx);
         tokio::spawn(async move {
             let join = tokio::task::spawn_blocking(move || {
                 let manager = crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
@@ -8101,18 +8126,18 @@ impl AppState {
     pub fn check_repo_init_complete(&mut self) -> bool {
         use crate::components::new_session::configure::RepoCheck;
 
-        let Some(ref mut receiver) = self.new_session.repo_init_receiver else {
+        let Some(ref mut receiver) = self.host.repo_init_receiver else {
             return false;
         };
         let (seq, result) = match receiver.try_recv() {
             Ok(payload) => payload,
             Err(mpsc::error::TryRecvError::Empty) => return false,
             Err(mpsc::error::TryRecvError::Disconnected) => {
-                self.new_session.repo_init_receiver = None;
+                self.host.repo_init_receiver = None;
                 return false;
             }
         };
-        self.new_session.repo_init_receiver = None;
+        self.host.repo_init_receiver = None;
         if seq != self.new_session.repo_init_seq {
             return false;
         }
@@ -8564,7 +8589,7 @@ impl AppState {
                             }
 
                             // Store tmux session in our map
-                            self.tmux.tmux_sessions.insert(session_id, tmux_session);
+                            self.host.tmux_sessions.insert(session_id, tmux_session);
 
                             let _ =
                                 log_sender.send("Tmux session created successfully!".to_string());
@@ -8810,7 +8835,7 @@ impl AppState {
                     interactive_session.branch_name.clone(),
                     "claude".to_string(),
                 );
-                self.tmux.tmux_sessions.insert(session_id, tmux_session);
+                self.host.tmux_sessions.insert(session_id, tmux_session);
 
                 info!("Successfully created Interactive session {}", session_id);
                 Ok(())
@@ -9257,7 +9282,7 @@ impl AppState {
         info!("=== DELETE INTERACTIVE SESSION START: {} ===", session_id);
 
         // Cleanup tmux session if it exists
-        if let Some(mut tmux_session) = self.tmux.tmux_sessions.remove(&session_id) {
+        if let Some(mut tmux_session) = self.host.tmux_sessions.remove(&session_id) {
             info!("Found tmux session in state, cleaning up: {}", session_id);
             if let Err(e) = tmux_session.cleanup().await {
                 warn!("Failed to cleanup tmux session from state: {}", e);
@@ -9310,7 +9335,7 @@ impl AppState {
         // Resolve tmux session name preferring the in-memory map, falling back to
         // sessions.json (handles edge case where the live map is out of sync).
         let tmux_name = self
-            .tmux
+            .host
             .tmux_sessions
             .get(&session_id)
             .map(|t| t.name().to_string())
@@ -9387,7 +9412,7 @@ impl AppState {
         // the live agent.
         if result.is_ok() {
             // Drop the live tmux handle but DO NOT touch SessionStore or worktree.
-            self.tmux.tmux_sessions.remove(&session_id);
+            self.host.tmux_sessions.remove(&session_id);
 
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_status(SessionStatus::Stopped);
@@ -9432,7 +9457,7 @@ impl AppState {
             return false;
         }
 
-        self.tmux.tmux_sessions.remove(&session_id);
+        self.host.tmux_sessions.remove(&session_id);
         if let Some(session) = self.find_session_mut(session_id) {
             session.set_status(SessionStatus::Stopped);
             session.is_attached = false;
@@ -9664,7 +9689,7 @@ impl AppState {
                 metadata.tmux_session_name.clone(),
                 metadata.agent_type.name().to_string(),
             );
-            self.tmux.tmux_sessions.insert(session_id, tmux_session);
+            self.host.tmux_sessions.insert(session_id, tmux_session);
 
             if let Some(session) = self.find_session_mut(session_id) {
                 session.set_status(SessionStatus::Running);
@@ -9803,7 +9828,7 @@ impl AppState {
         info!("Deleting Boss mode session: {}", session_id);
 
         // Cleanup tmux session if it exists (Boss mode might have tmux for attach)
-        if let Some(mut tmux_session) = self.tmux.tmux_sessions.remove(&session_id) {
+        if let Some(mut tmux_session) = self.host.tmux_sessions.remove(&session_id) {
             info!("Cleaning up tmux session for Boss session {}", session_id);
             if let Err(e) = tmux_session.cleanup().await {
                 warn!("Failed to cleanup tmux session: {}", e);
@@ -11060,7 +11085,7 @@ impl AppState {
 
     /// Stop the preview update task
     pub fn stop_preview_updates(&mut self) {
-        if let Some(task) = self.tmux.preview_update_task.take() {
+        if let Some(task) = self.host.preview_update_task.take() {
             task.abort();
         }
     }
@@ -11436,7 +11461,7 @@ impl AppState {
             // lands on a tab that takes input, and takes it away again when it
             // lands on one that does not.
             && self.shell.focused_pane == FocusedPane::LiveLogs
-            && *self.fleet.daemon_start_cta.status() != crate::fleet::daemon_cta::CtaStatus::Starting
+            && *self.host.daemon_start_cta.status() != crate::fleet::daemon_cta::CtaStatus::Starting
     }
 
     /// Why a conversation tab cannot send right now, in the pane's own words.
@@ -11458,8 +11483,8 @@ impl AppState {
             return None;
         }
         match tab {
-            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
-            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.host.pal_chat.as_ref(),
+            SessionTab::Thread => self.host.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?
         .state()
@@ -11482,11 +11507,11 @@ impl AppState {
             return false;
         }
         match self.shell.session_tab {
-            SessionTab::Pal => self.fleet.pal_chat.is_some(),
+            SessionTab::Pal => self.host.pal_chat.is_some(),
             // A broadcast owns the keyboard whether or not a thread host has
             // been opened: the composer is there the moment rows are checked.
             SessionTab::Thread => {
-                self.fleet.session_chat.is_some() || !self.broadcast_targets().is_empty()
+                self.host.session_chat.is_some() || !self.broadcast_targets().is_empty()
             }
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => false,
         }
@@ -11508,8 +11533,8 @@ impl AppState {
             return self.fleet.broadcast.capturing();
         }
         let host = match self.shell.session_tab {
-            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
-            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.host.pal_chat.as_ref(),
+            SessionTab::Thread => self.host.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         };
         host.is_some_and(|host| host.state().is_capturing_text())
@@ -11530,16 +11555,9 @@ impl AppState {
         let now_ms = chrono::Utc::now().timestamp_millis();
         match tab {
             SessionTab::Pal => {
-                // Runs every frame, so the bump is gated on the two things that
-                // are real changes: opening the conversation, and a tick that
-                // reports it moved.
-                let mut ticked = false;
-                self.fleet.update(|fleet| {
-                    let opened = fleet.pal_chat.is_none();
-                    let host = fleet.pal_chat.get_or_insert_with(ChatHost::pal);
-                    ticked = host.tick(now_ms);
-                    opened || ticked
-                });
+                // The conversation is host-only state, so running it every frame
+                // bumps no section; a tick that moved it asks for a repaint.
+                let ticked = self.host.pal_chat.get_or_insert_with(ChatHost::pal).tick(now_ms);
                 if ticked {
                     self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
@@ -11551,17 +11569,12 @@ impl AppState {
                 // old conversation is dropped rather than cached: nobody is
                 // reading it, and a cached host keeps polling the daemon for it.
                 let stale =
-                    self.fleet.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
-                let mut ticked = false;
-                self.fleet.update(|fleet| {
-                    if stale {
-                        fleet.session_chat = Some((key.clone(), ChatHost::thread(key)));
-                    }
-                    if let Some((_, host)) = fleet.session_chat.as_mut() {
-                        ticked = host.tick(now_ms);
-                    }
-                    stale || ticked
-                });
+                    self.host.session_chat.as_ref().is_none_or(|(existing, _)| *existing != key);
+                if stale {
+                    self.host.session_chat = Some((key.clone(), ChatHost::thread(key)));
+                }
+                let ticked =
+                    self.host.session_chat.as_mut().is_some_and(|(_, host)| host.tick(now_ms));
                 if ticked {
                     self.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
@@ -11587,8 +11600,8 @@ impl AppState {
     ) -> Option<&crate::fleet::chat_host::ChatHost> {
         use crate::components::session_tabs::SessionTab;
         match tab {
-            SessionTab::Pal => self.fleet.pal_chat.as_ref(),
-            SessionTab::Thread => self.fleet.session_chat.as_ref().map(|(_, host)| host),
+            SessionTab::Pal => self.host.pal_chat.as_ref(),
+            SessionTab::Thread => self.host.session_chat.as_ref().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }
     }
@@ -12027,7 +12040,7 @@ impl AppState {
         // on the refresh that reads the poller's cell every tick, rather than
         // on the pane: a daemon that came up and went down again while the
         // operator was on another tab is still a change this sees.
-        if self.fleet.daemon_start_cta.observe_daemon((!reachable) && daemon.not_running) {
+        if self.host.daemon_start_cta.observe_daemon((!reachable) && daemon.not_running) {
             changed = true;
         }
         let live: HashSet<Uuid> = marks.iter().map(|(id, ..)| *id).collect();
@@ -12187,24 +12200,24 @@ impl AppState {
         // This prevents spawning N tmux capture-pane subprocesses per tick
         const PREVIEW_INTERVAL_SECS: u64 = 5;
         let now = std::time::Instant::now();
-        if let Some(last) = self.workspace_load.last_preview_update {
+        if let Some(last) = self.host.last_preview_update {
             if now.duration_since(last).as_secs() < PREVIEW_INTERVAL_SECS {
                 return Ok(());
             }
         }
-        self.workspace_load.last_preview_update = Some(now);
+        self.host.last_preview_update = Some(now);
 
         // Non-selected sessions only need a status (running/idle) refresh, which
         // is not time-critical — sweep them on a longer cadence so we don't
         // spawn one `capture-pane` per non-selected session on every 5s preview
         // refresh. (perf: bead 9pb)
         const STATUS_INTERVAL_SECS: u64 = 20;
-        let do_status_check = match self.workspace_load.last_status_check {
-            Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
-            None => true,
-        };
+        let do_status_check = self
+            .host
+            .last_status_check
+            .is_none_or(|last| now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS);
         if do_status_check {
-            self.workspace_load.last_status_check = Some(now);
+            self.host.last_status_check = Some(now);
         }
 
         // updates: (session_id, content, claude_running) for the selected session.
@@ -12219,7 +12232,7 @@ impl AppState {
         // For all other sessions, just do a quick status check (visible area only).
         let selected_session_id = self.get_selected_session_id();
 
-        for (session_id, tmux_session) in &self.tmux.tmux_sessions {
+        for (session_id, tmux_session) in &self.host.tmux_sessions {
             let should_update = self
                 .sessions
                 .workspaces
@@ -12238,7 +12251,7 @@ impl AppState {
             // The selected session renders from the observer's vt100 screen,
             // so a parallel capture would waste work and rebuild terminal
             // text through the lossy legacy path.
-            if is_selected && self.tmux.embed_session.as_deref() != Some(tmux_session.name()) {
+            if is_selected && !self.embed_session_is(tmux_session.name()) {
                 // Selected session: capture last 200 lines (not full history)
                 // Full history can be megabytes for long-running sessions
                 let opts = CaptureOptions {
@@ -12327,8 +12340,8 @@ impl AppState {
         crate::fleet::attention_poll::spawn(
             &self.fleet.daemon_attention,
             &self.fleet.fleet_snapshot,
-            &self.fleet.attention_poll_running,
-            &self.fleet.daemon_attention_generation,
+            &self.host.attention_poll_running,
+            &self.host.daemon_attention_generation,
         );
         self.refresh_daemon_attention_generation();
         self.refresh_attention_markers(chrono::Utc::now().timestamp_millis());
@@ -13500,7 +13513,7 @@ impl App {
 
         // Kick off the live-window background poller. Render path reads
         // from its snapshot — never calls live_window::current() inline.
-        self.state.fleet.live_window_watcher.start();
+        self.state.host.live_window_watcher.start();
 
         // Initialize log streaming coordinator
         let (mut coordinator, log_sender) = LogStreamingCoordinator::new();
@@ -13522,8 +13535,8 @@ impl App {
             info!("Log streaming will be available when Docker is started");
         }
 
-        self.state.log_streams.log_streaming_coordinator = Some(coordinator);
-        self.state.log_streams.log_sender = Some(log_sender);
+        self.state.host.log_streaming_coordinator = Some(coordinator);
+        self.state.host.log_sender = Some(log_sender);
 
         // Try to refresh OAuth tokens if they're expired (before checking first-time setup)
         let home_dir = dirs::home_dir();
@@ -13610,7 +13623,7 @@ impl App {
 
     /// Initialize log streaming for all running sessions
     async fn init_log_streaming_for_sessions(&mut self) -> anyhow::Result<()> {
-        if let Some(coordinator) = &mut self.state.log_streams.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.state.host.log_streaming_coordinator {
             // Collect session info for streaming
             let sessions: Vec<(Uuid, String, String, crate::models::SessionMode)> = self
                 .state
@@ -13718,13 +13731,13 @@ impl App {
         let now = Instant::now();
         let should_check_token = self
             .state
-            .fleet
+            .host
             .last_token_refresh_check
             .map(|last| now.duration_since(last).as_secs() >= 300) // Check every 5 minutes
             .unwrap_or(true); // First time
 
         if should_check_token {
-            self.state.fleet.last_token_refresh_check = Some(now);
+            self.state.host.last_token_refresh_check = Some(now);
 
             // Check if we need to refresh OAuth tokens
             let home_dir = dirs::home_dir();
@@ -13776,13 +13789,13 @@ impl App {
         // Periodic session snapshot (every 30 minutes)
         let should_snapshot = self
             .state
-            .workspace_load
+            .host
             .last_snapshot_time
             .map(|last| now.duration_since(last).as_secs() >= 1800)
             .unwrap_or(true);
 
         if should_snapshot {
-            self.state.workspace_load.last_snapshot_time = Some(now);
+            self.state.host.last_snapshot_time = Some(now);
             tokio::spawn(async {
                 match crate::app::snapshot::SnapshotManager::take_snapshot().await {
                     Ok(snapshot) => {
@@ -13805,7 +13818,7 @@ impl App {
 
         // Process incoming log entries (non-blocking)
         let mut log_entries = Vec::new();
-        if let Some(coordinator) = &mut self.state.log_streams.log_streaming_coordinator {
+        if let Some(coordinator) = &mut self.state.host.log_streaming_coordinator {
             // Collect all available log entries without blocking
             while let Some((session_id, log_entry)) = coordinator.try_next_log() {
                 log_entries.push((session_id, log_entry));
@@ -13859,20 +13872,20 @@ impl App {
         let now = Instant::now();
         let should_update_logs = self
             .state
-            .log_streams
+            .host
             .last_log_check
             .map(|last| now.duration_since(last).as_secs() >= 3) // Update every 3 seconds
             .unwrap_or(true); // First time
 
         if should_update_logs {
-            self.state.log_streams.last_log_check = Some(now);
+            self.state.host.last_log_check = Some(now);
 
             // If we have an attached session, fetch its logs
             if let Some(attached_id) = self.state.sessions.attached_session_id {
                 // Check if we should update this session's logs (don't spam updates)
                 let should_update_session = self
                     .state
-                    .log_streams
+                    .host
                     .log_last_updated
                     .get(&attached_id)
                     .map(|last| now.duration_since(*last).as_secs() >= 2) // Update session logs every 2 seconds
@@ -13883,7 +13896,7 @@ impl App {
                     if let Err(e) = self.state.fetch_claude_logs(attached_id).await {
                         warn!("Failed to fetch logs for session {}: {}", attached_id, e);
                     } else {
-                        self.state.log_streams.log_last_updated.insert(attached_id, now);
+                        self.state.host.log_last_updated.insert(attached_id, now);
                         // Set flag to refresh UI with new logs
                         self.state.shell.ui_needs_refresh = true;
                     }

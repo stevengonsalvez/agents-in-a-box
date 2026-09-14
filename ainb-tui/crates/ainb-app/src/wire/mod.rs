@@ -471,7 +471,7 @@ view!(SessionLabelsView<'a> for SessionLabelsSection {
 });
 
 view!(TmuxView<'a> for TmuxSection {
-    embed_session: Option<String>,
+    embed_session: Option<crate::app::effect::TmuxSessionName>,
     other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
     other_tmux_expanded: bool,
     selected_other_tmux_index: Option<usize>,

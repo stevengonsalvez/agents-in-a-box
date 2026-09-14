@@ -1202,7 +1202,7 @@ fn fill_text_fields(state: &mut AppState, seed: &mut dyn Seed) {
             session.container_id = Some("c0ffee".to_string());
         }
         let tmux = state.tmux.get_mut();
-        tmux.embed_session = Some("ainb-managed".to_string());
+        tmux.embed_session = crate::app::effect::TmuxSessionName::new("ainb-managed");
         tmux.selected_other_tmux_sessions.insert("scratch".to_string());
         state.shell.get_mut().previous_screen = Some(crate::app::screens::ids::HOME.to_string());
         let fleet = state.fleet.get_mut();
