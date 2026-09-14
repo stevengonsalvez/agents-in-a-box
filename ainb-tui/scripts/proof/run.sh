@@ -45,8 +45,10 @@ export PROOF_OUT="${OUT:-$AINB_TUI_DIR/proof-out}"
 # operator's own PATH (a real `claude`, a real `headroom`) leaks in.
 export PROOF_BASE_PATH="/usr/local/bin:/usr/bin:/bin"
 
-for tool in tmux jq git curl python3; do
-  command -v "$tool" >/dev/null 2>&1 || { echo "missing required tool: $tool" >&2; exit 2; }
+# Checked on the PATH every world actually runs with, not the operator's.
+for tool in tmux jq git curl python3 ss ps; do
+  PATH="$PROOF_BASE_PATH" command -v "$tool" >/dev/null 2>&1 \
+    || { echo "missing required tool on $PROOF_BASE_PATH: $tool" >&2; exit 2; }
 done
 
 if ((BUILD)); then
