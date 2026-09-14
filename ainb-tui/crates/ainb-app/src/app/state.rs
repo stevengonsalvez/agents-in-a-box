@@ -9979,86 +9979,47 @@ impl AppState {
             }
         }
 
-        // Temporarily exit TUI to run interactive container
-        info!("Exiting TUI to run interactive authentication");
+        // The login needs the tty, which only the host that owns it can lend.
+        // It reports the exit back through `finish_oauth_login`.
+        info!("Handing the terminal to the interactive authentication");
+        self.emit(crate::app::effect::Effect::AttachTerminal(
+            crate::app::effect::TerminalTarget::ClaudeLogin {
+                auth_dir,
+                image: image_name.to_string(),
+            },
+        ));
 
-        // Hand the terminal over: the host leaves raw mode, the alternate
-        // screen, mouse capture and bracketed paste (the modes it set up).
-        let _ = crate::host::release_terminal();
+        Ok(())
+    }
 
-        println!("\n🔐 Claude Authentication Setup\n");
-        println!("This will guide you through the OAuth authentication process.");
-        println!("You'll be prompted to open a URL in your browser to complete authentication.\n");
-
-        // Run the auth container interactively
-        // Use inherit for stdin/stdout/stderr to ensure proper TTY forwarding
-        let status = std::process::Command::new("docker")
-            .args([
-                "run",
-                "--rm",
-                "-it",
-                "-v",
-                &format!("{}:/home/claude-user/.claude", auth_dir.display()),
-                "-e",
-                "PATH=/home/claude-user/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                "-e",
-                "HOME=/home/claude-user",
-                "-e",
-                "AUTH_METHOD=oauth",  // Specify OAuth method
-                "-w",
-                "/home/claude-user",
-                "--user",
-                "claude-user",
-                "--entrypoint",
-                "bash",
-                image_name,
-                "-c",
-                "/app/scripts/auth-setup.sh",
-            ])
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()?;
-
-        // Check if authentication was successful
+    /// Record how the interactive OAuth login the host ran for
+    /// [`crate::app::effect::TerminalTarget::ClaudeLogin`] ended. Success needs
+    /// both a clean exit and a non-empty `.credentials.json` in `auth_dir`.
+    /// Returns whether it succeeded, so the host can tell the user before it
+    /// restores its screen.
+    pub fn finish_oauth_login(&mut self, auth_dir: &std::path::Path, exited_ok: bool) -> bool {
         let credentials_path = auth_dir.join(".credentials.json");
-        let success =
-            status.success() && credentials_path.exists() && credentials_path.metadata()?.len() > 0;
+        let success = exited_ok
+            && std::fs::metadata(&credentials_path).is_ok_and(|metadata| metadata.len() > 0);
 
         if success {
-            println!("\n✅ Authentication successful!");
-            println!("Press Enter to continue...");
-            let _ = std::io::stdin().read_line(&mut String::new());
-
             // Success - transition to main view
             self.onboarding.auth_setup_state = None;
             self.shell.current_screen = screen_ids::SESSION_LIST.to_string();
             self.check_current_directory_status();
             self.shell.pending_async_action = Some(AsyncAction::RefreshWorkspaces);
-        } else {
-            println!("\n❌ Authentication failed!");
-            println!("Press Enter to return to the authentication menu...");
-            let _ = std::io::stdin().read_line(&mut String::new());
-
-            if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
-                auth_state.error_message = Some(
-                    "❌ Authentication failed\n\n\
-                     Please try again or use API Key method."
-                        .to_string(),
-                );
-                auth_state.is_processing = false;
-            }
+        } else if let Some(ref mut auth_state) = self.onboarding.auth_setup_state {
+            auth_state.error_message = Some(
+                "❌ Authentication failed\n\n\
+                 Please try again or use API Key method."
+                    .to_string(),
+            );
+            auth_state.is_processing = false;
         }
-
-        // Re-enable raw mode and the full input mode set established at startup —
-        // without re-enabling mouse capture + bracketed paste, mouse events stop
-        // arriving after the auth flow returns to the TUI.
-        let _ = crate::host::reclaim_terminal();
 
         // Force UI refresh
         self.shell.ui_needs_refresh = true;
-
-        Ok(())
+        success
     }
 
     /// Check if Docker is available and running (synchronous, static version)
