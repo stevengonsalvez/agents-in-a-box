@@ -7,7 +7,8 @@ use super::keymap::test_key_codes::*;
 use crate::app::effect::{Effect, TerminalTarget, ToolTerminal};
 use crate::app::intent::{Btn, Intent, Pos};
 use crate::app::keymap::{
-    Chord, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction, active_contexts,
+    Chord, HostAction, HostFlags, KeyAction, KeyContext, Keymap, ScrollAction, UiAction,
+    active_contexts,
 };
 #[cfg(test)]
 use crate::app::keymap::{Key, Mods};
@@ -23,13 +24,14 @@ use tracing::info;
 
 /// What intent dispatch needs from the renderer it runs under.
 ///
-/// Some intents resolve to renderer-local work: scrolling a pane, or finding
-/// what sits under the pointer, which only the renderer that drew the frame
-/// knows. The TUI's `UiState`
+/// Some intents resolve to renderer-local work: scrolling a pane, collapsing
+/// the sessions sidebar, or finding what sits under the pointer, which only
+/// the renderer that drew the frame knows. The TUI's `UiState`
 /// implements this; [`NoRenderer`] serves tests and hosts with none of it.
 pub trait RendererHost {
-    /// Queue a renderer-local scroll the keymap resolved.
-    fn queue_scroll(&mut self, action: ScrollAction);
+    /// Queue renderer-local work the keymap resolved, for the host to apply
+    /// against its own layout.
+    fn queue(&mut self, action: HostAction);
     /// Width, in columns, of the surface this host renders into, or `None`
     /// when it has none. Layout clamps read it per host, so two surfaces at
     /// different widths never share one value.
@@ -41,13 +43,13 @@ pub trait RendererHost {
     fn pointer(&mut self, state: &AppState, pos: Pos, btn: Btn) -> Option<Intent>;
 }
 
-/// A [`RendererHost`] with no renderer: scrolls are dropped and nothing is
+/// A [`RendererHost`] with no renderer: layout work is dropped and nothing is
 /// under the pointer.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoRenderer;
 
 impl RendererHost for NoRenderer {
-    fn queue_scroll(&mut self, _action: ScrollAction) {}
+    fn queue(&mut self, _action: HostAction) {}
 
     fn columns(&self) -> Option<u16> {
         None
@@ -137,7 +139,6 @@ pub enum AppEvent {
     SessionStartHangarDaemon,
     /// Toggle the sessions sidebar between full width and the thin rail —
     /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
-    ToggleSessionsSidebar,
     // Pointer commands: a press a renderer has hit-tested, naming what was
     // under the pointer by its place in state. See `crate::app::pointer`.
     /// Select session-list row `row`; `open` attaches it, as a double-click does.
@@ -1545,7 +1546,11 @@ impl EventHandler {
             // its `LayoutComponent`, never handed to the reducer. One arm, so a
             // new `ScrollAction` cannot be left out of it.
             UiAction::Scroll(scroll) => {
-                host.queue_scroll(scroll);
+                host.queue(HostAction::Scroll(scroll));
+                None
+            }
+            UiAction::ToggleSessionsSidebar => {
+                host.queue(HostAction::ToggleSessionsSidebar);
                 None
             }
         }
@@ -2175,11 +2180,6 @@ impl EventHandler {
             // applies it in the main loop where `UiState` is in scope and
             // persists it. Same shape as EnterInteractivePane below: the arm
             // exists for exhaustiveness, not to do nothing quietly.
-            // The sidebar's collapsed flag is renderer state, so the host
-            // applies it in the main loop where `UiState` is in scope and
-            // persists it there. The arm exists for exhaustiveness, not to do
-            // nothing quietly.
-            AppEvent::ToggleSessionsSidebar => {}
             // Only the host knows the pane size, so it performs the attach.
             AppEvent::EnterInteractivePane => {
                 state.emit(Effect::AttachTerminal(TerminalTarget::InPlace));
@@ -7050,14 +7050,34 @@ mod session_list_key_tests {
     }
 
     /// 'B' is the keyboard twin of the [-]/[+] sidebar glyph (mouse-only
-    /// before). Mapping-level test: no persistence side effects here.
+    /// before). The collapse is the renderer's layout, so the key hands it to
+    /// the host and gives the reducer nothing.
     #[test]
     fn shift_b_toggles_sessions_sidebar() {
+        #[derive(Default)]
+        struct Recorder(Vec<HostAction>);
+        impl RendererHost for Recorder {
+            fn queue(&mut self, action: HostAction) {
+                self.0.push(action);
+            }
+            fn columns(&self) -> Option<u16> {
+                None
+            }
+            fn pointer(&mut self, _: &AppState, _: Pos, _: Btn) -> Option<Intent> {
+                None
+            }
+        }
+
         let mut state = session_list_state();
-        assert!(matches!(
-            key(&mut state, 'B'),
-            Some(AppEvent::ToggleSessionsSidebar)
-        ));
+        let mut host = Recorder::default();
+        let event = EventHandler::handle_key_event_with_keymap(
+            Chord::new(Char('B'), Mods::NONE),
+            &mut state,
+            &Keymap::defaults(),
+            &mut host,
+        );
+        assert!(event.is_none());
+        assert_eq!(host.0, [HostAction::ToggleSessionsSidebar]);
     }
 }
 
