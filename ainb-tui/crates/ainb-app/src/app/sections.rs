@@ -918,6 +918,7 @@ mod agent_status_section_tests {
             }],
             read_revision: revision,
             unknown_events: Vec::new(),
+            read_at_ms: 0,
         }
     }
 
