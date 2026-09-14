@@ -749,8 +749,10 @@ impl DaemonClient {
                 message: error.message,
             });
         }
-        serde_json::from_value(hello.result.unwrap_or_else(|| Value::Object(Default::default())))
-            .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))
+        serde_json::from_value(
+            hello.result.unwrap_or_else(|| Value::Object(serde_json::Map::default())),
+        )
+        .map_err(|error| DaemonError::Decode(format!("decoding auth/hello: {error}")))
     }
 
     async fn connect_raw(&self) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
