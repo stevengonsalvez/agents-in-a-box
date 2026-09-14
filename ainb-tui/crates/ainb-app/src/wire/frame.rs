@@ -41,8 +41,8 @@ impl HostId {
 
 /// Where a section's content was read, for sections fed by a daemon.
 ///
-/// `read_clock_ms` is the daemon's own clock at the read. A renderer computes
-/// an age as `read_clock_ms - since_ms`, both on the daemon's clock, and never
+/// `clock_ms` is the daemon's own clock at the read. A renderer computes
+/// an age as `clock_ms - since_ms`, both on the daemon's clock, and never
 /// subtracts a remote timestamp from its local now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonRead {
@@ -51,7 +51,7 @@ pub struct DaemonRead {
 }
 
 /// One section's state as a renderer receives it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Frame {
     /// Stable wire name, [`section_name`].
     pub section: String,
@@ -74,14 +74,14 @@ impl Frame {
 }
 
 /// Everything one host tick sends down the channel.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameBatch {
     pub frames: Vec<Frame>,
 }
 
 impl FrameBatch {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
 }
@@ -188,24 +188,21 @@ impl Mirror {
     #[must_use]
     pub fn batch(&mut self, state: &AppState) -> FrameBatch {
         let versions = state.versions();
-        let owed: Vec<SectionId> = self
-            .subscription
-            .sections()
-            .filter(|id| self.sent[id.index()] != Some(versions[id.index()]))
-            .collect();
-        let frames = owed
-            .into_iter()
-            .map(|id| {
-                self.sent[id.index()] = Some(versions[id.index()]);
-                Frame {
-                    section: section_name(id).to_string(),
-                    version: versions[id.index()],
-                    host_id: self.host_id.clone(),
-                    daemon_read: (self.daemon_read)(state, id),
-                    body: section_json(state, id),
-                }
-            })
-            .collect();
+        let mut frames = Vec::new();
+        for id in SectionId::ALL {
+            let version = versions[id.index()];
+            if !self.subscription.contains(id) || self.sent[id.index()] == Some(version) {
+                continue;
+            }
+            self.sent[id.index()] = Some(version);
+            frames.push(Frame {
+                section: section_name(id).to_string(),
+                version,
+                host_id: self.host_id.clone(),
+                daemon_read: (self.daemon_read)(state, id),
+                body: section_json(state, id),
+            });
+        }
         FrameBatch { frames }
     }
 }
