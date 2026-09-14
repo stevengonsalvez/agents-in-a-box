@@ -175,6 +175,10 @@ pub struct PluginsHostSection {
     /// `tick_plugin_renders`; the host stores the JSON and never reads into
     /// it.
     pub plugin_ui_states: std::collections::HashMap<String, PluginUiState>,
+    /// Plugin screens a host other than the terminal wants kept live, so
+    /// their plugins keep rendering and publishing `ui.state` while the
+    /// terminal shows something else.
+    pub watched_plugin_screens: std::collections::BTreeSet<String>,
 }
 
 /// One plugin's `ui.state` view as the snapshot bus last delivered it.
@@ -194,6 +198,7 @@ impl Default for PluginsHostSection {
             plugin_render_errors: std::collections::HashMap::new(),
             plugin_runtime: None,
             plugin_ui_states: std::collections::HashMap::new(),
+            watched_plugin_screens: std::collections::BTreeSet::new(),
         }
     }
 }
