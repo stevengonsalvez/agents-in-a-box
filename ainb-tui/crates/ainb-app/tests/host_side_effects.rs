@@ -125,7 +125,7 @@ const CALL_SITES: &[(&str, usize, &str)] = &[
     ("docker/agents_dev.rs", 1, "docker service, output captured"),
     (
         "docker/container_manager.rs",
-        2,
+        1,
         "docker service, output captured",
     ),
     (
