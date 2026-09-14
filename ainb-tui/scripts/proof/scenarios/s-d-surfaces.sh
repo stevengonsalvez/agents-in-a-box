@@ -7,7 +7,9 @@ EXPECT="scripts/surface-combo-smoke.sh passes all four combinations ({tui} {web}
 
 scenario() {
   local status=0
-  REQUIRE=1 bash "$AINB_TUI_DIR/scripts/surface-combo-smoke.sh" "$AINB_BIN" \
+  # TMPDIR inside the world: the smoke makes its own homes with mktemp, and
+  # there they stay visible to teardown and to run.sh's leftover probe.
+  TMPDIR="$PROOF_WORLD" REQUIRE=1 bash "$AINB_TUI_DIR/scripts/surface-combo-smoke.sh" "$AINB_BIN" \
     >"$PROOF_WORLD/smoke.out" 2>&1 || status=$?
   redact_host <"$PROOF_WORLD/smoke.out" >"$NODE_DIR/surface-combo-smoke.txt"
   CAPTURES+=("surface-combo-smoke.txt")
