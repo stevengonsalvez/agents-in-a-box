@@ -113,11 +113,6 @@ const CALL_SITES: &[(&str, usize, &str)] = &[
         "the OSC 52 writer onboarding uses; leaves with it in P5",
     ),
     (
-        "components/daemons.rs",
-        1,
-        "daemon start and stop verbs, output captured (P3)",
-    ),
-    (
         "components/log_history_viewer.rs",
         1,
         "arboard copy (P5: Effect::Clipboard)",
