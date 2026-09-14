@@ -589,6 +589,23 @@ struct WizardDispatch {
 /// read here is the one the daemon wrote at boot. `None` when the file is
 /// missing or empty (the daemon then rejects the connection with a clear
 /// UNAUTHORIZED error instead of a hang).
+/// The `auth/hello` params for this plugin's daemon connection (#1040).
+///
+/// The plugin runs as a direct child of the TUI that hosts it, so it announces
+/// the TUI's pid (`host_pid`, its parent) and asks to be `transient`. The
+/// daemon honours that only beside a listed row at the same pid, which is the
+/// TUI's own presence lease, so a running TUI stays one `tui` row with its
+/// hangar screen open. With no presence at that pid (a plugin hosted outside a
+/// TUI) the daemon lists the connection like any other, so it never hides.
+#[must_use]
+pub fn auth_hello_params(token: &str, host_pid: u32) -> serde_json::Value {
+    serde_json::json!({
+        "token": token,
+        "surface": { "kind": "tui", "pid": host_pid },
+        "transient": true,
+    })
+}
+
 fn read_daemon_token() -> Option<String> {
     let path = ainb_hangar_proto::auth::default_token_file()?;
     let raw = std::fs::read_to_string(path).ok()?;
@@ -1015,10 +1032,7 @@ impl HangarPlugin {
         let auth_body = match encode_request(
             AUTH_REQ_ID,
             daemon_methods::AUTH_HELLO,
-            serde_json::json!({
-                "token": token,
-                "surface": { "kind": "tui", "pid": std::process::id() },
-            }),
+            auth_hello_params(&token, std::os::unix::process::parent_id()),
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -6303,6 +6317,20 @@ mod tests {
 
     /// #1038 review item 1: the grant names exactly the topics this plugin
     /// reads or publishes, never the whole bus.
+    /// #1040: the plugin's hello names its host's pid and asks to be folded
+    /// into that host's presence.
+    #[test]
+    fn the_daemon_hello_announces_the_host_pid_as_transient() {
+        let params = auth_hello_params("secret", 4242);
+        assert_eq!(params["token"], "secret");
+        assert_eq!(params["surface"]["kind"], "tui");
+        assert_eq!(params["surface"]["pid"], 4242);
+        assert_eq!(params["transient"], true);
+        let hello: ainb_hangar_proto::auth::HelloParams =
+            serde_json::from_value(params).expect("the daemon's hello shape");
+        assert!(hello.transient);
+    }
+
     #[test]
     fn manifest_grants_event_bus_for_its_topics_and_plugin_data() {
         let m: Manifest = toml::from_str(MANIFEST_TOML).unwrap();
