@@ -773,6 +773,77 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
+  # Every ainb-core tripwire, by pattern
+  #
+  # The `Test` job filters `not binary(/^tripwire_/)`, and until this job the
+  # only ainb-core tripwires CI ran were the ones a step named. A tripwire
+  # nobody named was a tripwire nobody ran, and 14 went red that way (#1023,
+  # #1024, #1025). This job inverts the default: every `tripwire_*` binary runs
+  # unless
+  # `crates/ainb-core/tests/tripwire_ci_exclusions.txt` names it, and every
+  # line there carries an issue and a reason, checked by
+  # `crates/ainb-core/tests/ci_tripwire_exclusions.rs` in the `Test` job.
+  #
+  # Linux only: the four macOS deaths gated under #966 would otherwise make it
+  # a macOS triage job. The SKIP guard is the same trap `fleet-send-tmux`
+  # guards against: a lane that is green because every tripwire found no tmux
+  # reads as coverage and is none.
+  # ────────────────────────────────────────────────────────────────────────────
+  core-tripwires:
+    name: ainb-core tripwires (ubuntu-latest)
+    needs: changes
+    if: '!cancelled()'
+    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - uses: Swatinem/rust-cache@v2
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        with:
+          workspaces: "ainb-tui -> target"
+      - uses: taiki-e/install-action@nextest
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+      - name: Install tmux, jq and lsof
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: sudo apt-get update && sudo apt-get install -y tmux jq lsof
+      - name: Every tripwire not excluded, serially
+        if: >-
+          !cancelled() && (github.event_name != 'pull_request' ||
+          needs.changes.outputs.relevant != 'false')
+        run: |
+          set -o pipefail
+          cargo build -p ainb-plugin-runtime --bins
+          filter='binary(/^tripwire_/)'
+          while read -r name _; do
+            case "$name" in ''|'#'*) continue ;; esac
+            filter="$filter & not binary(=$name)"
+          done < crates/ainb-core/tests/tripwire_ci_exclusions.txt
+          cargo nextest run -p ainb --test-threads 1 --no-fail-fast \
+            --success-output final -E "$filter" \
+            2>&1 | tee "$RUNNER_TEMP/core-tripwires.log"
+          passed=$(grep -oE '[0-9]+ passed' "$RUNNER_TEMP/core-tripwires.log" | tail -1 | cut -d' ' -f1 || true)
+          skipped=$(grep -cE '^\s*SKIP:' "$RUNNER_TEMP/core-tripwires.log" || true)
+          echo "passed=$passed skip_lines=$skipped"
+          if [ -z "$passed" ] || [ "$skipped" -ge "$passed" ]; then
+            echo "::error::every ainb-core tripwire SKIPped (or none ran), so this job exercised nothing"
+            exit 1
+          fi
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Hangar control-plane end-to-end tripwires (P0-P9)
   #
   # Mirrors the `ainb-hooks` per-feature pattern: install tmux on Linux, build
