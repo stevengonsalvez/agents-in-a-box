@@ -739,11 +739,8 @@ async fn run_tui_loop(
                     // reach the embed, the palette and plugins below, but never
                     // the host keymap.
                     let chord = crate::app::terminal_keys::chord_from_key_event(&key_event);
-                    let interactive_detach = chord.as_ref().is_some_and(|chord| {
-                        keymap
-                            .binding_for(&KeyContext::EmbedInteractive, EMBED_DETACH_ROW)
-                            .is_some_and(|row| row.chord.as_ref() == Some(chord))
-                    });
+                    let interactive_detach =
+                        chord.as_ref().is_some_and(|chord| keymap.releases_in_place_pane(chord));
                     if interactive_detach {
                         if app.state.is_interactive_pane() {
                             detach_interactive_pane(app, &keymap, &mut ui, terminal, &mut clients)
@@ -1441,9 +1438,6 @@ fn preview_scroll_route(
     }
 }
 
-/// The keymap row that releases the in-place interactive pane.
-const EMBED_DETACH_ROW: &str = "detach";
-
 /// Ask the reducer to leave the interactive pane and run what it returns.
 ///
 /// While the embed owns the keyboard the host routes Ctrl+Q itself, but the
@@ -1456,8 +1450,9 @@ async fn detach_interactive_pane(
     clients: &mut ainb::terminal_clients::TerminalClients,
 ) -> Result<()> {
     let command = ainb::CommandId::new(format!(
-        "{}.{EMBED_DETACH_ROW}",
-        KeyContext::EmbedInteractive.name()
+        "{}.{}",
+        KeyContext::EmbedInteractive.name(),
+        ainb::app::keymap::EMBED_DETACH_ROW
     ));
     let intent = ainb::Intent::Command(command, serde_json::Value::Null);
     run_intent(intent, app, keymap, ui, terminal, clients).await
