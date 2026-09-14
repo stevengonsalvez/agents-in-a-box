@@ -1,4 +1,4 @@
-// ABOUTME: The 19 sections AppState is grouped into. Each one sits behind a
+// ABOUTME: The 20 sections AppState is grouped into. Each one sits behind a
 // `Versioned<T>` on AppState, so any `&mut` access bumps that section alone.
 //
 // The grouping is the field audit from the plan (2026-09-05-desktop-p0-surface-safety.md
@@ -778,3 +778,209 @@ impl Default for ShellSection {
 /// the screen does.
 #[derive(Debug, Default)]
 pub struct InboxSection {}
+
+/// Section 20: agent status, the D14 one truth for every surface (T0-section,
+/// #1015).
+///
+/// Holds the last `fleet/roster_status` read folded by
+/// [`ainb_hangar_proto::status_view::StatusView`], the SAME reducer the TUI
+/// Fleet panel folds through, so a surface rendering from this section alone
+/// shows the panel's words. Populated by the host (it owns the socket); this
+/// crate only reduces.
+///
+/// Deliberately not `Serialize` (#983): it must not leave the process until
+/// the redaction layer exists. `agent_status_section_is_not_serialize` pins it.
+#[derive(Debug, Default)]
+pub struct AgentStatusSection {
+    /// The folded view, `None` until a read lands or while absent.
+    pub view: Option<ainb_hangar_proto::status_view::StatusView>,
+    /// Why there is no view, when there is none and the host knows why.
+    pub absent: Option<String>,
+}
+
+impl AgentStatusSection {
+    /// Fold one joined read. True when anything a surface renders changed;
+    /// a heartbeat-only read (same cards, newer revision) is not a change.
+    pub fn apply_read(
+        &mut self,
+        read: ainb_hangar_proto::agent_status::RosterStatusResult,
+        received_at_ms: i64,
+    ) -> bool {
+        let had_absent = self.absent.take().is_some();
+        let changed = match &mut self.view {
+            Some(view) => view.apply(read, received_at_ms),
+            None => {
+                self.view = Some(ainb_hangar_proto::status_view::StatusView::from_read(
+                    read,
+                    received_at_ms,
+                ));
+                true
+            }
+        };
+        changed || had_absent
+    }
+
+    /// The host's read failed. With a view its rows freeze and the host is
+    /// unreachable; without one the section is absent for `reason`.
+    pub fn mark_read_failed(&mut self, reason: impl Into<String>, now_ms: i64) -> bool {
+        let reason = reason.into();
+        match &mut self.view {
+            Some(view) => view.mark_unreachable(reason, now_ms),
+            None => {
+                let changed = self.absent.as_deref() != Some(reason.as_str());
+                self.absent = Some(reason);
+                changed
+            }
+        }
+    }
+
+    /// The daemon cannot serve the read at all: no view, and why.
+    pub fn mark_absent(&mut self, reason: impl Into<String>) -> bool {
+        let reason = reason.into();
+        let changed = self.view.is_some() || self.absent.as_deref() != Some(reason.as_str());
+        self.view = None;
+        self.absent = Some(reason);
+        changed
+    }
+
+    /// A newer Fleet revision was observed: rows go stale until a read lands.
+    pub fn observe_head(&mut self, head_revision: i64) -> bool {
+        self.view.as_mut().is_some_and(|view| view.observe_head(head_revision))
+    }
+}
+
+#[cfg(test)]
+mod agent_status_section_tests {
+    use super::AgentStatusSection;
+    use crate::app::versioned::Versioned;
+    use ainb_hangar_proto::agent_status::{RosterStatusResult, RosterStatusRow, status_row};
+    use ainb_hangar_proto::fleet::{
+        AttentionState, FleetCapabilities, FleetConfidence, FleetProvenance, FleetProvider,
+        FleetSession, LifecycleState, ManagementState, PaneBinding, TransportHealth,
+    };
+    use ainb_hangar_proto::status_view::ViewHealth;
+
+    fn session(attention: AttentionState, heartbeat: i64) -> FleetSession {
+        FleetSession {
+            session_key: "claude:one".into(),
+            provider: FleetProvider::Claude,
+            provider_session_id: Some("one".into()),
+            tmux_target: Some("dev:1.0".into()),
+            pane_binding: PaneBinding::Bound,
+            process_start_fingerprint: None,
+            cwd: "/w/app".into(),
+            display_name: None,
+            lifecycle: LifecycleState::Running,
+            active_work_count: 0,
+            attention,
+            current_request_fingerprint: None,
+            current_request: None,
+            management: ManagementState::Managed,
+            transport_health: TransportHealth::Healthy,
+            capabilities: FleetCapabilities::default(),
+            provenance: FleetProvenance::Authoritative,
+            confidence: FleetConfidence::High,
+            discovered_at: 1,
+            last_observed_at: heartbeat,
+            lifecycle_updated_at: 5,
+            attention_updated_at: 7,
+            model: None,
+            reasoning_effort: None,
+            model_updated_at: 0,
+            version: heartbeat,
+            updated_revision: heartbeat,
+        }
+    }
+
+    fn read(revision: i64, session: FleetSession) -> RosterStatusResult {
+        let status = status_row(&session, session.attention != AttentionState::None);
+        RosterStatusResult {
+            rows: vec![RosterStatusRow {
+                session,
+                status,
+                read_revision: revision,
+            }],
+            read_revision: revision,
+            unknown_events: Vec::new(),
+        }
+    }
+
+    /// #1015: section 20's version bumps on a status-row change and not on a
+    /// transport heartbeat that alters no rendered fact.
+    #[test]
+    fn a_heartbeat_leaves_the_section_version_untouched() {
+        let mut section = Versioned::new(AgentStatusSection::default());
+        assert!(section.update(|s| s.apply_read(read(3, session(AttentionState::Ask, 10)), 100)));
+        let after_first = section.version();
+
+        assert!(!section.update(|s| s.apply_read(read(4, session(AttentionState::Ask, 11)), 200)));
+        assert_eq!(
+            section.version(),
+            after_first,
+            "a heartbeat is not a change"
+        );
+
+        assert!(section.update(|s| s.apply_read(read(5, session(AttentionState::None, 12)), 300)));
+        assert_eq!(
+            section.version(),
+            after_first + 1,
+            "a state change is one bump"
+        );
+    }
+
+    /// #1015 failure story: absent without rows, unreachable with rows frozen,
+    /// stale when a newer revision is seen; each changes the version once.
+    #[test]
+    fn absent_unreachable_and_stale_are_section_facts() {
+        let mut section = Versioned::new(AgentStatusSection::default());
+        assert!(section.update(|s| s.mark_read_failed("connection refused", 1)));
+        assert_eq!(section.absent.as_deref(), Some("connection refused"));
+        assert!(!section.update(|s| s.mark_read_failed("connection refused", 2)));
+
+        section.update(|s| s.apply_read(read(3, session(AttentionState::Ask, 10)), 100));
+        assert_eq!(section.absent, None, "a landed read clears absent");
+        assert!(section.update(|s| s.observe_head(6)));
+        assert!(matches!(
+            section.view.as_ref().unwrap().health,
+            ViewHealth::Stale {
+                read_revision: 3,
+                head_revision: 6
+            }
+        ));
+        assert!(section.update(|s| s.mark_read_failed("daemon gone", 500)));
+        let view = section.view.as_ref().unwrap();
+        assert!(matches!(
+            &view.health,
+            ViewHealth::Unreachable {
+                stale_since_ms: 500,
+                ..
+            }
+        ));
+        assert_eq!(view.cards.len(), 1, "rows stay frozen as last read");
+
+        assert!(section.update(|s| s.mark_absent("daemon has no fleet/roster_status")));
+        assert!(section.view.is_none());
+    }
+
+    /// #983: section 20 must not be serialisable until the redaction layer
+    /// exists. Autoref probe: the inherent const wins only if `Serialize` holds.
+    #[test]
+    fn agent_status_section_is_not_serialize() {
+        trait NotSerialize {
+            const IS_SERIALIZE: bool = false;
+        }
+        struct Probe<T: ?Sized>(std::marker::PhantomData<T>);
+        impl<T: ?Sized> NotSerialize for Probe<T> {}
+        #[allow(dead_code)]
+        impl<T: ?Sized + serde::Serialize> Probe<T> {
+            const IS_SERIALIZE: bool = true;
+        }
+        assert!(!<Probe<AgentStatusSection>>::IS_SERIALIZE);
+        assert!(!<Probe<ainb_hangar_proto::status_view::StatusView>>::IS_SERIALIZE);
+        assert!(!<Probe<ainb_hangar_proto::status_view::AgentCard>>::IS_SERIALIZE);
+        assert!(
+            <Probe<ainb_hangar_proto::agent_status::AgentStatusRow>>::IS_SERIALIZE,
+            "probe works"
+        );
+    }
+}
