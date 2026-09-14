@@ -47,7 +47,8 @@ pub mod ids {
     pub const LOGIN_FINISHED: &str = "global.login_finished";
     /// `{"report": DaemonActionReport}`
     pub const DAEMON_ACTION_FINISHED: &str = "global.daemon_action_finished";
-    /// `{"store": String, "error": String}`
+    /// `{"store": String, "error": String}`, where `store` is a
+    /// `Persist::store_id` such as `"config"`
     pub const PERSIST_FAILED: &str = "global.persist_failed";
 
     /// Every report command id.
@@ -368,12 +369,13 @@ pub fn daemon_action_finished(report: &DaemonActionReport) -> Intent {
     command(ids::DAEMON_ACTION_FINISHED, json!({ "report": report }))
 }
 
-/// Report that the host could not write `store`.
+/// Report that the host could not write the store `store_id` names
+/// ([`crate::app::effect::Persist::store_id`]).
 #[must_use]
-pub fn persist_failed(store: &str, error: &str) -> Intent {
+pub fn persist_failed(store_id: &str, error: &str) -> Intent {
     command(
         ids::PERSIST_FAILED,
-        json!({ "store": store, "error": error }),
+        json!({ "store": store_id, "error": error }),
     )
 }
 
