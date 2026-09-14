@@ -987,6 +987,10 @@ const LEAF_TYPE_PREFIXES: &[&str] = &[
 /// Containers and options left empty in the sample on purpose, with the reason.
 const UNFILLED_WAIVED: &[(&str, &str)] = &[
     (
+        "TmuxView.embed_session",
+        "a TmuxSessionName written as a bare string: filled, and a leaf by shape",
+    ),
+    (
         "AgentCardFrame.wait_kind",
         "a WaitKind unit enum: filled, and a leaf by shape",
     ),
