@@ -1463,15 +1463,16 @@ mod menu_bar_render_tests {
 /// bar. Returns an empty vec when nothing should render (statusline
 /// unwired AND user declined, or status detection failed).
 ///
-/// The settings.json read goes through [`AppState::statusline_status`]
-/// so the top bar's 30-60Hz redraws don't translate into 30-60Hz
-/// filesystem reads.
+/// Draws from sections only (`config.statusline_status` and
+/// `fleet.live_window`, which the tick refreshes from the shared probe and
+/// watcher), so a host that receives mirrored sections draws the same row
+/// and no redraw touches the filesystem.
 pub fn build_live_status_spans(state: &AppState, max_width: usize) -> Vec<Span<'static>> {
     use crate::cli::statusline_install::StatuslineStatus;
     use crate::config::StatuslineDecision;
     use crate::models::live_window::Source;
 
-    let status = state.statusline_status();
+    let status = state.config.statusline_status.clone();
     let decision = state.config.app_config.ui_preferences.statusline_decision;
 
     // Trust the cache: if Tier1 data is flowing — whether it came from
@@ -1482,14 +1483,14 @@ pub fn build_live_status_spans(state: &AppState, max_width: usize) -> Vec<Span<'
     //
     // The snapshot is maintained by a background tokio poller so this
     // hot path never touches the filesystem itself.
-    let live = state.fleet.live_window_watcher.snapshot();
+    let live = &state.fleet.live_window;
     // Render the widget when Claude Tier1 data is flowing OR Codex usage is
     // present — Codex is overlaid independently (separate cache, its own
     // poller), so a user who runs Codex but never wired the Claude
     // statusline still sees their Codex burn instead of the CTA.
     let has_codex = live.codex_five_hour_pct.is_some() || live.codex_seven_day_pct.is_some();
     if live.source == Source::Tier1Cache || has_codex {
-        return build_live_widget_spans(&live, max_width);
+        return build_live_widget_spans(live, max_width);
     }
 
     match status {
