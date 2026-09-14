@@ -1062,10 +1062,12 @@ impl EventHandler {
         // opened via `ConfigEditSetting` is included only for its
         // `TextInput` / `NumberInput` variants (via
         // `ConfigPopupState::is_text_entry`); `Choice` and `Boolean`
-        // popups are navigation-only, so `H` is still allowed there.
+        // popups are navigation-only, so `H` is still allowed there. The `/`
+        // filter box is free-form too: every printable key belongs in the query.
         let config_text_active = state.shell.current_screen == screen_ids::CONFIG
             && (state.config.config_screen_state.editing
                 || state.config.config_screen_state.api_key_input_mode
+                || state.config.config_screen_state.is_searching()
                 || state.config.config_popup_state.is_text_entry());
 
         // Onboarding wizard text-entry steps: git-directories path input,
@@ -4919,11 +4921,17 @@ impl EventHandler {
             AppEvent::ConfigEditSetting => {
                 let selected = state.config.config_screen_state.current_setting().cloned();
                 if let Some(setting) = selected {
-                    // A row core cannot persist says so instead of opening an
-                    // editor that would throw the value away.
-                    if let Some(reason) =
+                    // The Claude auth row opens its own popup, from the list
+                    // and from a search match alike: picking "API key" there
+                    // also stores the key in the OS keychain, which the generic
+                    // choice popup cannot do.
+                    if setting.key == crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY {
+                        Self::process_event(AppEvent::AuthProviderPopupOpen, state);
+                    } else if let Some(reason) =
                         crate::config::screen_model::read_only_reason(&setting.key)
                     {
+                        // A row core cannot persist says so instead of opening
+                        // an editor that would throw the value away.
                         state.add_info_notification(format!("{}: {reason}", setting.label));
                     } else {
                         let title = setting.label.clone();

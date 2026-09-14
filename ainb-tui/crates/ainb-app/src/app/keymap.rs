@@ -465,6 +465,7 @@ impl KeyContext {
             "config.editing" => Self::Screen("config", SubContext::Named("editing")),
             "config.api_key" => Self::Screen("config", SubContext::Named("api_key")),
             "config.search" => Self::Screen("config", SubContext::Named("search")),
+            "config.categories" => Self::Screen("config", SubContext::Named("categories")),
             "config_popup.input" => Self::Screen("config_popup", SubContext::Named("input")),
             "auth_provider_popup.input" => {
                 Self::Screen("auth_provider_popup", SubContext::Named("input"))
@@ -691,6 +692,10 @@ pub fn active_contexts(state: &AppState, host: &HostFlags) -> Vec<KeyContext> {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("editing")));
                 } else if state.config.config_screen_state.is_searching() {
                     contexts.push(KeyContext::Screen(screen, SubContext::Named("search")));
+                } else if state.config.config_screen_state.focused_pane
+                    == crate::app::state::ConfigPane::Categories
+                {
+                    contexts.push(KeyContext::Screen(screen, SubContext::Named("categories")));
                 }
             }
             screen_ids::GIT_VIEW => {
