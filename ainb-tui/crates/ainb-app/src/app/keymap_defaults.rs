@@ -1320,6 +1320,20 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Select the sidebar item a click names; a second click opens it",
         ),
+        unbound(
+            Context::screen("git_view"),
+            "select_review_row",
+            AppEvent::GitReviewSelectRow {
+                target: crate::components::code_review::render::ReviewRowId::File(String::new()),
+            },
+            "Select the code review sidebar row a click names",
+        ),
+        unbound(
+            Context::screen("git_view"),
+            "scroll",
+            AppEvent::GitViewScrollBy(0),
+            "Scroll the active git view tab by the lines a wheel names",
+        ),
         // Host reports (`crate::app::reports::ids`), unbound for the same reason.
         unbound(
             Context::Global,
