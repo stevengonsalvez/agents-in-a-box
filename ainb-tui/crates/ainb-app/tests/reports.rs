@@ -429,3 +429,51 @@ fn the_login_report_lands_on_the_session_list_only_with_credentials() {
     assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
     assert!(moved.contains(&SectionId::Onboarding), "{moved:?}");
 }
+
+/// The Codex pairing code is a short-lived credential. The report that
+/// carries it can be dispatched to a remote reducer, so its serialised form
+/// holds a handle, and only the reducer of the process that ran `pair` shows
+/// the code.
+#[test]
+fn a_pairing_code_never_leaves_the_process_in_the_serialised_report() {
+    use ainb_app::cli::daemon::Action;
+    use ainb_app::fleet::daemons::probe::DaemonKind;
+
+    const CODE: &str = "PAIR-7Q4X-K2M9";
+    let mut state = AppState::new();
+    let daemons = &mut state.hangar.daemons_state;
+    daemons.dispatch(DaemonKind::HangarDaemon, Action::Pair);
+    let [request] = daemons.take_action_requests()[..] else {
+        panic!("one pair request");
+    };
+
+    let sealed = reports::DaemonActionReport {
+        daemon: DaemonKind::HangarDaemon.id().to_string(),
+        verb: Action::Pair.id().to_string(),
+        generation: 0,
+        ok: true,
+        summary: CODE.to_string(),
+        detail: format!("cmd: ainb daemon hangar-daemon pair\n\nstdout:\n{CODE}"),
+        local: None,
+    }
+    .sealed(request.generation);
+    let intent = reports::daemon_action_finished(&sealed);
+    let wire = serde_json::to_string(&intent).expect("the intent serialises");
+    assert!(
+        !wire.contains(CODE),
+        "the code left in the serialised report: {wire}"
+    );
+
+    // A reducer in another process gets the handle and nothing to redeem it
+    // for; this one shows the code on the row.
+    let _ = report(&mut state, intent);
+    let outcome = &state.hangar.daemons_state.outcomes[DaemonKind::HangarDaemon.id()];
+    assert_eq!(outcome.summary, CODE);
+    let value: serde_json::Value = serde_json::from_str(&wire).expect("json");
+    let args = value.pointer("/Command/1/report").expect("the report args");
+    assert!(
+        args["local"].is_string(),
+        "the serialised report carries a handle"
+    );
+    assert!(args["summary"].as_str().is_some_and(|s| s.contains("pairing code ready")));
+}
