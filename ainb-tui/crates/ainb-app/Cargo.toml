@@ -26,8 +26,6 @@ futures-util = { workspace = true }
 tar = { workspace = true }
 
 # Tmux and PTY
-portable-pty = { workspace = true }
-vt100 = { workspace = true }
 
 # Git
 git2 = { workspace = true }
