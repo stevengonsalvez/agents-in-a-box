@@ -47,6 +47,7 @@ scenario() {
 
   local story_ok=1
   grep -q 'states unverifiable' "$NODE_DIR/fleet-daemon-stopped.txt" || story_ok=0
+  grep -qE 'unreachable since|daemon not reachable' "$NODE_DIR/fleet-daemon-stopped.txt" || story_ok=0
   if ((!age_ok && !story_ok)); then
     observe "known failures: age renders ? (#$T0_SECTION_AGE_ISSUE) and no stopped-daemon story (#$T0_SECTION_STORY_ISSUE)"
   fi
