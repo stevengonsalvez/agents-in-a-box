@@ -5171,7 +5171,12 @@ impl EventHandler {
                             // Persist auth provider to config.toml
                             state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::ApiKey;
-                            if let Err(e) = state.config.app_config.save() {
+                            // Only this key: the rest of `app_config` is the startup snapshot,
+                            // and a whole-file save reverts what another TUI wrote since (#987).
+                            if let Err(e) = state.config.app_config.save_keys(&[
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                    .to_string(),
+                            ]) {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
@@ -5215,7 +5220,12 @@ impl EventHandler {
                             // Persist auth provider to config.toml
                             state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::SystemAuth;
-                            if let Err(e) = state.config.app_config.save() {
+                            // Only this key: the rest of `app_config` is the startup snapshot,
+                            // and a whole-file save reverts what another TUI wrote since (#987).
+                            if let Err(e) = state.config.app_config.save_keys(&[
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                    .to_string(),
+                            ]) {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
@@ -5255,7 +5265,14 @@ impl EventHandler {
                         // Persist switch to system auth in config.toml
                         state.config.app_config.authentication.claude_provider =
                             crate::config::ClaudeAuthProvider::SystemAuth;
-                        if let Err(e) = state.config.app_config.save() {
+                        // Only this key: the rest of `app_config` is the startup snapshot,
+                        // and a whole-file save reverts what another TUI wrote since (#987).
+                        if let Err(e) = state
+                            .config
+                            .app_config
+                            .save_keys(&[crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                .to_string()])
+                        {
                             tracing::warn!("Failed to save config: {}", e);
                         }
                     }
