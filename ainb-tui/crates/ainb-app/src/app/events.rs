@@ -1403,7 +1403,7 @@ impl EventHandler {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
-        let live_source = state.fleet.live_window_watcher.snapshot().source;
+        let live_source = state.host.live_window_watcher.snapshot().source;
         let status = state.statusline_status();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
@@ -1701,7 +1701,7 @@ impl EventHandler {
             PalCycleMode => Self::route_pal_dial(|dial| dial.cycle_mode(), state),
             PalRetry
                 if matches!(
-                    state.fleet.pal_dial.status(),
+                    state.host.pal_dial.status(),
                     crate::fleet::pal_dial::DialStatus::Failed { .. }
                 ) =>
             {
@@ -1937,7 +1937,7 @@ impl EventHandler {
         if state.shell.session_tab != crate::components::session_tabs::SessionTab::Pal {
             return None;
         }
-        turn(&mut state.fleet.pal_dial);
+        turn(&mut state.host.pal_dial);
         state.shell.ui_needs_refresh = true;
         Some(AppEvent::Consumed)
     }
@@ -2001,8 +2001,8 @@ impl EventHandler {
         }
 
         let host = match state.shell.session_tab {
-            SessionTab::Pal => state.fleet.pal_chat.as_mut(),
-            SessionTab::Thread => state.fleet.session_chat.as_mut().map(|(_, host)| host),
+            SessionTab::Pal => state.host.pal_chat.as_mut(),
+            SessionTab::Thread => state.host.session_chat.as_mut().map(|(_, host)| host),
             SessionTab::Preview | SessionTab::Ask | SessionTab::Err | SessionTab::Log => None,
         }?;
         let outcome = reduce_chat_key(host.state_mut(), action);
@@ -2506,19 +2506,19 @@ impl EventHandler {
             }
             AppEvent::NextSession => {
                 state.next_session();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::PreviousSession => {
                 state.previous_session();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::NextWorkspace => {
                 state.next_workspace();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::PreviousWorkspace => {
                 state.previous_workspace();
-                state.workspace_load.last_preview_update = None;
+                state.host.last_preview_update = None;
             }
             AppEvent::GoToTop => {
                 state.select_first_visible_session_in_current_workspace();
@@ -3214,7 +3214,7 @@ impl EventHandler {
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
                 let generation = state.hangar.daemons_state.next_generation();
-                if state.fleet.daemon_start_cta.start(generation) {
+                if state.host.daemon_start_cta.start(generation) {
                     state.emit(Effect::RunDaemonAction {
                         daemon: crate::fleet::daemons::probe::DaemonKind::HangarDaemon,
                         action: crate::cli::daemon::Action::Start,
@@ -3982,7 +3982,7 @@ impl EventHandler {
                 if report.daemon == crate::fleet::daemons::probe::DaemonKind::HangarDaemon.id()
                     && action == crate::cli::daemon::Action::Start
                 {
-                    state.fleet.daemon_start_cta.finish(report.generation, &outcome);
+                    state.host.daemon_start_cta.finish(report.generation, &outcome);
                 }
                 state.hangar.daemons_state.finish_action(
                     &report.daemon,
@@ -6152,7 +6152,7 @@ impl EventHandler {
                 // already carry our block. This event is reachable from the
                 // global `W` shortcut as well as the legacy Burndown route,
                 // so the guard lives here rather than at the keymap.
-                if state.fleet.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
+                if state.host.live_window_watcher.snapshot().source == LiveSource::Tier1Cache {
                     return;
                 }
                 // Read uncached: the install is a once-per-session action, so
@@ -9078,7 +9078,7 @@ mod session_composer_key_tests {
         let mut state = AppState::default();
         state.shell.current_screen = ids::SESSION_LIST.to_string();
         state.shell.session_tab = SessionTab::Pal;
-        state.fleet.pal_chat = Some(ChatHost::pal());
+        state.host.pal_chat = Some(ChatHost::pal());
         assert!(
             state.session_composer_captures_text(),
             "the fixture must actually be capturing, or every assertion below is vacuous"
