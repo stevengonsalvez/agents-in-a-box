@@ -582,6 +582,31 @@ pub enum SessionListRowTarget {
     Attachable(AttachableRef),
 }
 
+/// A session-list row by what it shows rather than where it sits.
+///
+/// Pointer commands carry this instead of a row index, so a click resolved
+/// against a frame drawn before the list changed selects the row the user saw
+/// or nothing, never whatever slid into its position. It is an intent
+/// payload, not state, so it crosses the wire.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionListRowId {
+    /// A workspace header, by the workspace's path.
+    Workspace(std::path::PathBuf),
+    /// An ainb session, by its id.
+    Session(Uuid),
+    /// A workspace's shell, by the workspace's path.
+    WorkspaceShell(std::path::PathBuf),
+    /// The "SSH Sessions" header.
+    SshHeader,
+    /// An SSH session, by its id.
+    SshSession(Uuid),
+    /// The "Other tmux" header.
+    OtherTmuxHeader,
+    /// A tmux session ainb did not create, by name.
+    OtherTmux(String),
+}
+
 // View enum was replaced in Phase 2a by ScreenId (String) + the screens::ids
 // constants module. Layout dispatch now goes through app::ScreenRegistry; see
 // `crate::app::screens` for the trait + identifier constants.
@@ -5576,6 +5601,98 @@ impl AppState {
         }
         self.workspace_load.last_preview_update = None;
         true
+    }
+
+    /// The identity of what `target` shows, or `None` when its indices no
+    /// longer point at anything.
+    #[must_use]
+    pub fn session_list_row_id(&self, target: SessionListRowTarget) -> Option<SessionListRowId> {
+        let workspace = |index: usize| self.sessions.workspaces.get(index);
+        Some(match target {
+            SessionListRowTarget::WorkspaceHeader { workspace_idx } => {
+                SessionListRowId::Workspace(workspace(workspace_idx)?.path.clone())
+            }
+            SessionListRowTarget::SshHeader => SessionListRowId::SshHeader,
+            SessionListRowTarget::OtherTmuxHeader => SessionListRowId::OtherTmuxHeader,
+            SessionListRowTarget::Attachable(AttachableRef::WorkspaceSession {
+                workspace_idx,
+                session_idx,
+            }) => {
+                SessionListRowId::Session(workspace(workspace_idx)?.sessions.get(session_idx)?.id)
+            }
+            SessionListRowTarget::Attachable(AttachableRef::WorkspaceShell { workspace_idx }) => {
+                let workspace = workspace(workspace_idx)?;
+                workspace.shell_session.as_ref()?;
+                SessionListRowId::WorkspaceShell(workspace.path.clone())
+            }
+            SessionListRowTarget::Attachable(AttachableRef::SshSession { ssh_idx }) => {
+                SessionListRowId::SshSession(self.ssh.ssh_sessions.get(ssh_idx)?.id)
+            }
+            SessionListRowTarget::Attachable(AttachableRef::OtherTmux { other_idx }) => {
+                SessionListRowId::OtherTmux(
+                    self.tmux.other_tmux_sessions.get(other_idx)?.name.clone(),
+                )
+            }
+        })
+    }
+
+    /// Where the row `id` names sits in the current list, or `None` when it is
+    /// gone.
+    #[must_use]
+    pub fn session_list_row_target_for(
+        &self,
+        id: &SessionListRowId,
+    ) -> Option<SessionListRowTarget> {
+        let workspace_index = |path: &std::path::Path| {
+            self.sessions.workspaces.iter().position(|workspace| workspace.path == path)
+        };
+        Some(match id {
+            SessionListRowId::Workspace(path) => SessionListRowTarget::WorkspaceHeader {
+                workspace_idx: workspace_index(path)?,
+            },
+            SessionListRowId::Session(session_id) => {
+                let (workspace_idx, session_idx) =
+                    self.sessions.workspaces.iter().enumerate().find_map(|(w, workspace)| {
+                        let s = workspace.sessions.iter().position(|s| s.id == *session_id)?;
+                        Some((w, s))
+                    })?;
+                SessionListRowTarget::Attachable(AttachableRef::WorkspaceSession {
+                    workspace_idx,
+                    session_idx,
+                })
+            }
+            SessionListRowId::WorkspaceShell(path) => {
+                let workspace_idx = workspace_index(path)?;
+                self.sessions.workspaces[workspace_idx].shell_session.as_ref()?;
+                SessionListRowTarget::Attachable(AttachableRef::WorkspaceShell { workspace_idx })
+            }
+            SessionListRowId::SshHeader => {
+                if self.ssh.ssh_sessions.is_empty() {
+                    return None;
+                }
+                SessionListRowTarget::SshHeader
+            }
+            SessionListRowId::SshSession(session_id) => {
+                SessionListRowTarget::Attachable(AttachableRef::SshSession {
+                    ssh_idx: self.ssh.ssh_sessions.iter().position(|s| s.id == *session_id)?,
+                })
+            }
+            SessionListRowId::OtherTmuxHeader => {
+                if self.tmux.other_tmux_sessions.is_empty() {
+                    return None;
+                }
+                SessionListRowTarget::OtherTmuxHeader
+            }
+            SessionListRowId::OtherTmux(name) => {
+                SessionListRowTarget::Attachable(AttachableRef::OtherTmux {
+                    other_idx: self
+                        .tmux
+                        .other_tmux_sessions
+                        .iter()
+                        .position(|session| session.name == *name)?,
+                })
+            }
+        })
     }
 
     pub fn session_list_row_target(&self, row_index: usize) -> Option<SessionListRowTarget> {
