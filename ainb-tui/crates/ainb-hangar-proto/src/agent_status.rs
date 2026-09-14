@@ -253,8 +253,8 @@ pub fn status_row(session: &FleetSession, has_open_request: bool) -> AgentStatus
 /// Separate from `status_row` rather than a new field on [`FleetSession`]:
 /// the wire session is built by 34 struct literals across the workspace, and
 /// the one surface that needs the stored value today is the daemon's own
-/// `fleet/status`, which holds the store row. The panel picks it up when it
-/// moves onto `fleet/status`.
+/// `fleet/status`, which holds the store row. The TUI Fleet panel reads that
+/// method's rows directly (#962), so it never calls this derivation itself.
 #[must_use]
 pub fn status_row_with_tier(
     session: &FleetSession,
