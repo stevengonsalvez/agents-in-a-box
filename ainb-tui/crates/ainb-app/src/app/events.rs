@@ -7037,12 +7037,19 @@ impl EventHandler {
             AppEvent::WatchPluginScreen { screen, watching } => {
                 let plugin_screen =
                     crate::app::screens::builtin::plugin_id_for_screen(&screen).is_some();
-                let watched = state.plugins_host.watched_plugin_screens.contains(&screen);
+                let watched = state.plugins_host.watched_plugin_screens.contains_key(&screen);
+                let now = std::time::Instant::now();
                 if !plugin_screen {
                     tracing::warn!(%screen, "watch request for a screen no plugin owns");
-                } else if watching && !watched {
-                    state.plugins_host.watched_plugin_screens.insert(screen);
-                } else if !watching && watched {
+                } else if watching && watched {
+                    // A renewal only moves the lease, which no frame carries.
+                    state.plugins_host.update(|host| {
+                        host.watched_plugin_screens.insert(screen, now);
+                        false
+                    });
+                } else if watching {
+                    state.plugins_host.watched_plugin_screens.insert(screen, now);
+                } else if watched {
                     state.plugins_host.watched_plugin_screens.remove(&screen);
                 }
             }
