@@ -655,7 +655,8 @@ pub struct Session {
     pub codex_model: Option<CodexModel>,
     #[serde(default)]
     pub ssh_target: Option<SshTarget>, // SSH connection target for SSH agent type
-    #[serde(default)]
+    // The operator's own label: kept on disk, left off a mirror frame (#983 M19).
+    #[serde(default, skip_serializing_if = "crate::wire::fields::omit_in_frame")]
     pub display_name: Option<String>, // Custom display name (overrides auto-generated name in UI)
 
     // Tmux integration fields
