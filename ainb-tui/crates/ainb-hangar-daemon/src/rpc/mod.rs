@@ -521,8 +521,12 @@ async fn serve_conn(
     };
 
     let events = broker.sink();
-    let connection = registry.insert(authenticated.surface).await;
-    emit_connections_changed(&events, &registry).await;
+    // A transient call connection (#963) is served like any other but never
+    // listed, so neither its open nor its close is a registry change.
+    let connection = registry.insert(authenticated.surface, authenticated.transient).await;
+    if !authenticated.transient {
+        emit_connections_changed(&events, &registry).await;
+    }
     // The connection's event subscription: at most one forwarder; a
     // re-subscribe replaces it (last subscribe wins, no duplicate delivery).
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
