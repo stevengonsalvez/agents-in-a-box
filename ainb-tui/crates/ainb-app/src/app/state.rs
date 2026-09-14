@@ -11791,7 +11791,11 @@ impl AppState {
             // seconds old rendered as "40m" and its `request_id`
             // (`ASK:<since_ms>`) collided with the older one — which is how a
             // previous question's draft could land under a new one.
-            let key = (id, chip.kind, chip.detail.clone());
+            let key = AttentionLocalKey {
+                session_id: id,
+                kind: chip.kind,
+                detail: chip.detail.clone(),
+            };
             let first_seen = *self.fleet.attention_local_since.entry(key).or_insert(chip.since_ms);
             chip.since_ms = first_seen;
         }
@@ -12016,17 +12020,21 @@ impl AppState {
         // A session that recovered (or vanished) must lose its ERR clock, or a
         // later failure would render with the age of the previous one.
         self.fleet.attention_error_since.retain(|id, _| live.contains(id));
-        self.fleet.attention_local_since.retain(|(id, ..), _| live.contains(id));
+        self.fleet.attention_local_since.retain(|key, _| live.contains(&key.session_id));
         // Every (session, kind) a LOCAL chip still claims this pass. Anything
         // else loses its clock below, so a question that closed and a later one
         // of the same kind do not share an instant.
-        let still_open: HashSet<(Uuid, AttentionKind, Option<String>)> = marks
+        let still_open: HashSet<AttentionLocalKey> = marks
             .iter()
             .flat_map(|(id, chips, ..)| {
                 chips
                     .iter()
                     .filter(|chip| !matches!(chip.answerable, Answerable::Daemon { .. }))
-                    .map(move |chip| (*id, chip.kind, chip.detail.clone()))
+                    .map(move |chip| AttentionLocalKey {
+                        session_id: *id,
+                        kind: chip.kind,
+                        detail: chip.detail.clone(),
+                    })
             })
             .collect();
         self.fleet.attention_local_since.retain(|key, _| still_open.contains(key));
