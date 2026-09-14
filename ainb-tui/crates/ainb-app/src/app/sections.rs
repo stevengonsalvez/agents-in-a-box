@@ -357,19 +357,6 @@ pub struct WorkspaceLoadSection {
     // Background workspace loading state
     pub is_loading_workspaces: bool,
     pub workspace_load_error: Option<String>,
-    pub workspace_load_started: Option<Instant>,
-    /// Channel receiver for background workspace loading results
-    pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
-    // Periodic session snapshot tracking
-    pub last_snapshot_time: Option<Instant>,
-    // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
-    pub last_preview_update: Option<Instant>,
-    // Throttle for the cheaper non-selected-session status sweep. Status
-    // (running/idle) is not time-critical, so it polls on a longer cadence than
-    // the selected session's live preview: one `capture-pane` subprocess per
-    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
-    // every 5s preview refresh. (perf: bead 9pb)
-    pub last_status_check: Option<Instant>,
 }
 
 impl Default for WorkspaceLoadSection {
@@ -377,11 +364,6 @@ impl Default for WorkspaceLoadSection {
         Self {
             is_loading_workspaces: false,
             workspace_load_error: None,
-            workspace_load_started: None,
-            workspace_load_receiver: None,
-            last_snapshot_time: None,
-            last_preview_update: None,
-            last_status_check: None,
         }
     }
 }
@@ -395,29 +377,10 @@ pub struct NewSessionSection {
     // `usage_state` / `usage_load_receiver`. Statusline-related state
     // (live_window_watcher, the statusline probe) stays with the host app
     // because that's a host CLI install concern, not a plugin one.
-    /// Background base-branch refresh for the Configure picker. The fetch +
-    /// re-list runs on `spawn_blocking`; the result lands here and is applied
-    /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
-    /// generation guard, so results from a closed or reopened picker are dropped.
-    pub branch_refresh_receiver: Option<
-        mpsc::UnboundedReceiver<(
-            u64,
-            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
-        )>,
-    >,
     /// Current branch-refresh generation (bumped on every picker open).
     pub branch_refresh_seq: u64,
-    /// Background remote-repo pre-flight for the Configure screen (ls-remote
-    /// at open: does the repo exist, does it have branches). Applied by
-    /// `check_repo_check_complete` on the next tick; the `u64` is a
-    /// generation guard so a stale check can't stamp a newer Configure form.
-    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
     /// Current repo-check generation (bumped on every Configure open).
     pub repo_check_seq: u64,
-    /// Background empty-remote initialization (`[i]` on Configure: README +
-    /// initial commit + push). `Ok(branch)` carries the branch the commit
-    /// landed on. Applied by `check_repo_init_complete` on the next tick.
-    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
     /// Current repo-init generation.
     pub repo_init_seq: u64,
 }
@@ -426,11 +389,8 @@ impl Default for NewSessionSection {
     fn default() -> Self {
         Self {
             new_session_state: None,
-            branch_refresh_receiver: None,
             branch_refresh_seq: 0,
-            repo_check_receiver: None,
             repo_check_seq: 0,
-            repo_init_receiver: None,
             repo_init_seq: 0,
         }
     }
@@ -477,27 +437,10 @@ pub struct LogsSection {
     pub logs: HashMap<Uuid, Vec<String>>,
     // Claude chat integration
     pub live_logs: HashMap<Uuid, Vec<LogEntry>>,
-    // Track when logs were last updated for each session
-    pub log_last_updated: HashMap<Uuid, std::time::Instant>,
-    // Track the last time we checked for log updates globally
-    pub last_log_check: Option<std::time::Instant>,
     // Track if current directory is a git repository
     pub last_logs_session_id: Option<Uuid>,
-    // Claude API client manager (when initialized)
-    pub log_streaming_coordinator: Option<LogStreamingCoordinator>,
-    // Channel sender for log streaming
-    pub log_sender: Option<mpsc::UnboundedSender<(Uuid, LogEntry)>>,
     // Log history viewer state
     pub log_history_state: crate::components::LogHistoryViewerState,
-    /// The `log` tab's history, filled by [`crate::fleet::session_log`] on its
-    /// own thread.
-    ///
-    /// Read on the render path, never QUERIED there: the store read used to
-    /// live inside `terminal.draw` and cost a real store up to 948 ms a frame.
-    pub session_log: Arc<crate::fleet::session_log::Shared>,
-    /// Whether the session-log worker is alive. Same idempotence flag, and the
-    /// same reason, as [`Self::attention_poll_running`].
-    pub session_log_running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for LogsSection {
@@ -505,14 +448,8 @@ impl Default for LogsSection {
         Self {
             logs: HashMap::new(),
             live_logs: HashMap::new(),
-            log_last_updated: HashMap::new(),
-            last_log_check: None,
             last_logs_session_id: None,
-            log_streaming_coordinator: None,
-            log_sender: None,
             log_history_state: crate::components::LogHistoryViewerState::new(),
-            session_log: Arc::new(crate::fleet::session_log::Shared::default()),
-            session_log_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -534,9 +471,6 @@ pub struct TmuxSection {
     // the new target instead of silently refocusing the stale one (see
     // `AppState::in_place_target`).
     pub embed_session: Option<crate::app::effect::TmuxSessionName>,
-    // Tmux integration
-    pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
-    pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
     // Other tmux sessions (not managed by agents-in-a-box)
     pub other_tmux_sessions: Vec<crate::models::OtherTmuxSession>,
     pub other_tmux_expanded: bool,
@@ -546,30 +480,18 @@ pub struct TmuxSection {
     pub other_tmux_rename_mode: bool,
     /// Buffer for the new name being typed during rename
     pub other_tmux_rename_buffer: String,
-    // A changed selection must settle before starting a read-only client.
-    pub(crate) observer_pending: Option<(String, Instant)>,
-    // A read-only observer that dies waits before the next retry.
-    pub(crate) observer_failed_target: Option<(String, Instant, u8)>,
-    // A spawned observer must survive briefly before it clears a prior retry
-    // count. `tmux attach-session` reports some startup failures asynchronously.
-    pub(crate) observer_started_at: Option<Instant>,
 }
 
 impl Default for TmuxSection {
     fn default() -> Self {
         Self {
             embed_session: None,
-            tmux_sessions: HashMap::new(),
-            preview_update_task: None,
             other_tmux_sessions: Vec::new(),
             other_tmux_expanded: true, // Default to expanded
             selected_other_tmux_index: None,
             selected_other_tmux_sessions: HashSet::new(),
             other_tmux_rename_mode: false,
             other_tmux_rename_buffer: String::new(),
-            observer_pending: None,
-            observer_failed_target: None,
-            observer_started_at: None,
         }
     }
 }
@@ -582,53 +504,18 @@ pub struct FleetSection {
     /// while the user is attached, so re-marking only happens for
     /// activity that arrives after they look away.
     pub attention_baseline: HashMap<Uuid, i64>,
-    /// Background poller for the live OAuth-window snapshot. The render
-    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
-    /// calling `live_window::current()` directly, because Tier 2's JSONL walk
-    /// would otherwise stall input handling on every frame.
-    pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
     /// The watcher's latest snapshot, copied in on the tick when it changes.
     /// Renderers draw the status bar's quota widget from this, so a host that
     /// only receives sections draws it too.
     pub live_window: crate::models::live_window::LiveWindow,
-    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
-    // session is live but the proxy died).
-    pub last_headroom_watchdog: Option<std::time::Instant>,
-    // Track the last time we checked for OAuth token refresh
-    pub last_token_refresh_check: Option<std::time::Instant>,
     /// The `ask` pane's own state: which option is selected, what has been
     /// typed, and what the last send did.
     pub ask_state: crate::fleet::answer::AskState,
-    /// The Pal conversation, opened lazily the first time the tab is.
-    ///
-    /// Lazy because opening it dials the daemon to resolve the minted channel
-    /// scope, and an operator who never opens the tab should never pay for it.
-    pub pal_chat: Option<crate::fleet::chat_host::ChatHost>,
-    /// The Pal pane's engine / model / guardrail header.
-    ///
-    /// NOT lazy like the conversation: the header is how an operator recovers
-    /// from an adapter that will not spawn, so it reads the registry the first
-    /// time the tab is rendered rather than waiting for a chat that may never
-    /// open. It costs one `fleet/adapter_list` per session.
-    pub pal_dial: crate::fleet::pal_dial::PalDial,
-    /// The Pal pane's offer to start the hangar daemon it needs.
-    ///
-    /// One per process, not one per pane: the offer starts the daemon the whole
-    /// TUI talks to, and a second copy would let two panes each shell a start
-    /// into the same home.
-    pub daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta,
     /// The broadcast composer, shown on `thread` while rows are checked.
     ///
     /// Survives a change of checkbox set on purpose: an operator who ticks a
     /// fifth session halfway through typing must not lose what they typed.
     pub broadcast: crate::fleet::broadcast::Broadcast,
-    /// The selected session's own thread, rebuilt when the selection moves to a
-    /// different session.
-    ///
-    /// One host, not one per session: a thread the operator has navigated away
-    /// from is not being read, and keeping N of them alive means N poll loops
-    /// against the daemon for conversations nobody is looking at.
-    pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
     /// The daemon's half of the attention picture, refreshed by
     /// [`crate::fleet::attention_poll`] on its own thread.
     ///
@@ -641,18 +528,6 @@ pub struct FleetSection {
     /// Snapshot metadata matched to local session identities. This avoids
     /// assigning a child sharing a cwd to its parent by accident.
     pub fleet_metadata: HashMap<Uuid, SessionFleetMetadata>,
-    /// Whether the attention poller thread is alive, so the render loop can
-    /// start one without having to remember whether it already did.
-    pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
-
-    /// The poller's publish counter, and the last value this section folded in.
-    ///
-    /// `daemon_attention` and `fleet_snapshot` are shared handles: the worker
-    /// writes through them without anything here taking `&mut`, so the section
-    /// version would never move for daemon-side news. The counter is read by
-    /// `&` like the cells, and `daemon_attention_seen` is the versioned copy
-    /// that `refresh_daemon_attention_generation` folds it into once a frame.
-    pub daemon_attention_generation: crate::fleet::attention_poll::Generation,
     pub daemon_attention_seen: u64,
     /// Daemon attention rows whose cwd matched no row on this screen, counted
     /// for the header so the ONE attention surface never silently swallows a
@@ -686,23 +561,14 @@ impl Default for FleetSection {
     fn default() -> Self {
         Self {
             attention_baseline: HashMap::new(),
-            live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
             live_window: crate::models::live_window::LiveWindow::default(),
-            last_headroom_watchdog: None,
-            last_token_refresh_check: None,
             ask_state: crate::fleet::answer::AskState::default(),
-            pal_chat: None,
-            pal_dial: crate::fleet::pal_dial::PalDial::new(),
-            daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
             broadcast: crate::fleet::broadcast::Broadcast::default(),
-            session_chat: None,
             daemon_attention: Arc::new(Mutex::new(
                 crate::fleet::attention::DaemonAttention::default(),
             )),
             fleet_snapshot: Arc::new(Mutex::new(Vec::new())),
             fleet_metadata: HashMap::new(),
-            attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             daemon_attention_seen: 0,
             attention_elsewhere: 0,
             attention_error_since: HashMap::new(),
@@ -1031,5 +897,157 @@ mod agent_status_section_tests {
             <Probe<ainb_hangar_proto::agent_status::AgentStatusRow>>::IS_SERIALIZE,
             "probe works"
         );
+    }
+}
+
+/// What only the process running the reducer can use: channels and task
+/// handles, worker liveness flags, the handles background workers write
+/// through, and the timers that pace the tick.
+///
+/// Deliberately not a section. None of it is something a renderer draws and
+/// none of it can cross to another process, so writing it bumps no version and
+/// no frame carries it.
+#[derive(Debug)]
+pub struct HostOnlyState {
+    // Tmux integration
+    pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,
+    pub preview_update_task: Option<tokio::task::JoinHandle<()>>,
+    // A changed selection must settle before starting a read-only client.
+    pub(crate) observer_pending: Option<(String, Instant)>,
+    // A read-only observer that dies waits before the next retry.
+    pub(crate) observer_failed_target: Option<(String, Instant, u8)>,
+    // A spawned observer must survive briefly before it clears a prior retry
+    // count. `tmux attach-session` reports some startup failures asynchronously.
+    pub(crate) observer_started_at: Option<Instant>,
+    pub workspace_load_started: Option<Instant>,
+    /// Channel receiver for background workspace loading results
+    pub workspace_load_receiver: Option<mpsc::UnboundedReceiver<WorkspaceLoadResult>>,
+    // Periodic session snapshot tracking
+    pub last_snapshot_time: Option<Instant>,
+    // Throttled tmux preview updates (avoid spawning subprocesses every 250ms tick)
+    pub last_preview_update: Option<Instant>,
+    // Throttle for the cheaper non-selected-session status sweep. Status
+    // (running/idle) is not time-critical, so it polls on a longer cadence than
+    // the selected session's live preview: one `capture-pane` subprocess per
+    // non-selected session is only spawned every `STATUS_INTERVAL_SECS`, not on
+    // every 5s preview refresh. (perf: bead 9pb)
+    pub last_status_check: Option<Instant>,
+    /// Background base-branch refresh for the Configure picker. The fetch +
+    /// re-list runs on `spawn_blocking`; the result lands here and is applied
+    /// by `check_branch_refresh_complete` on the next tick. The `u64` is a
+    /// generation guard, so results from a closed or reopened picker are dropped.
+    pub branch_refresh_receiver: Option<
+        mpsc::UnboundedReceiver<(
+            u64,
+            Result<Vec<crate::git::branch_list::BranchEntry>, String>,
+        )>,
+    >,
+    /// Background remote-repo pre-flight for the Configure screen (ls-remote
+    /// at open: does the repo exist, does it have branches). Applied by
+    /// `check_repo_check_complete` on the next tick; the `u64` is a
+    /// generation guard so a stale check can't stamp a newer Configure form.
+    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
+    /// Background empty-remote initialization (`[i]` on Configure: README +
+    /// initial commit + push). `Ok(branch)` carries the branch the commit
+    /// landed on. Applied by `check_repo_init_complete` on the next tick.
+    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
+    // Track when logs were last updated for each session
+    pub log_last_updated: HashMap<Uuid, std::time::Instant>,
+    // Track the last time we checked for log updates globally
+    pub last_log_check: Option<std::time::Instant>,
+    // Claude API client manager (when initialized)
+    pub log_streaming_coordinator: Option<LogStreamingCoordinator>,
+    // Channel sender for log streaming
+    pub log_sender: Option<mpsc::UnboundedSender<(Uuid, LogEntry)>>,
+    /// The `log` tab's history, filled by [`crate::fleet::session_log`] on its
+    /// own thread.
+    ///
+    /// Read on the render path, never QUERIED there: the store read used to
+    /// live inside `terminal.draw` and cost a real store up to 948 ms a frame.
+    pub session_log: Arc<crate::fleet::session_log::Shared>,
+    /// Whether the session-log worker is alive. Same idempotence flag, and the
+    /// same reason, as [`Self::attention_poll_running`].
+    pub session_log_running: Arc<std::sync::atomic::AtomicBool>,
+    /// Background poller for the live OAuth-window snapshot. The render
+    /// path reads via `snapshot()` (cheap RwLock read + clone) instead of
+    /// calling `live_window::current()` directly, because Tier 2's JSONL walk
+    /// would otherwise stall input handling on every frame.
+    pub live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher,
+    // Track the last Headroom proxy watchdog tick (re-ensure if a Headroom
+    // session is live but the proxy died).
+    pub last_headroom_watchdog: Option<std::time::Instant>,
+    // Track the last time we checked for OAuth token refresh
+    pub last_token_refresh_check: Option<std::time::Instant>,
+    /// The Pal conversation, opened lazily the first time the tab is.
+    ///
+    /// Lazy because opening it dials the daemon to resolve the minted channel
+    /// scope, and an operator who never opens the tab should never pay for it.
+    pub pal_chat: Option<crate::fleet::chat_host::ChatHost>,
+    /// The Pal pane's engine / model / guardrail header.
+    ///
+    /// NOT lazy like the conversation: the header is how an operator recovers
+    /// from an adapter that will not spawn, so it reads the registry the first
+    /// time the tab is rendered rather than waiting for a chat that may never
+    /// open. It costs one `fleet/adapter_list` per session.
+    pub pal_dial: crate::fleet::pal_dial::PalDial,
+    /// The Pal pane's offer to start the hangar daemon it needs.
+    ///
+    /// One per process, not one per pane: the offer starts the daemon the whole
+    /// TUI talks to, and a second copy would let two panes each shell a start
+    /// into the same home.
+    pub daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta,
+    /// The selected session's own thread, rebuilt when the selection moves to a
+    /// different session.
+    ///
+    /// One host, not one per session: a thread the operator has navigated away
+    /// from is not being read, and keeping N of them alive means N poll loops
+    /// against the daemon for conversations nobody is looking at.
+    pub session_chat: Option<(String, crate::fleet::chat_host::ChatHost)>,
+    /// Whether the attention poller thread is alive, so the render loop can
+    /// start one without having to remember whether it already did.
+    pub attention_poll_running: Arc<std::sync::atomic::AtomicBool>,
+    /// The attention poller's publish counter.
+    ///
+    /// `FleetSection::daemon_attention` and `fleet_snapshot` are shared
+    /// handles: the worker writes through them without anything taking `&mut`,
+    /// so the section version would never move for daemon-side news. The
+    /// counter is read by `&` like the cells, and
+    /// `FleetSection::daemon_attention_seen` is the versioned copy that
+    /// `refresh_daemon_attention_generation` folds it into once a frame.
+    pub daemon_attention_generation: crate::fleet::attention_poll::Generation,
+}
+
+impl Default for HostOnlyState {
+    fn default() -> Self {
+        Self {
+            tmux_sessions: HashMap::new(),
+            preview_update_task: None,
+            observer_pending: None,
+            observer_failed_target: None,
+            observer_started_at: None,
+            workspace_load_started: None,
+            workspace_load_receiver: None,
+            last_snapshot_time: None,
+            last_preview_update: None,
+            last_status_check: None,
+            branch_refresh_receiver: None,
+            repo_check_receiver: None,
+            repo_init_receiver: None,
+            log_last_updated: HashMap::new(),
+            last_log_check: None,
+            log_streaming_coordinator: None,
+            log_sender: None,
+            session_log: Arc::new(crate::fleet::session_log::Shared::default()),
+            session_log_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            live_window_watcher: crate::models::live_window_watcher::LiveWindowWatcher::default(),
+            last_headroom_watchdog: None,
+            last_token_refresh_check: None,
+            pal_chat: None,
+            pal_dial: crate::fleet::pal_dial::PalDial::new(),
+            daemon_start_cta: crate::fleet::daemon_cta::DaemonStartCta::default(),
+            session_chat: None,
+            attention_poll_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            daemon_attention_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 }
