@@ -155,7 +155,13 @@ pub enum TerminalTarget {
     /// Terminal host: sizes the pane for its layout, opens a writable tmux
     /// client on it, keeps the client, and reports
     /// [`crate::app::reports::in_place_opened`], or
-    /// [`crate::app::reports::in_place_failed`] with the error. It closes the
+    /// [`crate::app::reports::in_place_failed`] with the error. A host must
+    /// not report `in_place_opened` before it holds the client: the reducer
+    /// focuses the pane on that report. While the pane is live the host sends
+    /// every key to the client except the chord
+    /// [`crate::app::keymap::Keymap::releases_in_place_pane`] names, which it
+    /// runs as `embed_interactive.detach`. A host that can never hold a
+    /// writable client answers `in_place_failed` with `unsupported`. It closes the
     /// client once `TmuxSection::embed_session` no longer names the session,
     /// which is how the reducer declines or releases it. Output, input and
     /// exit stay between the host and its client; an exit or a closed input
