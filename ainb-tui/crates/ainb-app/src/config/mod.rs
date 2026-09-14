@@ -540,6 +540,18 @@ pub struct FleetStatusConfig {
     /// Env: `AINB_FLEET_LEGACY_CLASSIFY_PRIMARY`.
     #[serde(default)]
     pub legacy_classify_primary: bool,
+    /// Return the TUI Fleet panel to the pre-section read: `fleet/snapshot`
+    /// and `fleet/status` fetched separately and joined, instead of the one
+    /// joined `fleet/roster_status` read (T0-section, #1015).
+    ///
+    /// The ONE-RELEASE rollback for T0-section: honoured in the first tagged
+    /// release that carries section 20 and removed, with the pre-section read,
+    /// in the release after it. Both paths fold through the same reducer, so
+    /// this changes which daemon reads the panel pays for, never its words.
+    ///
+    /// Env: `AINB_FLEET_LEGACY_PANEL`.
+    #[serde(default)]
+    pub legacy_panel: bool,
 }
 
 /// Fleet orchestration configuration.

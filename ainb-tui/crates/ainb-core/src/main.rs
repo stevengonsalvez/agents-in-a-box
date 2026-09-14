@@ -194,6 +194,12 @@ async fn tokio_main() -> Result<()> {
             // marked a surface for good, so no call made during startup or
             // teardown lists as a second row.
             let presence = spawn_tui_presence();
+            // Section 20 (T0-section, #1015): one joined daemon read per Fleet
+            // revision, folded into the app state by its reducer. Held for the
+            // TUI's lifetime; dropping it stops the task.
+            let mut agent_status = ainb::agent_status_host::AgentStatusHost::spawn(Box::new(
+                fleet::bridge::daemon::tui_client,
+            ));
 
             // A plugin-disabled TUI is a diagnostic fallback with no Hangar
             // consumer. Do not leave a background daemon behind for it.
@@ -314,7 +320,8 @@ async fn tokio_main() -> Result<()> {
                 tracing::warn!("could not register as a headroom proxy user: {e}");
             }
 
-            let tui_result = run_tui(&mut app_state, &mut layout).await;
+            let tui_result = run_tui(&mut app_state, &mut layout, &mut agent_status).await;
+            drop(agent_status);
 
             // Explicitly tear down the plugin runtime before `app_state`
             // drops. Without this, `AppState.plugin_runtime_owner: Option<Runtime>`
@@ -421,7 +428,11 @@ fn spawn_tui_presence() -> fleet::bridge::daemon::PresenceLease {
     lease
 }
 
-async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
+async fn run_tui(
+    app: &mut App,
+    layout: &mut LayoutComponent,
+    agent_status: &mut ainb::agent_status_host::AgentStatusHost,
+) -> Result<()> {
     // Check if we have a proper TTY
     if !IsTerminal::is_terminal(&io::stdout()) {
         return Err(anyhow::anyhow!(
@@ -456,7 +467,7 @@ async fn run_tui(app: &mut App, layout: &mut LayoutComponent) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     // Ensure terminal cleanup happens even if there's an error
-    let result = run_tui_loop(app, layout, &mut terminal).await;
+    let result = run_tui_loop(app, layout, &mut terminal, agent_status).await;
 
     // Always clean up terminal using unified cleanup
     if let Err(e) = cleanup_terminal_with_instance(&mut terminal) {
@@ -476,6 +487,7 @@ async fn run_tui_loop(
     app: &mut App,
     layout: &mut LayoutComponent,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    agent_status: &mut ainb::agent_status_host::AgentStatusHost,
 ) -> Result<()> {
     // The ratatui host's own state: geometry, scroll offsets, hover and panel
     // widths. Lives here, beside the `LayoutComponent`, because
@@ -570,6 +582,10 @@ async fn run_tui_loop(
             run_intent(report, app, &keymap, &mut ui, terminal).await?;
             needs_redraw = true;
         }
+        // Section 20 updates from the agent-status host task. The TUI paints
+        // Fleet through the plugin, so a section change is not a repaint here;
+        // its version is what a mirrored surface subscribes to.
+        agent_status.drain_into(&mut app.state);
 
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted

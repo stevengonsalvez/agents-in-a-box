@@ -561,6 +561,7 @@ fn stamp_status(card: &mut Value, status: &ainb_hangar_proto::agent_status::Agen
     object.insert("provenance".into(), json!(provenance));
     object.insert("tier".into(), json!(tier));
     object.insert("evidenceObservedAt".into(), json!(evidence_observed_at));
+    object.insert("hostId".into(), json!(status.host_id));
     object.insert("paneUnbound".into(), json!(status.pane_unbound));
 }
 

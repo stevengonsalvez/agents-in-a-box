@@ -649,8 +649,51 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 updated_revision: 3,
             }
         };
+        let agent_status_session = fleet_session.clone();
         *fleet.fleet_snapshot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             vec![fleet_session];
+
+        // ---- agent status (section 20) ---------------------------------------------------------
+        use ainb_hangar_proto::agent_status as status;
+        let row = status::AgentStatusRow {
+            session_key: agent_status_session.session_key.clone(),
+            provider: agent_status_session.provider,
+            cwd: seed.text("agent_status.card.cwd", Captured),
+            display_name: Some(seed.text("agent_status.card.display_name", Captured)),
+            state: status::AgentState::Waiting,
+            provenance: status::Provenance::Hook,
+            tier: status::Tier::Hook,
+            evidence_observed_at: 2,
+            has_open_request: true,
+            pane_unbound: true,
+            pane_unbound_detail: Some(seed.text("agent_status.card.pane_unbound_detail", Captured)),
+            host_id: status::LOCAL_HOST_ID.to_string(),
+            turn_complete: false,
+            wait_kind: Some(status::WaitKind::Ask),
+            attachment: status::Attachment::Unbound,
+        };
+        let mut card_session = agent_status_session;
+        card_session.cwd = seed.text("agent_status.session.cwd", Captured);
+        card_session.display_name = Some(seed.text("agent_status.session.display_name", Captured));
+        card_session.current_request = Some(serde_json::json!({
+            "tool_input": seed.text("agent_status.session.current_request", Captured),
+        }));
+        let section = state.agent_status.get_mut();
+        section.observe_head(4);
+        section.apply_read(
+            status::RosterStatusResult {
+                rows: vec![status::RosterStatusRow {
+                    session: card_session,
+                    status: row,
+                    read_revision: 3,
+                }],
+                read_revision: 3,
+                unknown_events: Vec::new(),
+            },
+            5,
+        );
+        section.mark_read_failed(seed.text("agent_status.view.reason", Captured), 6);
+        section.absent = Some(seed.text("agent_status.absent", Captured));
     }
 
     // ---- hangar, mcp pool, plugins ---------------------------------------------------------

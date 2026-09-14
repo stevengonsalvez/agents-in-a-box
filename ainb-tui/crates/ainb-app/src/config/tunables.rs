@@ -188,6 +188,17 @@ pub fn legacy_classify_primary() -> bool {
     )
 }
 
+/// The `[fleet.status] legacy_panel` env spelling, read by the hangar plugin,
+/// which cannot depend on this crate.
+pub const LEGACY_PANEL_ENV: &str = "AINB_FLEET_LEGACY_PANEL";
+
+/// Whether the Fleet panel is rolled back to the pre-section two reads
+/// (T0-section's one-release rollback, removed the release after it ships).
+#[must_use]
+pub fn legacy_panel() -> bool {
+    resolved_bool(LEGACY_PANEL_ENV, snapshot().fleet.status.legacy_panel)
+}
+
 /// [`resolved`] for booleans, which have no useful `FromStr`.
 ///
 /// Accepts the tolerant token family the rest of ainb uses
@@ -297,6 +308,12 @@ pub fn export_env_bridge(config: &AppConfig) {
     publish(
         LEGACY_CLASSIFY_PRIMARY_ENV,
         config.fleet.status.legacy_classify_primary.to_string(),
+    );
+    // Bridged for the same reason: the Fleet panel runs in the hangar plugin,
+    // a subprocess that inherits this environment and cannot read this crate.
+    publish(
+        LEGACY_PANEL_ENV,
+        config.fleet.status.legacy_panel.to_string(),
     );
     publish(
         "AINB_HEADROOM_PORT",
@@ -1167,6 +1184,21 @@ mod tests {
     /// environment. It is the switch an operator reaches for when a real fleet
     /// reads worse after T0, and a flag that only answers to an exported
     /// variable is not a rollback for a daemon someone else started.
+    /// The T0-section rollback parses from `config.toml` and reaches the
+    /// environment the plugin subprocess inherits.
+    #[test]
+    fn the_t0_section_rollback_reads_from_config_and_is_bridged() {
+        let config = from_toml("[fleet.status]\nlegacy_panel = true\n");
+        assert!(
+            config.fleet.status.legacy_panel,
+            "`[fleet.status] legacy_panel` must parse"
+        );
+        with_env(LEGACY_PANEL_ENV, None, || {
+            export_env_bridge(&config);
+            assert_eq!(std::env::var(LEGACY_PANEL_ENV).as_deref(), Ok("true"));
+        });
+    }
+
     #[test]
     fn the_t0_rollback_reads_from_config() {
         let config = from_toml("[fleet.status]\nlegacy_classify_primary = true\n");

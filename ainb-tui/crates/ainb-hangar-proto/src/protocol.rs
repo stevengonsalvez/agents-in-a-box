@@ -317,6 +317,7 @@ pub const CAPABILITY_CATALOGUE: &[&str] = &[
     CAP_ATTENTION_FENCE,
     crate::fleet::FLEET_CAPABILITY_STATUS_READ,
     CAP_CONNECTIONS_TRANSIENT,
+    crate::fleet::FLEET_CAPABILITY_ROSTER_STATUS_READ,
 ];
 
 /// Whether this build advertises `id`.
@@ -358,10 +359,11 @@ mod tests {
         }
         assert_eq!(
             crate::fleet::FLEET_PROTOCOL_CAPABILITY_IDS.len(),
-            26,
+            27,
             "D17 names 26 fleet ids; the append rule is written against that count. \
-             Bumping this is the conscious act the guard exists to require: 26 is \
-             25 plus `fleet.status.read`, the D14 status derivation"
+             Bumping this is the conscious act the guard exists to require: 27 is \
+             25 plus `fleet.status.read`, the D14 status derivation, plus \
+             `fleet.roster_status.read`, its joined read (#1015)"
         );
     }
 

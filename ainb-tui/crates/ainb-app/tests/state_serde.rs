@@ -182,6 +182,8 @@ const DENY_WORDS: &[&str] = &[
     "remote",
     "host",
     "path",
+    "cwd",
+    "current_request",
     "dir",
     "home",
     "file",
@@ -199,6 +201,22 @@ const DENY_WORDS: &[&str] = &[
 /// Fields whose key matches a deny word and still carry text, each with why
 /// the text is safe on the wire. Keyed by the traced `Owner.field`.
 const NAME_ALLOW: &[(&str, &str)] = &[
+    (
+        "AgentCardFrame.host_id",
+        "the host a status row was derived on (`local` today), an identity, not an address",
+    ),
+    (
+        "AgentCardFrame.pane_unbound_detail",
+        "why a pane lost its binding, daemon prose scrubbed through redact::scrub",
+    ),
+    (
+        "AgentCardFrame.session_key",
+        "stable `provider:session-id` identity, not a credential",
+    ),
+    (
+        "StatusViewFrame.host_id",
+        "the host the joined read came from (`local` today), an identity, not an address",
+    ),
     (
         "AgentDef.source_path",
         "agent definition file under ~/.claude/agents",
@@ -395,6 +413,14 @@ const NAME_ALLOW: &[(&str, &str)] = &[
     (
         "ReviewFile.path",
         "repo-relative path of a changed file, the review list row",
+    ),
+    (
+        "FleetSession.current_request_fingerprint",
+        "a hash of the pending request; the request itself never reaches a frame",
+    ),
+    (
+        "FleetSession.cwd",
+        "working directory the fleet pane draws on each row, a path (#983 M19)",
     ),
     (
         "FleetSession.session_key",
@@ -982,6 +1008,10 @@ const LEAF_TYPE_PREFIXES: &[&str] = &[
 
 /// Containers and options left empty in the sample on purpose, with the reason.
 const UNFILLED_WAIVED: &[(&str, &str)] = &[
+    (
+        "AgentCardFrame.wait_kind",
+        "a WaitKind unit enum: filled, and a leaf by shape",
+    ),
     (
         "HookHealth.hook_binary_mode",
         "a HookBinaryMode unit enum: filled, and a leaf by shape",

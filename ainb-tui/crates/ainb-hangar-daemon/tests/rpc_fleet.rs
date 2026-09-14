@@ -928,3 +928,45 @@ async fn release_to_native_picker_closes_the_attention_row_as_native_claude() {
 
     fixture.finish();
 }
+
+/// #1015: `fleet/roster_status` answers roster and status joined per session
+/// from one read, and each half equals what `fleet/snapshot` and
+/// `fleet/status` return for the same store.
+#[tokio::test]
+async fn roster_status_joins_the_snapshot_and_status_halves_per_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, sink) = start_server(dir.path()).await;
+    let payload = serde_json::json!({ "source": "hook" });
+    apply_hook(
+        &store,
+        &sink,
+        "claude-start",
+        "claude",
+        "joined",
+        "SessionStart",
+        &payload,
+        100,
+    )
+    .await;
+
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+    let joined = client.call(methods::FLEET_ROSTER_STATUS, serde_json::json!({})).await;
+    assert!(
+        joined["error"].is_null(),
+        "fleet/roster_status must ack: {joined}"
+    );
+    let snapshot = client.call(methods::FLEET_SNAPSHOT, serde_json::json!({})).await;
+    let status = client.call(methods::FLEET_STATUS, serde_json::json!({})).await;
+
+    let rows = joined["result"]["rows"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "{joined}");
+    assert_eq!(rows[0]["session"], snapshot["result"]["sessions"][0]);
+    assert_eq!(rows[0]["status"], status["result"]["rows"][0]);
+    assert_eq!(rows[0]["status"]["host_id"], "local");
+    assert_eq!(rows[0]["read_revision"], joined["result"]["read_revision"]);
+    assert_eq!(
+        joined["result"]["read_revision"],
+        snapshot["result"]["head_revision"]
+    );
+}

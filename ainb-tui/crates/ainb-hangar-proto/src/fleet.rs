@@ -40,6 +40,9 @@ pub const FLEET_CAPABILITY_RUNTIME_READ: &str = "fleet.runtime.read";
 /// and they must be able to ASK whether a daemon serves it, instead of
 /// discovering the answer from a method-not-found.
 pub const FLEET_CAPABILITY_STATUS_READ: &str = "fleet.status.read";
+/// Negotiated capability for `fleet/roster_status`, the roster and status
+/// joined per session in one daemon read (#1015).
+pub const FLEET_CAPABILITY_ROSTER_STATUS_READ: &str = "fleet.roster_status.read";
 /// Negotiated capability required for chat-bus message sends.
 pub const FLEET_CAPABILITY_MESSAGE_SEND: &str = "fleet.message.send";
 /// Negotiated capability required for chat-bus message list and subscribe.
@@ -148,6 +151,8 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     // arm, per the rule above: a capability that names a method answering
     // -32601 is worse than no capability at all.
     FLEET_CAPABILITY_STATUS_READ,
+    // Advertised with its `fleet/roster_status` dispatch arm, the same rule.
+    FLEET_CAPABILITY_ROSTER_STATUS_READ,
 ];
 
 /// Inclusive supported protocol version range.
