@@ -1407,9 +1407,11 @@ pub fn defaults() -> Vec<Binding> {
                 report: crate::app::reports::DaemonActionReport {
                     daemon: String::new(),
                     verb: String::new(),
+                    generation: 0,
                     ok: false,
                     summary: String::new(),
                     detail: String::new(),
+                    local: None,
                 },
             },
             "Show how a daemon lifecycle command ended on its row",
