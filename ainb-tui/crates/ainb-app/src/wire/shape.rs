@@ -643,7 +643,7 @@ pub fn sample_state(seed: &mut dyn Seed) -> AppState {
                 lifecycle_updated_at: 2,
                 attention_updated_at: 1,
                 model: Some("claude-sonnet-4-5".to_string()),
-                reasoning_effort: None,
+                reasoning_effort: Some("high".to_string()),
                 model_updated_at: 2,
                 version: 1,
                 updated_revision: 3,
