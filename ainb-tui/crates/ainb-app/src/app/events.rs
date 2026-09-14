@@ -80,6 +80,9 @@ pub enum AppEvent {
     WatchPluginScreen {
         screen: String,
         watching: bool,
+        /// The viewport the watching host draws the screen at.
+        width: u16,
+        height: u16,
     },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
@@ -7086,21 +7089,34 @@ impl EventHandler {
                     ));
                 }
             }
-            AppEvent::WatchPluginScreen { screen, watching } => {
+            AppEvent::WatchPluginScreen {
+                screen,
+                watching,
+                width,
+                height,
+            } => {
                 let plugin_screen =
                     crate::app::screens::builtin::plugin_id_for_screen(&screen).is_some();
                 let watched = state.plugins_host.watched_plugin_screens.contains_key(&screen);
                 let now = std::time::Instant::now();
+                let lease = AppState::PLUGIN_SCREEN_WATCH_LEASE;
                 if !plugin_screen {
                     tracing::warn!(%screen, "watch request for a screen no plugin owns");
+                } else if watching && (width == 0 || height == 0) {
+                    tracing::warn!(%screen, width, height, "watch request with no viewport");
                 } else if watching && watched {
-                    // A renewal only moves the lease, which no frame carries.
+                    // A renewal moves the lease and maybe the render size,
+                    // neither of which a frame carries.
                     state.plugins_host.update(|host| {
-                        host.watched_plugin_screens.insert(screen, now);
+                        if let Some(watch) = host.watched_plugin_screens.get_mut(&screen) {
+                            watch.renew(now, width, height, lease);
+                        }
                         false
                     });
                 } else if watching {
-                    state.plugins_host.watched_plugin_screens.insert(screen, now);
+                    let mut watch = crate::app::sections::ScreenWatch::default();
+                    watch.renew(now, width, height, lease);
+                    state.plugins_host.watched_plugin_screens.insert(screen, watch);
                 } else if watched {
                     state.plugins_host.watched_plugin_screens.remove(&screen);
                 }
