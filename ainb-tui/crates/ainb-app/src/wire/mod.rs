@@ -22,9 +22,9 @@ pub mod trace;
 use crate::app::AppState;
 use crate::app::sections::{
     ClaudeChatSection, ConfigSection, FleetSection, GitViewSection, HangarSection, LogsSection,
-    McpPoolSection, NewSessionSection, OnboardingSection, PluginUiState, PluginsHostSection,
-    RecoverySection, SessionLabelsSection, SessionsSection, ShellSection, SkillsSection,
-    SshSection, TmuxSection, WorkspaceLoadSection,
+    McpPoolSection, NewSessionSection, OnboardingSection, PluginsHostSection, RecoverySection,
+    SessionLabelsSection, SessionsSection, ShellSection, SkillsSection, SshSection, TmuxSection,
+    WorkspaceLoadSection,
 };
 use crate::app::versioned::SectionId;
 use serde::{Serialize, Serializer};
@@ -300,11 +300,14 @@ view!(McpPoolView<'a> for McpPoolSection {
 #[derive(Serialize)]
 struct InboxView {}
 
+// `plugin_ui_states` stays out: each view is JSON its plugin wrote, with keys
+// no key-path check can know in advance, so nothing proves it free of a secret.
+// `watched_plugin_screens` stays out too: which screens other hosts watch is
+// host bookkeeping, not something a host draws.
 view!(PluginsHostView<'a> for PluginsHostSection {
     plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
     #[serde(serialize_with = "scrubbed_values")]
     plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
-    plugin_ui_states: std::collections::HashMap<String, PluginUiState>,
 });
 
 view!(ConfigView<'a> for ConfigSection {
