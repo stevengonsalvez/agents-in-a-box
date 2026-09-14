@@ -963,8 +963,14 @@ pub struct UiPreferences {
     #[serde(default)]
     pub preferred_editor: Option<String>,
 
-    /// Preferred HomeScreen sidebar width in terminal columns.
+    /// Preferred HomeScreen sidebar width as a fraction of the screen's width,
+    /// so the same preference draws proportionally on every surface.
     #[serde(default)]
+    pub home_sidebar_fraction: Option<f64>,
+
+    /// Legacy column count from before widths were fractions. Read only so
+    /// [`AppConfig::migrate_layout_widths`] can convert it; never written.
+    #[serde(default, skip_serializing)]
     pub home_sidebar_width: Option<u16>,
 
     /// Preferred Sessions screen sidebar width in terminal columns.
@@ -975,10 +981,15 @@ pub struct UiPreferences {
     #[serde(default)]
     pub sessions_sidebar_collapsed: Option<bool>,
 
-    /// Preferred SkillManager screen Sources-panel width in terminal
-    /// columns. `None` falls back to the 32-column default. Persisted
+    /// Preferred SkillManager Sources-panel width as a fraction of the
+    /// screen's width. `None` falls back to the 32-column default. Persisted
     /// on divider-drag / `[`-`]` resize-finish.
     #[serde(default)]
+    pub skill_manager_sources_fraction: Option<f64>,
+
+    /// Legacy column count from before widths were fractions. Read only so
+    /// [`AppConfig::migrate_layout_widths`] can convert it; never written.
+    #[serde(default, skip_serializing)]
     pub skill_manager_sources_width: Option<u16>,
 
     /// User's response to the "wire up Claude Code statusline" prompt.
@@ -1043,9 +1054,11 @@ impl Default for UiPreferences {
             show_session_menu_bar: true,
             session_filter: SessionFilter::default(),
             preferred_editor: None,
+            home_sidebar_fraction: None,
             home_sidebar_width: None,
             sessions_sidebar_width: None,
             sessions_sidebar_collapsed: None,
+            skill_manager_sources_fraction: None,
             skill_manager_sources_width: None,
             statusline_decision: StatuslineDecision::default(),
             tmux_decision: TmuxDecision::default(),
@@ -2092,6 +2105,35 @@ impl AppConfig {
     }
 
     /// Save configuration to user config directory
+    /// Convert layout widths saved as column counts into fractions of a
+    /// `columns`-wide screen, the surface the user last sized them on.
+    ///
+    /// One-time: a width that already has a fraction keeps it, and the legacy
+    /// count is dropped either way, so the next save writes only fractions.
+    /// Returns whether anything changed.
+    pub fn migrate_layout_widths(&mut self, columns: u16) -> bool {
+        let prefs = &mut self.ui_preferences;
+        let mut changed = false;
+        for (legacy, fraction) in [
+            (
+                &mut prefs.home_sidebar_width,
+                &mut prefs.home_sidebar_fraction,
+            ),
+            (
+                &mut prefs.skill_manager_sources_width,
+                &mut prefs.skill_manager_sources_fraction,
+            ),
+        ] {
+            if let Some(width) = legacy.take() {
+                changed = true;
+                if fraction.is_none() && columns > 0 {
+                    *fraction = Some((f64::from(width) / f64::from(columns)).clamp(0.0, 1.0));
+                }
+            }
+        }
+        changed
+    }
+
     pub fn save(&self) -> Result<()> {
         let config_dir = Self::get_user_config_dir()?;
         fs::create_dir_all(&config_dir)?;
@@ -3293,7 +3335,7 @@ show_git_status = false
         config.ui_preferences.show_container_status = false;
         config.ui_preferences.show_git_status = false;
         config.ui_preferences.preferred_editor = Some("nvim".to_string());
-        config.ui_preferences.home_sidebar_width = Some(42);
+        config.ui_preferences.home_sidebar_fraction = Some(0.35);
         config.ui_preferences.sessions_sidebar_width = Some(44);
         config.ui_preferences.sessions_sidebar_collapsed = Some(true);
         config.usage.plan = Some(UsagePlan {
@@ -3352,8 +3394,8 @@ show_git_status = false
             "preferred_editor not in TOML"
         );
         assert!(
-            toml_str.contains("home_sidebar_width = 42"),
-            "home_sidebar_width not in TOML"
+            toml_str.contains("home_sidebar_fraction = 0.35"),
+            "home_sidebar_fraction not in TOML"
         );
         assert!(
             toml_str.contains("sessions_sidebar_width = 44"),
@@ -3395,7 +3437,7 @@ show_git_status = false
             loaded.ui_preferences.preferred_editor,
             Some("nvim".to_string())
         );
-        assert_eq!(loaded.ui_preferences.home_sidebar_width, Some(42));
+        assert_eq!(loaded.ui_preferences.home_sidebar_fraction, Some(0.35));
         assert_eq!(loaded.ui_preferences.sessions_sidebar_width, Some(44));
         assert_eq!(loaded.ui_preferences.sessions_sidebar_collapsed, Some(true));
         assert_eq!(loaded.usage.plan.unwrap().reset_day, 12);
@@ -4141,5 +4183,48 @@ timeout = 30
         assert_eq!(config.ui_preferences.sessions_sidebar_width, Some(46));
         assert_eq!(config.ui_preferences.sessions_sidebar_collapsed, Some(true));
         assert_eq!(config.docker.timeout, 30);
+    }
+
+    #[test]
+    fn legacy_column_widths_migrate_to_fractions_once() {
+        let legacy = r#"
+[ui_preferences]
+home_sidebar_width = 40
+skill_manager_sources_width = 30
+"#;
+        let mut config = AppConfig::from_layers([legacy]).expect("layers");
+        assert_eq!(config.ui_preferences.home_sidebar_width, Some(40));
+
+        assert!(config.migrate_layout_widths(120));
+        assert_eq!(
+            config.ui_preferences.home_sidebar_fraction,
+            Some(40.0 / 120.0)
+        );
+        assert_eq!(
+            config.ui_preferences.skill_manager_sources_fraction,
+            Some(0.25)
+        );
+        assert_eq!(config.ui_preferences.home_sidebar_width, None);
+        assert!(
+            !config.migrate_layout_widths(80),
+            "a second run changes nothing"
+        );
+
+        let written = toml::to_string(&config.ui_preferences).expect("serialises");
+        assert!(!written.contains("sidebar_width = 40"), "{written}");
+        assert!(!written.contains("sources_width"), "{written}");
+        assert!(written.contains("home_sidebar_fraction"), "{written}");
+    }
+
+    #[test]
+    fn a_saved_fraction_wins_over_a_legacy_width() {
+        let both = r#"
+[ui_preferences]
+home_sidebar_width = 40
+home_sidebar_fraction = 0.5
+"#;
+        let mut config = AppConfig::from_layers([both]).expect("layers");
+        assert!(config.migrate_layout_widths(120));
+        assert_eq!(config.ui_preferences.home_sidebar_fraction, Some(0.5));
     }
 }
