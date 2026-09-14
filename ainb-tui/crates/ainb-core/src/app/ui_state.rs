@@ -288,13 +288,6 @@ pub struct UiState {
     /// Per-plugin-screen origin `(x, y)`, so absolute mouse coordinates can be
     /// translated into the plugin's own space.
     pub plugin_render_origins: HashMap<ScreenId, (u16, u16)>,
-    /// TTL cache behind the status bar's statusline probe: `(value, read_at)`.
-    /// Holding `W`, or any rapid keystroke, would otherwise hit the filesystem
-    /// once per frame.
-    statusline_status_cache: Option<(
-        Option<crate::cli::statusline_install::StatuslineStatus>,
-        Instant,
-    )>,
     /// Size `(rows, cols)` the embed should be resized to, measured off the
     /// pane interior the layout just carved. Only the layout knows that rect,
     /// but the resize is a mutation, so the draw records the want here and the
@@ -341,34 +334,6 @@ impl UiState {
             config.ui_preferences.sessions_sidebar_width,
             config.ui_preferences.sessions_sidebar_collapsed.unwrap_or(false),
         );
-    }
-
-    /// Read the statusline status with a TTL-bounded cache.
-    ///
-    /// The probe reads `~/.claude/settings.json`; the status bar asks for it
-    /// once a frame and the `W` shortcut once a keystroke, so without the TTL
-    /// both would pay a filesystem read every time.
-    ///
-    /// It took an `&AppState` it never read, to make the call site look like a
-    /// projection of app state. It is not one: nothing here depends on app
-    /// state, and a parameter that exists to suggest otherwise is worse than
-    /// no parameter.
-    pub fn statusline_status(
-        &mut self,
-    ) -> Option<crate::cli::statusline_install::StatuslineStatus> {
-        AppState::statusline_status_cached_inner(
-            &mut self.statusline_status_cache,
-            std::time::Duration::from_secs(crate::app::state::STATUSLINE_STATUS_CACHE_TTL_SECS),
-            Instant::now(),
-            crate::cli::statusline_install::detect_statusline_status,
-        )
-    }
-
-    /// Drop the cached statusline status so the next reader re-detects. Called
-    /// after the install event lands so the CTA flips on the very next frame
-    /// instead of waiting out the TTL.
-    pub fn invalidate_statusline_status(&mut self) {
-        self.statusline_status_cache = None;
     }
 
     /// Record a scroll intent the keymap resolved. Queued rather than applied
@@ -450,10 +415,6 @@ impl crate::app::events::RendererHost for UiState {
         self.queue(action);
     }
 
-    fn statusline_status(&mut self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
-        Self::statusline_status(self)
-    }
-
     fn columns(&self) -> Option<u16> {
         crossterm::terminal::size().ok().map(|(columns, _)| columns)
     }
@@ -472,23 +433,5 @@ impl crate::app::events::RendererHost for UiState {
             crate::app::Btn::Middle => return None,
         };
         crate::app::mouse::handle_mouse_event(event, state, self)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::cli::statusline_install::StatuslineStatus;
-
-    #[test]
-    fn invalidate_statusline_status_forces_refresh() {
-        let mut ui = UiState::default();
-        ui.statusline_status_cache = Some((Some(StatuslineStatus::NotConfigured), Instant::now()));
-
-        ui.invalidate_statusline_status();
-        assert!(
-            ui.statusline_status_cache.is_none(),
-            "invalidation must drop the cached entry"
-        );
     }
 }

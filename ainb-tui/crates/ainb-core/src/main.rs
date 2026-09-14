@@ -796,12 +796,6 @@ async fn run_tui_loop(
                                     &ui,
                                 );
                             }
-                            AppEvent::UsageWireStatusline => {
-                                EventHandler::process_event(app_event, &mut app.state);
-                                // settings.json just changed; drop the TTL cache
-                                // so the CTA flips on the very next frame.
-                                ui.invalidate_statusline_status();
-                            }
                             AppEvent::NewSession
                             | AppEvent::SearchWorkspace
                             | AppEvent::ConfirmationConfirm => {

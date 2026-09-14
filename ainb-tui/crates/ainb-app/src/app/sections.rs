@@ -357,7 +357,7 @@ pub struct NewSessionSection {
     // Usage analytics state: removed. Burndown plugin owns usage state
     // (provider, period, filters, zoom). Host no longer reads or writes
     // `usage_state` / `usage_load_receiver`. Statusline-related state
-    // (live_window_watcher, statusline_status_cache) stays in core
+    // (live_window_watcher, the statusline probe) stays with the host app
     // because that's a host CLI install concern, not a plugin one.
     /// Background base-branch refresh for the Configure picker. The fetch +
     /// re-list runs on `spawn_blocking`; the result lands here and is applied

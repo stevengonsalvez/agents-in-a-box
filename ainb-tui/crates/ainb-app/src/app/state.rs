@@ -2702,6 +2702,10 @@ pub struct AppState {
     /// Effects queued by the step being applied, for the host to drain. Not a
     /// section: see [`crate::app::effect::EffectOutbox`].
     effects: crate::app::effect::EffectOutbox,
+
+    /// Whether the Claude statusline is wired, cached. Not a section either:
+    /// see [`StatuslineProbe`].
+    statusline: StatuslineProbe,
 }
 
 /// Result of background workspace loading
@@ -3004,6 +3008,18 @@ impl AppState {
     pub fn take_effects(&mut self) -> Vec<crate::app::effect::Effect> {
         self.effects.take()
     }
+
+    /// Whether the Claude statusline is wired into `~/.claude/settings.json`,
+    /// read through a TTL cache. `None` when the settings file could not be
+    /// read.
+    pub fn statusline_status(&self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
+        self.statusline.status()
+    }
+
+    /// Drop the cached statusline status so the next read re-detects.
+    pub fn invalidate_statusline_status(&self) {
+        self.statusline.invalidate();
+    }
 }
 
 impl Default for AppState {
@@ -3050,6 +3066,7 @@ impl Default for AppState {
             recovery: Versioned::default(),
             mcp_pool: Versioned::default(),
             effects: crate::app::effect::EffectOutbox::default(),
+            statusline: StatuslineProbe::default(),
             // Initialize quick commit state
 
             // Initialize other tmux sessions
@@ -3119,20 +3136,52 @@ fn merge_oldest_call_day(
 /// scrolling activity.
 pub const STATUSLINE_STATUS_CACHE_TTL_SECS: u64 = 15;
 
+type StatuslineCache = Option<(
+    Option<crate::cli::statusline_install::StatuslineStatus>,
+    Instant,
+)>;
+
+/// The statusline probe, shared by the `W` shortcut in the reducer and every
+/// host's status bar.
+///
+/// An app service rather than renderer state: the answer comes from the
+/// filesystem, not from anything a renderer drew, and two hosts asking share
+/// one cache. The cache sits behind a lock so a renderer holding `&AppState`
+/// can read it without writing a section, which would bump that section's
+/// version every frame.
+#[derive(Debug, Default)]
+pub struct StatuslineProbe {
+    cache: std::sync::Mutex<StatuslineCache>,
+}
+
+impl StatuslineProbe {
+    /// The cached status, re-detected once the TTL has passed.
+    pub fn status(&self) -> Option<crate::cli::statusline_install::StatuslineStatus> {
+        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        AppState::statusline_status_cached_inner(
+            &mut cache,
+            std::time::Duration::from_secs(STATUSLINE_STATUS_CACHE_TTL_SECS),
+            Instant::now(),
+            crate::cli::statusline_install::detect_statusline_status,
+        )
+    }
+
+    /// Drop the cached status so the next read re-detects.
+    pub fn invalidate(&self) {
+        *self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Test seam for [`crate::app::ui_state::UiState::statusline_status`], which
-    /// owns the cache itself. Lets unit tests inject
-    /// a clock and a fake detector to verify TTL coalescing without
-    /// touching the filesystem.
+    /// Test seam for [`StatuslineProbe::status`]. Lets unit tests inject a
+    /// clock and a fake detector to verify TTL coalescing without touching
+    /// the filesystem.
     pub fn statusline_status_cached_inner<F>(
-        cache: &mut Option<(
-            Option<crate::cli::statusline_install::StatuslineStatus>,
-            Instant,
-        )>,
+        cache: &mut StatuslineCache,
         ttl: std::time::Duration,
         now: Instant,
         detect: F,

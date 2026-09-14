@@ -23,16 +23,13 @@ use tracing::info;
 
 /// What intent dispatch needs from the renderer it runs under.
 ///
-/// Some intents resolve to renderer-local work: scrolling a pane, asking
-/// whether wiring the Claude statusline would be productive (a terminal host
-/// answers from a short-lived cache), or finding what sits under the pointer,
-/// which only the renderer that drew the frame knows. The TUI's `UiState`
+/// Some intents resolve to renderer-local work: scrolling a pane, or finding
+/// what sits under the pointer, which only the renderer that drew the frame
+/// knows. The TUI's `UiState`
 /// implements this; [`NoRenderer`] serves tests and hosts with none of it.
 pub trait RendererHost {
     /// Queue a renderer-local scroll the keymap resolved.
     fn queue_scroll(&mut self, action: ScrollAction);
-    /// The Claude statusline wiring status, possibly from the host's cache.
-    fn statusline_status(&mut self) -> Option<StatuslineStatus>;
     /// Width, in columns, of the surface this host renders into, or `None`
     /// when it has none. Layout clamps read it per host, so two surfaces at
     /// different widths never share one value.
@@ -42,8 +39,8 @@ pub trait RendererHost {
     fn pointer(&mut self, state: &mut AppState, pos: Pos, btn: Btn) -> Option<AppEvent>;
 }
 
-/// A [`RendererHost`] with no renderer: scrolls are dropped, nothing is under
-/// the pointer, and the statusline status is detected fresh on every ask.
+/// A [`RendererHost`] with no renderer: scrolls are dropped and nothing is
+/// under the pointer.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoRenderer;
 
@@ -56,10 +53,6 @@ impl RendererHost for NoRenderer {
 
     fn pointer(&mut self, _state: &mut AppState, _pos: Pos, _btn: Btn) -> Option<AppEvent> {
         None
-    }
-
-    fn statusline_status(&mut self) -> Option<StatuslineStatus> {
-        crate::cli::statusline_install::detect_statusline_status().ok()
     }
 }
 
@@ -1149,15 +1142,15 @@ impl EventHandler {
     /// is ignored at the global layer and falls through to the active
     /// view's normal handling.
     ///
-    /// The settings.json read goes through [`RendererHost::statusline_status`]
+    /// The settings.json read goes through [`AppState::statusline_status`]
     /// so that holding `W` (or rapid keystrokes elsewhere) doesn't hammer
     /// the filesystem.
-    fn should_wire_statusline(state: &AppState, host: &mut dyn RendererHost) -> bool {
+    fn should_wire_statusline(state: &AppState) -> bool {
         // Read from the background watcher's snapshot — never call
         // live_window::current() inline; the Tier 2 fallback walks JSONL
         // transcripts and would stall input handling on every keystroke.
         let live_source = state.fleet.live_window_watcher.snapshot().source;
-        let status = host.statusline_status();
+        let status = state.statusline_status();
         Self::should_wire_statusline_inner(live_source, status.as_ref())
     }
 
@@ -1519,7 +1512,7 @@ impl EventHandler {
                 }
             }
             UiAction::UsageWireStatusline => {
-                Self::should_wire_statusline(state, host).then_some(AppEvent::UsageWireStatusline)
+                Self::should_wire_statusline(state).then_some(AppEvent::UsageWireStatusline)
             }
             // A read-only mirror uses tmux's own scrollback, so entering the
             // host's scroll mode over it would swallow navigation invisibly.
@@ -5553,15 +5546,16 @@ impl EventHandler {
                 }
                 // Read uncached: the install is a once-per-session action, so
                 // it can afford the settings.json read, and it must not act on a
-                // value up to the TTL old. The renderer drops its own cache
-                // after this event lands (`UiState::invalidate_statusline_status`
-                // in the run loop) so the CTA flips on the very next frame.
+                // value up to the TTL old.
                 match crate::cli::statusline_install::detect_statusline_status().ok() {
                     Some(StatuslineStatus::Configured) => return,
                     Some(_) => {}
                     None => return,
                 }
                 let outcome = install_statusline();
+                // settings.json may just have changed; drop the cache so every
+                // host's CTA flips on its very next frame.
+                state.invalidate_statusline_status();
                 match outcome {
                     Ok(InstallOutcome::Installed) => {
                         state.config.app_config.ui_preferences.statusline_decision =

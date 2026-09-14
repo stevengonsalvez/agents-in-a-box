@@ -4,17 +4,12 @@
 use ainb_app::app::RendererHost;
 use ainb_app::app::events::AppEvent;
 use ainb_app::app::keymap::ScrollAction;
-use ainb_app::cli::statusline_install::StatuslineStatus;
 use ainb_app::{AppState, Btn, CommandId, Intent, Keymap, Pos, dispatch};
 /// A host with a fixed surface width and nothing else.
 struct Surface(u16);
 
 impl RendererHost for Surface {
     fn queue_scroll(&mut self, _action: ScrollAction) {}
-
-    fn statusline_status(&mut self) -> Option<StatuslineStatus> {
-        None
-    }
 
     fn columns(&self) -> Option<u16> {
         Some(self.0)
