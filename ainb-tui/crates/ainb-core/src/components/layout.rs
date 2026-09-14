@@ -515,12 +515,6 @@ impl LayoutComponent {
                 if state.fleet.update(|fleet| fleet.pal_dial.tick()) {
                     state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
                 }
-                // The offer's own tick, for the same reason: the start runs on
-                // a detached worker, and its result has to reach the pane
-                // without the operator pressing anything else.
-                if state.fleet.update(|fleet| fleet.daemon_start_cta.tick()) {
-                    state.shell.set_if_changed(|shell| &mut shell.ui_needs_refresh, true);
-                }
                 let _ = state.chat_host_for(active);
             }
             SessionTab::Thread => {
