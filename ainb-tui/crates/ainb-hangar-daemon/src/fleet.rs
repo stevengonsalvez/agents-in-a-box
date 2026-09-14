@@ -730,7 +730,11 @@ pub async fn roster_status(
     let projection = read_projection(pool).await?;
     let snapshot = subscription_snapshot_wire(&projection);
     let status = status_from_projection(pool, &projection, &snapshot).await?;
-    Ok(ainb_hangar_proto::agent_status::join(&snapshot, &status))
+    let mut joined = ainb_hangar_proto::agent_status::join(&snapshot, &status);
+    // The daemon's clock at the read: evidence stamps are on it, so a surface
+    // on another machine measures a card's age against this, not its own now.
+    joined.read_at_ms = chrono::Utc::now().timestamp_millis();
+    Ok(joined)
 }
 
 #[cfg(any(test, feature = "test-support"))]
