@@ -197,7 +197,7 @@ fn an_unsubscribed_hot_section_applies_no_frame() {
     let (mut hot_mirror, _hot_tx, _) = connect(Subscription::only(&[SectionId::Sessions]));
     send(&mut mirror, &tx, &state);
     renderer.drain();
-    let applied = renderer.store.frames_applied();
+    let applied = renderer.store.sections_committed();
 
     for round in 0..50 {
         state.sessions.get_mut().selected_session_index = Some(round);
@@ -211,7 +211,7 @@ fn an_unsubscribed_hot_section_applies_no_frame() {
     tx.send(hot_mirror.batch(&state)).unwrap();
     let commit = renderer.drain();
     assert!(commit.changed.is_empty());
-    assert_eq!(renderer.store.frames_applied(), applied);
+    assert_eq!(renderer.store.sections_committed(), applied);
     assert!(renderer.store.section(&HostId::local(), SectionId::Sessions).is_none());
     assert_eq!(renderer.store.frames_ignored(), 1);
 
