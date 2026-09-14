@@ -67,6 +67,34 @@ fn mirror_frames_carry_exactly_the_checked_section_json() {
     }
 }
 
+/// A session's working directory, its operator label and a pending request's
+/// tool input never ride a frame (W0-mirror, #983 M19). `display_name` is also
+/// the name of a file-tree row's and a log file's own label, which are not a
+/// session's, so those two owners are the only ones allowed it.
+#[test]
+fn no_frame_carries_a_sessions_cwd_label_or_pending_request() {
+    isolated_home();
+    const WITHHELD: [&str; 3] = ["cwd", "current_request", "display_name"];
+    const NOT_A_SESSION: [&str; 2] = [
+        "FileTreeItem.display_name",
+        "SessionLogSummary.display_name",
+    ];
+    let trace = shape::trace_states(&shape::sample_states(&mut shape::PlainSeed));
+    let carried: BTreeSet<String> = trace
+        .fields
+        .iter()
+        .filter(|field| {
+            let key = field.owner_field.rsplit('.').next().unwrap_or_default();
+            WITHHELD.contains(&key) && !NOT_A_SESSION.contains(&field.owner_field.as_str())
+        })
+        .map(|field| format!("{}  ({})", field.owner_field, field.path))
+        .collect();
+    assert!(
+        carried.is_empty(),
+        "session identity text on a frame: {carried:#?}"
+    );
+}
+
 #[test]
 fn leaf_key_paths_match_the_committed_fixture() {
     isolated_home();
@@ -415,15 +443,15 @@ const NAME_ALLOW: &[(&str, &str)] = &[
         "repo-relative path of a changed file, the review list row",
     ),
     (
-        "FleetSession.current_request_fingerprint",
+        "FleetRowFrame.current_request_fingerprint",
         "a hash of the pending request; the request itself never reaches a frame",
     ),
     (
-        "FleetSession.cwd",
-        "working directory the fleet pane draws on each row, a path (#983 M19)",
+        "FleetRowFrame.host_id",
+        "the host a fleet row came from, an identity, so rows from two hosts fold apart",
     ),
     (
-        "FleetSession.session_key",
+        "FleetRowFrame.session_key",
         "stable `provider:session-id` identity, not a credential",
     ),
     (
