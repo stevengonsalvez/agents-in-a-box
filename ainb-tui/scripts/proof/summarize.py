@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fold proof-out/<node>/result.json files into summary.json and summary.md.
 
-Usage: summarize.py <proof-out dir> <binary version line>
+Usage: summarize.py <proof-out dir> <binary version line> [source commit]
 
 Exit status is 1 when any node failed or a result is missing or unreadable,
 so run.sh can hand it straight back as its own.
@@ -46,13 +46,17 @@ def md_cell(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
-def render_md(results: list[dict], binary: str) -> str:
+def render_md(results: list[dict], binary: str, source: str) -> str:
     passed = sum(1 for r in results if r["pass"])
     lines = [
         "# Proof run",
         "",
         f"**Binary:** `{binary}`",
         "",
+    ]
+    if source:
+        lines += [f"**Source:** `{source}` (the checkout run.sh ran from)", ""]
+    lines += [
         f"**Result:** {passed} of {len(results)} nodes pass.",
         "",
         "| node | result | expected | observed | captures |",
@@ -78,16 +82,18 @@ def render_md(results: list[dict], binary: str) -> str:
 def main() -> int:
     out = Path(sys.argv[1])
     binary = sys.argv[2]
+    source = sys.argv[3] if len(sys.argv) > 3 else ""
     results = load_results(out)
     summary = {
         "binary": binary,
+        "source": source,
         "nodes": len(results),
         "passed": sum(1 for r in results if r["pass"]),
         "failed": [r["node"] for r in results if not r["pass"]],
         "results": results,
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    (out / "summary.md").write_text(render_md(results, binary))
+    (out / "summary.md").write_text(render_md(results, binary, source))
     print(f"proof: {summary['passed']} of {summary['nodes']} nodes pass; "
           f"failed: {', '.join(summary['failed']) or 'none'}")
     print(f"proof: {out / 'summary.md'}")
