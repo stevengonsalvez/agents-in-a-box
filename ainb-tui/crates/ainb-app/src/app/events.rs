@@ -251,6 +251,11 @@ pub enum AppEvent {
     DaemonActionFinished {
         report: crate::app::reports::DaemonActionReport,
     },
+    /// The host could not write `store`.
+    PersistFailed {
+        store: String,
+        error: String,
+    },
     /// Click the code review sidebar row `target`; nothing when it is gone.
     GitReviewSelectRow {
         target: crate::components::code_review::render::ReviewRowId,
@@ -2091,6 +2096,11 @@ impl EventHandler {
                     }
                     None
                 }
+                PickRepoOutcome::FavoritesChanged { message, favorites } => {
+                    state.persist(crate::app::effect::Persist::Favorites(favorites));
+                    state.add_info_notification(message);
+                    None
+                }
                 PickRepoOutcome::Notice { message, is_error } => {
                     // Favorite added/removed or a refusal (e.g. starring a repo
                     // with no remote). Surface it and stay on the picker.
@@ -2254,22 +2264,20 @@ impl EventHandler {
         }
         // Only the keys this screen changed: the rest of `app_config` is the
         // startup snapshot, and saving it whole reverted another TUI's edit.
-        state.config.app_config.save_keys(&keys_to_save)?;
+        state.persist_app_config(keys_to_save);
         // Collected, not propagated — the same rule the modelled rows already
         // follow. An external value the registry rejects (a `0` in a
         // `min: 1` row, say) used to fail the whole save with `?`, so
         // `mark_saved()` never ran, the row stayed dirty, and every later save
         // in that session re-hit the same error. One bad row must not wedge
         // the screen.
-        let mut rejected = applied.rejected.clone();
-        if let Err(err) = crate::config::AppConfig::save_external_keys(&applied.external) {
-            let keys = applied
-                .external
-                .iter()
-                .map(|(key, _)| key.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            rejected.push((keys, err.to_string()));
+        // A value the registry rejects on write comes back as a failed
+        // settings write, with the key in the error.
+        let rejected = applied.rejected.clone();
+        if !applied.external.is_empty() {
+            state.persist(crate::app::effect::Persist::ConfigExternalKeys(
+                applied.external.clone(),
+            ));
         }
         state.config.config_screen_state.mark_saved();
         for (key, why) in &rejected {
@@ -2735,9 +2743,10 @@ impl EventHandler {
                 let preferences = &mut state.config.app_config.ui_preferences;
                 preferences.sessions_sidebar_width = Some(width);
                 preferences.sessions_sidebar_collapsed = Some(collapsed);
-                if let Err(e) = state.config.app_config.save() {
-                    tracing::warn!("Failed to persist Sessions pane preferences: {}", e);
-                }
+                state.persist_app_config([
+                    "ui_preferences.sessions_sidebar_width",
+                    "ui_preferences.sessions_sidebar_collapsed",
+                ]);
             }
             AppEvent::AttachTmuxSession => {
                 tracing::info!("[ACTION] Processing AttachTmuxSession event");
@@ -3860,9 +3869,7 @@ impl EventHandler {
             AppEvent::HomeSidebarSaveWidth { fraction } => {
                 state.config.app_config.ui_preferences.home_sidebar_fraction =
                     Some(fraction.clamp(0.0, 1.0));
-                if let Err(e) = state.config.app_config.save() {
-                    tracing::warn!("Failed to persist HomeScreen sidebar width: {}", e);
-                }
+                state.persist_app_config(["ui_preferences.home_sidebar_fraction"]);
             }
             AppEvent::AttachFinished { target, outcome } => {
                 Self::apply_attach_finished(state, target, outcome);
@@ -3965,6 +3972,11 @@ impl EventHandler {
             } => {
                 state.finish_oauth_login(&auth_dir, exited_ok);
             }
+            AppEvent::PersistFailed { store, error } => {
+                tracing::warn!(%store, %error, "a store write failed");
+                let label = crate::app::effect::Persist::store_label(&store);
+                state.add_error_notification(format!("Could not save {label}: {error}"));
+            }
             AppEvent::DaemonActionFinished { report } => {
                 let Some(action) = crate::cli::daemon::Action::from_id(&report.verb) else {
                     tracing::warn!(verb = %report.verb, "daemon report names no known verb");
@@ -4004,9 +4016,14 @@ impl EventHandler {
                 let legacy = prefs.home_sidebar_width.is_some()
                     || prefs.skill_manager_sources_width.is_some();
                 if legacy && state.config.app_config.migrate_layout_widths(columns) {
-                    if let Err(e) = state.config.app_config.save() {
-                        tracing::warn!("Failed to persist migrated layout widths: {}", e);
-                    }
+                    // The legacy counts no longer serialise, so naming them
+                    // removes them from the file.
+                    state.persist_app_config([
+                        "ui_preferences.home_sidebar_fraction",
+                        "ui_preferences.home_sidebar_width",
+                        "ui_preferences.skill_manager_sources_fraction",
+                        "ui_preferences.skill_manager_sources_width",
+                    ]);
                 }
             }
             AppEvent::HomeSidebarClickItem { item } => {
@@ -4192,21 +4209,14 @@ impl EventHandler {
 
                                 if let Some(existing_alias) = existing {
                                     favorites_store.remove(&existing_alias);
-                                    if let Err(e) = favorites_store.save() {
-                                        tracing::error!("Failed to save favorites: {}", e);
-                                        state.add_error_notification(format!(
-                                            "Could not update favorites: {e}"
-                                        ));
-                                    } else {
-                                        tracing::info!(
-                                            "Removed from favorites: {}",
-                                            existing_alias
-                                        );
-                                        state.add_success_notification(format!(
-                                            "★ Removed '{}' from favorites",
-                                            workspace_name
-                                        ));
-                                    }
+                                    state.persist(crate::app::effect::Persist::Favorites(
+                                        crate::app::effect::Snapshot(favorites_store),
+                                    ));
+                                    tracing::info!("Removed from favorites: {}", existing_alias);
+                                    state.add_success_notification(format!(
+                                        "★ Removed '{}' from favorites",
+                                        workspace_name
+                                    ));
                                 } else {
                                     let display_source = fav.source.clone();
                                     // Suffix the alias on collision so distinct
@@ -4231,12 +4241,10 @@ impl EventHandler {
                                             "★ Could not favorite '{}': alias already in use",
                                             workspace_name
                                         ));
-                                    } else if let Err(e) = favorites_store.save() {
-                                        tracing::error!("Failed to save favorites: {}", e);
-                                        state.add_error_notification(format!(
-                                            "Could not save favorite: {e}"
-                                        ));
                                     } else {
+                                        state.persist(crate::app::effect::Persist::Favorites(
+                                            crate::app::effect::Snapshot(favorites_store),
+                                        ));
                                         tracing::info!("Added to favorites: {}", display_source);
                                         state.add_success_notification(format!(
                                             "⭐ Added '{}' to favorites",
@@ -5013,9 +5021,7 @@ impl EventHandler {
             AppEvent::SkillManagerSaveSourcesWidth { fraction } => {
                 state.config.app_config.ui_preferences.skill_manager_sources_fraction =
                     Some(fraction.clamp(0.0, 1.0));
-                if let Err(e) = state.config.app_config.save() {
-                    tracing::warn!("Failed to persist SkillManager Sources width: {}", e);
-                }
+                state.persist_app_config(["ui_preferences.skill_manager_sources_fraction"]);
             }
             AppEvent::SkillManagerFocusPane(pane) => {
                 state.skills.skill_manager_state.focused_pane = pane;
@@ -5426,9 +5432,7 @@ impl EventHandler {
                 // toggled — a user who just looked around leaves the file alone.
                 if let Some(ids) = state.config.config_screen_state.take_expansion_to_persist() {
                     state.config.app_config.ui_preferences.config_tree_expanded = ids.clone();
-                    if let Err(e) = crate::config::AppConfig::save_tree_expansion(&ids) {
-                        tracing::warn!(error = %e, "could not persist config tree expansion");
-                    }
+                    state.persist_app_config(["ui_preferences.config_tree_expanded"]);
                 }
                 state.shell.current_screen = screen_ids::HOME.to_string();
             }
@@ -5775,12 +5779,9 @@ impl EventHandler {
                                 crate::config::ClaudeAuthProvider::ApiKey;
                             // Only this key: the rest of `app_config` is the startup snapshot,
                             // and a whole-file save reverts what another TUI wrote since (#987).
-                            if let Err(e) = state.config.app_config.save_keys(&[
-                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
-                                    .to_string(),
-                            ]) {
-                                tracing::warn!("Failed to save config: {}", e);
-                            }
+                            state.persist_app_config([
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            ]);
 
                             // Close popup and refresh
                             state.onboarding.auth_provider_popup_state.show_popup = false;
@@ -5824,12 +5825,9 @@ impl EventHandler {
                                 crate::config::ClaudeAuthProvider::SystemAuth;
                             // Only this key: the rest of `app_config` is the startup snapshot,
                             // and a whole-file save reverts what another TUI wrote since (#987).
-                            if let Err(e) = state.config.app_config.save_keys(&[
-                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
-                                    .to_string(),
-                            ]) {
-                                tracing::warn!("Failed to save config: {}", e);
-                            }
+                            state.persist_app_config([
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                            ]);
 
                             state.onboarding.auth_provider_popup_state.show_popup = false;
                             state.onboarding.auth_provider_popup_state.refresh_providers();
@@ -5869,14 +5867,9 @@ impl EventHandler {
                             crate::config::ClaudeAuthProvider::SystemAuth;
                         // Only this key: the rest of `app_config` is the startup snapshot,
                         // and a whole-file save reverts what another TUI wrote since (#987).
-                        if let Err(e) = state
-                            .config
-                            .app_config
-                            .save_keys(&[crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
-                                .to_string()])
-                        {
-                            tracing::warn!("Failed to save config: {}", e);
-                        }
+                        state.persist_app_config([
+                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                        ]);
                     }
                     Err(e) => {
                         state.add_error_notification(format!("Failed to delete: {}", e));
@@ -6179,7 +6172,7 @@ impl EventHandler {
                     Ok(InstallOutcome::Installed) => {
                         state.config.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
-                        let _ = state.config.app_config.save();
+                        state.persist_app_config(["ui_preferences.statusline_decision"]);
                         state.add_success_notification(
                             "Wired Claude Code statusline. Live data appears next prompt render."
                                 .to_string(),
@@ -6188,7 +6181,7 @@ impl EventHandler {
                     Ok(InstallOutcome::AlreadyInstalled) => {
                         state.config.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
-                        let _ = state.config.app_config.save();
+                        state.persist_app_config(["ui_preferences.statusline_decision"]);
                         state.add_success_notification(
                             "Statusline already wired — waiting for first prompt render."
                                 .to_string(),
@@ -6200,7 +6193,7 @@ impl EventHandler {
                         // user already opted in; surface as a success.
                         state.config.app_config.ui_preferences.statusline_decision =
                             crate::config::StatuslineDecision::Installed;
-                        let _ = state.config.app_config.save();
+                        state.persist_app_config(["ui_preferences.statusline_decision"]);
                         state.add_success_notification(
                             "Migrated existing ainb statusline → ainb claudecode statusline."
                                 .to_string(),
@@ -6506,6 +6499,7 @@ impl EventHandler {
                     state.persist_onboarding_git_dirs();
                 }
                 let mut trigger_dep_check = false;
+                let provider = state.config.app_config.authentication.claude_provider.clone();
                 if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     if onboarding_state.is_final_step() {
                         // On final step, finish onboarding
@@ -6526,7 +6520,7 @@ impl EventHandler {
                         if onboarding_state.current_step == OnboardingStep::Authentication {
                             onboarding_state.auth_pane =
                                 crate::components::onboarding::AuthPane::AgentList;
-                            onboarding_state.refresh_auth_statuses();
+                            onboarding_state.refresh_auth_statuses(&provider);
                         }
                     }
                 }
@@ -6549,13 +6543,14 @@ impl EventHandler {
                 {
                     state.persist_onboarding_git_dirs();
                 }
+                let provider = state.config.app_config.authentication.claude_provider.clone();
                 if let Some(ref mut onboarding_state) = state.onboarding.onboarding_state {
                     onboarding_state.go_back();
                     // Refresh per-agent auth when stepping back into the step.
                     if onboarding_state.current_step == OnboardingStep::Authentication {
                         onboarding_state.auth_pane =
                             crate::components::onboarding::AuthPane::AgentList;
-                        onboarding_state.refresh_auth_statuses();
+                        onboarding_state.refresh_auth_statuses(&provider);
                     }
                 }
             }
@@ -6678,22 +6673,12 @@ impl EventHandler {
             }
             AppEvent::OnboardingAuthSelect => {
                 use crate::components::onboarding::{AuthAgent, AuthMethodKind, AuthPane};
-                use crate::config::{AppConfig, ClaudeAuthProvider};
+                use crate::config::ClaudeAuthProvider;
 
                 // Read the active pane, then mutate/notify without a held borrow.
                 let pane = state.onboarding.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
 
                 // Persist the Claude auth provider so build_env_setup() honours it.
-                let set_claude_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
-                    Ok(mut c) => {
-                        c.authentication.claude_provider = p;
-                        if let Err(e) = c.save() {
-                            tracing::error!("Failed to save auth provider: {}", e);
-                        }
-                    }
-                    Err(e) => tracing::error!("Failed to load config for auth provider: {}", e),
-                };
-
                 match pane {
                     // Drill into the focused agent's method picker, defaulting the
                     // cursor to that agent's current method.
@@ -6717,7 +6702,11 @@ impl EventHandler {
                                 AuthAgent::Claude => {
                                     // System-wide: config gates injection, so the
                                     // key (if any) simply stops being injected.
-                                    set_claude_provider(ClaudeAuthProvider::SystemAuth);
+                                    state.config.app_config.authentication.claude_provider =
+                                        ClaudeAuthProvider::SystemAuth;
+                                    state.persist_app_config([
+                                        crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                    ]);
                                 }
                                 other => {
                                     // No config flag for these — a stored key would
@@ -6735,9 +6724,11 @@ impl EventHandler {
                                     }
                                 }
                             }
+                            let provider =
+                                state.config.app_config.authentication.claude_provider.clone();
                             if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                 o.auth_pane = AuthPane::AgentList;
-                                o.refresh_auth_statuses();
+                                o.refresh_auth_statuses(&provider);
                             }
                             state.add_info_notification(format!(
                                 "{}: {}",
@@ -6785,11 +6776,21 @@ impl EventHandler {
                             match stored {
                                 Ok(()) => {
                                     if agent == AuthAgent::Claude {
-                                        set_claude_provider(ClaudeAuthProvider::ApiKey);
+                                        state.config.app_config.authentication.claude_provider =
+                                            ClaudeAuthProvider::ApiKey;
+                                        state.persist_app_config([
+                                            crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY,
+                                        ]);
                                     }
+                                    let provider = state
+                                        .config
+                                        .app_config
+                                        .authentication
+                                        .claude_provider
+                                        .clone();
                                     if let Some(o) = state.onboarding.onboarding_state.as_mut() {
                                         o.auth_pane = AuthPane::AgentList;
-                                        o.refresh_auth_statuses();
+                                        o.refresh_auth_statuses(&provider);
                                     }
                                     state.add_success_notification(format!(
                                         "{} saved to keychain; injected as {}",

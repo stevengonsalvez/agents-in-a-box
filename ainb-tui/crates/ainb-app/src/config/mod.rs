@@ -18,6 +18,7 @@ pub mod lock;
 pub mod mcp;
 pub mod mcp_init;
 pub mod onboarding;
+pub mod persist;
 pub mod presets;
 pub mod registry;
 pub mod screen_model;

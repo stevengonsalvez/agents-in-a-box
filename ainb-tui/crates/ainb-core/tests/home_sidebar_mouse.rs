@@ -87,7 +87,12 @@ fn home_sidebar_resize_release_persists_width_to_isolated_home() {
     let save = gesture(Gesture::Release, Pos { x: 29, y: 10 }, &state, &mut ui)
         .expect("the release saves the width");
     assert!(!ui.home_sidebar.resize_active);
-    let _ = dispatch(&mut state, &Keymap::defaults(), &mut ui, save);
+    // The host writes the width after the step that saved it.
+    for effect in dispatch(&mut state, &Keymap::defaults(), &mut ui, save) {
+        if let ainb::Effect::Persist(store) = effect {
+            ainb::config::persist::write(&store).expect("the host writes the store");
+        }
+    }
 
     let loaded = AppConfig::load().unwrap();
     assert_eq!(
