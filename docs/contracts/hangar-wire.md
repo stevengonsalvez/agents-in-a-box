@@ -76,7 +76,10 @@ subscribes, reads the latest once at init, drops any envelope at or below the
 last sequence it applied, and renders the Fleet panel from it with no Fleet
 subscription or read of its own, so a Fleet event costs the TUI process one
 projection. An encoded envelope over 6 MiB is published as `absent` with the
-reason instead of cut short.
+reason instead of cut short. Declaring the subscription in the manifest
+(`[subscribes] snapshots`) means the runtime never idle-reaps the hangar plugin:
+once it spawns it lives for the TUI session, daemon socket and `secrets:read`
+grant included, which is what keeps it subscribed.
 
 ### Sockets
 
