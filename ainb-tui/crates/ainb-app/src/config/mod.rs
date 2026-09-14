@@ -607,7 +607,10 @@ pub struct FleetConfig {
     /// IS modelled, so anything nested under it that has no field here would be
     /// dropped on the next save. That is exactly how the bridge's Telegram,
     /// Slack and Discord tokens used to get wiped by any settings save.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::wire::fields::omit_in_frame_or_none"
+    )]
     pub bridge: Option<toml::Value>,
 }
 
