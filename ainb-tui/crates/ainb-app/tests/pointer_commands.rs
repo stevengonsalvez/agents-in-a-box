@@ -38,13 +38,15 @@ fn every_pointer_command_is_an_unbound_row_in_the_one_registry() {
         .iter()
         .chain(reports::ids::ALL)
         .chain(ainb_app::app::plugin_action::ids::ALL)
+        // The slash palette's commands that run from any screen.
+        .chain(&["global.open_learnings"])
         .copied()
         .collect();
     unbound.sort_unstable();
     host_commands.sort_unstable();
     assert_eq!(
         unbound, host_commands,
-        "only pointer, report and plugin action commands are unbound"
+        "only pointer, report, plugin action and slash palette commands are unbound"
     );
 }
 
@@ -154,4 +156,45 @@ fn row_identities_round_trip_through_the_list() {
         row += 1;
     }
     assert!(row > 0, "the fixture lists rows");
+}
+
+#[test]
+fn a_command_scoped_to_another_screen_changes_nothing() {
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let before = state.versions();
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Command(CommandId::new("home.learnings"), serde_json::Value::Null),
+    );
+
+    assert!(effects.is_empty());
+    assert_eq!(state.shell.current_screen, screen_ids::SESSION_LIST);
+    assert!(bumped(&before, &state.versions()).is_empty());
+
+    // The same row runs where its context is active.
+    state.shell.current_screen = screen_ids::HOME.to_string();
+    let _ = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Command(CommandId::new("home.learnings"), serde_json::Value::Null),
+    );
+    assert_eq!(state.shell.current_screen, screen_ids::LEARNINGS);
+}
+
+#[test]
+fn the_slash_palette_opens_learnings_from_any_screen() {
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let intent = ainb_app::app::slash_command_intent("recall").expect("recall maps");
+
+    let _ = dispatch(&mut state, &keymap, &mut NoRenderer, intent);
+
+    assert_eq!(state.shell.current_screen, screen_ids::LEARNINGS);
 }
