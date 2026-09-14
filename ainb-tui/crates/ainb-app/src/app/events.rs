@@ -1502,8 +1502,9 @@ impl EventHandler {
                 // its plugin) run from any screen. A row that writes outside
                 // ainb runs only from its key, so no other surface can fire it
                 // by name. Every other row passes the gate a key passes: it
-                // runs only while its context is active, so a click resolved
-                // on one screen cannot act after the user has left it.
+                // runs only while its context is active and no overlay covers
+                // it, so a click resolved on one screen cannot act after the
+                // user has left it or opened a dialog over it.
                 if KEY_ONLY_COMMANDS.contains(&id.as_str()) {
                     tracing::warn!("command `{id}` runs only from its key");
                     return None;
@@ -1514,7 +1515,9 @@ impl EventHandler {
                     embed_interactive: state.is_interactive_pane(),
                     ..HostFlags::default()
                 };
-                if !host_authored && !active_contexts(state, &flags).contains(&binding.ctx) {
+                if !host_authored
+                    && !crate::app::keymap::command_contexts(state, &flags).contains(&binding.ctx)
+                {
                     tracing::warn!("command `{id}` is not active on this screen");
                     return None;
                 }
