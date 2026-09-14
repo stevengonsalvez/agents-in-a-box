@@ -7,6 +7,13 @@
 // writes the real bot tokens, which is right for `save()` and wrong for a
 // transport. The compiler cannot tell the two apart, so the list does: a new call
 // site fails here until someone has decided which one it is.
+//
+// The scan is literal text, and that is its ceiling: it finds the paths in
+// `CALL` spelled out on one line. A `use serde_json::to_value;` then a bare
+// `to_value(`, a call split across lines, a macro that expands to one, or
+// `Serialize::serialize` driven by hand all pass unseen. The compile-time probe
+// above is the hard guarantee for `AppState` and the sections; this list is a
+// review prompt for everything else.
 
 use ainb_app::AppState;
 use ainb_app::app::sections::*;
@@ -138,8 +145,9 @@ fn current_call_sites() -> BTreeSet<String> {
         for file in files {
             let rel =
                 file.strip_prefix(&crates).unwrap_or(&file).to_string_lossy().replace('\\', "/");
-            // The seam itself, and test-only files.
-            if rel.contains("/wire/") || rel.ends_with("_tests.rs") {
+            // The seam itself (only ainb-app's, not any directory named `wire`),
+            // and test-only files.
+            if rel.starts_with("ainb-app/src/wire/") || rel.ends_with("_tests.rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&file).unwrap_or_default();
