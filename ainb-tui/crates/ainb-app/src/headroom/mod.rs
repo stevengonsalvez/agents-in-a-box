@@ -112,7 +112,23 @@ pub async fn ensure_proxy_running() -> Result<()> {
 
     // flock can block for the full 5s startup window, so keep all filesystem
     // and health-poll work off the Tokio worker thread.
-    tokio::task::spawn_blocking(ensure_proxy_running_under_process_lock)
+    tokio::task::spawn_blocking(|| ensure_proxy_running_under_process_lock(false))
+        .await
+        .context("headroom proxy startup task panicked")?
+}
+
+/// The watchdog's respawn: [`ensure_proxy_running`], but only while a live
+/// surface holds a proxy user lease (see [`register_user`]).
+///
+/// Checked under `proxy.pid.lock`, so a respawn cannot land after the last
+/// user has released and stopped the proxy, which would orphan a proxy
+/// nobody uses.
+pub async fn ensure_proxy_running_for_live_users() -> Result<()> {
+    if is_healthy().await {
+        return Ok(());
+    }
+    let _spawn_guard = SPAWN_LOCK.lock().await;
+    tokio::task::spawn_blocking(|| ensure_proxy_running_under_process_lock(true))
         .await
         .context("headroom proxy startup task panicked")?
 }
@@ -120,7 +136,7 @@ pub async fn ensure_proxy_running() -> Result<()> {
 /// Run the complete probe/spawn/health sequence while holding `proxy.pid.lock`.
 /// A second ainb process waits here instead of racing a failed bind and
 /// overwriting the first process's PID file.
-fn ensure_proxy_running_under_process_lock() -> Result<()> {
+fn ensure_proxy_running_under_process_lock(require_live_user: bool) -> Result<()> {
     let dir = headroom_dir();
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("create headroom dir {}", dir.display()))?;
@@ -131,6 +147,10 @@ fn ensure_proxy_running_under_process_lock() -> Result<()> {
 
     let port = proxy_port();
     if is_healthy_blocking(port) {
+        return Ok(());
+    }
+    if require_live_user && live_users(None).is_empty() {
+        info!("headroom proxy down but no live user holds a lease; not respawning");
         return Ok(());
     }
 
