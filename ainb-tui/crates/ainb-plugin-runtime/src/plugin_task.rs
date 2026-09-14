@@ -1580,6 +1580,7 @@ impl PluginTask {
         // and reap every managed child this plugin owned so no
         // host-supervised process outlives its requester.
         self.snapshots.unsubscribe_all(&self.plugin.id);
+        self.forget_ui_state();
         self.event_streams.drop_plugin(&self.plugin.id);
         self.managed_subprocess.kill_plugin(&self.plugin.id).await;
         self.unix_sockets.drop_plugin(&self.plugin.id);
@@ -1707,6 +1708,14 @@ impl PluginTask {
         self.kill_child().await;
     }
 
+    /// The plugin's `ui.state` view described a process that is gone. Left in
+    /// the store, a restart would be drawn from it before publishing its own.
+    fn forget_ui_state(&self) {
+        self.snapshots.remove(&Topic::from(ainb_plugin_protocol::topics::ui_state_topic(
+            self.plugin.id.as_str(),
+        )));
+    }
+
     async fn kill_child(&mut self) {
         if let Some(mut cs) = self.child.take() {
             let _ = cs.child.start_kill();
@@ -1715,6 +1724,7 @@ impl PluginTask {
             cs.stdout_reader.abort();
         }
         self.snapshots.unsubscribe_all(&self.plugin.id);
+        self.forget_ui_state();
         // Drop every event stream the plugin held — the process is gone,
         // so further events would leak to a dead subscription.
         self.event_streams.drop_plugin(&self.plugin.id);
