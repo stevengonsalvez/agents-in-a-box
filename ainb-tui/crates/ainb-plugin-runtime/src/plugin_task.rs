@@ -1447,7 +1447,22 @@ impl PluginTask {
                     warn!(plugin = %self.plugin.id, "bad snapshot publish");
                     return;
                 };
-                let topic = Topic::from(p.topic);
+                // `ui.state` is one view per plugin: a bare publish is stored
+                // under the publisher's own `ui.state/<id>`, and a publish to
+                // another plugin's slot is refused, so two plugins can never
+                // overwrite each other's view.
+                let own_ui_state =
+                    ainb_plugin_protocol::topics::ui_state_topic(self.plugin.id.as_str());
+                let topic = if p.topic == ainb_plugin_protocol::topics::UI_STATE {
+                    Topic::from(own_ui_state)
+                } else if p.topic.starts_with(ainb_plugin_protocol::topics::UI_STATE_PREFIX)
+                    && p.topic != own_ui_state
+                {
+                    warn!(plugin = %self.plugin.id, topic = %p.topic, "ui.state publish for another plugin refused");
+                    return;
+                } else {
+                    Topic::from(p.topic)
+                };
                 let payload = p.payload;
                 // Stamp the publisher from the wire connection this task
                 // owns — the plugin can't self-report a different id.
@@ -1565,6 +1580,7 @@ impl PluginTask {
         // and reap every managed child this plugin owned so no
         // host-supervised process outlives its requester.
         self.snapshots.unsubscribe_all(&self.plugin.id);
+        self.forget_ui_state();
         self.event_streams.drop_plugin(&self.plugin.id);
         self.managed_subprocess.kill_plugin(&self.plugin.id).await;
         self.unix_sockets.drop_plugin(&self.plugin.id);
@@ -1692,6 +1708,14 @@ impl PluginTask {
         self.kill_child().await;
     }
 
+    /// The plugin's `ui.state` view described a process that is gone. Left in
+    /// the store, a restart would be drawn from it before publishing its own.
+    fn forget_ui_state(&self) {
+        self.snapshots.remove(&Topic::from(ainb_plugin_protocol::topics::ui_state_topic(
+            self.plugin.id.as_str(),
+        )));
+    }
+
     async fn kill_child(&mut self) {
         if let Some(mut cs) = self.child.take() {
             let _ = cs.child.start_kill();
@@ -1700,6 +1724,7 @@ impl PluginTask {
             cs.stdout_reader.abort();
         }
         self.snapshots.unsubscribe_all(&self.plugin.id);
+        self.forget_ui_state();
         // Drop every event stream the plugin held — the process is gone,
         // so further events would leak to a dead subscription.
         self.event_streams.drop_plugin(&self.plugin.id);

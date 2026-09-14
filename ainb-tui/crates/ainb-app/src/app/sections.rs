@@ -175,18 +175,27 @@ pub struct PluginsHostSection {
     /// `tick_plugin_renders`; the host stores the JSON and never reads into
     /// it.
     pub plugin_ui_states: std::collections::HashMap<String, PluginUiState>,
+    /// The newest `ui.state` version per plugin that must not be shown again:
+    /// the last one seen before the plugin stopped, or one that was refused.
+    /// A restarted plugin's stale view, or one bad publish read again every
+    /// tick, stops here.
+    pub plugin_ui_state_spent: std::collections::HashMap<String, u64>,
+    /// Plugin screens a host other than the terminal wants kept live, so
+    /// their plugins keep rendering and publishing `ui.state` while the
+    /// terminal shows something else, each with when its watch was last
+    /// renewed. A watch lapses unless renewed within
+    /// `AppState::PLUGIN_SCREEN_WATCH_LEASE`, and goes when its plugin does.
+    pub watched_plugin_screens: std::collections::BTreeMap<String, std::time::Instant>,
 }
 
-/// One plugin's `ui.state` view as the snapshot bus last delivered it.
-#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+/// One plugin's `ui.state` view as the snapshot bus last delivered it. Never
+/// in a frame: the view is JSON its plugin wrote, with keys no redaction check
+/// knows in advance.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginUiState {
     /// Snapshot bus version of the publish, increasing per topic.
     pub version: u64,
-    /// The plugin's view, in the shape the plugin documents. Plugin-authored
-    /// text, so a frame carries it with every string scrubbed.
-    #[serde(serialize_with = "crate::wire::fields::scrub_json")]
-    #[cfg_attr(feature = "typescript-bindings", specta(type = specta_typescript::Unknown))]
+    /// The plugin's view, in the shape the plugin documents.
     pub view: serde_json::Value,
 }
 
@@ -198,6 +207,8 @@ impl Default for PluginsHostSection {
             plugin_render_errors: std::collections::HashMap::new(),
             plugin_runtime: None,
             plugin_ui_states: std::collections::HashMap::new(),
+            plugin_ui_state_spent: std::collections::HashMap::new(),
+            watched_plugin_screens: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -521,7 +532,7 @@ pub struct TmuxSection {
     // The tmux session name the live embed is attached to. Some iff `embed`
     // is Some. Re-entering on a DIFFERENT row releases the old client and
     // attaches to the new target instead of silently refocusing the stale
-    // one (see `enter_interactive_pane`).
+    // one (see `AppState::in_place_target`).
     pub embed_session: Option<String>,
     // Tmux integration
     pub tmux_sessions: HashMap<Uuid, crate::tmux::TmuxSession>,

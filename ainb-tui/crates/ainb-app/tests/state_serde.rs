@@ -695,10 +695,6 @@ const TYPE_ALLOW: &[(&str, &str)] = &[
         "env var names with every value `<redacted>` in frame",
     ),
     (
-        "PluginUiState.view",
-        "a plugin's published view with every string scrubbed",
-    ),
-    (
         "PluginsHostView.plugin_render_errors",
         "plugin render failures keyed by screen id, scrubbed",
     ),
@@ -969,7 +965,6 @@ const SERIALIZER_REDACTED: &[&str] = &[
     "OrphanedWorktree.source_repo",
     "PickRepoState.filter_len",
     "PickRepoState.git_auth_error",
-    "PluginUiState.view",
     "PluginsHostView.plugin_render_errors",
     "RecoveryResultLine.detail",
     "RepoCheck::Failed.0",

@@ -1320,6 +1320,20 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Select the sidebar item a click names; a second click opens it",
         ),
+        unbound(
+            Context::screen("git_view"),
+            "select_review_row",
+            AppEvent::GitReviewSelectRow {
+                target: crate::components::code_review::render::ReviewRowId::File(String::new()),
+            },
+            "Select the code review sidebar row a click names",
+        ),
+        unbound(
+            Context::screen("git_view"),
+            "scroll",
+            AppEvent::GitViewScrollBy(0),
+            "Scroll the active git view tab by the lines a wheel names",
+        ),
         // Host reports (`crate::app::reports::ids`), unbound for the same reason.
         unbound(
             Context::Global,
@@ -1338,6 +1352,22 @@ pub fn defaults() -> Vec<Binding> {
                 payload: serde_json::Value::Null,
             },
             "Run a plugin's own action by id",
+        ),
+        unbound(
+            Context::Screen("plugin", super::keymap::SubContext::Named("owned")),
+            "watch_screen",
+            AppEvent::WatchPluginScreen {
+                screen: String::new(),
+                watching: false,
+            },
+            "Keep a plugin screen rendering for a host that is not showing it here",
+        ),
+        // Slash-palette commands that run from any screen.
+        unbound(
+            Context::Global,
+            "open_learnings",
+            AppEvent::GoToLearnings,
+            "Open learnings from the slash palette",
         ),
         unbound(
             Context::Global,
@@ -1365,9 +1395,30 @@ pub fn defaults() -> Vec<Binding> {
         ),
         unbound(
             Context::Global,
-            "in_place_sized",
-            AppEvent::InPlaceSized { rows: 0, cols: 0 },
-            "Attach the selected row in place at the size the host measured",
+            "in_place_opened",
+            AppEvent::InPlaceOpened {
+                tmux_session: String::new(),
+                embed: crate::app::reports::LocalEmbed::placeholder(),
+            },
+            "Adopt the tmux client the host opened for the in-place pane",
+        ),
+        unbound(
+            Context::Global,
+            "in_place_failed",
+            AppEvent::InPlaceFailed {
+                tmux_session: String::new(),
+                error: String::new(),
+            },
+            "Say why the in-place attach would not open",
+        ),
+        unbound(
+            Context::Global,
+            "plugin_action_undelivered",
+            AppEvent::PluginActionUndelivered {
+                plugin: String::new(),
+                action_id: String::new(),
+            },
+            "Say that a plugin action found no running plugin",
         ),
         unbound(
             Context::Global,

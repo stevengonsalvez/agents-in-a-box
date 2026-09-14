@@ -146,9 +146,16 @@ fn event_loop(
     state: &mut GitViewState,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> Result<()> {
+    let mut layout = code_review::render::ReviewSidebarLayout::default();
     loop {
         terminal.draw(|frame| {
-            code_review::render::render(frame, frame.area(), &state.review, &state.review_ui);
+            code_review::render::render(
+                frame,
+                frame.area(),
+                &state.review,
+                &state.review_ui,
+                &mut layout,
+            );
         })?;
 
         if !event::poll(Duration::from_millis(250))? {
@@ -164,7 +171,10 @@ fn event_loop(
                 MouseEventKind::ScrollDown => state.review_scroll_down(WHEEL_LINES),
                 MouseEventKind::ScrollUp => state.review_scroll_up(WHEEL_LINES),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    state.review_sidebar_click(m.column, m.row);
+                    if let Some(row) = code_review::render::sidebar_row_at(&layout, m.column, m.row)
+                    {
+                        state.review_click_row(row);
+                    }
                 }
                 _ => {}
             },

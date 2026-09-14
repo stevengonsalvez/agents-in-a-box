@@ -3,7 +3,6 @@
 // `ainb-core::components::code_review::render`, which re-exports this module.
 
 use super::model::{DiffRow, ReviewFile, ReviewModel, RowKind};
-use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 
 /// Transient UI state for the review surface (selection + scroll).
@@ -20,12 +19,45 @@ pub struct CodeReviewUi {
     pub scroll: usize,
     /// Index of the hunk the `n`/`N` cursor is on (0-based, across all files).
     pub current_hunk: usize,
-    /// First visible sidebar tree row, recomputed during render (interior
-    /// mutability so `render` can take `&self`).
-    pub sidebar_window: Cell<usize>,
-    /// Screen rect of the sidebar list region from the last render, used to map
-    /// a mouse click back to a tree-row index.
-    pub sidebar_rect: Cell<crate::geometry::Area>,
+}
+
+/// A sidebar tree row by identity: the directory or file path it shows, so a
+/// click resolved against one frame selects the same row after the tree
+/// changed shape, or nothing when that row is gone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRowId {
+    /// A directory, by its repo-relative path.
+    Dir(String),
+    /// A changed file, by its repo-relative path.
+    File(String),
+}
+
+/// The identity of tree row `row`, if the tree has one there.
+#[must_use]
+pub fn sidebar_row_id(model: &ReviewModel, ui: &CodeReviewUi, row: usize) -> Option<ReviewRowId> {
+    match build_sidebar(model, &ui.collapsed_dirs).get(row)? {
+        SidebarRow::Dir { path, .. } => Some(ReviewRowId::Dir(path.clone())),
+        SidebarRow::File { file, .. } => {
+            Some(ReviewRowId::File(model.files.get(*file)?.path.clone()))
+        }
+    }
+}
+
+/// Where the tree row `id` names sits now, if it is still in the tree.
+#[must_use]
+pub fn sidebar_row_index(
+    model: &ReviewModel,
+    ui: &CodeReviewUi,
+    id: &ReviewRowId,
+) -> Option<usize> {
+    build_sidebar(model, &ui.collapsed_dirs).iter().position(|row| match (row, id) {
+        (SidebarRow::Dir { path, .. }, ReviewRowId::Dir(wanted)) => path == wanted,
+        (SidebarRow::File { file, .. }, ReviewRowId::File(wanted)) => {
+            model.files.get(*file).is_some_and(|f| &f.path == wanted)
+        }
+        _ => false,
+    })
 }
 
 /// A row in the flattened, scrollable view of the model.
@@ -450,17 +482,6 @@ pub fn sidebar_set_all_collapsed(model: &ReviewModel, ui: &mut CodeReviewUi, col
     let n = build_sidebar(model, &ui.collapsed_dirs).len();
     if ui.sidebar_selected >= n {
         ui.sidebar_selected = n.saturating_sub(1);
-    }
-}
-
-/// Hit-test a mouse position against the last-rendered sidebar; returns the
-/// tree-row index under `(x, y)`, if any.
-pub fn sidebar_row_at(ui: &CodeReviewUi, x: u16, y: u16) -> Option<usize> {
-    let r = ui.sidebar_rect.get();
-    if r.width > 0 && x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height {
-        Some(ui.sidebar_window.get() + usize::from(y - r.y))
-    } else {
-        None
     }
 }
 

@@ -98,6 +98,11 @@ impl SnapshotStore {
         self.get(topic).map(|(p, _, _)| p)
     }
 
+    /// Drop `topic`'s entry, so readers see nothing until its next publish.
+    pub fn remove(&self, topic: &Topic) {
+        self.inner.write().entries.remove(topic);
+    }
+
     /// Register `plugin` as a subscriber to `topic`.
     pub fn subscribe(&self, topic: Topic, plugin: PluginId) {
         self.inner.write().subscribers.entry(topic).or_default().insert(plugin);

@@ -10,6 +10,7 @@ use crate::app::events::AppEvent;
 use crate::app::intent::{Args, Intent};
 use crate::app::keymap::CommandId;
 use crate::app::state::{FocusedPane, SessionListRowId};
+use crate::components::code_review::render::ReviewRowId;
 use crate::components::sidebar::SidebarItem;
 use crate::components::skill_manager_screen::FocusedSkillPane;
 
@@ -38,6 +39,10 @@ pub mod ids {
     pub const HOME_SAVE_SIDEBAR_WIDTH: &str = "home.save_sidebar_width";
     /// `{"item": SidebarItem id}`
     pub const HOME_CLICK_SIDEBAR_ITEM: &str = "home.click_sidebar_item";
+    /// `{"target": ReviewRowId}`
+    pub const GIT_VIEW_SELECT_REVIEW_ROW: &str = "git_view.select_review_row";
+    /// `{"lines": i32}`, down when positive.
+    pub const GIT_VIEW_SCROLL: &str = "git_view.scroll";
 
     /// Every pointer command id.
     pub const ALL: &[&str] = &[
@@ -52,6 +57,8 @@ pub mod ids {
         SKILL_MANAGER_SAVE_SOURCES_WIDTH,
         HOME_SAVE_SIDEBAR_WIDTH,
         HOME_CLICK_SIDEBAR_ITEM,
+        GIT_VIEW_SELECT_REVIEW_ROW,
+        GIT_VIEW_SCROLL,
     ];
 }
 
@@ -155,6 +162,30 @@ pub fn save_home_sidebar_width(width: u16, columns: u16) -> Intent {
 #[must_use]
 pub fn click_home_sidebar_item(item: SidebarItem) -> Intent {
     command(ids::HOME_CLICK_SIDEBAR_ITEM, json!({ "item": item.id() }))
+}
+
+/// Click the code review sidebar row `target`.
+#[must_use]
+pub fn select_review_row(target: &ReviewRowId) -> Intent {
+    command(ids::GIT_VIEW_SELECT_REVIEW_ROW, json!({ "target": target }))
+}
+
+/// Scroll the git view's active tab by `lines`, down when positive.
+#[must_use]
+pub fn scroll_git_view(lines: i32) -> Intent {
+    command(ids::GIT_VIEW_SCROLL, json!({ "lines": lines }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewRowArgs {
+    target: ReviewRowId,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinesArgs {
+    lines: i32,
 }
 
 #[derive(Deserialize)]
@@ -266,6 +297,14 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
         AppEvent::HomeSidebarClickItem { .. } => parse::<ItemArgs>(args)
             .and_then(|args| SidebarItem::from_id(&args.item))
             .map(|item| AppEvent::HomeSidebarClickItem { item }),
+        AppEvent::GitReviewSelectRow { .. } => {
+            parse::<ReviewRowArgs>(args).map(|args| AppEvent::GitReviewSelectRow {
+                target: args.target,
+            })
+        }
+        AppEvent::GitViewScrollBy(_) => parse::<LinesArgs>(args)
+            .filter(|args| args.lines != 0)
+            .map(|args| AppEvent::GitViewScrollBy(args.lines)),
         _ => return None,
     })
 }

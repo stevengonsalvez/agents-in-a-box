@@ -5,11 +5,8 @@
 use super::ids;
 use crate::app::AppState;
 
-/// Static screen → plugin routing table. The `state.rs` render tick
-/// already maps the same way; both call sites read this so the
-/// authoritative list lives in one place.
-///
-/// Keep this list in sync with `tick_plugin_renders` in `app/state.rs`.
+/// Static screen → plugin routing table: the render tick, plugin action
+/// delivery and key routing all read this one list.
 pub const PLUGIN_SCREENS: &[(&str, &str)] = &[
     (ids::ANALYTICS, "burndown"),
     (ids::WITR, "witr"),
