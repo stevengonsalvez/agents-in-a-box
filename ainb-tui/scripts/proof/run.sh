@@ -55,7 +55,9 @@ if ((BUILD)); then
     && bash scripts/build-plugins.sh) || { echo "build failed" >&2; exit 2; }
 fi
 
-AINB_BIN="$AINB_TUI_DIR/target/debug/ainb"
+# A shared cargo target (CARGO_TARGET_DIR) is where the build put the binary;
+# the plugins are always staged under this checkout's dist/.
+AINB_BIN="${CARGO_TARGET_DIR:-$AINB_TUI_DIR/target}/debug/ainb"
 [[ -x "$AINB_BIN" ]] || { echo "no binary at $AINB_BIN (run with --build)" >&2; exit 2; }
 [[ -x "$AINB_TUI_DIR/dist/plugins/hangar-tui/hangar-tui" ]] \
   || { echo "plugins are not staged (run with --build)" >&2; exit 2; }
