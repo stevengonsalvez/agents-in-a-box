@@ -1,6 +1,6 @@
 // ABOUTME: Capstone tripwire for the interactive in-place tmux pane (goal validation
 // B5/B6/B8). Drives the REAL render path (TmuxPreviewPane::render_interactive) against a
-// REAL tmux session via AppState::enter_interactive_pane, asserting on the rendered
+// REAL tmux session through the in-place attach effect and its report, asserting on the rendered
 // ratatui buffer — the user-visible output — rather than internal state alone.
 //
 // REAL tmux — creates + destroys its own named session (kill-session by exact name only,
@@ -80,6 +80,32 @@ fn buffer_text(term: &Terminal<TestBackend>) -> String {
     term.backend().buffer().content().iter().map(|c| c.symbol()).collect()
 }
 
+/// What the terminal host does for `A` on the session list: dispatch the key's
+/// command, open the client the returned `AttachTerminal(InPlace)` names, as
+/// `effect_host::open_in_place` does, and dispatch the report. True when the
+/// pane is live and interactive afterwards.
+fn attach_in_place(state: &mut AppState, rows: u16, cols: u16) -> bool {
+    use ainb::app::reports::{self, LocalEmbed};
+    use ainb::app::{Effect, TerminalTarget};
+
+    let keymap = ainb::Keymap::defaults();
+    let command = ainb::Intent::Command(
+        ainb::CommandId::new("session_list.attach_interactive"),
+        serde_json::Value::Null,
+    );
+    for effect in ainb::dispatch(state, &keymap, &mut ainb::app::NoRenderer, command) {
+        if let Effect::AttachTerminal(TerminalTarget::InPlace { tmux_session, .. }) = effect {
+            let name = tmux_session.as_str();
+            let report = match ainb::tmux::EmbedClient::attach(name, rows, cols) {
+                Ok(client) => reports::in_place_opened(name, &LocalEmbed::keep(client)),
+                Err(error) => reports::in_place_failed(name, &error.to_string()),
+            };
+            let _ = ainb::dispatch(state, &keymap, &mut ainb::app::NoRenderer, report);
+        }
+    }
+    state.tmux.embed.is_some() && state.is_interactive_pane()
+}
+
 #[test]
 fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
     if !tmux_available() {
@@ -92,6 +118,7 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
     // Select the real tmux session as an "other tmux" row (the same resolution
     // path `a`/`l` use). selected_tmux_name() must resolve to it.
     let mut state = AppState::new();
+    state.shell.current_screen = "session_list".to_string();
     state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
     state.tmux.selected_other_tmux_index = Some(0);
     assert_eq!(
@@ -102,8 +129,8 @@ fn interactive_embed_renders_badge_and_live_input_then_release_keeps_session() {
 
     // ── B5: 'A' (in-pane attach) enters → the live render shows the INTERACTIVE focus badge ──
     assert!(
-        state.enter_interactive_pane(26, 100),
-        "enter_interactive_pane should attach"
+        attach_in_place(&mut state, 26, 100),
+        "the in-place attach should go live"
     );
     assert!(
         state.is_interactive_pane(),
@@ -200,10 +227,7 @@ fn interactive_embed_width_follows_the_sidebar_state() {
     // the expected interior widths env-dependent.
     let mut ui = UiState::default();
     ui.sessions_pane.restore(Some(40), false);
-    assert!(
-        state.enter_interactive_pane(28, 80),
-        "enter_interactive_pane"
-    );
+    assert!(attach_in_place(&mut state, 28, 80), "in-place attach");
 
     let mut layout = LayoutComponent::new();
     let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
@@ -252,16 +276,16 @@ fn reentering_on_a_different_row_retargets_the_embed() {
         OtherTmuxSession::new(second.clone(), false, 1),
     ];
     state.tmux.selected_other_tmux_index = Some(0);
-    assert!(state.enter_interactive_pane(26, 100), "attach to first");
+    assert!(attach_in_place(&mut state, 26, 100), "attach to first");
     let initial_target = state.tmux.embed_session.clone();
 
     // Same row again = self-healing no-op, embed target unchanged.
-    assert!(state.enter_interactive_pane(26, 100), "same-row re-entry");
+    assert!(attach_in_place(&mut state, 26, 100), "same-row re-entry");
     let same_row_target = state.tmux.embed_session.clone();
 
     // Different row: must swap the embed onto the newly selected session.
     state.tmux.selected_other_tmux_index = Some(1);
-    assert!(state.enter_interactive_pane(26, 100), "re-target to second");
+    assert!(attach_in_place(&mut state, 26, 100), "re-target to second");
     let swapped_target = state.tmux.embed_session.clone();
     let interactive_after = state.is_interactive_pane();
 
@@ -289,6 +313,69 @@ fn reentering_on_a_different_row_retargets_the_embed() {
     );
 }
 
+/// The production path: the host opens the client and reports it. The reducer
+/// adopts it only while the user is still on the session list with its row
+/// selected; a client that lands after they left is closed, not attached out
+/// of sight.
+#[test]
+fn an_opened_client_is_adopted_only_while_the_session_list_shows_its_row() {
+    use ainb::app::reports::{self, LocalEmbed};
+    use ainb::app::screens::ids;
+
+    if !tmux_available() {
+        eprintln!("SKIP: tmux unavailable");
+        return;
+    }
+    let session = new_session("adopt");
+    let keymap = ainb::Keymap::defaults();
+    let report_opened = |state: &mut AppState| {
+        let client = ainb::tmux::EmbedClient::attach(&session, 26, 100).expect("host attach");
+        let report = reports::in_place_opened(&session, &LocalEmbed::keep(client));
+        let _ = ainb::dispatch(state, &keymap, &mut ainb::app::NoRenderer, report);
+    };
+
+    let mut state = AppState::new();
+    state.tmux.other_tmux_sessions = vec![
+        OtherTmuxSession::new(session.clone(), false, 1),
+        OtherTmuxSession::new(format!("{session}-other"), false, 1),
+    ];
+
+    state.shell.current_screen = ids::SESSION_LIST.to_string();
+    state.tmux.selected_other_tmux_index = Some(1);
+    report_opened(&mut state);
+    let adopted_for_another_row = state.tmux.embed.is_some();
+
+    state.tmux.selected_other_tmux_index = Some(0);
+    state.shell.current_screen = ids::GIT_VIEW.to_string();
+    report_opened(&mut state);
+    let adopted_after_leaving = state.tmux.embed.is_some();
+
+    state.shell.current_screen = ids::SESSION_LIST.to_string();
+    report_opened(&mut state);
+    let adopted_here = state.is_interactive_pane();
+
+    state.release_interactive_pane();
+    let alive = session_alive(&session);
+    kill_session(&session);
+
+    assert!(
+        !adopted_for_another_row,
+        "a client for a row the user has moved off must not be adopted"
+    );
+    assert!(
+        !adopted_after_leaving,
+        "a client reported after the user left the session list must not be adopted"
+    );
+    assert!(
+        adopted_here,
+        "the same report on the session list adopts the client"
+    );
+    assert!(
+        alive,
+        "closing or releasing the client leaves the tmux session running"
+    );
+}
+
 /// Mode-boundary tripwire: while the embed is interactive, host mouse handling
 /// never runs (clicks/wheel don't break the mode), ':' reaches the PTY instead
 /// of opening the slash palette, and after release the host owns the mouse
@@ -309,10 +396,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     state.shell.current_screen = "session_list".to_string();
     state.tmux.other_tmux_sessions = vec![OtherTmuxSession::new(session.clone(), false, 1)];
     state.tmux.selected_other_tmux_index = Some(0);
-    assert!(
-        state.enter_interactive_pane(26, 100),
-        "enter_interactive_pane"
-    );
+    assert!(attach_in_place(&mut state, 26, 100), "in-place attach");
 
     // One full layout render publishes embed_pane_area + the sessions/preview
     // rects the mouse handler consults.

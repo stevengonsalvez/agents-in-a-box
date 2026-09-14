@@ -121,6 +121,16 @@ pub fn press(state: &AppState, ui: &mut UiState, pos: Pos, btn: Btn) -> Option<I
 }
 
 fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Intent> {
+    // Code review sidebar: name the row under the press by its path.
+    if state.shell.current_screen == screen_ids::GIT_VIEW && !state.shell.help_visible {
+        let git = state.git_view.git_view_state.as_ref()?;
+        if git.active_tab != crate::components::git_view::GitTab::Review {
+            return None;
+        }
+        let row = crate::components::code_review::render::sidebar_row_at(&ui.review_sidebar, x, y)?;
+        return git.review_row_id(row).map(|id| pointer::select_review_row(&id));
+    }
+
     if state.shell.current_screen == screen_ids::HOME && !state.shell.help_visible {
         let rect = ui.home_sidebar_rect?;
         let on_edge = on_home_sidebar_edge(rect, x, y);

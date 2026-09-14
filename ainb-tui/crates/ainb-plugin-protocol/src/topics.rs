@@ -30,6 +30,19 @@ pub const UI_CLOSE_REQUEST: &str = "ui.close_request";
 /// and never interprets it.
 pub const UI_STATE: &str = "ui.state";
 
+/// The start of every plugin's own [`UI_STATE`] topic.
+pub const UI_STATE_PREFIX: &str = "ui.state/";
+
+/// The topic a plugin's `ui.state` view is stored under.
+///
+/// A plugin publishes to [`UI_STATE`]; the runtime stores that under this
+/// topic for the publishing plugin, and refuses a publish to another plugin's.
+/// Hosts read a plugin's view here, so two publishers never share a slot.
+#[must_use]
+pub fn ui_state_topic(plugin_id: &str) -> String {
+    format!("{UI_STATE_PREFIX}{plugin_id}")
+}
+
 /// JSON payload for [`UI_CLOSE_REQUEST`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UiCloseRequest {

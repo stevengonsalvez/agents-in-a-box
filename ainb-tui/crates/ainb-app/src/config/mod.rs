@@ -2146,7 +2146,14 @@ impl AppConfig {
         }
         let prefs = &mut self.ui_preferences;
         let mut changed = false;
-        for (legacy, fraction) in [
+        // Each width goes through the clamp its panel applies at draw time
+        // first, so a count saved in a pane narrower than today's cannot
+        // become a fraction the panel would never draw.
+        let clamps: [fn(u16, u16) -> u16; 2] = [
+            crate::components::sidebar::SidebarState::clamp_width,
+            crate::components::skill_manager_screen::clamp_sources_width,
+        ];
+        for ((legacy, fraction), clamp) in [
             (
                 &mut prefs.home_sidebar_width,
                 &mut prefs.home_sidebar_fraction,
@@ -2155,9 +2162,13 @@ impl AppConfig {
                 &mut prefs.skill_manager_sources_width,
                 &mut prefs.skill_manager_sources_fraction,
             ),
-        ] {
+        ]
+        .into_iter()
+        .zip(clamps)
+        {
             if let Some(width) = legacy.take() {
                 changed = true;
+                let width = clamp(width, columns);
                 if fraction.is_none() {
                     *fraction = Some((f64::from(width) / f64::from(columns)).clamp(0.0, 1.0));
                 }
@@ -4310,6 +4321,31 @@ skill_manager_sources_width = 30
         assert!(!written.contains("sidebar_width = 40"), "{written}");
         assert!(!written.contains("sources_width"), "{written}");
         assert!(written.contains("home_sidebar_fraction"), "{written}");
+    }
+
+    #[test]
+    fn a_width_saved_in_a_wider_pane_migrates_to_what_the_panel_can_draw() {
+        let legacy = r"
+[ui_preferences]
+home_sidebar_width = 200
+skill_manager_sources_width = 4
+";
+        let mut config = AppConfig::from_layers([legacy]).expect("layers");
+        assert!(config.migrate_layout_widths(80));
+        let home = crate::components::sidebar::SidebarState::clamp_width(200, 80);
+        let sources = crate::components::skill_manager_screen::clamp_sources_width(4, 80);
+        assert!(
+            home < 80 && sources > 4,
+            "both counts are out of band at 80 columns"
+        );
+        assert_eq!(
+            config.ui_preferences.home_sidebar_fraction,
+            Some(f64::from(home) / 80.0)
+        );
+        assert_eq!(
+            config.ui_preferences.skill_manager_sources_fraction,
+            Some(f64::from(sources) / 80.0)
+        );
     }
 
     #[test]

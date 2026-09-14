@@ -338,13 +338,56 @@ fn the_abtop_setup_report_announces_either_outcome() {
 }
 
 #[test]
-fn an_in_place_size_with_no_row_selected_attaches_nothing() {
+fn an_in_place_client_that_would_not_open_says_why() {
     let mut state = AppState::new();
-    state.sessions.selected_workspace_index = None;
 
-    let _ = report(&mut state, reports::in_place_sized(24, 80));
+    let moved = report(
+        &mut state,
+        reports::in_place_failed("tmux_api_feat", "no server running"),
+    );
+
+    let errors = notices(&state, &NotificationType::Error);
+    assert!(
+        errors.len() == 1 && errors[0].contains("tmux_api_feat") && errors[0].contains("no server"),
+        "{errors:?}"
+    );
+    assert!(!state.is_interactive_pane());
+    assert_eq!(moved, vec![SectionId::Shell]);
+}
+
+/// A handle from another process (or one already adopted) has no client
+/// behind it, so the report opens nothing.
+#[test]
+fn an_in_place_report_with_nothing_to_adopt_opens_nothing() {
+    let mut state = AppState::new();
+    let handle: reports::LocalEmbed =
+        serde_json::from_value(serde_json::json!("not-a-parked-client")).expect("handle");
+
+    let moved = report(
+        &mut state,
+        reports::in_place_opened("tmux_api_feat", &handle),
+    );
 
     assert!(!state.is_interactive_pane());
+    assert!(moved.is_empty(), "{moved:?}");
+}
+
+#[test]
+fn a_plugin_action_the_runtime_could_not_deliver_says_so() {
+    let mut state = AppState::new();
+
+    let _ = report(
+        &mut state,
+        reports::plugin_action_undelivered("hangar-tui", "board.open_card"),
+    );
+
+    let errors = notices(&state, &NotificationType::Error);
+    assert!(
+        errors.len() == 1
+            && errors[0].contains("hangar-tui")
+            && errors[0].contains("board.open_card"),
+        "{errors:?}"
+    );
 }
 
 #[test]

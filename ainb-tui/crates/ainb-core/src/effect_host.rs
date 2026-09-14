@@ -1,7 +1,8 @@
 // ABOUTME: The terminal host's effect executor. The reducer in `ainb-app`
 // queues `Effect`s; the run loop runs each one here once the step that queued
-// it has finished writing state. The executor reads state and never writes it:
-// what the work changed comes back as report intents the run loop dispatches.
+// it has finished writing state. The executor neither reads nor writes state:
+// the effect carries what it needs, and what the work changed comes back as
+// report intents the run loop dispatches.
 
 use std::io::Stdout;
 
@@ -12,42 +13,43 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::app::reports::{self, AttachOutcome, AttachedTo, EditorOutcome, ShellCd, ShellOutcome};
-use crate::app::state::AppState;
 use crate::app::ui_state::UiState;
 use crate::app::{Effect, Intent, TerminalTarget, ToolTerminal};
 
 /// Carry out one effect for the terminal host and return the reports to
 /// dispatch, in order.
 ///
-/// State is read before the returned future starts, never across an await, so
-/// the run loop is free to dispatch into it the moment the work ends.
+/// The executor holds no state: everything an effect needs rides on it, plus
+/// the renderer's own `ui` layout and the plugin runtime the host owns.
 ///
 /// `Err` means the terminal itself could not be suspended or restored, which
 /// the run loop treats as fatal; every failure the user can act on is a report
 /// the reducer turns into a notice.
 pub fn execute<'t>(
     effect: Effect,
-    state: &AppState,
     terminal: &'t mut Terminal<CrosstermBackend<Stdout>>,
     ui: &UiState,
+    plugins: Option<&ainb_plugin_runtime::RuntimeHandle>,
 ) -> impl std::future::Future<Output = Result<Vec<Intent>>> + 't {
     let work = match effect {
-        Effect::AttachTerminal(TerminalTarget::InPlace) => {
-            Work::Done(vec![size_in_place(state, terminal, ui)])
-        }
-        Effect::AttachTerminal(TerminalTarget::Session(session_id)) => {
-            let tmux_session_name = state
-                .sessions
-                .workspaces
-                .iter()
-                .flat_map(|w| &w.sessions)
-                .find(|s| s.id == session_id)
-                .and_then(|s| s.tmux_session_name.clone());
-            Work::Session(session_id, tmux_session_name)
-        }
+        Effect::AttachTerminal(TerminalTarget::InPlace {
+            tmux_session,
+            show_menu_bar,
+        }) => Work::Done(vec![open_in_place(
+            terminal,
+            ui,
+            &tmux_session,
+            show_menu_bar,
+        )]),
         Effect::AttachTerminal(target) => Work::Attach(target),
         Effect::Detach => Work::Done(vec![reports::detached()]),
-        Effect::OpenEditor(path) => Work::Done(vec![open_editor(state, &path)]),
+        Effect::OpenEditor {
+            path,
+            preferred_editor,
+        } => Work::Done(vec![open_editor(
+            path.as_path(),
+            preferred_editor.as_deref(),
+        )]),
         Effect::PasteClipboard => Work::Done(vec![paste_clipboard()]),
         Effect::RunDaemonAction {
             daemon,
@@ -57,22 +59,37 @@ pub fn execute<'t>(
             spawn_daemon_action(daemon, action, generation);
             Work::Done(Vec::new())
         }
+        Effect::RunPluginAction {
+            plugin,
+            action_id,
+            payload,
+        } => {
+            let sent = plugins.is_some_and(|runtime| {
+                runtime.send_action(
+                    &ainb_plugin_runtime::types::PluginId::new(plugin.as_str()),
+                    action_id.as_str(),
+                    payload,
+                )
+            });
+            Work::Done(if sent {
+                Vec::new()
+            } else {
+                vec![reports::plugin_action_undelivered(&plugin, &action_id)]
+            })
+        }
     };
     async move {
         match work {
             Work::Done(reports) => Ok(reports),
-            Work::Session(session_id, tmux_session_name) => Ok(vec![
-                attach_session(terminal, session_id, tmux_session_name).await?,
-            ]),
             Work::Attach(target) => attach(terminal, target).await,
         }
     }
 }
 
-/// An effect with everything it reads from state already read.
+/// An effect's work, split into what finished before the future starts and
+/// what attaches a terminal.
 enum Work {
     Done(Vec<Intent>),
-    Session(Uuid, Option<String>),
     Attach(TerminalTarget),
 }
 
@@ -99,7 +116,18 @@ fn deferred() -> &'static (
 /// The run loop dispatches them like any other intent.
 #[must_use]
 pub fn take_deferred_reports() -> Vec<Intent> {
-    deferred().1.lock().map_or_else(|_| Vec::new(), |rx| rx.try_iter().collect())
+    drain(&deferred().1)
+}
+
+/// Everything waiting on `queue`, oldest first.
+fn drain(queue: &std::sync::Mutex<std::sync::mpsc::Receiver<Intent>>) -> Vec<Intent> {
+    // A worker that panicked while holding the lock leaves the queue intact;
+    // dropping every later report would pin rows on `working` forever.
+    let rx = queue.lock().unwrap_or_else(|poisoned| {
+        warn!("deferred report queue was poisoned; recovering it");
+        poisoned.into_inner()
+    });
+    rx.try_iter().collect()
 }
 
 /// Run a daemon lifecycle verb on a worker and report it when it exits. A
@@ -143,19 +171,22 @@ fn paste_clipboard() -> Intent {
     }
 }
 
-/// Attach to a target that needs nothing from state.
+/// Attach a terminal target full screen.
 async fn attach(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     target: TerminalTarget,
 ) -> Result<Vec<Intent>> {
     Ok(match target {
-        TerminalTarget::InPlace | TerminalTarget::Session(_) => {
-            unreachable!("resolved against state in execute")
+        TerminalTarget::InPlace { .. } => {
+            unreachable!("the in-place client opens before the future starts")
+        }
+        TerminalTarget::Session { id, tmux_session } => {
+            vec![attach_session(terminal, id, tmux_session.as_str()).await?]
         }
         TerminalTarget::Tmux(session_name) => {
-            let outcome = attach_named(terminal, &session_name).await?;
+            let outcome = attach_named(terminal, session_name.as_str()).await?;
             vec![reports::attach_finished(
-                &AttachedTo::Tmux(session_name),
+                &AttachedTo::Tmux(session_name.as_str().to_string()),
                 &outcome,
             )]
         }
@@ -173,7 +204,7 @@ async fn attach(
             attach_workspace_shell(
                 terminal,
                 workspace_path,
-                &tmux_session,
+                tmux_session.as_str(),
                 new_shell,
                 target_dir,
             )
@@ -304,15 +335,16 @@ fn claude_login(
     Ok(reports::login_finished(auth_dir, exited_ok))
 }
 
-/// The size of the selected row's writable preview pane.
-///
-/// The embed is sized to the exact interactive layout (the user's current
-/// sidebar and chrome) so tmux reflows once at attach instead of twice. The
-/// render path still resizes it each frame for terminal resizes.
-fn size_in_place(
-    state: &AppState,
+/// Open a writable tmux client on `tmux_session` for the session list's
+/// preview pane, sized to the exact interactive layout (the user's current
+/// sidebar and chrome) so tmux reflows once at attach instead of twice, and
+/// park it for the reducer to adopt. The render path still resizes it each
+/// frame for terminal resizes.
+fn open_in_place(
     terminal: &Terminal<CrosstermBackend<Stdout>>,
     ui: &UiState,
+    tmux_session: &crate::app::TmuxSessionName,
+    show_menu_bar: bool,
 ) -> Intent {
     let size = terminal.size().unwrap_or(ratatui::layout::Size {
         width: 80,
@@ -323,9 +355,13 @@ fn size_in_place(
         size.width,
         size.height,
         sidebar,
-        state.config.app_config.ui_preferences.show_session_menu_bar,
+        show_menu_bar,
     );
-    reports::in_place_sized(rows, cols)
+    let name = tmux_session.as_str();
+    match crate::tmux::EmbedClient::attach(name, rows, cols) {
+        Ok(client) => reports::in_place_opened(name, &reports::LocalEmbed::keep(client)),
+        Err(e) => reports::in_place_failed(name, &e.to_string()),
+    }
 }
 
 /// An ainb session's own tmux session, `tmux_session_name` as state named it
@@ -333,31 +369,19 @@ fn size_in_place(
 async fn attach_session(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     session_id: Uuid,
-    tmux_session_name: Option<String>,
+    tmux_session_name: &str,
 ) -> Result<Intent> {
     let target = AttachedTo::Session(session_id);
-    // The reducer checked the session has one before it queued the attach; a
-    // tick between the two can still remove the session.
-    let Some(tmux_session_name) = tmux_session_name else {
-        error!(
-            "[ACTION] Session {} has no tmux session to attach",
-            session_id
-        );
-        return Ok(reports::attach_finished(
-            &target,
-            &AttachOutcome::Failed("the session has no tmux session".to_string()),
-        ));
-    };
     info!(
         "[ACTION] Attaching session {} to tmux session '{}'",
         session_id, tmux_session_name
     );
-    let outcome = match attach_named(terminal, &tmux_session_name).await? {
+    let outcome = match attach_named(terminal, tmux_session_name).await? {
         // An attach can fail because the terminal is nested even though the
         // target is alive. Probe the exact target, so only a terminally
         // missing tmux session is reported as gone.
         AttachOutcome::Failed(error)
-            if tmux_session_presence(&tmux_session_name).await == TmuxSessionPresence::Missing =>
+            if tmux_session_presence(tmux_session_name).await == TmuxSessionPresence::Missing =>
         {
             AttachOutcome::TargetMissing(error)
         }
@@ -623,9 +647,9 @@ fn run_daemon_action(kind_id: &str, verb: &str) -> reports::DaemonActionReport {
     }
 }
 
-fn open_editor(state: &AppState, path: &std::path::Path) -> Intent {
+fn open_editor(path: &std::path::Path, preferred_editor: Option<&str>) -> Intent {
     info!("[EFFECT] Opening in editor: {:?}", path);
-    let Some(editor) = resolve_editor(&state.config.app_config) else {
+    let Some(editor) = resolve_editor(preferred_editor) else {
         warn!("No editor found in fallback chain");
         return reports::editor_finished(&EditorOutcome::NoneFound);
     };
@@ -644,10 +668,10 @@ fn open_editor(state: &AppState, path: &std::path::Path) -> Intent {
 
 /// The editor to run: the configured preference, then `code`, then `$EDITOR`,
 /// whichever is on `PATH` first.
-fn resolve_editor(config: &crate::config::AppConfig) -> Option<String> {
-    if let Some(ref editor) = config.ui_preferences.preferred_editor {
+fn resolve_editor(preferred_editor: Option<&str>) -> Option<String> {
+    if let Some(editor) = preferred_editor {
         if command_exists(editor) {
-            return Some(editor.clone());
+            return Some(editor.to_string());
         }
     }
     if command_exists("code") {
@@ -749,6 +773,27 @@ mod daemon_action_tests {
             take_deferred_reports().is_empty(),
             "a report is handed over once"
         );
+    }
+
+    /// A worker that panics holding the queue lock must not cost later
+    /// reports: the next drain recovers the queue and hands them over.
+    #[test]
+    fn a_poisoned_report_queue_still_hands_over_its_reports() {
+        // Its own queue, so the process-wide one other tests drain is untouched.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let held = std::sync::Arc::clone(&queue);
+        let _ = std::thread::spawn(move || {
+            let _held = held.lock();
+            panic!("worker dies holding the queue");
+        })
+        .join();
+        assert!(queue.is_poisoned());
+
+        let report = crate::app::reports::detached();
+        tx.send(report.clone()).expect("queue open");
+
+        assert_eq!(super::drain(&queue), vec![report]);
     }
 }
 

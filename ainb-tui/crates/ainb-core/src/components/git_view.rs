@@ -37,7 +37,12 @@ use super::code_review;
 pub struct GitViewComponent;
 
 impl GitViewComponent {
-    pub fn render(frame: &mut Frame, area: Rect, git_state: &GitViewState) {
+    pub fn render(
+        frame: &mut Frame,
+        area: Rect,
+        git_state: &GitViewState,
+        review_sidebar: &mut code_review::render::ReviewSidebarLayout,
+    ) {
         // Create main layout - adjust constraints based on commit mode
         let constraints = if git_state.is_in_commit_mode() {
             vec![
@@ -89,6 +94,7 @@ impl GitViewComponent {
                     chunks[1],
                     &git_state.review,
                     &git_state.review_ui,
+                    review_sidebar,
                 );
             }
             GitTab::Files => Self::render_files_tab(frame, chunks[1], git_state),

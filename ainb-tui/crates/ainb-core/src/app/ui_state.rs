@@ -353,6 +353,9 @@ pub struct UiState {
     pub home_sidebar_rect: Option<Rect>,
     /// Welcome panel `(content_height, visible_height)` from the last paint.
     pub welcome_viewport: (u16, u16),
+    /// Where the code review sidebar tree was last drawn, for its click
+    /// hit-test.
+    pub review_sidebar: crate::components::code_review::render::ReviewSidebarLayout,
     /// Log-history log-entry pane rect from the last paint, for text selection.
     pub log_entries_area: Option<Rect>,
     /// Scroll offset of the Session Recovery list. The SELECTION is core's
