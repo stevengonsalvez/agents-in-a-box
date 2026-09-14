@@ -180,6 +180,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "cts-event-bus-denied"
+path = "tests/canaries/event_bus_denied/main.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "cts-redraw-hint"
 path = "tests/canaries/redraw_hint/main.rs"
 test = false
