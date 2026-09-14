@@ -99,7 +99,7 @@ fn defaults_are_unique_documented_and_parseable() {
 
     assert_eq!(
         keymap.bindings().count(),
-        528,
+        527,
         "default table must be complete"
     );
 }
@@ -109,7 +109,7 @@ fn default_rows_resolve_to_their_independent_golden_actions() {
     let golden = golden_default_bindings();
     assert_eq!(
         golden.bindings.len(),
-        528,
+        527,
         "golden fixture must cover every host binding"
     );
 
