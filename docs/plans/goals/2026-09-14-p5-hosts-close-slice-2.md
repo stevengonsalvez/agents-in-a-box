@@ -44,7 +44,7 @@
 Begin by outputting your plan. Then execute end-to-end without checking
 in until done or genuinely blocked.
 
-— PROGRESS LOG —
+-- PROGRESS LOG --
 
 Plan, staged as the constraints allow:
 1. P5a, criterion 1: the host owns the terminal client and the in-place attach is portable.
