@@ -207,13 +207,9 @@ impl AgentStatusHost {
                 published = true;
             }
         }
-        let has_cards = state.agent_status.view.as_ref().is_some_and(|view| !view.cards.is_empty());
         let tick_due = self.last_tick.is_none_or(|at| now.duration_since(at) >= CLOCK_TICK);
-        if has_cards && (published || tick_due) {
-            let tick = AgentStatusClock {
-                clock_ms: card_clock_ms(&state.agent_status, local_now_ms),
-            };
-            if let Ok(payload) = serde_json::to_vec(&tick) {
+        if published || tick_due {
+            if let Some(payload) = encode_clock(&state.agent_status, local_now_ms) {
                 send(AGENT_STATUS_CLOCK_TOPIC, payload);
                 self.last_tick = Some(now);
             }
@@ -236,6 +232,19 @@ const CLOCK_TICK: Duration = Duration::from_secs(1);
 /// clock still ages its cards correctly.
 fn card_clock_ms(_section: &AgentStatusSection, local_now_ms: i64) -> i64 {
     local_now_ms
+}
+
+/// The card-clock tick the plugins fold, encoded, or `None` while section 20
+/// holds no cards (nothing on screen has an age to advance).
+#[must_use]
+pub fn encode_clock(section: &AgentStatusSection, local_now_ms: i64) -> Option<Vec<u8>> {
+    if section.view.as_ref().is_none_or(|view| view.cards.is_empty()) {
+        return None;
+    }
+    serde_json::to_vec(&AgentStatusClock {
+        clock_ms: card_clock_ms(section, local_now_ms),
+    })
+    .ok()
 }
 
 /// Section 20 as the envelope the plugins fold, encoded.
