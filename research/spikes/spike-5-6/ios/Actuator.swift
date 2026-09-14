@@ -53,6 +53,36 @@ final class Actuator: XCTestCase {
         }
     }
 
+    /// Taps the app's 30, 5 and 1 min banner buttons (longest first, so the
+    /// 1 min banner cannot fire before the transition), answers the permission
+    /// alert, then locks (SPIKE_LOCK=1) or presses Home, all in one runner
+    /// launch so the runner's start-up cost stays outside the 1 min window. The
+    /// simulator asks before opening a deep link, so taps replace the deep link.
+    func testScheduleBannersAndLeave() {
+        let cancel = springboard.alerts.buttons["Cancel"]
+        if cancel.exists { cancel.tap() }
+        app.activate()
+        for label in ["30 min", "5 min", "1 min"] {
+            let button = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", label)).firstMatch
+            XCTAssertTrue(button.waitForExistence(timeout: 10))
+            button.tap()
+            stamp("tapped \(label)")
+            let allow = springboard.alerts.buttons["Allow"]
+            if allow.waitForExistence(timeout: 2) {
+                allow.tap()
+                stamp("notifications_allowed")
+            }
+        }
+        sleep(1)
+        if ProcessInfo.processInfo.environment["SPIKE_LOCK"] == "0" {
+            stamp("home_pressed")
+            XCUIDevice.shared.press(.home)
+        } else {
+            stamp("lock_pressed")
+            XCUIDevice.shared.perform(NSSelectorFromString("pressLockButton"))
+        }
+    }
+
     /// Taps the app's biometric probe button, then stays alive long enough for
     /// the host to answer the Face ID sheet with a simulated match or non-match.
     func testTapBiometricProbe() {
