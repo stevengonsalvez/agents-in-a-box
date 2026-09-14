@@ -68,4 +68,6 @@ latest_state = ["fleet.agent_status"]
 
 [lifecycle]
 spawn = "lazy"
-idle_reap_secs = 0
+# An explicit idle window (#1053 review): reaped after ten unused minutes like
+# any plugin; a visible Hangar screen counts as use.
+idle_reap_secs = 600
