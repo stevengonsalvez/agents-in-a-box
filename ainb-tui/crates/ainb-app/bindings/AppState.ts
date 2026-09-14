@@ -2308,6 +2308,12 @@ export type FrameBatch = FrameBatch_Serialize;
 /**  Everything one host tick sends down the channel. */
 export type FrameBatch_Serialize = {
 	frames: Frame_Serialize[],
+	/**
+	 *  Sections that changed but were withheld as over [`MAX_FRAME_BYTES`].
+	 *  The renderer is told, so a section it keeps drawing is known stale
+	 *  rather than silently so.
+	 */
+	oversize?: OversizeSection[],
 };
 
 /**  One section's state as a renderer receives it. */
@@ -3237,6 +3243,13 @@ export type OtherTmuxSession = {
 	windows: number,
 	/**  Creation time (if available from tmux) */
 	created: string | null,
+};
+
+/**  A section the host did not send because its body is over the ceiling. */
+export type OversizeSection = {
+	section: string,
+	version: number,
+	bytes: number,
 };
 
 /**
