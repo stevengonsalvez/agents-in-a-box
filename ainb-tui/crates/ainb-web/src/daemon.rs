@@ -187,7 +187,9 @@ impl DaemonClient {
     }
 
     async fn call_inner(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
-        let (mut reader, mut writer) = self.open_authenticated().await?;
+        // Transient (#963): the presence socket is this surface's one row, so a
+        // one-shot call must not list a second `web` for its few milliseconds.
+        let (mut reader, mut writer) = self.open_authenticated(true).await?;
 
         // The real call.
         write_frame(&mut writer, method, params, 2).await?;
@@ -203,8 +205,12 @@ impl DaemonClient {
 
     /// Dial and complete the mandatory `auth/hello` frame, leaving the stream
     /// available to either a one-shot RPC or the web server's lifetime owner.
+    ///
+    /// `transient` is true for a one-shot RPC: the daemon serves it and stamps
+    /// provenance from it, but only the presence socket is listed.
     async fn open_authenticated(
         &self,
+        transient: bool,
     ) -> Result<(BufReader<OwnedReadHalf>, OwnedWriteHalf), DaemonError> {
         let stream =
             UnixStream::connect(&self.socket).await.map_err(|source| DaemonError::Connect {
@@ -215,19 +221,17 @@ impl DaemonClient {
         let mut reader = BufReader::new(read_half);
 
         // First frame MUST be auth/hello or the daemon closes the connection.
-        write_frame(
-            &mut writer,
-            methods::AUTH_HELLO,
-            json!({
-                "token": self.token,
-                "surface": { "kind": "web", "pid": std::process::id() },
-                // D17: declared, never assumed. An older daemon ignores both.
-                "protocol": ainb_hangar_proto::protocol::ProtocolRange::supported(),
-                "capabilities": ainb_hangar_proto::protocol::catalogue_strings(),
-            }),
-            1,
-        )
-        .await?;
+        let mut hello = json!({
+            "token": self.token,
+            "surface": { "kind": "web", "pid": std::process::id() },
+            // D17: declared, never assumed. An older daemon ignores both.
+            "protocol": ainb_hangar_proto::protocol::ProtocolRange::supported(),
+            "capabilities": ainb_hangar_proto::protocol::catalogue_strings(),
+        });
+        if transient {
+            hello["transient"] = Value::Bool(true);
+        }
+        write_frame(&mut writer, methods::AUTH_HELLO, hello, 1).await?;
         let hello = read_response(&mut reader).await?;
         if let Some(err) = hello.error {
             return Err(DaemonError::Rpc {
@@ -328,7 +332,7 @@ struct PresenceConnection {
 
 impl PresenceConnection {
     async fn connect(client: &DaemonClient) -> Result<Self, DaemonError> {
-        let (reader, writer) = client.open_authenticated().await?;
+        let (reader, writer) = client.open_authenticated(false).await?;
         Ok(Self {
             reader,
             writer,
