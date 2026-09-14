@@ -837,9 +837,11 @@ jobs:
           cargo nextest run -p ainb --test-threads 1 --no-fail-fast \
             --success-output final -E "$filter" \
             2>&1 | tee "$RUNNER_TEMP/core-tripwires.log"
-          # nextest's summary line; test binaries print their own "N passed".
-          passed=$(grep -oE 'tests run: [0-9]+ passed' "$RUNNER_TEMP/core-tripwires.log" | tail -1 | grep -oE '[0-9]+ passed' | cut -d' ' -f1 || true)
-          skipped=$(grep -cE '^\s*SKIP:' "$RUNNER_TEMP/core-tripwires.log" || true)
+          # nextest colours its summary, so strip escapes first; read its own
+          # line because test binaries print their own "N passed".
+          sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/core-tripwires.log" > "$RUNNER_TEMP/core-tripwires.txt"
+          passed=$(grep -oE '[0-9]+ tests run: [0-9]+ passed' "$RUNNER_TEMP/core-tripwires.txt" | tail -1 | grep -oE '[0-9]+ passed' | cut -d' ' -f1 || true)
+          skipped=$(grep -cE '^\s*SKIP:' "$RUNNER_TEMP/core-tripwires.txt" || true)
           echo "passed=$passed skip_lines=$skipped"
           if [ -z "$passed" ] || [ "$skipped" -ge "$passed" ]; then
             echo "::error::every ainb-core tripwire SKIPped (or none ran), so this job exercised nothing"
