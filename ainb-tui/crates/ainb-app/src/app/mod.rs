@@ -26,7 +26,7 @@ pub mod state;
 pub mod versioned;
 
 pub use effect::{Effect, TerminalTarget, ToolTerminal};
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 pub use events::{AppEvent, EventHandler};
 pub use events::{
     NoRenderer, RendererHost, is_in_text_input_context, skill_manager_overlay_open,
