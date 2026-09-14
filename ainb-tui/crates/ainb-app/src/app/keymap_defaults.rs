@@ -1271,7 +1271,7 @@ pub fn defaults() -> Vec<Binding> {
             Context::screen("session_list"),
             "save_pane_layout",
             AppEvent::SaveSessionsPaneLayout {
-                width: 0,
+                fraction: 0.0,
                 collapsed: false,
             },
             "Save the sessions pane width and collapsed flag a renderer set",
