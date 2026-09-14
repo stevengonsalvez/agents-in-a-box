@@ -1228,8 +1228,12 @@ impl EventHandler {
     ) -> Option<AppEvent> {
         match intent {
             Intent::Key(chord) => Self::handle_key_event_with_keymap(chord, state, keymap, host),
-            Intent::Command(id, _args) => {
-                let action = keymap.command(&id)?.action.clone();
+            Intent::Command(id, args) => {
+                let binding = keymap.command(&id)?;
+                let Some(action) = binding.action.with_args(&args) else {
+                    tracing::warn!("command `{id}` rejected arguments {args}");
+                    return None;
+                };
                 Self::apply_key_action(action, state, host)
             }
             Intent::Mouse(pos, btn) => host.pointer(state, pos, btn),
