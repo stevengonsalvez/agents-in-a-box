@@ -596,4 +596,50 @@ mod tests {
             "shutting down the embed client must NOT kill the tmux session"
         );
     }
+
+    /// Issue #990: the TUI panicked in vt100 (`grid.rs:683`, attempt to
+    /// subtract with overflow) while it mirrored a tmux pane. vt100 0.16 panics
+    /// on a screen one row tall as soon as a line wraps, and on a screen one
+    /// column wide as soon as a wide glyph arrives. The observer is sized from
+    /// the host terminal (`interactive_embed_size` gives 1 row on a 15-row
+    /// terminal with the menu bar shown), so a short terminal was enough.
+    ///
+    /// Drives a real observer at those geometries, then feeds its screen
+    /// model the bytes a mirrored full-width TUI produces. Any panic fails the
+    /// test.
+    #[test]
+    fn observer_screen_survives_degenerate_preview_geometry() {
+        if !tmux_available() {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+        if !EmbedClient::read_only_observer_supported() {
+            eprintln!("SKIP: tmux lacks ignore-size client support");
+            return;
+        }
+        let _g = lock_serial();
+        let session = new_session("geometry");
+        let wide_frame = format!("{}\r\n🦊🦊🦊 {}\r\n", "─".repeat(120), "x".repeat(120));
+
+        let mut outcomes = Vec::new();
+        for (rows, cols) in [(1, 38), (1, 80), (24, 1), (0, 0)] {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut client = EmbedClient::observe(&session, rows, cols).expect("observe");
+                client.parser().write().expect("parser lock").process(wide_frame.as_bytes());
+                // Shrinking into the same geometry after content exists.
+                client.resize(24, 80).expect("grow");
+                client.parser().write().expect("parser lock").process(wide_frame.as_bytes());
+                client.resize(rows, cols).expect("shrink");
+                client.parser().write().expect("parser lock").process(wide_frame.as_bytes());
+            }));
+            outcomes.push(((rows, cols), outcome.is_ok()));
+        }
+        kill_session(&session);
+        for ((rows, cols), survived) in outcomes {
+            assert!(
+                survived,
+                "vt100 panicked for an observer sized {rows}x{cols}"
+            );
+        }
+    }
 }
