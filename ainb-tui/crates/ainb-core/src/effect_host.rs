@@ -174,6 +174,15 @@ fn claude_login(
     }
     let _ = std::io::stdin().read_line(&mut String::new());
 
+    // The login ran on the primary screen. Clear it and its scrollback
+    // (ESC[3J) before taking the terminal back, so nothing the child printed,
+    // the OAuth URL included, stays readable after the TUI returns.
+    {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(b"\x1b[H\x1b[2J\x1b[3J");
+        let _ = stdout.flush();
+    }
     reclaim_terminal()?;
     terminal.clear()?;
     Ok(())
