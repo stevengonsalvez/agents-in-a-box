@@ -22,6 +22,9 @@ fn fixture_dir() -> PathBuf {
 /// Draw one frame of `fixture` and return it as text, one line per row.
 fn render(fixture: &ParityFixture) -> String {
     let mut state = fixture.build();
+    // What the host's startup and tick do before a frame: the status bar draws
+    // from the sections this fills.
+    state.refresh_statusline();
     let layout = LayoutComponent::new();
     layout.tick_before_draw(&mut state);
     let mut layout = layout;
