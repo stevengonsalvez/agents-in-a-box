@@ -9703,6 +9703,50 @@ mod tests {
         serde_json::to_vec(&AgentStatusEnvelope::from_view(sequence, &view)).unwrap()
     }
 
+    /// #1058: with the daemon gone, the Fleet panel shows the section 20
+    /// failure story in the lens body (`states unverifiable`, the host and the
+    /// reason) beside the offline banner, and the card keeps its frozen row and
+    /// its age on the host clock.
+    #[test]
+    fn a_stopped_daemon_renders_the_unreachable_story_beside_the_offline_banner() {
+        use ainb_hangar_proto::agent_status::AgentState;
+        let mut plugin = connected_plugin_with_issue();
+        go_to(&mut plugin, "fleet");
+        plugin.apply_agent_status(&envelope_bytes(1, 8, AgentState::Waiting));
+
+        // The host's reader lost the daemon: it publishes the frozen rows as
+        // unreachable, and the plugin's own socket is down too.
+        let read: ainb_hangar_proto::agent_status::RosterStatusResult =
+            serde_json::from_value(roster_status_json(8, AgentState::Waiting)).unwrap();
+        let mut view = ainb_hangar_proto::status_view::StatusView::from_read(read, 1);
+        let evidence = view.cards().next().unwrap().status.evidence_observed_at;
+        view.mark_unreachable("daemon not reachable", evidence + 60_000);
+        plugin.apply_agent_status(
+            &serde_json::to_vec(&AgentStatusEnvelope::from_view(2, &view)).unwrap(),
+        );
+        plugin.apply_agent_status_clock(
+            &serde_json::to_vec(&AgentStatusClock {
+                clock_ms: evidence + 65_000,
+            })
+            .unwrap(),
+        );
+        plugin.conn.on_error("daemon socket closed");
+        assert!(HangarPlugin::is_offline(plugin.conn.state()));
+
+        let buf = plugin.compose_frame(160, 30);
+        let text = buf_text(&buf, 160, 30);
+        assert!(text.contains("Fleet daemon offline"), "{text}");
+        assert!(text.contains("states unverifiable"), "{text}");
+        assert!(
+            text.contains("host local unreachable since 5s: daemon not reachable"),
+            "{text}"
+        );
+        assert!(
+            text.contains("waiting · hook · tier 0 · 1m"),
+            "the frozen card ages: {text}"
+        );
+    }
+
     /// #1031: the panel renders the envelope the host published, through the
     /// one reducer, complete with the pending request; a stale publish is
     /// dropped and a garbled one is logged, never rendered.
