@@ -1359,6 +1359,8 @@ pub fn defaults() -> Vec<Binding> {
             AppEvent::WatchPluginScreen {
                 screen: String::new(),
                 watching: false,
+                width: 0,
+                height: 0,
             },
             "Keep a plugin screen rendering for a host that is not showing it here",
         ),
