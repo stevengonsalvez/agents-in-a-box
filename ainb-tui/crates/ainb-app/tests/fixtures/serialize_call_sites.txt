@@ -4,6 +4,8 @@
 # A new line is triaged first: frames go through wire::serialize_section only.
 # Regenerate: UPDATE_SERIALIZE_CALL_SITES=1 cargo test -p ainb-app --test serialize_guard
 ainb-app/src/agent_parsers/claude_json.rs | serde_json::to_string_pretty(&v)
+ainb-app/src/app/effect.rs | serde_json::to_value(&other.0)
+ainb-app/src/app/effect.rs | serde_json::to_value(&self.0)
 ainb-app/src/app/snapshot.rs | serde_json::to_string_pretty(snapshot)
 ainb-app/src/app/state.rs | toml::Value::try_from(&*config)
 ainb-app/src/app/state.rs | toml::Value::try_from(config)
