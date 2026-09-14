@@ -341,12 +341,14 @@ pub async fn authenticate_first_frame(
     };
 
     let settled = |caller: Caller| AuthenticatedHello {
+        // A Pal connection is an agent-held socket the operator must always be
+        // able to see, so it cannot opt out of the listing.
+        transient: params.transient && matches!(caller, Caller::Operator),
         caller,
         surface: params.surface.clone(),
         protocol: selected,
         capabilities: params.capabilities.clone(),
         device: params.device.clone(),
-        transient: params.transient,
     };
 
     // The Pal credential FIRST, and it is never the daemon token: a scoped
@@ -572,6 +574,34 @@ mod tests {
             authenticate_first_frame(store.pool(), &hello(&pal)).await.is_err(),
             "a revoked Pal credential still authenticated"
         );
+    }
+
+    /// `transient` hides a call connection from the registry listing (#963).
+    /// An operator may ask for that; a Pal connection may not, because the
+    /// listing is how an operator sees agent-held sockets.
+    #[tokio::test]
+    async fn only_an_operator_connection_can_be_transient() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let path = ensure_socket_token(store.pool(), dir.path()).await.unwrap();
+        let daemon = std::fs::read_to_string(&path).unwrap().trim().to_string();
+        let pal = mint_pal_token("channel:01J0TRANSIENT");
+
+        let hello = |token: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": methods::AUTH_HELLO,
+                "params": { "token": token, "transient": true }
+            }))
+            .unwrap()
+        };
+        let (_, operator) = authenticate_first_frame(store.pool(), &hello(&daemon))
+            .await
+            .expect("operator authenticates");
+        assert!(operator.transient);
+        let (_, pal) = authenticate_first_frame(store.pool(), &hello(&pal))
+            .await
+            .expect("Pal authenticates");
+        assert!(!pal.transient, "a Pal connection must stay listed");
     }
 
     /// Pal's allowed method set is exactly the tool table's reach.
