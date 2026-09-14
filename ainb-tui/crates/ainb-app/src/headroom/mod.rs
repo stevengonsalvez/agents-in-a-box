@@ -397,18 +397,23 @@ fn process_is_alive(pid: u32) -> bool {
 /// Drop this process's lease, then stop the ainb-managed proxy only if no
 /// other live user remains. Returns `true` when the proxy was stopped.
 ///
-/// Held under `proxy.pid.lock`, the lock the spawn path takes, so another
-/// TUI's watchdog cannot respawn the proxy between this count and the stop.
+/// The whole release runs under `proxy.pid.lock`, the lock the spawn path
+/// holds from its health probe until `proxy.pid` is written. Taking it before
+/// touching the lease or reading the pid is what makes release and a watchdog
+/// spawn mutually exclusive: a spawn still in its health poll has not written
+/// `proxy.pid` yet, so a release that read the pid outside the lock would see
+/// nothing to stop and leave that proxy running with no lease.
 pub fn release_user_and_stop_if_unused() -> bool {
     let me = std::process::id();
+    let pid_path = pid_file();
+    let _process_lock = std::fs::create_dir_all(headroom_dir())
+        .and_then(|()| crate::config::lock::lock_for(&pid_path))
+        .map_err(|e| warn!("lock headroom pid file {}: {e}", pid_path.display()))
+        .ok();
     let _ = std::fs::remove_file(users_dir().join(me.to_string()));
     if read_pid().is_none() {
         return false;
     }
-    let pid_path = pid_file();
-    let _process_lock = crate::config::lock::lock_for(&pid_path)
-        .map_err(|e| warn!("lock headroom pid file {}: {e}", pid_path.display()))
-        .ok();
     let others = live_users(Some(me));
     if !others.is_empty() {
         info!(
