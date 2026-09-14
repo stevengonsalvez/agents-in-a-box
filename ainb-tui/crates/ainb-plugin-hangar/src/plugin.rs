@@ -258,6 +258,12 @@ const FLEET_SUBSCRIBE_REQ_ID: i64 = 58;
 /// `fleet/status`, the D14 one-truth read the Fleet panel renders its state,
 /// lenses and counts from (#962). Sent after every snapshot pull.
 const FLEET_STATUS_REQ_ID: i64 = 65;
+/// `fleet/roster_status`, the roster and status joined in one daemon read the
+/// Fleet panel renders from (#1015). Sent once per Fleet refresh.
+const FLEET_ROSTER_STATUS_REQ_ID: i64 = 67;
+/// Environment switch the TUI host sets from `[fleet.status] legacy_panel`:
+/// the panel returns to the pre-section two reads, joined by the proto join.
+pub const LEGACY_PANEL_ENV: &str = "AINB_FLEET_LEGACY_PANEL";
 /// JSON-RPC "method not found": the answer of a daemon older than `fleet/status`.
 const METHOD_NOT_FOUND: i32 = -32601;
 /// First wait before re-reading `fleet/status` after a failed read.
@@ -389,6 +395,11 @@ pub struct HangarPlugin {
     fleet_status_failures: u32,
     /// The failure reason last logged, so a repeating failure logs once.
     fleet_status_logged: Option<String>,
+    /// `[fleet.status] legacy_panel`: read `fleet/snapshot` and `fleet/status`
+    /// separately and join them with the proto join, as before section 20.
+    legacy_panel: bool,
+    /// The legacy path's snapshot half, waiting for its status half.
+    legacy_snapshot: Option<ainb_hangar_proto::fleet::FleetSnapshot>,
     /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
     /// screen on a fresh machine until the user accepts (`y`), then `Dismissed`.
     /// Initialised from the recorded `warnings_ack` on `plugin/init`.
@@ -699,6 +710,8 @@ impl Default for HangarPlugin {
             fleet_status_retry_at: None,
             fleet_status_failures: 0,
             fleet_status_logged: None,
+            legacy_panel: std::env::var(LEGACY_PANEL_ENV).is_ok_and(|value| value == "1"),
+            legacy_snapshot: None,
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
             pending_detail_slug: None,
@@ -1518,6 +1531,7 @@ impl HangarPlugin {
             RpcId::Number(ATTENTION_SUBSCRIBE_REQ_ID) => self.apply_attention(resp),
             RpcId::Number(FLEET_SNAPSHOT_REQ_ID) => self.apply_fleet_snapshot(resp),
             RpcId::Number(FLEET_STATUS_REQ_ID) => self.apply_fleet_status(resp),
+            RpcId::Number(FLEET_ROSTER_STATUS_REQ_ID) => self.apply_fleet_roster_status(resp),
             RpcId::Number(FLEET_SUBSCRIBE_REQ_ID) => self.apply_fleet_subscription(resp),
             RpcId::Number(FLEET_ACTION_REQ_ID) => self.apply_fleet_action_result(resp),
             RpcId::Number(FLEET_BROADCAST_REQ_ID) => self.apply_fleet_broadcast_result(resp),
@@ -2505,81 +2519,124 @@ impl HangarPlugin {
         }
     }
 
-    /// Replace Fleet pane rows from one authoritative snapshot while preserving
-    /// selection by stable session key.
+    /// The legacy path's snapshot half (`[fleet.status] legacy_panel`), held
+    /// until its status half lands and the two are joined by the proto join.
     fn apply_fleet_snapshot(&mut self, resp: &RpcResponse) {
         let Some(result) = &resp.result else {
+            self.fail_fleet_read(None, "fleet/snapshot reply carried no result".to_string());
             return;
         };
-        let Ok(snapshot) =
-            serde_json::from_value::<ainb_hangar_proto::fleet::FleetSnapshot>(result.clone())
+        match serde_json::from_value::<ainb_hangar_proto::fleet::FleetSnapshot>(result.clone()) {
+            Ok(snapshot) => self.legacy_snapshot = Some(snapshot),
+            Err(error) => {
+                self.fail_fleet_read(
+                    None,
+                    format!("fleet/snapshot reply did not decode: {error}"),
+                );
+            }
+        }
+    }
+
+    /// The legacy path's status half: joined with the held snapshot through
+    /// [`ainb_hangar_proto::agent_status::join`], then folded exactly like a
+    /// `fleet/roster_status` read, so both paths render through one reducer.
+    fn apply_fleet_status(&mut self, resp: &RpcResponse) {
+        let Some(status) = self
+            .decode_fleet_read::<ainb_hangar_proto::agent_status::AgentStatusResult>(
+                resp,
+                "fleet/status",
+            )
         else {
             return;
         };
-        let rows = snapshot.sessions.into_iter().map(Into::into).collect();
-        self.screens.fleet.apply_snapshot(snapshot.head_revision, rows);
-        self.conn.on_event();
+        let Some(snapshot) = self.legacy_snapshot.take() else {
+            // No snapshot half to join: ask for the pair again.
+            self.fleet_fetch_pending = true;
+            return;
+        };
+        let joined = ainb_hangar_proto::agent_status::join(&snapshot, &status);
+        self.apply_fleet_read(joined);
     }
 
-    /// Fold one `fleet/status` reply into the Fleet panel (#962).
-    ///
-    /// A daemon without the method answers "method not found"; the panel then
-    /// says its states are unverifiable instead of deriving them itself, and
-    /// this connection stops asking. Any other error leaves the last status in
-    /// place for the next pull to replace.
-    fn apply_fleet_status(&mut self, resp: &RpcResponse) {
-        if let Some(error) = &resp.error {
-            let reason = match error.code {
-                METHOD_NOT_FOUND => "daemon has no fleet/status".to_string(),
-                ainb_hangar_proto::STORE_UNAVAILABLE => {
-                    format!("daemon store unavailable: {}", error.message)
-                }
-                code => format!("fleet/status failed ({code}): {}", error.message),
-            };
-            self.fail_fleet_status(reason);
-            return;
-        }
-        let Some(result) = &resp.result else {
-            self.fail_fleet_status("fleet/status reply carried no result".to_string());
-            return;
-        };
-        let status = match serde_json::from_value::<
-            ainb_hangar_proto::agent_status::AgentStatusResult,
-        >(result.clone())
+    /// Fold one `fleet/roster_status` read into the Fleet panel (#1015).
+    fn apply_fleet_roster_status(&mut self, resp: &RpcResponse) {
+        if let Some(read) = self
+            .decode_fleet_read::<ainb_hangar_proto::agent_status::RosterStatusResult>(
+                resp,
+                "fleet/roster_status",
+            )
         {
-            Ok(status) => status,
-            Err(error) => {
-                self.fail_fleet_status(format!("fleet/status reply did not decode: {error}"));
-                return;
-            }
-        };
+            self.apply_fleet_read(read);
+        }
+    }
+
+    fn apply_fleet_read(&mut self, read: ainb_hangar_proto::agent_status::RosterStatusResult) {
         self.fleet_status_retry_at = None;
         self.fleet_status_failures = 0;
         self.fleet_status_logged = None;
-        if !self.screens.fleet.apply_status(status) {
-            // Older than the roster on screen: read again rather than join a
-            // state from an earlier instant (#962).
-            self.fleet_status_pending = true;
+        let head = self.screens.fleet.head_revision();
+        let revision = read.read_revision;
+        if !self.screens.fleet.apply_read(read, now_ms_clock()) || revision < head {
+            // Older than a revision already seen: read again rather than
+            // render an earlier instant as current.
+            self.fleet_fetch_pending = revision < head;
         }
         self.conn.on_event();
     }
 
-    /// Every `fleet/status` failure takes this one path (#962): the panel
-    /// names the reason in its header and lens body, the reason is logged once
-    /// per distinct failure, and the read is retried after an exponential
+    /// Decode one Fleet read reply, or route its failure through
+    /// [`Self::fail_fleet_read`] and return `None`.
+    fn decode_fleet_read<T: serde::de::DeserializeOwned>(
+        &mut self,
+        resp: &RpcResponse,
+        method: &str,
+    ) -> Option<T> {
+        if let Some(error) = &resp.error {
+            let reason = match error.code {
+                METHOD_NOT_FOUND => format!("daemon has no {method}"),
+                ainb_hangar_proto::STORE_UNAVAILABLE => {
+                    format!("daemon store unavailable: {}", error.message)
+                }
+                code => format!("{method} failed ({code}): {}", error.message),
+            };
+            self.fail_fleet_read(Some(error.code), reason);
+            return None;
+        }
+        let Some(result) = &resp.result else {
+            self.fail_fleet_read(None, format!("{method} reply carried no result"));
+            return None;
+        };
+        match serde_json::from_value::<T>(result.clone()) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                self.fail_fleet_read(None, format!("{method} reply did not decode: {error}"));
+                None
+            }
+        }
+    }
+
+    /// Every Fleet read failure takes this one path (#962, #1015): the panel
+    /// renders the reason in its lens body (absent for a daemon without the
+    /// method, unreachable with frozen rows otherwise), the reason is logged
+    /// once per distinct failure, and the read is retried after an exponential
     /// backoff instead of the panel silently keeping, or inventing, a state.
-    fn fail_fleet_status(&mut self, reason: String) {
+    fn fail_fleet_read(&mut self, code: Option<i32>, reason: String) {
         self.fleet_status_failures = self.fleet_status_failures.saturating_add(1);
         let exponent = self.fleet_status_failures.saturating_sub(1).min(5);
         let backoff =
             (FLEET_STATUS_RETRY_INITIAL * 2_u32.pow(exponent)).min(FLEET_STATUS_RETRY_MAX);
         self.fleet_status_retry_at = Some(std::time::Instant::now() + backoff);
         self.fleet_status_pending = false;
+        self.legacy_snapshot = None;
         if self.fleet_status_logged.as_deref() != Some(reason.as_str()) {
             self.pending_logs.push(format!("hangar: fleet status unavailable: {reason}"));
             self.fleet_status_logged = Some(reason.clone());
         }
-        self.screens.fleet.mark_status_unavailable(reason);
+        if code == Some(METHOD_NOT_FOUND) {
+            self.screens.fleet.mark_absent(reason);
+        } else {
+            self.screens.fleet.mark_read_failed(reason, now_ms_clock());
+        }
         self.conn.on_event();
     }
 
@@ -2605,10 +2662,10 @@ impl HangarPlugin {
         >(result.clone()) else {
             return;
         };
-        let rows = subscription.snapshot.sessions.into_iter().map(Into::into).collect();
-        self.screens.fleet.apply_snapshot(subscription.snapshot.head_revision, rows);
-        // The seed is a snapshot pull too: its state comes from `fleet/status`.
-        self.fleet_status_pending = true;
+        // The panel renders from the joined read, not from the seed's
+        // snapshot: record the revisions and read (#1015).
+        self.screens.fleet.observe_revision(subscription.snapshot.head_revision);
+        self.fleet_fetch_pending = true;
         for event in subscription.replay {
             self.screens.fleet.observe_revision(event.revision);
         }
@@ -2891,23 +2948,31 @@ impl HangarPlugin {
         &mut self,
         send: &mut impl FnMut(String, Vec<u8>) -> Result<NotificationEnqueueOutcome>,
     ) {
+        // Backing off after a failed read: the refresh waits for its slot.
+        if self.fleet_status_retry_at.is_some_and(|at| std::time::Instant::now() < at) {
+            return;
+        }
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
-        let Ok(body) = encode_request(
-            FLEET_SNAPSHOT_REQ_ID,
-            daemon_methods::FLEET_SNAPSHOT,
-            serde_json::json!({}),
-        ) else {
+        // One joined read per refresh (#1015); the legacy panel keeps the two
+        // reads, the status half queued right behind the snapshot.
+        let (id, method) = if self.legacy_panel {
+            (FLEET_SNAPSHOT_REQ_ID, daemon_methods::FLEET_SNAPSHOT)
+        } else {
+            (
+                FLEET_ROSTER_STATUS_REQ_ID,
+                daemon_methods::FLEET_ROSTER_STATUS,
+            )
+        };
+        let Ok(body) = encode_request(id, method, serde_json::json!({})) else {
             self.fleet_fetch_pending = false;
             return;
         };
         match send(stream_id, body) {
             Ok(NotificationEnqueueOutcome::Queued) => {
                 self.fleet_fetch_pending = false;
-                // Every snapshot pull is followed by its status read, queued
-                // after it so the reply lands on the roster it describes.
-                self.fleet_status_pending = true;
+                self.fleet_status_pending = self.legacy_panel;
             }
             Ok(NotificationEnqueueOutcome::Full) => {}
             Ok(NotificationEnqueueOutcome::Closed) => {
@@ -3003,7 +3068,8 @@ impl HangarPlugin {
         }
         if self.fleet_status_retry_at.is_some_and(|at| std::time::Instant::now() >= at) {
             self.fleet_status_retry_at = None;
-            self.fleet_status_pending = true;
+            self.fleet_fetch_pending = true;
+            self.try_fetch_fleet_snapshot(&mut send);
         }
         if self.fleet_status_pending {
             self.try_fetch_fleet_status(&mut send);
@@ -9817,13 +9883,7 @@ mod tests {
         );
     }
 
-    /// #962: every Fleet snapshot pull is followed by a `fleet/status` read,
-    /// the reply is what the panel's state comes from, and a daemon without the
-    /// method leaves the panel unverifiable and stops being asked.
-    #[test]
-    fn a_fleet_snapshot_pull_reads_fleet_status_and_honours_an_old_daemon() {
-        let mut plugin = connected_plugin_with_issue();
-        plugin.fleet_fetch_pending = true;
+    fn methods_sent(plugin: &mut HangarPlugin) -> Vec<String> {
         let mut methods = Vec::new();
         plugin.drain_pending_refreshes_with(|_, body| {
             let text = String::from_utf8_lossy(&body).into_owned();
@@ -9832,109 +9892,208 @@ mod tests {
             methods.push(frame["method"].as_str().unwrap_or_default().to_string());
             Ok(NotificationEnqueueOutcome::Queued)
         });
-        assert_eq!(
-            methods,
-            vec![daemon_methods::FLEET_SNAPSHOT, daemon_methods::FLEET_STATUS]
-        );
-
-        let row = ainb_hangar_proto::agent_status::AgentStatusRow {
-            state: ainb_hangar_proto::agent_status::AgentState::Working,
-            ..crate::screen::fleet::test_status(
-                "codex:thread-1",
-                ainb_hangar_proto::agent_status::AgentState::Working,
-            )
-        };
-        plugin.on_daemon_response(&ainb_hangar_proto::RpcResponse {
-            jsonrpc: "2.0".into(),
-            id: RpcId::Number(FLEET_STATUS_REQ_ID),
-            result: Some(serde_json::json!({ "rows": [row], "head_revision": 4 })),
-            error: None,
-        });
-        assert_eq!(
-            plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
-            Some(ainb_hangar_proto::agent_status::AgentState::Working)
-        );
-
-        plugin.on_daemon_response(&ainb_hangar_proto::RpcResponse {
-            jsonrpc: "2.0".into(),
-            id: RpcId::Number(FLEET_STATUS_REQ_ID),
-            result: None,
-            error: Some(ainb_hangar_proto::RpcError {
-                code: METHOD_NOT_FOUND,
-                message: "method not found".into(),
-                data: None,
-            }),
-        });
-        assert_eq!(
-            plugin.screens.fleet.status_unavailable(),
-            Some("daemon has no fleet/status")
-        );
-        assert!(plugin.screens.fleet.status_for("codex:thread-1").is_none());
-
-        plugin.fleet_fetch_pending = true;
-        let mut after = Vec::new();
-        plugin.drain_pending_refreshes_with(|_, body| {
-            after.push(String::from_utf8_lossy(&body).contains("fleet/status"));
-            Ok(NotificationEnqueueOutcome::Queued)
-        });
-        assert_eq!(after, vec![false], "backing off: no status read yet");
+        methods
     }
 
-    /// Review of #1014: a store fault on `fleet/status` is not silent. The
-    /// header carries the reason, it is logged once however often it repeats,
-    /// and the read is retried after its backoff rather than never.
-    #[test]
-    fn a_store_unavailable_status_read_is_named_logged_once_and_retried() {
-        let mut plugin = connected_plugin_with_issue();
-        let store_fault = || ainb_hangar_proto::RpcResponse {
+    fn fleet_reply(id: i64, result: serde_json::Value) -> RpcResponse {
+        RpcResponse {
             jsonrpc: "2.0".into(),
-            id: RpcId::Number(FLEET_STATUS_REQ_ID),
+            id: RpcId::Number(id),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn fleet_error(id: i64, code: i32, message: &str) -> RpcResponse {
+        RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(id),
             result: None,
             error: Some(ainb_hangar_proto::RpcError {
-                code: ainb_hangar_proto::STORE_UNAVAILABLE,
-                message: "database is locked".into(),
+                code,
+                message: message.into(),
                 data: None,
             }),
+        }
+    }
+
+    /// A one-session joined read, in wire JSON.
+    fn roster_status_json(
+        revision: i64,
+        state: ainb_hangar_proto::agent_status::AgentState,
+    ) -> serde_json::Value {
+        let status = crate::screen::fleet::test_status("codex:thread-1", state);
+        serde_json::json!({
+            "rows": [{
+                "session": {
+                    "session_key": "codex:thread-1", "provider": "codex",
+                    "provider_session_id": "thread-1", "tmux_target": "codex-1:0.0",
+                    "process_start_fingerprint": null, "cwd": "/work/shared",
+                    "display_name": "codex-1", "lifecycle": "IDLE", "attention": "ASK",
+                    "current_request_fingerprint": "fingerprint",
+                    "current_request": {"questions": [{
+                        "id": "q1", "header": "Tool", "question": "Pick tools",
+                        "options": [{"label": "rg", "description": "Text"},
+                                    {"label": "ast-grep", "description": "Syntax"}],
+                        "multiSelect": true
+                    }]},
+                    "management": "MANAGED", "transport_health": "HEALTHY",
+                    "capabilities": {"structured_answer": true, "tmux_attach": true},
+                    "provenance": "authoritative", "confidence": "HIGH",
+                    "discovered_at": 1, "last_observed_at": 2,
+                    "lifecycle_updated_at": 2, "attention_updated_at": 2,
+                    "version": 4, "updated_revision": 7
+                },
+                "status": status,
+                "read_revision": revision
+            }],
+            "read_revision": revision
+        })
+    }
+
+    /// #1015 budget: one Fleet event costs this surface ONE read, the joined
+    /// `fleet/roster_status`, where it used to cost `fleet/snapshot` plus
+    /// `fleet/status`.
+    #[test]
+    fn one_fleet_event_costs_one_joined_read() {
+        let mut plugin = connected_plugin_with_issue();
+        plugin.on_daemon_event(&serde_json::json!({
+            "method": "fleet/event",
+            "params": {
+                "revision": 12, "event_id": "evt-12", "session_key": "codex:thread-1",
+                "observed_at": 100, "provenance": "authoritative", "event_type": "turn_started",
+                "payload": {}, "session_version": 3, "applied": true
+            }
+        }));
+        assert_eq!(
+            methods_sent(&mut plugin),
+            vec![daemon_methods::FLEET_ROSTER_STATUS]
+        );
+        assert!(
+            methods_sent(&mut plugin).is_empty(),
+            "nothing else is owed for that event"
+        );
+    }
+
+    /// The joined read is what the panel renders; an older daemon without it
+    /// leaves the view absent and stops asking until its backoff slot.
+    #[test]
+    fn a_joined_read_renders_and_an_old_daemon_is_absent_not_derived() {
+        use ainb_hangar_proto::agent_status::AgentState;
+        let mut plugin = connected_plugin_with_issue();
+        plugin.on_daemon_response(&fleet_reply(
+            FLEET_ROSTER_STATUS_REQ_ID,
+            roster_status_json(4, AgentState::Waiting),
+        ));
+        assert_eq!(
+            plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
+            Some(AgentState::Waiting)
+        );
+
+        plugin.on_daemon_response(&fleet_error(
+            FLEET_ROSTER_STATUS_REQ_ID,
+            METHOD_NOT_FOUND,
+            "method not found",
+        ));
+        assert_eq!(
+            plugin.screens.fleet.health_line().as_deref(),
+            Some("absent: daemon has no fleet/roster_status")
+        );
+        assert!(
+            plugin.screens.fleet.status_for("codex:thread-1").is_none(),
+            "no fallback rows"
+        );
+        plugin.fleet_fetch_pending = true;
+        assert!(
+            methods_sent(&mut plugin).is_empty(),
+            "backing off: no read yet"
+        );
+    }
+
+    /// Review of #1014, carried over: a store fault is named, logged once
+    /// however often it repeats, and retried after its backoff. With rows
+    /// already on screen the host is unreachable and the rows stay frozen.
+    #[test]
+    fn a_store_unavailable_read_is_named_logged_once_and_retried() {
+        use ainb_hangar_proto::agent_status::AgentState;
+        let mut plugin = connected_plugin_with_issue();
+        plugin.on_daemon_response(&fleet_reply(
+            FLEET_ROSTER_STATUS_REQ_ID,
+            roster_status_json(4, AgentState::Waiting),
+        ));
+        let fault = || {
+            fleet_error(
+                FLEET_ROSTER_STATUS_REQ_ID,
+                ainb_hangar_proto::STORE_UNAVAILABLE,
+                "database is locked",
+            )
         };
         let logs_before = plugin.pending_logs.len();
-        plugin.on_daemon_response(&store_fault());
+        plugin.on_daemon_response(&fault());
+        let line = plugin.screens.fleet.health_line().expect("a failure line");
+        assert!(
+            line.starts_with("host local unreachable since")
+                && line.ends_with("daemon store unavailable: database is locked"),
+            "{line}"
+        );
         assert_eq!(
-            plugin.screens.fleet.status_unavailable(),
-            Some("daemon store unavailable: database is locked")
+            plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
+            Some(AgentState::Waiting),
+            "rows stay frozen as last read"
         );
         let first_retry = plugin.fleet_status_retry_at.expect("a retry is scheduled");
-
-        plugin.on_daemon_response(&store_fault());
+        plugin.on_daemon_response(&fault());
         assert_eq!(
             plugin.pending_logs.len(),
             logs_before + 1,
-            "a repeating failure logs once: {:?}",
+            "{:?}",
             plugin.pending_logs
         );
-        assert!(
-            plugin.fleet_status_retry_at.expect("still scheduled") > first_retry,
-            "the second failure backs off further"
-        );
+        assert!(plugin.fleet_status_retry_at.expect("still scheduled") > first_retry);
 
-        // Not before the backoff slot...
-        let mut sent = Vec::new();
-        plugin.drain_pending_refreshes_with(|_, body| {
-            sent.push(String::from_utf8_lossy(&body).contains("fleet/status"));
-            Ok(NotificationEnqueueOutcome::Queued)
-        });
-        assert!(sent.iter().all(|status| !status), "{sent:?}");
-        // ...and on the next tick once it is due.
-        plugin.fleet_status_retry_at = Some(std::time::Instant::now());
         assert!(
-            plugin.wants_redraw(),
-            "a due retry asks for the frame it goes out on"
+            methods_sent(&mut plugin).is_empty(),
+            "not before the backoff slot"
         );
-        let mut retried = Vec::new();
-        plugin.drain_pending_refreshes_with(|_, body| {
-            retried.push(String::from_utf8_lossy(&body).contains("fleet/status"));
-            Ok(NotificationEnqueueOutcome::Queued)
-        });
-        assert_eq!(retried, vec![true]);
+        plugin.fleet_status_retry_at = Some(std::time::Instant::now());
+        assert!(plugin.wants_redraw(), "a due retry asks for its frame");
+        assert_eq!(
+            methods_sent(&mut plugin),
+            vec![daemon_methods::FLEET_ROSTER_STATUS]
+        );
+    }
+
+    /// `[fleet.status] legacy_panel`: the pre-section two reads, joined by the
+    /// proto join and folded by the same reducer, render the same row.
+    #[test]
+    fn the_legacy_panel_reads_two_halves_and_joins_them_with_the_one_join() {
+        use ainb_hangar_proto::agent_status::AgentState;
+        let mut plugin = connected_plugin_with_issue();
+        plugin.legacy_panel = true;
+        plugin.fleet_fetch_pending = true;
+        assert_eq!(
+            methods_sent(&mut plugin),
+            vec![daemon_methods::FLEET_SNAPSHOT, daemon_methods::FLEET_STATUS]
+        );
+        let joined = roster_status_json(6, AgentState::Waiting);
+        let session = joined["rows"][0]["session"].clone();
+        let status = joined["rows"][0]["status"].clone();
+        plugin.on_daemon_response(&fleet_reply(
+            FLEET_SNAPSHOT_REQ_ID,
+            serde_json::json!({"head_revision": 6, "sessions": [session]}),
+        ));
+        plugin.on_daemon_response(&fleet_reply(
+            FLEET_STATUS_REQ_ID,
+            serde_json::json!({"rows": [status], "head_revision": 6}),
+        ));
+        assert_eq!(
+            plugin.screens.fleet.status_for("codex:thread-1").map(|status| status.state),
+            Some(AgentState::Waiting)
+        );
+        assert_eq!(
+            plugin.screens.fleet.status_view().map(|view| view.read_revision),
+            Some(6)
+        );
     }
 
     #[test]
@@ -10193,24 +10352,16 @@ mod tests {
         };
         plugin.on_daemon_response(&response);
         assert_eq!(plugin.screens.fleet.head_revision(), 8);
-        // The seed is a snapshot pull: its state comes from `fleet/status`
-        // (#962), and the needs-input lens has nothing until that read answers.
+        // The seed records revisions and asks for the joined read; the panel
+        // renders from that read, never from the seed's snapshot (#1015).
         assert!(
-            plugin.fleet_status_pending,
-            "the subscribe seed arms a status read"
+            plugin.fleet_fetch_pending,
+            "the subscribe seed arms the joined read"
         );
-        plugin.on_daemon_response(&RpcResponse {
-            jsonrpc: "2.0".into(),
-            id: RpcId::Number(FLEET_STATUS_REQ_ID),
-            result: Some(serde_json::json!({
-                "rows": [crate::screen::fleet::test_status(
-                    "codex:thread-1",
-                    ainb_hangar_proto::agent_status::AgentState::Waiting,
-                )],
-                "head_revision": 8
-            })),
-            error: None,
-        });
+        plugin.on_daemon_response(&fleet_reply(
+            FLEET_ROSTER_STATUS_REQ_ID,
+            roster_status_json(8, ainb_hangar_proto::agent_status::AgentState::Waiting),
+        ));
         let selected = plugin.screens.fleet.selected_session().expect("Fleet row");
         assert_eq!(selected.session_key, "codex:thread-1");
         let questions = selected
