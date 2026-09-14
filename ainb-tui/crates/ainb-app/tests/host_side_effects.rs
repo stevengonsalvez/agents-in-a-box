@@ -210,6 +210,11 @@ const REDUCER_DISK_WRITES: &[(&str, usize, &str)] = &[
          configure, and the API key env file auth setup writes",
     ),
     (
+        "components/new_session/configure.rs",
+        1,
+        "a named preset on Ctrl+S, which the same step adds to the list and selects",
+    ),
+    (
         "components/new_session/pick_repo.rs",
         1,
         "session defaults on Ctrl+R, which the next key reads",
@@ -227,7 +232,15 @@ const REDUCER_DISK_WRITES: &[(&str, usize, &str)] = &[
 ];
 
 /// What a line has to contain to count as a reducer writing to disk.
-const DISK_WRITE_PATTERNS: &[&str] = &[".save()", ".save_to(", "fs::write("];
+const DISK_WRITE_PATTERNS: &[&str] = &[
+    ".save()",
+    ".save_to(",
+    "fs::write(",
+    "save_keys(",
+    "save_external_keys(",
+    "save_tree_expansion(",
+    "save_preset(",
+];
 
 /// What a line has to contain to count as a host side effect.
 const PATTERNS: &[&str] = &[
