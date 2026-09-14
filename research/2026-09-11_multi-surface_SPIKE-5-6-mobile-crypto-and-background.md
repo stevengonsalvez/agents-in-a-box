@@ -759,9 +759,14 @@ tmux session name or PID: the `spike56hw-peer`, `spike56hw-ios` and
 `spike56hw-android` tmux sessions (with `peerd`), and the `spike56hw-iphone17`
 simulator, which was shut down and deleted along with its keychain. On the
 shared `iPhone 17` simulator it had booted, the app and the test runner were
-uninstalled and the device shut down. The scratch key the app wrote to that
-simulator's keychain stays there, because section 5.4 shows uninstall does not
-remove it and resetting that keychain would wipe unrelated items. The app was
+uninstalled and the device shut down. Uninstall does not remove keychain items
+(section 5.4), so the app's scratch device static key, private half included,
+was still in that simulator's keychain. With the device shut down, the single
+`genp` row in the simulator's `keychain-2-debug.db` whose access group ends in
+`.dev.ainb.spike.wire` was deleted: `genp` went from 40 rows to 39 and rows for
+the app from 1 to 0, and `pragma integrity_check` returned `ok`. The device then
+booted and shut down cleanly, and the count stayed 0. No other row was touched,
+and the keychain was not reset. The app was
 uninstalled from `emulator-5554`, which was pre-existing and left running. The
 four Rust targets it added were removed, along with the 57 Xcode derived-data
 folders its test runs wrote. The session scratch (SDK root, Gradle home, npm
