@@ -791,10 +791,11 @@ async fn run_tui_loop(
                             // same reason the [-]/[+] mouse glyph persists it.
                             AppEvent::ToggleSessionsSidebar => {
                                 ui.sessions_pane.toggle_collapsed();
-                                crate::app::mouse::persist_sessions_pane_preferences(
-                                    &mut app.state,
-                                    &ui,
+                                let save = ainb::app::pointer::save_sessions_pane_layout(
+                                    ui.sessions_pane.preferred_width,
+                                    ui.sessions_pane.collapsed,
                                 );
+                                run_intent(save, app, &keymap, &mut ui, terminal).await?;
                             }
                             AppEvent::NewSession
                             | AppEvent::SearchWorkspace
@@ -845,7 +846,6 @@ async fn run_tui_loop(
                     }
                 }
                 Event::Mouse(mouse_event) => {
-                    use crate::app::events::AppEvent;
                     use crossterm::event::{MouseButton, MouseEventKind};
 
                     // Mode boundary: while the interactive embed owns input,
@@ -913,28 +913,23 @@ async fn run_tui_loop(
                                 if let Some(ref mut git_state) = app.state.git_view.git_view_state {
                                     git_state.review_sidebar_click(col, row);
                                 }
-                            } else if let Some(app_event) = EventHandler::resolve_intent(
-                                ainb::Intent::Mouse(ainb::Pos { x: col, y: row }, ainb::Btn::Left),
-                                &mut app.state,
-                                &keymap,
-                                &mut ui,
-                            ) {
-                                EventHandler::process_event(app_event, &mut app.state);
+                            } else {
+                                let press = ainb::Intent::Mouse(
+                                    ainb::Pos { x: col, y: row },
+                                    ainb::Btn::Left,
+                                );
+                                run_intent(press, app, &keymap, &mut ui, terminal).await?;
                             }
                         }
                         MouseEventKind::Down(MouseButton::Right) => {
-                            let pos = ainb::Pos {
-                                x: mouse_event.column,
-                                y: mouse_event.row,
-                            };
-                            if let Some(app_event) = EventHandler::resolve_intent(
-                                ainb::Intent::Mouse(pos, ainb::Btn::Right),
-                                &mut app.state,
-                                &keymap,
-                                &mut ui,
-                            ) {
-                                EventHandler::process_event(app_event, &mut app.state);
-                            }
+                            let press = ainb::Intent::Mouse(
+                                ainb::Pos {
+                                    x: mouse_event.column,
+                                    y: mouse_event.row,
+                                },
+                                ainb::Btn::Right,
+                            );
+                            run_intent(press, app, &keymap, &mut ui, terminal).await?;
                         }
                         MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                             // Handle mouse scroll based on current view
@@ -1064,12 +1059,16 @@ async fn run_tui_loop(
                                 == crate::app::screens::ids::LOG_HISTORY
                             {
                                 app.state.log_streams.log_history_state.update_selection(col, row);
-                            } else if let Some(app_event) = crate::app::mouse::handle_mouse_event(
-                                AppEvent::MouseDragging { x: col, y: row },
-                                &mut app.state,
-                                &mut ui,
-                            ) {
-                                EventHandler::process_event(app_event, &mut app.state);
+                            } else {
+                                apply_gesture(
+                                    crate::app::mouse::Gesture::Drag,
+                                    ainb::Pos { x: col, y: row },
+                                    app,
+                                    &keymap,
+                                    &mut ui,
+                                    terminal,
+                                )
+                                .await?;
                             }
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
@@ -1080,23 +1079,29 @@ async fn run_tui_loop(
                                 == crate::app::screens::ids::LOG_HISTORY
                             {
                                 app.state.log_streams.log_history_state.end_selection();
-                            } else if let Some(app_event) = crate::app::mouse::handle_mouse_event(
-                                AppEvent::MouseDragEnd { x: col, y: row },
-                                &mut app.state,
-                                &mut ui,
-                            ) {
-                                EventHandler::process_event(app_event, &mut app.state);
+                            } else {
+                                apply_gesture(
+                                    crate::app::mouse::Gesture::Release,
+                                    ainb::Pos { x: col, y: row },
+                                    app,
+                                    &keymap,
+                                    &mut ui,
+                                    terminal,
+                                )
+                                .await?;
                             }
                         }
                         MouseEventKind::Moved => {
                             let (col, row) = (mouse_event.column, mouse_event.row);
-                            if let Some(app_event) = crate::app::mouse::handle_mouse_event(
-                                AppEvent::MouseMove { x: col, y: row },
-                                &mut app.state,
+                            apply_gesture(
+                                crate::app::mouse::Gesture::Move,
+                                ainb::Pos { x: col, y: row },
+                                app,
+                                &keymap,
                                 &mut ui,
-                            ) {
-                                EventHandler::process_event(app_event, &mut app.state);
-                            }
+                                terminal,
+                            )
+                            .await?;
                         }
                         _ => {}
                     }
@@ -1397,10 +1402,38 @@ async fn detach_interactive_pane(
         KeyContext::EmbedInteractive.name()
     ));
     let intent = ainb::Intent::Command(command, serde_json::Value::Null);
+    run_intent(intent, app, keymap, ui, terminal).await
+}
+
+/// Dispatch one intent and run the effects it returns, in order, once the
+/// state it wrote is committed.
+async fn run_intent(
+    intent: ainb::Intent,
+    app: &mut App,
+    keymap: &Keymap,
+    ui: &mut crate::app::ui_state::UiState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
     for effect in ainb::dispatch(&mut app.state, keymap, ui, intent) {
         ainb::effect_host::execute(effect, app, terminal, ui).await?;
     }
     Ok(())
+}
+
+/// Apply a drag, release or hover, then dispatch whatever it finished (a
+/// resize that now wants saving).
+async fn apply_gesture(
+    gesture: crate::app::mouse::Gesture,
+    pos: ainb::Pos,
+    app: &mut App,
+    keymap: &Keymap,
+    ui: &mut crate::app::ui_state::UiState,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> Result<()> {
+    match crate::app::mouse::gesture(gesture, pos, &mut app.state, ui) {
+        Some(intent) => run_intent(intent, app, keymap, ui, terminal).await,
+        None => Ok(()),
+    }
 }
 
 fn setup_logging() {
