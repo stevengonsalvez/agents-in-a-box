@@ -284,6 +284,8 @@ impl ActionMenu {
 
 /// `HookHealth` belongs to the notifyd crate, which knows nothing of frames, so
 /// its free text is scrubbed on the way into the Daemons snapshot's frame.
+// `&Option<T>` is the signature serde's `serialize_with` hands over.
+#[allow(clippy::ref_option)]
 fn scrub_hook_health<S: serde::Serializer>(
     health: &Option<HookHealth>,
     serializer: S,
