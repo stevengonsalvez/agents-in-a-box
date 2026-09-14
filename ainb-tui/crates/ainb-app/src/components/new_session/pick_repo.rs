@@ -536,7 +536,20 @@ pub fn handle_key(state: &mut PickRepoState, key: &Chord) -> PickRepoOutcome {
                 return PickRepoOutcome::Stay;
             }
             let parsed = parse_with(&state.filter, &RealFs);
-            tracing::debug!("pick_repo: smart-parse {:?} -> {parsed:?}", state.filter);
+            // The filter can be a pasted clipboard; the log gets its length, as
+            // the mirror frame does, and the parse kind.
+            let kind = match &parsed {
+                RepoSource::HttpsUrl(_) => "https url",
+                RepoSource::SshUrl(_) => "ssh url",
+                RepoSource::SshSession(_) => "ssh session",
+                RepoSource::LocalPath(_) => "local path",
+                RepoSource::GithubShorthand { .. } => "github shorthand",
+                RepoSource::Filter(_) => "filter",
+            };
+            tracing::debug!(
+                "pick_repo: smart-parse {} chars -> {kind}",
+                state.filter.chars().count()
+            );
             state.defaults.last_repo = Some(state.filter.clone());
             resolve_outcome(parsed)
         }
