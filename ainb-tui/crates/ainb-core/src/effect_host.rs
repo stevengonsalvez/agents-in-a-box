@@ -116,9 +116,14 @@ fn deferred() -> &'static (
 /// The run loop dispatches them like any other intent.
 #[must_use]
 pub fn take_deferred_reports() -> Vec<Intent> {
+    drain(&deferred().1)
+}
+
+/// Everything waiting on `queue`, oldest first.
+fn drain(queue: &std::sync::Mutex<std::sync::mpsc::Receiver<Intent>>) -> Vec<Intent> {
     // A worker that panicked while holding the lock leaves the queue intact;
     // dropping every later report would pin rows on `working` forever.
-    let rx = deferred().1.lock().unwrap_or_else(|poisoned| {
+    let rx = queue.lock().unwrap_or_else(|poisoned| {
         warn!("deferred report queue was poisoned; recovering it");
         poisoned.into_inner()
     });
@@ -774,17 +779,21 @@ mod daemon_action_tests {
     /// reports: the next drain recovers the queue and hands them over.
     #[test]
     fn a_poisoned_report_queue_still_hands_over_its_reports() {
-        let _ = std::thread::spawn(|| {
-            let _held = super::deferred().1.lock();
+        // Its own queue, so the process-wide one other tests drain is untouched.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let held = std::sync::Arc::clone(&queue);
+        let _ = std::thread::spawn(move || {
+            let _held = held.lock();
             panic!("worker dies holding the queue");
         })
         .join();
-        assert!(super::deferred().1.is_poisoned());
+        assert!(queue.is_poisoned());
 
         let report = crate::app::reports::detached();
-        super::deferred().0.send(report.clone()).expect("queue open");
+        tx.send(report.clone()).expect("queue open");
 
-        assert!(take_deferred_reports().contains(&report));
+        assert_eq!(super::drain(&queue), vec![report]);
     }
 }
 
