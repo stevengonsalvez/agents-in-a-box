@@ -528,3 +528,80 @@ async fn a_thousand_event_replay_leaves_no_projection_drift() {
         drift.asking_session_without_open
     );
 }
+
+/// #962: the window between an answer and the hook that clears the session is
+/// not drift. Driven through the shipped hook reducer and the same answered
+/// flip `attention/answer` claims with, so both clocks are the production ones.
+///
+/// The strict measure still counts the window, which is the false positive the
+/// daemon sweep used to log on every answer. The sweep's clocked measure does
+/// not, until the settle window runs out with the session still asking, and
+/// the agent's clearing hook leaves both measures clean.
+#[tokio::test]
+async fn an_answer_awaiting_its_clearing_hook_is_not_logged_as_drift() {
+    use ainb_hangar_store::repo::attention::ANSWER_SETTLE_MS;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    hook(
+        &store,
+        "e-ask",
+        "AskUserQuestion",
+        Some("AskUserQuestion"),
+        BASE_MS,
+        Some(raise(0, BASE_MS)),
+    )
+    .await;
+    let card = format!("att:{SESSION_ID}:0");
+    let answered_at = BASE_MS + 2_000;
+    assert_eq!(
+        AttentionRepo::mark_answered_if_open(
+            store.pool(),
+            &card,
+            "tui@host",
+            "sqlite",
+            answered_at
+        )
+        .await
+        .expect("answer"),
+        1
+    );
+
+    let strict = AttentionRepo::drift_against_fleet_session(store.pool()).await.expect("drift");
+    assert_eq!(
+        strict.asking_session_without_open, 1,
+        "the strict measure still sees the window"
+    );
+    let swept = AttentionRepo::drift_against_fleet_session_at(store.pool(), answered_at + 1_000)
+        .await
+        .expect("drift");
+    assert!(
+        swept.is_clean(),
+        "the sweep must not log a fresh answer: {swept:?}"
+    );
+    let stale = AttentionRepo::drift_against_fleet_session_at(
+        store.pool(),
+        answered_at + ANSWER_SETTLE_MS + 1,
+    )
+    .await
+    .expect("drift");
+    assert_eq!(
+        stale.asking_session_without_open, 1,
+        "a clearing hook missing past the settle window is drift"
+    );
+
+    hook(
+        &store,
+        "e-stop",
+        "Stop",
+        None,
+        answered_at + 3_000,
+        Some(release(answered_at + 3_000)),
+    )
+    .await;
+    let cleared = AttentionRepo::drift_against_fleet_session(store.pool()).await.expect("drift");
+    assert!(
+        cleared.is_clean(),
+        "the clearing hook ends the window: {cleared:?}"
+    );
+}
