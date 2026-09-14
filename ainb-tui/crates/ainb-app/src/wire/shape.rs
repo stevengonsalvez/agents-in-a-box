@@ -211,10 +211,11 @@ pub const TYPED_LABELS: &[&str] = &[
     "new_session.configure.save_preset_modal",
 ];
 
-/// Every sample the checks trace: [`sample_state`], whose config popup is the
-/// Ctrl+K `SecretInput`, and the same state with a plain setting open in a
-/// `TextInput`. The popup holds one variant at a time, so both are needed for
-/// either to be seen.
+/// Every sample the checks trace.
+///
+/// [`sample_state`], whose config popup is the Ctrl+K `SecretInput`, and the
+/// same state with a plain setting open in a `TextInput`. The popup holds one
+/// variant at a time, so both are needed for either to be seen.
 ///
 /// # Panics
 ///
