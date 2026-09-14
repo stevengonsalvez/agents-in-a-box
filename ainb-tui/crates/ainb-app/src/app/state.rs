@@ -3204,15 +3204,24 @@ impl AppState {
         self.effects.push(effect);
     }
 
-    /// Queue a write of `store` for the host, after this step.
+    /// Queue a write of `store` for the host, after this step. A write to a
+    /// store this step already queued folds into that one and moves after
+    /// anything queued since, so the host writes each store once, last value
+    /// winning.
     pub fn persist(&mut self, store: crate::app::effect::Persist) {
-        self.emit(crate::app::effect::Effect::Persist(store));
+        self.effects.push_persist(store);
     }
 
-    /// Queue a write of the user config as it stands now.
-    pub fn persist_app_config(&mut self) {
+    /// Queue a write of `keys`, dotted user config keys this step changed,
+    /// with their values as they stand now. Keys left out keep what is on
+    /// disk.
+    pub fn persist_app_config<K: Into<String>>(&mut self, keys: impl IntoIterator<Item = K>) {
+        let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+        if keys.is_empty() {
+            return;
+        }
         let config = crate::app::effect::Snapshot(self.config.app_config.clone());
-        self.persist(crate::app::effect::Persist::AppConfig(config));
+        self.persist(crate::app::effect::Persist::AppConfig { config, keys });
     }
 
     /// Queue a write of the session labels as they stand now.
@@ -3810,7 +3819,7 @@ impl AppState {
 
         // Detect current per-agent auth up front so the Authentication step
         // always opens showing real current values (config + keychain).
-        state.refresh_auth_statuses();
+        state.refresh_auth_statuses(&self.config.app_config.authentication.claude_provider);
 
         self.onboarding.onboarding_state = Some(state);
         self.shell.current_screen = screen_ids::ONBOARDING.to_string();
@@ -3862,7 +3871,7 @@ impl AppState {
 
         // App-config scan paths (what session creation actually reads).
         self.config.app_config.workspace_defaults.workspace_scan_paths = valid;
-        self.persist_app_config();
+        self.persist_app_config(["workspace_defaults.workspace_scan_paths"]);
     }
 
     /// Complete the onboarding process
@@ -3879,8 +3888,10 @@ impl AppState {
                 state.get_valid_directories();
 
             // Save selected editor preference
+            let mut keys = vec!["workspace_defaults.workspace_scan_paths"];
             if let Some(editor) = state.get_selected_editor() {
                 self.config.app_config.ui_preferences.preferred_editor = Some(editor);
+                keys.push("ui_preferences.preferred_editor");
             }
 
             // Optional OpenTelemetry -> Grafana Cloud setup. Best-effort: a
@@ -3911,7 +3922,7 @@ impl AppState {
                 }
             }
 
-            self.persist_app_config();
+            self.persist_app_config(keys);
         }
 
         // Clean up and return to home
@@ -6318,7 +6329,7 @@ impl AppState {
     pub fn toggle_session_menu_bar(&mut self) {
         let show = !self.config.app_config.ui_preferences.show_session_menu_bar;
         self.config.app_config.ui_preferences.show_session_menu_bar = show;
-        self.persist_app_config();
+        self.persist_app_config(["ui_preferences.show_session_menu_bar"]);
         self.add_info_notification(if show {
             "Keymap legend shown".to_string()
         } else {
@@ -6331,7 +6342,7 @@ impl AppState {
     pub fn cycle_session_filter(&mut self) {
         self.sessions.session_filter = self.sessions.session_filter.next();
         self.config.app_config.ui_preferences.session_filter = self.sessions.session_filter;
-        self.persist_app_config();
+        self.persist_app_config(["ui_preferences.session_filter"]);
         // Selection indices are positional over the *displayed* list. Resetting
         // to the first session of the first workspace is simplest and matches
         // what `load_real_workspaces` already does after a refresh.
@@ -12535,7 +12546,7 @@ impl AppState {
             let _lock = crate::interactive::SessionStore::lock()
                 .map_err(|e| warn!("Failed to lock sessions.json for Headroom flip: {e}"))
                 .ok();
-            let mut store = crate::interactive::SessionStore::load();
+            let store = crate::interactive::SessionStore::load();
             let launch_settings = match store.sessions.get(&tmux_session_name) {
                 None => {
                     self.add_warning_notification(
@@ -12562,6 +12573,7 @@ impl AppState {
             // ahead; the flag is re-read from a stale store on the next restart.
             self.persist(crate::app::effect::Persist::SessionHeadroom {
                 tmux_session: tmux_session_name.clone(),
+                expected: true,
                 enabled: false,
             });
             launch_settings
