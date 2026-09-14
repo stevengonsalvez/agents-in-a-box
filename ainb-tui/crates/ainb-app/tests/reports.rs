@@ -43,9 +43,17 @@ fn the_width_report_turns_saved_column_counts_into_fractions_of_the_host() {
     assert_eq!(
         effects,
         vec![ainb_app::Effect::Persist(
-            ainb_app::app::Persist::AppConfig(ainb_app::app::Snapshot(
-                state.config.app_config.clone()
-            ))
+            ainb_app::app::Persist::AppConfig {
+                config: ainb_app::app::Snapshot(state.config.app_config.clone()),
+                keys: [
+                    "ui_preferences.home_sidebar_fraction",
+                    "ui_preferences.home_sidebar_width",
+                    "ui_preferences.skill_manager_sources_fraction",
+                    "ui_preferences.skill_manager_sources_width",
+                ]
+                .map(String::from)
+                .to_vec(),
+            }
         )]
     );
     let prefs = &state.config.app_config.ui_preferences;
