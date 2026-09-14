@@ -20,7 +20,8 @@ use crate::app::{Effect, Intent, TerminalTarget, ToolTerminal};
 /// dispatch, in order.
 ///
 /// The executor holds no state: everything an effect needs rides on it, plus
-/// the renderer's own `ui` layout and the plugin runtime the host owns.
+/// the renderer's own `ui` layout, the live tmux client it keeps for the
+/// preview pane, and the plugin runtime the host owns.
 ///
 /// `Err` means the terminal itself could not be suspended or restored, which
 /// the run loop treats as fatal; every failure the user can act on is a report
@@ -29,18 +30,24 @@ pub fn execute<'t>(
     effect: Effect,
     terminal: &'t mut Terminal<CrosstermBackend<Stdout>>,
     ui: &UiState,
+    clients: &mut crate::terminal_clients::TerminalClients,
     plugins: Option<&ainb_plugin_runtime::RuntimeHandle>,
 ) -> impl std::future::Future<Output = Result<Vec<Intent>>> + 't {
     let work = match effect {
         Effect::AttachTerminal(TerminalTarget::InPlace {
             tmux_session,
             show_menu_bar,
-        }) => Work::Done(vec![open_in_place(
-            terminal,
-            ui,
-            &tmux_session,
+        }) => {
+            let (rows, cols) = preview_size(terminal, ui, show_menu_bar);
+            Work::Done(vec![clients.open_in_place(&tmux_session, rows, cols)])
+        }
+        Effect::AttachTerminal(TerminalTarget::Observe {
+            tmux_session,
             show_menu_bar,
-        )]),
+        }) => {
+            let (rows, cols) = preview_size(terminal, ui, show_menu_bar);
+            Work::Done(vec![clients.open_observer(&tmux_session, rows, cols)])
+        }
         Effect::AttachTerminal(target) => Work::Attach(target),
         Effect::Detach => Work::Done(vec![reports::detached()]),
         Effect::OpenEditor {
@@ -177,8 +184,8 @@ async fn attach(
     target: TerminalTarget,
 ) -> Result<Vec<Intent>> {
     Ok(match target {
-        TerminalTarget::InPlace { .. } => {
-            unreachable!("the in-place client opens before the future starts")
+        TerminalTarget::InPlace { .. } | TerminalTarget::Observe { .. } => {
+            unreachable!("the preview client opens before the future starts")
         }
         TerminalTarget::Session { id, tmux_session } => {
             vec![attach_session(terminal, id, tmux_session.as_str()).await?]
@@ -335,33 +342,25 @@ fn claude_login(
     Ok(reports::login_finished(auth_dir, exited_ok))
 }
 
-/// Open a writable tmux client on `tmux_session` for the session list's
-/// preview pane, sized to the exact interactive layout (the user's current
-/// sidebar and chrome) so tmux reflows once at attach instead of twice, and
-/// park it for the reducer to adopt. The render path still resizes it each
-/// frame for terminal resizes.
-fn open_in_place(
+/// The preview pane's interior under the session list's current layout (the
+/// user's sidebar and chrome), so a client opens at the size it is drawn and
+/// tmux reflows once. The render path still resizes it for terminal resizes.
+fn preview_size(
     terminal: &Terminal<CrosstermBackend<Stdout>>,
     ui: &UiState,
-    tmux_session: &crate::app::TmuxSessionName,
     show_menu_bar: bool,
-) -> Intent {
+) -> (u16, u16) {
     let size = terminal.size().unwrap_or(ratatui::layout::Size {
         width: 80,
         height: 24,
     });
     let sidebar = ui.sessions_pane.effective_width(size.width);
-    let (rows, cols) = crate::components::layout::interactive_embed_size(
+    crate::components::layout::interactive_embed_size(
         size.width,
         size.height,
         sidebar,
         show_menu_bar,
-    );
-    let name = tmux_session.as_str();
-    match crate::tmux::EmbedClient::attach(name, rows, cols) {
-        Ok(client) => reports::in_place_opened(name, &reports::LocalEmbed::keep(client)),
-        Err(e) => reports::in_place_failed(name, &e.to_string()),
-    }
+    )
 }
 
 /// An ainb session's own tmux session, `tmux_session_name` as state named it
