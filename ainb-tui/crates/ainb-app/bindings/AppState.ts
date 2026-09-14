@@ -4375,6 +4375,15 @@ export type StatuslineStatus_Serialize =
 { Other: string };
 
 /**
+ *  The sections a renderer wants frames for.
+ * 
+ *  On the wire, the list of wire names ([`section_name`]), so a remote renderer
+ *  sends its filter to the host. A name this build does not know is skipped:
+ *  a newer renderer can ask an older host for a section it lacks.
+ */
+export type Subscription = string[];
+
+/**
  *  Assess-then-apply dialog for `[s]` sync. Holds the dry-run plan text
  *  (rendered as a git-style diff) and the scope that produced it so the
  *  apply step re-runs the identical scope with `--yes`.
