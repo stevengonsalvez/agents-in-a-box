@@ -132,7 +132,7 @@ mod tests {
         state.terminal_exited(missing);
 
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
+            state.host.observer_failed_target.as_ref().map(|(target, _, _)| target.as_str()),
             Some(missing)
         );
         assert!(
@@ -146,7 +146,7 @@ mod tests {
 
         state.tmux.selected_other_tmux_index = None;
         assert!(state.request_terminal_observer().is_none());
-        assert!(state.tmux.observer_failed_target.is_none());
+        assert!(state.host.observer_failed_target.is_none());
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
         }
 
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.host.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3)
         );
         assert!(state.shell.notifications.iter().any(|notification| {
@@ -170,13 +170,13 @@ mod tests {
         let session = "ainb-observer-retry-reset";
         let mut state = state_with_other_tmux_sessions(&[session]);
         state.shell.current_screen = "session_list".to_string();
-        state.tmux.observer_failed_target =
+        state.host.observer_failed_target =
             Some((session.to_string(), std::time::Instant::now(), 2));
 
         assert_eq!(settled_observer_request(&mut state), Some(observe(session)));
         state.adopt_terminal_observer(session);
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.host.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(2),
             "a spawned client can still fail asynchronously"
         );
@@ -184,7 +184,7 @@ mod tests {
         state.release_interactive_pane();
         state.record_observer_failure(session.to_string());
         assert_eq!(
-            state.tmux.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
+            state.host.observer_failed_target.as_ref().map(|(_, _, attempts)| *attempts),
             Some(3),
             "a failed spawn must advance the existing retry count"
         );
@@ -195,14 +195,14 @@ mod tests {
         let session = "ainb-observer-grace";
         let mut state = state_with_other_tmux_sessions(&[session]);
         state.shell.current_screen = "session_list".to_string();
-        state.tmux.observer_failed_target =
+        state.host.observer_failed_target =
             Some((session.to_string(), std::time::Instant::now(), 2));
 
         assert_eq!(settled_observer_request(&mut state), Some(observe(session)));
         state.adopt_terminal_observer(session);
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(!state.tick_terminal_pane());
-        assert!(state.tmux.observer_failed_target.is_none());
+        assert!(state.host.observer_failed_target.is_none());
     }
 
     #[test]
@@ -215,7 +215,7 @@ mod tests {
         state.adopt_terminal_observer(active);
 
         state.tmux.selected_other_tmux_index = Some(1);
-        state.tmux.observer_failed_target = Some((
+        state.host.observer_failed_target = Some((
             blocked.to_string(),
             std::time::Instant::now(),
             MAX_OBSERVER_FAILURES,
