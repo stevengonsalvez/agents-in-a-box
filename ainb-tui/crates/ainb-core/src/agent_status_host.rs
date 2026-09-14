@@ -312,9 +312,9 @@ mod tests {
         })
     }
 
-    /// One fake daemon connection: acks hello, then answers each request with
-    /// `answer(method, n)` where `n` counts roster_status reads on this
-    /// connection. `after_subscribe` runs once the subscription is acked.
+    /// One fake daemon connection: acks hello, answers each `fleet/roster_status`
+    /// with `answer`, counting reads in `reads`, and after the subscription is
+    /// acked either closes or pushes `after_subscribe`.
     async fn serve_connection(
         stream: tokio::net::UnixStream,
         reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -333,7 +333,7 @@ mod tests {
                         &mut writer,
                         &json!({"jsonrpc": "2.0", "id": id, "result": {}}),
                     )
-                    .await
+                    .await;
                 }
                 "fleet/roster_status" => {
                     reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
