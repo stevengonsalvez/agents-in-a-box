@@ -696,31 +696,6 @@ impl AttentionRepo {
     pub async fn drift_against_fleet_session(
         pool: &SqlitePool,
     ) -> Result<AttentionDrift, sqlx::Error> {
-        // No settle window: the strict pre-#962 measure, for tests that need
-        // every disagreement counted. The daemon sweep passes its clock.
-        Self::drift_against_fleet_session_at(pool, i64::MAX).await
-    }
-
-    /// [`Self::drift_against_fleet_session`] measured at `now_ms`, excluding the
-    /// normal window between an answer and the hook that clears the session.
-    ///
-    /// Answering a card closes the inbox row at once, but `fleet_session` keeps
-    /// reading `ASK` until the agent's next hook line reports the question gone.
-    /// Every answer therefore used to count as "an asking session with no open
-    /// card", a lost raise, for however long the agent took to move on (#962).
-    /// A session is not drift while a card of its was answered at or after its
-    /// current attention state was stamped, AND that answer is younger than
-    /// [`ANSWER_SETTLE_MS`]. Past the settle window a session still asking is
-    /// counted again, so a hook that really was lost still shows up.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`sqlx::Error`] if either count fails.
-    pub async fn drift_against_fleet_session_at(
-        pool: &SqlitePool,
-        now_ms: i64,
-    ) -> Result<AttentionDrift, sqlx::Error> {
-        let settle_floor = now_ms.saturating_sub(ANSWER_SETTLE_MS);
         // An `approval` row is deliberately excluded from the first direction
         // for the same reason `close_unclaimed_open` excludes it: an ACP
         // permission is owned by the pool's parked responder, not by a
@@ -752,16 +727,8 @@ impl AttentionRepo {
                AND NOT EXISTS ( \
                    SELECT 1 FROM attention a \
                    WHERE a.session_id = f.provider_session_id AND a.state = 'open' \
-               ) \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM attention a \
-                   WHERE a.session_id = f.provider_session_id \
-                     AND a.state = 'answered' \
-                     AND a.answered_at >= f.attention_updated_at \
-                     AND a.answered_at >= ? \
                )",
         )
-        .bind(settle_floor)
         .fetch_one(pool)
         .await?;
         Ok(AttentionDrift {
@@ -801,11 +768,6 @@ impl AttentionRepo {
         Ok(res.rows_affected())
     }
 }
-
-/// How long after an answer a session may still read `ASK` before the drift
-/// assertion counts it (#962): the time an agent takes to emit the hook line
-/// that clears its question.
-pub const ANSWER_SETTLE_MS: i64 = 300_000;
 
 /// How far the inbox and `fleet_session.attention_state` have drifted apart.
 ///
@@ -874,77 +836,6 @@ fn row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<Option<AttentionRow>
 mod tests {
     use super::*;
     use crate::Store;
-
-    /// #962: the window between an answer and the hook that clears the session
-    /// is not drift, but a session still asking past the settle window is, and
-    /// so is one whose answered card predates its current question.
-    #[tokio::test]
-    async fn an_answered_session_is_not_drift_until_the_settle_window_ends() {
-        use crate::repo::fleet::{
-            FleetRepo, FleetSessionPatch, NewFleetEvent, ObservationAuthority,
-        };
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::open_in(dir.path()).await.unwrap();
-        let pool = store.pool();
-        let ask_at = 1_000_000_i64;
-        let ask_event = |id: &str, at: i64| NewFleetEvent {
-            event_id: id.into(),
-            session_key: "claude:settle".into(),
-            observed_at: at,
-            authority: ObservationAuthority::Authoritative,
-            event_type: "PreToolUse".into(),
-            payload: "{}".into(),
-            patch: FleetSessionPatch {
-                provider: Some("claude".into()),
-                provider_session_id: Some("settle".into()),
-                attention_state: Some("ASK".into()),
-                ..FleetSessionPatch::default()
-            },
-        };
-        FleetRepo::apply_event(pool, &ask_event("e-ask", ask_at)).await.unwrap();
-        AttentionRepo::insert(pool, &ask("card-1", "settle", None, ask_at))
-            .await
-            .unwrap();
-        assert!(
-            AttentionRepo::drift_against_fleet_session_at(pool, ask_at + 1)
-                .await
-                .unwrap()
-                .is_clean()
-        );
-
-        let answered_at = ask_at + 5_000;
-        AttentionRepo::mark_answered_if_open(pool, "card-1", "tui@host", "sqlite", answered_at)
-            .await
-            .unwrap();
-        let just_after = AttentionRepo::drift_against_fleet_session_at(pool, answered_at + 1_000)
-            .await
-            .unwrap();
-        assert!(
-            just_after.is_clean(),
-            "an answer awaiting its hook is not drift: {just_after:?}"
-        );
-
-        let past_settle =
-            AttentionRepo::drift_against_fleet_session_at(pool, answered_at + ANSWER_SETTLE_MS + 1)
-                .await
-                .unwrap();
-        assert_eq!(
-            past_settle.asking_session_without_open, 1,
-            "a hook still missing past the settle window is drift"
-        );
-
-        // A NEW question after the answer: the old answered card no longer
-        // vouches for it, so a missing raise counts at once.
-        let second_ask = answered_at + 10_000;
-        FleetRepo::apply_event(pool, &ask_event("e-ask-2", second_ask)).await.unwrap();
-        let new_question = AttentionRepo::drift_against_fleet_session_at(pool, second_ask + 1)
-            .await
-            .unwrap();
-        assert_eq!(
-            new_question.asking_session_without_open, 1,
-            "an answer older than the current question does not excuse it"
-        );
-    }
 
     /// Seed one workspace so the FK-scoped inserts resolve.
     async fn seed_workspace(pool: &SqlitePool, ws: &str) {
