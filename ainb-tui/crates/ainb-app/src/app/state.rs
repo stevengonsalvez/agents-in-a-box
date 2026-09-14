@@ -1950,6 +1950,45 @@ impl ConfigScreenState {
         Ok(applied)
     }
 
+    /// The dotted `config.toml` keys a save must write after
+    /// [`apply_to_app_config`](Self::apply_to_app_config) folded the edits in.
+    ///
+    /// Only what the user changed on this screen: every other modelled key in
+    /// the in-memory config is the startup snapshot, and writing it back would
+    /// revert whatever another process saved since. Daemon rows, external rows
+    /// (written by their own key-level writer) and rows the registry rejected
+    /// are left out; a rejected row still holds the snapshot value.
+    #[must_use]
+    pub fn keys_to_save(&self, applied: &AppliedEdits) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut toggled_a_plugin = false;
+        for key in &self.dirty {
+            if let Some((plugin, field)) = Self::parse_plugin_row_key(key) {
+                keys.push(format!(
+                    "plugins.{}.{}",
+                    registry::quote_key_segment(plugin),
+                    registry::quote_key_segment(field)
+                ));
+            } else if Self::parse_plugin_toggle_key(key).is_some() {
+                toggled_a_plugin = true;
+            } else if screen_model::read_only_reason(key).is_some()
+                || registry::hangar_daemon_key(key).is_some()
+                || registry::is_external(key)
+                || applied.rejected.iter().any(|(rejected, _)| rejected == key)
+            {
+                continue;
+            } else {
+                keys.push(key.clone());
+            }
+        }
+        if toggled_a_plugin {
+            keys.push("plugins.disabled".to_string());
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     /// Forget the pending edits after they have been written, so a later save
     /// does not rewrite values another process may have changed since.
     pub fn mark_saved(&mut self) {
