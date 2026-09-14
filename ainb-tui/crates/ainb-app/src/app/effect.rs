@@ -84,11 +84,12 @@ pub enum Effect {
     },
 }
 
-/// A tmux session name an effect can target: not empty, free of the `:` and
-/// `.` tmux reads as window and pane separators and of control characters, and
-/// not starting with `$`, `%`, `@` or `=`, which tmux reads as a session, pane
-/// or window id or an exact-match marker, so a name could reach another
-/// session.
+/// A tmux session name an effect can target.
+///
+/// Not empty, free of the `:` and `.` tmux reads as window and pane separators
+/// and of control characters, and not starting with `$`, `%`, `@` or `=`,
+/// which tmux reads as a session, pane or window id or an exact-match marker,
+/// so such a name could reach another session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxSessionName(String);
 
