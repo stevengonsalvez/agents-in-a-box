@@ -773,11 +773,12 @@ fn axis_handle_action_forwarded_and_ui_state_read_back() {
     m.provides.snapshots = vec![topics::UI_STATE.into()];
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-action-forward"));
     let id = register(&rt, bin, m);
+    let view_topic = topics::ui_state_topic(id.as_str());
 
     drop(block_render(&rt, &handle, &id, 1, 1));
     wait_running(&handle, &id);
     assert!(
-        handle.snapshot_get_versioned(topics::UI_STATE).is_none(),
+        handle.snapshot_get_versioned(&view_topic).is_none(),
         "no view state before any action"
     );
 
@@ -807,7 +808,7 @@ fn axis_handle_action_forwarded_and_ui_state_read_back() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut view = None;
     while std::time::Instant::now() < deadline {
-        view = handle.snapshot_get_versioned(topics::UI_STATE);
+        view = handle.snapshot_get_versioned(&view_topic);
         if view.is_some() {
             break;
         }
@@ -826,7 +827,7 @@ fn axis_handle_action_forwarded_and_ui_state_read_back() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut next = None;
     while std::time::Instant::now() < deadline {
-        next = handle.snapshot_get_versioned(topics::UI_STATE).filter(|(_, v, _)| *v > version);
+        next = handle.snapshot_get_versioned(&view_topic).filter(|(_, v, _)| *v > version);
         if next.is_some() {
             break;
         }
@@ -836,6 +837,55 @@ fn axis_handle_action_forwarded_and_ui_state_read_back() {
     let second: serde_json::Value = serde_json::from_slice(&payload).expect("ui.state is JSON");
     assert_eq!(second["actions"], 2);
     assert_eq!(second["last"], "board.close_card");
+}
+
+/// Two plugins publishing `ui.state` in the same tick each keep their own
+/// view: the runtime stores a bare `ui.state` publish under the publisher's
+/// `ui.state/<id>`, so neither overwrites the other and the bare topic stays
+/// empty.
+#[test]
+fn axis_two_plugins_publish_ui_state_without_overwriting_each_other() {
+    use ainb_plugin_runtime::topics;
+
+    let (rt, handle) = build_runtime();
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-action-forward"));
+    let ids: Vec<PluginId> = ["cts-view-a", "cts-view-b"]
+        .into_iter()
+        .map(|name| {
+            let mut m = manifest(name);
+            m.provides.cli_namespaces = vec!["action".into()];
+            m.capabilities.event_bus = CapabilityGrant::Bool(true);
+            m.provides.snapshots = vec![topics::UI_STATE.into()];
+            register(&rt, bin.clone(), m)
+        })
+        .collect();
+    for id in &ids {
+        drop(block_render(&rt, &handle, id, 1, 1));
+        wait_running(&handle, id);
+    }
+
+    // Both actions go out before either plugin has published.
+    for (id, action) in ids.iter().zip(["view.a", "view.b"]) {
+        assert!(handle.send_action(id, action, serde_json::Value::Null));
+    }
+
+    for (id, action) in ids.iter().zip(["view.a", "view.b"]) {
+        let topic = topics::ui_state_topic(id.as_str());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut view = None;
+        while view.is_none() && std::time::Instant::now() < deadline {
+            view = handle.snapshot_get_versioned(&topic);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (payload, _, publisher) = view.unwrap_or_else(|| panic!("{topic} never landed"));
+        assert_eq!(&publisher, id, "{topic} is stamped with its own plugin");
+        let view: serde_json::Value = serde_json::from_slice(&payload).expect("JSON view");
+        assert_eq!(view["last"], action, "{topic} holds its own plugin's view");
+    }
+    assert!(
+        handle.snapshot_get_versioned(topics::UI_STATE).is_none(),
+        "no plugin's view is stored under the shared bare topic"
+    );
 }
 
 // =====================================================================
