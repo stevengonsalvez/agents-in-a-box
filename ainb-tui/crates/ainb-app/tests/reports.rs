@@ -167,10 +167,9 @@ fn a_session_attach_whose_target_is_gone_stops_the_session_and_reloads_the_rows(
         state.shell.pending_async_action,
         Some(AsyncAction::RefreshWorkspaces)
     ));
-    assert_eq!(
-        moved,
-        vec![SectionId::Sessions, SectionId::Tmux, SectionId::Shell]
-    );
+    // The dropped tmux session handle is host-only state, so no tmux section
+    // moves.
+    assert_eq!(moved, vec![SectionId::Sessions, SectionId::Shell]);
 }
 
 #[test]
