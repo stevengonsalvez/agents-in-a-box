@@ -170,6 +170,20 @@ pub struct PluginsHostSection {
     /// owns the underlying `Runtime` via `plugin_runtime_owner` so the
     /// tokio executor is torn down when `App` drops.
     pub plugin_runtime: Option<ainb_plugin_runtime::RuntimeHandle>,
+    /// Each plugin's last `ui.state` view, keyed by plugin id, for a renderer
+    /// that draws the plugin's screen itself. Refreshed by
+    /// `tick_plugin_renders`; the host stores the JSON and never reads into
+    /// it.
+    pub plugin_ui_states: std::collections::HashMap<String, PluginUiState>,
+}
+
+/// One plugin's `ui.state` view as the snapshot bus last delivered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginUiState {
+    /// Snapshot bus version of the publish, increasing per topic.
+    pub version: u64,
+    /// The plugin's view, in the shape the plugin documents.
+    pub view: serde_json::Value,
 }
 
 impl Default for PluginsHostSection {
@@ -179,6 +193,7 @@ impl Default for PluginsHostSection {
             plugin_captures_text: std::collections::HashMap::new(),
             plugin_render_errors: std::collections::HashMap::new(),
             plugin_runtime: None,
+            plugin_ui_states: std::collections::HashMap::new(),
         }
     }
 }
