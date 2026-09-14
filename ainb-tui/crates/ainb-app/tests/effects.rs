@@ -369,3 +369,33 @@ fn the_oauth_login_report_succeeds_only_with_credentials_written() {
     assert!(state.onboarding.auth_setup_state.is_none());
     assert_eq!(state.shell.current_screen, ids::SESSION_LIST);
 }
+
+/// The run loop's top-of-loop drain exists for effects queued outside a
+/// dispatch: the host re-queues what a clipboard paste returns, and a tick
+/// that errors leaves what it queued. They wait on the outbox, and the next
+/// hand-over (a dispatch or a drain) returns them first, in order.
+#[test]
+fn effects_queued_outside_dispatch_wait_for_the_next_hand_over() {
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with_selection("/parity/api/worktrees/feat-login");
+    state.emit(Effect::Detach);
+
+    let effects = dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        command("session_list.editor"),
+    );
+
+    assert_eq!(
+        effects,
+        vec![
+            Effect::Detach,
+            Effect::OpenEditor("/parity/api/worktrees/feat-login".into()),
+        ]
+    );
+    state.emit(Effect::Detach);
+    assert_eq!(state.take_effects(), vec![Effect::Detach]);
+    assert!(state.take_effects().is_empty());
+}
