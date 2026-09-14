@@ -49,6 +49,10 @@ pub fn execute<'t>(
         Effect::Detach => Work::Done(vec![reports::detached()]),
         Effect::OpenEditor(path) => Work::Done(vec![open_editor(state, &path)]),
         Effect::PasteClipboard => Work::Done(vec![paste_clipboard()]),
+        Effect::RunDaemonAction { daemon, action } => {
+            spawn_daemon_action(daemon, action);
+            Work::Done(Vec::new())
+        }
     };
     async move {
         match work {
@@ -66,6 +70,59 @@ enum Work {
     Done(Vec<Intent>),
     Session(Uuid, Option<String>),
     Attach(TerminalTarget),
+}
+
+/// Reports from work that outlives the effect that started it, waiting for the
+/// run loop to dispatch them.
+///
+/// ponytail: one process-wide queue, because this process runs one terminal
+/// host; a host that ran two would give each its own.
+fn deferred() -> &'static (
+    std::sync::mpsc::Sender<Intent>,
+    std::sync::Mutex<std::sync::mpsc::Receiver<Intent>>,
+) {
+    static DEFERRED: std::sync::OnceLock<(
+        std::sync::mpsc::Sender<Intent>,
+        std::sync::Mutex<std::sync::mpsc::Receiver<Intent>>,
+    )> = std::sync::OnceLock::new();
+    DEFERRED.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (tx, std::sync::Mutex::new(rx))
+    })
+}
+
+/// Reports that background work finished since the last call, oldest first.
+/// The run loop dispatches them like any other intent.
+#[must_use]
+pub fn take_deferred_reports() -> Vec<Intent> {
+    deferred().1.lock().map_or_else(|_| Vec::new(), |rx| rx.try_iter().collect())
+}
+
+/// Run a daemon lifecycle verb on a worker and report it when it exits. A
+/// worker that cannot start is reported as the failure, so the row never
+/// stays on `working` waiting for a report that is not coming.
+fn spawn_daemon_action(
+    daemon: crate::fleet::daemons::probe::DaemonKind,
+    action: crate::cli::daemon::Action,
+) {
+    let tx = deferred().0.clone();
+    let spawned = std::thread::Builder::new().name("ainb-daemon-action".into()).spawn({
+        let tx = tx.clone();
+        move || {
+            let report = run_daemon_action(daemon.id(), action.id());
+            let _ = tx.send(reports::daemon_action_finished(&report));
+        }
+    });
+    if let Err(error) = spawned {
+        let report = reports::DaemonActionReport {
+            daemon: daemon.id().to_string(),
+            verb: action.id().to_string(),
+            ok: false,
+            summary: format!("{} failed", action.id()),
+            detail: format!("the worker that runs `ainb daemon` did not start: {error}"),
+        };
+        let _ = tx.send(reports::daemon_action_finished(&report));
+    }
 }
 
 /// The system clipboard's text as a bracketed paste would deliver it.
@@ -464,6 +521,93 @@ async fn attach_workspace_shell(
     ])
 }
 
+/// Shell one `ainb daemon <kind> <action>` and capture everything it said.
+///
+/// Runs on a worker thread. The captured argv, exit status, and output are
+/// what the row's error view shows verbatim: the operator sees the actual
+/// failure, not our summary of it.
+fn run_daemon_action(kind_id: &str, verb: &str) -> reports::DaemonActionReport {
+    let argv = format!("ainb daemon {kind_id} {verb}");
+    // Never self-exec a test harness: under `cargo test` current_exe() is the
+    // test binary, and libtest treats the trailing argv as name filters, so
+    // this would re-run the suite instead of running a subcommand. See
+    // `crate::self_exec_guard` and issue #715.
+    if crate::self_exec_guard::running_under_cargo_test() {
+        return reports::DaemonActionReport {
+            daemon: kind_id.to_string(),
+            verb: verb.to_string(),
+            ok: false,
+            summary: format!("{verb} unavailable"),
+            detail: format!(
+                "cmd: {argv}\nrefusing to self-exec a cargo test binary \
+                 (current_exe is a test harness, not `ainb`)"
+            ),
+        };
+    }
+    let bin = match std::env::current_exe() {
+        Ok(bin) => bin,
+        Err(e) => {
+            return reports::DaemonActionReport {
+                daemon: kind_id.to_string(),
+                verb: verb.to_string(),
+                ok: false,
+                summary: format!("{verb} failed"),
+                detail: format!("cmd: {argv}\ncould not resolve the running ainb binary: {e}"),
+            };
+        }
+    };
+    match std::process::Command::new(bin).args(["daemon", kind_id, verb]).output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let ok = out.status.success();
+            // The LAST non-empty line, not the first: it was named `first_line`
+            // for long enough that a CLI ending its output with a help block
+            // badged the row with the help's closing line. Every verb reachable
+            // from this menu therefore has to end its stdout with the sentence
+            // worth badging; `fleet atc mode --set` prints its notes first for
+            // exactly this reason.
+            let badge_line = |s: &str| {
+                s.lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let summary = if ok {
+                let line = badge_line(&stdout);
+                if line.is_empty() {
+                    format!("{verb} ok")
+                } else {
+                    line
+                }
+            } else {
+                format!("{verb} failed")
+            };
+            reports::DaemonActionReport {
+                daemon: kind_id.to_string(),
+                verb: verb.to_string(),
+                ok,
+                summary,
+                detail: format!(
+                    "cmd: {argv}\nexit: {}\n\nstdout:\n{}\n\nstderr:\n{}",
+                    out.status,
+                    if stdout.is_empty() { "(none)" } else { &stdout },
+                    if stderr.is_empty() { "(none)" } else { &stderr },
+                ),
+            }
+        }
+        Err(e) => reports::DaemonActionReport {
+            daemon: kind_id.to_string(),
+            verb: verb.to_string(),
+            ok: false,
+            summary: format!("{verb} failed"),
+            detail: format!("cmd: {argv}\ncould not run it: {e}"),
+        },
+    }
+}
+
 fn open_editor(state: &AppState, path: &std::path::Path) -> Intent {
     info!("[EFFECT] Opening in editor: {:?}", path);
     let Some(editor) = resolve_editor(&state.config.app_config) else {
@@ -549,6 +693,43 @@ fn is_explicitly_missing_tmux_target(stderr: &str) -> bool {
     stderr.contains("can't find session")
         || stderr.contains("no server running")
         || (stderr.contains("error connecting to") && stderr.contains("no such file or directory"))
+}
+
+#[cfg(test)]
+mod daemon_action_tests {
+    use super::{spawn_daemon_action, take_deferred_reports};
+    use crate::app::{CommandId, Intent};
+
+    /// The verb runs on a worker, and its report reaches the run loop's queue
+    /// once it exits. Under `cargo test` the runner refuses to self-exec, which
+    /// is itself the reported failure.
+    #[test]
+    fn a_daemon_verb_reports_through_the_deferred_queue() {
+        spawn_daemon_action(
+            crate::fleet::daemons::probe::DaemonKind::McpPool,
+            crate::cli::daemon::Action::Stop,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut reports = Vec::new();
+        while reports.is_empty() && std::time::Instant::now() < deadline {
+            reports = take_deferred_reports();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let [Intent::Command(id, args)] = reports.as_slice() else {
+            panic!("expected one report, got {reports:?}");
+        };
+        assert_eq!(
+            id,
+            &CommandId::new(crate::app::reports::ids::DAEMON_ACTION_FINISHED)
+        );
+        assert_eq!(args["report"]["daemon"], "mcp-pool");
+        assert_eq!(args["report"]["verb"], "stop");
+        assert_eq!(args["report"]["ok"], false);
+        assert!(
+            take_deferred_reports().is_empty(),
+            "a report is handed over once"
+        );
+    }
 }
 
 #[cfg(test)]
