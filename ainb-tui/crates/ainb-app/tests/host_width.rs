@@ -35,7 +35,7 @@ fn a_resize_step_reaches_only_the_host_that_dispatched_it() {
         &mut wide,
         step("skill_manager.grow_sources"),
     );
-    dispatch(
+    let _ = dispatch(
         &mut state,
         &keymap,
         &mut narrow,
