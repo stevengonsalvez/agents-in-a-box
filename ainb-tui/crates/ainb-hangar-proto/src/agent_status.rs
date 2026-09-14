@@ -587,7 +587,11 @@ fn evidence_observed_at(session: &FleetSession, state: AgentState) -> i64 {
     let group = match state {
         AgentState::Waiting => session.attention_updated_at,
         AgentState::Working | AgentState::Idle | AgentState::Exited => session.lifecycle_updated_at,
-        AgentState::Unverifiable => 0,
+        // Nothing has reported a state, so there is no evidence clock to read.
+        // The session's discovery is the one stable fact; `last_observed_at`
+        // moves on every transport heartbeat and would make a silent row look
+        // freshly observed, and bump every surface that versions on it (#1015).
+        AgentState::Unverifiable => return session.discovered_at,
     };
     if group > 0 {
         group
@@ -795,6 +799,22 @@ mod tests {
         assert_eq!(joined.rows[0].session.session_key, "claude:s-1");
         assert_eq!(joined.rows[0].status.state, AgentState::Waiting);
         assert_eq!(joined.rows[0].read_revision, 8);
+    }
+
+    /// #1015 review: a silent row's evidence clock does not move with
+    /// transport heartbeats, so a heartbeat is not a change for it either.
+    #[test]
+    fn a_silent_rows_evidence_clock_ignores_heartbeats() {
+        let mut silent = session(LifecycleState::Unknown, AttentionState::None);
+        let before = status_row(&silent, false);
+        assert_eq!(before.state, AgentState::Unverifiable);
+        assert_eq!(before.evidence_observed_at, silent.discovered_at);
+        silent.last_observed_at += 60_000;
+        assert_eq!(
+            status_row(&silent, false),
+            before,
+            "a heartbeat changes nothing on the row"
+        );
     }
 
     #[test]
