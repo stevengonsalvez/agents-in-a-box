@@ -945,16 +945,6 @@ export type CodeReviewUi = {
 	scroll: number,
 	/**  Index of the hunk the `n`/`N` cursor is on (0-based, across all files). */
 	current_hunk: number,
-	/**
-	 *  First visible sidebar tree row, recomputed during render (interior
-	 *  mutability so `render` can take `&self`).
-	 */
-	sidebar_window: number,
-	/**
-	 *  Screen rect of the sidebar list region from the last render, used to map
-	 *  a mouse click back to a tree-row index.
-	 */
-	sidebar_rect: Area,
 };
 
 /**
@@ -3342,20 +3332,6 @@ export type PickerBranchEntry = {
 	in_use: boolean,
 };
 
-/**  One plugin's `ui.state` view as the snapshot bus last delivered it. */
-export type PluginUiState = PluginUiState_Serialize;
-
-/**  One plugin's `ui.state` view as the snapshot bus last delivered it. */
-export type PluginUiState_Serialize = {
-	/**  Snapshot bus version of the publish, increasing per topic. */
-	version: number,
-	/**
-	 *  The plugin's view, in the shape the plugin documents. Plugin-authored
-	 *  text, so a frame carries it with every string scrubbed.
-	 */
-	view: unknown,
-};
-
 /**
  *  Per-plugin filter persisted in `config.toml`.
  * 
@@ -3414,7 +3390,6 @@ export type PluginsHostView = PluginsHostView_Serialize;
 export type PluginsHostView_Serialize = {
 	plugin_captures_text: { [key in string]: boolean },
 	plugin_render_errors: { [key in string]: string },
-	plugin_ui_states: { [key in string]: PluginUiState_Serialize },
 };
 
 /**
