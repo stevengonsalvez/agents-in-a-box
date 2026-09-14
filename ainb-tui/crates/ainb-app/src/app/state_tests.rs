@@ -4505,3 +4505,100 @@ mod notice_surface_tests {
         crate::config::tunables::install_snapshot(crate::config::AppConfig::default());
     }
 }
+
+#[cfg(test)]
+mod config_keys_to_save_tests {
+    use crate::app::state::{AppliedEdits, ConfigScreenState};
+    use crate::config::settings_model::ConfigValue;
+
+    fn screen_with_dirty(keys: &[&str]) -> ConfigScreenState {
+        let mut screen = ConfigScreenState::default();
+        screen.dirty = keys.iter().map(|key| (*key).to_string()).collect();
+        screen
+    }
+
+    /// Each kind of dirty row maps to the config.toml key it writes, or to
+    /// nothing when another writer owns it.
+    #[test]
+    fn keys_to_save_maps_every_row_kind_to_its_config_key() {
+        let screen = screen_with_dirty(&[
+            "workspace_defaults.branch_prefix",
+            // Optional row cleared: the key is still named, so save_keys removes it.
+            "docker.host",
+            "plugin:learnings:learnings_dir",
+            "plugin-enabled:abtop",
+            "plugin-enabled:witr",
+            "hangar_daemon.autostandup.enabled",
+            "skills.catalog_release",
+            "workspace_defaults.scan_max_depth",
+        ]);
+        let applied = AppliedEdits {
+            rejected: vec![(
+                "workspace_defaults.scan_max_depth".to_string(),
+                "out of range".to_string(),
+            )],
+            ..AppliedEdits::default()
+        };
+
+        assert_eq!(
+            screen.keys_to_save(&applied),
+            vec![
+                "docker.host".to_string(),
+                "plugins.disabled".to_string(),
+                "plugins.learnings.learnings_dir".to_string(),
+                "workspace_defaults.branch_prefix".to_string(),
+            ],
+            "daemon rows go to SQLite, external rows to their own writer, and a \
+             rejected row still holds the startup value"
+        );
+    }
+
+    /// A plugin name or field that is not a bare TOML key is quoted, so the
+    /// dotted path does not split into invented tables.
+    #[test]
+    fn keys_to_save_quotes_plugin_segments_that_are_not_bare_keys() {
+        let screen = screen_with_dirty(&["plugin:my.plugin:model id"]);
+        assert_eq!(
+            screen.keys_to_save(&AppliedEdits::default()),
+            vec!["plugins.\"my.plugin\".\"model id\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn confirming_the_shown_value_does_not_mark_the_row_dirty() {
+        let mut screen = ConfigScreenState::default();
+        let shown = screen
+            .settings
+            .values()
+            .flatten()
+            .find(|row| row.key == "workspace_defaults.branch_prefix")
+            .map(|row| row.value.clone())
+            .expect("branch_prefix row");
+
+        screen.set_row_value("workspace_defaults.branch_prefix", shown);
+
+        assert!(screen.dirty.is_empty(), "an unchanged value is not an edit");
+    }
+
+    #[test]
+    fn a_row_set_back_to_its_original_value_is_clean_again() {
+        let mut screen = ConfigScreenState::default();
+        let key = "workspace_defaults.branch_prefix";
+        let original = screen
+            .settings
+            .values()
+            .flatten()
+            .find(|row| row.key == key)
+            .map(|row| row.value.clone())
+            .expect("branch_prefix row");
+
+        screen.set_row_value(key, ConfigValue::Text("g6a/".to_string()));
+        assert!(screen.dirty.contains(key));
+        screen.set_row_value(key, ConfigValue::Text("g6b/".to_string()));
+        assert!(screen.dirty.contains(key));
+        screen.set_row_value(key, original);
+
+        assert!(!screen.dirty.contains(key), "back to the startup value");
+        assert!(screen.keys_to_save(&AppliedEdits::default()).is_empty());
+    }
+}

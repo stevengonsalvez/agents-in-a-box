@@ -27,7 +27,7 @@ use crate::fleet::attention::{Answerable, AttentionKind, SessionAttention};
 // Phase 6 (new-session redesign): ParsedRepo / RemoteBranch / legacy
 // `RepoSource` import retired with the legacy remote-clone flow.
 use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -1464,6 +1464,9 @@ pub struct ConfigScreenState {
     /// `[fleet.bridge.telegram]` section the user never created. Tracking the
     /// edits themselves cannot invent a value.
     pub dirty: BTreeSet<String>,
+    /// Each edited row's raw value before its first edit since the last save,
+    /// so setting it back clears the row from `dirty`.
+    pub values_before_edit: BTreeMap<String, String>,
     /// Whether the tree expansion changed since the screen opened.
     ///
     /// Expanding a section is a navigation keystroke; writing config.toml on
@@ -1533,6 +1536,7 @@ impl ConfigScreenState {
             visible_rows: Vec::new(),
             search: None,
             dirty: BTreeSet::new(),
+            values_before_edit: BTreeMap::new(),
             expansion_dirty: false,
             keychain_target: None,
             editing: false,
@@ -1830,11 +1834,29 @@ impl ConfigScreenState {
         self.refresh_visible_rows();
     }
 
+    /// Set a row's value, marking it dirty only when the value actually changes.
+    ///
+    /// Opening an editor and confirming the value it showed is not an edit:
+    /// marking it dirty made the save write this TUI's startup value over
+    /// whatever another writer saved since, and toast "Saved". A row edited and
+    /// then set back to the value it had before its first edit is clean again,
+    /// for the same reason.
     pub fn set_row_value(&mut self, key: &str, value: ConfigValue) {
         for rows in self.settings.values_mut() {
             if let Some(row) = rows.iter_mut().find(|row| row.key == key) {
+                let before = row.value.raw();
+                let after = value.raw();
                 row.value = value;
-                self.dirty.insert(key.to_string());
+                if before == after {
+                    return;
+                }
+                let original = self.values_before_edit.entry(key.to_string()).or_insert(before);
+                if *original == after {
+                    self.values_before_edit.remove(key);
+                    self.dirty.remove(key);
+                } else {
+                    self.dirty.insert(key.to_string());
+                }
                 return;
             }
         }
@@ -1950,10 +1972,48 @@ impl ConfigScreenState {
         Ok(applied)
     }
 
+    /// The dotted `config.toml` keys a save must write after
+    /// [`apply_to_app_config`](Self::apply_to_app_config) folded the edits in.
+    ///
+    /// Only what the user changed on this screen: every other modelled key in
+    /// the in-memory config is the startup snapshot, and writing it back would
+    /// revert whatever another process saved since. Daemon rows, external rows
+    /// (written by their own key-level writer) and rows the registry rejected
+    /// are left out; a rejected row still holds the snapshot value.
+    #[must_use]
+    pub fn keys_to_save(&self, applied: &AppliedEdits) -> Vec<String> {
+        let mut keys = Vec::new();
+        let mut toggled_a_plugin = false;
+        for key in &self.dirty {
+            if let Some((plugin, field)) = Self::parse_plugin_row_key(key) {
+                keys.push(format!(
+                    "plugins.{}.{}",
+                    registry::quote_key_segment(plugin),
+                    registry::quote_key_segment(field)
+                ));
+            } else if Self::parse_plugin_toggle_key(key).is_some() {
+                toggled_a_plugin = true;
+            } else if screen_model::read_only_reason(key).is_none()
+                && registry::hangar_daemon_key(key).is_none()
+                && !registry::is_external(key)
+                && !applied.rejected.iter().any(|(rejected, _)| rejected == key)
+            {
+                keys.push(key.clone());
+            }
+        }
+        if toggled_a_plugin {
+            keys.push("plugins.disabled".to_string());
+        }
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     /// Forget the pending edits after they have been written, so a later save
     /// does not rewrite values another process may have changed since.
     pub fn mark_saved(&mut self) {
         self.dirty.clear();
+        self.values_before_edit.clear();
     }
 
     /// Prefix that marks a [`ConfigCategory::Plugins`] row as a per-plugin

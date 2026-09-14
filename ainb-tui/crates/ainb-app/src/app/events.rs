@@ -1934,6 +1934,7 @@ impl EventHandler {
         // the section once and borrows the two fields off the inner struct.
         let config = state.config.get_mut();
         let mut applied = config.config_screen_state.apply_to_app_config(&mut config.app_config)?;
+        let keys_to_save = config.config_screen_state.keys_to_save(&applied);
         // Nothing to write: return before touching the file. `save()` renders
         // the whole AppConfig from the snapshot loaded at startup, so pressing
         // `S` with no edits would revert anything `ainb config set` or another
@@ -1959,7 +1960,9 @@ impl EventHandler {
                 queued_for_daemon,
             });
         }
-        state.config.app_config.save()?;
+        // Only the keys this screen changed: the rest of `app_config` is the
+        // startup snapshot, and saving it whole reverted another TUI's edit.
+        state.config.app_config.save_keys(&keys_to_save)?;
         // Collected, not propagated — the same rule the modelled rows already
         // follow. An external value the registry rejects (a `0` in a
         // `min: 1` row, say) used to fail the whole save with `?`, so
@@ -5188,7 +5191,12 @@ impl EventHandler {
                             // Persist auth provider to config.toml
                             state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::ApiKey;
-                            if let Err(e) = state.config.app_config.save() {
+                            // Only this key: the rest of `app_config` is the startup snapshot,
+                            // and a whole-file save reverts what another TUI wrote since (#987).
+                            if let Err(e) = state.config.app_config.save_keys(&[
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                    .to_string(),
+                            ]) {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
@@ -5232,7 +5240,12 @@ impl EventHandler {
                             // Persist auth provider to config.toml
                             state.config.app_config.authentication.claude_provider =
                                 crate::config::ClaudeAuthProvider::SystemAuth;
-                            if let Err(e) = state.config.app_config.save() {
+                            // Only this key: the rest of `app_config` is the startup snapshot,
+                            // and a whole-file save reverts what another TUI wrote since (#987).
+                            if let Err(e) = state.config.app_config.save_keys(&[
+                                crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                    .to_string(),
+                            ]) {
                                 tracing::warn!("Failed to save config: {}", e);
                             }
 
@@ -5272,7 +5285,14 @@ impl EventHandler {
                         // Persist switch to system auth in config.toml
                         state.config.app_config.authentication.claude_provider =
                             crate::config::ClaudeAuthProvider::SystemAuth;
-                        if let Err(e) = state.config.app_config.save() {
+                        // Only this key: the rest of `app_config` is the startup snapshot,
+                        // and a whole-file save reverts what another TUI wrote since (#987).
+                        if let Err(e) = state
+                            .config
+                            .app_config
+                            .save_keys(&[crate::app::state::ConfigScreenState::CLAUDE_PROVIDER_KEY
+                                .to_string()])
+                        {
                             tracing::warn!("Failed to save config: {}", e);
                         }
                     }
