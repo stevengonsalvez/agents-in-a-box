@@ -370,6 +370,30 @@ impl RuntimeHandle {
         handle.mouse_inbox.send(params).is_ok()
     }
 
+    /// Ask `plugin_id` to run its action `action_id` with `payload`.
+    /// Non-blocking: the plugin's task writes the `plugin/handle_action`
+    /// notification, spawning the plugin first if it is idle. What the action
+    /// changed arrives through the plugin's next render and `ui.state`.
+    ///
+    /// Returns `false` if the plugin is unknown or its task is gone.
+    pub fn send_action(
+        &self,
+        plugin_id: &PluginId,
+        action_id: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> bool {
+        let Some(handle) = self.lookup(plugin_id) else {
+            return false;
+        };
+        let params = ainb_plugin_protocol::params::HandleActionParams {
+            action_id: action_id.into(),
+            payload,
+        };
+        // Mark dirty BEFORE enqueue (same race-avoidance as `send_key`).
+        handle.render_dirty.store(true, Ordering::Release);
+        handle.inbox.send(Command::HandleAction(params)).is_ok()
+    }
+
     /// Publish a snapshot from the host side. Non-blocking. Subscriber
     /// fan-out happens on the tokio runtime. Stamped with the reserved
     /// [`crate::snapshot::HOST_PUBLISHER`] id — both discovery and
