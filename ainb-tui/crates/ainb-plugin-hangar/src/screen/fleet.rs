@@ -4329,6 +4329,7 @@ mod tests {
                 rows: Vec::new(),
                 read_revision: 0,
                 unknown_events: Vec::new(),
+                read_at_ms: 0,
             },
             0,
         ));
@@ -4412,6 +4413,7 @@ mod tests {
                 .collect(),
             read_revision: revision,
             unknown_events: Vec::new(),
+            read_at_ms: 0,
         }
     }
 
