@@ -26,9 +26,11 @@ fn isolated_home() {
     });
 }
 
-/// The renderer: a store plus the receiving end of the channel.
+/// The renderer: a store plus the receiving end of the channel, and the host
+/// the transport says is at the other end of it.
 struct Renderer {
     store: MirrorStore,
+    peer: HostId,
     rx: mpsc::Receiver<FrameBatch>,
 }
 
@@ -36,7 +38,7 @@ impl Renderer {
     /// Drain whatever the channel holds right now, as one transaction.
     fn drain(&mut self) -> ainb_app::wire::store::Commit {
         let pending: Vec<FrameBatch> = self.rx.try_iter().collect();
-        self.store.apply_drain(pending)
+        self.store.apply_drain(&self.peer, pending)
     }
 }
 
@@ -47,6 +49,7 @@ fn connect(subscription: Subscription) -> (Mirror, mpsc::Sender<FrameBatch>, Ren
         tx,
         Renderer {
             store: MirrorStore::new(subscription),
+            peer: HostId::local(),
             rx,
         },
     )
@@ -312,32 +315,27 @@ fn roster_read(
     }
 }
 
-/// Two machines mirror the same session key into one renderer: both are held,
-/// each with its own host id and version, and the folded count is two.
+/// Two machines mirror the same session key into one renderer over their own
+/// channels: both are held, each with its own host id and version, and the
+/// folded count is two.
 #[test]
 fn two_hosts_fold_into_one_renderer_without_collision() {
     isolated_home();
     let subscription = Subscription::only(&[SectionId::AgentStatus]);
-    let (tx, rx) = mpsc::channel();
-    let mut renderer = Renderer {
-        store: MirrorStore::new(subscription),
-        rx,
-    };
-    for host in ["h1", "h2"] {
-        let mut state = AppState::new();
-        state.apply_agent_status_read(roster_read(host, 10_000, 9_000), 10_000);
-        let mut mirror = Mirror::new(HostId::new(host), subscription);
-        tx.send(mirror.batch(&state)).unwrap();
-    }
-    let commit = renderer.drain();
+    let mut store = MirrorStore::new(subscription);
     let (h1, h2) = (HostId::new("h1"), HostId::new("h2"));
-    assert_eq!(
-        commit.changed,
-        vec![
-            (h1.clone(), SectionId::AgentStatus),
-            (h2.clone(), SectionId::AgentStatus)
-        ]
-    );
+    for host in [&h1, &h2] {
+        let mut state = AppState::new();
+        state.apply_agent_status_read(roster_read(host.as_str(), 10_000, 9_000), 10_000);
+        let batch = Mirror::new(host.clone(), subscription).batch(&state);
+        let commit = store.apply_drain(host, [batch]);
+        assert_eq!(commit.changed, vec![(host.clone(), SectionId::AgentStatus)]);
+    }
+    let renderer = Renderer {
+        store,
+        peer: h1.clone(),
+        rx: mpsc::channel().1,
+    };
     for host in [&h1, &h2] {
         let card =
             &renderer.store.section(host, SectionId::AgentStatus).unwrap().body["view"]["cards"][0];
