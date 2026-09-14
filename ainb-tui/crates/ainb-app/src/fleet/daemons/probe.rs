@@ -249,6 +249,7 @@ pub struct DaemonStatus {
     pub last_inbound_error: Option<String>,
     /// A short human explanation of the state — the load-bearing field for
     /// telling "clean stop" from "crashed (stale heartbeat)".
+    #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
     pub reason: String,
     /// The instance whose OS scheduler is installed while the instance itself
     /// is NOT provisioned (ATC only). A timer firing into nothing produces an
