@@ -296,7 +296,12 @@ fn an_error_notice_carries_its_remedy_is_dismissable_and_outlives_itself_in_the_
 
     // The headline is what the old box could hold. These are the rows it could
     // not, and they are the whole point of the longer lifetime.
-    for token in ["Failed to attach to", ERROR_REMEDY, "refuses to nest"] {
+    //
+    // "refuses" and "to nest" are checked apart: the selected row is the TUI's
+    // own session, so the preview pane beside the notice shows the own-session
+    // placeholder, and `flat()` joins each screen row left to right. Where the
+    // notice wraps between the two words, placeholder text lands between them.
+    for token in ["Failed to attach to", ERROR_REMEDY, "refuses", "to nest"] {
         if !shown.contains(token) {
             tmux.bail(&format!("the notice is missing {token:?}"));
         }
