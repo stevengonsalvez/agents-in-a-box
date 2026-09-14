@@ -1398,9 +1398,42 @@ pub fn defaults() -> Vec<Binding> {
             "in_place_opened",
             AppEvent::InPlaceOpened {
                 tmux_session: String::new(),
-                embed: crate::app::reports::LocalEmbed::placeholder(),
             },
-            "Adopt the tmux client the host opened for the in-place pane",
+            "Focus the tmux client the host opened for the in-place pane",
+        ),
+        unbound(
+            Context::Global,
+            "observer_opened",
+            AppEvent::ObserverOpened {
+                tmux_session: String::new(),
+            },
+            "Show the read-only tmux client the host opened for the preview",
+        ),
+        unbound(
+            Context::Global,
+            "observer_failed",
+            AppEvent::ObserverFailed {
+                tmux_session: String::new(),
+                error: String::new(),
+                unsupported: false,
+            },
+            "Back off, or give up, after a preview client would not open",
+        ),
+        unbound(
+            Context::Global,
+            "terminal_exited",
+            AppEvent::TerminalExited {
+                tmux_session: String::new(),
+            },
+            "Release a live pane whose tmux client ended",
+        ),
+        unbound(
+            Context::Global,
+            "terminal_input_closed",
+            AppEvent::TerminalInputClosed {
+                tmux_session: String::new(),
+            },
+            "Release a live pane that can no longer take input",
         ),
         unbound(
             Context::Global,
