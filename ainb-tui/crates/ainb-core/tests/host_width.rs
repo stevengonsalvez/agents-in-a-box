@@ -1,4 +1,4 @@
-//! One AppState, two terminal hosts at different widths: resizing the Skill
+//! One `AppState`, two terminal hosts at different widths: resizing the Skill
 //! Manager's Sources panel on one surface never moves the panel the other
 //! draws.
 
