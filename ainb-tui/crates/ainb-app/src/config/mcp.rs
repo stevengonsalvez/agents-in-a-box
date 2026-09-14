@@ -70,13 +70,17 @@ pub enum McpServerDefinition {
     /// Simple command-based server
     Command {
         command: String,
+        #[serde(serialize_with = "crate::wire::fields::scrub_vec_in_frame")]
         args: Vec<String>,
-        #[serde(default)]
+        #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
         env: HashMap<String, String>,
     },
 
     /// JSON-based configuration (for complex servers)
-    Json { config: serde_json::Value },
+    Json {
+        #[serde(skip_serializing_if = "crate::wire::fields::omit_in_frame")]
+        config: serde_json::Value,
+    },
 }
 
 fn default_true() -> bool {
