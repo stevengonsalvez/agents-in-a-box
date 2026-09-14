@@ -320,7 +320,7 @@
     {"context":"session_list","chord":"p","action":"App(QuickCommitStart)"},
     {"context":"session_list","chord":"o","action":"App(OpenInEditor)"},
     {"context":"session_list","chord":"E","action":"App(ToggleExpandAll)"},
-    {"context":"session_list","chord":"B","action":"App(ToggleSessionsSidebar)"},
+    {"context":"session_list","chord":"B","action":"Ui(ToggleSessionsSidebar)"},
     {"context":"session_list","chord":"M","action":"App(ToggleSessionMenuBar)"},
     {"context":"session_list","chord":"i","action":"App(GoToStats)"},
     {"context":"session_list","chord":"w","action":"App(GoToWitr)"},
