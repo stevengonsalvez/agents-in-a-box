@@ -451,6 +451,13 @@ async fn serve_conn(
         }
     }
 
+    // The kernel's pid for the peer, which is what a plugin's host claim is
+    // checked against before its connection may fold (#1040).
+    let peer_pid = stream
+        .peer_cred()
+        .ok()
+        .and_then(|cred| cred.pid())
+        .and_then(|pid| u32::try_from(pid).ok());
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
@@ -525,8 +532,14 @@ async fn serve_conn(
     // the registry accepts it as one it is never listed, so neither its open
     // nor its close is a registry change. The registry, not the client,
     // decides: a transient request with no presence at its pid is listed.
-    let (connection, listed) =
-        registry.insert(authenticated.surface, authenticated.transient).await;
+    let (connection, listed) = registry
+        .insert(
+            authenticated.surface,
+            authenticated.transient,
+            authenticated.host,
+            peer_pid,
+        )
+        .await;
     if listed {
         emit_connections_changed(&events, &registry).await;
     }
