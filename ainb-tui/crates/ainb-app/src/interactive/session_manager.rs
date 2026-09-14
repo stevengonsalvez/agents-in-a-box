@@ -1250,12 +1250,8 @@ impl SessionStore {
         // truncate the store and lose every tracked session. With the proxy
         // watchdog, session-create and the `H` downgrade all writing here,
         // an in-place truncating write would widen the corruption window.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, content)?;
-        if let Err(e) = std::fs::rename(&tmp, &path) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
+        // `write_atomic` also keeps the file's mode and follows a symlink.
+        crate::config::write_atomic(&path, &content)?;
         debug!("Saved {} sessions to {:?}", self.sessions.len(), path);
         Ok(())
     }
