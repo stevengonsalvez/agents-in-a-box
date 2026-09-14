@@ -129,18 +129,18 @@ pub enum AppEvent {
     /// `Enter` on the `pal` tab while it is offering to start the hangar
     /// daemon it needs.
     SessionStartHangarDaemon,
-    /// Toggle the sessions sidebar between full width and the thin rail —
-    /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
     // Pointer commands: a press a renderer has hit-tested, naming what was
-    // under the pointer by its place in state. See `crate::app::pointer`.
-    /// Select session-list row `row`; `open` attaches it, as a double-click does.
+    // under the pointer by identity, never by position. See
+    // `crate::app::pointer`.
+    /// Select the session-list row `target` names; `open` attaches it, as a
+    /// double-click does. Nothing happens when that row is gone.
     SessionListSelectRow {
-        row: usize,
+        target: crate::app::state::SessionListRowId,
         open: bool,
     },
-    /// Open the context menu of session-list row `row`, when it is a session.
+    /// Open the context menu of the row `target` names, when it is a session.
     SessionListOpenRowMenu {
-        row: usize,
+        target: crate::app::state::SessionListRowId,
     },
     /// Focus a pane of the session list.
     SessionListFocusPane(crate::app::state::FocusedPane),
@@ -153,9 +153,9 @@ pub enum AppEvent {
     SkillManagerFocusPane(crate::components::skill_manager_screen::FocusedSkillPane),
     /// Start dragging the home sidebar's resize edge.
     HomeSidebarBeginResize,
-    /// Click home sidebar item `index`; a second click on it opens it.
+    /// Click home sidebar `item`; a second click on it opens it.
     HomeSidebarClickItem {
-        index: usize,
+        item: crate::components::sidebar::SidebarItem,
     },
     // New session creation events. Phase 6 (new-session redesign) retired
     // the legacy 13-step variants; only `NewSessionCancel` survives as the
@@ -344,15 +344,15 @@ pub enum AppEvent {
     /// `Esc` — clear the active source filter (if any). Falls through to
     /// [`Self::SkillManagerBack`] when no filter is set.
     SkillManagerClearSourceFilter,
-    /// A Source row was clicked: focus the Sources panel, move its
-    /// cursor to row `index`, and apply that source as the filter.
+    /// A Source row was clicked: move the Sources cursor to the source
+    /// with `uri` and apply it as the filter. Nothing happens when it is gone.
     SkillManagerSourceClick {
-        index: usize,
+        uri: String,
     },
     /// A Unit row was clicked: focus the Units panel and move the unit
-    /// cursor to the visible-row `position`.
+    /// cursor to the visible unit declared as `uri`, if it is still listed.
     SkillManagerUnitClick {
-        position: usize,
+        uri: String,
     },
     /// A renderer resized the Sources panel: persist `width` as the
     /// preference every renderer starts from.
@@ -2407,20 +2407,20 @@ impl EventHandler {
                 let dismissed = state.dismiss_notifications();
                 tracing::debug!("Event: DismissNotifications - cleared={dismissed}");
             }
-            AppEvent::SessionListSelectRow { row, open } => {
-                if let Some(target) = state.session_list_row_target(row) {
+            AppEvent::SessionListSelectRow { target, open } => {
+                if let Some(target) = state.session_list_row_target_for(&target) {
                     state.select_session_list_row(target);
                     if open {
                         Self::process_event(AppEvent::AttachTmuxSession, state);
                     }
                 }
             }
-            AppEvent::SessionListOpenRowMenu { row } => {
+            AppEvent::SessionListOpenRowMenu { target } => {
                 use crate::app::state::{AttachableRef, SessionListRowTarget};
                 if let Some(SessionListRowTarget::Attachable(
                     target @ (AttachableRef::WorkspaceSession { .. }
                     | AttachableRef::SshSession { .. }),
-                )) = state.session_list_row_target(row)
+                )) = state.session_list_row_target_for(&target)
                 {
                     state.open_session_context_menu(target);
                 }
@@ -3455,13 +3455,18 @@ impl EventHandler {
             AppEvent::HomeSidebarBeginResize => {
                 state.shell.home_screen_v2_state.start_sidebar_resize();
             }
-            AppEvent::HomeSidebarClickItem { index } => {
-                let outcome = state
-                    .shell
-                    .home_screen_v2_state
-                    .click_sidebar_item(index, std::time::Instant::now());
-                if outcome.double_click {
-                    Self::process_event(AppEvent::HomeScreenSidebarSelect, state);
+            AppEvent::HomeSidebarClickItem { item } => {
+                let index = crate::components::sidebar::SidebarItem::all()
+                    .iter()
+                    .position(|candidate| *candidate == item);
+                if let Some(index) = index {
+                    let outcome = state
+                        .shell
+                        .home_screen_v2_state
+                        .click_sidebar_item(index, std::time::Instant::now());
+                    if outcome.double_click {
+                        Self::process_event(AppEvent::HomeScreenSidebarSelect, state);
+                    }
                 }
             }
             AppEvent::HomeScreenSidebarUp => {
@@ -4417,7 +4422,16 @@ impl EventHandler {
                     &ainb_home,
                 );
             }
-            AppEvent::SkillManagerSourceClick { index } => {
+            AppEvent::SkillManagerSourceClick { uri } => {
+                let Some(index) = state
+                    .skills
+                    .skill_manager_state
+                    .sources
+                    .iter()
+                    .position(|source| source.uri == uri)
+                else {
+                    return;
+                };
                 state.skills.skill_manager_state.source_selected = index;
                 state.skills.skill_manager_state.apply_selected_source_filter();
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -4426,11 +4440,14 @@ impl EventHandler {
                     &ainb_home,
                 );
             }
-            AppEvent::SkillManagerUnitClick { position } => {
+            AppEvent::SkillManagerUnitClick { uri } => {
                 use crate::components::skill_manager_screen::FocusedSkillPane;
                 state.skills.skill_manager_state.focused_pane = FocusedSkillPane::Units;
-                let visible = state.skills.skill_manager_state.visible_indices();
-                if let Some(&abs) = visible.get(position) {
+                let listed =
+                    state.skills.skill_manager_state.visible_indices().into_iter().find(|&index| {
+                        state.skills.skill_manager_state.units[index].declared_uri == uri
+                    });
+                if let Some(abs) = listed {
                     state.skills.skill_manager_state.selected = abs;
                     let ainb_home = ainb_skill_core::default_ainb_home();
                     crate::components::skill_manager_screen::recompute_detail(
