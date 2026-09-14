@@ -15,6 +15,8 @@
 // The four leak checks and the key-path fixture all read the frame through
 // [`serialize_section`], so they judge exactly what a host receives.
 
+#[cfg(feature = "typescript-bindings")]
+pub mod bindings;
 pub mod fields;
 pub mod frame;
 pub mod shape;
@@ -217,6 +219,7 @@ fn opt_len<S: Serializer>(value: &&Option<String>, serializer: S) -> Result<S::O
 macro_rules! view {
     ($view:ident<$lt:lifetime> for $section:ty { $( $(#[$attr:meta])* $field:ident : $ty:ty ),* $(,)? }) => {
         #[derive(Serialize)]
+        #[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
         // Field names mirror the section's, prefixes and all, so the frame
         // keys match the Rust fields a later derive would emit.
         #[allow(clippy::struct_field_names)]
@@ -273,6 +276,7 @@ view!(SshView<'a> for SshSection {
 view!(GitViewView<'a> for GitViewSection {
     git_view_state: Option<crate::components::GitViewState>,
     #[serde(rename = "quick_commit_message_len", serialize_with = "opt_len")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<u32>))]
     quick_commit_message: Option<String>,
     quick_commit_cursor: usize,
     is_current_dir_git_repo: bool,
@@ -281,6 +285,7 @@ view!(GitViewView<'a> for GitViewSection {
 view!(WorkspaceLoadView<'a> for WorkspaceLoadSection {
     is_loading_workspaces: bool,
     #[serde(serialize_with = "scrubbed_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     workspace_load_error: Option<String>,
 });
 
@@ -308,8 +313,10 @@ view!(FleetView<'a> for FleetSection {
     ask_state: crate::fleet::answer::AskState,
     broadcast: crate::fleet::broadcast::Broadcast,
     #[serde(serialize_with = "locked")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = crate::fleet::attention::DaemonAttention))]
     daemon_attention: Mutex<crate::fleet::attention::DaemonAttention>,
     #[serde(serialize_with = "fleet_rows")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Vec<ainb_hangar_proto::fleet::FleetSession>))]
     fleet_snapshot: Mutex<Vec<ainb_hangar_proto::fleet::FleetSession>>,
     fleet_metadata: std::collections::HashMap<uuid::Uuid, crate::app::state::SessionFleetMetadata>,
     daemon_attention_seen: u64,
@@ -330,11 +337,13 @@ view!(McpPoolView<'a> for McpPoolSection {
 });
 
 #[derive(Serialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 struct InboxView {}
 
 view!(PluginsHostView<'a> for PluginsHostSection {
     plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
     #[serde(serialize_with = "scrubbed_values")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = std::collections::HashMap<crate::app::screens::ScreenId, String>))]
     plugin_render_errors: std::collections::HashMap<crate::app::screens::ScreenId, String>,
     plugin_ui_states: std::collections::HashMap<String, PluginUiState>,
 });
@@ -446,4 +455,58 @@ mod tests {
         assert!(frame.contains("draft_len"), "{frame}");
         assert!(!frame.contains("typed answer"), "{frame}");
     }
+}
+
+/// The body type of every section's frame, keyed by its wire name. Exists only
+/// for the TypeScript export: a renderer narrows `frame.body` with
+/// `SectionBodies[frame.section]`.
+#[cfg(feature = "typescript-bindings")]
+#[derive(specta::Type)]
+#[allow(dead_code)]
+struct SectionBodies<'a> {
+    sessions: SessionsView<'a>,
+    session_labels: SessionLabelsView<'a>,
+    tmux: TmuxView<'a>,
+    ssh: SshView<'a>,
+    git_view: GitViewView<'a>,
+    workspace_load: WorkspaceLoadView<'a>,
+    new_session: NewSessionView<'a>,
+    logs: LogsView<'a>,
+    claude_chat: ClaudeChatView<'a>,
+    fleet: FleetView<'a>,
+    hangar: HangarView<'a>,
+    mcp_pool: McpPoolView<'a>,
+    inbox: InboxView,
+    plugins_host: PluginsHostView<'a>,
+    config: ConfigView<'a>,
+    skills: SkillsView<'a>,
+    recovery: RecoveryView<'a>,
+    onboarding: OnboardingView<'a>,
+    shell: ShellView<'a>,
+}
+
+/// Register every section view with the TypeScript export, named for its section.
+#[cfg(feature = "typescript-bindings")]
+pub(crate) fn register_section_views(types: specta::Types) -> specta::Types {
+    types
+        .register::<SectionBodies<'static>>()
+        .register::<SessionsView<'static>>()
+        .register::<SessionLabelsView<'static>>()
+        .register::<TmuxView<'static>>()
+        .register::<SshView<'static>>()
+        .register::<GitViewView<'static>>()
+        .register::<WorkspaceLoadView<'static>>()
+        .register::<NewSessionView<'static>>()
+        .register::<LogsView<'static>>()
+        .register::<ClaudeChatView<'static>>()
+        .register::<FleetView<'static>>()
+        .register::<HangarView<'static>>()
+        .register::<McpPoolView<'static>>()
+        .register::<InboxView>()
+        .register::<PluginsHostView<'static>>()
+        .register::<ConfigView<'static>>()
+        .register::<SkillsView<'static>>()
+        .register::<RecoveryView<'static>>()
+        .register::<OnboardingView<'static>>()
+        .register::<ShellView<'static>>()
 }
