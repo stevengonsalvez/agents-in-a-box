@@ -903,6 +903,7 @@ fn fill_secondary_screens(state: &mut AppState, seed: &mut dyn Seed) {
                 ok: false,
                 summary: seed.text("hangar.outcome.summary", Captured),
                 detail: seed.text("hangar.outcome.detail", Captured),
+                local_only: false,
             },
         );
         if let Some(shared) = hangar.daemons_state.shared.as_ref() {
