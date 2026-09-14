@@ -315,6 +315,89 @@ pub fn stop() -> bool {
     true
 }
 
+// ── Proxy users ──────────────────────────────────────────────────────────────
+
+/// One empty file per live surface (a TUI today, the desktop host next) that
+/// may route sessions through the shared proxy, named by its pid.
+///
+/// A liveness check rather than a reference count: a TUI that crashes never
+/// decrements a counter, but its pid stops answering `kill(pid, 0)`, so the
+/// stale file is pruned the next time anyone counts.
+fn users_dir() -> PathBuf {
+    headroom_dir().join("users")
+}
+
+/// Record this process as a user of the shared proxy. Call once at startup.
+pub fn register_user() -> Result<()> {
+    let dir = users_dir();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create headroom users dir {}", dir.display()))?;
+    let lease = dir.join(std::process::id().to_string());
+    std::fs::write(&lease, b"")
+        .with_context(|| format!("write headroom user lease {}", lease.display()))
+}
+
+/// Pids with a lease whose process is still alive, excluding `except`.
+/// Removes the lease of every pid that is gone.
+fn live_users(except: Option<u32>) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir(users_dir()) else {
+        return Vec::new();
+    };
+    let mut live = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if Some(pid) == except {
+            continue;
+        }
+        if process_is_alive(pid) {
+            live.push(pid);
+        } else {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    live.sort_unstable();
+    live
+}
+
+/// `kill(pid, 0)`: `EPERM` still means the process exists.
+fn process_is_alive(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    let Ok(raw) = i32::try_from(pid) else {
+        return false;
+    };
+    matches!(kill(Pid::from_raw(raw), None), Ok(()) | Err(nix::errno::Errno::EPERM))
+}
+
+/// Drop this process's lease, then stop the ainb-managed proxy only if no
+/// other live user remains. Returns `true` when the proxy was stopped.
+///
+/// Held under `proxy.pid.lock`, the lock the spawn path takes, so another
+/// TUI's watchdog cannot respawn the proxy between this count and the stop.
+pub fn release_user_and_stop_if_unused() -> bool {
+    let me = std::process::id();
+    let _ = std::fs::remove_file(users_dir().join(me.to_string()));
+    if read_pid().is_none() {
+        return false;
+    }
+    let pid_path = pid_file();
+    let _process_lock = crate::config::lock::lock_for(&pid_path)
+        .map_err(|e| warn!("lock headroom pid file {}: {e}", pid_path.display()))
+        .ok();
+    let others = live_users(Some(me));
+    if !others.is_empty() {
+        info!(
+            "leaving shared headroom proxy running: {} other live user(s) {others:?}",
+            others.len()
+        );
+        return false;
+    }
+    stop()
+}
+
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
 fn read_pid() -> Option<u32> {
