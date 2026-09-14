@@ -486,7 +486,7 @@ mod tests {
     fn hidden_leaves_never_become_rows() {
         let rows = build_rows(&seed());
         let keys: Vec<&str> = rows.values().flatten().map(|row| row.key.as_str()).collect();
-        for hidden in ["version", "ui_preferences.home_sidebar_width"] {
+        for hidden in ["version", "ui_preferences.home_sidebar_fraction"] {
             assert!(
                 !keys.contains(&hidden),
                 "hidden leaf '{hidden}' was rendered"
