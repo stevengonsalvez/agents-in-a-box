@@ -228,8 +228,10 @@ pub const DENY_LABEL: &str = "deny";
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct AttentionOption {
     /// The label the operator picks and the text delivered as the answer.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub label: String,
     /// The option's own explanation, or empty.
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub description: String,
 }
 
