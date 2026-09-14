@@ -12165,10 +12165,10 @@ impl AppState {
         // spawn one `capture-pane` per non-selected session on every 5s preview
         // refresh. (perf: bead 9pb)
         const STATUS_INTERVAL_SECS: u64 = 20;
-        let do_status_check = match self.host.last_status_check {
-            Some(last) => now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS,
-            None => true,
-        };
+        let do_status_check = self
+            .host
+            .last_status_check
+            .is_none_or(|last| now.duration_since(last).as_secs() >= STATUS_INTERVAL_SECS);
         if do_status_check {
             self.host.last_status_check = Some(now);
         }
