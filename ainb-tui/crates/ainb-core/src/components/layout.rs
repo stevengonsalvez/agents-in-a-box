@@ -244,9 +244,22 @@ fn session_menu_bar_height(show_menu_bar: bool) -> u16 {
     if show_menu_bar { 6 } else { 1 }
 }
 
+/// Size the host's live tmux client to the pane interior the frame that just
+/// went out measured, once per change.
+pub fn resize_terminal_client(
+    ui: &mut UiState,
+    clients: &mut crate::terminal_clients::TerminalClients,
+) {
+    if let Some(size) = ui.embed_desired_size.take() {
+        if ui.last_embed_size != Some(size) && clients.resize(size.0, size.1) {
+            ui.last_embed_size = Some(size);
+        }
+    }
+}
+
 /// Apply the effects of a frame that only the frame could measure.
 ///
-/// The embed's size, the HomeScreen sidebar rect, the welcome panel's viewport
+/// The HomeScreen sidebar rect, the welcome panel's viewport
 /// and the log-history entry pane all come out of the layout arithmetic, so
 /// they cannot be known before the draw. Applying them is a mutation and the
 /// draw takes `&AppState`, so the draw records what it measured in [`UiState`]
@@ -258,16 +271,6 @@ pub fn publish_after_draw(state: &mut AppState, ui: &mut UiState) {
     // an unconditional `&mut` would bump the tmux, shell and logs sections once
     // a frame, and a section that changes every frame tells a subscriber
     // nothing at all.
-    if let Some(size) = ui.embed_desired_size.take() {
-        if ui.last_embed_size != Some(size) {
-            let (rows, cols) = size;
-            if let Some(embed) = state.tmux.get_mut().embed.as_mut() {
-                let _ = embed.resize(rows, cols);
-                ui.last_embed_size = Some(size);
-            }
-        }
-    }
-
     state.shell.set_if_changed(
         |shell| &mut shell.home_screen_v2_state.welcome.content_height,
         ui.welcome_viewport.0,
