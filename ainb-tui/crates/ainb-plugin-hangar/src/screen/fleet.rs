@@ -172,7 +172,7 @@ impl FleetSessionRow {
     /// Count actionable structured questions without guessing from generic input.
     fn structured_question_count(&self) -> Option<usize> {
         self.waits_on(WaitKind::Ask)
-            .then(|| self.current_request.as_ref())
+            .then_some(self.current_request.as_ref())
             .flatten()
             .map(answer_questions)
             .filter(|questions| !questions.is_empty())
@@ -4280,9 +4280,9 @@ mod tests {
         let wait_kind = match attention.to_ascii_uppercase().as_str() {
             "ASK" => Some(WaitKind::Ask),
             "APPROVAL" => Some(WaitKind::Approval),
-            "WAITING" => Some(WaitKind::Waiting),
             "ERROR" => Some(WaitKind::Error),
             "NONE" => None,
+            // "WAITING" and any other non-NONE fixture token wait on input.
             _ => Some(WaitKind::Waiting),
         };
         let state = if wait_kind.is_some() {
