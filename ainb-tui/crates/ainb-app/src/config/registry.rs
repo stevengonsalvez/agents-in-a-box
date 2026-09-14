@@ -592,7 +592,7 @@ pub static CONFIG_REGISTRY: &[Entry] = &[
         why: "written by the divider drag on the Home screen; a layout artefact, not a preference to type",
     },
     Entry::Hidden {
-        key: "ui_preferences.sessions_sidebar_width",
+        key: "ui_preferences.sessions_sidebar_fraction",
         why: "written by the divider drag on the Sessions screen",
     },
     Entry::Hidden {
@@ -1903,7 +1903,8 @@ mod tests {
                 preferred_editor: Some("nvim".to_string()),
                 home_sidebar_fraction: Some(0.25),
                 home_sidebar_width: None,
-                sessions_sidebar_width: Some(28),
+                sessions_sidebar_fraction: Some(0.3),
+                sessions_sidebar_width: None,
                 sessions_sidebar_collapsed: Some(true),
                 skill_manager_sources_fraction: Some(0.3),
                 skill_manager_sources_width: None,

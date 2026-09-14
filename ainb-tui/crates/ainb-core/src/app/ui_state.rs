@@ -20,14 +20,17 @@ use crate::app::keymap::{HostAction, ScrollAction};
 use crate::app::screens::ScreenId;
 use crate::app::state::{
     AppState, AttachableRef, COLLAPSED_SESSIONS_SIDEBAR_WIDTH, DEFAULT_SESSIONS_SIDEBAR_WIDTH,
-    MIN_SESSIONS_SIDEBAR_WIDTH, SESSIONS_PREVIEW_RESERVE, SESSIONS_ROW_DOUBLE_CLICK_WINDOW,
-    SessionListRowTarget,
+    MIN_SESSIONS_SIDEBAR_WIDTH, SESSIONS_ROW_DOUBLE_CLICK_WINDOW, SessionListRowTarget,
 };
 use crate::components::layout::LayoutComponent;
 
 #[derive(Debug, Clone)]
 pub struct SessionsPaneState {
-    pub preferred_width: u16,
+    /// The sidebar width in columns set on this surface, by a drag or a
+    /// legacy column count. `None` until then, so the saved fraction applies.
+    width: Option<u16>,
+    /// The saved preference: the sidebar's share of its row.
+    saved_fraction: Option<f64>,
     pub collapsed: bool,
     resize_active: bool,
     edge_hovered: bool,
@@ -46,7 +49,8 @@ pub struct SessionsPaneState {
 impl Default for SessionsPaneState {
     fn default() -> Self {
         Self {
-            preferred_width: DEFAULT_SESSIONS_SIDEBAR_WIDTH,
+            width: None,
+            saved_fraction: None,
             collapsed: false,
             resize_active: false,
             edge_hovered: false,
@@ -61,11 +65,26 @@ impl Default for SessionsPaneState {
 }
 
 impl SessionsPaneState {
-    pub fn restore(&mut self, width: Option<u16>, collapsed: bool) {
-        if let Some(width) = width {
-            self.preferred_width = width.max(MIN_SESSIONS_SIDEBAR_WIDTH);
+    /// Restore the saved layout: a `fraction` of the row, else a `legacy`
+    /// column count an older ainb saved (converted on launch), and the
+    /// collapsed flag.
+    pub fn restore(&mut self, fraction: Option<f64>, legacy: Option<u16>, collapsed: bool) {
+        self.saved_fraction = fraction;
+        if fraction.is_none() {
+            self.width = legacy.map(|width| width.max(MIN_SESSIONS_SIDEBAR_WIDTH));
         }
         self.collapsed = collapsed;
+    }
+
+    /// The expanded width in columns before clamping, on a `row`-wide
+    /// screen: this surface's, else the saved fraction, else the default.
+    #[must_use]
+    pub fn preferred_width(&self, row: u16) -> u16 {
+        self.width
+            .or_else(|| {
+                self.saved_fraction.map(|fraction| (fraction * f64::from(row)).round() as u16)
+            })
+            .unwrap_or(DEFAULT_SESSIONS_SIDEBAR_WIDTH)
     }
 
     pub fn set_layout(&mut self, sessions_rect: Rect, preview_rect: Rect) {
@@ -103,24 +122,34 @@ impl SessionsPaneState {
             return COLLAPSED_SESSIONS_SIDEBAR_WIDTH.min(terminal_width);
         }
 
-        Self::clamp_width(self.preferred_width, terminal_width)
-    }
-
-    pub fn clamp_width(width: u16, terminal_width: u16) -> u16 {
-        if terminal_width <= COLLAPSED_SESSIONS_SIDEBAR_WIDTH {
-            return terminal_width;
-        }
-
-        let max_width = terminal_width.saturating_sub(SESSIONS_PREVIEW_RESERVE);
-        if max_width < MIN_SESSIONS_SIDEBAR_WIDTH {
-            return terminal_width.saturating_sub(1).max(1);
-        }
-
-        width.clamp(MIN_SESSIONS_SIDEBAR_WIDTH, max_width)
+        self.expanded_width(terminal_width)
     }
 
     pub fn expanded_width(&self, terminal_width: u16) -> u16 {
-        Self::clamp_width(self.preferred_width, terminal_width)
+        crate::app::state::clamp_sessions_sidebar_width(
+            self.preferred_width(terminal_width),
+            terminal_width,
+        )
+    }
+
+    /// The intent that saves this layout: the width the user asked for as a
+    /// fraction of a `row`-wide screen, unclamped, so a narrow surface cannot
+    /// shrink the preference every surface draws from. The clamp is applied
+    /// only when drawing. `None` for a row with no width yet.
+    #[must_use]
+    pub fn save_layout(&self, row: u16) -> Option<crate::app::Intent> {
+        if row == 0 {
+            return None;
+        }
+        let fraction = match (self.width, self.saved_fraction) {
+            (Some(width), _) => f64::from(width) / f64::from(row),
+            (None, Some(fraction)) => fraction,
+            (None, None) => f64::from(DEFAULT_SESSIONS_SIDEBAR_WIDTH) / f64::from(row),
+        };
+        Some(crate::app::pointer::save_sessions_pane_layout(
+            fraction,
+            self.collapsed,
+        ))
     }
 
     pub fn edge_highlighted(&self) -> bool {
@@ -247,7 +276,7 @@ impl SessionsPaneState {
             return;
         };
         let requested = x.saturating_sub(rect.x).saturating_add(1);
-        self.preferred_width = Self::clamp_width(requested, terminal_width);
+        self.width = Some(requested.min(terminal_width));
     }
 
     pub fn finish_resize(&mut self) -> bool {
@@ -378,6 +407,7 @@ impl UiState {
     /// Restore the persisted sidebar preferences into the renderer's copy.
     pub fn restore(&mut self, config: &crate::config::AppConfig) {
         self.sessions_pane.restore(
+            config.ui_preferences.sessions_sidebar_fraction,
             config.ui_preferences.sessions_sidebar_width,
             config.ui_preferences.sessions_sidebar_collapsed.unwrap_or(false),
         );
@@ -412,10 +442,8 @@ impl UiState {
             HostAction::ToggleSessionsSidebar => {
                 self.sessions_pane.toggle_collapsed();
                 self.needs_redraw = true;
-                Some(crate::app::pointer::save_sessions_pane_layout(
-                    self.sessions_pane.preferred_width,
-                    self.sessions_pane.collapsed,
-                ))
+                let row = self.sessions_pane.last_content_width().unwrap_or(columns);
+                self.sessions_pane.save_layout(row)
             }
             HostAction::GrowSkillSources | HostAction::ShrinkSkillSources => {
                 use crate::components::skill_manager_screen::{

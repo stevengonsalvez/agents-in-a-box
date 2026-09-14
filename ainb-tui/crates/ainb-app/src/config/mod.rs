@@ -997,8 +997,14 @@ pub struct UiPreferences {
     #[serde(default, skip_serializing)]
     pub home_sidebar_width: Option<u16>,
 
-    /// Preferred Sessions screen sidebar width in terminal columns.
+    /// Preferred Sessions screen sidebar width as a fraction of its row, so
+    /// the same preference draws proportionally on every surface.
     #[serde(default)]
+    pub sessions_sidebar_fraction: Option<f64>,
+
+    /// Legacy column count from before widths were fractions. Read only so
+    /// [`AppConfig::migrate_layout_widths`] can convert it; never written.
+    #[serde(default, skip_serializing)]
     pub sessions_sidebar_width: Option<u16>,
 
     /// Whether the Sessions screen sidebar starts minimized.
@@ -1080,6 +1086,7 @@ impl Default for UiPreferences {
             preferred_editor: None,
             home_sidebar_fraction: None,
             home_sidebar_width: None,
+            sessions_sidebar_fraction: None,
             sessions_sidebar_width: None,
             sessions_sidebar_collapsed: None,
             skill_manager_sources_fraction: None,
@@ -2131,12 +2138,14 @@ impl AppConfig {
         Ok(doc.to_string())
     }
 
-    /// Save configuration to user config directory
-    /// Convert layout widths saved as column counts into fractions of a
-    /// `columns`-wide screen, the surface the user last sized them on.
+    /// Convert layout widths saved as column counts into fractions of
+    /// `columns`, the width of the content row the host draws them in (the
+    /// terminal width for the terminal host).
     ///
     /// One-time: a width that already has a fraction keeps it, and the legacy
     /// count is dropped either way, so the next save writes only fractions.
+    /// The fraction is taken against whichever surface migrates first, so the
+    /// same count converts differently on a narrow and a wide first launch.
     /// Returns whether anything changed.
     pub fn migrate_layout_widths(&mut self, columns: u16) -> bool {
         // A host that measured no width yet (a zero-width first frame) cannot
@@ -2150,23 +2159,24 @@ impl AppConfig {
         // Each width goes through the clamp its panel applies at draw time
         // first, so a count saved in a pane narrower than today's cannot
         // become a fraction the panel would never draw.
-        let clamps: [fn(u16, u16) -> u16; 2] = [
-            crate::components::sidebar::SidebarState::clamp_width,
-            crate::components::skill_manager_screen::clamp_sources_width,
-        ];
-        for ((legacy, fraction), clamp) in [
+        let migrations: [(&mut Option<u16>, &mut Option<f64>, fn(u16, u16) -> u16); 3] = [
             (
                 &mut prefs.home_sidebar_width,
                 &mut prefs.home_sidebar_fraction,
+                crate::components::sidebar::SidebarState::clamp_width,
+            ),
+            (
+                &mut prefs.sessions_sidebar_width,
+                &mut prefs.sessions_sidebar_fraction,
+                crate::app::state::clamp_sessions_sidebar_width,
             ),
             (
                 &mut prefs.skill_manager_sources_width,
                 &mut prefs.skill_manager_sources_fraction,
+                crate::components::skill_manager_screen::clamp_sources_width,
             ),
-        ]
-        .into_iter()
-        .zip(clamps)
-        {
+        ];
+        for (legacy, fraction, clamp) in migrations {
             if let Some(width) = legacy.take() {
                 changed = true;
                 let width = clamp(width, columns);
@@ -3444,7 +3454,7 @@ show_git_status = false
         config.ui_preferences.show_git_status = false;
         config.ui_preferences.preferred_editor = Some("nvim".to_string());
         config.ui_preferences.home_sidebar_fraction = Some(0.35);
-        config.ui_preferences.sessions_sidebar_width = Some(44);
+        config.ui_preferences.sessions_sidebar_fraction = Some(0.4);
         config.ui_preferences.sessions_sidebar_collapsed = Some(true);
         config.usage.plan = Some(UsagePlan {
             id: UsagePlanId::ClaudePro,
@@ -3506,8 +3516,8 @@ show_git_status = false
             "home_sidebar_fraction not in TOML"
         );
         assert!(
-            toml_str.contains("sessions_sidebar_width = 44"),
-            "sessions_sidebar_width not in TOML"
+            toml_str.contains("sessions_sidebar_fraction = 0.4"),
+            "sessions_sidebar_fraction not in TOML"
         );
         assert!(
             toml_str.contains("sessions_sidebar_collapsed = true"),
@@ -3546,7 +3556,7 @@ show_git_status = false
             Some("nvim".to_string())
         );
         assert_eq!(loaded.ui_preferences.home_sidebar_fraction, Some(0.35));
-        assert_eq!(loaded.ui_preferences.sessions_sidebar_width, Some(44));
+        assert_eq!(loaded.ui_preferences.sessions_sidebar_fraction, Some(0.4));
         assert_eq!(loaded.ui_preferences.sessions_sidebar_collapsed, Some(true));
         assert_eq!(loaded.usage.plan.unwrap().reset_day, 12);
         assert_eq!(loaded.usage.currency.code, "GBP");
@@ -4298,6 +4308,7 @@ timeout = 30
         let legacy = r#"
 [ui_preferences]
 home_sidebar_width = 40
+sessions_sidebar_width = 60
 skill_manager_sources_width = 30
 "#;
         let mut config = AppConfig::from_layers([legacy]).expect("layers");
@@ -4308,11 +4319,13 @@ skill_manager_sources_width = 30
             config.ui_preferences.home_sidebar_fraction,
             Some(40.0 / 120.0)
         );
+        assert_eq!(config.ui_preferences.sessions_sidebar_fraction, Some(0.5));
         assert_eq!(
             config.ui_preferences.skill_manager_sources_fraction,
             Some(0.25)
         );
         assert_eq!(config.ui_preferences.home_sidebar_width, None);
+        assert_eq!(config.ui_preferences.sessions_sidebar_width, None);
         assert!(
             !config.migrate_layout_widths(80),
             "a second run changes nothing"

@@ -21,7 +21,13 @@ use crate::app::{Effect, Intent, TerminalTarget, ToolTerminal};
 ///
 /// The executor holds no state: everything an effect needs rides on it, plus
 /// the renderer's own `ui` layout, the live tmux client it keeps for the
-/// preview pane, and the plugin runtime the host owns.
+/// preview pane, and the plugin runtime handle.
+///
+/// Divergence, D1's first: the handle is not yet the host's alone. The run
+/// loop reads `plugins` from `AppState.plugins_host.plugin_runtime`, because
+/// `forward_key_to_focused_plugin` and `forward_mouse_to_focused_plugin` in
+/// `screens/builtin.rs` call the runtime from inside the reducer step. It
+/// leaves `AppState` when forwarding becomes an effect the host runs (#1045).
 ///
 /// `Err` means the terminal itself could not be suspended or restored, which
 /// the run loop treats as fatal; every failure the user can act on is a report

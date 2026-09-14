@@ -48,6 +48,8 @@ fn the_width_report_turns_saved_column_counts_into_fractions_of_the_host() {
                 keys: [
                     "ui_preferences.home_sidebar_fraction",
                     "ui_preferences.home_sidebar_width",
+                    "ui_preferences.sessions_sidebar_fraction",
+                    "ui_preferences.sessions_sidebar_width",
                     "ui_preferences.skill_manager_sources_fraction",
                     "ui_preferences.skill_manager_sources_width",
                 ]

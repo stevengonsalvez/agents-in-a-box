@@ -150,11 +150,12 @@ session_filter = "all"
 
 # Sidebar geometry. Normally written by the TUI as you drag/collapse a pane
 # rather than set by hand; listed here so the keys are discoverable. The home
-# sidebar and Skill Manager Sources panel are fractions of the screen width, so
-# they draw proportionally at any terminal size; an older column count
-# (home_sidebar_width, skill_manager_sources_width) is converted on launch.
+# sidebar, Sessions sidebar and Skill Manager Sources panel are fractions of the
+# screen width, so they draw proportionally at any terminal size; an older column
+# count (home_sidebar_width, sessions_sidebar_width, skill_manager_sources_width)
+# is converted on launch.
 # home_sidebar_fraction = 0.33
-# sessions_sidebar_width = 40
+# sessions_sidebar_fraction = 0.33
 # sessions_sidebar_collapsed = false
 # skill_manager_sources_fraction = 0.27
 

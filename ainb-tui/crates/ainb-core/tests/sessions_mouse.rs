@@ -176,7 +176,7 @@ fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
     click(&mut state, &mut ui, 39, 8);
     finish_gesture(Gesture::Drag, &mut state, &mut ui, 55, 8);
 
-    assert_eq!(ui.sessions_pane.preferred_width, 56);
+    assert_eq!(ui.sessions_pane.expanded_width(120), 56);
     let config_path = home.path().join(".agents-in-a-box/config/config.toml");
     assert!(
         !config_path.exists(),
@@ -186,7 +186,13 @@ fn sessions_mouse_drag_resizes_and_persists_on_release_only() {
     finish_gesture(Gesture::Release, &mut state, &mut ui, 55, 8);
 
     let config = std::fs::read_to_string(config_path).expect("persisted config");
-    assert!(config.contains("sessions_sidebar_width = 56"));
+    let row = ui.sessions_pane.last_content_width().expect("drawn row");
+    let fraction = f64::from(56u16) / f64::from(row);
+    assert!(
+        config.contains(&format!("sessions_sidebar_fraction = {fraction}")),
+        "{config}"
+    );
+    assert!(!config.contains("sessions_sidebar_width"), "{config}");
 }
 
 #[test]

@@ -235,7 +235,7 @@ fn interactive_embed_width_follows_the_sidebar_state() {
     // developer's persisted preference from the real config, which would make
     // the expected interior widths env-dependent.
     let mut ui = UiState::default();
-    ui.sessions_pane.restore(Some(40), false);
+    ui.sessions_pane.restore(None, Some(40), false);
     let mut clients = TerminalClients::default();
     assert!(
         attach_in_place(&mut state, &mut clients, 28, 80),

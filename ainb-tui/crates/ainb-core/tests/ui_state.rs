@@ -216,3 +216,55 @@ fn app_state_carries_no_terminal_geometry() {
         "AppState must hold no terminal geometry, found: {offenders:#?}"
     );
 }
+
+/// The fraction a sessions layout save carries.
+fn saved_fraction(intent: &ainb::Intent) -> f64 {
+    let ainb::Intent::Command(_, args) = intent else {
+        panic!("a save is a command, got {intent:?}");
+    };
+    args["fraction"].as_f64().expect("fraction")
+}
+
+/// A preference restored as 0.6 of the row survives a collapse toggle on a
+/// surface too narrow to draw it: the save carries what the user asked for,
+/// and only drawing clamps.
+#[test]
+fn a_restored_sidebar_fraction_survives_a_toggle_on_a_narrow_surface() {
+    let mut ui = UiState::default();
+    ui.sessions_pane.restore(Some(0.6), None, false);
+    assert!(
+        ui.sessions_pane.expanded_width(80) < 48,
+        "80 columns cannot draw 0.6"
+    );
+
+    ui.sessions_pane.toggle_collapsed();
+    let save = ui.sessions_pane.save_layout(80).expect("a row to save against");
+    assert!((saved_fraction(&save) - 0.6).abs() < f64::EPSILON);
+    assert!(
+        ui.sessions_pane.save_layout(0).is_none(),
+        "no save before a row has a width"
+    );
+}
+
+/// A width dragged on a 200-column surface is saved as a fraction and draws
+/// in proportion on a fresh surface at 200 and at 80 columns.
+#[test]
+fn a_saved_sidebar_fraction_draws_in_proportion_at_80_and_200_columns() {
+    use ainb::app::NoRenderer;
+    use ainb::app::keymap::Keymap;
+
+    let mut dragged = UiState::default();
+    dragged.sessions_pane.restore(None, Some(70), false);
+    let save = dragged.sessions_pane.save_layout(200).expect("save");
+
+    let mut state = AppState::new();
+    state.shell.current_screen = ainb::app::screens::ids::SESSION_LIST.to_string();
+    let _ = ainb::dispatch(&mut state, &Keymap::defaults(), &mut NoRenderer, save);
+    let fraction = state.config.app_config.ui_preferences.sessions_sidebar_fraction;
+    assert_eq!(fraction, Some(0.35));
+
+    let mut restored = UiState::default();
+    restored.restore(&state.config.app_config);
+    assert_eq!(restored.sessions_pane.expanded_width(200), 70);
+    assert_eq!(restored.sessions_pane.expanded_width(80), 28);
+}

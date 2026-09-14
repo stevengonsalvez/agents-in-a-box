@@ -14,7 +14,9 @@ pub mod ids {
     /// `{"plugin": String, "action_id": String, "payload": Value}`
     pub const PLUGIN_ACTION: &str = "plugin.owned.action";
 
-    /// `{"screen": String, "watching": bool}`
+    /// `{"screen": String, "watching": bool, "width": u16, "height": u16}`;
+    /// `width` and `height` default to 0, so a stop in the older two-field
+    /// shape still parses.
     pub const WATCH_SCREEN: &str = "plugin.owned.watch_screen";
 
     /// Every plugin action command id.
@@ -30,13 +32,20 @@ pub fn run(plugin: &str, action_id: &str, payload: Value) -> Intent {
     )
 }
 
-/// Keep `screen`'s plugin rendering while the terminal shows something
-/// else (`watching`), or stop.
+/// Keep `screen`'s plugin rendering at `width` by `height`, the viewport the
+/// watching host draws it at, while the terminal shows something else
+/// (`watching`), or stop. Several hosts watching one screen get the largest
+/// size any of them asked for, up to `ScreenWatch::MAX_VIEWPORT`.
+///
+/// A stop names no watcher, so it ends nothing at once: the request lapses
+/// with its lease. For the same reason a host that shrinks its viewport keeps
+/// the larger render until its older, larger request lapses, up to
+/// `AppState::PLUGIN_SCREEN_WATCH_LEASE` later.
 #[must_use]
-pub fn watch_screen(screen: &str, watching: bool) -> Intent {
+pub fn watch_screen(screen: &str, watching: bool, width: u16, height: u16) -> Intent {
     Intent::Command(
         CommandId::new(ids::WATCH_SCREEN),
-        json!({ "screen": screen, "watching": watching }),
+        json!({ "screen": screen, "watching": watching, "width": width, "height": height }),
     )
 }
 
@@ -45,6 +54,10 @@ pub fn watch_screen(screen: &str, watching: bool) -> Intent {
 struct WatchArgs {
     screen: String,
     watching: bool,
+    #[serde(default)]
+    width: u16,
+    #[serde(default)]
+    height: u16,
 }
 
 #[derive(Deserialize)]
@@ -75,6 +88,8 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
                 AppEvent::WatchPluginScreen {
                     screen: args.screen,
                     watching: args.watching,
+                    width: args.width,
+                    height: args.height,
                 }
             }),
         ),
