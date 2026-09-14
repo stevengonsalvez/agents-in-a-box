@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use ainb_app::app::NoRenderer;
 use ainb_app::app::TerminalTarget;
+use ainb_app::app::keymap::Chord;
 use ainb_app::app::reports::{self, AttachOutcome, AttachedTo};
 use ainb_app::app::screens::ids;
 use ainb_app::models::other_tmux::OtherTmuxSession;
@@ -25,6 +26,8 @@ struct HeadlessHost {
     no_in_place: bool,
     /// In-place attaches this host was asked for.
     in_place_requests: usize,
+    /// Keys this host sent to its client.
+    forwarded: Vec<Chord>,
 }
 
 impl HeadlessHost {
@@ -68,6 +71,20 @@ impl HeadlessHost {
             queue.extend(dispatch(state, keymap, &mut NoRenderer, report));
         }
         self.reconcile(state);
+    }
+
+    /// Route a key the way a host must while the in-place pane is live: every
+    /// key to the client except the chord that releases it.
+    fn key(&mut self, state: &mut AppState, keymap: &Keymap, chord: &str) {
+        let chord = Chord::parse(chord).expect("chord");
+        if state.is_interactive_pane() && keymap.releases_in_place_pane(&chord) {
+            self.command(state, keymap, "embed_interactive.detach");
+        } else if state.is_interactive_pane() {
+            self.forwarded.push(chord);
+        } else {
+            let effects = dispatch(state, keymap, &mut NoRenderer, Intent::Key(chord));
+            self.run(state, keymap, effects);
+        }
     }
 
     fn command(&mut self, state: &mut AppState, keymap: &Keymap, id: &str) {
@@ -262,4 +279,26 @@ fn a_host_that_cannot_attach_in_place_is_not_asked_again() {
         "{:?}",
         state.shell.notifications
     );
+}
+
+#[test]
+fn a_live_in_place_pane_takes_every_key_but_the_one_that_releases_it() {
+    isolated_home();
+    let keymap = Keymap::defaults();
+    let mut state = session_list_with(&["ainb-contract-g"]);
+    let mut host = HeadlessHost::default();
+    host.command(&mut state, &keymap, "session_list.attach_interactive");
+    let before = state.versions();
+
+    for chord in [":", "q", "ctrl+c", "?", "esc"] {
+        host.key(&mut state, &keymap, chord);
+    }
+    assert_eq!(host.forwarded.len(), 5, "every key went to the client");
+    assert_eq!(state.versions(), before, "none reached the reducer");
+    assert!(state.is_interactive_pane());
+
+    host.key(&mut state, &keymap, "ctrl+q");
+    assert_eq!(host.forwarded.len(), 5, "the release chord is not typed");
+    assert!(!state.is_interactive_pane());
+    assert_eq!(host.held, None);
 }
