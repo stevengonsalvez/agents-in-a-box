@@ -52,6 +52,7 @@ pub enum Btn {
 /// its own. The TUI host uses [`EventHandler::resolve_intent`] instead,
 /// because it handles a few resolved events (embed sizing, sidebar collapse)
 /// against its own layout before the reducer sees the rest.
+#[must_use = "the effects are host work the reducer did not perform; run them or they are lost"]
 pub fn dispatch(
     state: &mut AppState,
     keymap: &Keymap,
