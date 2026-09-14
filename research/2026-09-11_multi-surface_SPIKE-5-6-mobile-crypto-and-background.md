@@ -20,16 +20,18 @@ only, no iOS SDK). Stevie chose an emulator-only report. So:
 
 No simulator was used for anything, because no iOS simulator exists without Xcode.
 
+**Status: emulator-only draft.** Every timing, custody and OS-policy number below is tagged `[emulator]`. Bundle sizes are tagged `[release APK]` because they do not depend on the device. A hardware lane (Xcode 26.4.1, iPhone on iOS 26.4.2, Android emulator) appends the iPhone and emulator columns to sections 3 and 4, and writes the final decision input. Section 1 is the provisional reading from this box.
+
 ---
 
-## 1. Decision input
+## 1. Decision input (provisional, emulator-only; the hardware lane finalizes)
 
 | question | answer | basis |
 |---|---|---|
-| uniffi as the M1 wire shape? | **Go on Android, not yet shown on iOS.** Make an iPhone run of this same harness the first gate of M1, before any UI work. | Android measured end to end. iOS not built. |
-| Does D13 need a JS Noise review? | **No, on the evidence so far.** The Rust crate did the whole handshake and framing on the phone. No JS crypto was needed. This flips only if the iPhone leg fails. | measured on Android |
-| Does the push reopen row move to M1+1? | **Yes.** The spec's bar is a grace period under 60 s. Android 15 destroyed the live socket **6.0 to 6.4 s** after the app left the foreground, in 9 of 10 runs. The 10th run lost all heartbeats without a reset. | measured, emulator; iOS unmeasured |
-| Can M1 promise a timely local banner from a backgrounded app? | **No.** The 1-minute banner showed up 48 s late and the 5-minute banner 164 s late. The OS scheduled all three as inexact alarms, with windows of 45 s, 3 min 45 s and 22 min 30 s. | measured, emulator |
+| uniffi as the M1 wire shape? | **Go on Android, not yet shown on iOS.** Make an iPhone run of this same harness the first gate of M1, before any UI work. | `[emulator]` end to end. iOS not built. |
+| Does D13 need a JS Noise review? | **No, on the evidence so far.** The Rust crate did the whole handshake and framing on the phone. No JS crypto was needed. This flips only if the iPhone leg fails. | `[emulator]` |
+| Does the push reopen row move to M1+1? | **Yes.** The spec's bar is a grace period under 60 s. Android 15 destroyed the live socket **6.0 to 6.4 s** after the app left the foreground, in 9 of 10 runs. The 10th run lost all heartbeats without a reset. | `[emulator]`; iOS unmeasured |
+| Can M1 promise a timely local banner from a backgrounded app? | **No.** The 1-minute banner showed up 48 s late and the 5-minute banner 164 s late. The OS scheduled all three as inexact alarms, with windows of 45 s, 3 min 45 s and 22 min 30 s. | `[emulator]` |
 
 ### What M1 must take from this
 
@@ -128,7 +130,7 @@ unpinned host key and a wrong host id were each rejected at Noise message 1
 | network | guest to host via the emulator NAT (`10.0.2.2`) |
 | toolchain | rustc 1.94.0, NDK 27.1.12297006, Gradle 9.3.1, targets `x86_64-linux-android` and `aarch64-linux-android` |
 
-### 3.2 Handshake and framed messages on the phone
+### 3.2 Handshake and framed messages on the phone `[emulator]`
 
 The first launch after install connected, handshook, sent `auth/hello` and
 `fleet/subscribe` under AEAD, and the in-crate heartbeat got its pong. The peer
@@ -144,7 +146,7 @@ In-app, first launch: Noise IK 176.3 ms, `auth/hello` 3.7 ms, `fleet/subscribe`
 
 The `--exclude-libs` build (x86_64 `.so` 1,843,360 bytes against 7,756,344 by default) was installed fresh on the same emulator and completed the same sequence: handshake, `auth/hello`, `fleet/subscribe`, heartbeat pong, and a warm reconnect with WS 1,043.9 ms and Noise 14.4 ms. In-app: Noise IK 2.5 ms, `auth/hello` 3.2 ms, `fleet/subscribe` 2.2 ms (`proof/android-emu-biometric.png`). Hiding the symbols breaks nothing the binding uses.
 
-### 3.3 Cold start, app launch to first framed message
+### 3.3 Cold start, app launch to first framed message `[emulator]`
 
 The timer runs from the host issuing `am start -W` after `am force-stop`, until `peerd`
 receives `auth/hello` from the new process. Both ends use the host clock. An `adb shell` round trip on
@@ -178,7 +180,7 @@ loopback. On a real phone over Wi-Fi, WS connect will be LAN latency
 React Native start-up, the secure-store read and the notification channel.
 It was not split further.
 
-### 3.4 Bundle size, release, arm64-v8a
+### 3.4 Bundle size, release, arm64-v8a `[release APK]`
 
 Same app, same dependencies, `-PreactNativeArchitectures=arm64-v8a`, clean
 build directories between variants. The baseline sets `SPIKE_NO_WIRE=1`: the native module
@@ -197,9 +199,9 @@ by 2,868 bytes, `libappmodules.so` by 17,864 bytes. In the default `.so`, `.dyns
 `--gc-sections`. Native libraries are stored uncompressed in the APK, so the gzip column
 approximates the download `[inference]`.
 
-### 3.5 Device static key custody
+### 3.5 Device static key custody `[emulator]`
 
-| question | Android (emulator) | iOS |
+| question | Android `[emulator]` | iOS (hardware lane) |
 |---|---|---|
 | API | `expo-secure-store` 57.0.4: AES-GCM key in Android Keystore wrapping ciphertext in SharedPreferences. `keychainAccessible: AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY` is an iOS-only option, ignored here. | not run. The same code would use Keychain `kSecClassGenericPassword` with `AfterFirstUnlockThisDeviceOnly` `[inference from the module's API]`. |
 | key minted where | `generateDeviceKeypair()` in the crate. The private key crosses the JS heap once as base64 on its way into secure storage. | |
@@ -215,7 +217,7 @@ handle `[inference]`. This spike did not build that.
 
 ## 4. Spike 6 on Android
 
-### 4.1 Socket lifetime with a 15 s heartbeat
+### 4.1 Socket lifetime with a 15 s heartbeat `[emulator]`
 
 Each run force-stops the app, launches it, waits for `auth/hello` and 20 s of
 foreground heartbeats, then either presses HOME with the screen kept on
@@ -256,7 +258,7 @@ which covers the locked case: an app on top of a sleeping screen is blocked too.
 Real Android 15 phones run the same AOSP policy `[inference]`. OEM builds may add
 their own kill policies on top, and none were measured.
 
-### 4.2 Local needs-input banner, app backgrounded, screen off
+### 4.2 Local needs-input banner, app backgrounded, screen off `[emulator]`
 
 The app was scheduled through its deep link with `expo-notifications` 57.0.18
 (`TIME_INTERVAL`, channel importance HIGH, `POST_NOTIFICATIONS` granted). Then
@@ -277,7 +279,7 @@ charging.
 
 ---
 
-## 5. iOS: blocked
+## 5. iOS: blocked on this box, handed to the hardware lane
 
 Nothing ran. To unblock:
 
