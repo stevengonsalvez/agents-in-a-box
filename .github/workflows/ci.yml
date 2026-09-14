@@ -826,6 +826,9 @@ jobs:
         run: |
           set -o pipefail
           cargo build -p ainb-plugin-runtime --bins
+          # Plugin tripwires SKIP without staged plugins, which would pass
+          # them without exercising anything.
+          bash scripts/build-plugins.sh
           filter='binary(/^tripwire_/)'
           while read -r name _; do
             case "$name" in ''|'#'*) continue ;; esac
@@ -834,7 +837,8 @@ jobs:
           cargo nextest run -p ainb --test-threads 1 --no-fail-fast \
             --success-output final -E "$filter" \
             2>&1 | tee "$RUNNER_TEMP/core-tripwires.log"
-          passed=$(grep -oE '[0-9]+ passed' "$RUNNER_TEMP/core-tripwires.log" | tail -1 | cut -d' ' -f1 || true)
+          # nextest's summary line; test binaries print their own "N passed".
+          passed=$(grep -oE 'tests run: [0-9]+ passed' "$RUNNER_TEMP/core-tripwires.log" | tail -1 | grep -oE '[0-9]+ passed' | cut -d' ' -f1 || true)
           skipped=$(grep -cE '^\s*SKIP:' "$RUNNER_TEMP/core-tripwires.log" || true)
           echo "passed=$passed skip_lines=$skipped"
           if [ -z "$passed" ] || [ "$skipped" -ge "$passed" ]; then
