@@ -23,10 +23,18 @@ pub mod ids {
     pub const SHELL_PREPARED: &str = "global.shell_prepared";
     /// `{"ok": bool}`
     pub const ABTOP_SETUP_FINISHED: &str = "global.abtop_setup_finished";
-    /// `{"tmux_session": String, "embed": LocalEmbed}`
+    /// `{"tmux_session": String}`
     pub const IN_PLACE_OPENED: &str = "global.in_place_opened";
     /// `{"tmux_session": String, "error": String}`
     pub const IN_PLACE_FAILED: &str = "global.in_place_failed";
+    /// `{"tmux_session": String}`
+    pub const OBSERVER_OPENED: &str = "global.observer_opened";
+    /// `{"tmux_session": String, "error": String, "unsupported": bool}`
+    pub const OBSERVER_FAILED: &str = "global.observer_failed";
+    /// `{"tmux_session": String}`
+    pub const TERMINAL_EXITED: &str = "global.terminal_exited";
+    /// `{"tmux_session": String}`
+    pub const TERMINAL_INPUT_CLOSED: &str = "global.terminal_input_closed";
     /// `{"plugin": String, "action_id": String}`
     pub const PLUGIN_ACTION_UNDELIVERED: &str = "global.plugin_action_undelivered";
     /// No arguments.
@@ -48,6 +56,10 @@ pub mod ids {
         ABTOP_SETUP_FINISHED,
         IN_PLACE_OPENED,
         IN_PLACE_FAILED,
+        OBSERVER_OPENED,
+        OBSERVER_FAILED,
+        TERMINAL_EXITED,
+        TERMINAL_INPUT_CLOSED,
         PLUGIN_ACTION_UNDELIVERED,
         DETACHED,
         EDITOR_FINISHED,
@@ -248,13 +260,13 @@ pub fn abtop_setup_finished(ok: bool) -> Intent {
     command(ids::ABTOP_SETUP_FINISHED, json!({ "ok": ok }))
 }
 
-/// Report that the host opened a tmux client on `tmux_session` for the
-/// in-place pane, parked as `embed` for the reducer to adopt.
+/// Report that the host opened, and keeps, a writable tmux client on
+/// `tmux_session` for the in-place pane.
 #[must_use]
-pub fn in_place_opened(tmux_session: &str, embed: &LocalEmbed) -> Intent {
+pub fn in_place_opened(tmux_session: &str) -> Intent {
     command(
         ids::IN_PLACE_OPENED,
-        json!({ "tmux_session": tmux_session, "embed": embed }),
+        json!({ "tmux_session": tmux_session }),
     )
 }
 
@@ -267,6 +279,47 @@ pub fn in_place_failed(tmux_session: &str, error: &str) -> Intent {
     )
 }
 
+/// Report that the host opened, and keeps, a read-only tmux client on
+/// `tmux_session` for the preview pane.
+#[must_use]
+pub fn observer_opened(tmux_session: &str) -> Intent {
+    command(
+        ids::OBSERVER_OPENED,
+        json!({ "tmux_session": tmux_session }),
+    )
+}
+
+/// Report that the read-only client on `tmux_session` would not open:
+/// `unsupported` when this host cannot mirror a terminal at all, so there is
+/// nothing to retry.
+#[must_use]
+pub fn observer_failed(tmux_session: &str, error: &str, unsupported: bool) -> Intent {
+    command(
+        ids::OBSERVER_FAILED,
+        json!({ "tmux_session": tmux_session, "error": error, "unsupported": unsupported }),
+    )
+}
+
+/// Report that the host's client on `tmux_session` ended on its own: the
+/// session went away or tmux dropped the client.
+#[must_use]
+pub fn terminal_exited(tmux_session: &str) -> Intent {
+    command(
+        ids::TERMINAL_EXITED,
+        json!({ "tmux_session": tmux_session }),
+    )
+}
+
+/// Report that input for the client on `tmux_session` could not be written,
+/// so a focused pane would silently eat keys.
+#[must_use]
+pub fn terminal_input_closed(tmux_session: &str) -> Intent {
+    command(
+        ids::TERMINAL_INPUT_CLOSED,
+        json!({ "tmux_session": tmux_session }),
+    )
+}
+
 /// Report that the host's plugin runtime has no running `plugin` to take
 /// `action_id`.
 #[must_use]
@@ -275,53 +328,6 @@ pub fn plugin_action_undelivered(plugin: &str, action_id: &str) -> Intent {
         ids::PLUGIN_ACTION_UNDELIVERED,
         json!({ "plugin": plugin, "action_id": action_id }),
     )
-}
-
-/// A tmux client the host opened for the in-place pane, parked in this
-/// process until the reducer adopts it.
-///
-/// Serialised as an opaque random handle, like [`LocalOutput`]: the client is
-/// a PTY this process owns, so only this process's reducer can adopt it, and
-/// only once. A report that is never dispatched leaves its client parked
-/// until the process ends.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LocalEmbed(String);
-
-type LocalEmbeds = std::sync::Mutex<std::collections::HashMap<String, crate::tmux::EmbedClient>>;
-
-fn local_embeds() -> &'static LocalEmbeds {
-    static EMBEDS: std::sync::OnceLock<LocalEmbeds> = std::sync::OnceLock::new();
-    EMBEDS.get_or_init(LocalEmbeds::default)
-}
-
-impl LocalEmbed {
-    /// A handle nothing is parked behind, for the keymap row's placeholder
-    /// event.
-    #[must_use]
-    pub const fn placeholder() -> Self {
-        Self(String::new())
-    }
-
-    /// Park `client` behind a new handle.
-    #[must_use]
-    pub fn keep(client: crate::tmux::EmbedClient) -> Self {
-        let handle = Uuid::new_v4().to_string();
-        local_embeds()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(handle.clone(), client);
-        Self(handle)
-    }
-
-    /// The parked client, once, in the process that parked it.
-    #[must_use]
-    pub fn adopt(&self) -> Option<crate::tmux::EmbedClient> {
-        local_embeds()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.0)
-    }
 }
 
 /// Report that the user left the live terminal.
@@ -410,9 +416,16 @@ struct OkArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OpenedArgs {
+struct TerminalArgs {
     tmux_session: String,
-    embed: LocalEmbed,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObserverFailedArgs {
+    tmux_session: String,
+    error: String,
+    unsupported: bool,
 }
 
 #[derive(Deserialize)]
@@ -483,9 +496,30 @@ pub(crate) fn with_args(event: &AppEvent, args: &Args) -> Option<Option<AppEvent
             parse::<OkArgs>(args).map(|args| AppEvent::AbtopSetupFinished { ok: args.ok })
         }
         AppEvent::InPlaceOpened { .. } => {
-            parse::<OpenedArgs>(args).map(|args| AppEvent::InPlaceOpened {
+            parse::<TerminalArgs>(args).map(|args| AppEvent::InPlaceOpened {
                 tmux_session: args.tmux_session,
-                embed: args.embed,
+            })
+        }
+        AppEvent::ObserverOpened { .. } => {
+            parse::<TerminalArgs>(args).map(|args| AppEvent::ObserverOpened {
+                tmux_session: args.tmux_session,
+            })
+        }
+        AppEvent::ObserverFailed { .. } => {
+            parse::<ObserverFailedArgs>(args).map(|args| AppEvent::ObserverFailed {
+                tmux_session: args.tmux_session,
+                error: args.error,
+                unsupported: args.unsupported,
+            })
+        }
+        AppEvent::TerminalExited { .. } => {
+            parse::<TerminalArgs>(args).map(|args| AppEvent::TerminalExited {
+                tmux_session: args.tmux_session,
+            })
+        }
+        AppEvent::TerminalInputClosed { .. } => {
+            parse::<TerminalArgs>(args).map(|args| AppEvent::TerminalInputClosed {
+                tmux_session: args.tmux_session,
             })
         }
         AppEvent::InPlaceFailed { .. } => {
