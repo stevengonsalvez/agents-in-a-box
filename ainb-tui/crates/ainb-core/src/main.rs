@@ -490,6 +490,9 @@ async fn run_tui_loop(
     // Layout widths saved as column counts by an older ainb become fractions
     // of this terminal, the surface they were last sized on.
     let columns = terminal.size().map_or(80, |size| size.width);
+    // The status bar draws from sections the tick refreshes; fill them now so
+    // the frames before the first tick show the statusline CTA, not a gap.
+    app.state.refresh_statusline();
     run_intent(
         ainb::app::reports::migrate_layout_widths(columns),
         app,
