@@ -4431,8 +4431,19 @@ export type TmuxDecision =
 /**  Accepted; ainb has written ~/.tmux.conf (and deployed helpers). */
 "installed";
 
+/**
+ *  A tmux session name an effect can target.
+ * 
+ *  Not empty, free of the `:` and `.` tmux reads as window and pane separators
+ *  and of control characters, with no whitespace at either end, and not
+ *  starting with `$`, `%`, `@` or `=`, which tmux reads as a session, pane or
+ *  window id or an exact-match marker, so such a name could reach another
+ *  session.
+ */
+export type TmuxSessionName = string;
+
 export type TmuxView = {
-	embed_session: string | null,
+	embed_session: TmuxSessionName | null,
 	other_tmux_sessions: OtherTmuxSession[],
 	other_tmux_expanded: boolean,
 	selected_other_tmux_index: number | null,
