@@ -22,6 +22,14 @@
 /// the user has since navigated to.
 pub const UI_CLOSE_REQUEST: &str = "ui.close_request";
 
+/// A plugin's view state, for a host that draws the plugin's screen itself.
+///
+/// Published by a plugin whenever the state its screen shows changes. The
+/// payload is the plugin's own JSON view of that state, a contract between
+/// the plugin and the renderers that draw it; the host reads it by version
+/// and never interprets it.
+pub const UI_STATE: &str = "ui.state";
+
 /// JSON payload for [`UI_CLOSE_REQUEST`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UiCloseRequest {
