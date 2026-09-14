@@ -50,7 +50,9 @@ cli_namespaces = ["hangar"]
 snapshots = []
 
 [subscribes]
-snapshots = []
+# The agent-status envelope the TUI host publishes; the Fleet panel renders
+# from it and reads no Fleet status of its own (#1031).
+snapshots = ["fleet.agent_status"]
 
 [lifecycle]
 spawn = "lazy"
