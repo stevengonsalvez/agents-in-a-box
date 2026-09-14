@@ -6293,13 +6293,21 @@ mod tests {
         assert_eq!(m.provides.cli_namespaces, ["hangar"]);
     }
 
+    /// #1038 review item 1: the grant names exactly the topics this plugin
+    /// reads or publishes, never the whole bus.
     #[test]
-    fn manifest_grants_event_bus_and_plugin_data() {
+    fn manifest_grants_event_bus_for_its_topics_and_plugin_data() {
         let m: Manifest = toml::from_str(MANIFEST_TOML).unwrap();
-        assert!(matches!(
-            m.capabilities.event_bus,
-            CapabilityGrant::Bool(true)
-        ));
+        assert_eq!(
+            m.capabilities.event_bus.allow_list(),
+            Some(
+                &[
+                    AGENT_STATUS_TOPIC.to_string(),
+                    format!("{}*", ainb_plugin_sdk::topics::UI_STATE),
+                    ainb_plugin_sdk::topics::UI_CLOSE_REQUEST.to_string(),
+                ][..]
+            )
+        );
         assert!(matches!(
             m.capabilities.write_plugin_data,
             CapabilityGrant::Bool(true)
