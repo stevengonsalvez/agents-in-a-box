@@ -12,7 +12,8 @@ use std::path::PathBuf;
 /// (`★` favorite, `⌚` recent, `📁` local) and the sort precedence
 /// (favorites → recents → locals).
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RowKind {
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
+pub enum RepoRowKind {
     /// User-pinned favorite, sourced from `favorites.yaml`.
     Favorite,
     /// Recently launched repo, sourced from `session-defaults.yaml.per_repo`.
@@ -21,7 +22,7 @@ pub enum RowKind {
     Local,
 }
 
-impl RowKind {
+impl RepoRowKind {
     pub const fn marker(self) -> &'static str {
         match self {
             Self::Favorite => "\u{2605}", // ★
@@ -35,23 +36,27 @@ impl RowKind {
 /// persistence (`SessionDefaults.last_repo`) — for favorites it's the alias,
 /// for locals it's the filesystem path stringified.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PickRepoRow {
     pub id: String,
     pub label: String,
     pub source: RepoSource,
-    pub kind: RowKind,
+    pub kind: RepoRowKind,
 }
 
 /// Inline clone progress shown on the highlighted row when a remote clone is
 /// in flight. Phase 4 wires the spinner; the bytes/total fields are populated
 /// by the async clone driver in Phase 5+.
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct CloneProgress {
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub url: String,
     pub bytes_done: u64,
     pub bytes_total: u64,
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub error: Option<String>,
 }
 
@@ -59,6 +64,7 @@ pub struct CloneProgress {
 /// URL requires authentication. The dispatcher runs `gh auth status` before
 /// advancing to Configure for HTTPS/GitHub sources.
 #[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum GitAuthStatus {
     /// Async check in flight.
     Checking,
@@ -95,6 +101,7 @@ pub enum PickRepoOutcome {
 /// Persistent state for the picker. Constructed once per new-session
 /// invocation. Owned by `NewSessionState.pick_repo_state`.
 #[derive(serde::Serialize, Debug)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct PickRepoState {
     /// Current filter text (also doubles as smart-parse input on Enter when
     /// no row matches).
@@ -102,6 +109,7 @@ pub struct PickRepoState {
         rename = "filter_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub filter: String,
     /// All rows in display order (favorites → recents → locals).
     pub rows: Vec<PickRepoRow>,
@@ -120,6 +128,7 @@ pub struct PickRepoState {
     /// stdout). Shown in the `NotAuthenticated` modal so the user sees the real
     /// reason instead of a generic "auth failed". `None` until a probe fails.
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub git_auth_error: Option<String>,
     /// Snapshot of session-defaults — read on open, updated on `^R`.
     #[serde(skip)]
@@ -240,7 +249,7 @@ pub fn build_rows(
             id: fav.alias.clone(),
             label: fav.display().to_string(),
             source,
-            kind: RowKind::Favorite,
+            kind: RepoRowKind::Favorite,
         };
         if seen_ids.insert(row.id.clone()) {
             rows.push(row);
@@ -268,7 +277,7 @@ pub fn build_rows(
             id: alias.clone(),
             label: alias.clone(),
             source,
-            kind: RowKind::Recent,
+            kind: RepoRowKind::Recent,
         };
         if seen_ids.insert(row.id.clone()) {
             rows.push(row);
@@ -289,7 +298,7 @@ pub fn build_rows(
             id: id.clone(),
             label,
             source: RepoSource::LocalPath(path.clone()),
-            kind: RowKind::Local,
+            kind: RepoRowKind::Local,
         };
         if seen_ids.insert(row.id.clone()) {
             rows.push(row);
@@ -649,7 +658,7 @@ fn collect_local_repo_paths(state: &PickRepoState) -> Vec<PathBuf> {
     state
         .rows
         .iter()
-        .filter(|r| r.kind == RowKind::Local)
+        .filter(|r| r.kind == RepoRowKind::Local)
         .filter_map(|r| match &r.source {
             RepoSource::LocalPath(p) => Some(p.clone()),
             _ => None,
