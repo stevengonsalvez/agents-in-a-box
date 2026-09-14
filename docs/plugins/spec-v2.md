@@ -47,6 +47,8 @@ snapshots      = []          # snapshot topics the plugin publishes
 [subscribes]
 snapshots = []               # topics the runtime auto-pushes via
                              # `plugin/handle_event` notifications
+latest_state = []            # the subset of `snapshots` that carry the
+                             # latest state, not a stream (see below)
 
 [lifecycle]
 spawn          = "lazy"      # "lazy" (default) or "eager"
@@ -61,6 +63,8 @@ idle_reap_secs = 600         # 0 disables reaping
 **Capability semantics.** `CapabilityGrant` accepts two forms: `true|false` (boolean grant) and `["host1", "host2"]` (allow-list grant; e.g. `network = ["api.openai.com"]`). The host evaluates `is_granted()` at request dispatch: denied capabilities return JSON-RPC error code `-32001` (CAPABILITY_DENIED).
 
 **Subscriptions.** `[subscribes].snapshots` is the declarative subscription path: the runtime auto-pushes `plugin/handle_event` for every publish on listed topics, with no imperative subscribe call required at startup. Plugins may also call `host/snapshot/subscribe` at runtime for the same effect.
+
+**Latest-state subscriptions and idle reap.** A subscribed topic whose every publish replaces the last (the plugin only ever needs the newest value) is listed again under `[subscribes].latest_state`. The runtime keeps a plugin alive past its idle window only while it subscribes to a topic NOT marked latest-state, because a publish to a reaped plugin is dropped and a stream cannot be recovered. A latest-state subscriber is reaped like any other plugin; on respawn it resubscribes and reads the newest value with `host/snapshot/get`. `latest_state` MUST be a subset of `snapshots` (a manifest that marks an unsubscribed topic is skipped at discovery), and `[subscribes]` refuses unknown keys, so a misspelling fails to parse rather than silently marking nothing. A plugin whose screen the host has on display is never reaped, whatever it subscribes to.
 
 **Lifecycle:** `eager` plugins are spawned at host startup; `lazy` plugins spawn on first inbound request. Required for pure-publisher plugins (`session-reader` is `eager` so it can boot the chunked-publish stream before any subscriber calls into it).
 
@@ -119,7 +123,7 @@ Wire shape:
 | `plugin/handle_key` | Notification | `HandleKeyParams` |: |
 | `plugin/cli_dispatch` | Request | `CliDispatchParams` | `CliDispatchResult` |
 
-`plugin/init` MUST be the first method called; the plugin MUST reply with its decoded manifest + its declared ABI version. `plugin/shutdown` is the last method; the plugin SHOULD exit within the host's shutdown grace window (currently 5 s).
+`plugin/init` MUST be the first method called; the plugin MUST reply with its decoded manifest + its declared ABI version. `PluginInitParams.host`, when present, names the surface hosting the plugin process: `{ kind, pid }`, where `kind` is the host's surface kind as the hangar daemon names surfaces (`tui`, `desktop`) and `pid` is the host process, the plugin's parent. A host that predates the field omits it. `plugin/shutdown` is the last method; the plugin SHOULD exit within the host's shutdown grace window (currently 5 s).
 
 Lifecycle ordering for a typical screen-owning plugin:
 
