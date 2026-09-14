@@ -281,17 +281,46 @@ impl ActionMenu {
 }
 
 /// What a finished lifecycle action reported.
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct ActionOutcome {
     pub action: Action,
     pub ok: bool,
     /// One line for the row itself.
-    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub summary: String,
     /// Everything the command said: the argv, its exit status, and its output.
     /// This is what the error view shows, verbatim.
-    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub detail: String,
+    /// `summary` and `detail` were redeemed from output kept in this process
+    /// (a Codex pairing code). The terminal shows them; a mirror frame never
+    /// carries them, in any form.
+    pub local_only: bool,
+}
+
+/// What a frame says in place of output that stays on this machine.
+pub const LOCAL_ONLY_SUMMARY: &str = "output kept on this machine";
+
+/// A frame carries the row's outcome, never local-only output: a pairing code
+/// is a credential and a scrub cannot recognise it, so the text is replaced
+/// whole. Everything else is scrubbed.
+impl serde::Serialize for ActionOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let (summary, detail) = if self.local_only {
+            (LOCAL_ONLY_SUMMARY.to_string(), String::new())
+        } else {
+            (
+                crate::fleet::bridge::redact::scrub(&self.summary),
+                crate::fleet::bridge::redact::scrub(&self.detail),
+            )
+        };
+        let mut outcome = serializer.serialize_struct("ActionOutcome", 5)?;
+        outcome.serialize_field("action", &self.action)?;
+        outcome.serialize_field("ok", &self.ok)?;
+        outcome.serialize_field("summary", &summary)?;
+        outcome.serialize_field("detail", &detail)?;
+        outcome.serialize_field("local_only", &self.local_only)?;
+        outcome.end()
+    }
 }
 
 impl DaemonsState {
@@ -561,6 +590,7 @@ impl DaemonsState {
                              start` from a terminal, where you can watch it.",
                             ACTION_TIMEOUT.as_secs()
                         ),
+                        local_only: false,
                     },
                 ));
             }
