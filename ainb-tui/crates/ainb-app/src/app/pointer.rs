@@ -93,13 +93,14 @@ pub fn focus_session_pane(pane: &FocusedPane) -> Intent {
     command(ids::SESSION_LIST_FOCUS_PANE, json!({ "pane": pane }))
 }
 
-/// Persist the sessions pane layout a renderer just changed: a sidebar
-/// `width` columns of a `row`-wide screen, and whether it is collapsed.
+/// Persist the sessions pane layout a renderer just changed: the sidebar's
+/// share of its row as the user asked for it, before any clamp, and whether
+/// it is collapsed.
 #[must_use]
-pub fn save_sessions_pane_layout(width: u16, row: u16, collapsed: bool) -> Intent {
+pub fn save_sessions_pane_layout(fraction: f64, collapsed: bool) -> Intent {
     command(
         ids::SESSION_LIST_SAVE_PANE_LAYOUT,
-        json!({ "fraction": fraction_of(width, row), "collapsed": collapsed }),
+        json!({ "fraction": fraction.clamp(0.0, 1.0), "collapsed": collapsed }),
     )
 }
 
