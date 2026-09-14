@@ -929,6 +929,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 4,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 10,
@@ -981,6 +982,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 2,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 5,
@@ -1013,6 +1015,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 3,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 5,
@@ -1060,6 +1063,7 @@ mod tests {
                 RosterStatusResult {
                     rows: Vec::new(),
                     read_revision: 1,
+                    read_at_ms: 0,
                     unknown_events: Vec::new(),
                 },
                 1,
