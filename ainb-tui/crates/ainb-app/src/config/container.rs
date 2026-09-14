@@ -43,7 +43,7 @@ pub struct ContainerTemplateConfig {
     pub entrypoint: Option<Vec<String>>,
 
     /// Environment variables
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::wire::fields::env_values_in_frame")]
     pub environment: HashMap<String, String>,
 
     /// User to run as (optional)
