@@ -57,6 +57,8 @@ pub struct DaemonStartCta {
     /// the pane reopens on the next outage still showing the tick from the
     /// last one.
     last_seen_down: Option<bool>,
+    /// The generation of the start that is out, so only its report ends it.
+    generation: Option<u64>,
 }
 
 impl DaemonStartCta {
@@ -71,10 +73,11 @@ impl DaemonStartCta {
     /// Returns `true` when anything changed, so the caller marks the frame
     /// dirty without diffing the pane. A report with no start out (the
     /// Daemons screen's own start of the same daemon) changes nothing.
-    pub fn finish(&mut self, outcome: &ActionOutcome) -> bool {
-        if self.status != CtaStatus::Starting {
+    pub fn finish(&mut self, generation: u64, outcome: &ActionOutcome) -> bool {
+        if self.status != CtaStatus::Starting || self.generation != Some(generation) {
             return false;
         }
+        self.generation = None;
         // The LAST non-empty line of everything the command said, which is the
         // same line the Daemons screen badges a row with. The full transcript
         // is in that screen's error view; repeating it inside a chat pane would
@@ -137,11 +140,12 @@ impl DaemonStartCta {
     /// first one is mid-way through taking. The host reports every start it
     /// runs, including one that could not be spawned, so the pane never stays
     /// on `starting…`.
-    pub fn start(&mut self) -> bool {
+    pub fn start(&mut self, generation: u64) -> bool {
         if self.status == CtaStatus::Starting {
             return false;
         }
         self.status = CtaStatus::Starting;
+        self.generation = Some(generation);
         true
     }
 }
@@ -167,12 +171,16 @@ mod tests {
         let mut cta = DaemonStartCta::default();
         assert_eq!(cta.status(), &CtaStatus::Offered);
         assert!(
-            !cta.finish(&outcome(true, "started", "cmd: …")),
+            !cta.finish(1, &outcome(true, "started", "cmd: …")),
             "a report nobody here asked for must not dirty the frame"
         );
         assert_eq!(cta.status(), &CtaStatus::Offered);
-        assert!(cta.start(), "the first press queues the start");
-        assert!(!cta.start(), "a second press while it is out does not");
+        assert!(cta.start(1), "the first press queues the start");
+        assert!(!cta.start(2), "a second press while it is out does not");
+        assert!(
+            !cta.finish(2, &outcome(true, "started", "cmd: …")),
+            "a report for a start it did not queue does not end the one that is out"
+        );
     }
 
     /// A start that failed reports the command's OWN closing line. A start that
@@ -181,8 +189,8 @@ mod tests {
     #[test]
     fn a_landed_start_reports_what_the_command_said() {
         let mut cta = DaemonStartCta::default();
-        cta.start();
-        assert!(cta.finish(&outcome(
+        cta.start(1);
+        assert!(cta.finish(1, &outcome(
             false,
             "start failed",
             "cmd: ainb daemon hangar-daemon start\nexit: exit status: 1\n\nstderr:\nrefusing to \
@@ -198,8 +206,8 @@ mod tests {
         );
 
         let mut cta = DaemonStartCta::default();
-        cta.start();
-        assert!(cta.finish(&outcome(true, "already running (pid 4242)", "cmd: …")));
+        cta.start(1);
+        assert!(cta.finish(1, &outcome(true, "already running (pid 4242)", "cmd: …")));
         assert_eq!(
             cta.status(),
             &CtaStatus::Reported {
@@ -223,8 +231,8 @@ mod tests {
             !cta.observe_daemon(true),
             "the first look reports no change"
         );
-        cta.start();
-        cta.finish(&outcome(true, "already running (pid 4242)", "cmd: …"));
+        cta.start(1);
+        cta.finish(1, &outcome(true, "already running (pid 4242)", "cmd: …"));
         assert!(matches!(cta.status(), CtaStatus::Reported { ok: true, .. }));
 
         // The daemon comes up, then goes down again: the pane reopens on a
