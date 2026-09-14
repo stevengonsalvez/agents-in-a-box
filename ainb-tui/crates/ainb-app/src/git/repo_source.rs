@@ -24,7 +24,7 @@ pub enum RepoSource {
     /// Unparseable input — pass through to the fuzzy filter on the picker list.
     /// New-session screen 1 (smart-parse v2) sink variant; never produced by
     /// the legacy `from_input` parser.
-    Filter(String),
+    Filter(#[serde(serialize_with = "crate::wire::fields::char_count")] String),
 }
 
 /// Parsed repository components for cache path generation
