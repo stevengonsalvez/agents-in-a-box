@@ -763,7 +763,29 @@ mod picker_local_paths_tests {
     }
 }
 
+/// The reducer: resolves input to the crate's event enum and applies it.
+///
+/// Crate-private outside the `test-support` feature, like that enum. Hosts
+/// drive it through [`crate::app::dispatch`] and the free functions below.
 pub struct EventHandler;
+
+/// Whether keys go to a free-form text field, so a host must not read a
+/// printable key as a shortcut of its own (the slash palette's `:`).
+pub fn is_in_text_input_context(state: &AppState) -> bool {
+    EventHandler::is_in_text_input_context(state)
+}
+
+/// Whether a Skill Manager overlay covers its panels, so a pointer press must
+/// not reach the panels underneath.
+pub fn skill_manager_overlay_open(state: &AppState) -> bool {
+    EventHandler::skill_manager_overlay_open(state)
+}
+
+/// The intent a slash-palette command name runs, or `None` when the host maps
+/// no command to it.
+pub fn slash_command_intent(cmd: &str) -> Option<Intent> {
+    EventHandler::slash_command_intent(cmd)
+}
 
 /// Whether Esc-ing out of Configure should write this repo into
 /// `SessionDefaults::per_repo` at all.
