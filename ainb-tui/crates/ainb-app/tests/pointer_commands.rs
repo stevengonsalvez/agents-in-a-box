@@ -1,0 +1,156 @@
+// ABOUTME: Pointer commands live in the one keymap registry, take their
+// payloads through `KeyAction::with_args`, and name what was hit by identity,
+// so a click resolved against an older frame never acts on the wrong row.
+
+use ainb_app::app::NoRenderer;
+use ainb_app::app::pointer::{self, ids};
+use ainb_app::app::screens::ids as screen_ids;
+use ainb_app::app::state::SessionListRowId;
+use ainb_app::models::{Session, Workspace};
+use ainb_app::{AppState, CommandId, Intent, Keymap, SectionId, dispatch};
+
+fn bumped(before: &[u64], after: &[u64]) -> Vec<SectionId> {
+    SectionId::ALL
+        .into_iter()
+        .filter(|id| before[id.index()] != after[id.index()])
+        .collect()
+}
+
+#[test]
+fn every_pointer_command_is_an_unbound_row_in_the_one_registry() {
+    let keymap = Keymap::defaults();
+    let listed: Vec<String> = keymap.commands().map(|(id, _)| id.to_string()).collect();
+    for id in ids::ALL {
+        assert!(
+            listed.iter().any(|candidate| candidate == id),
+            "{id} is not listed"
+        );
+        let row = keymap.command(&CommandId::new(*id)).expect("row resolves");
+        assert!(row.chord.is_none(), "{id} has a key");
+    }
+    let unbound: Vec<&String> = listed
+        .iter()
+        .filter(|id| {
+            keymap
+                .command(&CommandId::new(id.as_str()))
+                .is_some_and(|row| row.chord.is_none())
+        })
+        .collect();
+    assert_eq!(
+        unbound.len(),
+        ids::ALL.len(),
+        "only pointer commands are unbound"
+    );
+}
+
+#[test]
+fn a_pointer_command_run_without_its_payload_changes_nothing() {
+    let keymap = Keymap::defaults();
+    for id in ids::ALL {
+        let row = keymap.command(&CommandId::new(*id)).expect("row resolves");
+        if row.action.with_args(&serde_json::Value::Null).is_some() {
+            // The two rows that take no payload.
+            assert!(
+                [
+                    ids::SKILL_MANAGER_ALL_SOURCES,
+                    ids::HOME_BEGIN_SIDEBAR_RESIZE
+                ]
+                .contains(id),
+                "{id} runs bare"
+            );
+            continue;
+        }
+        let mut state = AppState::new();
+        state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+        let before = state.versions();
+        let effects = dispatch(
+            &mut state,
+            &keymap,
+            &mut NoRenderer,
+            Intent::Command(CommandId::new(*id), serde_json::Value::Null),
+        );
+        assert!(effects.is_empty(), "{id}");
+        assert!(bumped(&before, &state.versions()).is_empty(), "{id}");
+    }
+}
+
+/// A list of two workspaces, one session each, with nothing selected.
+fn two_workspaces() -> AppState {
+    let mut state = AppState::new();
+    state.shell.current_screen = screen_ids::SESSION_LIST.to_string();
+    let mut first = Workspace::new("api".to_string(), "/parity/api".into());
+    first.add_session(Session::new(
+        "feat-login".to_string(),
+        "/parity/api/wt".to_string(),
+    ));
+    let mut second = Workspace::new("web".to_string(), "/parity/web".into());
+    second.add_session(Session::new(
+        "spike-ssr".to_string(),
+        "/parity/web/wt".to_string(),
+    ));
+    state.sessions.workspaces = vec![first, second];
+    state.sessions.selected_workspace_index = None;
+    state.sessions.selected_session_index = None;
+    state
+}
+
+#[test]
+fn a_click_captured_before_its_workspace_is_removed_selects_nothing() {
+    let keymap = Keymap::defaults();
+    let mut state = two_workspaces();
+    let removed_session = state.sessions.workspaces[0].sessions[0].id;
+    // The frame the user clicked showed feat-login in the first workspace.
+    let click = pointer::select_session_row(&SessionListRowId::Session(removed_session), false);
+
+    // A refresh lands before the click is applied and drops that workspace, so
+    // spike-ssr now sits where feat-login was.
+    state.sessions.workspaces.remove(0);
+    let before = state.versions();
+
+    let effects = dispatch(&mut state, &keymap, &mut NoRenderer, click);
+
+    assert!(effects.is_empty());
+    assert_eq!(
+        state.sessions.selected_workspace_index, None,
+        "no workspace selected"
+    );
+    assert_eq!(
+        state.sessions.selected_session_index, None,
+        "no session selected"
+    );
+    assert!(bumped(&before, &state.versions()).is_empty());
+}
+
+#[test]
+fn a_click_on_a_row_that_moved_selects_that_row_where_it_is_now() {
+    let keymap = Keymap::defaults();
+    let mut state = two_workspaces();
+    let kept_session = state.sessions.workspaces[1].sessions[0].id;
+    let click = pointer::select_session_row(&SessionListRowId::Session(kept_session), false);
+
+    state.sessions.workspaces.remove(0);
+    let _ = dispatch(&mut state, &keymap, &mut NoRenderer, click);
+
+    assert_eq!(state.sessions.selected_workspace_index, Some(0));
+    assert_eq!(state.sessions.selected_session_index, Some(0));
+    assert_eq!(
+        state.sessions.workspaces[0].sessions[0].id, kept_session,
+        "the session the user clicked, not whatever took its old position"
+    );
+}
+
+#[test]
+fn row_identities_round_trip_through_the_list() {
+    let state = two_workspaces();
+    let mut row = 0;
+    while let Some(target) = state.session_list_row_target(row) {
+        let id = state.session_list_row_id(target).expect("every listed row has an identity");
+        assert_eq!(
+            state.session_list_row_target_for(&id),
+            Some(target),
+            "row {row}"
+        );
+        row += 1;
+    }
+    assert!(row > 0, "the fixture lists rows");
+}
