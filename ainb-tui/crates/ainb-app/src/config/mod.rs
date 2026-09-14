@@ -2138,12 +2138,14 @@ impl AppConfig {
         Ok(doc.to_string())
     }
 
-    /// Save configuration to user config directory
-    /// Convert layout widths saved as column counts into fractions of a
-    /// `columns`-wide screen, the surface the user last sized them on.
+    /// Convert layout widths saved as column counts into fractions of
+    /// `columns`, the width of the content row the host draws them in (the
+    /// terminal width for the terminal host).
     ///
     /// One-time: a width that already has a fraction keeps it, and the legacy
     /// count is dropped either way, so the next save writes only fractions.
+    /// The fraction is taken against whichever surface migrates first, so the
+    /// same count converts differently on a narrow and a wide first launch.
     /// Returns whether anything changed.
     pub fn migrate_layout_widths(&mut self, columns: u16) -> bool {
         // A host that measured no width yet (a zero-width first frame) cannot
@@ -2157,28 +2159,24 @@ impl AppConfig {
         // Each width goes through the clamp its panel applies at draw time
         // first, so a count saved in a pane narrower than today's cannot
         // become a fraction the panel would never draw.
-        let clamps: [fn(u16, u16) -> u16; 3] = [
-            crate::components::sidebar::SidebarState::clamp_width,
-            crate::app::state::clamp_sessions_sidebar_width,
-            crate::components::skill_manager_screen::clamp_sources_width,
-        ];
-        for ((legacy, fraction), clamp) in [
+        let migrations: [(&mut Option<u16>, &mut Option<f64>, fn(u16, u16) -> u16); 3] = [
             (
                 &mut prefs.home_sidebar_width,
                 &mut prefs.home_sidebar_fraction,
+                crate::components::sidebar::SidebarState::clamp_width,
             ),
             (
                 &mut prefs.sessions_sidebar_width,
                 &mut prefs.sessions_sidebar_fraction,
+                crate::app::state::clamp_sessions_sidebar_width,
             ),
             (
                 &mut prefs.skill_manager_sources_width,
                 &mut prefs.skill_manager_sources_fraction,
+                crate::components::skill_manager_screen::clamp_sources_width,
             ),
-        ]
-        .into_iter()
-        .zip(clamps)
-        {
+        ];
+        for (legacy, fraction, clamp) in migrations {
             if let Some(width) = legacy.take() {
                 changed = true;
                 let width = clamp(width, columns);
