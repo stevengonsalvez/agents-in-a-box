@@ -32,6 +32,53 @@ pub enum SidebarItem {
 }
 
 impl SidebarItem {
+    /// The item's stable name in pointer and palette payloads.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Sessions => "sessions",
+            Self::Daemons => "daemons",
+            Self::Recovery => "recovery",
+            Self::Mcp => "mcp",
+            Self::Logs => "logs",
+            Self::Stats => "stats",
+            Self::Witr => "witr",
+            Self::Abtop => "abtop",
+            Self::Skills => "skills",
+            Self::SkillManager => "skill_manager",
+            Self::Hangar => "hangar",
+            Self::Memory => "memory",
+            Self::Changelog => "changelog",
+            Self::Setup => "setup",
+            Self::Help => "help",
+        }
+    }
+
+    /// The item [`Self::id`] names.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "config" => Self::Config,
+            "sessions" => Self::Sessions,
+            "daemons" => Self::Daemons,
+            "recovery" => Self::Recovery,
+            "mcp" => Self::Mcp,
+            "logs" => Self::Logs,
+            "stats" => Self::Stats,
+            "witr" => Self::Witr,
+            "abtop" => Self::Abtop,
+            "skills" => Self::Skills,
+            "skill_manager" => Self::SkillManager,
+            "hangar" => Self::Hangar,
+            "memory" => Self::Memory,
+            "changelog" => Self::Changelog,
+            "setup" => Self::Setup,
+            "help" => Self::Help,
+            _ => return None,
+        })
+    }
+
     /// Get the display icon for this item (emoji)
     pub fn icon(&self) -> &'static str {
         match self {
@@ -253,4 +300,17 @@ pub fn item_index_at(area: Area, y: u16, selected_index: usize) -> Option<usize>
         row = row.saturating_add(height);
     }
     None
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::SidebarItem;
+
+    #[test]
+    fn every_sidebar_item_round_trips_through_its_id() {
+        for item in SidebarItem::all() {
+            assert_eq!(SidebarItem::from_id(item.id()), Some(*item));
+        }
+        assert_eq!(SidebarItem::from_id("nope"), None);
+    }
 }
