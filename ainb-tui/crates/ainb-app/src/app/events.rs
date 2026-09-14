@@ -5608,9 +5608,11 @@ impl EventHandler {
                     None => return,
                 }
                 let outcome = install_statusline();
-                // settings.json may just have changed; drop the cache so every
-                // host's CTA flips on its very next frame.
+                // settings.json may just have changed; drop the cache and copy
+                // the fresh answer into its section so every host's CTA flips
+                // on its very next frame.
                 state.invalidate_statusline_status();
+                state.refresh_statusline();
                 match outcome {
                     Ok(InstallOutcome::Installed) => {
                         state.config.app_config.ui_preferences.statusline_decision =
