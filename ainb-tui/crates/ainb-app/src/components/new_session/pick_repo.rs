@@ -47,9 +47,11 @@ pub struct PickRepoRow {
 /// by the async clone driver in Phase 5+.
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct CloneProgress {
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub url: String,
     pub bytes_done: u64,
     pub bytes_total: u64,
+    #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
     pub error: Option<String>,
 }
 
