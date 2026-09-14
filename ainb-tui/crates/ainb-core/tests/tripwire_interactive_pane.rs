@@ -409,7 +409,7 @@ fn mode_boundary_holds_for_mouse_and_palette_keys_until_release() {
     // Next frame re-lays-out the normal split; (80,10) sits in the preview
     // pane, so a click there must move focus to LiveLogs.
     draw_frame(&mut term, &mut layout, &mut state, &mut ui);
-    ainb::dispatch(
+    let _ = ainb::dispatch(
         &mut state,
         &ainb::Keymap::defaults(),
         &mut ui,
