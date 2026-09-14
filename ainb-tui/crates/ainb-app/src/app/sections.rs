@@ -910,9 +910,10 @@ pub type BranchRefreshPayload = (
 /// handles, worker liveness flags, the handles background workers write
 /// through, and the timers that pace the tick.
 ///
-/// Deliberately not a section. None of it is something a renderer draws and
-/// none of it can cross to another process, so writing it bumps no version and
-/// no frame carries it.
+/// Deliberately not a section: none of it crosses to another process, so
+/// writing it bumps no version and no frame carries it. The terminal host still
+/// draws three of its handles until D1, listed in `HOST_STATE_READS` in
+/// `tests/host_side_effects.rs`.
 #[derive(Debug)]
 pub struct HostOnlyState {
     // Tmux integration
