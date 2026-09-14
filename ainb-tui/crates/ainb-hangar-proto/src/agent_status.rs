@@ -438,7 +438,7 @@ pub fn status_row_with_tier(
     }
 }
 
-fn wait_kind_of(attention: AttentionState) -> Option<WaitKind> {
+const fn wait_kind_of(attention: AttentionState) -> Option<WaitKind> {
     match attention {
         AttentionState::Ask => Some(WaitKind::Ask),
         AttentionState::Approval => Some(WaitKind::Approval),
