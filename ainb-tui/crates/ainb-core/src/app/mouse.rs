@@ -92,7 +92,9 @@ pub fn press(state: &AppState, ui: &mut UiState, pos: Pos, btn: Btn) -> Option<I
             if state.shell.current_screen != screen_ids::SESSION_LIST || state.shell.help_visible {
                 return None;
             }
-            ui.sessions_pane.row_index_at(x, y).map(pointer::open_session_row_menu)
+            let target = state.session_list_row_target(ui.sessions_pane.row_index_at(x, y)?)?;
+            let id = state.session_list_row_id(target)?;
+            Some(pointer::open_session_row_menu(&id))
         }
         Btn::Middle => None,
     }
@@ -104,7 +106,10 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
         if home.is_on_sidebar_edge(x, y) {
             return Some(pointer::begin_home_sidebar_resize());
         }
-        return home.sidebar_item_index_at(x, y).map(pointer::click_home_sidebar_item);
+        return home
+            .sidebar_item_index_at(x, y)
+            .and_then(|index| crate::components::sidebar::SidebarItem::all().get(index).copied())
+            .map(pointer::click_home_sidebar_item);
     }
 
     // SkillManager: divider-drag-resize + click-to-select on
@@ -137,8 +142,8 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
                 return Some(pointer::all_skill_sources());
             }
             let index = usize::from(row.saturating_sub(1));
-            if index < state.skills.skill_manager_state.sources.len() {
-                return Some(pointer::select_skill_source(index));
+            if let Some(source) = state.skills.skill_manager_state.sources.get(index) {
+                return Some(pointer::select_skill_source(&source.uri));
             }
             // Empty area inside the panel → just focus it.
             return Some(pointer::focus_skill_pane(
@@ -152,9 +157,12 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
         if point_in_rect(x, y, units_rect) {
             let data_y = sources_rect.y.saturating_add(2);
             if y >= data_y {
+                let skills = &state.skills.skill_manager_state;
                 let position = usize::from(y - data_y);
-                if position < state.skills.skill_manager_state.visible_indices().len() {
-                    return Some(pointer::select_skill_unit(position));
+                if let Some(&index) = skills.visible_indices().get(position) {
+                    return Some(pointer::select_skill_unit(
+                        &skills.units[index].declared_uri,
+                    ));
                 }
             }
             return Some(pointer::focus_skill_pane(
@@ -188,11 +196,12 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
     }
 
     let row = ui.sessions_pane.row_index_at(x, y);
-    if let Some((row, target)) =
-        row.and_then(|row| Some((row, state.session_list_row_target(row)?)))
-    {
+    let hit = row
+        .and_then(|row| state.session_list_row_target(row))
+        .and_then(|target| Some((target, state.session_list_row_id(target)?)));
+    if let Some((target, id)) = hit {
         let open = ui.sessions_pane.record_row_click(target, Instant::now());
-        return Some(pointer::select_session_row(row, open));
+        return Some(pointer::select_session_row(&id, open));
     }
 
     let pane = if ui.sessions_pane.contains_sessions_point(x, y) {
