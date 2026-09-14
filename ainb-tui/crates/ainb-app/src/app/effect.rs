@@ -92,6 +92,7 @@ pub enum Effect {
 /// window id or an exact-match marker, so such a name could reach another
 /// session.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct TmuxSessionName(String);
 
 impl TmuxSessionName {
