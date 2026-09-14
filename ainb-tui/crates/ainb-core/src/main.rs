@@ -561,6 +561,12 @@ async fn run_tui_loop(
             run_effects(leftover, app, &keymap, &mut ui, terminal).await?;
             needs_redraw = true;
         }
+        // Reports from background work (a daemon verb) that finished since the
+        // last iteration.
+        for report in ainb::effect_host::take_deferred_reports() {
+            run_intent(report, app, &keymap, &mut ui, terminal).await?;
+            needs_redraw = true;
+        }
 
         // Drive plugin-owned screens before every paint. Pushes any
         // host-side state into each plugin and drains its painted
