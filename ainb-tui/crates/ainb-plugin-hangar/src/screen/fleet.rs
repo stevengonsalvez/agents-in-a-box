@@ -2974,16 +2974,16 @@ fn operator_state_color(session: &FleetSessionRow) -> Color {
 /// row, or `unverifiable · no status yet` before one has arrived (#962).
 #[must_use]
 pub fn status_line(session: &FleetSessionRow, now_ms: i64) -> String {
-    match &session.status {
-        Some(status) => {
+    session.status.as_ref().map_or_else(
+        || "unverifiable · no status yet".to_string(),
+        |status| {
             let (_, state, provenance, tier, observed) = status.identity_tuple();
             format!(
                 "{state} · {provenance} · tier {tier} · {}",
                 format_age(now_ms, observed)
             )
-        }
-        None => "unverifiable · no status yet".to_string(),
-    }
+        },
+    )
 }
 
 fn attention_color(attention: &str) -> Color {
