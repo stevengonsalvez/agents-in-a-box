@@ -12,7 +12,7 @@ use ainb_fleet_core::types::{
 };
 use ainb_hangar_store::repo::fleet::{
     ApplyFleetEventResult, AttentionProjection, FleetEventRow, FleetRepo, FleetRepoError,
-    FleetSessionPatch, FleetSessionRow, NewFleetEvent, ObservationAuthority,
+    FleetSessionPatch, FleetSessionRow, NewFleetEvent, ObservationAuthority, SupersedeRequest,
 };
 use ainb_hangar_store::repo::fleet_provider_event::{
     FleetProviderEventError, FleetProviderEventRepo, NewFleetProviderEvent,
@@ -507,65 +507,52 @@ pub async fn apply_hook_with_attention(
             ..FleetSessionPatch::default()
         },
     };
-    // The one write. The Fleet event, the session state it reduces to, and the
-    // inbox rows that state implies all reach disk together or not at all.
-    let applied = FleetRepo::apply_event_with_attention(pool, &event, attention.as_ref()).await?;
-    let result = applied.fleet.clone();
-    if !result.duplicate {
-        events.emit_fleet_revision(result.revision);
-    }
-    if let Some(update) = hook_work_update(&observation, session_key.as_str()) {
-        apply_workload_projection(pool, events, &update).await?;
-    }
     // Retirement keys on the RESOLVED binding, never only on the
     // hook-provided target (D14). A correlated binding already names the exact
     // discovered row it came from, so it retires that key directly instead of
     // re-deriving it from a fingerprint the scan may never have recorded.
-    match &binding {
-        // `None` is a RE-confirmed binding: the discovered row it came from was
-        // retired when the decision was first made, so there is nothing left to
-        // supersede and the query would match nothing every time the bound
-        // session emits a hook line.
+    let supersede = match &binding {
         crate::pane_binding::PaneBinding::Correlated {
             legacy_key: Some(legacy_key),
             ..
-        } => {
-            if let Some(revision) = FleetRepo::supersede_session(
-                pool,
-                legacy_key,
-                session_key.as_str(),
-                observation.observed_at,
-            )
-            .await?
-            {
-                events.emit_fleet_revision(revision);
-            }
-        }
+        } => Some(SupersedeRequest::Key {
+            legacy_key: legacy_key.clone(),
+        }),
         // A re-confirmed binding: the discovered row was retired when the
-        // decision was first made, so there is nothing left to supersede.
+        // decision was first made, so there is nothing left to supersede and
+        // the query would match nothing every time the bound session emits.
         crate::pane_binding::PaneBinding::Correlated {
             legacy_key: None, ..
-        } => {}
+        } => None,
         crate::pane_binding::PaneBinding::FromHook { .. } => {
-            if let (Some(target), Some(fingerprint)) =
-                (tmux_target.as_deref(), process_start_fingerprint.as_deref())
-            {
-                retire_correlated_legacy(
-                    pool,
-                    events,
-                    session_key.as_str(),
-                    provider.as_str(),
-                    target,
-                    fingerprint,
-                    observation.observed_at,
-                )
-                .await?;
+            match (tmux_target.as_deref(), process_start_fingerprint.as_deref()) {
+                (Some(target), Some(fingerprint)) => Some(SupersedeRequest::MatchingPane {
+                    provider: provider.as_str().to_string(),
+                    tmux_target: target.to_string(),
+                    process_start_fingerprint: fingerprint.to_string(),
+                }),
+                _ => None,
             }
         }
         // Nothing was attributed, so there is nothing to retire. The discovered
         // pane row stays visible beside the hook row on purpose: suppressing it
         // would hide a live agent rather than admit the binding is missing.
-        crate::pane_binding::PaneBinding::Unbound(_) => {}
+        crate::pane_binding::PaneBinding::Unbound(_) => None,
+    };
+    // The one write. The Fleet event, the session state it reduces to, the
+    // inbox rows that state implies, and the duplicate it retires all reach
+    // disk together or not at all (#962).
+    let applied =
+        FleetRepo::apply_hook_event(pool, &event, attention.as_ref(), supersede.as_ref()).await?;
+    let result = applied.fleet.clone();
+    if !result.duplicate {
+        events.emit_fleet_revision(result.revision);
+    }
+    for revision in &applied.superseded {
+        events.emit_fleet_revision(*revision);
+    }
+    if let Some(update) = hook_work_update(&observation, session_key.as_str()) {
+        apply_workload_projection(pool, events, &update).await?;
     }
     Ok(HookApplyOutcome {
         fleet: result,
@@ -704,36 +691,6 @@ fn hook_work_update(
         event_id: observation.event_id.clone(),
         observed_at: observation.observed_at,
     })
-}
-
-async fn retire_correlated_legacy(
-    pool: &SqlitePool,
-    events: &EventSink,
-    managed_key: &str,
-    provider: &str,
-    tmux_target: &str,
-    process_start_fingerprint: &str,
-    observed_at: i64,
-) -> Result<(), FleetRepoError> {
-    let legacy_keys = sqlx::query_scalar::<_, String>(
-        "SELECT session_key FROM fleet_session WHERE session_key != ? AND provider = ? \
-         AND management_state = 'DEGRADED' AND tmux_target = ? \
-         AND process_start_fingerprint = ? AND visible = 1",
-    )
-    .bind(managed_key)
-    .bind(provider)
-    .bind(tmux_target)
-    .bind(process_start_fingerprint)
-    .fetch_all(pool)
-    .await?;
-    for legacy_key in legacy_keys {
-        if let Some(revision) =
-            FleetRepo::supersede_session(pool, &legacy_key, managed_key, observed_at).await?
-        {
-            events.emit_fleet_revision(revision);
-        }
-    }
-    Ok(())
 }
 
 /// Read one status row per agent: the D14 "one truth" read.
