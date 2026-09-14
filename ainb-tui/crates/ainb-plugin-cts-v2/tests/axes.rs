@@ -713,6 +713,90 @@ fn axis_handle_mouse_forwarded_to_plugin() {
 }
 
 // =====================================================================
+// handle_action: a host asks a plugin to run one of its actions by id, and
+// reads what the action changed from the plugin's `ui.state` topic.
+// =====================================================================
+//
+// `RuntimeHandle::send_action` delivers a `plugin/handle_action`
+// notification with the action id and its JSON payload verbatim. The
+// canary records it and publishes its view on `ui.state`, which the host
+// reads by version without interpreting it.
+
+#[test]
+fn axis_handle_action_forwarded_and_ui_state_read_back() {
+    use ainb_plugin_runtime::topics;
+
+    let (rt, handle) = build_runtime();
+    let mut m = manifest("cts-action-forward");
+    m.provides.cli_namespaces = vec!["action".into()];
+    m.provides.snapshots = vec![topics::UI_STATE.into()];
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-action-forward"));
+    let id = register(&rt, bin, m);
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+    assert!(
+        handle.snapshot_get_versioned(topics::UI_STATE).is_none(),
+        "no view state before any action"
+    );
+
+    let sent = handle.send_action(
+        &id,
+        "board.open_card",
+        serde_json::json!({ "id": "card-7" }),
+    );
+    assert!(sent, "send_action should enqueue for a running plugin");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        if let CliOutcome::Ok(r) = block_cli(&rt, &handle, &id, "action", vec!["last".into()]) {
+            last = String::from_utf8_lossy(&r.stdout).trim().to_string();
+            if last != "none" {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        last, r#"board.open_card {"id":"card-7"}"#,
+        "canary must report the action id and payload verbatim"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut view = None;
+    while std::time::Instant::now() < deadline {
+        view = handle.snapshot_get_versioned(topics::UI_STATE);
+        if view.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (payload, version, publisher) = view.expect("the action published ui.state");
+    assert_eq!(publisher, id, "ui.state is stamped with the publishing plugin");
+    let first: serde_json::Value = serde_json::from_slice(&payload).expect("ui.state is JSON");
+    assert_eq!(first["actions"], 1);
+
+    // A second action moves the version, so a host polling by version sees it.
+    assert!(handle.send_action(&id, "board.close_card", serde_json::Value::Null));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut next = None;
+    while std::time::Instant::now() < deadline {
+        next = handle
+            .snapshot_get_versioned(topics::UI_STATE)
+            .filter(|(_, v, _)| *v > version);
+        if next.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let (payload, _, _) = next.expect("a second action bumps the ui.state version");
+    let second: serde_json::Value = serde_json::from_slice(&payload).expect("ui.state is JSON");
+    assert_eq!(second["actions"], 2);
+    assert_eq!(second["last"], "board.close_card");
+}
+
+// =====================================================================
 // A15: event_stream_subscribe — cap-gated streaming, cancellation,
 //      anti-cheat sentinel verification, restart cleanup
 // =====================================================================
