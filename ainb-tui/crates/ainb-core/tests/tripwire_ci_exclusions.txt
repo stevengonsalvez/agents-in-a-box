@@ -9,6 +9,9 @@ tripwire_new_session_branch_auto_derive         #1023  red on v2 before and afte
 tripwire_new_session_favorite_toggle            #1023  red on v2 before and after #1008 on the lane F box
 tripwire_new_session_modified_badge             #1023  one of two tests red on v2 before and after #1008
 tripwire_new_session_persists_half_typed_prompt #1023  red on v2 before and after #1008 on the lane F box
+tripwire_new_session_custom_unlocks_editing     #1027  red in CI only; green on v2 and this branch on the lane F box
+tripwire_new_session_save_preset                #1027  red in CI only; green on v2 and this branch on the lane F box
+tripwire_new_session_yolo_toggle                #1027  red in CI only; green on v2 and this branch on the lane F box
 tripwire_sessions_answer_daemon_down            #1024  red on v2 before and after #1008 on the lane F box
 tripwire_sessions_answer_daemon_up              #1024  red on v2 before and after #1008 on the lane F box
 tripwire_sessions_approve_unblocks_hook         #1024  red on v2 before and after #1008 on the lane F box
