@@ -27,7 +27,9 @@ pub mod snapshot;
 pub mod state;
 pub mod versioned;
 
-pub use effect::{EditorPath, Effect, TerminalTarget, TmuxSessionName, ToolTerminal};
+pub use effect::{
+    EditorPath, Effect, Persist, Snapshot, TerminalTarget, TmuxSessionName, ToolTerminal,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use events::{AppEvent, EventHandler};
 // The wire sample state opens the Ctrl+K popup through the real reducer.
