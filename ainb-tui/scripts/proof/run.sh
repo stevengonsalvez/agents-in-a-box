@@ -132,7 +132,12 @@ done
 
 # Summaries cover every result directory present, so an --only rerun of one
 # node refreshes its row without dropping the others.
-python3 "$PROOF_DIR/summarize.py" "$PROOF_OUT" "$BINARY_LINE"
+# The checkout the scenarios came from; `+dirty` when it has local changes.
+SOURCE_LINE="$(git -C "$PROOF_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
+if [[ -n "$(git -C "$PROOF_DIR" status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+  SOURCE_LINE+="+dirty"
+fi
+python3 "$PROOF_DIR/summarize.py" "$PROOF_OUT" "$BINARY_LINE" "$SOURCE_LINE"
 status=$?
 
 # Only this run's worlds: a process belongs to it when its environment names a
