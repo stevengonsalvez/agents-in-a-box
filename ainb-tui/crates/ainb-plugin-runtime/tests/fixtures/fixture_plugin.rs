@@ -7,9 +7,12 @@
 //!
 //! - `plugin/init` → reply with name/version echo.
 //! - `plugin/render` → reply with a 1×1 buffer carrying "X" at (0,0).
-//! - `plugin/cli_dispatch` → reply with stdout "ok\n", `exit_code` 0.
-//! - `plugin/handle_event` → notification, just record (host-side test
-//!   asserts via the followup snapshot publish round-trip).
+//! - `plugin/cli_dispatch` → reply with stdout "ok\n", `exit_code` 0. With
+//!   argv `subscribe <topic>` it first sends `host/snapshot/subscribe` for the
+//!   topic (the reply is read and ignored).
+//! - `plugin/handle_event` → notification: recorded on stderr, and a delivery
+//!   for a subscribed (non-`socket:`) topic is re-published verbatim under
+//!   `fixture.received`, so a host test can read back exactly what arrived.
 //! - `host/action/invoke` → reply with payload echo (so the runtime
 //!   test's `invoke_action()` round-trips).
 //! - `plugin/shutdown` → notification; exit 0.
@@ -29,8 +32,8 @@ use std::io::{BufReader, Write};
 use ainb_plugin_protocol::framing::{MAX_BODY_BYTES, encode};
 use ainb_plugin_protocol::methods;
 use ainb_plugin_protocol::params::{
-    ActionInvokeParams, ActionInvokeResult, CliDispatchResult, PluginInitResult, RenderResult,
-    SnapshotPublishParams,
+    ActionInvokeParams, ActionInvokeResult, CliDispatchParams, CliDispatchResult,
+    HandleEventParams, PluginInitResult, RenderResult, SnapshotPublishParams,
 };
 use ainb_plugin_protocol::wire_buffer::{Cell, Coord, WireBuffer};
 use serde_json::{Value, json};
@@ -64,6 +67,11 @@ fn main() {
         let method = v.get("method").and_then(serde_json::Value::as_str).unwrap_or("");
         let params = v.get("params").cloned().unwrap_or(Value::Null);
 
+        // A reply to a request this fixture sent (a subscribe): nothing to do.
+        if method.is_empty() {
+            continue;
+        }
+
         match method {
             methods::PLUGIN_INIT => {
                 if std::env::var("FIXTURE_HANG_ON_INIT").is_ok() {
@@ -90,6 +98,13 @@ fn main() {
                 }
             }
             methods::PLUGIN_CLI_DISPATCH => {
+                if let Ok(dispatch) = serde_json::from_value::<CliDispatchParams>(params.clone()) {
+                    if let [verb, topic] = dispatch.argv.as_slice() {
+                        if verb == "subscribe" {
+                            subscribe(&mut writer, topic);
+                        }
+                    }
+                }
                 if let Some(id) = id {
                     let result = serde_json::to_value(CliDispatchResult {
                         stdout: bytes::Bytes::from_static(b"ok\n"),
@@ -103,6 +118,11 @@ fn main() {
             methods::PLUGIN_HANDLE_EVENT => {
                 // Notification — log to stderr so the host's stderr drain sees it.
                 eprintln!("fixture: handle_event {params}");
+                if let Ok(event) = serde_json::from_value::<HandleEventParams>(params) {
+                    if !event.topic.starts_with("socket:") {
+                        publish_snapshot(&mut writer, "fixture.received", &event.payload);
+                    }
+                }
             }
             methods::PLUGIN_HANDLE_KEY => {
                 // Notification — re-publish the raw params as a
@@ -182,6 +202,18 @@ fn write_value<W: Write>(w: &mut W, v: &Value) {
     if let Err(e) = w.flush() {
         eprintln!("fixture: flush failed: {e}");
     }
+}
+
+/// Ask the host for `topic`'s deliveries. The id is outside the host's own
+/// range; the reply is skipped by the main loop.
+fn subscribe<W: Write>(w: &mut W, topic: &str) {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 900_001,
+        "method": methods::HOST_SNAPSHOT_SUBSCRIBE,
+        "params": { "topic": topic },
+    });
+    write_value(w, &body);
 }
 
 fn publish_snapshot<W: Write>(w: &mut W, topic: &str, payload: &[u8]) {
