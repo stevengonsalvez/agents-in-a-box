@@ -769,6 +769,23 @@ mod daemon_action_tests {
             "a report is handed over once"
         );
     }
+
+    /// A worker that panics holding the queue lock must not cost later
+    /// reports: the next drain recovers the queue and hands them over.
+    #[test]
+    fn a_poisoned_report_queue_still_hands_over_its_reports() {
+        let _ = std::thread::spawn(|| {
+            let _held = super::deferred().1.lock();
+            panic!("worker dies holding the queue");
+        })
+        .join();
+        assert!(super::deferred().1.is_poisoned());
+
+        let report = crate::app::reports::detached();
+        super::deferred().0.send(report.clone()).expect("queue open");
+
+        assert!(take_deferred_reports().contains(&report));
+    }
 }
 
 #[cfg(test)]
