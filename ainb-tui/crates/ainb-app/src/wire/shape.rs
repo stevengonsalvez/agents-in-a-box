@@ -71,9 +71,35 @@ pub fn trace_states(states: &[AppState]) -> trace::Trace {
             all.fields.extend(one.fields);
             all.strings.extend(one.strings);
             all.leaf_paths.extend(one.leaf_paths);
+            frame_envelope_paths(state, id, &mut all.leaf_paths);
         }
     }
     all
+}
+
+/// The frame around a section body, as it is serialised: `frame.section`,
+/// `frame.version`, `frame.epoch`, `frame.host_id` and `frame.daemon_read.*`.
+/// The body's own paths are the section's; a field added to the envelope is a
+/// new field on the mirror wire just the same.
+fn frame_envelope_paths(state: &AppState, id: SectionId, into: &mut BTreeSet<String>) {
+    fn leaves(value: &serde_json::Value, path: &str, into: &mut BTreeSet<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    leaves(child, &format!("{path}.{key}"), into);
+                }
+            }
+            _ => {
+                into.insert(path.to_string());
+            }
+        }
+    }
+    let mut envelope = serde_json::to_value(crate::wire::frame::Frame::new(state, id))
+        .expect("a frame serialises");
+    if let Some(map) = envelope.as_object_mut() {
+        map.remove("body");
+    }
+    leaves(&envelope, "frame", into);
 }
 
 /// The leaf key paths the frames of `states` produce.
