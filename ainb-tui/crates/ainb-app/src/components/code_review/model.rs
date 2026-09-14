@@ -6,7 +6,7 @@ use crate::components::git_view::GitFileStatus;
 
 /// A full review of working-directory (or commit) changes: every changed file
 /// with its structured hunks, ready to flatten into a scrollable row list.
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct ReviewModel {
     /// Changed files, sorted by path.
     pub files: Vec<ReviewFile>,
@@ -25,7 +25,7 @@ impl ReviewModel {
 }
 
 /// One changed file and its hunks.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct ReviewFile {
     /// Repo-relative path.
     pub path: String,
@@ -45,11 +45,12 @@ pub struct ReviewFile {
     pub hunks: Vec<Hunk>,
     /// The new-side file content split into lines, used to reveal context lines
     /// when the user expands a collapsed gap. Empty for binary/deleted files.
+    #[serde(skip)]
     pub new_lines: Vec<String>,
 }
 
 /// A contiguous run of changed + surrounding-context lines.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct Hunk {
     /// 1-based first old (pre-image) line number in this hunk; 0 if none.
     pub old_start: usize,
@@ -70,7 +71,7 @@ pub struct Hunk {
 }
 
 /// Whether a row is unchanged context, an addition, or a removal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowKind {
     /// Unchanged line shown for context.
     Context,
@@ -81,7 +82,7 @@ pub enum RowKind {
 }
 
 /// A single diff line with its line numbers, text, and word-emphasis ranges.
-#[derive(Debug, Clone)]
+#[derive(serde::Serialize, Debug, Clone)]
 pub struct DiffRow {
     /// Context / Added / Removed.
     pub kind: RowKind,
@@ -90,6 +91,7 @@ pub struct DiffRow {
     /// 1-based new line number, or `None` for removed rows.
     pub new_lineno: Option<usize>,
     /// Full line text with the trailing newline stripped (no diff marker).
+    #[serde(serialize_with = "crate::wire::fields::scrub_str")]
     pub raw: String,
     /// Byte ranges within `raw` that changed at the word level (brighter
     /// highlight).
