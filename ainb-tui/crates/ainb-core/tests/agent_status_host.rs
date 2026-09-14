@@ -92,9 +92,10 @@ async fn the_host_task_fills_section_20_and_follows_each_revision() {
     let (store, sink, socket, token) = start_daemon(home.path()).await;
     hook(&store, &sink, "e-start", "SessionStart", 1_700_000_000_000).await;
 
-    let mut host = AgentStatusHost::spawn(Box::new(move || {
-        Ok(DaemonClient::with_parts(socket.clone(), token.clone()))
-    }));
+    let mut host = AgentStatusHost::spawn(
+        Box::new(move || Ok(DaemonClient::with_parts(socket.clone(), token.clone()))),
+        false,
+    );
     let mut state = AppState::default();
     wait_for(&mut host, &mut state, "the first joined read", |state| {
         state
