@@ -18,7 +18,7 @@ use uuid::Uuid;
 /// detached, a login wrote credentials, a tool was missing) comes back as a
 /// report intent from [`crate::app::reports`], which the host dispatches like
 /// any other; the reducer turns it into state and notices.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Give the user a live terminal on `target`.
     ///
@@ -82,6 +82,63 @@ pub enum Effect {
         action_id: String,
         payload: serde_json::Value,
     },
+    /// Write a store the step just changed, as it stood when the effect was
+    /// queued.
+    ///
+    /// The reducer never writes to disk, so `dispatch` never waits on it.
+    /// Terminal host: writes the store with [`crate::config::persist::write`]
+    /// once the step that queued it has finished, in the order the writes were
+    /// queued, and reports a failure with
+    /// [`crate::app::reports::persist_failed`] naming the store; a write that
+    /// lands says nothing. Desktop host: the same writes to the same files.
+    Persist(Persist),
+}
+
+/// A store an [`Effect::Persist`] writes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Persist {
+    /// The user config, `config.toml`, whole.
+    AppConfig(Snapshot<crate::config::AppConfig>),
+    /// The repository favourites, whole.
+    Favorites(Snapshot<crate::config::FavoritesStore>),
+    /// The durable session labels, whole.
+    SessionLabels(Snapshot<crate::config::SessionLabelStore>),
+    /// The onboarding record, whole.
+    Onboarding(Snapshot<crate::config::OnboardingConfig>),
+    /// The onboarding record's git directories, set on the record on disk so
+    /// the rest of it is kept.
+    OnboardingGitDirectories(Vec<PathBuf>),
+    /// The Claude auth provider, set on the user config on disk so the rest
+    /// of the file is kept.
+    ClaudeAuthProvider(crate::config::ClaudeAuthProvider),
+    /// One session's Headroom switch in the interactive session store, set
+    /// under the store's lock.
+    SessionHeadroom { tmux_session: String, enabled: bool },
+}
+
+impl Persist {
+    /// What a notice calls the store.
+    #[must_use]
+    pub const fn store(&self) -> &'static str {
+        match self {
+            Self::AppConfig(_) | Self::ClaudeAuthProvider(_) => "settings",
+            Self::Favorites(_) => "favorites",
+            Self::SessionLabels(_) => "session labels",
+            Self::Onboarding(_) | Self::OnboardingGitDirectories(_) => "onboarding",
+            Self::SessionHeadroom { .. } => "session store",
+        }
+    }
+}
+
+/// A store's contents as they stood when an effect was queued. The stores do
+/// not implement equality, so two snapshots compare by their serialised form.
+#[derive(Debug, Clone)]
+pub struct Snapshot<T>(pub T);
+
+impl<T: serde::Serialize> PartialEq for Snapshot<T> {
+    fn eq(&self, other: &Self) -> bool {
+        serde_json::to_value(&self.0).ok() == serde_json::to_value(&other.0).ok()
+    }
 }
 
 /// A tmux session name an effect can target.
