@@ -61,7 +61,97 @@ async fn attach(
             workspace_index,
             target_dir,
         } => attach_workspace_shell(app, terminal, workspace_index, target_dir).await,
+        TerminalTarget::ClaudeLogin { auth_dir, image } => {
+            claude_login(app, terminal, &auth_dir, &image)
+        }
     }
+}
+
+/// Leave every input mode the TUI set up at startup (raw mode, the alternate
+/// screen, mouse capture, bracketed paste), so a child sees a plain tty.
+fn release_terminal() -> std::io::Result<()> {
+    use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
+    use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
+    disable_raw_mode()?;
+    crossterm::execute!(
+        std::io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    )
+}
+
+/// Restore the input modes [`release_terminal`] left. Without mouse capture
+/// and bracketed paste, mouse events stop arriving after the child returns.
+fn reclaim_terminal() -> std::io::Result<()> {
+    use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
+    use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+    enable_raw_mode()?;
+    crossterm::execute!(
+        std::io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+}
+
+/// The Claude OAuth login in `image`, on the plain tty.
+fn claude_login(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    auth_dir: &std::path::Path,
+    image: &str,
+) -> Result<()> {
+    info!("Exiting TUI to run interactive authentication");
+    release_terminal()?;
+
+    println!("\n🔐 Claude Authentication Setup\n");
+    println!("This will guide you through the OAuth authentication process.");
+    println!("You'll be prompted to open a URL in your browser to complete authentication.\n");
+
+    // Inherit stdin/stdout/stderr so the container gets the real TTY.
+    let exited_ok = std::process::Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-it",
+            "-v",
+            &format!("{}:/home/claude-user/.claude", auth_dir.display()),
+            "-e",
+            "PATH=/home/claude-user/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "-e",
+            "HOME=/home/claude-user",
+            "-e",
+            "AUTH_METHOD=oauth",
+            "-w",
+            "/home/claude-user",
+            "--user",
+            "claude-user",
+            "--entrypoint",
+            "bash",
+            image,
+            "-c",
+            "/app/scripts/auth-setup.sh",
+        ])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map_err(|e| error!("Failed to start the authentication container: {}", e))
+        .is_ok_and(|status| status.success());
+
+    if app.state.finish_oauth_login(auth_dir, exited_ok) {
+        println!("\n✅ Authentication successful!");
+        println!("Press Enter to continue...");
+    } else {
+        println!("\n❌ Authentication failed!");
+        println!("Press Enter to return to the authentication menu...");
+    }
+    let _ = std::io::stdin().read_line(&mut String::new());
+
+    reclaim_terminal()?;
+    terminal.clear()?;
+    Ok(())
 }
 
 /// The selected row, writable in the preview pane.
