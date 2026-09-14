@@ -71,3 +71,4 @@ fleet.dashboard.read
 hangar.attention.fence
 fleet.status.read
 hangar.connections.transient
+fleet.roster_status.read
