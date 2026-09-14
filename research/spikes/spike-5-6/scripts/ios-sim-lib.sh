@@ -17,6 +17,22 @@ act() {
     -destination "id=$SIM" -only-testing:"AinbSpikeUITests/Actuator/$test" >>"${ACT_LOG:-/dev/null}" 2>&1
 }
 
+# CoreSimulatorService relaunches under host memory pressure and shuts every
+# booted device down; boot again (no-op when already booted) before each run.
+ensure_booted() { xcrun simctl bootstatus "$SIM" -b >/dev/null; }
+
+# Epoch ms of CoreSimulatorService shutting this device down after $1, or empty.
+service_shutdown_after() {
+  python3 - "$SIM" "$1" <<'EOF'
+import os, re, sys, datetime
+since = int(sys.argv[2]) / 1000
+for line in open(os.path.expanduser("~/Library/Logs/CoreSimulator/CoreSimulator.log"), errors="replace"):
+    if sys.argv[1] in line and "Shutting down" in line:
+        stamp = datetime.datetime.strptime(f"{datetime.date.today().year} {line[:15]}", "%Y %b %d %H:%M:%S").timestamp()
+        if stamp >= since: print(int(stamp * 1000)); break
+EOF
+}
+
 # Newest actuator stamp for an event name, epoch ms.
 last_event() { grep " $1" "$EVENTS" | tail -1 | cut -d' ' -f1; }
 
