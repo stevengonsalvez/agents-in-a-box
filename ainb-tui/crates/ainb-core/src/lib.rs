@@ -6,6 +6,7 @@
 // keeps every `ainb::config::..` and `crate::config::..` path unchanged.
 pub use ainb_app::*;
 
+pub mod agent_status_host;
 pub mod app;
 pub mod cli;
 pub mod components;
