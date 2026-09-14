@@ -21,6 +21,7 @@ use crate::app::{App, Effect, TerminalTarget, ToolTerminal};
 pub async fn execute(
     effect: Effect,
     app: &mut App,
+    keymap: &crate::app::Keymap,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ui: &mut UiState,
 ) -> Result<()> {
@@ -35,6 +36,30 @@ pub async fn execute(
         Effect::OpenEditor(path) => {
             open_editor(app, &path);
             Ok(())
+        }
+        Effect::PasteClipboard => {
+            paste_clipboard(app, keymap, ui);
+            Ok(())
+        }
+    }
+}
+
+/// Read the system clipboard and paste its text as a bracketed paste would.
+///
+/// Effects the paste itself queues go back on the outbox for the run loop's
+/// next drain, so executing one effect never recurses into another.
+fn paste_clipboard(app: &mut App, keymap: &crate::app::Keymap, ui: &mut UiState) {
+    let text = arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text());
+    match text {
+        Ok(text) => {
+            let intent = crate::app::Intent::Text(text);
+            for effect in crate::app::dispatch(&mut app.state, keymap, ui, intent) {
+                app.state.emit(effect);
+            }
+        }
+        Err(e) => {
+            warn!("Clipboard paste failed: {}", e);
+            app.state.add_error_notification(format!("Could not read clipboard: {}", e));
         }
     }
 }
