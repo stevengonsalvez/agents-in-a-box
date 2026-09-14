@@ -15,7 +15,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 /// One section as the renderer holds it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirroredSection {
     pub version: u64,
     pub host_id: HostId,
@@ -54,7 +54,7 @@ pub struct RootSelector {
 
 impl std::fmt::Debug for RootSelector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RootSelector").field("name", &self.name).finish()
+        f.debug_struct("RootSelector").field("name", &self.name).finish_non_exhaustive()
     }
 }
 
@@ -216,9 +216,11 @@ fn count<'a>(values: impl Iterator<Item = &'a serde_json::Value>) -> u64 {
     values.count() as u64
 }
 
-/// The root selectors every renderer shares: the counts and flags a status
-/// bar, a tab badge or a window title draws. Each returns a [`Scalar`], so a
-/// write to one row re-runs a selector once, never a list of row readers.
+/// The root selectors every renderer shares.
+///
+/// The counts and flags a status bar, a tab badge or a window title draws.
+/// Each returns a [`Scalar`], so a write to one row re-runs a selector once,
+/// never a list of row readers.
 pub const ROOT_SELECTORS: &[RootSelector] = &[
     RootSelector {
         name: "session_count",
