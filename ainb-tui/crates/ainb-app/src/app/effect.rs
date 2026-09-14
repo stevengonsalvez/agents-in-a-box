@@ -60,6 +60,16 @@ pub enum TerminalTarget {
         workspace_index: usize,
         target_dir: Option<PathBuf>,
     },
+    /// The Claude OAuth login, run interactively in `image` with `auth_dir`
+    /// mounted as the container user's `~/.claude`.
+    ///
+    /// Terminal host: leaves its screen for a plain tty, runs the image's
+    /// auth script, waits for Enter after it exits, restores its screen and
+    /// reports how the child exited to [`crate::app::AppState::finish_oauth_login`],
+    /// which decides success from the credentials the login wrote. When the
+    /// child cannot start, the host reports it as a failed exit. Desktop host:
+    /// the same command in a terminal window it opens, reported the same way.
+    ClaudeLogin { auth_dir: PathBuf, image: String },
 }
 
 /// Companion tools the host runs in their own tmux session.
