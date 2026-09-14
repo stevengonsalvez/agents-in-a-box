@@ -1339,6 +1339,13 @@ pub fn defaults() -> Vec<Binding> {
             },
             "Run a plugin's own action by id",
         ),
+        // Slash-palette commands that run from any screen.
+        unbound(
+            Context::Global,
+            "open_learnings",
+            AppEvent::GoToLearnings,
+            "Open learnings from the slash palette",
+        ),
         unbound(
             Context::Global,
             "attach_finished",
@@ -1365,9 +1372,30 @@ pub fn defaults() -> Vec<Binding> {
         ),
         unbound(
             Context::Global,
-            "in_place_sized",
-            AppEvent::InPlaceSized { rows: 0, cols: 0 },
-            "Attach the selected row in place at the size the host measured",
+            "in_place_opened",
+            AppEvent::InPlaceOpened {
+                tmux_session: String::new(),
+                embed: crate::app::reports::LocalEmbed::placeholder(),
+            },
+            "Adopt the tmux client the host opened for the in-place pane",
+        ),
+        unbound(
+            Context::Global,
+            "in_place_failed",
+            AppEvent::InPlaceFailed {
+                tmux_session: String::new(),
+                error: String::new(),
+            },
+            "Say why the in-place attach would not open",
+        ),
+        unbound(
+            Context::Global,
+            "plugin_action_undelivered",
+            AppEvent::PluginActionUndelivered {
+                plugin: String::new(),
+                action_id: String::new(),
+            },
+            "Say that a plugin action found no running plugin",
         ),
         unbound(
             Context::Global,
