@@ -1,0 +1,45 @@
+# /goal P5 closes slice 2: the host owns the terminal client, every reducer write to disk goes through a persistence effect, the runtime handle leaves AppState, the in-place attach has a desktop story, the command gate matches the key gate, and the tripwire ratchet closes both ways, so D1 can start from a host contract a second renderer can implement from the docs alone
+
+— CONTEXT —
+· Project: agents-in-a-box (ainb) desktop programme, slice 2 node P2-P5 (`docs/plans/2026-09-12-desktop-programme.md`), last of the four staged PRs under `docs/plans/goals/2026-09-13-p2-p5-effects-and-hosts.md` (P5 section plus the deferrals recorded in P3 and P4). Issue #1035 carries the nine criteria from the P4 design review; items 1 to 4 block D1 (desktop shell). Spec: `docs/plans/2026-09-11-multi-surface-decisions-spec.md` D15 (renderer contract) and the Effect row as amended by P2, P3 and P4.
+· Stack: Rust workspace under `ainb-tui/`; `ainb-app` (reducers, `Effect` outbox, report intents, `app/effect.rs` validating newtypes `TmuxSessionName` and `EditorPath`, `app/reports.rs` with `LocalEmbed` and the process-global embed registry, `tmux/embed_client.rs`, `plugins_host.plugin_runtime`, `watched_plugin_screens`), `ainb-core` (`effect_host.rs` executor `execute(effect, terminal, ui, plugins)`, `main.rs` run loop, tripwires under `tests/`), `ainb-plugin-runtime` (snapshot store with `remove`, per-plugin `ui.state/<plugin>` topics), CI `ci.yml` job `ainb-core tripwires (ubuntu-latest)` with `tests/tripwire_ci_exclusions.txt` and `ci_tripwire_exclusions.rs`; `ainb-app/tests/host_side_effects.rs` fence (`REACHABLE_TODAY` still names `portable-pty`).
+· Current state: `v2` after P4 (#1021): reducers perform no side effect except the preview PTY the fence still allows; the executor takes no `&AppState`; `ui.state` is per plugin with eviction, a size cap and lease-renewed screen watches; `Intent::Command` is gated by screen context with `Context::Global` split from host-authored report ids; `AppState.tmux.embed` still holds an `EmbedClient` and `LocalEmbed` parks live PTY clients in a process-global map (a second host gets a silent no-op on `in_place_opened`); `app_config.save()` and the other stores (`favorites_store`, `session_label_store`, session meta, onboarding config) are still written from reducer arms (8 in `events.rs`, 6 in `state.rs`); `plugins_host.plugin_runtime` is a runtime handle inside `AppState`; `watch_screen` carries no viewport; the tripwire ratchet is per binary with a ratio SKIP guard; 14 tripwires are red with no verdict (#1023, #1024, #1025, #1027, #1028); `sessions_sidebar_width` is still a column count. Lane C is on #1031 (section 20 single owner, touches `main.rs` and the hangar plugin) and lane K on W0-mirror (`ainb-app/src/wire/*`, frames and subscription); rebase daily and name shared files.
+· Working dir: the Orca worktree this session was launched in (`p1-ainb-app` on claude-hetzner), branch `stevengonsalvez/p5-hosts` from `origin/v2` after a `cargo clean` (this box has 150 GB and 15 GB RAM shared with other sessions: build with `-j 4` and `CARGO_INCREMENTAL=0`, one test invocation at a time, push after every commit).
+· Constraints: PRs target `v2`, staged as needed (host-owned client and in-place story; persistence effect; runtime handle and viewport; gate parity and tripwire ratchet), one file per commit, GPG-signed with `git -c gpg.format=openpgp -c user.signingkey=907EC78C72C6AFF6 commit -S`, no attribution trailers, `cargo fmt --all -- --check` in the pre-push gate; no em-dashes on lines you author; never touch `ainb-core/src/app/*`; the fence in `ainb-app/tests/host_side_effects.rs` shrinks (drop `portable-pty` from `REACHABLE_TODAY`) and never grows; no `Serialize` added to any section outside the `wire/` seam and every newly serialised field triaged against the key-path fixture; the executor stays free of `&AppState`; every effect that changes state reports through a named intent; the persistence effect runs after the store commit and a source guard in the `CALL_SITES` style asserts no `.save()` on a reducer-reachable path; parity snapshots byte-identical or changed in their own commit with the reason; keymap golden and CLI reference regenerated in their own commits; gates: `cargo test -p ainb-app --features test-support -p ainb-core -p ainb-plugin-runtime`, `cargo clippy --workspace -- -D warnings`, the sessions and review tripwires green in CI; update the P2-P5 row in the programme doc in the PR that flips it and record every decision in the goal doc.
+· Audience: the D1 desktop shell lane, which starts from this contract; W0-mirror (lane K) which carries the frames; the security reviewer who checks the command gate and the client ownership; and Stevie.
+
+— SUCCESS CRITERIA (ALL MUST BE TRUE) —
+1. The host owns the terminal client and the in-place attach has a story: `AppState.tmux.embed` holds only `embed_session: Option<TmuxSessionName>` plus focus, the host keeps the `EmbedClient`, `LocalEmbed` and the process-global registry are deleted, `enter_interactive_pane` and `sync_terminal_observer` leave `AppState`, `portable-pty` leaves `REACHABLE_TODAY`, `tripwire_interactive_pane` drives the effect and the report; and either the `in_place_opened` report is portable to a second host (a headless test host adopts and releases it) or the effect doc and the programme doc state in one line that `TerminalTarget::InPlace` is terminal-host-only and name what D1 does instead, with a test that a foreign host gets an explicit `in_place_unsupported` report rather than a silent no-op.
+2. Persistence and the runtime handle: every reducer write to disk (`app_config`, `favorites_store`, `session_label_store`, session meta, onboarding config) goes through one persistence effect the host runs after the store commit, with a source guard asserting no `.save()` on a reducer-reachable path and a test that a failed write surfaces as a report and never blocks `dispatch`; `plugins_host.plugin_runtime` moves to the host and `main.rs` passes its own handle (or `effect_host.rs` names the divergence D1 inherits); `watch_screen` carries `{screen, watching, width, height}` with the largest requested size winning across hosts and the tick's fallback size no longer hardcoded; `sessions_sidebar_width` becomes a fraction of its row with the same one-time migration `home_sidebar_width` got.
+3. Gate parity and the ratchet: `Intent::Command` resolves through the same precedence the key path uses so an overlay or a confirm dialog blocks a screen-scoped command (test: `git_view.scroll` with a confirmation dialog open changes nothing), and the decision whether `HostFlags` moves into `AppState` or intents carry it is written in the goal doc; the tripwire ratchet is per test, a scheduled job runs only the excluded set and warns when one goes green, the SKIP guard asserts the expected skip set rather than a ratio; each of the 14 red tripwires has a one-sentence verdict (test rot or product bug, with evidence) on its issue; the mirror granularity decision (diff by key path or by section) is written in the goal doc and agreed with lane K; the P2-P5 row flips to done with the run ids.
+4. Final deliverable runs without errors
+5. You can show proof (screenshot · test output · URL)
+
+— OPERATING RULES — NON-NEGOTIABLE —
+1. PLAN FIRST. Output a numbered task list before writing any code.
+2. WORK AUTONOMOUSLY. Don't ask clarifying Qs unless genuinely blocked.
+3. SELF-VERIFY. After every step: run tests, inspect output, confirm it worked.
+4. DEBUG YOURSELF. If it fails, diagnose + fix. Don't hand it back.
+5. USE EVERY TOOL. MCPs · terminal · web · code exec · pull real data.
+6. NO PLACEHOLDERS. No TODOs · no stubs · real components + real states.
+7. PROGRESS LOG. Track completed · in-flight · decisions · blockers.
+8. STAY ON GOAL. Discoveries off-spec? Note + keep moving.
+9. IF BLOCKED. Log the wall · continue everything parallelizable.
+10. CHECK SUCCESS BEFORE STOPPING. Re-read criteria · confirm each is met.
+
+— QUALITY BAR —
+· Code: clean, typed, follows project conventions
+· Design: looks like a well-funded startup shipped it
+· Output: survives a senior code review
+· Docs: every new pattern / env var / decision logged
+
+— FINAL DELIVERABLE —
+✅ Confirmation each criterion is satisfied
+📂 Every file created / modified
+🚀 How to run / test / deploy
+📊 Proof (screenshot · test output · URL)
+📝 Decisions made + anything to know
+⚠️ Known limitations + follow-ups
+
+Begin by outputting your plan. Then execute end-to-end without checking
+in until done or genuinely blocked.
