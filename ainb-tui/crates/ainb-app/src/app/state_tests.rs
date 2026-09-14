@@ -1138,6 +1138,39 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
+    fn refresh_statusline_bumps_its_sections_only_when_the_answer_changes() {
+        use crate::app::versioned::SectionId;
+
+        // Whatever the probe answers on this machine, a second read of the
+        // same answer must not bump.
+        let mut state = AppState::new();
+        state.refresh_statusline();
+        let settled = state.versions();
+
+        state.refresh_statusline();
+        assert_eq!(
+            state.versions(),
+            settled,
+            "an unchanged answer bumps nothing"
+        );
+
+        state.config.statusline_status = Some(
+            crate::cli::statusline_install::StatuslineStatus::Other("stale".into()),
+        );
+        let stale = state.versions();
+        state.refresh_statusline();
+        assert!(
+            state.versions()[SectionId::Config.index()] > stale[SectionId::Config.index()],
+            "a changed answer bumps Config"
+        );
+        assert_eq!(
+            state.versions()[SectionId::Fleet.index()],
+            stale[SectionId::Fleet.index()],
+            "an unchanged live window leaves Fleet alone"
+        );
+    }
+
+    #[test]
     fn statusline_probe_invalidate_forces_refresh() {
         use crate::cli::statusline_install::StatuslineStatus;
 
