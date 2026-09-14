@@ -752,6 +752,41 @@ fn axis_snapshot_bus_requires_the_event_bus_grant() {
     );
 }
 
+/// #1038 review item 1, through the real runtime: the list form of the grant
+/// is a topic allow-list. A plugin granted `event_bus = ["other.*"]` is denied
+/// `-32001` on both requests for a topic outside it, and its publish there is
+/// dropped, exactly as with no grant at all.
+#[test]
+fn axis_snapshot_bus_list_grant_denies_an_unlisted_topic() {
+    let (rt, handle) = build_runtime();
+    let mut m = manifest("cts-event-bus-denied");
+    m.provides.cli_namespaces = vec!["bus".into()];
+    m.capabilities.event_bus = CapabilityGrant::List(vec!["other.*".into()]);
+    assert!(
+        m.capabilities.event_bus.is_granted(),
+        "granted, for other topics"
+    );
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_cts-event-bus-denied"));
+    let id = register(&rt, bin, m);
+
+    drop(block_render(&rt, &handle, &id, 1, 1));
+    wait_running(&handle, &id);
+
+    match block_cli(&rt, &handle, &id, "bus", vec!["probe".into()]) {
+        CliOutcome::Ok(r) => assert_eq!(
+            String::from_utf8_lossy(&r.stdout).trim(),
+            "get:-32001 subscribe:-32001",
+            "a topic outside the allow-list is denied on both requests"
+        ),
+        other => panic!("expected CliOutcome::Ok, got {other:?}"),
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        handle.snapshot_get("cts.event_bus").is_none(),
+        "a publish outside the allow-list must not reach the bus"
+    );
+}
+
 // =====================================================================
 // handle_action: a host asks a plugin to run one of its actions by id, and
 // reads what the action changed from the plugin's `ui.state` topic.
