@@ -108,6 +108,10 @@ pub struct SkillsViewState {
     pub loading: bool,
     pub selected_index: usize,
     pub search_active: bool,
+    #[serde(
+        rename = "search_query_len",
+        serialize_with = "crate::wire::fields::char_count"
+    )]
     pub search_query: String,
 }
 
