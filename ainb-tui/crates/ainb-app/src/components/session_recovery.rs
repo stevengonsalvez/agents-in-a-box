@@ -13,9 +13,11 @@ use uuid::Uuid;
 
 /// Represents an orphaned agent session (from ~/.claude/agents/*.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct OrphanedSession {
     pub session: String,
     #[serde(serialize_with = "crate::wire::fields::scrub_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub task: String,
     pub directory: String,
     pub created: String,
@@ -32,6 +34,7 @@ pub struct OrphanedSession {
 
 /// Type of orphaned worktree
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum OrphanType {
     /// by-session/<uuid> symlink points to missing directory
     BrokenSymlink,
@@ -65,6 +68,7 @@ impl OrphanType {
 
 /// Represents an orphaned worktree (from ~/.agents-in-a-box/worktrees/)
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct OrphanedWorktree {
     /// UUID from by-session/ symlink (if any)
     pub id: Option<String>,
@@ -76,9 +80,11 @@ pub struct OrphanedWorktree {
     pub branch: Option<String>,
     /// Last commit message/hash
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub last_commit: Option<String>,
     /// Original repository (detected from git remote)
     #[serde(serialize_with = "crate::wire::fields::scrub_opt_in_frame")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub source_repo: Option<String>,
     /// Type of orphan
     pub orphan_type: OrphanType,
@@ -144,6 +150,7 @@ impl Default for OrphanedWorktree {
 
 /// View mode for recovery screen
 #[derive(serde::Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub enum RecoveryViewMode {
     /// Show only orphaned sessions (from ~/.claude/agents/)
     #[default]
@@ -182,6 +189,7 @@ pub enum RecoveryRow {
 
 /// State for the session recovery component
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct SessionRecoveryState {
     /// Orphaned sessions from ~/.claude/agents/
     pub orphaned_sessions: Vec<OrphanedSession>,
@@ -197,9 +205,11 @@ pub struct SessionRecoveryState {
     pub loading: bool,
     /// Last error message
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub last_error: Option<String>,
     /// Last action result message
     #[serde(serialize_with = "crate::wire::fields::scrub_opt")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = Option<String>))]
     pub action_result: Option<String>,
     /// Bulk recovery result overlay (shown after multi-resume)
     pub recovery_overlay: Option<RecoveryOverlay>,
@@ -210,6 +220,7 @@ pub struct SessionRecoveryState {
         rename = "search_query_len",
         serialize_with = "crate::wire::fields::char_count"
     )]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = u32))]
     pub search_query: String,
     /// Whether the inline search bar has keyboard focus.
     pub search_active: bool,
@@ -217,6 +228,7 @@ pub struct SessionRecoveryState {
 
 /// Overlay showing results of a bulk recovery operation
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct RecoveryOverlay {
     pub title: String,
     pub results: Vec<RecoveryResultLine>,
@@ -224,10 +236,12 @@ pub struct RecoveryOverlay {
 }
 
 #[derive(serde::Serialize, Debug, Clone)]
+#[cfg_attr(feature = "typescript-bindings", derive(specta::Type))]
 pub struct RecoveryResultLine {
     pub name: String,
     pub success: bool,
     #[serde(serialize_with = "crate::wire::fields::scrub_str")]
+    #[cfg_attr(feature = "typescript-bindings", specta(type = String))]
     pub detail: String,
 }
 
