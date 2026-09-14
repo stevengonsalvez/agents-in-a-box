@@ -5,7 +5,6 @@
 
 use std::time::Instant;
 
-use crate::app::events::EventHandler;
 use crate::app::pointer;
 use crate::app::screens::ids as screen_ids;
 use crate::app::ui_state::UiState;
@@ -110,7 +109,7 @@ fn left_press(state: &AppState, ui: &mut UiState, x: u16, y: u16) -> Option<Inte
     // overlay (banner / input / library / browse / help)
     // don't leak through to the panels.
     if state.shell.current_screen == screen_ids::SKILL_MANAGER {
-        if EventHandler::skill_manager_overlay_open(state) {
+        if crate::app::skill_manager_overlay_open(state) {
             return None;
         }
         let (sources_rect, units_rect, sources_w) = skill_manager_top_rects(state)?;
