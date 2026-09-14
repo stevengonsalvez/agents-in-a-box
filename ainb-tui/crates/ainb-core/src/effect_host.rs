@@ -66,6 +66,10 @@ pub fn execute<'t>(
             spawn_daemon_action(daemon, action, generation);
             Work::Done(Vec::new())
         }
+        Effect::Persist(store) => Work::Done(match crate::config::persist::write(&store) {
+            Ok(()) => Vec::new(),
+            Err(error) => vec![reports::persist_failed(store.store_id(), &error)],
+        }),
         Effect::RunPluginAction {
             plugin,
             action_id,
