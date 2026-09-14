@@ -63,6 +63,15 @@ pub fn daemon_read(state: &AppState, id: SectionId) -> Option<frame::DaemonRead>
             revision: view.read_revision,
             clock_ms: view.read_at_ms,
         }),
+        // The Fleet rows' stamps (`attention_updated_at`, `last_observed_at`) are
+        // on the same daemon's clock. The snapshot poll that fills them carries
+        // no clock of its own, so the frame names the newest daemon clock this
+        // host holds: section 20's last read, and the newest revision it saw. A
+        // renderer ages a row against that, never against its own now (#1044).
+        SectionId::Fleet => state.agent_status.view.as_ref().map(|view| frame::DaemonRead {
+            revision: view.head_revision.max(view.read_revision),
+            clock_ms: view.read_at_ms,
+        }),
         SectionId::Sessions
         | SectionId::SessionLabels
         | SectionId::Tmux
@@ -72,7 +81,6 @@ pub fn daemon_read(state: &AppState, id: SectionId) -> Option<frame::DaemonRead>
         | SectionId::NewSession
         | SectionId::Logs
         | SectionId::ClaudeChat
-        | SectionId::Fleet
         | SectionId::Hangar
         | SectionId::McpPool
         | SectionId::Inbox
