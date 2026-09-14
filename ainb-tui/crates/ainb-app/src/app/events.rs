@@ -63,6 +63,14 @@ pub enum AppEvent {
         plugin_id: String,
         payload: Vec<u8>,
     },
+    /// Ask `plugin` to run its own action `action_id` with `payload`, over
+    /// `plugin/handle_action`. What the action changed comes back through the
+    /// plugin's render and its `ui.state` topic.
+    PluginAction {
+        plugin: String,
+        action_id: String,
+        payload: serde_json::Value,
+    },
     /// Navigate to a registered screen by id. Phase 2c added this variant to
     /// collapse the per-screen `GoTo*` variants behind one dispatch path —
     /// existing `GoTo*` variants are kept for now and translate through this
@@ -6785,6 +6793,29 @@ impl EventHandler {
                     payload_len = payload.len(),
                     "received AppEvent::Plugin (Phase 2c stub — bridge dispatch lands in Phase 3)",
                 );
+            }
+            AppEvent::PluginAction {
+                plugin,
+                action_id,
+                payload,
+            } => {
+                let known = crate::app::screens::builtin::PLUGIN_SCREENS
+                    .iter()
+                    .any(|(_, owner)| *owner == plugin);
+                let sent = known
+                    && state.plugins_host.plugin_runtime.as_ref().is_some_and(|runtime| {
+                        runtime.send_action(
+                            &ainb_plugin_runtime::types::PluginId::new(plugin.as_str()),
+                            action_id.as_str(),
+                            payload,
+                        )
+                    });
+                if !sent {
+                    tracing::warn!(%plugin, %action_id, "plugin action not delivered");
+                    state.add_error_notification(format!(
+                        "Could not run `{action_id}`: the {plugin} plugin is not running"
+                    ));
+                }
             }
             AppEvent::NavigateTo(screen_id) => {
                 // Phase 2c integration step: route through the screen-id table
