@@ -4508,7 +4508,7 @@ mod notice_surface_tests {
 
 #[cfg(test)]
 mod host_tmux_session_tests {
-    use crate::app::state::session_for_ancestry;
+    use crate::tmux::process_detection::session_for_ancestry;
 
     const PANES: &str = "\
 4101 ainb-chat-126424
