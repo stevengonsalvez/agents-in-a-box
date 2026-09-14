@@ -402,6 +402,15 @@ pub const FLEET_SNAPSHOT: &str = "fleet/snapshot";
 /// [`crate::agent_status::status_row`], so a state is one function's answer
 /// rather than three surfaces' independent guesses.
 pub const FLEET_STATUS: &str = "fleet/status";
+/// Read the roster and status joined per session in ONE daemon read (#1015).
+///
+/// Params: `{}`. Result:
+/// [`crate::agent_status::RosterStatusResult`]: each row pairs the roster
+/// session with its [`crate::agent_status::AgentStatusRow`] and the revision
+/// both halves were read at. A surface renders a Fleet card from this reply
+/// alone; before it every surface fetched `fleet/snapshot` and `fleet/status`
+/// and joined them itself.
+pub const FLEET_ROSTER_STATUS: &str = "fleet/roster_status";
 /// Negotiate Fleet protocol version and capability catalogue.
 pub const FLEET_NEGOTIATE: &str = "fleet/negotiate";
 /// Subscribe after a global Fleet revision.
@@ -1844,6 +1853,7 @@ pub const ALL_METHODS: &[&str] = &[
     // Fleet control-plane methods are appended at the wire catalogue tail.
     FLEET_SNAPSHOT,
     FLEET_STATUS,
+    FLEET_ROSTER_STATUS,
     FLEET_SUBSCRIBE,
     FLEET_ACTION,
     FLEET_BROADCAST,
@@ -2177,6 +2187,7 @@ mod tests {
             HANGAR_ISSUE_REACTION_REMOVE,
             FLEET_SNAPSHOT,
             FLEET_STATUS,
+            FLEET_ROSTER_STATUS,
             FLEET_SUBSCRIBE,
             FLEET_ACTION,
             FLEET_BROADCAST,
