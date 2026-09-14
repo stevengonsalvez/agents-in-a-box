@@ -1,0 +1,19 @@
+# ainb-core tripwire binaries the `core-tripwires` CI job does NOT run.
+#
+# Every tripwire_*.rs under tests/ runs in that job unless it is listed here.
+# One binary per line: name, issue, reason. `ci_tripwire_exclusions.rs` fails
+# on a line with no issue or reason, a name with no test file, or a duplicate.
+# Remove a line in the PR that makes its tripwire green.
+tripwire_new_session_agent_pills_visible        #1023  red on v2 before and after #1008 on the lane F box
+tripwire_new_session_branch_auto_derive         #1023  red on v2 before and after #1008 on the lane F box
+tripwire_new_session_favorite_toggle            #1023  red on v2 before and after #1008 on the lane F box
+tripwire_new_session_modified_badge             #1023  one of two tests red on v2 before and after #1008
+tripwire_new_session_persists_half_typed_prompt #1023  red on v2 before and after #1008 on the lane F box
+tripwire_sessions_answer_daemon_down            #1024  red on v2 before and after #1008 on the lane F box
+tripwire_sessions_answer_daemon_up              #1024  red on v2 before and after #1008 on the lane F box
+tripwire_sessions_approve_unblocks_hook         #1024  red on v2 before and after #1008 on the lane F box
+tripwire_sessions_broadcast                     #1024  red on v2 before and after #1008 on the lane F box
+tripwire_sessions_daemon_attention              #1024  red on v2 before and after #1008 on the lane F box
+tripwire_sessions_err_pane                      #1024  red on v2 before and after #1008 on the lane F box
+tripwire_fleet_chat_screen                      #1025  red on v2 before and after #1008 on the lane F box
+tripwire_fleet_session_thread                   #1025  red on v2 before and after #1008 on the lane F box
