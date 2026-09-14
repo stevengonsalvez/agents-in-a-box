@@ -131,6 +131,11 @@ fn locked<T: Serialize, S: Serializer>(cell: &&Mutex<T>, serializer: S) -> Resul
 /// input of a pending approval (the command about to run, the file about to be
 /// written), unbounded and shaped by the agent, so a frame carries the
 /// fingerprint and never the request.
+///
+/// `cwd` stays (#983 M19): it is the working directory the fleet pane draws on
+/// each row, a path rather than a credential, and no deny word or type catches
+/// it, so this is where that decision is recorded. When section 20
+/// (`agent_status`) lands, its `cwd` and `current_request` join the deny-list.
 // serde's `serialize_with` hands the view's `&&T`, so the double reference is its signature.
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn fleet_rows<S: Serializer>(
