@@ -34,9 +34,11 @@ pub trait RendererHost {
     /// when it has none. Layout clamps read it per host, so two surfaces at
     /// different widths never share one value.
     fn columns(&self) -> Option<u16>;
-    /// Hit-test a press at `pos` against the last drawn frame and apply it.
-    /// Returns the event for the reducer, if the press produced one.
-    fn pointer(&mut self, state: &mut AppState, pos: Pos, btn: Btn) -> Option<AppEvent>;
+    /// Hit-test a press at `pos` against the last drawn frame. Returns the
+    /// intent the press means, usually a [`crate::app::pointer`] command naming
+    /// what was under it, for dispatch to apply. The host reads state but
+    /// never writes it.
+    fn pointer(&mut self, state: &AppState, pos: Pos, btn: Btn) -> Option<Intent>;
 }
 
 /// A [`RendererHost`] with no renderer: scrolls are dropped and nothing is
@@ -51,7 +53,7 @@ impl RendererHost for NoRenderer {
         None
     }
 
-    fn pointer(&mut self, _state: &mut AppState, _pos: Pos, _btn: Btn) -> Option<AppEvent> {
+    fn pointer(&mut self, _state: &AppState, _pos: Pos, _btn: Btn) -> Option<Intent> {
         None
     }
 }
@@ -136,31 +138,6 @@ pub enum AppEvent {
     /// Toggle the sessions sidebar between full width and the thin rail —
     /// the keyboard twin ('B') of clicking the [-]/[+] glyph on its border.
     ToggleSessionsSidebar,
-    // Mouse events
-    MouseClick {
-        x: u16,
-        y: u16,
-    },
-    MouseRightClick {
-        x: u16,
-        y: u16,
-    },
-    MouseDragStart {
-        x: u16,
-        y: u16,
-    },
-    MouseDragEnd {
-        x: u16,
-        y: u16,
-    },
-    MouseDragging {
-        x: u16,
-        y: u16,
-    },
-    MouseMove {
-        x: u16,
-        y: u16,
-    },
     // Pointer commands: a press a renderer has hit-tested, naming what was
     // under the pointer by its place in state. See `crate::app::pointer`.
     /// Select session-list row `row`; `open` attaches it, as a double-click does.
@@ -1257,14 +1234,24 @@ impl EventHandler {
         match intent {
             Intent::Key(chord) => Self::handle_key_event_with_keymap(chord, state, keymap, host),
             Intent::Command(id, args) => {
-                let binding = keymap.command(&id)?;
+                let Some(binding) = keymap.command(&id) else {
+                    return crate::app::pointer::event_for(&id, &args).or_else(|| {
+                        tracing::warn!("command `{id}` is unknown or rejected arguments {args}");
+                        None
+                    });
+                };
                 let Some(action) = binding.action.with_args(&args) else {
                     tracing::warn!("command `{id}` rejected arguments {args}");
                     return None;
                 };
                 Self::apply_key_action(action, state, host)
             }
-            Intent::Mouse(pos, btn) => host.pointer(state, pos, btn),
+            // A press resolves to what was under it; a host answering a press
+            // with another press would loop, so that answer is dropped.
+            Intent::Mouse(pos, btn) => match host.pointer(state, pos, btn)? {
+                Intent::Mouse(..) => None,
+                intent => Self::resolve_intent(intent, state, keymap, host),
+            },
             Intent::Text(text) => Self::handle_paste_event(text.clone(), state).or_else(|| {
                 Self::paste_into_text_input(&text, state);
                 None
@@ -6510,15 +6497,6 @@ impl EventHandler {
                     tracing::info!("Factory reset completed");
                     state.start_onboarding(true, None);
                 }
-            }
-            // Mouse events are handled directly in the main event loop
-            AppEvent::MouseClick { .. }
-            | AppEvent::MouseRightClick { .. }
-            | AppEvent::MouseDragStart { .. }
-            | AppEvent::MouseDragEnd { .. }
-            | AppEvent::MouseDragging { .. }
-            | AppEvent::MouseMove { .. } => {
-                // These are processed by handle_mouse_event
             }
             // Phase 2c plugin-shaped variants. Today the in-core burndown
             // handlers still drive Analytics directly through the legacy
