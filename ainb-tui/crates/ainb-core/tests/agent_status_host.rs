@@ -9,6 +9,10 @@
 
 use std::time::{Duration, Instant};
 
+#[allow(unused)]
+#[path = "tripwire_helpers.rs"]
+mod tripwire_helpers;
+
 use ainb::agent_status_host::AgentStatusHost;
 use ainb::app::state::AppState;
 use ainb::fleet::bridge::daemon::DaemonClient;
@@ -210,4 +214,153 @@ async fn one_fleet_event_costs_this_process_one_projection() {
             "{event_id}: the panel renders exactly section 20"
         );
     }
+}
+
+/// #1038 review item 5, end to end through the plugin runtime: a plugin
+/// subscribed to `fleet.agent_status` receives section 20 as the host
+/// publishes it (`publish_snapshot`, then `plugin/handle_event`), the Fleet pane
+/// folds what arrived into exactly section 20's view, a later section change
+/// arrives as a newer envelope, and `publish` holds a change while there is no
+/// runtime.
+///
+/// The fixture plugin relays each delivery back under `fixture.received`, so
+/// the assertion is on the bytes the plugin was handed, not on the host's own
+/// copy. Its grant names the topic, as the hangar plugin's does.
+#[test]
+fn a_section_change_reaches_a_subscribed_plugin_through_the_runtime() {
+    use ainb_hangar_proto::status_topic::{AGENT_STATUS_TOPIC, AgentStatusEnvelope};
+    use ainb_plugin_hangar::screen::fleet::FleetPaneState;
+    use ainb_plugin_protocol::manifest::{
+        Capabilities, CapabilityGrant, Lifecycle, Manifest, PluginMeta, Provides, SpawnMode,
+        Subscribes,
+    };
+    use ainb_plugin_runtime::registry::RegisteredPlugin;
+    use ainb_plugin_runtime::types::CliOutcome;
+
+    let (rt, handle) = tripwire_helpers::fast_runtime();
+    let manifest = Manifest {
+        plugin: PluginMeta {
+            name: "status-topic-fixture".into(),
+            version: "0.1.0".into(),
+            abi_version: 2,
+            description: "agent-status topic subscriber".into(),
+        },
+        capabilities: Capabilities {
+            event_bus: CapabilityGrant::List(vec![
+                AGENT_STATUS_TOPIC.to_string(),
+                "fixture.*".to_string(),
+            ]),
+            ..Capabilities::default()
+        },
+        provides: Provides {
+            screens: vec![],
+            commands: vec![],
+            cli_namespaces: vec!["echo".into()],
+            snapshots: vec!["fixture.received".into()],
+        },
+        subscribes: Subscribes {
+            snapshots: vec![AGENT_STATUS_TOPIC.to_string()],
+        },
+        lifecycle: Lifecycle {
+            spawn: SpawnMode::Lazy,
+            idle_reap_secs: 600,
+        },
+        config: Vec::new(),
+    };
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        tripwire_helpers::sibling_bin("ainb-fixture-plugin"),
+        std::path::PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    tripwire_helpers::ensure_running(&rt, &handle, &id);
+    let subscribed = handle.dispatch_cli(
+        &id,
+        "echo",
+        vec!["subscribe".into(), AGENT_STATUS_TOPIC.into()],
+    );
+    let subscribed = rt.tokio_handle().block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), subscribed)
+            .await
+            .expect("subscribe dispatch timed out")
+            .expect("subscribe dispatch closed")
+    });
+    assert!(matches!(subscribed, CliOutcome::Ok(_)), "{subscribed:?}");
+
+    let received = |sequence: u64| -> AgentStatusEnvelope {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(bytes) = handle.snapshot_get("fixture.received") {
+                let envelope: AgentStatusEnvelope =
+                    serde_json::from_slice(&bytes).expect("the plugin was handed an envelope");
+                if envelope.sequence >= sequence {
+                    return envelope;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "envelope {sequence} never reached the plugin"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    let home = tempfile::tempdir().expect("home");
+    let (store, sink, mut host, mut state) = rt.tokio_handle().block_on(async {
+        let (store, sink, socket, token) = start_daemon(home.path()).await;
+        hook(&store, &sink, "e-start", "SessionStart", 1_700_000_000_000).await;
+        let mut host = AgentStatusHost::spawn(
+            Box::new(move || Ok(DaemonClient::with_parts(socket.clone(), token.clone()))),
+            false,
+        );
+        let mut state = AppState::default();
+        wait_for(&mut host, &mut state, "the first joined read", |state| {
+            state
+                .agent_status
+                .view
+                .as_ref()
+                .is_some_and(|view| view.cards.contains_key("claude:host-1"))
+        })
+        .await;
+        (store, sink, host, state)
+    });
+
+    assert!(
+        !host.publish(&state, None),
+        "no runtime yet: the change is held"
+    );
+    assert!(
+        host.publish(&state, Some(&handle)),
+        "and published once there is one"
+    );
+    let mut pane = FleetPaneState::default();
+    assert!(pane.apply_envelope(received(1)));
+    assert_eq!(pane.status_view(), state.agent_status.view.as_ref());
+
+    let first_revision = state.agent_status.view.as_ref().expect("view").read_revision;
+    rt.tokio_handle().block_on(async {
+        hook(&store, &sink, "e-ask", "PreToolUse", 1_700_000_001_000).await;
+        wait_for(
+            &mut host,
+            &mut state,
+            "the revision after a hook",
+            |state| {
+                state
+                    .agent_status
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.read_revision > first_revision)
+            },
+        )
+        .await;
+    });
+    assert!(host.publish(&state, Some(&handle)));
+    assert!(pane.apply_envelope(received(2)));
+    assert_eq!(
+        pane.status_view(),
+        state.agent_status.view.as_ref(),
+        "the section change reached the pane"
+    );
+    drop(host);
 }
