@@ -399,6 +399,7 @@ async fn handle_method<P: Plugin>(
                 let ctx = InitContext {
                     granted_capabilities: &p.granted_capabilities,
                     config: &p.config,
+                    host: p.host.as_ref(),
                 };
                 guard.on_init(host, ctx).await?;
                 guard.manifest()

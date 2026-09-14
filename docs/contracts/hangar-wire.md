@@ -50,6 +50,28 @@ its pid is listed like any other connection, and a Pal connection is always
 listed. A daemon that does not advertise the capability ignores the member and
 lists every connection.
 
+Whether a transient connection is listed is decided each time the registry is
+read, not when it connects, so a call that arrives in a presence gap (after a
+daemon restart, before its surface's lease redials) folds as soon as the
+presence is back.
+
+**Plugin surfaces and the host convention** (#1040). A plugin process that
+talks to the daemon, such as the hangar plugin, is its own surface kind:
+`surface: { kind: "plugin", pid: <the plugin's own pid> }`. It names the
+surface hosting it in a separate hello member, `host: { kind, pid }`, taken
+from `PluginInitParams.host` (the runtime reports its own surface kind and pid
+at `plugin/init`), and sets `transient`. The daemon folds the connection into
+that host's presence only when the kernel backs the claim: `host.pid` must be
+the connection's peer process (`peer_cred`), which it is when the host runtime
+dials on the plugin's behalf, or the peer's parent, when the plugin dials
+itself. A claim naming any other pid, or pid 0 or 1, never folds; the
+connection is listed as a `plugin` row. The same holds for a non-TUI host: a
+desktop shell reports `kind: "desktop"` and its own pid, and its plugin folds
+into the desktop row rather than claiming to be a TUI. A plugin with no host at
+init makes no claim. Against a daemon too old to decode the `plugin` kind (it
+refuses the hello's shape), the hangar plugin redials with the pre-#1040 hello,
+`kind: "tui"` under its own pid, which that daemon lists as a second row.
+
 **`fleet/roster_status`** (#1015, capability `fleet.roster_status.read`). One
 read that returns every visible session's roster entry and its D14 status row
 joined per `session_key`, both derived from ONE Fleet projection, so they
@@ -78,10 +100,15 @@ subscribes, reads the latest once at init, drops any envelope at or below the
 last sequence it applied, and renders the Fleet panel from it with no Fleet
 subscription or read of its own, so a Fleet event costs the TUI process one
 projection. An encoded envelope over 6 MiB is published as `absent` with the
-reason instead of cut short. Declaring the subscription in the manifest
-(`[subscribes] snapshots`) means the runtime never idle-reaps the hangar plugin:
-once it spawns it lives for the TUI session, daemon socket and `secrets:read`
-grant included, which is what keeps it subscribed.
+reason instead of cut short. The hangar manifest declares the subscription
+under `[subscribes] snapshots` and marks it `latest_state` (#1040). The runtime
+keeps a plugin alive past its idle window only for a subscription that is not
+latest-state, a stream whose missed deliveries could not be recovered, so the
+hangar plugin is idle-reaped like any other plugin after its explicit
+`idle_reap_secs = 600`, taking its daemon socket and `secrets:read` grant with
+it. A plugin whose screen the TUI has on display is never reaped, so an open
+Hangar screen does not freeze. On its next use it respawns, resubscribes, and
+reads the latest envelope with `host/snapshot/get`.
 
 Who can read the envelope. It carries every agent's `cwd`, `display_name`, raw
 `current_request` (the pending tool input) and fingerprints, the fields the #983

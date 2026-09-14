@@ -49,7 +49,7 @@ pub use ainb_plugin_protocol::{
         HandleActionParams, HandleEventParams, HandleKeyParams, HandleMouseParams, KEY_MOD_ALT,
         KEY_MOD_CTRL, KEY_MOD_SHIFT, KEY_MOD_SUPER, KeyCode, KeyEvent, KeyKind, LogLevel,
         LogParams, MouseButton, MouseEvent, MouseKind, NetworkFetchParams, NetworkFetchResult,
-        PluginInitParams, PluginInitResult, PluginShutdownParams, PluginShutdownResult,
+        PluginHost, PluginInitParams, PluginInitResult, PluginShutdownParams, PluginShutdownResult,
         RenderParams, RenderResult, SecretStoreGetParams, SecretStoreGetResult, SnapshotGetParams,
         SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
         SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,

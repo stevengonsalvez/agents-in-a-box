@@ -92,6 +92,9 @@ pub struct AuthenticatedHello {
     /// process's presence is held by another connection. A request only: the
     /// registry honours it solely beside a listed row at the same pid.
     pub transient: bool,
+    /// The surface a plugin connection says hosts it (#1040). A claim: the
+    /// registry checks it against the connection's peer before folding.
+    pub host: Option<ainb_hangar_proto::connections::SurfaceHost>,
 }
 
 /// Every method a Pal connection may call, and nothing else.
@@ -350,6 +353,7 @@ pub async fn authenticate_first_frame(
         protocol: selected,
         capabilities: params.capabilities.clone(),
         device: params.device.clone(),
+        host: params.host,
     };
 
     // The Pal credential FIRST, and it is never the daemon token: a scoped

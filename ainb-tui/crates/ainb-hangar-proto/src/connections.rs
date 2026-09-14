@@ -19,7 +19,13 @@ pub enum SurfaceKind {
     Cli,
     /// Copilot integration.
     Copilot,
-    /// Legacy or unrecognised client which supplied no surface metadata.
+    /// A plugin process hosted by another surface (#1040): the hangar plugin
+    /// inside a TUI or a desktop shell. Its hello names that host separately,
+    /// so its own `pid` stays the plugin's and a host is never misnamed.
+    Plugin,
+    /// Legacy or unrecognised client which supplied no surface metadata, or a
+    /// kind a newer client sends that this build does not know.
+    #[serde(other)]
     Unknown,
 }
 
@@ -33,6 +39,7 @@ impl SurfaceKind {
             Self::Desktop => "desktop",
             Self::Cli => "cli",
             Self::Copilot => "copilot",
+            Self::Plugin => "plugin",
             Self::Unknown => "unknown",
         }
     }
@@ -62,6 +69,20 @@ impl SurfaceInfo {
             pid: 0,
         }
     }
+}
+
+/// The surface hosting a plugin connection (#1040): what kind it is and its
+/// process id, as the plugin runtime handed them to the plugin at init.
+///
+/// A claim only. The daemon folds a plugin's transient connection into its
+/// host's presence only when `pid` is the connection's peer process or that
+/// peer's parent, so a plugin cannot hide behind a surface it does not run in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceHost {
+    /// The hosting surface's kind (`tui`, `desktop`, ...).
+    pub kind: SurfaceKind,
+    /// The hosting surface's process id.
+    pub pid: u32,
 }
 
 /// One live authenticated connection, stamped by the daemon.
@@ -95,6 +116,28 @@ mod tests {
         let encoded = serde_json::to_string(&SurfaceKind::Tui).expect("kind serializes");
         assert_eq!(encoded, "\"tui\"");
         assert_eq!(SurfaceKind::Unknown.as_str(), "unknown");
+    }
+
+    /// #1040: the plugin kind has a stable name, and a kind this build does not
+    /// know decodes as `unknown` instead of refusing the whole hello.
+    #[test]
+    fn a_plugin_kind_is_named_and_an_unknown_kind_still_decodes() {
+        assert_eq!(
+            serde_json::to_string(&SurfaceKind::Plugin).unwrap(),
+            "\"plugin\""
+        );
+        assert_eq!(SurfaceKind::Plugin.as_str(), "plugin");
+        let later: SurfaceKind = serde_json::from_str("\"watch\"").expect("decodes");
+        assert_eq!(later, SurfaceKind::Unknown);
+        let host: SurfaceHost =
+            serde_json::from_value(serde_json::json!({"kind": "desktop", "pid": 42})).unwrap();
+        assert_eq!(
+            host,
+            SurfaceHost {
+                kind: SurfaceKind::Desktop,
+                pid: 42
+            }
+        );
     }
 
     #[test]

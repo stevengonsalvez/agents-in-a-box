@@ -260,9 +260,15 @@ impl RuntimeHandle {
     /// calls this once per plugin per tick and skips the render kick
     /// entirely when the result is `false` — turning the loop from a
     /// fixed-cadence render storm into an event-driven repaint.
+    ///
+    /// The host calls this only for the screen it has on display, so the call
+    /// also marks the plugin shown: a visible plugin is not idle-reaped even
+    /// when nothing changes on it (#1053).
     pub fn take_render_dirty(&self, plugin_id: &PluginId) -> bool {
-        self.lookup(plugin_id)
-            .is_some_and(|p| p.render_dirty.swap(false, Ordering::AcqRel))
+        self.lookup(plugin_id).is_some_and(|p| {
+            p.cache.mark_shown();
+            p.render_dirty.swap(false, Ordering::AcqRel)
+        })
     }
 
     /// Explicitly mark a plugin's screen as needing a repaint. Used by

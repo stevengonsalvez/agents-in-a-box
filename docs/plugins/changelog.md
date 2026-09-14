@@ -11,6 +11,15 @@ Tracks how the plugin contract (`./spec-v2.md`) evolves.
 - The runtime's `ABI_VERSION` integer in `crates/ainb-plugin-runtime/src/plugin_task.rs` is the wire-level handshake version stamped on `plugin/init`. Bump only when the contract version bumps.
 - Snapshot wire types (e.g. `ainb-plugin-types-sessions`) carry their own `WIRE_VERSION` constants: those evolve independently from the contract version.
 
+## v2 additions, protocol crate 0.2.0: 2026-09-14
+
+Additive to the v2 contract (existing plugins keep passing CTS). The Rust crate goes to 0.2.0 because two public struct shapes changed.
+
+- **`[subscribes].latest_state`** (#1040): marks subscribed topics that carry the latest state. Only a subscription outside it keeps a plugin from idle reap. Must be a subset of `snapshots`; `[subscribes]` now refuses unknown keys.
+- **`PluginInitParams.host`** (#1040): `{ kind, pid }` of the surface hosting the plugin, so a plugin that talks to the hangar daemon can name its host.
+- **`event_bus` list form** (#1038): the allow-list covers exactly the topics it names (`*` suffix for a prefix). The blanket `true` covers every topic except `fleet.` ones.
+- **Idle reap**: a plugin whose screen is on display is not reaped; a reap answers requests still in flight with a runtime error.
+
 ## v2: 2026-05-14
 
 Subprocess plugin contract. Plugins are native executables exchanging JSON-RPC 2.0 over LSP-style Content-Length framed stdio. Replaces the v1 wasm contract entirely.

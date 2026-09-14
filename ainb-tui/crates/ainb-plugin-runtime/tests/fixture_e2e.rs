@@ -638,3 +638,137 @@ fn lazy_spawn_stays_idle_without_request() {
         handle.lifecycle_state(&id)
     );
 }
+
+/// #1040: idle reap is gated on the manifest's `latest_state` marker. A plugin
+/// whose only subscription is a latest-state topic is reaped like any other
+/// once idle; one subscribed to a stream is kept running.
+#[test]
+fn a_latest_state_subscriber_is_reaped_when_idle_and_a_stream_subscriber_is_not() {
+    let cfg = RuntimeConfig {
+        idle_reap: Duration::from_millis(200),
+        ..RuntimeConfig::default()
+    };
+    let (rt, handle) = Runtime::with_config(cfg).expect("build runtime");
+    let register = |name: &str, latest_state: Vec<String>| {
+        let mut manifest = fixture_manifest();
+        manifest.plugin.name = name.into();
+        manifest.lifecycle.idle_reap_secs = 0;
+        manifest.subscribes = Subscribes {
+            snapshots: vec!["fleet.agent_status".into()],
+            latest_state,
+        };
+        let plugin = RegisteredPlugin::new(
+            manifest,
+            fixture_path(),
+            PathBuf::from("/dev/null/manifest.toml"),
+        );
+        let id = plugin.id.clone();
+        rt.register(plugin);
+        id
+    };
+    let latest = register("reaped-latest", vec!["fleet.agent_status".into()]);
+    let stream = register("kept-stream", Vec::new());
+    for id in [&latest, &stream] {
+        drop(handle.render(id, Viewport::new(1, 1), 0));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while [&latest, &stream]
+        .iter()
+        .any(|id| handle.lifecycle_state(id) != Some(LifecycleState::Running))
+    {
+        assert!(std::time::Instant::now() < deadline, "both plugins start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The idle check ticks every 5 s; allow two ticks.
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    while handle.lifecycle_state(&latest) != Some(LifecycleState::Idle) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the latest-state subscriber was never reaped: {:?}",
+            handle.lifecycle_state(&latest)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        handle.lifecycle_state(&stream),
+        Some(LifecycleState::Running),
+        "a stream subscriber is not reaped"
+    );
+}
+
+fn reap_runtime() -> (Runtime, ainb_plugin_runtime::RuntimeHandle) {
+    Runtime::with_config(RuntimeConfig {
+        idle_reap: Duration::from_millis(200),
+        ..RuntimeConfig::default()
+    })
+    .expect("build runtime")
+}
+
+fn register_named(rt: &Runtime, name: &str) -> PluginId {
+    let mut manifest = fixture_manifest();
+    manifest.plugin.name = name.into();
+    manifest.lifecycle.idle_reap_secs = 0;
+    let plugin = RegisteredPlugin::new(
+        manifest,
+        fixture_path(),
+        PathBuf::from("/dev/null/manifest.toml"),
+    );
+    let id = plugin.id.clone();
+    rt.register(plugin);
+    id
+}
+
+/// #1053 review item 3: a plugin whose screen the host has on display is not
+/// idle-reaped, however long nothing changes on it; one off screen is.
+#[test]
+fn a_shown_plugin_past_its_idle_window_is_not_reaped_and_a_hidden_one_is() {
+    let (rt, handle) = reap_runtime();
+    let shown = register_named(&rt, "shown");
+    let hidden = register_named(&rt, "hidden");
+    for id in [&shown, &hidden] {
+        drop(handle.render(id, Viewport::new(1, 1), 0));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while [&shown, &hidden]
+        .iter()
+        .any(|id| handle.lifecycle_state(id) != Some(LifecycleState::Running))
+    {
+        assert!(std::time::Instant::now() < deadline, "both plugins start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The host's render tick for the screen on display, and nothing else.
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    while handle.lifecycle_state(&hidden) != Some(LifecycleState::Idle) {
+        let _ = handle.take_render_dirty(&shown);
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hidden plugin was never reaped: {:?}",
+            handle.lifecycle_state(&hidden)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        handle.lifecycle_state(&shown),
+        Some(LifecycleState::Running),
+        "a plugin on display is in use"
+    );
+}
+
+/// #1053 review item 4: a reap answers a request still in flight with a
+/// runtime error, not a dropped channel.
+#[test]
+fn a_reap_answers_an_in_flight_request_with_a_runtime_error() {
+    let (rt, handle) = reap_runtime();
+    let id = register_named(&rt, "hanging");
+    let rx = handle.dispatch_cli(&id, "echo", vec!["hang".into()]);
+    let outcome = rt.tokio_handle().block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), rx)
+            .await
+            .expect("the in-flight request is answered when the plugin is reaped")
+    });
+    match outcome {
+        Ok(CliOutcome::RuntimeError(why)) => assert_eq!(why, "plugin reaped"),
+        other => panic!("expected a runtime error from the reap, got {other:?}"),
+    }
+}

@@ -322,6 +322,7 @@ impl Harness {
             granted_capabilities: Vec::new(),
             abi_version: 2,
             config,
+            host: None,
         };
         self.send_request(methods::PLUGIN_INIT, params).await
     }

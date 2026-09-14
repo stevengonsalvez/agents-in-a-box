@@ -75,6 +75,8 @@ const ABI_VERSION: u32 = 2;
 pub struct RenderCache {
     inner: Arc<parking_lot::Mutex<Option<WireBuffer>>>,
     captures_text: Arc<std::sync::atomic::AtomicBool>,
+    /// When the host last found this plugin's screen on display (#1053).
+    shown_at: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 impl RenderCache {
@@ -82,6 +84,17 @@ impl RenderCache {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record that the host has this plugin's screen on display right now.
+    pub fn mark_shown(&self) {
+        *self.shown_at.lock() = Some(Instant::now());
+    }
+
+    /// Whether the host found this plugin's screen on display within `window`.
+    #[must_use]
+    pub fn shown_within(&self, window: Duration) -> bool {
+        self.shown_at.lock().is_some_and(|at| at.elapsed() <= window)
     }
 
     /// Replace the cached buffer.
@@ -863,6 +876,11 @@ impl PluginTask {
             // Host-resolved `[plugins.<name>]` table (JSON), stamped onto the
             // RegisteredPlugin at discovery; JSON null when unconfigured.
             config: self.plugin.config.clone(),
+            // The plugin is this process's direct child (#1040).
+            host: Some(ainb_plugin_protocol::params::PluginHost {
+                kind: self.config.host_kind.to_string(),
+                pid: std::process::id(),
+            }),
         })
         .expect("PluginInitParams serializable");
         let id = self.ids.allocate();
@@ -1551,24 +1569,29 @@ impl PluginTask {
         }
     }
 
-    async fn handle_exit(&mut self) {
-        warn!(plugin = %self.plugin.id, "plugin exited / pipe closed");
-        // Drain any outstanding ledger entries with a runtime-error.
+    /// Answer every request still waiting on the plugin with `why`, so a
+    /// caller sees a runtime error instead of a dropped channel.
+    fn fail_pending(&mut self, why: &str) {
         let pending: Vec<(u64, Pending)> = self.ledger.drain().collect();
         for (_, p) in pending {
             match p {
                 Pending::Render(r) => {
-                    let _ = r.send(RenderOutcome::RuntimeError("plugin exited".into()));
+                    let _ = r.send(RenderOutcome::RuntimeError(why.into()));
                 }
                 Pending::Cli(r) => {
-                    let _ = r.send(CliOutcome::RuntimeError("plugin exited".into()));
+                    let _ = r.send(CliOutcome::RuntimeError(why.into()));
                 }
                 Pending::Action(r) => {
-                    let _ = r.send(ActionOutcome::RuntimeError("plugin exited".into()));
+                    let _ = r.send(ActionOutcome::RuntimeError(why.into()));
                 }
                 Pending::Init => {}
             }
         }
+    }
+
+    async fn handle_exit(&mut self) {
+        warn!(plugin = %self.plugin.id, "plugin exited / pipe closed");
+        self.fail_pending("plugin exited");
         if let Some(cs) = self.child.take() {
             cs.stderr_drain.abort();
             cs.stdout_reader.abort();
@@ -1661,10 +1684,17 @@ impl PluginTask {
         let reap_threshold =
             Duration::from_secs(u64::from(self.plugin.manifest.lifecycle.idle_reap_secs))
                 .max(self.config.idle_reap);
-        let has_subs = self.plugin.manifest.subscribes.snapshots.iter().any(|_| true);
+        // A subscription to a stream keeps the plugin: a delivery published
+        // while it is reaped is gone. A latest-state topic does not, because the
+        // respawned plugin reads the latest value again (#1040).
+        let keeps_alive = self.plugin.manifest.subscribes.blocks_idle_reap()
+            // A screen on display is in use even when nothing is typed or
+            // published into it (#1053): an open Hangar screen must not
+            // freeze after its idle window. The host marks it every tick.
+            || self.cache.shown_within(SHOWN_GRACE);
         if matches!(*self.state.read(), LifecycleState::Running)
             && elapsed >= reap_threshold
-            && !has_subs
+            && !keeps_alive
         {
             info!(plugin = %self.plugin.id, "idle reap (idle for {elapsed:?})");
             self.shutdown().await;
@@ -1715,6 +1745,10 @@ impl PluginTask {
     }
 
     async fn kill_child(&mut self) {
+        // A request sent before the stop gets its answer here (#1053): without
+        // this its sender drops with the ledger and the caller sees a bare
+        // channel error, or with a later respawn, a reply routed to nothing.
+        self.fail_pending("plugin reaped");
         if let Some(mut cs) = self.child.take() {
             let _ = cs.child.start_kill();
             let _ = cs.child.wait().await;
@@ -1734,6 +1768,11 @@ impl PluginTask {
         self.unix_sockets.drop_plugin(&self.plugin.id);
     }
 }
+
+/// How recently the host must have found a plugin's screen on display for the
+/// plugin to count as in use. The host checks every render tick (250 ms), so
+/// this only has to outlast a stalled frame or two.
+const SHOWN_GRACE: Duration = Duration::from_secs(30);
 
 /// Expand a leading `~` / `~/` to `$HOME`. Other paths pass through. Unix-only
 /// home resolution via `$HOME`, consistent with the project's platform stance.
