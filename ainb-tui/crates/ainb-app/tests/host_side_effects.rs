@@ -59,14 +59,6 @@ const REACHABLE_TODAY: &[(&str, &str)] = &[
         "clipboard-win",
         "arboard's Windows backend; leaves with arboard",
     ),
-    (
-        "portable-pty",
-        "the session preview embed: a tmux client in a PTY whose screen the TUI \
-         draws. The host opens the writable one (ainb-core effect_host \
-         open_in_place, for AttachTerminal(InPlace)) and the reducer adopts it \
-         from a LocalEmbed report; the read-only observer is still opened by \
-         AppState::sync_terminal_observer, which only the run loop calls",
-    ),
 ];
 
 /// Modules that spawn a process or touch the clipboard, with the number of
@@ -184,12 +176,6 @@ const CALL_SITES: &[(&str, usize, &str)] = &[
     ("rtk/mod.rs", 6, "rtk install and init, output captured"),
     ("setup/provision.rs", 3, "dependency provisioning commands"),
     ("tmux/capture.rs", 1, "tmux capture-pane, output captured"),
-    (
-        "tmux/embed_client.rs",
-        3,
-        "the preview embed's tmux client: a PTY attach whose screen the TUI draws, \
-         and its version probe",
-    ),
     ("tmux/mod.rs", 5, "tmux service, output captured"),
     (
         "tmux/process_detection.rs",
