@@ -365,7 +365,7 @@ pub struct HangarPlugin {
     snapshot_response_ids: BTreeMap<i64, i64>,
     /// The latest agent-status envelope read at init, until it is folded
     /// (#1031), or why the subscription was refused.
-    agent_status_seed: Option<tokio::sync::oneshot::Receiver<Result<Vec<u8>, String>>>,
+    agent_status_seed: Option<tokio::sync::oneshot::Receiver<std::result::Result<Vec<u8>, String>>>,
     /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
     /// screen on a fresh machine until the user accepts (`y`), then `Dismissed`.
     /// Initialised from the recorded `warnings_ack` on `plugin/init`.
