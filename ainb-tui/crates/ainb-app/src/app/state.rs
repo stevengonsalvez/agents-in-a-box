@@ -12794,22 +12794,43 @@ impl AppState {
         now: std::time::Instant,
         gone: impl Fn(&str) -> bool,
     ) {
+        let lease = Self::PLUGIN_SCREEN_WATCH_LEASE;
         let lapsed: Vec<String> = self
             .plugins_host
             .watched_plugin_screens
             .iter()
-            .filter(|(screen, renewed)| {
-                now.saturating_duration_since(**renewed) > Self::PLUGIN_SCREEN_WATCH_LEASE
+            .filter(|(screen, watch)| {
+                watch
+                    .requests
+                    .iter()
+                    .all(|(at, _, _)| now.saturating_duration_since(*at) > lease)
                     || crate::app::screens::builtin::plugin_id_for_screen(screen).is_none_or(&gone)
             })
             .map(|(screen, _)| screen.clone())
             .collect();
+        // Older requests inside a live watch only change the size it renders
+        // at, which no frame carries.
+        self.plugins_host.update(|host| {
+            for watch in host.watched_plugin_screens.values_mut() {
+                watch.lapse(now, lease);
+            }
+            false
+        });
         if !lapsed.is_empty() {
             let host = self.plugins_host.get_mut();
             for screen in lapsed {
                 host.watched_plugin_screens.remove(&screen);
             }
         }
+    }
+
+    /// The size a screen another host watches renders at, when one does.
+    #[must_use]
+    pub fn watched_viewport(&self, screen_id: &str) -> Option<(u16, u16)> {
+        self.plugins_host
+            .watched_plugin_screens
+            .get(screen_id)
+            .and_then(ScreenWatch::viewport)
     }
 
     /// Whether some host wants `screen_id`'s plugin rendering: the terminal
@@ -13305,17 +13326,17 @@ impl App {
                 continue;
             }
 
-            // Viewport comes from the previous frame's allocated area
+            // Shown here, the viewport is the previous frame's allocated area
             // (stashed by `PluginScreen::render`); (0, 0) means that render
-            // hasn't happened yet. A screen another host keeps live but this
-            // one never drew renders at the plugin's fallback size: the frame
-            // is not painted here, only its `ui.state` view is read.
+            // hasn't happened yet. Kept live for other hosts, it is the
+            // largest size a watching host asked for: the frame is not painted
+            // here, only its `ui.state` view is read.
             let shown_here = self.state.shell.current_screen == *screen_id;
-            let (width, height) = viewports
-                .render_areas
-                .get(*screen_id)
-                .copied()
-                .unwrap_or(if shown_here { (0, 0) } else { (80, 24) });
+            let (width, height) = if shown_here {
+                viewports.render_areas.get(*screen_id).copied().unwrap_or((0, 0))
+            } else {
+                self.state.watched_viewport(screen_id).unwrap_or((0, 0))
+            };
 
             // No allocated area stashed yet — the very first entry to this
             // screen, before `PluginScreen::render` has run once. Kicking now
