@@ -21,6 +21,20 @@ use crate::tmux::pty_wrapper::PtyWrapper;
 /// unboundedly.
 const WRITER_QUEUE_CAPACITY: usize = 256;
 
+/// The smallest screen the vt100 model is ever given, in rows and columns.
+///
+/// vt100 0.16 panics on a one-row screen as soon as a line wraps
+/// (`grid.rs:683`, subtract with overflow) and on a one-column screen as soon
+/// as a wide glyph arrives, and the embed is sized from the host terminal, so
+/// a short or narrow terminal was enough to crash the TUI (#990). Two is the
+/// floor a fuzz of fresh screens found no panic at.
+const MIN_SCREEN_DIM: u16 = 2;
+
+/// A vt100 screen model of at least [`MIN_SCREEN_DIM`] in each direction.
+fn screen_parser(rows: u16, cols: u16) -> vt100::Parser {
+    vt100::Parser::new(rows.max(MIN_SCREEN_DIM), cols.max(MIN_SCREEN_DIM), 0)
+}
+
 /// Enforce the environment the embed's `tmux attach` client depends on.
 ///
 /// portable-pty 0.9's `CommandBuilder::new` seeds the child with the FULL
@@ -149,8 +163,8 @@ impl EmbedClient {
                 anyhow::ensure!(status.success(), "tmux {command} rejected {target}");
             }
         }
-        let rows = rows.max(1);
-        let cols = cols.max(1);
+        let rows = rows.max(MIN_SCREEN_DIM);
+        let cols = cols.max(MIN_SCREEN_DIM);
 
         let mut cmd = CommandBuilder::new("tmux");
         cmd.arg("attach-session");
@@ -168,7 +182,7 @@ impl EmbedClient {
 
         let pty = PtyWrapper::start_with_size(cmd, rows, cols).context("spawn tmux attach PTY")?;
 
-        let parser = Arc::new(RwLock::new(vt100::Parser::new(rows, cols, 0)));
+        let parser = Arc::new(RwLock::new(screen_parser(rows, cols)));
         let exited = Arc::new(AtomicBool::new(false));
         // Starts dirty so the first interactive frame paints immediately.
         let dirty = Arc::new(AtomicBool::new(true));
@@ -294,14 +308,17 @@ impl EmbedClient {
     /// cached size change, so the next frame retries from a consistent state
     /// instead of rendering a screen model that disagrees with the PTY.
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        let rows = rows.max(1);
-        let cols = cols.max(1);
+        let rows = rows.max(MIN_SCREEN_DIM);
+        let cols = cols.max(MIN_SCREEN_DIM);
         if rows == self.rows && cols == self.cols {
             return Ok(());
         }
         self.pty.resize(cols, rows)?;
+        // A fresh model, not `set_size`: vt100 0.16 can panic on the next
+        // write after shrinking a screen that holds content, and tmux repaints
+        // the whole client on the SIGWINCH the PTY resize just sent.
         if let Ok(mut p) = self.parser.write() {
-            p.screen_mut().set_size(rows, cols);
+            *p = screen_parser(rows, cols);
         }
         self.rows = rows;
         self.cols = cols;
