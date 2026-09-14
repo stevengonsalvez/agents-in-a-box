@@ -1319,6 +1319,15 @@ fn credential_samples() -> Vec<String> {
         format!("https://x-access-token:{}@github.com/o/r.git", run('l', 16)),
         format!("bot123456789:{}", run('m', 35)),
         format!("xoxb-1111-2222-{}", run('n', 24)),
+        format!("sk_live_{}", run('S', 24)),
+        format!("rk_live_{}", run('R', 24)),
+        format!("npm_{}", run('N', 36)),
+        format!("pypi-AgEIcHlwaS5vcmc{}", run('P', 60)),
+        format!("hf_{}", run('H', 34)),
+        format!("dop_v1_{}", run('a', 64)),
+        format!("SG.{}.{}", run('G', 22), run('g', 43)),
+        format!("xoxc-{}", run('1', 40)),
+        format!("xoxd-{}", run('2', 40)),
     ]
 }
 
