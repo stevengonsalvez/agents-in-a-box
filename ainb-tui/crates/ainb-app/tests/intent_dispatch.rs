@@ -195,3 +195,48 @@ fn an_unbound_row_is_a_command_no_key_reaches_until_an_override_binds_it() {
         Some(KeyAction::App(AppEvent::ToggleHelp))
     ));
 }
+
+#[test]
+fn command_args_replace_the_payload_of_a_row_that_carries_one() {
+    let keymap = Keymap::defaults();
+    let mut state = AppState::new();
+    state.shell.current_screen = ainb_app::app::screens::ids::SESSION_LIST.to_string();
+    let attach_one = || CommandId::new("session_list.attach_one");
+
+    // The row attaches position 1; the argument asks for position 7, which an
+    // empty list does not have, and the notice names the argument.
+    dispatch(
+        &mut state,
+        &keymap,
+        &mut NoRenderer,
+        Intent::Command(attach_one(), serde_json::json!(7)),
+    );
+    let latest = state.shell.notifications.last().map(|note| note.message.clone());
+    assert_eq!(latest.as_deref(), Some("No session at position 7"));
+}
+
+#[test]
+fn command_args_that_do_not_fit_the_row_change_nothing() {
+    let keymap = Keymap::defaults();
+    let rejected = [
+        // A row with no payload takes only Null.
+        ("global.help", serde_json::json!({ "n": 1 })),
+        // Wrong payload type.
+        ("session_list.attach_one", serde_json::json!("seven")),
+        // Positions count from 1.
+        ("session_list.attach_one", serde_json::json!(0)),
+    ];
+    for (id, args) in rejected {
+        let mut state = AppState::new();
+        state.shell.current_screen = ainb_app::app::screens::ids::SESSION_LIST.to_string();
+        let before = state.versions();
+        let effects = dispatch(
+            &mut state,
+            &keymap,
+            &mut NoRenderer,
+            Intent::Command(CommandId::new(id), args.clone()),
+        );
+        assert!(effects.is_empty(), "{id} {args}");
+        assert!(bumped(&before, &state.versions()).is_empty(), "{id} {args}");
+    }
+}
