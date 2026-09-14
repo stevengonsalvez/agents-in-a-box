@@ -205,6 +205,10 @@ pub enum AppEvent {
         auth_dir: std::path::PathBuf,
         exited_ok: bool,
     },
+    /// A daemon lifecycle command exited.
+    DaemonActionFinished {
+        report: crate::app::reports::DaemonActionReport,
+    },
     /// Click home sidebar `item`; a second click on it opens it.
     HomeSidebarClickItem {
         item: crate::components::sidebar::SidebarItem,
@@ -1624,6 +1628,9 @@ impl EventHandler {
                 state.hangar.daemons_state.confirm_menu();
                 if let Some(session) = state.hangar.daemons_state.take_attach_request() {
                     Self::emit_full_screen_attach(state, TerminalTarget::Tmux(session));
+                }
+                for (daemon, action) in state.hangar.daemons_state.take_action_requests() {
+                    state.emit(Effect::RunDaemonAction { daemon, action });
                 }
                 None
             }
@@ -3074,7 +3081,12 @@ impl EventHandler {
             // cannot open was to already know it was the hangar daemon, and to
             // go and find the row that starts it.
             AppEvent::SessionStartHangarDaemon => {
-                state.fleet.daemon_start_cta.start();
+                if state.fleet.daemon_start_cta.start() {
+                    state.emit(Effect::RunDaemonAction {
+                        daemon: crate::fleet::daemons::probe::DaemonKind::HangarDaemon,
+                        action: crate::cli::daemon::Action::Start,
+                    });
+                }
                 state.shell.ui_needs_refresh = true;
             }
             AppEvent::SwitchPaneFocus => {
@@ -3756,6 +3768,27 @@ impl EventHandler {
                 exited_ok,
             } => {
                 state.finish_oauth_login(&auth_dir, exited_ok);
+            }
+            AppEvent::DaemonActionFinished { report } => {
+                let Some(action) = crate::cli::daemon::Action::from_id(&report.verb) else {
+                    tracing::warn!(verb = %report.verb, "daemon report names no known verb");
+                    return;
+                };
+                let outcome = crate::components::daemons::ActionOutcome {
+                    action,
+                    ok: report.ok,
+                    summary: report.summary,
+                    detail: report.detail,
+                };
+                // The Pal pane's offer starts the same daemon the Daemons
+                // screen does, so one report can answer both.
+                if report.daemon == crate::fleet::daemons::probe::DaemonKind::HangarDaemon.id()
+                    && action == crate::cli::daemon::Action::Start
+                {
+                    state.fleet.daemon_start_cta.finish(&outcome);
+                }
+                state.hangar.daemons_state.finish_action(&report.daemon, outcome);
+                state.shell.ui_needs_refresh = true;
             }
             AppEvent::MigrateLayoutWidths { columns } => {
                 // Read first: a config with nothing to migrate is not written,
