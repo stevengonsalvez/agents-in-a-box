@@ -11,16 +11,25 @@ RUNS=${RUNS:-5}
 WINDOW_S=${WINDOW_S:-600}
 
 echo "# mode=$MODE window=${WINDOW_S}s simulator: $(xcrun simctl getenv "$SIM" SIMULATOR_MODEL_IDENTIFIER) iOS $(xcrun simctl getenv "$SIM" SIMULATOR_RUNTIME_VERSION)"
-for run in $(seq 1 "$RUNS"); do
-  act testUnlockAndForeground
+# Runs a simulator-service restart interrupts are reported as aborted and
+# repeated, up to three attempts per wanted run.
+run=0; attempt=0
+while [ "$run" -lt "$RUNS" ] && [ "$attempt" -lt $(( RUNS * 3 )) ]; do
+  attempt=$(( attempt + 1 ))
+  ensure_booted
+  act testUnlockAndForeground || true
   xcrun simctl terminate "$SIM" "$BUNDLE" 2>/dev/null || true
   sleep 2
   t_launch=$(now_ms)
-  xcrun simctl launch "$SIM" "$BUNDLE" >/dev/null
-  read -r conn _ < <(wait_hello_after "$t_launch" 60)
+  xcrun simctl launch "$SIM" "$BUNDLE" >/dev/null || { echo "attempt $attempt $MODE: aborted, launch failed"; continue; }
+  read -r conn _ < <(wait_hello_after "$t_launch" 60) || { echo "attempt $attempt $MODE: aborted, no auth/hello"; continue; }
   sleep 20   # at least one foreground heartbeat
   if [ "$MODE" = background ]; then act testHome; t_bg=$(last_event home_pressed); else act testLock; t_bg=$(last_event lock_pressed); fi
+  [ "$t_bg" -ge "$t_launch" ] || { echo "attempt $attempt $MODE: aborted, actuator did not stamp"; continue; }
   sleep $(( WINDOW_S - ( $(now_ms) - t_bg ) / 1000 ))
+  down=$(service_shutdown_after "$t_launch")
+  [ -z "$down" ] || { echo "attempt $attempt $MODE: aborted, simulator service shut the device down at +$(( (down - t_bg) / 1000 ))s"; continue; }
+  run=$(( run + 1 ))
   pings=$(pings_for "$conn" | tr '\n' ' ')
   disconnect=$(python3 - "$PEER_LOG" "$conn" <<'EOF'
 import json, sys
