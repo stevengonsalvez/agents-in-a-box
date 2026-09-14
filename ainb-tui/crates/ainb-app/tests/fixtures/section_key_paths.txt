@@ -130,7 +130,7 @@ config.app_config.ui_preferences.home_sidebar_fraction
 config.app_config.ui_preferences.preferred_editor
 config.app_config.ui_preferences.session_filter
 config.app_config.ui_preferences.sessions_sidebar_collapsed
-config.app_config.ui_preferences.sessions_sidebar_width
+config.app_config.ui_preferences.sessions_sidebar_fraction
 config.app_config.ui_preferences.show_container_status
 config.app_config.ui_preferences.show_git_status
 config.app_config.ui_preferences.show_session_menu_bar
