@@ -1698,11 +1698,10 @@ mod tests {
             true,
             Some("sock"),
         )]);
-        // A sender that never sends, started long enough ago to be past the
-        // give-up point.
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ActionOutcome>();
+        // An action the host never reported, asked for long enough ago to be
+        // past the give-up point.
         let started = std::time::Instant::now() - (ACTION_TIMEOUT + Duration::from_secs(1));
-        state.inflight.insert(DaemonKind::McpPool.id(), (rx, started));
+        state.inflight.insert(DaemonKind::McpPool.id(), started);
 
         state.poll_actions();
 
@@ -1720,7 +1719,6 @@ mod tests {
             "the row must say what happened, got {:?}",
             outcome.detail
         );
-        drop(tx);
     }
 
     /// Esc unwinds the innermost overlay first. Popping straight out from under
@@ -1859,6 +1857,142 @@ mod tests {
         assert!(
             state.shared.is_none(),
             "render must not spawn the collector; only `tick` may"
+        );
+    }
+
+    /// A daemons state on the Daemons screen, isolated from the real home.
+    fn app_on_daemons(rows: Vec<DaemonStatus>) -> (tempfile::TempDir, crate::app::AppState) {
+        let home = tempfile::tempdir().expect("scratch home");
+        std::env::set_var("HOME", home.path());
+        let mut state = crate::app::AppState::new();
+        state.shell.current_screen = crate::app::screens::ids::DAEMONS.to_string();
+        state.hangar.daemons_state = seeded_state(rows);
+        (home, state)
+    }
+
+    fn report(daemon: DaemonKind, verb: &str, ok: bool, summary: &str) -> crate::app::Intent {
+        crate::app::reports::daemon_action_finished(&crate::app::reports::DaemonActionReport {
+            daemon: daemon.id().to_string(),
+            verb: verb.to_string(),
+            ok,
+            summary: summary.to_string(),
+            detail: format!("cmd: ainb daemon {} {verb}", daemon.id()),
+        })
+    }
+
+    /// Enter on a verb asks the host to run it rather than running it, and the
+    /// host's report is what lands on the row.
+    #[test]
+    fn a_verb_is_queued_for_the_host_and_its_report_lands_on_the_row() {
+        use crate::app::{Effect, Intent, Keymap, NoRenderer, dispatch};
+
+        let (_home, mut state) = app_on_daemons(vec![status(
+            DaemonKind::McpPool,
+            DaemonState::Stopped,
+            false,
+            None,
+        )]);
+        state.hangar.daemons_state.open_menu();
+        let keymap = Keymap::defaults();
+        let enter = Intent::Key(crate::app::Chord::parse("enter").expect("chord"));
+
+        let effects = dispatch(&mut state, &keymap, &mut NoRenderer, enter);
+
+        let [Effect::RunDaemonAction { daemon, action }] = effects.as_slice() else {
+            panic!("expected one daemon action, got {effects:?}");
+        };
+        assert_eq!(*daemon, DaemonKind::McpPool);
+        assert!(
+            state.hangar.daemons_state.inflight.contains_key(DaemonKind::McpPool.id()),
+            "the row shows working until the report lands"
+        );
+
+        let before = state.versions();
+        let effects = dispatch(
+            &mut state,
+            &keymap,
+            &mut NoRenderer,
+            report(DaemonKind::McpPool, action.id(), true, "mcp pool started"),
+        );
+        assert!(effects.is_empty());
+        let daemons = &state.hangar.daemons_state;
+        assert!(daemons.inflight.is_empty());
+        let outcome = daemons.outcomes.get(DaemonKind::McpPool.id()).expect("outcome");
+        assert!(outcome.ok);
+        assert_eq!(outcome.summary, "mcp pool started");
+        assert_ne!(before, state.versions(), "the row's section moved");
+    }
+
+    /// A report that lands after the row gave up does not replace the timeout
+    /// the row already shows.
+    #[test]
+    fn a_report_after_the_give_up_is_ignored() {
+        use crate::app::{Keymap, NoRenderer, dispatch};
+
+        let (_home, mut state) = app_on_daemons(vec![status(
+            DaemonKind::McpPool,
+            DaemonState::Stopped,
+            false,
+            None,
+        )]);
+        let started = std::time::Instant::now()
+            .checked_sub(ACTION_TIMEOUT + Duration::from_secs(1))
+            .expect("the clock is past the give-up point");
+        state.hangar.daemons_state.inflight.insert(DaemonKind::McpPool.id(), started);
+        state.hangar.daemons_state.poll_actions();
+
+        let _ = dispatch(
+            &mut state,
+            &Keymap::defaults(),
+            &mut NoRenderer,
+            report(DaemonKind::McpPool, "start", true, "started late"),
+        );
+
+        let outcome = state
+            .hangar
+            .daemons_state
+            .outcomes
+            .get(DaemonKind::McpPool.id())
+            .expect("the give-up outcome");
+        assert_eq!(outcome.summary, "timed out");
+    }
+
+    /// The Pal pane's start offer queues one start, however often it is
+    /// pressed, and the hangar daemon's start report answers it.
+    #[test]
+    fn the_hangar_start_offer_queues_one_start_and_takes_its_report() {
+        use crate::app::events::{AppEvent, EventHandler};
+        use crate::app::{Effect, Keymap, NoRenderer, dispatch};
+        use crate::fleet::daemon_cta::CtaStatus;
+
+        let (_home, mut state) = app_on_daemons(Vec::new());
+        EventHandler::process_event(AppEvent::SessionStartHangarDaemon, &mut state);
+        EventHandler::process_event(AppEvent::SessionStartHangarDaemon, &mut state);
+        assert_eq!(
+            state.take_effects(),
+            vec![Effect::RunDaemonAction {
+                daemon: DaemonKind::HangarDaemon,
+                action: Action::Start,
+            }]
+        );
+
+        let _ = dispatch(
+            &mut state,
+            &Keymap::defaults(),
+            &mut NoRenderer,
+            report(
+                DaemonKind::HangarDaemon,
+                "start",
+                true,
+                "already running (pid 4242)",
+            ),
+        );
+        assert_eq!(
+            state.fleet.daemon_start_cta.status(),
+            &CtaStatus::Reported {
+                ok: true,
+                detail: "already running (pid 4242)".to_string(),
+            }
         );
     }
 }
