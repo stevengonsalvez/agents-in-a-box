@@ -3789,16 +3789,16 @@ impl EventHandler {
                 };
                 // Output kept local to this process (a pairing code) is shown
                 // here; a report from elsewhere shows the redacted fields.
-                let (summary, detail) = report
-                    .local
-                    .as_ref()
-                    .and_then(crate::app::reports::LocalOutput::redeem)
-                    .unwrap_or((report.summary, report.detail));
+                let redeemed =
+                    report.local.as_ref().and_then(crate::app::reports::LocalOutput::redeem);
+                let local_only = redeemed.is_some();
+                let (summary, detail) = redeemed.unwrap_or((report.summary, report.detail));
                 let outcome = crate::components::daemons::ActionOutcome {
                     action,
                     ok: report.ok,
                     summary,
                     detail,
+                    local_only,
                 };
                 // The Pal pane's offer starts the same daemon the Daemons
                 // screen does, so one report can answer both.
