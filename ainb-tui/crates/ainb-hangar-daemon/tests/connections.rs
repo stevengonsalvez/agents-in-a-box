@@ -110,6 +110,24 @@ impl Client {
         );
     }
 
+    /// `auth/hello` with an explicit surface pid and `transient` request.
+    async fn hello_with(&mut self, home: &std::path::Path, kind: &str, pid: u32, transient: bool) {
+        let token = std::fs::read_to_string(ainb_hangar_proto::auth::token_file_in(home))
+            .expect("read daemon token");
+        let mut params = serde_json::json!({
+            "token": token.trim(),
+            "surface": { "kind": kind, "pid": pid },
+        });
+        if transient {
+            params["transient"] = serde_json::Value::Bool(true);
+        }
+        let response = self.call(methods::AUTH_HELLO, params).await;
+        assert!(
+            response["error"].is_null(),
+            "hello must succeed: {response}"
+        );
+    }
+
     async fn subscribe_connections(&mut self) {
         let response = self.call(methods::ATTENTION_SUBSCRIBE, serde_json::json!({})).await;
         assert!(
@@ -738,13 +756,19 @@ async fn presence_lease_registers_once_a_late_daemon_comes_up() {
     daemon.stop();
 }
 
-/// #963, web half: the web surface's one-shot reads are transient, so only its
-/// presence socket is ever listed. Before the flag each read listed a second
-/// `web` row for its lifetime, which an exact-count smoke saw as flicker.
+/// #963, web half: the web surface's one-shot reads are transient beside its
+/// presence socket, so only that socket is ever listed. Before the flag each
+/// read listed a second `web` row for its lifetime, which an exact-count smoke
+/// saw as flicker.
 #[tokio::test]
-async fn web_one_shot_calls_never_list_a_web_row() {
+async fn web_one_shot_calls_beside_its_presence_never_list_a_second_row() {
     let home = tempfile::tempdir().expect("temporary Hangar home");
     let (socket, _store) = start_server(home.path()).await;
+
+    // The web server's presence socket, at this process's pid, as `serve`
+    // holds it.
+    let mut presence = Client::connect(&socket).await;
+    presence.hello_with(home.path(), "web", std::process::id(), false).await;
 
     let mut watcher = Client::connect(&socket).await;
     watcher.hello(home.path(), Some("tui")).await;
@@ -766,10 +790,43 @@ async fn web_one_shot_calls_never_list_a_web_row() {
         panic!("a one-shot web read changed the listed registry: {event}");
     }
     let listed = watcher.connections().await;
+    let web_rows = listed["connections"].as_array().map_or(0, |rows| {
+        rows.iter().filter(|row| row["surface"]["kind"] == "web").count()
+    });
+    assert_eq!(web_rows, 1, "only the presence socket is listed: {listed}");
+    drop(presence);
+}
+
+/// Review finding on #998: the daemon, not the client, decides transient. A
+/// transient hello with no listed presence at its pid is listed like any other
+/// connection and announced to subscribers, so no client can hide by asking.
+#[tokio::test]
+async fn a_transient_hello_without_a_presence_at_its_pid_is_listed_and_announced() {
+    let home = tempfile::tempdir().expect("temporary Hangar home");
+    let (socket, _store) = start_server(home.path()).await;
+
+    let mut watcher = Client::connect(&socket).await;
+    watcher.hello(home.path(), Some("tui")).await;
+    watcher.subscribe_connections().await;
+
+    let mut hiding = Client::connect(&socket).await;
+    hiding.hello_with(home.path(), "cli", 31337, true).await;
+
+    let changed = watcher.next_connections_changed().await;
+    let announced = changed["connections"]
+        .as_array()
+        .is_some_and(|rows| rows.iter().any(|row| row["surface"]["pid"] == 31337));
+    assert!(
+        announced,
+        "the refused transient row must be announced: {changed}"
+    );
+
+    let listed = watcher.connections().await;
     assert!(
         listed["connections"]
             .as_array()
-            .is_some_and(|rows| rows.iter().all(|row| row["surface"]["kind"] != "web")),
-        "no web presence was held, so no web row may be listed: {listed}"
+            .is_some_and(|rows| rows.iter().any(|row| row["surface"]["pid"] == 31337)),
+        "the refused transient row must be listed: {listed}"
     );
+    drop(hiding);
 }
