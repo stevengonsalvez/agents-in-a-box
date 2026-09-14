@@ -25,9 +25,9 @@ pub enum BroadcastPhase {
     /// Kept until the operator clears it: a receipt list that vanished on the
     /// next repaint would make a partial failure unreadable, and a partial
     /// failure is the case this pane exists to show.
-    Sent(Vec<FleetActionReceipt>),
+    Sent(#[serde(serialize_with = "crate::wire::fields::scrub_receipts")] Vec<FleetActionReceipt>),
     /// The CALL failed, as opposed to a recipient refusing. Nothing was sent.
-    Failed(String),
+    Failed(#[serde(serialize_with = "crate::wire::fields::scrub_str")] String),
 }
 
 /// One landed effect.
